@@ -861,3 +861,114 @@ a.row-link {
   opacity: 0.5;
   cursor: default;
 }
+
+/* Bulk action bar (Story #2939) — appears above the fleet table when ≥1 row selected. */
+.bulkbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+  background: var(--tint-blue);
+  border: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.bulk-sel {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.bulk-n {
+  font-weight: 700;
+  color: var(--accent);
+}
+.bulk-summary {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.bulkbar-grow {
+  flex: 1;
+}
+.bulk-tag-in {
+  flex: 1;
+  min-width: 120px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunk);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.bulk-tag-in::placeholder {
+  color: var(--text-faint);
+}
+.bulk-tag-in:disabled {
+  opacity: 0.6;
+}
+.bbtn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.bbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.bbtn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.bbtn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.bbtn-clear {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bbtn-clear:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Checkbox column — leftmost column in the fleet table (Story #2939). */
+.tbl .c-cbx {
+  width: 40px;
+  padding: 0 10px;
+  text-align: center;
+  cursor: default;
+}
+.tbl thead .c-cbx {
+  /* Prevent the sort-click handler from registering on the checkbox header. */
+  cursor: default;
+}
+.tbl-cbx {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  margin: 0;
+  display: block;
+}

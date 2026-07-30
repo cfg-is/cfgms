@@ -223,7 +223,8 @@ function dataRows(): HTMLElement[] {
 }
 
 function firstCellText(row: HTMLElement): string | null {
-  return within(row).getAllByRole('cell')[0]?.textContent ?? null
+  // Use the name-cell anchor text — robust to the checkbox column being first.
+  return within(row).queryByRole('link')?.textContent?.trim() ?? null
 }
 
 describe('pagination', () => {
@@ -344,12 +345,9 @@ describe('server-driven search (selector)', () => {
 
     // Typing in the search box should reset to page 1.
     rerender(<FleetWrapper search="host-" />)
-    await waitFor(() => {
-      const pager = screen.queryByTestId('fleet-pager')
-      if (pager) {
-        expect(pager.textContent).toContain('Showing 1')
-      }
-    })
+    await waitFor(() =>
+      expect(screen.getByTestId('fleet-pager').textContent).toContain('Showing 1'),
+    )
   })
 })
 
@@ -746,5 +744,114 @@ describe('fleet health tiles (Issue #2729)', () => {
     await screen.findByRole('table')
 
     expect(screen.queryByTestId('fleet-health-tiles')).not.toBeInTheDocument()
+  })
+})
+
+describe('bulk selection (Story #2939)', () => {
+  it('checking a row checkbox surfaces the bulk action bar with an accurate count', async () => {
+    mockFleet([
+      makeSteward({ id: 's1', hostname: 'host-1' }),
+      makeSteward({ id: 's2', hostname: 'host-2' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select host-1' }))
+
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+    expect(screen.getByTestId('bulk-action-bar').textContent).toContain('1')
+    expect(screen.getByTestId('bulk-action-bar').textContent).toContain('selected')
+  })
+
+  it('unchecking all rows hides the bulk action bar', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    const checkbox = screen.getByRole('checkbox', { name: 'Select host-1' })
+    fireEvent.click(checkbox)
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    fireEvent.click(checkbox)
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+  })
+
+  it('[REQUIRED] changing page clears selection (bulk action bar disappears)', async () => {
+    const fleet = Array.from({ length: 60 }, (_, i) =>
+      makeSteward({ id: `s${String(i).padStart(3, '0')}`, hostname: `host-${i}` }),
+    )
+    mockFleet(fleet)
+    renderFleet()
+    await screen.findByRole('table')
+
+    // Select a row on the first page.
+    const checkboxes = screen.getAllByRole('checkbox', { name: /^Select host-/ })
+    fireEvent.click(checkboxes[0]!)
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    // Navigate to the next page — selection must be cleared.
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await waitFor(() =>
+      expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument(),
+    )
+  })
+
+  it('[REQUIRED] changing sort clears selection (bulk action bar disappears)', async () => {
+    mockFleet([
+      makeSteward({ id: 's1', hostname: 'alpha' }),
+      makeSteward({ id: 's2', hostname: 'bravo' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select alpha' }))
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('columnheader', { name: /name/i }))
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+  })
+
+  it('[REQUIRED] changing filter clears selection (bulk action bar disappears)', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'alpha' })])
+    const { rerender } = render(<FleetWrapper search="" />)
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select alpha' }))
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    rerender(<FleetWrapper search="alpha" />)
+    await waitFor(() =>
+      expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument(),
+    )
+  })
+
+  it('selecting all rows via header checkbox selects every row on the page', async () => {
+    mockFleet([
+      makeSteward({ id: 's1', hostname: 'host-1' }),
+      makeSteward({ id: 's2', hostname: 'host-2' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all on page' }))
+
+    expect(screen.getByRole('checkbox', { name: 'Select host-1' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Select host-2' })).toBeChecked()
+    expect(screen.getByTestId('bulk-action-bar').textContent).toContain('2')
+  })
+
+  it('"Clear" in the bulk action bar deselects all rows and hides the bar', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select host-1' }))
+    expect(screen.getByTestId('bulk-action-bar')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(screen.queryByTestId('bulk-action-bar')).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Select host-1' })).not.toBeChecked()
   })
 })

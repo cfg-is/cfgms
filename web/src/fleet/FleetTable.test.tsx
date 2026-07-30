@@ -9,6 +9,8 @@
  * AC: a plain left-click calls the onRowSelect handler (drawer opens);
  *     modified clicks (Ctrl, Meta, Shift) do NOT call onRowSelect and do NOT
  *     call preventDefault — native anchor behavior takes over.
+ *
+ * Story #2939: checkbox column (select-all header + per-row) added.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
@@ -46,6 +48,36 @@ function renderTable(
         onSort={() => {}}
         nowMs={NOW_MS}
         onRowSelect={onRowSelect}
+      />
+    </MemoryRouter>,
+  )
+}
+
+function renderTableWithSelection(
+  stewards: Steward[],
+  selectedIds: ReadonlySet<string>,
+  {
+    onToggleRow = () => {},
+    onToggleAll = () => {},
+    onRowSelect,
+  }: {
+    onToggleRow?: (id: string) => void
+    onToggleAll?: () => void
+    onRowSelect?: (s: Steward) => void
+  } = {},
+) {
+  return render(
+    <MemoryRouter>
+      <FleetTable
+        stewards={stewards}
+        columns={defaultColumns}
+        sort={null}
+        onSort={() => {}}
+        nowMs={NOW_MS}
+        onRowSelect={onRowSelect}
+        selectedIds={selectedIds}
+        onToggleRow={onToggleRow}
+        onToggleAll={onToggleAll}
       />
     </MemoryRouter>,
   )
@@ -165,5 +197,118 @@ describe('row action menu (Story #2938 AC)', () => {
 
     expect(onRowSelect).toHaveBeenCalledTimes(1)
     expect(onRowSelect.mock.calls[0]?.[0].id).toBe('stw-1')
+  })
+})
+
+describe('checkbox column (Story #2939 AC)', () => {
+  it('no checkbox column when selectedIds is not provided', () => {
+    renderTable([makeSteward('stw-1', 'host1')], vi.fn())
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it('renders a row checkbox for each steward when selectedIds is provided', () => {
+    renderTableWithSelection(
+      [makeSteward('stw-1', 'host1'), makeSteward('stw-2', 'host2')],
+      new Set(),
+    )
+    expect(screen.getAllByRole('checkbox')).toHaveLength(3) // header + 2 rows
+  })
+
+  it('row checkbox is checked when the steward id is in selectedIds', () => {
+    renderTableWithSelection(
+      [makeSteward('stw-1', 'host1'), makeSteward('stw-2', 'host2')],
+      new Set(['stw-1']),
+    )
+    expect(screen.getByRole('checkbox', { name: 'Select host1' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Select host2' })).not.toBeChecked()
+  })
+
+  it('clicking a row checkbox calls onToggleRow with the steward id', () => {
+    const onToggleRow = vi.fn()
+    renderTableWithSelection([makeSteward('stw-1', 'host1')], new Set(), { onToggleRow })
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select host1' }))
+    expect(onToggleRow).toHaveBeenCalledTimes(1)
+    expect(onToggleRow).toHaveBeenCalledWith('stw-1')
+  })
+
+  it('clicking a row checkbox does NOT call onRowSelect (drawer stays closed)', () => {
+    const onRowSelect = vi.fn()
+    const onToggleRow = vi.fn()
+    renderTableWithSelection([makeSteward('stw-1', 'host1')], new Set(), {
+      onRowSelect,
+      onToggleRow,
+    })
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select host1' }))
+    expect(onRowSelect).not.toHaveBeenCalled()
+  })
+
+  it('header checkbox has aria-label "Select all on page"', () => {
+    renderTableWithSelection([makeSteward('stw-1', 'host1')], new Set())
+    expect(screen.getByRole('checkbox', { name: 'Select all on page' })).toBeInTheDocument()
+  })
+
+  it('header checkbox is indeterminate when some (not all) rows are selected', () => {
+    renderTableWithSelection(
+      [makeSteward('stw-1', 'host1'), makeSteward('stw-2', 'host2')],
+      new Set(['stw-1']),
+    )
+    const header = screen.getByRole('checkbox', { name: 'Select all on page' })
+    expect((header as HTMLInputElement).indeterminate).toBe(true)
+    expect(header).not.toBeChecked()
+  })
+
+  it('header checkbox is checked (not indeterminate) when all rows are selected', () => {
+    renderTableWithSelection(
+      [makeSteward('stw-1', 'host1'), makeSteward('stw-2', 'host2')],
+      new Set(['stw-1', 'stw-2']),
+    )
+    const header = screen.getByRole('checkbox', { name: 'Select all on page' })
+    expect(header).toBeChecked()
+    expect((header as HTMLInputElement).indeterminate).toBe(false)
+  })
+
+  it('header checkbox is unchecked and not indeterminate when nothing is selected', () => {
+    renderTableWithSelection([makeSteward('stw-1', 'host1')], new Set())
+    const header = screen.getByRole('checkbox', { name: 'Select all on page' })
+    expect(header).not.toBeChecked()
+    expect((header as HTMLInputElement).indeterminate).toBe(false)
+  })
+
+  it('clicking the header checkbox calls onToggleAll', () => {
+    const onToggleAll = vi.fn()
+    renderTableWithSelection([makeSteward('stw-1', 'host1')], new Set(), { onToggleAll })
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all on page' }))
+    expect(onToggleAll).toHaveBeenCalledTimes(1)
+  })
+
+  it('clicking the header checkbox does NOT trigger column sort', () => {
+    const onSort = vi.fn()
+    render(
+      <MemoryRouter>
+        <FleetTable
+          stewards={[makeSteward('stw-1', 'host1')]}
+          columns={defaultColumns}
+          sort={null}
+          onSort={onSort}
+          nowMs={NOW_MS}
+          selectedIds={new Set()}
+          onToggleRow={() => {}}
+          onToggleAll={() => {}}
+        />
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all on page' }))
+    expect(onSort).not.toHaveBeenCalled()
+  })
+
+  it('row checkboxes coexist correctly with the kebab action column', () => {
+    renderTableWithSelection([makeSteward('stw-1', 'host1')], new Set(), {
+      onRowSelect: vi.fn(),
+    })
+    expect(screen.getByRole('checkbox', { name: 'Select host1' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Actions' })).toBeInTheDocument()
   })
 })

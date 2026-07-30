@@ -246,6 +246,38 @@ steward table inside the app shell. Canonical design:
 Story #2498 adds saved views and the row drill-in asset-DNA drawer (both
 below).
 
+### Checkbox selection + bulk actions (Story #2939)
+
+Canonical design:
+[`docs/design/mockups/fleet-bulk.html`](../docs/design/mockups/fleet-bulk.html)
+(founder-approved 2026-07-24).
+
+[`src/fleet/FleetTable.tsx`](src/fleet/FleetTable.tsx) renders a checkbox
+column (leftmost) when `selectedIds` is provided. The header checkbox
+implements select-all-on-page; it is indeterminate when some but not all
+rows on the current page are selected.
+
+[`src/fleet/BulkActionBar.tsx`](src/fleet/BulkActionBar.tsx) is mounted by
+`FleetOverview` above the table panel when ≥1 row is selected; it disappears
+at zero selection. The bar shows the selected count and an **Edit tags**
+action.
+
+**Bulk tag edit** opens an inline tag editor in the bar. Clicking **Add to
+selected** or **Remove from selected** issues one `POST` or `DELETE
+/api/v1/stewards/{id}/tags` call per selected steward — no server-side batch
+endpoint is used, so the per-steward tenant authorization check in
+`resolveStewardForTags` runs for every steward individually. Results are
+surfaced per-item (e.g. "8 of 10 succeeded, 2 failed: id1, id2"); partial
+success is never swallowed into a single pass/fail toast.
+
+**Selection reset**: selection clears when the page, filter, or sort
+changes. Stale selections across a different displayed row set would allow
+bulk operations on rows the operator is no longer looking at, which is a
+correctness hazard. No selection state is preserved across page navigation.
+
+No decommission affordance of any kind exists in these components — that is
+Section 2's follow-on epic.
+
 ### Data flow
 
 - **Endpoint:** `GET /api/v1/stewards?limit=<n>&offset=<n>` through the
