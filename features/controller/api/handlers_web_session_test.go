@@ -528,7 +528,7 @@ func TestPasskeyLogin_Throttled_429(t *testing.T) {
 func TestPasskeyLogin_IPThrottled_429(t *testing.T) {
 	srv, _ := setupPasskeySessionServer(t)
 
-	// Simulate failures from a specific IP.
+	// Accumulate per-IP failures to trigger throttle.
 	const fakeIP = "10.0.0.42"
 	for i := 0; i < 4; i++ {
 		srv.recordPasskeyLoginFailure("ip:" + fakeIP)

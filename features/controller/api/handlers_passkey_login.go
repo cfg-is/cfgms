@@ -399,6 +399,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 
 	s.writeResponse(w, http.StatusOK, PasskeyLoginFinishResponse{
 		OK:        true,
+		Username:  acct.Username,
 		TenantID:  acct.TenantID,
 		RootScope: acct.RootScope,
 	})

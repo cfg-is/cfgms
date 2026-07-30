@@ -17,6 +17,38 @@ function jsonResponse(
   })
 }
 
+// ── WebAuthn test helpers ────────────────────────────────────────────────────
+
+const MOCK_PASSKEY_BEGIN_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    timeout: 60000,
+    rpId: 'localhost',
+    allowCredentials: [],
+    userVerification: 'required' as const,
+  },
+}
+
+function makePublicKeyCredential(id = 'cred-id-b64u'): PublicKeyCredential {
+  const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  return {
+    id,
+    type: 'public-key',
+    rawId: toArrayBuffer(id),
+    response: {
+      clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+      authenticatorData: toArrayBuffer('authenticator-data'),
+      signature: toArrayBuffer('signature'),
+      userHandle: null,
+    } as AuthenticatorAssertionResponse,
+    getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  } as unknown as PublicKeyCredential
+}
+
+// ── Probe component ──────────────────────────────────────────────────────────
+
 /** Probe component exposing auth state + actions to the tests. */
 function Probe() {
   const auth = useAuth()
@@ -25,7 +57,7 @@ function Probe() {
       <output data-testid="status">{auth.status}</output>
       <output data-testid="principal">{auth.principal?.username ?? ''}</output>
       <output data-testid="tenantId">{auth.principal?.tenantId ?? ''}</output>
-      <button onClick={() => void auth.login('admin@msp-a', 'pw-pw-pw-pw')}>
+      <button onClick={() => void auth.login('admin@msp-a')}>
         do-login
       </button>
       <button onClick={() => void auth.logout()}>do-logout</button>
@@ -44,22 +76,34 @@ function DataCallChild() {
   return <div>PROTECTED-CONTENT</div>
 }
 
+// ── Fetch + WebAuthn mocks ───────────────────────────────────────────────────
+
 const fetchMock = vi.fn<typeof fetch>()
 
-function mockLoginEndpoints(loginStatus: number, loginBody: unknown = {}) {
-  fetchMock.mockImplementation((input, init) => {
+/**
+ * Mock the full passkey login ceremony endpoints for a given finish outcome.
+ * Also stubs navigator.credentials.get with a synthetic public-key credential.
+ * finishBody must include data.username so the principal is set correctly.
+ */
+function mockPasskeyLoginEndpoints(finishStatus: number, finishBody: unknown = {}) {
+  vi.stubGlobal('navigator', {
+    credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+  })
+  fetchMock.mockImplementation((input) => {
     const url = String(input)
     if (url.endsWith('/api/v1/web/csrf')) {
       document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
       return Promise.resolve(jsonResponse(204))
     }
-    if (url.endsWith('/api/v1/web/login')) {
-      return Promise.resolve(jsonResponse(loginStatus, loginBody))
+    if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+      return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+    }
+    if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+      return Promise.resolve(jsonResponse(finishStatus, finishBody))
     }
     if (url.endsWith('/api/v1/web/logout')) {
       return Promise.resolve(jsonResponse(204))
     }
-    void init
     return Promise.resolve(jsonResponse(200))
   })
 }
@@ -86,7 +130,9 @@ describe('AuthProvider state transitions', () => {
   })
 
   it('login success → signedIn with the principal username', async () => {
-    mockLoginEndpoints(200)
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -100,10 +146,12 @@ describe('AuthProvider state transitions', () => {
   })
 
   it('login success stores the response tenantId on the principal (Issue #2919)', async () => {
-    // The login body's data.tenant_id is the sole source of principal.tenantId,
+    // The finish response's data.tenant_id is the sole source of principal.tenantId,
     // which AppShell forwards to TenantScopeProvider rootPath — the tenant-subtree
     // boundary. A tenant-scoped account must land on its own path, not root.
-    mockLoginEndpoints(200, { data: { tenant_id: 'msp-a', root_scope: false } })
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: 'msp-a', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -119,7 +167,9 @@ describe('AuthProvider state transitions', () => {
   it('a root-scoped login (empty tenant_id) leaves principal.tenantId empty (Issue #2919)', async () => {
     // A root-scoped grant carries an empty tenant_id; principal.tenantId must stay
     // '' so TenantScopeProvider initialises at root rather than a spurious subtree.
-    mockLoginEndpoints(200, { data: { tenant_id: '', root_scope: true } })
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: true },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -134,7 +184,23 @@ describe('AuthProvider state transitions', () => {
   })
 
   it('login failure → invalid, not signed in, not expired', async () => {
-    mockLoginEndpoints(401)
+    // credentials.get() throws NotAllowedError (user has no matching passkey).
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn().mockRejectedValue(new DOMException('No passkey', 'NotAllowedError')),
+      },
+    })
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/web/csrf')) {
+        document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+        return Promise.resolve(jsonResponse(204))
+      }
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+      }
+      return Promise.resolve(jsonResponse(200))
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -148,7 +214,9 @@ describe('AuthProvider state transitions', () => {
   })
 
   it('a plain 401 (no step-up header) after sign-in → expired', async () => {
-    mockLoginEndpoints(200)
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -172,7 +240,9 @@ describe('AuthProvider state transitions', () => {
   })
 
   it('logout calls the endpoint and returns to signedOut', async () => {
-    mockLoginEndpoints(200)
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -194,7 +264,9 @@ describe('AuthProvider state transitions', () => {
   })
 
   it('never writes auth state to localStorage or sessionStorage', async () => {
-    mockLoginEndpoints(200)
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -221,7 +293,9 @@ describe('AuthProvider — step-up (Story #2786)', () => {
   }
 
   it('CFGMS-StepUp 401 shows the step-up modal, NOT the sign-in screen', async () => {
-    mockLoginEndpoints(200)
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+    })
     // presence/begin returns valid options so the modal reaches 'waiting' state.
     fetchMock.mockImplementation((input) => {
       const url = String(input)
@@ -229,7 +303,16 @@ describe('AuthProvider — step-up (Story #2786)', () => {
         document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
         return Promise.resolve(jsonResponse(204))
       }
-      if (url.endsWith('/api/v1/web/login')) return Promise.resolve(jsonResponse(200))
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+      }
+      if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+        return Promise.resolve(
+          jsonResponse(200, {
+            data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+          }),
+        )
+      }
       if (url.includes('presence/begin')) {
         return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
       }
@@ -280,7 +363,9 @@ describe('AuthProvider — step-up (Story #2786)', () => {
   })
 
   it('plain 401 (no CFGMS-StepUp header) still triggers session-expired — regression', async () => {
-    mockLoginEndpoints(200)
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -305,14 +390,25 @@ describe('AuthProvider — step-up (Story #2786)', () => {
   })
 
   it('cancelling the step-up modal leaves auth status signedIn', async () => {
-    mockLoginEndpoints(200)
+    vi.stubGlobal('navigator', {
+      credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
+    })
     fetchMock.mockImplementation((input) => {
       const url = String(input)
       if (url.endsWith('/api/v1/web/csrf')) {
         document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
         return Promise.resolve(jsonResponse(204))
       }
-      if (url.endsWith('/api/v1/web/login')) return Promise.resolve(jsonResponse(200))
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+      }
+      if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+        return Promise.resolve(
+          jsonResponse(200, {
+            data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+          }),
+        )
+      }
       if (url.includes('presence/begin')) {
         return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
       }
@@ -389,7 +485,9 @@ describe('RequireAuth route guard', () => {
   })
 
   it('renders protected content once signed in via explicit login', async () => {
-    mockLoginEndpoints(200)
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -405,7 +503,22 @@ describe('RequireAuth route guard', () => {
   })
 
   it('shows login screen immediately for invalid status (failed login attempt)', async () => {
-    mockLoginEndpoints(401)
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn().mockRejectedValue(new DOMException('No passkey', 'NotAllowedError')),
+      },
+    })
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/web/csrf')) {
+        document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+        return Promise.resolve(jsonResponse(204))
+      }
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+      }
+      return Promise.resolve(jsonResponse(200))
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -423,7 +536,9 @@ describe('RequireAuth route guard', () => {
   })
 
   it('shows login screen immediately for expired status (mid-session 401)', async () => {
-    mockLoginEndpoints(200)
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+    })
     render(
       <AuthProvider>
         <Probe />
@@ -485,7 +600,22 @@ describe('AuthProvider — session probe (Story #2933)', () => {
   })
 
   it('explicit failed login → invalid immediately (regression: not via probe path)', async () => {
-    mockLoginEndpoints(401)
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn().mockRejectedValue(new DOMException('No passkey', 'NotAllowedError')),
+      },
+    })
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/web/csrf')) {
+        document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+        return Promise.resolve(jsonResponse(204))
+      }
+      if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+      }
+      return Promise.resolve(jsonResponse(200))
+    })
     render(
       <AuthProvider>
         <Probe />

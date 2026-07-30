@@ -118,9 +118,11 @@ type PasskeyLoginBeginRequest struct {
 }
 
 // PasskeyLoginFinishResponse is returned on successful passkey login. Contains the
-// tenant scope so the frontend can initialise TenantScopeProvider (Issue #2919).
+// authenticated username and tenant scope so the frontend can initialise
+// TenantScopeProvider and display the principal (Issue #2919, #2993).
 type PasskeyLoginFinishResponse struct {
 	OK        bool   `json:"ok"`
+	Username  string `json:"username"`
 	TenantID  string `json:"tenant_id"`
 	RootScope bool   `json:"root_scope"`
 }
