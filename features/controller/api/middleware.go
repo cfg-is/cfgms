@@ -594,6 +594,17 @@ type AuthorizationDecision struct {
 	ConditionalVars map[string]interface{} `json:"conditional_vars,omitempty"`
 }
 
+// isWithinTenantScope reports whether resourceTenant falls within callerTenant's
+// subtree. callerTenant == "" means an unscoped mTLS admin — always true. Otherwise
+// resourceTenant must equal callerTenant or be a "/"-prefixed descendant, so
+// "root/msp-a" cannot match "root/msp-alpha".
+func isWithinTenantScope(callerTenant, resourceTenant string) bool {
+	if callerTenant == "" {
+		return true
+	}
+	return resourceTenant == callerTenant || strings.HasPrefix(resourceTenant, callerTenant+"/")
+}
+
 // requirePermission creates middleware that enforces specific permission requirements.
 // Human-authenticated principals (Assurance >= AssuranceBasic) short-circuit to ALLOW for any permission.
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
