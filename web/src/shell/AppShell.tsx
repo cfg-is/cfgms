@@ -31,6 +31,7 @@ const NAV_ITEMS = [
   { label: 'Modules', to: '/modules', soon: false },
   { label: 'Config', to: '/config', soon: false },
   { label: 'Workflows', to: '/workflows', soon: false },
+  { label: 'Scripts', to: '/scripts', soon: false },
   { label: 'Audit', to: '/audit', soon: false },
   { label: 'Accounts', to: '/accounts', soon: false },
 ] as const

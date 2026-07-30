@@ -30,6 +30,7 @@ import ConfigListView from './config/ConfigListView.tsx'
 import WorkflowListView from './workflow/WorkflowListView.tsx'
 import AccountsView from './accounts/AccountsView.tsx'
 import ModuleReviewQueue from './modules/ModuleReviewQueue.tsx'
+import ScriptsView from './scripts/ScriptsView.tsx'
 
 function App() {
   return (
@@ -44,6 +45,7 @@ function App() {
             <Route path="modules" element={<ModuleReviewQueue />} />
             <Route path="workflows" element={<WorkflowListView />} />
             <Route path="accounts" element={<AccountsView />} />
+            <Route path="scripts" element={<ScriptsView />} />
           </Route>
         </Routes>
       </RequireAuth>
