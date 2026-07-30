@@ -505,7 +505,7 @@ describe('WorkflowListView — structured step builder (Story #2984)', () => {
     expect(screen.getAllByTestId('step-row')).toHaveLength(2)
 
     const removeBtns = screen.getAllByTestId('step-remove-btn')
-    fireEvent.click(removeBtns[0])
+    fireEvent.click(removeBtns[0]!)
     expect(screen.getAllByTestId('step-row')).toHaveLength(1)
   })
 
@@ -529,8 +529,8 @@ describe('WorkflowListView — structured step builder (Story #2984)', () => {
 
     const nameInputs = screen.getAllByTestId('step-name-input') as HTMLInputElement[]
     expect(nameInputs).toHaveLength(2)
-    expect(nameInputs[0].value).toBe('step-a')
-    expect(nameInputs[1].value).toBe('step-b')
+    expect(nameInputs[0]!.value).toBe('step-a')
+    expect(nameInputs[1]!.value).toBe('step-b')
   })
 
   it('script step script-body field is pre-populated from existing config.script', async () => {
@@ -626,7 +626,7 @@ describe('WorkflowListView — variables editor (Story #2984)', () => {
     expect(screen.getAllByTestId('var-row')).toHaveLength(2)
 
     const removeBtns = screen.getAllByTestId('var-remove-btn')
-    fireEvent.click(removeBtns[0])
+    fireEvent.click(removeBtns[0]!)
     expect(screen.getAllByTestId('var-row')).toHaveLength(1)
   })
 
@@ -650,10 +650,10 @@ describe('WorkflowListView — variables editor (Story #2984)', () => {
 
     const keyInputs = screen.getAllByTestId('var-key-input') as HTMLInputElement[]
     const valInputs = screen.getAllByTestId('var-value-input') as HTMLInputElement[]
-    fireEvent.change(keyInputs[0], { target: { value: 'ENV' } })
-    fireEvent.change(valInputs[0], { target: { value: 'production' } })
-    fireEvent.change(keyInputs[1], { target: { value: 'TIMEOUT' } })
-    fireEvent.change(valInputs[1], { target: { value: '30' } })
+    fireEvent.change(keyInputs[0]!, { target: { value: 'ENV' } })
+    fireEvent.change(valInputs[0]!, { target: { value: 'production' } })
+    fireEvent.change(keyInputs[1]!, { target: { value: 'TIMEOUT' } })
+    fireEvent.change(valInputs[1]!, { target: { value: '30' } })
 
     let capturedBody: Record<string, unknown> | null = null
     fetchMock.mockImplementationOnce((_url: RequestInfo | URL, opts?: RequestInit): Promise<Response> => {
