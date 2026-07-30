@@ -42,6 +42,7 @@ const (
 	CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY CommandType = 10 // Issue #1943: controller pushes a new steward binary for self-upgrade
 	CommandType_COMMAND_TYPE_RELAY_RESPONSE      CommandType = 11 // Issue #1994: controller sends relay response back to steward relay goroutine
 	CommandType_COMMAND_TYPE_OPEN_TERMINAL       CommandType = 12 // Issue #2760: steward dials out Terminal RPC and bridges to a local PTY
+	CommandType_COMMAND_TYPE_OBSERVE_MODULES     CommandType = 13 // Issue #3104: controller pushes resolved observe-module set to steward
 )
 
 // Enum value maps for CommandType.
@@ -60,6 +61,7 @@ var (
 		10: "COMMAND_TYPE_PUSH_STEWARD_BINARY",
 		11: "COMMAND_TYPE_RELAY_RESPONSE",
 		12: "COMMAND_TYPE_OPEN_TERMINAL",
+		13: "COMMAND_TYPE_OBSERVE_MODULES",
 	}
 	CommandType_value = map[string]int32{
 		"COMMAND_TYPE_UNSPECIFIED":         0,
@@ -75,6 +77,7 @@ var (
 		"COMMAND_TYPE_PUSH_STEWARD_BINARY": 10,
 		"COMMAND_TYPE_RELAY_RESPONSE":      11,
 		"COMMAND_TYPE_OPEN_TERMINAL":       12,
+		"COMMAND_TYPE_OBSERVE_MODULES":     13,
 	}
 )
 
@@ -126,7 +129,8 @@ const (
 	EventType_EVENT_TYPE_UPGRADE_DOWNLOADED  EventType = 12 // steward.upgrade.downloaded
 	EventType_EVENT_TYPE_UPGRADE_SWAPPED     EventType = 13 // steward.upgrade.swapped
 	EventType_EVENT_TYPE_UPGRADE_COMMITTED   EventType = 14 // steward.upgrade.committed
-	EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK EventType = 15 // steward.upgrade.rolled_back
+	EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK    EventType = 15 // steward.upgrade.rolled_back
+	EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST  EventType = 16 // Issue #3104: steward initiates Tier-2 observe sweep
 )
 
 // Enum value maps for EventType.
@@ -148,6 +152,7 @@ var (
 		13: "EVENT_TYPE_UPGRADE_SWAPPED",
 		14: "EVENT_TYPE_UPGRADE_COMMITTED",
 		15: "EVENT_TYPE_UPGRADE_ROLLED_BACK",
+		16: "EVENT_TYPE_OBSERVE_SWEEP_REQUEST",
 	}
 	EventType_value = map[string]int32{
 		"EVENT_TYPE_UNSPECIFIED":         0,
@@ -165,7 +170,8 @@ var (
 		"EVENT_TYPE_UPGRADE_DOWNLOADED":  12,
 		"EVENT_TYPE_UPGRADE_SWAPPED":     13,
 		"EVENT_TYPE_UPGRADE_COMMITTED":   14,
-		"EVENT_TYPE_UPGRADE_ROLLED_BACK": 15,
+		"EVENT_TYPE_UPGRADE_ROLLED_BACK":    15,
+		"EVENT_TYPE_OBSERVE_SWEEP_REQUEST":  16,
 	}
 )
 

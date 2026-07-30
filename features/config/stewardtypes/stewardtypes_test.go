@@ -257,6 +257,59 @@ func TestGetDNARefreshInterval_ZeroFallback(t *testing.T) {
 		"zero duration must fall back to 30m default")
 }
 
+// --- GetObserveSweepN (Issue #3104, ADR-024 Amendment 1 §3) ---
+
+// intPtr returns a pointer to n. StewardSettings.ObserveSweepN is a *int so an
+// explicitly configured 0 (sweep disabled) is distinguishable from an absent key.
+func intPtr(n int) *int { return &n }
+
+func TestGetObserveSweepN_UnsetUsesDefault(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{}}
+	assert.Equal(t, DefaultObserveSweepN, GetObserveSweepN(cfg),
+		"an absent observe_sweep_n must yield the shipped default cadence")
+}
+
+func TestGetObserveSweepN_ExplicitZeroDisables(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{ObserveSweepN: intPtr(0)}}
+	assert.Equal(t, 0, GetObserveSweepN(cfg),
+		"an explicit observe_sweep_n: 0 must disable the sweep, not fall back to the default")
+}
+
+func TestGetObserveSweepN_ExplicitValue(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{ObserveSweepN: intPtr(3)}}
+	assert.Equal(t, 3, GetObserveSweepN(cfg))
+}
+
+func TestGetObserveSweepN_NegativeTreatedAsDisabled(t *testing.T) {
+	cfg := StewardConfig{Steward: StewardSettings{ObserveSweepN: intPtr(-1)}}
+	assert.Equal(t, 0, GetObserveSweepN(cfg),
+		"a negative cadence must never reach the client as a live cadence")
+}
+
+func TestValidateConfiguration_RejectsNegativeObserveSweepN(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:            "steward-1",
+			Mode:          ModeStandalone,
+			ObserveSweepN: intPtr(-1),
+		},
+	}
+	err := ValidateConfiguration(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "observe_sweep_n")
+}
+
+func TestValidateConfiguration_AcceptsZeroObserveSweepN(t *testing.T) {
+	cfg := StewardConfig{
+		Steward: StewardSettings{
+			ID:            "steward-1",
+			Mode:          ModeStandalone,
+			ObserveSweepN: intPtr(0),
+		},
+	}
+	require.NoError(t, ValidateConfiguration(cfg))
+}
+
 // --- GetConfiguredModules ---
 
 func TestGetConfiguredModules_DeduplicatesModules(t *testing.T) {

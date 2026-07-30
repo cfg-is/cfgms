@@ -106,6 +106,10 @@ func ValidateConfiguration(config StewardConfig) error {
 		}
 	}
 
+	if config.Steward.ObserveSweepN != nil && *config.Steward.ObserveSweepN < 0 {
+		return fmt.Errorf("observe_sweep_n must be 0 (disabled) or a positive cycle count, got %d", *config.Steward.ObserveSweepN)
+	}
+
 	if err := ValidateScriptSigningConfig(config.Steward.ScriptSigning); err != nil {
 		return fmt.Errorf("script_signing configuration invalid: %w", err)
 	}
@@ -221,6 +225,25 @@ func GetDNARefreshInterval(cfg StewardConfig) time.Duration {
 		return 30 * time.Minute
 	}
 	return d
+}
+
+// DefaultObserveSweepN is the Tier-2 whole-domain observe sweep cadence applied
+// when observe_sweep_n is not set: the sweep runs on every 10th convergence tick
+// (Issue #3104, ADR-024 Amendment 1 §3).
+const DefaultObserveSweepN = 10
+
+// GetObserveSweepN returns the Tier-2 observe sweep cadence in convergence cycles.
+// An unset observe_sweep_n yields DefaultObserveSweepN; an explicit 0 disables the
+// sweep. Negative values are rejected by ValidateConfiguration and treated as
+// disabled here so an unvalidated config can never produce a negative cadence.
+func GetObserveSweepN(cfg StewardConfig) int {
+	if cfg.Steward.ObserveSweepN == nil {
+		return DefaultObserveSweepN
+	}
+	if n := *cfg.Steward.ObserveSweepN; n > 0 {
+		return n
+	}
+	return 0
 }
 
 // GetConfiguredModules returns a deduplicated list of module names required by the configuration.

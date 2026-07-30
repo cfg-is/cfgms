@@ -25,6 +25,10 @@ enum CommandType {
   // Issue #2760: steward dials out Terminal RPC and bridges to a local PTY.
   // Command.params keys: session_id (string), shell (string), cols (int32), rows (int32).
   COMMAND_TYPE_OPEN_TERMINAL = 12;
+  // Issue #3104 (ADR-024 Amendment 1): controller pushes the resolved observe-module
+  // set back to the steward after receiving EventObserveSweepRequest.
+  // Command.params keys: "modules" (JSON array of ObserveModuleSpec objects).
+  COMMAND_TYPE_OBSERVE_MODULES = 13;
 }
 
 // EventType enumerates the types of events a steward emits to a controller.
@@ -47,6 +51,10 @@ enum EventType {
   EVENT_TYPE_UPGRADE_SWAPPED = 13;    // steward.upgrade.swapped
   EVENT_TYPE_UPGRADE_COMMITTED = 14;  // steward.upgrade.committed
   EVENT_TYPE_UPGRADE_ROLLED_BACK = 15; // steward.upgrade.rolled_back
+  // Issue #3104 (ADR-024 Amendment 1): steward initiates a Tier-2 whole-domain
+  // observe sweep by publishing baseline DNA; the controller responds with
+  // COMMAND_TYPE_OBSERVE_MODULES carrying the resolved module set.
+  EVENT_TYPE_OBSERVE_SWEEP_REQUEST = 16;
 }
 
 // Severity is used by both Event and LogEntry to indicate importance level.

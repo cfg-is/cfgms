@@ -115,6 +115,23 @@ This is the steward's core activity. It runs on startup, on schedule, and in res
 | **Event hook** | Module-defined monitor detects a relevant change (e.g., file modified, service stopped) |
 | **Controller command** | Controller sends `sync_config` — immediate convergence trigger, an optimization not a dependency |
 
+### Tiered Convergence (ADR-024 Amendment 1)
+
+Each convergence tick is classified as **Tier-1** or **Tier-2**. Both tiers enforce identical drift-detection and resource-enforcement semantics; they differ only in what happens after declared-resource work completes.
+
+**Tier-1 (every cycle):** Declared-resource enforcement — `Get → Compare → Set → Verify` for every resource in the active cfg. Fast and lightweight; runs every convergence tick.
+
+**Tier-2 (every Nth cycle):** All of Tier-1, plus a whole-domain observe sweep. `N` is the `steward.observe_sweep_n` knob in the steward config file. When the key is absent — including when the steward has no local config file at all — `N` defaults to 10, so the sweep runs on every 10th tick. Setting `N = 0` disables the sweep entirely. Setting `N = 1` runs the sweep on every tick. Negative values are rejected at config validation.
+
+**Tier-2 observe sweep sequence:**
+
+1. The steward reports its current baseline DNA to the controller as an `EventObserveSweepRequest`.
+2. The controller resolves which observe modules apply to this device (matching `observe_when` predicates against the reported DNA) and responds with `CommandObserveModules` carrying the resolved `{name, kind}` specs.
+3. For each spec, the steward loads the module via the existing signed/trust-verified pull path, invokes its `Get()` read-only, and collects the resulting fragments.
+4. Observe-module fragments are merged into the existing DNA fragment set via `Assembler.Assemble`, then committed through `setCurrentDNAFragments` — **the same emission path used by declared-resource convergence** (ADR-024 Amendment 1 §2; no new channel). Module authority always preempts observe-only host-fact fragments for the same kind (ADR-016).
+
+The observe sweep adds endpoint-side CPU proportional to the number and cost of matched observe modules, controllable by tuning `N`.
+
 ### Per-Resource Cycle
 
 For each resource in the cfg, the execution engine runs:

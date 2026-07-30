@@ -100,7 +100,8 @@ var allCommandTypes = []types.CommandType{
 	types.CommandRelayResponse,
 	types.CommandPushSigningCert,
 	types.CommandPushStewardBinary,
-	types.CommandOpenTerminal, // Issue #2760
+	types.CommandOpenTerminal,   // Issue #2760
+	types.CommandObserveModules, // Issue #3104
 }
 
 func TestCommandTypeRoundTrip(t *testing.T) {
@@ -357,6 +358,7 @@ var wireCrossingEventTypes = []types.EventType{
 	types.EventStewardUpgradeSwapped,
 	types.EventStewardUpgradeCommitted,
 	types.EventStewardUpgradeRolledBack,
+	types.EventObserveSweepRequest, // Issue #3104
 }
 
 func TestEventTypeRoundTrip(t *testing.T) {

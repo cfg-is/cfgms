@@ -34,6 +34,7 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	dna "github.com/cfgis/cfgms/features/steward/dna"
@@ -57,6 +58,13 @@ import (
 // inject a stub returning deterministic attribute maps without real I/O.
 type DNACollector interface {
 	CollectAttributes(ctx context.Context) (map[string]string, error)
+}
+
+// ObserveModuleLoader loads steward modules by name for the Tier-2 whole-domain
+// observe sweep (Issue #3104, ADR-024 Amendment 1 §3). Production code wraps
+// factory.ModuleFactory; tests inject a deterministic in-memory implementation.
+type ObserveModuleLoader interface {
+	LoadModule(name string) (modules.Module, error)
 }
 
 // FragmentCollector is an optional extension of DNACollector. When the wired
@@ -256,6 +264,22 @@ type TransportClient struct {
 	// early-returns), so it adds no overhead and never blocks the loop. Tests use
 	// it to observe real ticks without wall-clock sleeps.
 	dnaRefreshTick chan struct{}
+
+	// Tier-2 whole-domain observe sweep (Issue #3104, ADR-024 Amendment 1 §3).
+	// observeSweepN is the cadence: run sweep every Nth convergence cycle.
+	// 0 = disabled. Protected by mu.
+	observeSweepN int
+	// observeSweepCounter counts convergence ticks toward the next sweep.
+	// Resets to 0 after each sweep. Protected by mu.
+	observeSweepCounter int
+	// observeModuleLoader loads modules by name for the Tier-2 sweep.
+	// Nil = disabled. Injectable for testing. Protected by mu.
+	observeModuleLoader ObserveModuleLoader
+	// observeSweepTick, when non-nil, receives one value after each call to
+	// checkAndTriggerObserveSweep (whether or not a sweep fired). Nil in
+	// production; non-nil in tests for deterministic cadence synchronisation.
+	// Uses the same pattern as dnaRefreshTick.
+	observeSweepTick chan struct{}
 
 	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
 	// downloads binaries to a subdirectory here. (Issue #1943)
@@ -486,6 +510,18 @@ type TransportConfig struct {
 	// dna.Collector via main.go after registration.
 	DNACollector DNACollector
 
+	// ObserveSweepN sets the Tier-2 observe sweep cadence: every Nth convergence
+	// cycle the steward publishes an EventObserveSweepRequest so the controller can
+	// push back the resolved observe-module set (Issue #3104, ADR-024 Amendment 1 §3).
+	// 0 (the zero value) disables the sweep.
+	ObserveSweepN int
+
+	// ObserveModuleLoader loads steward modules by name for the Tier-2 sweep.
+	// When nil, the sweep runs but cannot execute module Get calls (no-op).
+	// Production code wires factory.ModuleFactory; tests inject a deterministic
+	// in-memory implementation.
+	ObserveModuleLoader ObserveModuleLoader
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -560,8 +596,10 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
 		// Self-exit after a pushed-upgrade swap only when a launcher is supervising
 		// this process (it sets EnvStewardLauncherManaged=1 on its child). (Issue #2003)
-		launcherManaged: os.Getenv(version.EnvStewardLauncherManaged) == "1",
-		logger:          cfg.Logger,
+		launcherManaged:     os.Getenv(version.EnvStewardLauncherManaged) == "1",
+		observeSweepN:       cfg.ObserveSweepN,
+		observeModuleLoader: cfg.ObserveModuleLoader,
+		logger:              cfg.Logger,
 	}
 
 	return c, nil
@@ -1097,6 +1135,14 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		return c.handlePushStewardBinary(ctx, cmd)
 	})
 
+	// Register observe_modules handler — controller pushes the resolved Tier-2
+	// observe-module set. The handler loads each module, runs Get read-only, and
+	// merges the resulting fragments into the existing DNA fragment emission path.
+	// (Issue #3104, ADR-024 Amendment 1 §3)
+	handler.RegisterHandler(cpTypes.CommandObserveModules, func(ctx context.Context, cmd *cpTypes.Command) error {
+		return c.handleObserveModules(ctx, cmd)
+	})
+
 	return handler, nil
 }
 
@@ -1602,6 +1648,10 @@ func (c *TransportClient) StartConvergenceLoop(ctx context.Context) {
 				if err := c.TriggerConvergence(ctx); err != nil {
 					c.logger.Warn("Scheduled convergence failed", "error", err)
 				}
+				// Tier-2 cadence: run whole-domain observe sweep every Nth cycle.
+				// The counter increments regardless of convergence success so the
+				// cadence is wall-clock-based, not config-dependent.
+				c.checkAndTriggerObserveSweep(ctx)
 			}
 		}
 	}()
@@ -2611,4 +2661,218 @@ func copyStringMap(m map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Tier-2 whole-domain observe sweep (Issue #3104, ADR-024 Amendment 1 §3)
+// ---------------------------------------------------------------------------
+
+// checkAndTriggerObserveSweep is called by StartConvergenceLoop on each
+// convergence tick. It increments the Tier-2 counter; when the counter reaches
+// observeSweepN it fires a whole-domain observe sweep request and resets the
+// counter. N=0 disables the sweep.
+//
+// This method always signals observeSweepTick on completion so that tests can
+// synchronize with the cadence counter without using wall-clock sleeps — the
+// same pattern as notifyDNARefreshTick.
+func (c *TransportClient) checkAndTriggerObserveSweep(ctx context.Context) {
+	c.mu.Lock()
+	n := c.observeSweepN
+	if n <= 0 {
+		c.mu.Unlock()
+		c.notifyObserveSweepTick(ctx)
+		return
+	}
+	c.observeSweepCounter++
+	fire := c.observeSweepCounter >= n
+	if fire {
+		c.observeSweepCounter = 0
+	}
+	c.mu.Unlock()
+
+	if fire {
+		c.triggerObserveSweep(ctx)
+	}
+	c.notifyObserveSweepTick(ctx)
+}
+
+// notifyObserveSweepTick signals observeSweepTick after each
+// checkAndTriggerObserveSweep call. Nil in production; non-nil in tests.
+// The send is guarded by ctx.Done so an un-drained channel never blocks.
+func (c *TransportClient) notifyObserveSweepTick(ctx context.Context) {
+	c.mu.RLock()
+	tick := c.observeSweepTick
+	c.mu.RUnlock()
+	if tick == nil {
+		return
+	}
+	select {
+	case tick <- struct{}{}:
+	case <-ctx.Done():
+	}
+}
+
+// triggerObserveSweep publishes an EventObserveSweepRequest carrying the current
+// baseline DNA to the controller. The controller resolves the observe-module set
+// and responds with CommandObserveModules. (Issue #3104, ADR-024 Amendment 1 §3)
+func (c *TransportClient) triggerObserveSweep(ctx context.Context) {
+	c.mu.RLock()
+	sid := c.stewardID
+	tid := c.tenantID
+	c.mu.RUnlock()
+
+	if sid == "" {
+		c.logger.Debug("Tier-2 observe sweep skipped: steward not yet registered")
+		return
+	}
+
+	c.dnaMu.RLock()
+	attrs := copyStringMap(c.currentDNAAttrs)
+	c.dnaMu.RUnlock()
+
+	dnaJSON, err := json.Marshal(attrs)
+	if err != nil {
+		c.logger.Warn("Tier-2 observe sweep: failed to marshal baseline DNA", "error", err)
+		return
+	}
+
+	event := &cpTypes.Event{
+		ID:        fmt.Sprintf("evt_obs_%d", time.Now().UnixNano()),
+		Type:      cpTypes.EventObserveSweepRequest,
+		StewardID: sid,
+		TenantID:  tid,
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"baseline_dna": string(dnaJSON),
+		},
+	}
+
+	if err := c.publishEventWithQueue(ctx, event); err != nil {
+		c.logger.Warn("Tier-2 observe sweep: failed to publish sweep request", "error", err)
+	}
+}
+
+// handleObserveModules processes a COMMAND_TYPE_OBSERVE_MODULES command from the
+// controller. It loads each specified module, calls Get read-only, and merges
+// the resulting fragments into currentDNAFragments through the existing
+// setCurrentDNAFragments path (ADR-024 Amendment 1 §2 — no new parallel channel).
+func (c *TransportClient) handleObserveModules(ctx context.Context, cmd *cpTypes.Command) error {
+	c.mu.RLock()
+	loader := c.observeModuleLoader
+	c.mu.RUnlock()
+
+	if loader == nil {
+		c.logger.Warn("observe_modules: no module loader configured; skipping observe sweep")
+		return nil
+	}
+
+	specs, err := parseObserveModuleSpecs(cmd.Params["modules"])
+	if err != nil {
+		return fmt.Errorf("observe_modules: %w", err)
+	}
+	if len(specs) == 0 {
+		return nil
+	}
+
+	// Load each module and build the inputs for Assembler.Assemble.
+	activeModules := make(map[string]modules.Module, len(specs))
+	ownership := make(map[string][]modules.OwnershipDeclaration, len(specs))
+	for _, spec := range specs {
+		mod, loadErr := loader.LoadModule(spec.Name)
+		if loadErr != nil {
+			c.logger.Warn("observe sweep: module load failed; skipping",
+				"module", logging.SanitizeLogValue(spec.Name), "error", loadErr)
+			continue
+		}
+		activeModules[spec.Name] = mod
+		ownership[spec.Name] = []modules.OwnershipDeclaration{{Kind: spec.Kind}}
+	}
+
+	if len(activeModules) == 0 {
+		return nil
+	}
+
+	// Snapshot current host-fact fragments as input to the assembler so that
+	// module-owned kinds preempt the corresponding host-fact fragments
+	// (ADR-016 clause 5, Assembler phase 3).
+	c.dnaMu.RLock()
+	hostFactFragments := make([]*commonpb.Fragment, len(c.currentDNAFragments))
+	copy(hostFactFragments, c.currentDNAFragments)
+	c.dnaMu.RUnlock()
+
+	// Merge observe-module fragments with host-fact fragments. The Assembler
+	// handles authority resolution per ADR-016 and ADR-017.
+	assembler := dna.NewAssembler(c.logger)
+	merged, _, assembleErr := assembler.Assemble(ctx, activeModules, ownership, hostFactFragments)
+	if assembleErr != nil {
+		return fmt.Errorf("observe sweep: assemble fragments: %w", assembleErr)
+	}
+
+	// Write through the existing fragment emission path (ADR-024 Amendment 1 §2).
+	// setCurrentDNAFragments updates currentDNAAggregateRoot, which the heartbeat
+	// loop carries to the controller; the controller detects the change and issues
+	// CommandSyncDNA to pull the merged fragment set.
+	c.setCurrentDNAFragments(merged)
+
+	c.logger.Info("Tier-2 observe sweep completed",
+		"observe_modules", len(activeModules),
+		"total_fragments", len(merged))
+
+	return nil
+}
+
+// parseObserveModuleSpecs converts the "modules" param from a CommandObserveModules
+// command into a []cpTypes.ObserveModuleSpec. It handles the three shapes the param
+// can arrive in:
+//
+//   - string: JSON-encoded array (gRPC wire path)
+//   - []interface{}: already-parsed JSON array (in-process path)
+//   - []cpTypes.ObserveModuleSpec: native slice (test path)
+func parseObserveModuleSpecs(raw interface{}) ([]cpTypes.ObserveModuleSpec, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	var specs []cpTypes.ObserveModuleSpec
+
+	switch v := raw.(type) {
+	case string:
+		if v == "" {
+			return nil, nil
+		}
+		if err := json.Unmarshal([]byte(v), &specs); err != nil {
+			return nil, fmt.Errorf("modules param is not a JSON array: %w", err)
+		}
+	case []interface{}:
+		specs = make([]cpTypes.ObserveModuleSpec, 0, len(v))
+		for i, elem := range v {
+			m, ok := elem.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("modules[%d]: expected object, got %T", i, elem)
+			}
+			spec := cpTypes.ObserveModuleSpec{}
+			if name, ok := m["name"].(string); ok {
+				spec.Name = name
+			}
+			if kind, ok := m["kind"].(string); ok {
+				spec.Kind = kind
+			}
+			specs = append(specs, spec)
+		}
+	case []cpTypes.ObserveModuleSpec:
+		specs = v
+	default:
+		return nil, fmt.Errorf("modules param has unsupported type %T", raw)
+	}
+
+	for i, spec := range specs {
+		if spec.Name == "" {
+			return nil, fmt.Errorf("modules[%d]: name is required", i)
+		}
+		if spec.Kind == "" {
+			return nil, fmt.Errorf("modules[%d]: kind is required", i)
+		}
+	}
+
+	return specs, nil
 }
