@@ -927,3 +927,139 @@ func TestHandleDeleteRole_JustificationHeaderAccepted(t *testing.T) {
 		&controller.GetRoleRequest{RoleId: "client-1.role-hdr"})
 	assert.Error(t, err, "role must be gone after a justified delete")
 }
+
+// --- Log injection (CWE-117) regression coverage ---
+//
+// The {id} path segment is URL-decoded by the router, so "%0D%0A" arrives at the
+// handler as a real CRLF. That raw ID is echoed verbatim by the RBAC store's
+// "role %s not found" error (features/rbac/memory/store.go), which the handlers
+// then log as the "error" value — so both the "role_id" and the "error" values
+// carry attacker-controlled bytes and both must be sanitized.
+
+// forgedLogRecord is the tail of a log-forgery payload: the text an attacker wants
+// to land at the start of its own log line after an injected CRLF.
+const forgedLogRecord = `level=error msg="forged audit record"`
+
+// injectionRoleID returns a role ID within tenantID that carries a CRLF followed by
+// a complete forged log record — the decoded form of ".../roles/ghost%0D%0Alevel=...".
+func injectionRoleID(tenantID string) string {
+	return tenantID + ".ghost\r\n" + forgedLogRecord
+}
+
+// assertNoForgedLogRecord verifies that the tainted role ID reached the log in
+// neutralised form: present (so the assertion cannot pass vacuously) but with its
+// CR/LF replaced, leaving the forged record trapped inside a single log line.
+func assertNoForgedLogRecord(t *testing.T, captured string) {
+	t.Helper()
+	assert.NotContains(t, captured, "\r",
+		"carriage return from the role ID must not reach the log")
+	assert.NotContains(t, captured, "\n"+forgedLogRecord,
+		"payload must not be able to start a new log line")
+	assert.Contains(t, captured, "__"+forgedLogRecord,
+		"tainted value must reach the log with its CR/LF replaced (proves the log site was exercised)")
+}
+
+// TestRoleHandlers_LogInjectionSanitized verifies that every role handler log site on a
+// failure path neutralises control characters in both the role ID and the error text,
+// for the not-found paths (error raised by the store) and the service-rejection paths
+// (error raised by the real rbac.Manager for a missing M-AUTH-2 justification).
+func TestRoleHandlers_LogInjectionSanitized(t *testing.T) {
+	updateBody, err := json.Marshal(RoleInfo{Name: "Renamed", TenantID: "client-1"})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name       string
+		existing   bool // create the role first, so the handler reaches its service call
+		wantStatus int
+		call       func(*Server, string) *httptest.ResponseRecorder
+	}{
+		{
+			name:       "get_not_found",
+			wantStatus: http.StatusNotFound,
+			call: func(s *Server, roleID string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				s.handleGetRole(rec, unjustifiedRoleRequest(http.MethodGet,
+					"/api/v1/rbac/roles/ghost", "client-1", roleID, nil))
+				return rec
+			},
+		},
+		{
+			name:       "update_not_found",
+			wantStatus: http.StatusNotFound,
+			call: func(s *Server, roleID string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				s.handleUpdateRole(rec, unjustifiedRoleRequest(http.MethodPut,
+					"/api/v1/rbac/roles/ghost", "client-1", roleID, updateBody))
+				return rec
+			},
+		},
+		{
+			name:       "delete_not_found",
+			wantStatus: http.StatusNotFound,
+			call: func(s *Server, roleID string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				s.handleDeleteRole(rec, unjustifiedRoleRequest(http.MethodDelete,
+					"/api/v1/rbac/roles/ghost", "client-1", roleID, nil))
+				return rec
+			},
+		},
+		{
+			name:       "update_service_failure",
+			existing:   true,
+			wantStatus: http.StatusInternalServerError,
+			call: func(s *Server, roleID string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				s.handleUpdateRole(rec, unjustifiedRoleRequest(http.MethodPut,
+					"/api/v1/rbac/roles/ghost", "client-1", roleID, updateBody))
+				return rec
+			},
+		},
+		{
+			name:       "delete_service_failure",
+			existing:   true,
+			wantStatus: http.StatusInternalServerError,
+			call: func(s *Server, roleID string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				s.handleDeleteRole(rec, unjustifiedRoleRequest(http.MethodDelete,
+					"/api/v1/rbac/roles/ghost", "client-1", roleID, nil))
+				return rec
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The logger must be installed at construction: Server.New starts the
+			// API-key cleanup goroutine, which reads s.logger concurrently.
+			capture := &captureAllLogger{}
+			server := setupTestServerWithLogger(t, capture)
+
+			roleID := injectionRoleID("client-1")
+			if tc.existing {
+				createRoleForTenant(t, server, "client-1", roleID, "Injected Role")
+			}
+
+			rec := tc.call(server, roleID)
+
+			require.Equal(t, tc.wantStatus, rec.Code)
+			assertNoForgedLogRecord(t, capture.captured())
+		})
+	}
+}
+
+// TestHandleGetPermission_LogInjectionSanitized covers the same CWE-117 shape on the
+// permission read path: the {id} path segment is echoed by the store's
+// "permission %s not found" error and logged alongside the raw ID.
+func TestHandleGetPermission_LogInjectionSanitized(t *testing.T) {
+	capture := &captureAllLogger{}
+	server := setupTestServerWithLogger(t, capture)
+
+	permissionID := "ghost\r\n" + forgedLogRecord
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rbac/permissions/ghost", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": permissionID})
+	rec := httptest.NewRecorder()
+	server.handleGetPermission(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assertNoForgedLogRecord(t, capture.captured())
+}

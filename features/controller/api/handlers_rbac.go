@@ -85,7 +85,7 @@ func (s *Server) handleGetPermission(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.GetPermission(r.Context(), req)
 	if err != nil {
-		s.logger.Error("Failed to get permission", "permission_id", permissionID, "error", err)
+		s.logger.Error("Failed to get permission", "permission_id", logging.SanitizeLogValue(permissionID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusNotFound, "Permission not found", "PERMISSION_NOT_FOUND")
 		return
 	}
@@ -246,7 +246,7 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.GetRole(r.Context(), req)
 	if err != nil {
-		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
 		return
 	}
@@ -306,7 +306,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	// a caller from bypassing the check by lying about the tenant in the update payload.
 	existing, err := s.rbacService.GetRole(r.Context(), &controller.GetRoleRequest{RoleId: roleID})
 	if err != nil {
-		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
 		return
 	}
@@ -356,7 +356,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.UpdateRole(ctx, req)
 	if err != nil {
-		s.logger.Error("Failed to update role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.logger.Error("Failed to update role", "role_id", logging.SanitizeLogValue(roleID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update role", "INTERNAL_ERROR")
 		return
 	}
@@ -395,7 +395,7 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	// not depend on an audit-log side effect being active).
 	existing, err := s.rbacService.GetRole(r.Context(), &controller.GetRoleRequest{RoleId: roleID})
 	if err != nil {
-		s.logger.Error("Failed to get role for deletion", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.logger.Error("Failed to get role for deletion", "role_id", logging.SanitizeLogValue(roleID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
 		return
 	}
@@ -428,7 +428,7 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	// here would therefore be unreachable, so the error return is the only outcome
 	// this handler distinguishes.
 	if _, err := s.rbacService.DeleteRole(ctx, req); err != nil {
-		s.logger.Error("Failed to delete role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+		s.logger.Error("Failed to delete role", "role_id", logging.SanitizeLogValue(roleID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete role", "INTERNAL_ERROR")
 		return
 	}
