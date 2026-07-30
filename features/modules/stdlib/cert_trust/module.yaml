@@ -27,6 +27,9 @@ interfaces:
 owns:
   - kind: cert_trust  # authority over cert_trust:* objects this module manages
 
+# observe_when: omitted — pending module-tagging story (bounded inventory-worthy
+# domain; observe_when predicate will be added by the ADR-024 epic).
+
 security:
   requires_root: true  # modifying the system trust store requires elevated privileges
   capabilities: []

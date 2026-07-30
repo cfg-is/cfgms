@@ -13,6 +13,38 @@ import (
 	filemod "github.com/cfgis/cfgms/features/modules/stdlib/file"
 )
 
+// ── AssertObserveReadOnly — passing-case tests ────────────────────────────────
+// Failure-case coverage lives in fragment_test_helper_internal_test.go
+// (package conformance), which tests the unexported checkObserveReadOnly
+// function directly to avoid the *testing.T mock constraint.
+
+// TestAssertObserveReadOnly_Pass_ReadOnlyEnvelope verifies that
+// AssertObserveReadOnly does not call t.Errorf when the envelope declares no
+// writes_paths and the command list contains no banned verb prefixes.
+func TestAssertObserveReadOnly_Pass_ReadOnlyEnvelope(t *testing.T) {
+	envelope := &modules.BehavioralEnvelope{
+		ReadsPaths: []string{"/etc/hosts"},
+	}
+	commands := []string{
+		"Get-Item C:\\something",
+		"Get-Service wuauserv",
+	}
+	conformance.AssertObserveReadOnly(t, envelope, commands)
+}
+
+// TestAssertObserveReadOnly_Pass_NilEnvelope verifies that AssertObserveReadOnly
+// tolerates a nil envelope (module has no behavioral_envelope declared).
+func TestAssertObserveReadOnly_Pass_NilEnvelope(t *testing.T) {
+	conformance.AssertObserveReadOnly(t, nil, nil)
+}
+
+// TestAssertObserveReadOnly_Pass_EmptyCommandList verifies that a nil command
+// list skips the verb-level check without error.
+func TestAssertObserveReadOnly_Pass_EmptyCommandList(t *testing.T) {
+	envelope := &modules.BehavioralEnvelope{}
+	conformance.AssertObserveReadOnly(t, envelope, nil)
+}
+
 // configuredFileModule creates a file module with AllowedBasePath set to basePath,
 // ready for Get calls without needing a prior Set.
 func configuredFileModule(t *testing.T, basePath string) modules.Module {

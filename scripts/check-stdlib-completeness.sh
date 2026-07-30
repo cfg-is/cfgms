@@ -137,6 +137,25 @@ while IFS= read -r module; do
 
     done < <(find "$MODULE_DIR" -name '*.go' ! -name '*_test.go' -print0 2>/dev/null || true)
 
+    # ── Check 6: observe_when considered (ADR-024 §3) ─────────────────────────
+    #
+    # Every stdlib module must either:
+    #   a. carry an observe_when: key (bounded, inventory-worthy domain), or
+    #   b. carry a deliberate-omission marker comment in the form:
+    #        # observe_when: omitted — <reason>
+    #
+    # The comment is the only way to record "I considered this and said no"
+    # because module.yaml has no schema field for deliberate absence. Modules
+    # with unbounded or content-bearing domains (file, script) omit it
+    # permanently per ADR-024 §3; inventory-worthy modules omit it temporarily
+    # until the module-tagging story adds their predicate.
+
+    if ! grep -qE "^observe_when[[:space:]]*:" "$MANIFEST" && \
+       ! grep -qE "^#[[:space:]]*observe_when:[[:space:]]*omitted" "$MANIFEST"; then
+        record_violation "$module" "check-6" \
+            "module.yaml missing observe_when declaration or omission marker (ADR-024 §3); add 'observe_when:' or '# observe_when: omitted — <reason>'"
+    fi
+
 done < <(extract_modules)
 
 echo ""
@@ -163,4 +182,7 @@ echo "  check-4: add owns: - kind: <name> to module.yaml (ADR-016 clause 5)"
 echo "  check-5: rename stub_*.go to *_stub.go, replace panic(\"TODO\") with real"
 echo "           implementation, replace ErrNotImplemented with ErrUnsupportedPlatform"
 echo "           (legitimate cross-platform fallback) or a module-specific error."
+echo "  check-6: add observe_when: predicate (bounded inventory-worthy domain) OR"
+echo "           add '# observe_when: omitted — <reason>' comment (content-bearing"
+echo "           or unbounded domain) to module.yaml (ADR-024 §3)"
 exit 1

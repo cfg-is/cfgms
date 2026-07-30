@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -86,5 +88,76 @@ func AssertNoEphemeralFields(t *testing.T, state modules.ConfigState, banned []s
 		if _, ok := m[field]; ok {
 			t.Errorf("AssertNoEphemeralFields: AsMap() contains banned ephemeral field %q (ADR-016 clause 4)", field)
 		}
+	}
+}
+
+// DefaultBannedMutatingVerbPrefixes is the set of PowerShell verb prefixes that
+// indicate a mutating cmdlet invocation, used by AssertObserveReadOnly's
+// command-verb layer check (ADR-024 §4). Covers the four standard PowerShell
+// CRUD verb groups that modify system state.
+var DefaultBannedMutatingVerbPrefixes = []string{
+	"New-", "Set-", "Remove-", "Add-",
+}
+
+// checkObserveReadOnly implements the two-layer read-only check and returns a
+// list of violation messages (empty = pass). Kept unexported so callers use
+// AssertObserveReadOnly; the unexported form enables unit testing of the check
+// logic via package-internal tests without requiring a *testing.T mock.
+func checkObserveReadOnly(envelope *modules.BehavioralEnvelope, commands []string) []string {
+	var violations []string
+
+	// Layer 1: writes_paths must be empty at the envelope level.
+	if envelope != nil && len(envelope.WritesPaths) > 0 {
+		violations = append(violations, fmt.Sprintf(
+			"BehavioralEnvelope.writes_paths is non-empty %v; observe path must declare no writes (ADR-024 §4)",
+			envelope.WritesPaths,
+		))
+	}
+
+	// Layer 2: scan caller-supplied command strings for banned mutating-verb prefixes.
+	for _, cmd := range commands {
+		for _, prefix := range DefaultBannedMutatingVerbPrefixes {
+			if strings.Contains(cmd, prefix) {
+				violations = append(violations, fmt.Sprintf(
+					"command contains banned mutating verb prefix %q (ADR-024 §4):\n%s",
+					prefix, cmd,
+				))
+			}
+		}
+	}
+
+	return violations
+}
+
+// AssertObserveReadOnly asserts that an observe path is provably read-only per
+// ADR-024 §4. Call it in a module's own _test.go alongside AssertDeterministicGet
+// and AssertNoEphemeralFields to cover the full observe-mode conformance surface.
+//
+// Two independent checks form a two-layer defence:
+//
+// Layer 1 (envelope-level): envelope.WritesPaths must be empty. A non-empty
+// WritesPaths list proves the module's behavioural envelope declares a write,
+// violating the "no mutations" requirement for observe-eligible paths.
+//
+// Layer 2 (command-verb-level): each string in commands is scanned for banned
+// PowerShell mutating-verb prefixes (New-*, Set-*, Remove-*, Add-*) drawn from
+// DefaultBannedMutatingVerbPrefixes. This catches modules that correctly declare
+// an empty writes_paths in their manifest but whose observe path still invokes a
+// mutating cmdlet internally. Callers supply the PowerShell script blocks or
+// command strings executed during the observe path.
+//
+// The two-layer design is intentional: the envelope check is necessary but not
+// sufficient — a module could declare no writes_paths in its manifest while its
+// Get still calls a mutating command. The command-verb check closes that gap;
+// document this two-layer requirement in any module's test so a future reader
+// does not assume the envelope check alone is sufficient (ADR-024 §4).
+//
+// This helper generalises the inline assertNoWriteCmdlets pattern from
+// features/modules/hyperv/observe_test.go; pass the same kind of PowerShell
+// script-block strings the caller records for each executed command.
+func AssertObserveReadOnly(t *testing.T, envelope *modules.BehavioralEnvelope, commands []string) {
+	t.Helper()
+	for _, msg := range checkObserveReadOnly(envelope, commands) {
+		t.Errorf("AssertObserveReadOnly: %s", msg)
 	}
 }
