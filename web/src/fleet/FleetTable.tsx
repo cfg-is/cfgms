@@ -12,13 +12,46 @@
  * Row drill-in (Story #2498): rows are selectable via click or Enter/Space;
  * the parent opens the asset-DNA drawer for the selected steward.
  */
+import { useEffect, useRef } from 'react'
 import { deriveHealth, formatLastSeen } from './health.ts'
 import type { ColumnDef, Steward } from './columns.ts'
+import { stewardDisplayName } from './columns.ts'
 import RowActionMenu from './RowActionMenu.tsx'
 
 export interface SortState {
   key: string
   direction: 1 | -1
+}
+
+/* Header checkbox with indeterminate support for "some but not all" state. */
+function HeaderCheckbox({
+  allSelected,
+  someSelected,
+  onToggleAll,
+}: {
+  allSelected: boolean
+  someSelected: boolean
+  onToggleAll: () => void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = someSelected && !allSelected
+    }
+  })
+
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      className="tbl-cbx"
+      checked={allSelected}
+      aria-label="Select all on page"
+      onChange={onToggleAll}
+      onClick={(e) => e.stopPropagation()}
+    />
+  )
 }
 
 const CELL_CLASS: Record<string, string> = {
@@ -95,6 +128,9 @@ export default function FleetTable({
   onSort,
   nowMs,
   onRowSelect,
+  selectedIds,
+  onToggleRow,
+  onToggleAll,
 }: {
   stewards: Steward[]
   columns: ColumnDef[]
@@ -102,11 +138,28 @@ export default function FleetTable({
   onSort: (key: string) => void
   nowMs: number
   onRowSelect?: (steward: Steward) => void
+  selectedIds?: ReadonlySet<string>
+  onToggleRow?: (stewardId: string) => void
+  onToggleAll?: () => void
 }) {
+  const hasSelection = selectedIds !== undefined
+  const allOnPage =
+    hasSelection && stewards.length > 0 && stewards.every((s) => selectedIds.has(s.id))
+  const someOnPage = hasSelection && stewards.some((s) => selectedIds.has(s.id)) && !allOnPage
+
   return (
     <table className="tbl">
       <thead>
         <tr>
+          {hasSelection && (
+            <th className="c-cbx">
+              <HeaderCheckbox
+                allSelected={allOnPage}
+                someSelected={someOnPage}
+                onToggleAll={onToggleAll ?? (() => {})}
+              />
+            </th>
+          )}
           {columns.map((column) => {
             const active = sort?.key === column.key
             return (
@@ -151,6 +204,23 @@ export default function FleetTable({
                   : undefined
               }
             >
+              {hasSelection && (
+                <td className="c-cbx">
+                  <input
+                    type="checkbox"
+                    className="tbl-cbx"
+                    checked={selectedIds!.has(steward.id)}
+                    aria-label={`Select ${stewardDisplayName(steward)}`}
+                    onChange={() => onToggleRow?.(steward.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      /* Prevent Space from bubbling to the tr's onKeyDown
+                       * so it doesn't open the drawer while toggling the checkbox. */
+                      if (e.key === ' ' || e.key === 'Enter') e.stopPropagation()
+                    }}
+                  />
+                </td>
+              )}
               {columns.map((column) => (
                 <Cell
                   key={column.key}

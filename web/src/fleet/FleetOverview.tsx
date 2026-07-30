@@ -35,6 +35,7 @@ import {
   type Steward,
 } from './columns.ts'
 import { deriveHealth, fetchFleetHealth, parseLastSeen, type FleetHealth } from './health.ts'
+import BulkActionBar from './BulkActionBar.tsx'
 import ColumnPicker from './ColumnPicker.tsx'
 import FleetTable, { type SortState } from './FleetTable.tsx'
 import { ErrorNotice, FleetEmpty, LoadingRows, NoMatch } from './FleetStates.tsx'
@@ -85,6 +86,7 @@ export default function FleetOverview() {
   const [visible, setVisible] = useState<ReadonlySet<ColumnKey>>(
     () => new Set(loadColumnPrefs() ?? DEFAULT_VISIBLE),
   )
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set())
 
   const [fleetHealth, setFleetHealth] = useState<FleetHealth | null>(null)
 
@@ -104,6 +106,16 @@ export default function FleetOverview() {
   if (search !== prevSearch) {
     setPrevSearch(search)
     setPageIndex(0)
+  }
+
+  // Reset selection when the displayed row set changes (page, filter, sort, page size).
+  // Stale selections across a different row set are a correctness hazard — AC requirement.
+  const sortKey = sort !== null ? `${sort.key}:${sort.direction}` : ''
+  const selResetKey = `${pageIndex}:${search}:${sortKey}:${pageSize}`
+  const [prevSelResetKey, setPrevSelResetKey] = useState(selResetKey)
+  if (selResetKey !== prevSelResetKey) {
+    setPrevSelResetKey(selResetKey)
+    setSelectedIds(new Set())
   }
 
   const { page, loading, error, fetchedAtMs, retry } = useStewards(
@@ -144,6 +156,21 @@ export default function FleetOverview() {
         ? { key, direction: was.direction === 1 ? -1 : 1 }
         : { key, direction: 1 },
     )
+  }
+
+  function toggleRow(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleAll() {
+    const allIds = displayRows.map((s) => s.id)
+    const allSelected = allIds.length > 0 && allIds.every((id) => selectedIds.has(id))
+    setSelectedIds(allSelected ? new Set() : new Set(allIds))
   }
 
   function onToggleColumn(key: ColumnKey) {
@@ -247,14 +274,25 @@ export default function FleetOverview() {
         ) : displayRows.length === 0 ? (
           <NoMatch scopeOnly={false} />
         ) : (
-          <FleetTable
-            stewards={displayRows}
-            columns={columns}
-            sort={sort}
-            onSort={onSort}
-            nowMs={nowMs}
-            onRowSelect={(steward) => setDrawerStewardId(steward.id)}
-          />
+          <>
+            {selectedIds.size > 0 && (
+              <BulkActionBar
+                selectedIds={selectedIds}
+                onClear={() => setSelectedIds(new Set())}
+              />
+            )}
+            <FleetTable
+              stewards={displayRows}
+              columns={columns}
+              sort={sort}
+              onSort={onSort}
+              nowMs={nowMs}
+              onRowSelect={(steward) => setDrawerStewardId(steward.id)}
+              selectedIds={selectedIds}
+              onToggleRow={toggleRow}
+              onToggleAll={toggleAll}
+            />
+          </>
         )}
 
         {page !== null && error === null && total > 0 && (
