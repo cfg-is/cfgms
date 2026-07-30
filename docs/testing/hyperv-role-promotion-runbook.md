@@ -198,7 +198,19 @@ so the simplification is not mistaken for an active convergence confirmation.
 
 ---
 
-## 4. Cleanup / recovery
+## 4. FC-cascade config invariant (Issue #3107)
+
+The `promote-hv-role` workflow is the **only** path that creates clustered `hyperv.vm` resources (those carrying an `ha_role` block). Every promotion terminates with the `move_resource_to_cluster` step, so all clustered hyperv declarations land in `cluster-policies/<clusterName>` and never remain in device scope (`stewards/<stewardID>`).
+
+**Why this invariant is load-bearing:** `GET /api/v1/clusters/{name}/reconciliation` derives its declared-resource set exclusively from `cluster-policies/<clusterName>` via `GetClusterDeclaredResources`. A `hyperv.vm` resource that carries `ha_role` but lives in device scope is **silently absent** from the reconciliation input — `Reconcile` never classifies it as `declared-but-missing`, `orphan-dead-owner`, or `split-brain`; it simply cannot see the resource. This is not an error surface — it is a silent blind spot.
+
+**Verification (Issue #3107):** As of the shipping of this story, a `git grep` across all repo fixtures, test configs, and deployment examples confirms zero scattered device-scope clustered declarations. The fleet has been greenfield on this invariant since epics #2657/#2807 shipped. No migration tooling was needed or built.
+
+**Authoring rules:**
+- **Via workflow (normal path):** run `cfg workflow promote-hv-role` — this is the only supported way to promote a standalone VM into a cluster role. The workflow writes `ha_role` into device scope temporarily (the `set_ha_role` step) and then atomically relocates the resource to `cluster-policies/<clusterName>` (the `move_resource_to_cluster` step). The device-scope `ha_role` state exists only during the fixed soak window between the two steps.
+- **Via direct config upload (bulk authoring):** use `cfg config upload` targeting `cluster-policies/<clusterName>` from the start. Never author a clustered resource directly into the device-scope `stewards/<id>` document — it will be accepted by the config service (there is no write-time guard) but will be invisible to all reconciliation and cascade machinery.
+
+## 5. Cleanup / recovery
 
 If a run is interrupted before `ccCleanupRole` runs, remove the test artifacts
 manually (elevated, on any member):
