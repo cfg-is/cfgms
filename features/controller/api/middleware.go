@@ -230,6 +230,17 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	}
 }
 
+// isWithinTenantScope reports whether resourceTenant is within callerTenant's
+// authorized subtree. An empty callerTenant (mTLS admin with no tenant scope)
+// has unrestricted access and always returns true.
+func isWithinTenantScope(callerTenant, resourceTenant string) bool {
+	if callerTenant == "" {
+		return true
+	}
+	return resourceTenant == callerTenant ||
+		strings.HasPrefix(resourceTenant, callerTenant+"/")
+}
+
 // hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
 func hasHeaderCredentials(r *http.Request) bool {
 	if r.Header.Get("X-API-Key") != "" {
@@ -592,17 +603,6 @@ type AuthorizationDecision struct {
 	SubjectID       string                 `json:"subject_id"`
 	TenantID        string                 `json:"tenant_id"`
 	ConditionalVars map[string]interface{} `json:"conditional_vars,omitempty"`
-}
-
-// isWithinTenantScope reports whether resourceTenant falls within callerTenant's
-// subtree. callerTenant == "" means an unscoped mTLS admin — always true. Otherwise
-// resourceTenant must equal callerTenant or be a "/"-prefixed descendant, so
-// "root/msp-a" cannot match "root/msp-alpha".
-func isWithinTenantScope(callerTenant, resourceTenant string) bool {
-	if callerTenant == "" {
-		return true
-	}
-	return resourceTenant == callerTenant || strings.HasPrefix(resourceTenant, callerTenant+"/")
 }
 
 // requirePermission creates middleware that enforces specific permission requirements.

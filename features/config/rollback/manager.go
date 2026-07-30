@@ -175,7 +175,7 @@ func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request Ro
 
 	// Check validation results
 	if !preview.ValidationResults.Passed && !request.Options.Force {
-		return nil, ErrRollbackValidationFailed
+		return nil, validationFailure(&preview.ValidationResults)
 	}
 
 	// Check approval if required
@@ -299,6 +299,20 @@ func (m *DefaultRollbackManager) ListRollbackHistory(ctx context.Context, target
 
 // Helper methods
 
+// validationFailure maps failed validation results onto the rollback error that describes
+// them. A caller the RBAC manager refused is denied, not malformed, so the refusal keeps
+// its own error code (surfaced by the API as 403) instead of collapsing into the generic
+// validation failure (422).
+func validationFailure(results *ValidationResults) *RollbackError {
+	for _, issue := range results.Errors {
+		if issue.Type == ValidationIssuePermission {
+			return ErrRollbackPermissionDenied
+		}
+	}
+
+	return ErrRollbackValidationFailed
+}
+
 func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, operation *RollbackOperation, preview *RollbackPreview) {
 	// Update status to validating
 	operation.Status = RollbackStatusValidating
@@ -317,7 +331,7 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	}
 
 	if !validationResults.Passed && !operation.Request.Options.Force {
-		m.failRollback(ctx, operation, ErrRollbackValidationFailed)
+		m.failRollback(ctx, operation, validationFailure(validationResults))
 		return
 	}
 

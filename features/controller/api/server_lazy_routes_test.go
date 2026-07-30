@@ -92,7 +92,7 @@ func TestServer_SetRollbackManager_RegistersRoutes_PostConstruction(t *testing.T
 		"rollback route must be 404 before SetRollbackManager")
 
 	// Wire the manager post-construction, exactly as production does.
-	server.SetRollbackManager(&testRollbackManager{})
+	server.SetRollbackManager(newRollbackStack(t).manager)
 
 	// Unauthenticated request must now return 401, not 404.
 	req = httptest.NewRequest("GET", "/api/v1/rollback/points", nil)
@@ -107,7 +107,7 @@ func TestServer_SetRollbackManager_RegistersRoutes_PostConstruction(t *testing.T
 // A caller with a valid API key but without config:rollback permission must receive 403.
 func TestServer_SetRollbackManager_EnforcesPermissionGate(t *testing.T) {
 	server := setupTestServer(t)
-	server.SetRollbackManager(&testRollbackManager{})
+	server.SetRollbackManager(newRollbackStack(t).manager)
 
 	// Key without config:rollback permission.
 	noPermKey := NewTestKey(t, server, []string{"steward:read"})

@@ -633,6 +633,67 @@ func TestRollout_Start_AdminCrossTenantAllowed(t *testing.T) {
 	assert.Equal(t, "tenant-b", finalRecord.TenantID, "admin-supplied tenant_id must own the rollout")
 }
 
+// ── [REQUIRED TEST] Session-principal cross-tenant isolation (Issue #3143) ───────
+
+// TestRollout_Start_SessionPrincipal_CrossTenantRejected is the required AC test for
+// Issue #3143: a web-session caller scoped to tenant-a carries GlobalScope=true (the
+// middleware hardcodes it) and must still be refused when it targets tenant-b via
+// req.TenantID. Under the previous "!principal.GlobalScope" guard this request was
+// accepted and drove orchestration against the victim tenant's fleet; the tenant-subtree
+// guard makes the flag irrelevant. withScopedPrincipal (GlobalScope=false) cannot detect
+// a reversion, so this test injects the session-shaped principal explicitly.
+func TestRollout_Start_SessionPrincipal_CrossTenantRejected(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-b"}
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout", bytes.NewReader(b))
+	req = withSessionPrincipal(req, "tenant-a")
+	rec := httptest.NewRecorder()
+
+	server.handleStartRollout(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"session principal scoped to tenant-a must not start a rollout for tenant-b: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "CROSS_TENANT")
+
+	// No rollout may exist for the victim tenant, and none may have been misattributed
+	// to the caller's own tenant either.
+	victimRollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), "tenant-b")
+	require.NoError(t, err)
+	assert.Empty(t, victimRollouts, "no rollout record may be created for the victim tenant")
+	callerRollouts, err := rolloutStore.ListRolloutsByTenant(context.Background(), "tenant-a")
+	require.NoError(t, err)
+	assert.Empty(t, callerRollouts, "a rejected cross-tenant start must not create any rollout")
+}
+
+// TestRollout_Start_SessionPrincipal_OwnSubtreeAllowed verifies the fix does not
+// over-restrict: a session principal scoped to tenant-a may start a rollout for a
+// descendant tenant, which is inside its authorized subtree.
+func TestRollout_Start_SessionPrincipal_OwnSubtreeAllowed(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-a/child-1"}
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout", bytes.NewReader(b))
+	req = withSessionPrincipal(req, "tenant-a")
+	rec := httptest.NewRecorder()
+
+	server.handleStartRollout(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code,
+		"session principal scoped to tenant-a must start a rollout for its descendant tenant: %s", rec.Body.String())
+
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	finalRecord := waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
+	assert.Equal(t, "tenant-a/child-1", finalRecord.TenantID,
+		"the rollout must be attributed to the requested descendant tenant")
+}
+
 // TestRollout_CompletesWhenAllRingsStewardsOnVersion verifies that when all stewards
 // are already on the target version the rollout completes without halting.
 func TestRollout_CompletesWhenAllRingsStewardsOnVersion(t *testing.T) {

@@ -270,9 +270,8 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
 	// cross-tenant push existence. requirePermission path-var isolation does not
 	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
-	// Global-scope callers (GlobalScope=true, typically empty TenantID) may read any push record.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !principal.GlobalScope && record.TenantID != callerTenant {
+	if !isWithinTenantScope(callerTenant, record.TenantID) {
 		s.respondError(w, http.StatusNotFound, "push not found")
 		return
 	}

@@ -244,10 +244,15 @@ func (s *LocalRepositoryStore) GetHistory(ctx context.Context, localPath, filePa
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 
-	// Get commit iterator
-	iter, err := repo.Log(&git.LogOptions{
-		FileName: &filePath,
-	})
+	// Get commit iterator. LogOptions.FileName filters the log to commits touching that
+	// file, and an empty file name matches no commit at all — so an empty filePath (the
+	// caller asking for whole-repository history) must leave the filter unset.
+	logOptions := &git.LogOptions{}
+	if filePath != "" {
+		logOptions.FileName = &filePath
+	}
+
+	iter, err := repo.Log(logOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get log: %w", err)
 	}

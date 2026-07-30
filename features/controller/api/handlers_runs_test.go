@@ -691,9 +691,12 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 		wantVis   bool
 	}{
 		{
+			// Admin callers (mTLS, empty TenantID) have unrestricted access.
+			// In real requests, tenantID comes from ctxkeys.TenantID which equals
+			// principal.TenantID — for admins that is "" (unrestricted).
 			name:      "AssuranceBasic_admin_any_tenant",
 			principal: &Principal{ID: "admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""},
-			tenantID:  "tenant-b",
+			tenantID:  "",
 			wantVis:   true,
 		},
 		{
@@ -731,6 +734,31 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 				tc.principal, run.TenantID, tc.tenantID)
 		})
 	}
+}
+
+// TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked verifies the fix for Issue
+// #3143: a session-authenticated principal has GlobalScope=true (set by middleware)
+// even when scoped to a specific tenant. Before the fix, the GlobalScope flag caused
+// runVisibleTo to return true for any run regardless of the caller's tenant. After
+// the fix, only callerTenant (from ctxkeys.TenantID) governs access.
+func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
+	// Simulate a web-session principal as middleware.go builds it: GlobalScope=true
+	// because it is hardcoded, but TenantID correctly set from the session.
+	sessionPrincipal := &Principal{
+		ID:          "web-acct-abc",
+		GlobalScope: true, // the middleware bug — this flag must no longer gate cross-tenant access
+		TenantID:    "tenant-a",
+		Assurance:   session.AssuranceBasic,
+	}
+
+	runOwnTenant := &controllerrun.RunRecord{RunID: "r-own", TenantID: "tenant-a"}
+	runOtherTenant := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
+
+	// tenantID = "tenant-a" (as set by withPrincipal via ctxkeys.TenantID in real requests).
+	assert.True(t, runVisibleTo(sessionPrincipal, runOwnTenant, "tenant-a"),
+		"session principal must see runs belonging to their own tenant")
+	assert.False(t, runVisibleTo(sessionPrincipal, runOtherTenant, "tenant-a"),
+		"session principal must NOT see runs belonging to a different tenant (Issue #3143)")
 }
 
 // ── [REQUIRED TEST] GlobalScope ⊥ Assurance independence (Issue #2787) ───────
@@ -783,6 +811,35 @@ func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	assert.True(t, admitted,
 		"AssuranceStrong+GlobalScope:false principal must be admitted by requirePermission on a Strong-gated route (body: %s)", rec.Body.String())
+}
+
+// TestAuthRunAccess_DoesNotConsultGlobalScope proves the empty-tenant admission gate in
+// authRunAccess (handlers_runs.go) keys off principal.Assurance, not principal.GlobalScope
+// (Issue #3143 acceptance follow-up). GlobalScope is hardcoded true on every session
+// principal by middleware.go, so gating admission on "!principal.GlobalScope" is a dead
+// check for session principals — it can never fire regardless of whether the caller is
+// genuinely entitled to operate with an empty tenant. Flip GlobalScope on both sides of
+// the table below: only Assurance should determine the outcome.
+func TestAuthRunAccess_DoesNotConsultGlobalScope(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+
+	// GlobalScope=false (as a correctly-scoped session principal would be, absent the
+	// middleware bug) must still be ADMITTED when Assurance is not machine-level —
+	// admission for an empty-tenant caller depends on Assurance, not GlobalScope.
+	humanNoTenant := &Principal{ID: "session-acct", Assurance: session.AssuranceBasic, GlobalScope: false, TenantID: ""}
+	req := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/runs/whatever", nil), humanNoTenant)
+	rec := httptest.NewRecorder()
+	_, _, ok := server.authRunAccess(rec, req)
+	assert.True(t, ok, "Assurance-based admission must admit a non-machine empty-tenant principal even with GlobalScope=false; body: %s", rec.Body.String())
+
+	// GlobalScope=true (mirroring the middleware bug) must NOT rescue a machine
+	// (API-key-style) principal with no tenant — it must still be rejected.
+	machineNoTenant := &Principal{ID: "bugged-key", Assurance: session.AssuranceMachine, GlobalScope: true, TenantID: ""}
+	req2 := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/runs/whatever", nil), machineNoTenant)
+	rec2 := httptest.NewRecorder()
+	_, _, ok2 := server.authRunAccess(rec2, req2)
+	assert.False(t, ok2, "a machine-assurance empty-tenant principal must be rejected regardless of GlobalScope")
+	assert.Equal(t, http.StatusUnauthorized, rec2.Code)
 }
 
 // ---- [REQUIRED TEST] Banned-pattern enforcement (C2) -------------------------

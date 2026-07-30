@@ -52,7 +52,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject non-admin callers with no tenant — mirrors authRunAccess (Issue #1990).
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, tenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -98,15 +98,13 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
 	// Global-scope callers (empty tenantID) are unrestricted.
 	if parsedTenantPath != "" {
-		if !principal.GlobalScope && tenantID != "" &&
-			parsedTenantPath != tenantID &&
-			!strings.HasPrefix(parsedTenantPath, tenantID+"/") {
+		if !isWithinTenantScope(tenantID, parsedTenantPath) {
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
-	} else if !principal.GlobalScope {
+	} else if tenantID != "" {
 		filter.TenantSubtree = tenantID
 	}
 
@@ -239,7 +237,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject non-admin callers with no tenant — mirrors authRunAccess (Issue #1990).
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, tenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -259,7 +257,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !principal.GlobalScope && job.TenantID != tenantID {
+	if !isWithinTenantScope(tenantID, job.TenantID) {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
