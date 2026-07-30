@@ -2,7 +2,7 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Refresh-request queue page (Story #2941).
+ * Refresh-request queue page (Story #2941, #2973).
  * Fetches GET /api/v1/stewards/refresh/pending — bare-array response (no
  * {data:...} envelope). Shape-validated by parsePendingRefreshList before
  * any value reaches the DOM.
@@ -10,8 +10,10 @@
  * Reject calls POST /api/v1/stewards/refresh/{pending_id}/reject and removes
  * the row on success; surfaces a row-level error without crashing on failure.
  *
- * Approve is out of scope for this story (Section 2 follow-on epic) — no
- * button, no disabled state, no deferred control of any kind.
+ * Approve calls POST /api/v1/stewards/refresh/{pending_id}/approve and removes
+ * the row on success; surfaces a row-level error without crashing on failure.
+ * Approve is Strong-gated (AssuranceStrong / S1 elevation); step-up is handled
+ * transparently by apiFetch + StepUpModal in AuthContext (Story #2967).
  *
  * Security A9.1: all device-supplied and operator-influenced values render
  * as JSX text nodes only, never via dangerouslySetInnerHTML.
@@ -131,6 +133,7 @@ export default function RefreshQueuePage() {
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
   const [rejectErrors, setRejectErrors] = useState<Map<string, string>>(new Map())
+  const [approveErrors, setApproveErrors] = useState<Map<string, string>>(new Map())
 
   const key = `refresh:${attempt}`
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
@@ -188,6 +191,37 @@ export default function RefreshQueuePage() {
         new Map(prev).set(
           pendingId,
           cause instanceof Error && cause.message ? cause.message : 'Reject request failed',
+        ),
+      )
+    }
+  }
+
+  async function handleApprove(pendingId: string) {
+    setApproveErrors((prev) => {
+      const next = new Map(prev)
+      next.delete(pendingId)
+      return next
+    })
+    try {
+      const response = await apiFetch(
+        `/api/v1/stewards/refresh/${encodeURIComponent(pendingId)}/approve`,
+        { method: 'POST' },
+      )
+      if (!response.ok) {
+        setApproveErrors((prev) =>
+          new Map(prev).set(pendingId, `Approve failed — ${response.status}`),
+        )
+        return
+      }
+      setOutcome((prev) => {
+        if (!prev?.entries) return prev
+        return { ...prev, entries: prev.entries.filter((e) => e.pending_id !== pendingId) }
+      })
+    } catch (cause: unknown) {
+      setApproveErrors((prev) =>
+        new Map(prev).set(
+          pendingId,
+          cause instanceof Error && cause.message ? cause.message : 'Approve request failed',
         ),
       )
     }
@@ -263,6 +297,14 @@ export default function RefreshQueuePage() {
                       <td>
                         <button
                           type="button"
+                          className="wf-btn-sm"
+                          data-testid={`approve-btn-${entry.pending_id}`}
+                          onClick={() => void handleApprove(entry.pending_id)}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
                           className="wf-btn-sm-danger"
                           data-testid={`reject-btn-${entry.pending_id}`}
                           onClick={() => void handleReject(entry.pending_id)}
@@ -271,6 +313,19 @@ export default function RefreshQueuePage() {
                         </button>
                       </td>
                     </tr>
+                    {approveErrors.has(entry.pending_id) && (
+                      <tr>
+                        <td colSpan={7}>
+                          <span
+                            className="wf-form-error"
+                            data-testid={`approve-error-${entry.pending_id}`}
+                            role="alert"
+                          >
+                            {approveErrors.get(entry.pending_id)}
+                          </span>
+                        </td>
+                      </tr>
+                    )}
                     {rejectErrors.has(entry.pending_id) && (
                       <tr>
                         <td colSpan={7}>

@@ -207,11 +207,11 @@ describe('RefreshQueuePage — list rendering', () => {
     expect(screen.getByTestId('reject-btn-ref-abc123')).toBeInTheDocument()
   })
 
-  it('renders no approve control of any kind', async () => {
+  it('shows an Approve button for each row', async () => {
     fetchMock.mockResolvedValue(makeRefreshResponse([makeEntry()]))
     renderPage()
     await waitFor(() => expect(screen.getByTestId('refresh-table')).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: /approve/i })).toBeNull()
+    expect(screen.getByTestId('approve-btn-ref-abc123')).toBeInTheDocument()
   })
 
   it('shows an error notice on a non-200 list response', async () => {
@@ -324,6 +324,100 @@ describe('RefreshQueuePage — reject', () => {
     await waitFor(() => expect(screen.getAllByTestId('refresh-row')).toHaveLength(2))
 
     fireEvent.click(screen.getByTestId('reject-btn-ref-abc123'))
+
+    await waitFor(() => expect(screen.getAllByTestId('refresh-row')).toHaveLength(1))
+    expect(screen.getByText('ref-def456')).toBeInTheDocument()
+    expect(screen.queryByText('ref-abc123')).toBeNull()
+  })
+})
+
+// ── Approve flow (Story #2973) ────────────────────────────────────────────────
+// Approve calls POST /api/v1/stewards/refresh/{pending_id}/approve.
+// Strong step-up (S1 elevation) is handled transparently by apiFetch +
+// StepUpModal in AuthContext — no explicit assertion here; the step-up
+// ceremony fires only when the server returns 401 CFGMS-StepUp.
+
+describe('RefreshQueuePage — approve', () => {
+  it('approve removes the row from the list on success', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeRefreshResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('refresh-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-btn-ref-abc123'))
+
+    await waitFor(() => expect(screen.getByTestId('refresh-empty')).toBeInTheDocument())
+    expect(screen.queryByTestId('refresh-row')).toBeNull()
+    const approveCall = fetchMock.mock.calls[1]!
+    expect(String(approveCall[0])).toContain('/approve')
+    expect((approveCall[1] as RequestInit | undefined)?.method).toBe('POST')
+  })
+
+  it('surfaces a row-level error on a failed approve without crashing', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeRefreshResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('refresh-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-btn-ref-abc123'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-error-ref-abc123')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('approve-error-ref-abc123')).toHaveTextContent('403')
+    expect(screen.getByTestId('refresh-table')).toBeInTheDocument()
+    expect(screen.getAllByTestId('refresh-row')).toHaveLength(1)
+  })
+
+  it('surfaces a row-level error on a network failure during approve without crashing', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeRefreshResponse([makeEntry()]))
+      .mockRejectedValueOnce(new Error('connection refused'))
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('refresh-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-btn-ref-abc123'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-error-ref-abc123')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('approve-error-ref-abc123')).toHaveTextContent('connection refused')
+    expect(screen.getAllByTestId('refresh-row')).toHaveLength(1)
+  })
+
+  it('clears a previous approve error when approve is retried', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeRefreshResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('refresh-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-btn-ref-abc123'))
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-error-ref-abc123')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('approve-btn-ref-abc123'))
+    await waitFor(() => expect(screen.getByTestId('refresh-empty')).toBeInTheDocument())
+    expect(screen.queryByTestId('approve-error-ref-abc123')).toBeNull()
+  })
+
+  it('keeps other rows intact when one approve succeeds', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        makeRefreshResponse([
+          makeEntry(),
+          makeEntry({ pending_id: 'ref-def456', device_id: 'dev-uvw321' }),
+        ]),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+    renderPage()
+    await waitFor(() => expect(screen.getAllByTestId('refresh-row')).toHaveLength(2))
+
+    fireEvent.click(screen.getByTestId('approve-btn-ref-abc123'))
 
     await waitFor(() => expect(screen.getAllByTestId('refresh-row')).toHaveLength(1))
     expect(screen.getByText('ref-def456')).toBeInTheDocument()
