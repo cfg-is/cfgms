@@ -1305,3 +1305,82 @@ func TestHandleGetRole_TenantScoping(t *testing.T) {
 		})
 	}
 }
+
+// ── log-injection sanitization (CodeQL go/log-injection) ─────────────────────
+
+// assertLogFieldsSanitized fails if any captured Error field carries a CR or LF,
+// which is what lets an attacker append a synthetic record to the log stream.
+func assertLogFieldsSanitized(t *testing.T, capLog *errorCapturingLogger, fields ...string) {
+	t.Helper()
+	for _, field := range fields {
+		v := capLog.kvValue(field)
+		require.NotNil(t, v, "expected %q to be logged", field)
+		s, ok := v.(string)
+		require.True(t, ok, "%q must be logged as a pre-sanitized string, got %T", field, v)
+		assert.NotContains(t, s, "\n", "%q must not carry LF", field)
+		assert.NotContains(t, s, "\r", "%q must not carry CR", field)
+	}
+}
+
+// TestHandleGetRole_ErrorLogValueSanitized verifies that a CRLF-bearing role ID
+// from the {id} path segment cannot forge a log record. The store re-embeds the
+// raw ID in its "role %s not found" error, so sanitizing only the role_id field
+// is insufficient — the error field must be sanitized too.
+func TestHandleGetRole_ErrorLogValueSanitized(t *testing.T) {
+	capLog := &errorCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// The path segment an attacker supplies as %0d%0a decodes to CRLF in mux.Vars.
+	dirtyID := "missing-role\r\nlevel=ERROR msg=\"forged record\""
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rbac/roles/missing-role", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+	req = mux.SetURLVars(req, map[string]string{"id": dirtyID})
+	rec := httptest.NewRecorder()
+
+	server.handleGetRole(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+	assertLogFieldsSanitized(t, capLog, "role_id", "error")
+	assert.NotContains(t, rec.Body.String(), "forged record",
+		"raw role ID must not be reflected in the response body")
+}
+
+// TestHandleGetPermission_ErrorLogValueSanitized covers the same source-to-sink
+// path on the permission handler, whose store error likewise re-embeds the raw
+// {id} path segment.
+func TestHandleGetPermission_ErrorLogValueSanitized(t *testing.T) {
+	capLog := &errorCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	dirtyID := "missing-perm\r\nlevel=ERROR msg=\"forged record\""
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rbac/permissions/missing-perm", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a"))
+	req = mux.SetURLVars(req, map[string]string{"id": dirtyID})
+	rec := httptest.NewRecorder()
+
+	server.handleGetPermission(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+	assertLogFieldsSanitized(t, capLog, "permission_id", "error")
+}
+
+// TestHandleGetRole_CleanErrorPassesThrough verifies sanitization does not mangle
+// a well-formed role ID or error message — the fix must strip control characters
+// without corrupting legitimate diagnostic output.
+func TestHandleGetRole_CleanErrorPassesThrough(t *testing.T) {
+	capLog := &errorCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	req := roleMutationRequest(http.MethodGet, "no-such-role", "tenant-a", nil)
+	rec := httptest.NewRecorder()
+
+	server.handleGetRole(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "no-such-role", capLog.kvValue("role_id"),
+		"a clean role ID must be logged verbatim")
+	errVal, ok := capLog.kvValue("error").(string)
+	require.True(t, ok, "error must be logged as a string")
+	assert.Contains(t, errVal, "no-such-role",
+		"a clean error message must survive sanitization intact")
+}

@@ -129,7 +129,7 @@ func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.ListPermissions(r.Context(), req)
 	if err != nil {
-		s.logger.Error("Failed to list permissions", "error", err)
+		s.logger.Error("Failed to list permissions", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list permissions", "INTERNAL_ERROR")
 		return
 	}
@@ -210,7 +210,7 @@ func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.ListRoles(r.Context(), req)
 	if err != nil {
-		s.logger.Error("Failed to list roles", "error", err)
+		s.logger.Error("Failed to list roles", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list roles", "INTERNAL_ERROR")
 		return
 	}
