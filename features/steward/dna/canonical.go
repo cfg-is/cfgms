@@ -12,6 +12,204 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
+// DecodeCanonicalFragment reverses CanonicalizeFragment, recovering the stable
+// key-value pairs from canonical bytes. Ephemeral keys were stripped at encode
+// time and are absent from the result. The returned map uses Go native types:
+//   - bool for B-tagged values
+//   - int64 for I-tagged values
+//   - uint64 for U-tagged values
+//   - float64 for F-tagged values
+//   - string for S- and O-tagged values
+//   - map[string]interface{} for M-tagged nested maps
+//   - []interface{} for L-tagged slices
+//   - nil for N-tagged null values
+//
+// Used by the cluster registry to extract resource_owner from cluster:* fragments.
+//
+// # Hostile-input handling
+//
+// canonical_bytes arrive from stewards, which per the threat model run on hosts
+// that may be compromised. Every declared length and count in the header is
+// therefore validated against the bytes actually remaining in the buffer before
+// any allocation, and nesting depth is capped at maxCanonDecodeDepth. Without
+// those checks a 14-byte payload declaring a 2^32-element slice drives the Go
+// runtime into an unrecoverable "out of memory" fatal error (not a panic, so no
+// recovery interceptor can contain it), and deeply nested map tags drive it into
+// an equally unrecoverable "stack overflow".
+func DecodeCanonicalFragment(b []byte) (map[string]interface{}, error) {
+	if len(b) > MaxCanonicalFragmentSize {
+		return nil, fmt.Errorf("DecodeCanonicalFragment: %d bytes exceeds maximum %d",
+			len(b), MaxCanonicalFragmentSize)
+	}
+	m, n, err := decodeCanonMap(b, 0)
+	if err != nil {
+		return nil, fmt.Errorf("DecodeCanonicalFragment: %w", err)
+	}
+	if n != len(b) {
+		return nil, fmt.Errorf("DecodeCanonicalFragment: %d bytes consumed, %d total", n, len(b))
+	}
+	return m, nil
+}
+
+// MaxCanonicalFragmentSize bounds the canonical_bytes payload DecodeCanonicalFragment
+// will accept. It matches the gRPC maxRecvMsgSize in
+// pkg/dataplane/providers/grpc/limits.go so that a fragment which cannot arrive over
+// the wire also cannot be fed to the decoder by an in-process caller. Real fragments
+// are curated key subsets (see PartitionHostFacts) and are orders of magnitude smaller.
+const MaxCanonicalFragmentSize = 8 * 1024 * 1024
+
+// maxCanonDecodeDepth bounds map/slice nesting during decode. decodeCanonValue and
+// decodeCanonMap are mutually recursive, so without a ceiling a stream of nested 'M'
+// tags (9 input bytes per level) overflows the goroutine stack — a fatal, unrecoverable
+// runtime error. Real fragment payloads are flat maps of scalars; the deepest shape in
+// the codebase is a map of maps (depth 2), so 32 is far above any legitimate use.
+const maxCanonDecodeDepth = 32
+
+// minCanonMapEntrySize is the smallest number of bytes a single map entry can occupy:
+// 4 bytes of key length (a zero-length key is legal) plus a 1-byte type tag. Used to
+// reject an entry count that is structurally impossible for the remaining buffer
+// before any allocation is made from it.
+const minCanonMapEntrySize = 5
+
+// decodeCanonMap decodes [uint32 count][entries...] from b at the given nesting depth.
+// Returns the map, bytes consumed, and any error.
+//
+// The declared entry count is validated against the remaining buffer before the map is
+// built, and the map grows incrementally rather than being pre-sized from the header,
+// so a hostile count cannot drive an allocation larger than the input itself.
+func decodeCanonMap(b []byte, depth int) (map[string]interface{}, int, error) {
+	if depth > maxCanonDecodeDepth {
+		return nil, 0, fmt.Errorf("decodeCanonMap: nesting depth exceeds %d", maxCanonDecodeDepth)
+	}
+	if len(b) < 4 {
+		return nil, 0, fmt.Errorf("decodeCanonMap: need 4 bytes for count, have %d", len(b))
+	}
+	count := uint64(binary.BigEndian.Uint32(b[:4]))
+	pos := 4
+	if maxEntries := uint64(len(b)-pos) / minCanonMapEntrySize; count > maxEntries {
+		return nil, 0, fmt.Errorf("decodeCanonMap: declared %d entries exceeds %d possible in %d remaining bytes",
+			count, maxEntries, len(b)-pos)
+	}
+	m := make(map[string]interface{})
+	for i := uint64(0); i < count; i++ {
+		if pos+4 > len(b) {
+			return nil, 0, fmt.Errorf("decodeCanonMap: key length truncated at entry %d", i)
+		}
+		klen := uint64(binary.BigEndian.Uint32(b[pos : pos+4]))
+		pos += 4
+		if klen > uint64(len(b)-pos) {
+			return nil, 0, fmt.Errorf("decodeCanonMap: key bytes truncated at entry %d", i)
+		}
+		key := string(b[pos : pos+int(klen)])
+		pos += int(klen)
+		v, n, err := decodeCanonValue(b[pos:], depth)
+		if err != nil {
+			return nil, 0, fmt.Errorf("decodeCanonMap: entry %q: %w", key, err)
+		}
+		pos += n
+		m[key] = v
+	}
+	return m, pos, nil
+}
+
+// decodeCanonValue decodes one type-tagged value from b at the given nesting depth.
+// Returns the value, bytes consumed, and any error.
+func decodeCanonValue(b []byte, depth int) (interface{}, int, error) {
+	if depth > maxCanonDecodeDepth {
+		return nil, 0, fmt.Errorf("decodeCanonValue: nesting depth exceeds %d", maxCanonDecodeDepth)
+	}
+	if len(b) == 0 {
+		return nil, 0, fmt.Errorf("decodeCanonValue: empty buffer")
+	}
+	switch b[0] {
+	case canonTagNull:
+		return nil, 1, nil
+
+	case canonTagBool:
+		if len(b) < 2 {
+			return nil, 0, fmt.Errorf("decodeCanonValue: bool truncated")
+		}
+		return b[1] != 0x00, 2, nil
+
+	case canonTagInt:
+		if len(b) < 9 {
+			return nil, 0, fmt.Errorf("decodeCanonValue: int64 truncated")
+		}
+		return int64(binary.BigEndian.Uint64(b[1:9])), 9, nil
+
+	case canonTagUint:
+		if len(b) < 9 {
+			return nil, 0, fmt.Errorf("decodeCanonValue: uint64 truncated")
+		}
+		return binary.BigEndian.Uint64(b[1:9]), 9, nil
+
+	case canonTagFloat:
+		if len(b) < 5 {
+			return nil, 0, fmt.Errorf("decodeCanonValue: float length truncated")
+		}
+		// Compared in uint64 (not int) so the guard holds on 32-bit GOARCH, where
+		// int(uint32) can go negative and make "len(b) < 5+slen" trivially false.
+		slen := uint64(binary.BigEndian.Uint32(b[1:5]))
+		if slen > uint64(len(b)-5) {
+			return nil, 0, fmt.Errorf("decodeCanonValue: float string truncated")
+		}
+		s := string(b[5 : 5+int(slen)])
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, 0, fmt.Errorf("decodeCanonValue: parse float %q: %w", s, err)
+		}
+		return v, 5 + int(slen), nil
+
+	case canonTagString, canonTagOther:
+		if len(b) < 5 {
+			return nil, 0, fmt.Errorf("decodeCanonValue: string/other length truncated")
+		}
+		// uint64 comparison for the same 32-bit-safety reason as canonTagFloat.
+		slen := uint64(binary.BigEndian.Uint32(b[1:5]))
+		if slen > uint64(len(b)-5) {
+			return nil, 0, fmt.Errorf("decodeCanonValue: string/other bytes truncated")
+		}
+		return string(b[5 : 5+int(slen)]), 5 + int(slen), nil
+
+	case canonTagMap:
+		m, n, err := decodeCanonMap(b[1:], depth+1)
+		if err != nil {
+			return nil, 0, fmt.Errorf("decodeCanonValue: nested map: %w", err)
+		}
+		return m, 1 + n, nil
+
+	case canonTagSlice:
+		if len(b) < 5 {
+			return nil, 0, fmt.Errorf("decodeCanonValue: slice count truncated")
+		}
+		count := uint64(binary.BigEndian.Uint32(b[1:5]))
+		pos := 5
+		// Every element consumes at least one type-tag byte, so a count larger than
+		// the remaining buffer is structurally impossible. Rejecting it here (rather
+		// than discovering the truncation mid-loop) keeps a hostile header from
+		// driving an allocation before a single element has been read.
+		if count > uint64(len(b)-pos) {
+			return nil, 0, fmt.Errorf("decodeCanonValue: declared %d slice elements exceeds %d remaining bytes",
+				count, len(b)-pos)
+		}
+		// Grown incrementally rather than pre-sized from the declared count, so the
+		// allocation tracks elements actually decoded instead of the declared header.
+		elems := make([]interface{}, 0)
+		for i := uint64(0); i < count; i++ {
+			v, n, err := decodeCanonValue(b[pos:], depth+1)
+			if err != nil {
+				return nil, 0, fmt.Errorf("decodeCanonValue: slice element %d: %w", i, err)
+			}
+			elems = append(elems, v)
+			pos += n
+		}
+		return elems, pos, nil
+
+	default:
+		return nil, 0, fmt.Errorf("decodeCanonValue: unknown tag 0x%02x", b[0])
+	}
+}
+
 // Wire-format type tags for CanonicalizeFragment's length-prefix encoding.
 // Each value field is preceded by one of these bytes to distinguish types that
 // share a textual representation (e.g. bool(true) vs int64(1) vs string("1")).
@@ -163,6 +361,21 @@ func canonEncodeValue(v interface{}) ([]byte, error) {
 
 	case map[string]interface{}:
 		inner, err := canonEncodeMap(val)
+		if err != nil {
+			return nil, err
+		}
+		return append([]byte{canonTagMap}, inner...), nil
+
+	case map[string]string:
+		// Normalise to map[string]interface{} so the encoding is identical to the
+		// map[string]interface{} path (sorted keys, length-prefix entries, decodable).
+		// Without this case, map[string]string falls to the default/O path which
+		// produces Go's fmt.Sprintf("%v") string — opaque and not decodable.
+		converted := make(map[string]interface{}, len(val))
+		for k, v := range val {
+			converted[k] = v
+		}
+		inner, err := canonEncodeMap(converted)
 		if err != nil {
 			return nil, err
 		}

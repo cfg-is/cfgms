@@ -11,8 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/modules"
 	steward "github.com/cfgis/cfgms/features/steward"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -242,4 +245,83 @@ func TestSteward_CollectModuleDNAAttributes_NilDetailsSafe(t *testing.T) {
 	for k := range attrs {
 		assert.NotContains(t, k, "cluster:cfg-lab", "nil Details must cache nothing")
 	}
+}
+
+// ─── Issue #2908: cluster ChangeEvent → fragment path ─────────────────────────
+
+// TestSteward_CollectModuleFragments_ClusterChangeEvent is the REQUIRED end-to-end
+// test for #2908 AC2+AC3+AC4: a hyperv cluster ChangeEvent (ownership change)
+// produces a cluster:<Name> fragment via CollectModuleFragments, and that fragment
+// is readable by clusterregistry.BuildRegistry and clusterregistry.Reconcile.
+func TestSteward_CollectModuleFragments_ClusterChangeEvent(t *testing.T) {
+	s, mon := startMonitoredSteward(t)
+
+	// Simulate a cluster ownership change event (hyperv module S4 Monitor output).
+	mon.SendChange(modules.ChangeEvent{
+		ResourceID: "cluster:cfg-lab",
+		ChangeType: modules.ChangeTypeModified,
+		Details: execution.NewConfigState(map[string]interface{}{
+			"name":           "cfg-lab",
+			"cno_owner_node": "CFG-70-02",
+			"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
+			"resource_owner": map[string]string{"web-01": "CFG-70-02"},
+			"found":          true,
+		}),
+	})
+
+	ctx := context.Background()
+	require.Eventually(t, func() bool {
+		for _, f := range s.CollectModuleFragments(ctx) {
+			if f.FragmentId == "cluster:cfg-lab" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond,
+		"cluster:cfg-lab fragment must appear after the ChangeEvent")
+
+	collected := s.CollectModuleFragments(ctx)
+
+	// Locate the cluster:cfg-lab fragment.
+	var fragBytes []byte
+	for _, f := range collected {
+		if f.FragmentId == "cluster:cfg-lab" {
+			fragBytes = f.CanonicalBytes
+			break
+		}
+	}
+	require.NotNil(t, fragBytes, "cluster:cfg-lab canonical bytes must be non-nil")
+
+	// Decode the canonical bytes — resource_owner must be readable by the registry.
+	data, err := sdna.DecodeCanonicalFragment(fragBytes)
+	require.NoError(t, err)
+	owners, ok := data["resource_owner"].(map[string]interface{})
+	require.True(t, ok, "resource_owner must decode as map[string]interface{}, got %T", data["resource_owner"])
+	assert.Equal(t, "CFG-70-02", owners["web-01"], "web-01 owner must survive fragment round-trip")
+
+	// The clusterregistry must parse the fragment into a usable Registry.
+	stewards := []fleet.StewardData{
+		{
+			ID:            "steward-a",
+			TenantID:      "default",
+			Status:        "active",
+			LastHeartbeat: time.Now(),
+			DNAFragments:  collected,
+		},
+	}
+	reg := clusterregistry.BuildRegistry(stewards)
+	entry := reg.Cluster("cfg-lab")
+	require.NotNil(t, entry, "clusterregistry must resolve cluster:cfg-lab from fragment")
+	assert.Equal(t, "CFG-70-02", entry.RoleOwners["web-01"],
+		"resource_owner.web-01 must be readable from the registry")
+
+	// Reconcile must classify the declared role as present-with-live-owner.
+	declared := []clusterregistry.DeclaredResource{
+		{ClusterName: "cfg-lab", RoleName: "web-01"},
+	}
+	results := clusterregistry.Reconcile(declared, reg, stewards, func(_ string) bool { return true })
+	require.Len(t, results, 1)
+	assert.Equal(t, clusterregistry.StatusPresentLiveOwner, results[0].Status,
+		"Reconcile must report present-with-live-owner after a cluster ChangeEvent")
+	assert.Equal(t, "CFG-70-02", results[0].OwnerID)
 }

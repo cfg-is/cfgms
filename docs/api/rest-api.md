@@ -1807,8 +1807,8 @@ Get execution history for a trigger.
 ### Cluster Management
 
 Read-only view of the Hyper-V cluster topology derived on demand from steward DNA
-attributes. **This API is eventually consistent**: it reflects whatever `cluster:<name>.*`
-DNA attributes were last published by each steward's `DNARefreshLoop` ticker (default
+fragments. **This API is eventually consistent**: it reflects whatever `cluster:<name>`
+DNA fragments were last published by each steward's `DNARefreshLoop` ticker (default
 30 minutes, configurable via `DNARefreshInterval`). A cluster topology change — a new
 member node, a role ownership transfer — can take up to one refresh interval to appear
 in these endpoints. This is acceptable because no safety-critical behavior (no-duplicate-VM
@@ -1817,9 +1817,9 @@ off live PowerShell queries on every convergence tick, not off this read API.
 
 #### GET /api/v1/clusters
 
-List all clusters visible to the authenticated caller. Clusters are derived by parsing
-`cluster:<name>.*` keys from each steward's `DNA.Attributes`. Only clusters whose member
-stewards belong to the caller's tenant (or a descendant tenant) are returned.
+List all clusters visible to the authenticated caller. Clusters are derived by decoding
+the `cluster:<name>` fragments in each steward's `DNA.Fragments` (ADR-017). Only clusters
+whose member stewards belong to the caller's tenant (or a descendant tenant) are returned.
 
 **Required permission:** `cluster:list`
 
@@ -1847,9 +1847,9 @@ all clusters.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | string | Cluster name from the `cluster:<name>.*` DNA key prefix |
-| `members` | []string | Sorted steward IDs whose DNA carries `cluster:<name>.*` keys |
-| `role_owners` | object | Map of role name → owner node, parsed from `cluster:<name>.resource_owner.<role>` keys |
+| `name` | string | Cluster name from the `cluster:<name>` DNA fragment ID |
+| `members` | []string | Sorted steward IDs whose DNA carries a `cluster:<name>` fragment |
+| `role_owners` | object | Map of role name → owner node, from the fragment's `resource_owner` field |
 
 #### GET /api/v1/clusters/{name}
 
@@ -1893,8 +1893,8 @@ across tenant boundaries.
 Reconcile the declared clustered resources for a named cluster against the actual
 cluster registry. This is the **controller's accountable-authority** view: it
 cross-checks the resource declarations stored in `cluster-policies/<name>` (the
-"should exist" side) with the `cluster:<name>.resource_owner.*` DNA attributes
-published by member stewards (the "does exist" side).
+"should exist" side) with the `resource_owner` field of the `cluster:<name>` DNA
+fragments published by member stewards (the "does exist" side).
 
 Returns 404 under the same conditions as `GET /api/v1/clusters/{name}`.
 

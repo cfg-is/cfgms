@@ -18,6 +18,7 @@ import (
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -830,12 +831,14 @@ func TestNewConfigurationServiceV2_WiresClusterRegistry(t *testing.T) {
 
 	stewardID := "cluster-member-1"
 
-	// Register the steward in the ControllerService with cluster DNA attributes.
-	// cluster:cfg-lab.member is a valid cluster:<name>.<field> key that causes
-	// BuildRegistry to record stewardID as a member of "cfg-lab".
-	dna := makeTestDNA(stewardID, map[string]string{
-		"cluster:cfg-lab.member": "true",
-	})
+	// Register the steward in the ControllerService with a cluster:cfg-lab ADR-017
+	// fragment — the shape BuildRegistry parses to record stewardID as a member of
+	// "cfg-lab" (Issue #2908). Built via sdna.NewFragment so the canonical bytes come
+	// from the same production encoder the steward uses.
+	clusterFrag, err := sdna.NewFragment("cluster:cfg-lab", "hyperv", sdna.MapState{"name": "cfg-lab"})
+	require.NoError(t, err)
+	dna := makeTestDNA(stewardID, nil)
+	dna.Fragments = []*common.Fragment{clusterFrag}
 	controllerSvc.mu.Lock()
 	controllerSvc.stewards[stewardID] = &StewardInfo{
 		ID:       stewardID,
@@ -873,7 +876,7 @@ func TestNewConfigurationServiceV2_WiresClusterRegistry(t *testing.T) {
 
 	_, hasCfgLabVM := resourcesByName["cfg-lab-vm"]
 	assert.True(t, hasCfgLabVM,
-		"steward with cluster:cfg-lab.member DNA must receive cfg-lab-vm from cluster-policies/cfg-lab")
+		"steward with a cluster:cfg-lab DNA fragment must receive cfg-lab-vm from cluster-policies/cfg-lab")
 
 	src, hasSrc := effective.Sources["resource.cfg-lab-vm"]
 	require.True(t, hasSrc, "cluster resource source must be tracked in effective config")

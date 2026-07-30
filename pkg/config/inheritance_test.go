@@ -12,10 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -563,15 +565,19 @@ func TestResolveRingVersion_DefaultFallbackWhenFallbackRingEmpty(t *testing.T) {
 
 // buildClusterRegistry constructs a real *clusterregistry.Registry from the given
 // steward DNA, exercising the production BuildRegistry parse path (no stubs). It
-// marks stewardID as a member of each named cluster via the cluster:<name>.member
-// DNA convention that clusterregistry.BuildRegistry parses.
-func buildClusterRegistry(stewardID string, clusters ...string) *clusterregistry.Registry {
-	attrs := make(map[string]string, len(clusters))
+// marks stewardID as a member of each named cluster by attaching a cluster:<name>
+// ADR-017 fragment, built through sdna.NewFragment — the same production path the
+// steward's monitor bridge uses (Issue #2908).
+func buildClusterRegistry(t *testing.T, stewardID string, clusters ...string) *clusterregistry.Registry {
+	t.Helper()
+	frags := make([]*commonpb.Fragment, 0, len(clusters))
 	for _, c := range clusters {
-		attrs["cluster:"+c+".member"] = "true"
+		frag, err := sdna.NewFragment("cluster:"+c, "hyperv", sdna.MapState{"name": c})
+		require.NoError(t, err)
+		frags = append(frags, frag)
 	}
 	return clusterregistry.BuildRegistry([]fleet.StewardData{
-		{ID: stewardID, DNAAttributes: attrs},
+		{ID: stewardID, DNAFragments: frags},
 	})
 }
 
@@ -617,7 +623,7 @@ func TestResolveConfiguration_ClusterCascade_MemberReceivesResources(t *testing.
 		}),
 	}))
 
-	registry := buildClusterRegistry("steward-1", "cfg-lab")
+	registry := buildClusterRegistry(t, "steward-1", "cfg-lab")
 	router := &cfgStoreAsRouter{ConfigStore: cs}
 	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
 
@@ -683,7 +689,7 @@ func TestResolveConfiguration_NoMembership_Unchanged(t *testing.T) {
 	require.NoError(t, err)
 
 	// Resolve with registry wired but steward has no membership
-	emptyRegistry := buildClusterRegistry("other-steward", "cfg-lab")
+	emptyRegistry := buildClusterRegistry(t, "other-steward", "cfg-lab")
 	irWithRegistry := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), emptyRegistry)
 	effectiveWithRegistry, err := irWithRegistry.ResolveConfiguration(ctx, "client", "steward-2")
 	require.NoError(t, err)
@@ -723,7 +729,7 @@ func TestResolveConfiguration_ClusterLeave_DropsResources(t *testing.T) {
 	router := &cfgStoreAsRouter{ConfigStore: cs}
 
 	// First call: steward IS a member — cluster-vm must appear
-	memberRegistry := buildClusterRegistry("steward-1", "cfg-lab")
+	memberRegistry := buildClusterRegistry(t, "steward-1", "cfg-lab")
 	irMember := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), memberRegistry)
 	effectiveMember, err := irMember.ResolveConfiguration(ctx, "client", "steward-1")
 	require.NoError(t, err)
@@ -736,7 +742,7 @@ func TestResolveConfiguration_ClusterLeave_DropsResources(t *testing.T) {
 		"cluster-vm must appear when steward is a member of cfg-lab")
 
 	// Second call: steward has LEFT the cluster (registry returns nil) — cluster-vm must be gone
-	leftRegistry := buildClusterRegistry("other-steward", "cfg-lab")
+	leftRegistry := buildClusterRegistry(t, "other-steward", "cfg-lab")
 	irLeft := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), leftRegistry)
 	effectiveLeft, err := irLeft.ResolveConfiguration(ctx, "client", "steward-1")
 	require.NoError(t, err)
@@ -776,7 +782,7 @@ func TestResolveConfiguration_CorruptClusterConfig_DoesNotFailResolution(t *test
 		Data: []byte("{{{{this is not valid YAML: [[["),
 	}))
 
-	registry := buildClusterRegistry("steward-1", "bad-cluster")
+	registry := buildClusterRegistry(t, "steward-1", "bad-cluster")
 	router := &cfgStoreAsRouter{ConfigStore: cs}
 	ir := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry)
 
@@ -855,7 +861,7 @@ func TestResolveConfiguration_ClusterConfigError_LogValueSanitized(t *testing.T)
 
 	// stewardID containing newline and CR that must be stripped at the log call site.
 	injectedStewardID := "steward\n123\rinjected"
-	registry := buildClusterRegistry(injectedStewardID, "bad-cluster")
+	registry := buildClusterRegistry(t, injectedStewardID, "bad-cluster")
 	router := &cfgStoreAsRouter{ConfigStore: cs}
 
 	capture := logging.NewCapturingLogger()
@@ -877,7 +883,7 @@ func TestResolveConfiguration_ClusterConfigError_LogValueSanitized(t *testing.T)
 
 	// A clean value (no control chars) must pass through unchanged.
 	cleanStewardID := "clean-steward-456"
-	cleanRegistry := buildClusterRegistry(cleanStewardID, "bad-cluster")
+	cleanRegistry := buildClusterRegistry(t, cleanStewardID, "bad-cluster")
 	cleanCapture := logging.NewCapturingLogger()
 	irClean := NewInheritanceResolverWithClusters(router, sm.GetClientTenantStore(), sm.GetTenantStore(), cleanRegistry)
 	irClean.WithLogger(cleanCapture)
@@ -912,7 +918,7 @@ func (p *fixedRoleProvider) MatchingRoleFragments(_ context.Context, _ string) (
 func TestNewInheritanceResolverWithRoles_WiresClusterAndRoleProviders(t *testing.T) {
 	sm := pkgtesting.SetupTestStorage(t)
 	router := &cfgStoreAsRouter{ConfigStore: sm.GetConfigStore()}
-	registry := buildClusterRegistry("steward-1", "cluster-a")
+	registry := buildClusterRegistry(t, "steward-1", "cluster-a")
 	roles := &fixedRoleProvider{}
 
 	ir := NewInheritanceResolverWithRoles(router, sm.GetClientTenantStore(), sm.GetTenantStore(), registry, roles)

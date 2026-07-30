@@ -483,6 +483,12 @@ func (s *Steward) CollectModuleDNAAttributes(ctx context.Context) map[string]str
 	return s.executor.CollectModuleDNAAttributes(ctx)
 }
 
+// CollectModuleFragments delegates to the executor's monitor engine.
+// See execution.Executor.CollectModuleFragments for the fragment convention.
+func (s *Steward) CollectModuleFragments(ctx context.Context) []*commonpb.Fragment {
+	return s.executor.CollectModuleFragments(ctx)
+}
+
 // Stop gracefully shuts down the steward and cleans up resources.
 //
 // This method:

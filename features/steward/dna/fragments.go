@@ -206,6 +206,51 @@ func (s *attributeConfigState) GetManagedFields() []string { return nil }
 
 var _ modules.ConfigState = (*attributeConfigState)(nil)
 
+// MapState adapts an already-materialised map[string]interface{} state snapshot to
+// modules.ConfigState so it can be canonicalized by CanonicalizeFragment.
+//
+// It is a projection of state a module already produced via its own AsMap(), not a
+// second independent reader of the underlying resource (ADR-017 §2a): the only
+// method with real behaviour is AsMap. It therefore takes no part in a Get/Set
+// convergence cycle, and the remaining ConfigState methods are inert.
+type MapState map[string]interface{}
+
+// AsMap returns the wrapped snapshot.
+func (s MapState) AsMap() map[string]interface{} { return s }
+
+// ToYAML is inert: MapState exists only to feed the canonical encoder.
+func (s MapState) ToYAML() ([]byte, error) { return nil, nil }
+
+// FromYAML is inert: MapState is read-only.
+func (s MapState) FromYAML(_ []byte) error { return nil }
+
+// Validate is inert: the snapshot was already validated by its producing module.
+func (s MapState) Validate() error { return nil }
+
+// GetManagedFields is inert: MapState declares no field ownership.
+func (s MapState) GetManagedFields() []string { return nil }
+
+var _ modules.ConfigState = MapState(nil)
+
+// NewFragment canonicalizes state (S2) and hashes it (S3) into an ADR-017 Fragment.
+//
+// It is the single construction point for fragments assembled outside
+// PartitionHostFacts — the steward's monitor bridge for cluster:* state and the
+// controller-side fixtures that exercise the cluster registry parse path both use
+// it, so canonical bytes and fragment hash can never drift apart.
+func NewFragment(fragmentID, authority string, state modules.ConfigState) (*commonpb.Fragment, error) {
+	canonical, err := CanonicalizeFragment(fragmentID, authority, state)
+	if err != nil {
+		return nil, fmt.Errorf("NewFragment %q: %w", fragmentID, err)
+	}
+	return &commonpb.Fragment{
+		FragmentId:     fragmentID,
+		Authority:      authority,
+		CanonicalBytes: canonical,
+		FragmentHash:   FragmentHash(canonical),
+	}, nil
+}
+
 // PartitionHostFacts reads the already-populated flat attributes map (written by
 // collectHardwareInfo, collectNetworkInfo, collectSecurityInfo, collectBasicInfo,
 // and the background software/security collectors) and groups a curated, stable,

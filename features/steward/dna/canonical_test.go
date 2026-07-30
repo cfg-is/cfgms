@@ -4,6 +4,7 @@ package dna
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -354,4 +355,299 @@ func TestCanonicalizeFragment_StringVsNestedMap(t *testing.T) {
 
 	assert.False(t, bytes.Equal(outStr, outMap),
 		"string value and nested-map value at the same key must produce different bytes")
+}
+
+// ─── DecodeCanonicalFragment (Issue #2908) ────────────────────────────────────
+
+// TestDecodeCanonicalFragment_RoundTrips verifies that every supported type
+// survives a CanonicalizeFragment → DecodeCanonicalFragment round-trip.
+func TestDecodeCanonicalFragment_RoundTrips(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      map[string]interface{}
+		wantOut map[string]interface{} // expected decoded form (may differ in exact numeric type)
+	}{
+		{
+			name:    "string",
+			in:      map[string]interface{}{"v": "hello"},
+			wantOut: map[string]interface{}{"v": "hello"},
+		},
+		{
+			name:    "bool_true",
+			in:      map[string]interface{}{"v": true},
+			wantOut: map[string]interface{}{"v": true},
+		},
+		{
+			name:    "bool_false",
+			in:      map[string]interface{}{"v": false},
+			wantOut: map[string]interface{}{"v": false},
+		},
+		{
+			name:    "int64",
+			in:      map[string]interface{}{"v": int64(42)},
+			wantOut: map[string]interface{}{"v": int64(42)},
+		},
+		{
+			name:    "nil",
+			in:      map[string]interface{}{"v": nil},
+			wantOut: map[string]interface{}{"v": nil},
+		},
+		{
+			name: "nested_map_interface",
+			in:   map[string]interface{}{"owners": map[string]interface{}{"csv": "node-a"}},
+			wantOut: map[string]interface{}{
+				"owners": map[string]interface{}{"csv": "node-a"},
+			},
+		},
+		{
+			name: "slice_strings",
+			in:   map[string]interface{}{"members": []interface{}{"node-a", "node-b"}},
+			wantOut: map[string]interface{}{
+				"members": []interface{}{"node-a", "node-b"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := stateFrom(tc.in)
+			b, err := CanonicalizeFragment("frag:test", "module", state)
+			require.NoError(t, err)
+
+			got, err := DecodeCanonicalFragment(b)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantOut, got)
+		})
+	}
+}
+
+// TestDecodeCanonicalFragment_MapStringString verifies that map[string]string
+// values (used by ClusterStatus.AsMap for resource_owner) encode as proper maps
+// and decode back to map[string]interface{} — not as an opaque Go format string.
+func TestDecodeCanonicalFragment_MapStringString(t *testing.T) {
+	state := stateFrom(map[string]interface{}{
+		"resource_owner": map[string]string{
+			"web-01": "CFG-70-02",
+			"csv":    "CFG-AB-02",
+		},
+	})
+
+	b, err := CanonicalizeFragment("cluster:cfg-lab", "hyperv", state)
+	require.NoError(t, err)
+
+	got, err := DecodeCanonicalFragment(b)
+	require.NoError(t, err)
+
+	owners, ok := got["resource_owner"].(map[string]interface{})
+	require.True(t, ok, "resource_owner must decode as map[string]interface{}, got %T", got["resource_owner"])
+	assert.Equal(t, "CFG-70-02", owners["web-01"])
+	assert.Equal(t, "CFG-AB-02", owners["csv"])
+}
+
+// TestDecodeCanonicalFragment_ClusterStatusShape is the concrete end-to-end
+// round-trip for the full ClusterStatus.AsMap() payload (Issue #2908 AC).
+func TestDecodeCanonicalFragment_ClusterStatusShape(t *testing.T) {
+	// Simulate exactly what ClusterStatus.AsMap() returns.
+	in := map[string]interface{}{
+		"name":                       "cfg-lab",
+		"cno_owner_node":             "CFG-70-02",
+		"member_nodes":               []string{"CFG-70-02", "CFG-AB-02"},
+		"resource_owner":             map[string]string{"web-01": "CFG-70-02"},
+		"csv_paths":                  []string{"/ClusterStorage/Volume1"},
+		"found":                      true,
+		"cluster_access_ok":          true,
+		"cluster_access_remediation": "",
+	}
+
+	b, err := CanonicalizeFragment("cluster:cfg-lab", "hyperv", stateFrom(in))
+	require.NoError(t, err)
+
+	got, err := DecodeCanonicalFragment(b)
+	require.NoError(t, err)
+
+	// resource_owner must be a proper map, not the Go fmt.Sprintf("%v") string.
+	owners, ok := got["resource_owner"].(map[string]interface{})
+	require.True(t, ok, "resource_owner must decode as map[string]interface{}, got %T", got["resource_owner"])
+	assert.Equal(t, "CFG-70-02", owners["web-01"])
+
+	// name and cno_owner_node must survive round-trip as strings.
+	assert.Equal(t, "cfg-lab", got["name"])
+	assert.Equal(t, "CFG-70-02", got["cno_owner_node"])
+
+	// found must survive as bool.
+	assert.Equal(t, true, got["found"])
+
+	// member_nodes must survive as []interface{} of strings.
+	members, ok := got["member_nodes"].([]interface{})
+	require.True(t, ok, "member_nodes must decode as []interface{}, got %T", got["member_nodes"])
+	assert.ElementsMatch(t, []interface{}{"CFG-70-02", "CFG-AB-02"}, members)
+}
+
+// TestDecodeCanonicalFragment_TrailingBytesError verifies that trailing bytes
+// after a valid payload return an error rather than silently succeeding.
+func TestDecodeCanonicalFragment_TrailingBytesError(t *testing.T) {
+	state := stateFrom(map[string]interface{}{"v": "hello"})
+	b, err := CanonicalizeFragment("frag:x", "module", state)
+	require.NoError(t, err)
+
+	// Append a garbage byte.
+	corrupted := append(b, 0xFF)
+	_, err = DecodeCanonicalFragment(corrupted)
+	assert.Error(t, err, "trailing bytes must return an error")
+}
+
+// TestDecodeCanonicalFragment_TruncatedError verifies that a truncated payload
+// returns an error.
+func TestDecodeCanonicalFragment_TruncatedError(t *testing.T) {
+	state := stateFrom(map[string]interface{}{"v": "hello"})
+	b, err := CanonicalizeFragment("frag:x", "module", state)
+	require.NoError(t, err)
+
+	// Truncate to the first 3 bytes.
+	_, err = DecodeCanonicalFragment(b[:3])
+	assert.Error(t, err, "truncated payload must return an error")
+}
+
+// TestDecodeCanonicalFragment_EmptyState verifies that an empty map encodes and
+// decodes as an empty map.
+func TestDecodeCanonicalFragment_EmptyState(t *testing.T) {
+	state := stateFrom(map[string]interface{}{})
+	b, err := CanonicalizeFragment("frag:empty", "module", state)
+	require.NoError(t, err)
+
+	got, err := DecodeCanonicalFragment(b)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// ─── Hostile canonical_bytes (steward-supplied, threat-model hardening) ───────
+
+// be32 returns the big-endian encoding of v, matching the wire format's
+// length/count header shape.
+func be32(v uint32) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return b[:]
+}
+
+// TestDecodeCanonicalFragment_HostileSliceCount verifies that a declared slice
+// element count larger than the remaining buffer is rejected before any
+// allocation is made from it. Every element consumes at least one type-tag byte,
+// so such a count is structurally impossible.
+//
+// Before the count was validated, a 14-byte payload declaring 50 000 000 elements
+// allocated 762 MB and a payload declaring 4 294 967 295 elements ended in
+// "fatal error: out of memory" — a Go runtime fatal error that recover() cannot
+// catch, so no gRPC/HTTP recovery interceptor would have contained it.
+func TestDecodeCanonicalFragment_HostileSliceCount(t *testing.T) {
+	for _, count := range []uint32{50_000_000, 4_294_967_295, 1} {
+		// One map entry: zero-length key, value = slice with a hostile element count.
+		var b []byte
+		b = append(b, be32(1)...)     // map entry count = 1
+		b = append(b, be32(0)...)     // key length = 0
+		b = append(b, canonTagSlice)  // value tag: slice
+		b = append(b, be32(count)...) // hostile element count
+		require.Len(t, b, 13, "fixture must stay small enough to prove the count is not trusted")
+
+		_, err := DecodeCanonicalFragment(b)
+		require.Error(t, err, "slice count %d must be rejected", count)
+		assert.Contains(t, err.Error(), "slice elements",
+			"error must name the impossible slice count, got: %v", err)
+	}
+}
+
+// TestDecodeCanonicalFragment_HostileMapCount verifies that a declared map entry
+// count larger than the remaining buffer can hold is rejected before the map is
+// allocated. A 4-byte payload of FF FF FF FF previously drove allocation to
+// multi-GB and ended in an unrecoverable "fatal error: out of memory".
+func TestDecodeCanonicalFragment_HostileMapCount(t *testing.T) {
+	for _, count := range []uint32{4_294_967_295, 50_000_000, 1} {
+		_, err := DecodeCanonicalFragment(be32(count))
+		require.Error(t, err, "map entry count %d must be rejected", count)
+		assert.Contains(t, err.Error(), "entries exceeds",
+			"error must name the impossible entry count, got: %v", err)
+	}
+}
+
+// TestDecodeCanonicalFragment_HostileNestingDepth verifies that unbounded nesting
+// is rejected by the maxCanonDecodeDepth ceiling. 45 MB of nested 'M' tags
+// previously produced "fatal error: stack overflow", which is also unrecoverable.
+func TestDecodeCanonicalFragment_HostileNestingDepth(t *testing.T) {
+	// Build maxCanonDecodeDepth+5 levels of {"": {"": ... }}.
+	depth := maxCanonDecodeDepth + 5
+	var b []byte
+	for i := 0; i < depth; i++ {
+		b = append(b, be32(1)...) // one entry at this level
+		b = append(b, be32(0)...) // zero-length key
+		b = append(b, canonTagMap)
+	}
+	b = append(b, be32(0)...) // innermost map: zero entries
+
+	_, err := DecodeCanonicalFragment(b)
+	require.Error(t, err, "nesting beyond the depth ceiling must be rejected")
+	assert.Contains(t, err.Error(), "nesting depth exceeds",
+		"error must name the depth ceiling, got: %v", err)
+}
+
+// TestDecodeCanonicalFragment_LegitimateNestingStillDecodes guards the depth
+// ceiling against being set so low that real fragment shapes break: the deepest
+// payload in the codebase is a map of maps (ClusterStatus.resource_owner).
+func TestDecodeCanonicalFragment_LegitimateNestingStillDecodes(t *testing.T) {
+	// Three levels of nesting — well within the ceiling, well beyond real use.
+	b, err := CanonicalizeFragment("cluster:cfg-lab", "hyperv", stateFrom(map[string]interface{}{
+		"l1": map[string]interface{}{
+			"l2": map[string]interface{}{
+				"l3": map[string]interface{}{"owner": "CFG-70-02"},
+			},
+		},
+	}))
+	require.NoError(t, err)
+
+	got, err := DecodeCanonicalFragment(b)
+	require.NoError(t, err, "legitimately nested fragments must still decode")
+	l1 := got["l1"].(map[string]interface{})
+	l2 := l1["l2"].(map[string]interface{})
+	l3 := l2["l3"].(map[string]interface{})
+	assert.Equal(t, "CFG-70-02", l3["owner"])
+}
+
+// TestDecodeCanonicalFragment_HostileStringLength verifies that a declared string
+// length exceeding the remaining buffer is rejected rather than indexed. The
+// uint64 comparison in the decoder also keeps the guard sound on 32-bit GOARCH,
+// where int(uint32(0xFFFFFFFF)) is negative and would make a len() check a no-op.
+func TestDecodeCanonicalFragment_HostileStringLength(t *testing.T) {
+	for _, tag := range []byte{canonTagString, canonTagOther, canonTagFloat} {
+		var b []byte
+		b = append(b, be32(1)...)             // map entry count = 1
+		b = append(b, be32(0)...)             // key length = 0
+		b = append(b, tag)                    // value tag
+		b = append(b, be32(4_294_967_295)...) // hostile declared length
+		b = append(b, 'x')                    // one real byte
+
+		_, err := DecodeCanonicalFragment(b)
+		require.Error(t, err, "hostile length for tag %q must be rejected", string(tag))
+		assert.Contains(t, err.Error(), "truncated",
+			"error must report truncation for tag %q, got: %v", string(tag), err)
+	}
+}
+
+// TestDecodeCanonicalFragment_HostileKeyLength verifies the map key-length guard.
+func TestDecodeCanonicalFragment_HostileKeyLength(t *testing.T) {
+	var b []byte
+	b = append(b, be32(1)...)             // map entry count = 1
+	b = append(b, be32(4_294_967_295)...) // hostile key length
+	b = append(b, 'k', canonTagNull)      // one real key byte + a value tag
+
+	_, err := DecodeCanonicalFragment(b)
+	require.Error(t, err, "hostile key length must be rejected")
+	assert.Contains(t, err.Error(), "key bytes truncated")
+}
+
+// TestDecodeCanonicalFragment_OversizedInputRejected verifies the total-size cap,
+// which bounds heap amplification for any in-process caller that is not behind the
+// gRPC maxRecvMsgSize limit.
+func TestDecodeCanonicalFragment_OversizedInputRejected(t *testing.T) {
+	_, err := DecodeCanonicalFragment(make([]byte, MaxCanonicalFragmentSize+1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum")
 }
