@@ -4,8 +4,10 @@ package factory
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -230,6 +232,155 @@ func TestAllBuiltinModulesLoad(t *testing.T) {
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
 	}
+}
+
+// TestModuleFactory_ConcurrentLoadModule_NoDataRace exercises the single
+// long-lived factory the way the steward does: one shared *ModuleFactory reached
+// concurrently from many goroutines (convergence executor, command handlers —
+// which run one goroutine per command — and the Tier-2 observe sweep). Before
+// the factory carried a mutex, the unguarded reads/writes of f.instances and
+// f.injectionStatus made this a "fatal error: concurrent map writes", an
+// unrecoverable process abort that no recover() can catch.
+//
+// Run under -race (make test runs the suite with -race) this fails on any
+// unsynchronized access to the factory's mutable state.
+func TestModuleFactory_ConcurrentLoadModule_NoDataRace(t *testing.T) {
+	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	// Names spanning the constructor map plus the specially-handled patch module.
+	names := []string{"file", "directory", "script", "user", "time", "package", "firewall", "cert_trust", "hostname", "patch"}
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, goroutines*len(names))
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			<-start
+			for i := range names {
+				// Rotate the starting offset so goroutines contend on different
+				// names at the same moment rather than marching in lockstep.
+				name := names[(i+g)%len(names)]
+				mod, err := f.LoadModule(name)
+				if err != nil {
+					errs <- err
+					continue
+				}
+				if mod == nil {
+					errs <- fmt.Errorf("module %q loaded as nil", name)
+				}
+				// Concurrent readers of the same guarded state.
+				_ = f.GetLoadedModules()
+				_ = f.ListModulesWithLoggers()
+			}
+		}(g)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent LoadModule: %v", err)
+	}
+
+	// Every requested module must be cached exactly once (the instance cache is
+	// consistent, not corrupted, after concurrent loads).
+	loaded := f.GetLoadedModules()
+	assert.ElementsMatch(t, names, loaded, "each concurrently loaded module must be cached exactly once")
+}
+
+// TestModuleFactory_ConcurrentLoadModule_ReturnsSharedInstance verifies that
+// serializing construction under the factory mutex yields a single shared
+// instance per module name: concurrent callers must not each get their own
+// module object, which would silently split module state across call paths.
+func TestModuleFactory_ConcurrentLoadModule_ReturnsSharedInstance(t *testing.T) {
+	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	const goroutines = 24
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make(chan modules.Module, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			mod, err := f.LoadModule("file")
+			if err == nil {
+				results <- mod
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var first modules.Module
+	count := 0
+	for mod := range results {
+		count++
+		if first == nil {
+			first = mod
+			continue
+		}
+		assert.Same(t, first, mod, "all concurrent LoadModule callers must receive the same cached instance")
+	}
+	assert.Equal(t, goroutines, count, "every goroutine must load the module successfully")
+}
+
+// TestModuleFactory_ConcurrentMutatorsAndLoads_NoDataRace drives the setters
+// (SetStewardID / SetSecretStore / SetMaintenanceGate / RegisterModule /
+// UnloadModule) concurrently with LoadModule. These all touch the same guarded
+// fields the load path reads, so any missing lock shows up under -race.
+func TestModuleFactory_ConcurrentMutatorsAndLoads_NoDataRace(t *testing.T) {
+	f := NewWithStewardID(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, "steward-1", logging.NewNoopLogger())
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			if _, err := f.LoadModule("file"); err != nil {
+				t.Errorf("LoadModule(file): %v", err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			f.SetStewardID(fmt.Sprintf("steward-%d", i))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			f.SetMaintenanceGate(nil)
+			f.SetSecretStore(nil)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			f.RegisterModule("script", file.New())
+			f.UnloadModule("script")
+		}
+	}()
+
+	close(start)
+	wg.Wait()
 }
 
 // TestGithubRunner_IsInBuiltinModuleConstructors asserts that "github_runner" is

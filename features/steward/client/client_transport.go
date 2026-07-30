@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -280,6 +281,16 @@ type TransportClient struct {
 	// production; non-nil in tests for deterministic cadence synchronisation.
 	// Uses the same pattern as dnaRefreshTick.
 	observeSweepTick chan struct{}
+	// observeSweepInFlight is the single-flight guard for handleObserveModules.
+	// Command handlers run one goroutine per command, and the cadence in
+	// checkAndTriggerObserveSweep keeps firing while a sweep is still running
+	// (a module Get slower than N convergence ticks yields two in-flight
+	// observe_modules commands with distinct IDs, which replay de-duplication
+	// does not catch). Overlapping sweeps would drive concurrent module loads
+	// and concurrent fragment merges, so a second sweep is dropped while one is
+	// in flight rather than queued — the dropped sweep's work is fully covered
+	// by the next cadence tick.
+	observeSweepInFlight atomic.Bool
 
 	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
 	// downloads binaries to a subdirectory here. (Issue #1943)
@@ -2712,6 +2723,20 @@ func (c *TransportClient) notifyObserveSweepTick(ctx context.Context) {
 	}
 }
 
+// observeSweepEventSeq is a monotonically increasing counter appended to
+// Tier-2 observe sweep event IDs. time.Now().UnixNano() alone can collide
+// when checkAndTriggerObserveSweep fires in tight succession under coarse
+// clock resolution (observed on Windows CI runners); the offline queue
+// de-duplicates events by ID, so a collision silently drops the later event.
+// The counter guarantees uniqueness independent of clock resolution.
+var observeSweepEventSeq atomic.Int64
+
+// newObserveSweepEventID builds a collision-resistant ID for a Tier-2 observe
+// sweep event from a nanosecond timestamp and a monotonic sequence number.
+func newObserveSweepEventID(nowUnixNano, seq int64) string {
+	return fmt.Sprintf("evt_obs_%d_%d", nowUnixNano, seq)
+}
+
 // triggerObserveSweep publishes an EventObserveSweepRequest carrying the current
 // baseline DNA to the controller. The controller resolves the observe-module set
 // and responds with CommandObserveModules. (Issue #3104, ADR-024 Amendment 1 §3)
@@ -2737,7 +2762,7 @@ func (c *TransportClient) triggerObserveSweep(ctx context.Context) {
 	}
 
 	event := &cpTypes.Event{
-		ID:        fmt.Sprintf("evt_obs_%d", time.Now().UnixNano()),
+		ID:        newObserveSweepEventID(time.Now().UnixNano(), observeSweepEventSeq.Add(1)),
 		Type:      cpTypes.EventObserveSweepRequest,
 		StewardID: sid,
 		TenantID:  tid,
@@ -2756,7 +2781,18 @@ func (c *TransportClient) triggerObserveSweep(ctx context.Context) {
 // controller. It loads each specified module, calls Get read-only, and merges
 // the resulting fragments into currentDNAFragments through the existing
 // setCurrentDNAFragments path (ADR-024 Amendment 1 §2 — no new parallel channel).
+//
+// Sweeps are single-flight: while one sweep is running, any further
+// observe_modules command is dropped instead of running concurrently. The
+// controller re-requests on the next cadence tick, so no observation is lost.
 func (c *TransportClient) handleObserveModules(ctx context.Context, cmd *cpTypes.Command) error {
+	if !c.observeSweepInFlight.CompareAndSwap(false, true) {
+		c.logger.Warn("observe_modules: sweep already in flight; dropping overlapping command",
+			"command_id", logging.SanitizeLogValue(cmd.ID))
+		return nil
+	}
+	defer c.observeSweepInFlight.Store(false)
+
 	c.mu.RLock()
 	loader := c.observeModuleLoader
 	c.mu.RUnlock()

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,7 +23,11 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/features/steward/factory"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -137,10 +142,19 @@ func drainObserveSweepEvents(q *OfflineQueue) []*cpTypes.Event {
 // as a JSON-encoded "modules" param (the wire format the controller sends).
 func observeCmd(t *testing.T, specs []cpTypes.ObserveModuleSpec) *cpTypes.Command {
 	t.Helper()
+	return observeCmdWithID(t, "cmd-obs-1", specs)
+}
+
+// observeCmdWithID is observeCmd with an explicit command ID. Overlapping
+// sweeps arrive as commands with distinct IDs (replay de-duplication keys on
+// the ID and therefore does not suppress them), so concurrency tests must be
+// able to set the ID.
+func observeCmdWithID(t *testing.T, id string, specs []cpTypes.ObserveModuleSpec) *cpTypes.Command {
+	t.Helper()
 	raw, err := json.Marshal(specs)
 	require.NoError(t, err)
 	return &cpTypes.Command{
-		ID:        "cmd-obs-1",
+		ID:        id,
 		Type:      cpTypes.CommandObserveModules,
 		StewardID: "steward-1",
 		Params:    map[string]interface{}{"modules": string(raw)},
@@ -577,6 +591,47 @@ func TestObserveSweepCadence_N1FiresEveryTick(t *testing.T) {
 	assert.Len(t, events, 3, "with N=1 every convergence tick must trigger a sweep")
 }
 
+// TestNewObserveSweepEventID_UniqueUnderIdenticalTimestamp reproduces the
+// Windows CI failure of TestObserveSweepCadence_N1FiresEveryTick: three
+// tight-loop calls to triggerObserveSweep landed within the same clock tick
+// (coarse timer resolution), so time.Now().UnixNano() alone produced three
+// identical event IDs. The offline queue de-duplicates by event ID (see
+// OfflineQueue.Add's seenIDs check), so only one of the three events survived
+// draining even though three sweeps fired. Fixing this requires uniqueness
+// that does not depend on clock resolution at all.
+func TestNewObserveSweepEventID_UniqueUnderIdenticalTimestamp(t *testing.T) {
+	const collidingTimestamp = int64(1234567890)
+
+	seen := make(map[string]struct{})
+	for seq := int64(1); seq <= 3; seq++ {
+		id := newObserveSweepEventID(collidingTimestamp, seq)
+		_, dup := seen[id]
+		assert.False(t, dup, "event ID must be unique even when the timestamp component collides: %s", id)
+		seen[id] = struct{}{}
+	}
+	assert.Len(t, seen, 3, "all three IDs must be distinct despite the identical timestamp")
+}
+
+// TestTriggerObserveSweep_RapidSuccessionProducesDistinctEvents drives
+// triggerObserveSweep in a tight loop (no wall-clock gaps between calls,
+// mirroring how checkAndTriggerObserveSweep is exercised in cadence tests)
+// and confirms every call survives offline-queue de-duplication as a
+// separate event.
+func TestTriggerObserveSweep_RapidSuccessionProducesDistinctEvents(t *testing.T) {
+	c, q := newObserveTestClient(t)
+	c.stewardID = "steward-1"
+	c.tenantID = "tenant-1"
+
+	ctx := context.Background()
+	const iterations = 25
+	for i := 0; i < iterations; i++ {
+		c.triggerObserveSweep(ctx)
+	}
+
+	events := drainObserveSweepEvents(q)
+	assert.Len(t, events, iterations, "each triggerObserveSweep call must publish a distinct, undeduplicated event")
+}
+
 // ---------------------------------------------------------------------------
 // observeSweepTick synchronisation (mirrors dnaRefreshTick pattern)
 // ---------------------------------------------------------------------------
@@ -597,6 +652,175 @@ func TestCheckAndTriggerObserveSweep_SignalsTick(t *testing.T) {
 
 	assert.Equal(t, 3, len(tick),
 		"observeSweepTick must receive one value per checkAndTriggerObserveSweep call")
+}
+
+// ---------------------------------------------------------------------------
+// Overlapping sweeps: single-flight guard and shared-loader concurrency
+// ---------------------------------------------------------------------------
+
+// sweepProbeModule is a real modules.Module that records how many Get calls are
+// in flight at once and can be held inside Get until released. It is the
+// instrument the overlapping-sweep tests read: maxInFlight > 1 means two sweeps
+// ran concurrently over the shared module loader.
+type sweepProbeModule struct {
+	calls       atomic.Int32
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
+	entered     chan struct{} // signalled once per Get entry (buffered)
+	release     chan struct{} // Get blocks until closed; nil = never block
+}
+
+var _ modules.Module = (*sweepProbeModule)(nil)
+
+func (m *sweepProbeModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	m.calls.Add(1)
+	n := m.inFlight.Add(1)
+	defer m.inFlight.Add(-1)
+	for {
+		high := m.maxInFlight.Load()
+		if n <= high || m.maxInFlight.CompareAndSwap(high, n) {
+			break
+		}
+	}
+	if m.entered != nil {
+		m.entered <- struct{}{}
+	}
+	if m.release != nil {
+		<-m.release
+	}
+	return &inMemoryConfigState{data: map[string]interface{}{"vm_count": 1}}, nil
+}
+
+func (m *sweepProbeModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+// TestHandleObserveModules_OverlappingSweepIsDropped verifies the single-flight
+// guard. The controller can issue a second observe_modules command while the
+// first sweep is still inside a module Get (a Get slower than N convergence
+// ticks is enough, and the two commands carry distinct IDs so replay
+// de-duplication does not suppress the second). Without the guard both sweeps
+// run concurrently over the same module loader, which for the production
+// *factory.ModuleFactory is a concurrent map write — a fatal, unrecoverable
+// process abort. The overlapping command must be dropped instead.
+func TestHandleObserveModules_OverlappingSweepIsDropped(t *testing.T) {
+	c, _ := newObserveTestClient(t)
+
+	mod := &sweepProbeModule{
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+	c.observeModuleLoader = newInMemoryLoader(map[string]modules.Module{"hyperv": mod})
+
+	specs := []cpTypes.ObserveModuleSpec{{Name: "hyperv", Kind: "hyperv"}}
+	ctx := context.Background()
+
+	// release unblocks every Get held in the module. Idempotent so the failure
+	// path can unblock leaked sweeps without risking a double close.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(mod.release) }) }
+	t.Cleanup(release)
+
+	// Sweep A: enters the module Get and stays there until released.
+	first := make(chan error, 1)
+	go func() {
+		first <- c.handleObserveModules(ctx, observeCmdWithID(t, "cmd-obs-a", specs))
+	}()
+	<-mod.entered // sweep A is now inside Get — a sweep is definitively in flight
+
+	// Sweep B arrives while A is in flight: it must return without touching the
+	// loader. Racing its completion against a second Get entry keeps the
+	// assertion deterministic — no timeout, no sleep. mod.entered has spare
+	// buffer capacity, so an unguarded sweep B signals it and is detected here
+	// rather than deadlocking the test.
+	second := make(chan error, 1)
+	go func() {
+		second <- c.handleObserveModules(ctx, observeCmdWithID(t, "cmd-obs-b", specs))
+	}()
+	select {
+	case err := <-second:
+		require.NoError(t, err, "a dropped overlapping sweep is not a command failure")
+	case <-mod.entered:
+		release()
+		t.Fatal("overlapping sweep ran against the shared module loader while a sweep was in flight")
+	}
+	assert.Equal(t, int32(1), mod.calls.Load(),
+		"overlapping sweep must be dropped, not run against the shared module loader")
+
+	release()
+	require.NoError(t, <-first)
+	assert.Equal(t, int32(1), mod.maxInFlight.Load(),
+		"at most one observe sweep may be in flight at a time")
+
+	// The guard is released once the sweep finishes: the next command runs.
+	require.NoError(t, c.handleObserveModules(ctx, observeCmdWithID(t, "cmd-obs-c", specs)))
+	assert.Equal(t, int32(2), mod.calls.Load(),
+		"a sweep issued after the previous one completed must run")
+}
+
+// TestHandleObserveModules_ConcurrentCommandsWithRealFactory_NoDataRace runs
+// concurrent observe_modules commands against the production module loader —
+// the single long-lived *factory.ModuleFactory that cmd/steward wires into
+// TransportConfig.ObserveModuleLoader — while other goroutines load modules
+// from that same factory the way the convergence path does.
+//
+// Under -race this fails on any unsynchronized access to the factory's instance
+// cache or injection-status map, which in production surfaces as
+// "fatal error: concurrent map writes" and kills the steward process.
+func TestHandleObserveModules_ConcurrentCommandsWithRealFactory_NoDataRace(t *testing.T) {
+	c, _ := newObserveTestClient(t)
+
+	loader := factory.NewWithStewardID(
+		discovery.ModuleRegistry{},
+		stewardconfig.ErrorHandlingConfig{ModuleLoadFailure: stewardconfig.ActionContinue},
+		"steward-1",
+		logging.NewNoopLogger(),
+	)
+	c.observeModuleLoader = loader
+
+	specs := []cpTypes.ObserveModuleSpec{
+		{Name: "file", Kind: "file"},
+		{Name: "script", Kind: "script"},
+		{Name: "user", Kind: "user"},
+	}
+
+	ctx := context.Background()
+	const sweeps = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < sweeps; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			cmd := observeCmdWithID(t, fmt.Sprintf("cmd-obs-%d", i), specs)
+			if err := c.handleObserveModules(ctx, cmd); err != nil {
+				t.Errorf("handleObserveModules: %v", err)
+			}
+		}(i)
+	}
+
+	// Concurrent module loads off the same factory, mirroring the convergence
+	// executor running alongside the Tier-2 sweep.
+	for i := 0; i < sweeps; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for _, spec := range specs {
+				if _, err := loader.LoadModule(spec.Name); err != nil {
+					t.Errorf("LoadModule(%s): %v", spec.Name, err)
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	assert.ElementsMatch(t, []string{"file", "script", "user"}, loader.GetLoadedModules(),
+		"each module must be cached exactly once after concurrent sweeps and loads")
 }
 
 // ---------------------------------------------------------------------------
