@@ -230,6 +230,17 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	}
 }
 
+// isWithinTenantScope reports whether resourceTenant is within callerTenant's
+// authorized subtree. An empty callerTenant (mTLS admin with no tenant scope)
+// has unrestricted access and always returns true.
+func isWithinTenantScope(callerTenant, resourceTenant string) bool {
+	if callerTenant == "" {
+		return true
+	}
+	return resourceTenant == callerTenant ||
+		strings.HasPrefix(resourceTenant, callerTenant+"/")
+}
+
 // hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
 func hasHeaderCredentials(r *http.Request) bool {
 	if r.Header.Get("X-API-Key") != "" {

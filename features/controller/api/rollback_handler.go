@@ -157,8 +157,9 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 		principal = h.PrincipalExtractor(r)
 	}
 
-	// Cross-tenant enforcement. For a scoped principal (non-admin with a TenantID), we
+	// Cross-tenant enforcement. For a tenant-scoped principal (non-empty TenantID), we
 	// must verify the target steward belongs to the principal's tenant or a child.
+	// An empty TenantID (mTLS admin) bypasses this check and has unrestricted access.
 	//
 	// Two-phase check with segment-boundary comparison (prevents "root/msp-ab" from
 	// matching "root/msp-a" — only self and children like "root/msp-a/client-1" pass):
@@ -166,7 +167,7 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 	//     this is always used in production and cannot be bypassed by the caller.
 	//   Phase 2 (fallback): caller-supplied steward_tenant_path field — used when
 	//     stewardTenantLookup is nil (e.g. handler unit tests).
-	if principal != nil && !principal.GlobalScope && principal.TenantID != "" {
+	if principal != nil && principal.TenantID != "" {
 		var resolvedTenant string
 		if h.stewardTenantLookup != nil {
 			resolvedTenant = h.stewardTenantLookup(req.TargetID)

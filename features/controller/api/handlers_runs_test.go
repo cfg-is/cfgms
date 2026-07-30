@@ -691,9 +691,12 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 		wantVis   bool
 	}{
 		{
+			// Admin callers (mTLS, empty TenantID) have unrestricted access.
+			// In real requests, tenantID comes from ctxkeys.TenantID which equals
+			// principal.TenantID — for admins that is "" (unrestricted).
 			name:      "AssuranceBasic_admin_any_tenant",
 			principal: &Principal{ID: "admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""},
-			tenantID:  "tenant-b",
+			tenantID:  "",
 			wantVis:   true,
 		},
 		{
@@ -731,6 +734,31 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 				tc.principal, run.TenantID, tc.tenantID)
 		})
 	}
+}
+
+// TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked verifies the fix for Issue
+// #3143: a session-authenticated principal has GlobalScope=true (set by middleware)
+// even when scoped to a specific tenant. Before the fix, the GlobalScope flag caused
+// runVisibleTo to return true for any run regardless of the caller's tenant. After
+// the fix, only callerTenant (from ctxkeys.TenantID) governs access.
+func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
+	// Simulate a web-session principal as middleware.go builds it: GlobalScope=true
+	// because it is hardcoded, but TenantID correctly set from the session.
+	sessionPrincipal := &Principal{
+		ID:          "web-acct-abc",
+		GlobalScope: true, // the middleware bug — this flag must no longer gate cross-tenant access
+		TenantID:    "tenant-a",
+		Assurance:   session.AssuranceBasic,
+	}
+
+	runOwnTenant := &controllerrun.RunRecord{RunID: "r-own", TenantID: "tenant-a"}
+	runOtherTenant := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
+
+	// tenantID = "tenant-a" (as set by withPrincipal via ctxkeys.TenantID in real requests).
+	assert.True(t, runVisibleTo(sessionPrincipal, runOwnTenant, "tenant-a"),
+		"session principal must see runs belonging to their own tenant")
+	assert.False(t, runVisibleTo(sessionPrincipal, runOtherTenant, "tenant-a"),
+		"session principal must NOT see runs belonging to a different tenant (Issue #3143)")
 }
 
 // ── [REQUIRED TEST] GlobalScope ⊥ Assurance independence (Issue #2787) ───────

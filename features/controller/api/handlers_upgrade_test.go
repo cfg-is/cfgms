@@ -26,6 +26,7 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -1262,4 +1263,54 @@ func TestUpgradeStatus_AssuranceBoundary(t *testing.T) {
 				"tenantID=%q isAdmin=%v accessing upgrade record in %q", tc.tenantID, tc.isAdmin, recordTenant)
 		})
 	}
+}
+
+// ── [REQUIRED TEST] Session-principal cross-tenant isolation (Issue #3143) ───
+
+// TestUpgradeStatus_SessionPrincipal_CrossTenantBlocked verifies the Issue #3143
+// fix for handlers_upgrade.go: a web-session caller has GlobalScope=true set by
+// middleware even when scoped to a specific tenant. Before the fix, this caused the
+// cross-tenant guard to pass and the session caller could read any tenant's upgrade
+// record. After the fix, callerTenantID from ctxkeys.TenantID governs access.
+func TestUpgradeStatus_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
+	const recordTenant = "tenant-a"
+
+	stewards := []fleet.StewardData{{ID: "steward-sess", TenantID: recordTenant, Status: "online"}}
+	server, upgradeStore := setupUpgradeServer(t, recordTenant, stewards)
+
+	// Create an upgrade record owned by tenant-a directly (bypassing dispatch so we
+	// control the TenantID without needing a published binary for this test).
+	fakeSig := make([]byte, 64)
+	record := &business.UpgradeRecord{
+		ID:              "upgrade-tenant-a-session-test",
+		StewardID:       "steward-sess",
+		TenantID:        recordTenant,
+		Version:         "v0.5.12",
+		Platform:        "linux",
+		Arch:            "amd64",
+		Status:          business.UpgradeStatusDispatched,
+		Publisher:       "cfgms",
+		BundleSignature: fakeSig,
+		CreatedAt:       time.Now().UTC(),
+		OperationNonce:  make([]byte, 32),
+	}
+	require.NoError(t, upgradeStore.CreateUpgrade(context.Background(), record))
+
+	// Build a session principal exactly as authenticationMiddleware does: GlobalScope=true
+	// is hardcoded regardless of the account's actual tenant scope (middleware.go:429).
+	sessionCaller := &Principal{
+		ID:          "web-acct-sess",
+		GlobalScope: true, // the middleware bug — scoped accounts should not bypass tenant checks
+		TenantID:    "tenant-b",
+		Assurance:   session.AssuranceBasic,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/upgrade/"+record.ID, nil)
+	req = withPrincipal(req, sessionCaller)
+	req = mux.SetURLVars(req, map[string]string{"upgrade_id": record.ID})
+	rec := httptest.NewRecorder()
+	server.handleUpgradeStatus(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"session principal scoped to tenant-b must not read tenant-a's upgrade record (body: %s)", rec.Body.String())
 }

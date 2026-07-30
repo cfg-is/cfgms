@@ -76,11 +76,10 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admin mTLS principals carry global (cross-tenant) scope with an empty tenant
-	// (middleware.go:173); an empty tenant yields an unscoped fleet search and the
+	// An empty callerTenantID (mTLS admin) yields an unscoped fleet search; the
 	// per-tenant isolation filter below is skipped for admins. Only a NON-admin caller
 	// with no tenant is a genuine auth failure (Issue #1999, same pattern as #1990).
-	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	_, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -133,17 +132,15 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	// Scope to the caller's subtree. An explicit selector prefix must be within
 	// the caller's subtree; absent prefix defaults to callerTenantID and all
-	// descendants. Global-scope callers (empty callerTenantID) are unrestricted.
+	// descendants. An empty callerTenantID (mTLS admin) is unrestricted.
 	if parsedTenantPath != "" {
-		if !principal.GlobalScope && callerTenantID != "" &&
-			parsedTenantPath != callerTenantID &&
-			!strings.HasPrefix(parsedTenantPath, callerTenantID+"/") {
+		if !isWithinTenantScope(callerTenantID, parsedTenantPath) {
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
-	} else if !principal.GlobalScope {
+	} else if callerTenantID != "" {
 		filter.TenantSubtree = callerTenantID
 	}
 
@@ -246,12 +243,12 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Record tenant: scoped callers are bound to their own tenant (== steward tenant by
-		// the isolation filter above). Global-scope callers (empty tenant) attribute each
-		// record to the target steward's tenant so per-tenant status/rollback isolation keeps
-		// working (Issue #1999).
+		// the isolation filter above). Admin callers (empty tenant) attribute each record to
+		// the target steward's tenant so per-tenant status/rollback isolation keeps working
+		// (Issue #1999).
 		recordTenantID := callerTenantID
 		authMethod := "api_key"
-		if principal.GlobalScope {
+		if callerTenantID == "" {
 			recordTenantID = st.TenantID
 			authMethod = "mtls_admin"
 		}
@@ -394,10 +391,9 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
-	// and may view any tenant's record; only a NON-admin caller with no tenant is a
-	// genuine auth failure (Issue #1999, same pattern as #1990).
-	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	// An empty callerTenantID (mTLS admin) has unrestricted access; only a NON-admin
+	// caller with no tenant is a genuine auth failure (Issue #1999, same pattern as #1990).
+	_, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -421,9 +417,9 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant isolation: tenant-scoped callers can only view records in their own
-	// tenant; global-scope principals have cross-tenant access (Issue #1999).
-	if !principal.GlobalScope && record.TenantID != callerTenantID {
+	// Tenant isolation: callers scoped to a tenant can only view records within their
+	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
+	if !isWithinTenantScope(callerTenantID, record.TenantID) {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
@@ -448,10 +444,9 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
-	// and may roll back any tenant's record; only a NON-admin caller with no tenant is a
-	// genuine auth failure (Issue #1999, same pattern as #1990).
-	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	// An empty callerTenantID (mTLS admin) has unrestricted rollback access; only a
+	// NON-admin caller with no tenant is a genuine auth failure (Issue #1999).
+	_, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -474,18 +469,18 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
 	}
-	// Tenant isolation: tenant-scoped callers can only roll back records in their own
-	// tenant; global-scope principals have cross-tenant access (Issue #1999).
-	if !principal.GlobalScope && original.TenantID != callerTenantID {
+	// Tenant isolation: callers scoped to a tenant can only roll back records within their
+	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
+	if !isWithinTenantScope(callerTenantID, original.TenantID) {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
 		return
 	}
 	// Record tenant: the rollback record is attributed to the original record's tenant for
-	// global-scope callers and to the caller's tenant for tenant-scoped callers
+	// admin callers (empty tenant) and to the caller's tenant for tenant-scoped callers
 	// (== original tenant by the isolation check above), so per-tenant status/listing
 	// stays consistent (Issue #1999).
 	effectiveTenantID := callerTenantID
-	if principal.GlobalScope {
+	if callerTenantID == "" {
 		effectiveTenantID = original.TenantID
 	}
 	// Blob namespace: the rollback binary is read from the caller's namespace, the same place
@@ -562,7 +557,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rollbackAuthMethod := "api_key"
-	if principal.GlobalScope {
+	if callerTenantID == "" {
 		rollbackAuthMethod = "mtls_admin"
 	}
 	rollbackUpgradeID := uuid.New().String()

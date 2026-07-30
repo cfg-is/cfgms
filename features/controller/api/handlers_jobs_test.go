@@ -442,6 +442,73 @@ func TestHandleGetJob_NilStore_Returns503(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
+// ── [REQUIRED TEST] Session-principal cross-tenant isolation (Issue #3143) ───────
+
+// TestHandleGetJob_SessionPrincipal_CrossTenantBlocked is the required AC test from
+// Issue #3143: a web-session caller (GlobalScope=true set by middleware, TenantID="tenant-a")
+// must not be able to read a job belonging to "tenant-b". Before the fix, GlobalScope=true
+// caused the cross-tenant guard to be bypassed for every session-authenticated caller.
+func TestHandleGetJob_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+
+	// Seed a job owned by tenant-b.
+	victimJob := &batchjob.BatchJob{
+		ID:       "job-owned-by-tenant-b",
+		TenantID: "tenant-b",
+		Selector: "all",
+		Config:   batchjob.BatchJobConfig{BatchSize: 1},
+		Status:   batchjob.BatchJobStatusPending,
+	}
+	require.NoError(t, store.CreateBatchJob(context.Background(), victimJob))
+
+	// Build a session principal exactly as authenticationMiddleware does: GlobalScope=true
+	// is hardcoded regardless of the account's actual tenant scope (middleware.go:429).
+	sessionCaller := &Principal{
+		ID:          "web-acct-xyz",
+		GlobalScope: true, // the middleware bug — scoped accounts should not be global
+		TenantID:    "tenant-a",
+		Assurance:   session.AssuranceBasic,
+	}
+
+	rec := getJobAs(server, sessionCaller, "job-owned-by-tenant-b")
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"session principal scoped to tenant-a must not access tenant-b's job (body: %s)", rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
+// TestHandleGetJob_SessionPrincipal_OwnTenantAllowed verifies that the fix does not
+// over-restrict: a session principal scoped to tenant-a can still read their own jobs.
+func TestHandleGetJob_SessionPrincipal_OwnTenantAllowed(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+
+	ownJob := &batchjob.BatchJob{
+		ID:       "job-owned-by-tenant-a",
+		TenantID: "tenant-a",
+		Selector: "all",
+		Config:   batchjob.BatchJobConfig{BatchSize: 2},
+		Status:   batchjob.BatchJobStatusPending,
+	}
+	require.NoError(t, store.CreateBatchJob(context.Background(), ownJob))
+
+	sessionCaller := &Principal{
+		ID:          "web-acct-xyz",
+		GlobalScope: true,
+		TenantID:    "tenant-a",
+		Assurance:   session.AssuranceBasic,
+	}
+
+	rec := getJobAs(server, sessionCaller, "job-owned-by-tenant-a")
+	require.Equal(t, http.StatusOK, rec.Code,
+		"session principal scoped to tenant-a must be able to read their own tenant's job (body: %s)", rec.Body.String())
+}
+
 // ── Tenant isolation regression tests — Issue #2781 ──────────────────────────
 
 // TestJobsTenantIsolation_AssuranceBoundary is a table-driven regression test

@@ -79,7 +79,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	_, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -102,15 +102,18 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant scope: tenant-scoped (non-global) callers are confined to their own tenant.
-	// Only a global-scope principal may target another tenant via req.TenantID; a scoped
-	// caller that supplies a different tenant is rejected rather than silently redirected.
-	// This mirrors the cross-tenant guard in handlers_upgrade.go and closes the isolation
-	// gap where a tenant-scoped caller holding installer:dispatch:steward could drive
-	// orchestration against a victim tenant's fleet (Issue #2340).
+	// Tenant scope: a caller may only target its own tenant subtree via req.TenantID; a
+	// caller that supplies a tenant outside that subtree is rejected rather than silently
+	// redirected. Only an unscoped caller (empty tenant — mTLS admin) may target any tenant.
+	// The principal's GlobalScope flag is deliberately NOT consulted: the web-session
+	// middleware sets GlobalScope=true on every session principal regardless of its tenant
+	// scope, so gating on it let a tenant-scoped web caller drive another tenant's rollout
+	// (Issue #3143). This mirrors the cross-tenant guard in handlers_upgrade.go and closes
+	// the isolation gap where a tenant-scoped caller holding installer:dispatch:steward
+	// could drive orchestration against a victim tenant's fleet (Issue #2340).
 	tenantID := callerTenantID
 	if req.TenantID != "" && req.TenantID != callerTenantID {
-		if !principal.GlobalScope {
+		if !isWithinTenantScope(callerTenantID, req.TenantID) {
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"Cannot start a rollout for another tenant",
 				"CROSS_TENANT")

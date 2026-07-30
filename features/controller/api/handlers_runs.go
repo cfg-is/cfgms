@@ -118,12 +118,12 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 	return principal, tenantID, true
 }
 
-// runVisibleTo reports whether the principal may read/cancel the given run. Global-scope
-// principals have cross-tenant access; tenant-scoped callers may access only runs
-// owned by their tenant. Callers return 404 (not 403) on false to avoid leaking
-// cross-tenant run existence (Issue #1990).
-func runVisibleTo(principal *Principal, run *controllerrun.RunRecord, tenantID string) bool {
-	return principal.GlobalScope || run.TenantID == tenantID
+// runVisibleTo reports whether the caller may read/cancel the given run.
+// Callers scoped to a tenant see only runs within their authorized subtree; an
+// empty tenantID (mTLS admin) has unrestricted access. Callers return 404 (not
+// 403) on false to avoid leaking cross-tenant run existence (Issue #1990).
+func runVisibleTo(_ *Principal, run *controllerrun.RunRecord, tenantID string) bool {
+	return isWithinTenantScope(tenantID, run.TenantID)
 }
 
 // handlePostRunScript handles POST /api/v1/runs/script.

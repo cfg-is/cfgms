@@ -1150,6 +1150,85 @@ func TestHandleGetConfigPush_CrossTenantReturn404(t *testing.T) {
 	assert.Equal(t, "push not found", resp["error"])
 }
 
+// ── [REQUIRED TEST] Session-principal cross-tenant isolation (Issue #3143) ───────
+
+// withSessionPrincipal injects a web-session principal exactly as
+// authenticationMiddleware builds it (middleware.go webPrincipal block): GlobalScope
+// is hardcoded true regardless of the account's real scope, while TenantID carries the
+// session's tenant. Any handler that gates cross-tenant access on GlobalScope instead
+// of the tenant subtree is bypassed by this principal.
+func withSessionPrincipal(req *http.Request, tenantID string) *http.Request {
+	p := &Principal{
+		ID:          "web-acct:" + tenantID,
+		Name:        "web-session:" + tenantID,
+		Assurance:   session.AssuranceBasic,
+		GlobalScope: true,
+		TenantID:    tenantID,
+	}
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+	return req.WithContext(ctx)
+}
+
+// TestHandleGetConfigPush_SessionPrincipal_CrossTenantBlocked is the required AC test
+// for Issue #3143: a web-session caller scoped to tenant-a (GlobalScope=true, as set by
+// the middleware) must not read tenant-b's push record. Under the previous
+// "!principal.GlobalScope && record.TenantID != callerTenant" guard the GlobalScope
+// flag short-circuited the check and the record was returned; the tenant-subtree guard
+// makes the flag irrelevant.
+func TestHandleGetConfigPush_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+
+	rec := createPushRecord(t, pushStore, "push-owned-by-tenant-b", "tenant-b", "cfg-001")
+
+	req := withSessionPrincipal(newGetPushRequest(t, rec.ID), "tenant-a")
+	httpRec := httptest.NewRecorder()
+
+	server.handleGetConfigPush(httpRec, req)
+
+	// 404 (not 403) so the caller cannot confirm the push ID exists.
+	require.Equal(t, http.StatusNotFound, httpRec.Code,
+		"session principal scoped to tenant-a must not read tenant-b's push record (body: %s)", httpRec.Body.String())
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(httpRec.Body.Bytes(), &resp))
+	assert.Equal(t, "push not found", resp["error"])
+	assert.NotContains(t, httpRec.Body.String(), "cfg-001", "no record detail may leak cross-tenant")
+}
+
+// TestHandleGetConfigPush_SessionPrincipal_OwnSubtreeAllowed verifies the fix does not
+// over-restrict: a session principal scoped to tenant-a reads its own record and records
+// in its descendant tenants.
+func TestHandleGetConfigPush_SessionPrincipal_OwnSubtreeAllowed(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, pushStore := makePushServerWithStore(t, cp)
+
+	own := createPushRecord(t, pushStore, "push-owned-by-tenant-a", "tenant-a", "cfg-own")
+	child := createPushRecord(t, pushStore, "push-owned-by-child", "tenant-a/child-1", "cfg-child")
+
+	for _, tc := range []struct {
+		name   string
+		pushID string
+		tenant string
+	}{
+		{"own_tenant", own.ID, "tenant-a"},
+		{"descendant_tenant", child.ID, "tenant-a/child-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := withSessionPrincipal(newGetPushRequest(t, tc.pushID), "tenant-a")
+			httpRec := httptest.NewRecorder()
+
+			server.handleGetConfigPush(httpRec, req)
+
+			require.Equal(t, http.StatusOK, httpRec.Code,
+				"session principal scoped to tenant-a must read %s (body: %s)", tc.tenant, httpRec.Body.String())
+			var resp PushStatusResponse
+			require.NoError(t, json.Unmarshal(httpRec.Body.Bytes(), &resp))
+			assert.Equal(t, tc.tenant, resp.TenantID)
+		})
+	}
+}
+
 // TestHandleGetConfigPush_AdminCanReadAnyTenant verifies that an admin caller
 // can read a push record regardless of its tenant.
 func TestHandleGetConfigPush_AdminCanReadAnyTenant(t *testing.T) {
