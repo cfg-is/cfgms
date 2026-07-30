@@ -3,14 +3,18 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // RotateSigningCertRequest is the optional JSON body for the rotate endpoint.
@@ -130,10 +134,24 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 		}
 
 		for _, certInfo := range certInfos {
+			// The owning steward is the certificate's recorded ClientID, never the
+			// caller-supplied query param. GetCertificateByCommonName matches on
+			// COMMON NAME, which is independent of the owner (a cert may be issued
+			// with an FQDN common name while ClientID is the steward ID — see
+			// service.CertificateProvisioningRequest). Labelling the result with the
+			// query param would make the tenant-scope filter below evaluate a
+			// caller-controlled string instead of the resource's actual owner,
+			// disclosing other tenants' certificates. Fall back to the query param
+			// only when the cert carries no ClientID at all, in which case it is a
+			// controller-internal cert that the scope filter treats as unattributable.
+			ownerStewardID := certInfo.ClientID
+			if ownerStewardID == "" {
+				ownerStewardID = stewardID
+			}
 			certificates = append(certificates, CertificateInfo{
 				SerialNumber:        certInfo.SerialNumber,
 				CommonName:          certInfo.CommonName,
-				StewardID:           stewardID,
+				StewardID:           ownerStewardID,
 				IsValid:             certInfo.IsValid,
 				ExpiresAt:           certInfo.ExpiresAt,
 				DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration), // Safe conversion with bounds validation
@@ -160,7 +178,100 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Apply tenant-scope filter: scoped callers only see certs for stewards
+	// within their own tenant subtree. Only an unscoped admin (callerTenant == "")
+	// skips filtering; every scoped caller requires an evaluable steward store.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		if s.stewardStore == nil {
+			// Without the steward store, subtree membership cannot be evaluated at
+			// all. Returning the unfiltered list would disclose every tenant's
+			// certificates, so fail closed the same way handleDecommissionSteward
+			// and the registration-refresh handlers do.
+			s.logger.Error("certificate list failed: steward store not configured",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+
+		scoped, err := s.filterCertsByTenantScope(r.Context(), certificates, callerTenant)
+		if err != nil {
+			// The scope filter could not be evaluated. Returning the unfiltered
+			// list would disclose other tenants' certificates, so fail the request.
+			s.logger.Error("Failed to apply tenant scope to certificate list",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant), "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
+			return
+		}
+		certificates = scoped
+	}
+
 	s.writeSuccessResponse(w, certificates)
+}
+
+// filterCertsByTenantScope keeps only the certificates a caller scoped to
+// callerTenant is entitled to see. A certificate is dropped only when its owning
+// steward is demonstrably outside callerTenant's subtree; certificates that
+// cannot be attributed to any tenant are left visible rather than dropped.
+//
+//   - Empty StewardID: controller-internal cert (CA/signing/server). Not a
+//     tenant-scoped resource, so always kept.
+//   - business.ErrStewardNotFound: the certificate has no owning steward record
+//     to check a tenant against (e.g. controller-internal certs, or a steward
+//     that exists only in the in-memory registry and not yet in the durable
+//     store — Issue #2929), so per story AC it is kept and visible fleet-wide,
+//     same as today.
+//   - Any other store error: returned to the caller so the request fails instead of
+//     degrading to no filtering at all during a storage outage.
+//
+// callerTenant == "" is an unscoped admin: the certificates are returned unchanged,
+// including unattributable ones. GetSteward lookups are deduped by StewardID
+// within the request.
+func (s *Server) filterCertsByTenantScope(ctx context.Context, certs []CertificateInfo, callerTenant string) ([]CertificateInfo, error) {
+	if callerTenant == "" {
+		// Unscoped admin — no subtree to restrict to.
+		return certs, nil
+	}
+
+	// scopeCache maps StewardID → whether that steward is within the caller's subtree.
+	scopeCache := make(map[string]bool)
+
+	filtered := make([]CertificateInfo, 0, len(certs))
+	for _, c := range certs {
+		if c.StewardID == "" {
+			// No owning steward — controller-internal or signing cert.
+			// Not a tenant-scoped resource; always visible.
+			filtered = append(filtered, c)
+			continue
+		}
+
+		if inScope, cached := scopeCache[c.StewardID]; cached {
+			if inScope {
+				filtered = append(filtered, c)
+			}
+			continue
+		}
+
+		record, err := s.stewardStore.GetSteward(ctx, c.StewardID)
+		if err != nil {
+			if errors.Is(err, business.ErrStewardNotFound) {
+				// No durable record — no tenant owner to check against, so the
+				// cert is kept and visible fleet-wide, per story AC.
+				scopeCache[c.StewardID] = true
+				filtered = append(filtered, c)
+				continue
+			}
+			// Genuine store fault: the scope decision cannot be made at all.
+			return nil, fmt.Errorf("steward lookup for tenant scope failed: %w", err)
+		}
+
+		inScope := isWithinTenantScope(callerTenant, record.TenantID)
+		scopeCache[c.StewardID] = inScope
+		if inScope {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered, nil
 }
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision
@@ -195,20 +306,18 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		ValidityDays: int(provisionReq.ValidityDays),
 	}
 
-	// Call provisioning service
+	// Call provisioning service. The service reports every failure as both a
+	// non-nil error and Success == false — the two are never independent — so a
+	// single failure branch covers both, plus a nil-response guard. The service's
+	// Message field carries internal error text (CA state, filesystem paths) and is
+	// deliberately logged rather than returned to the caller.
 	provisionResp, err := s.certProvisioningService.ProvisionCertificate(req)
-	if err != nil {
+	if err != nil || provisionResp == nil || !provisionResp.Success {
 		s.logger.Error("Failed to provision certificate",
 			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
 			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
 			"error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
-		return
-	}
-
-	// Check response success
-	if !provisionResp.Success {
-		s.writeErrorResponse(w, http.StatusBadRequest, provisionResp.Message, "PROVISION_ERROR")
 		return
 	}
 
