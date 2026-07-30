@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO-free)
@@ -221,13 +222,135 @@ func getPath(config map[string]interface{}) string {
 // nowUTC returns the current time in UTC (facilitates testing overrides if needed).
 func nowUTC() time.Time { return time.Now().UTC() }
 
+// isMemoryPath reports whether path denotes an in-memory SQLite database.
+// In-memory databases are only ever created by tests (production always uses a
+// file). They are always empty at open, so the full schema-DDL/back-fill pass
+// can be replaced by the deserialize fast-path in openAndInit.
+func isMemoryPath(path string) bool {
+	return path == ":memory:" || strings.Contains(path, "mode=memory")
+}
+
+// schemaTemplate holds a serialized page image of a freshly-initialised database,
+// built exactly once per process. Running the full schema DDL (~15 CREATE TABLEs
+// plus indexes and three back-fill probes) costs ~176ms per open under the race
+// detector; a single large test package (features/controller/api) opens ~900
+// in-memory databases, which alone pushed the suite past the 5-minute test-fast
+// budget and produced the timeout captured in initializeSchema. Deserializing a
+// prebuilt page image is a memcpy (~15ms under -race) and yields a byte-identical
+// schema because the template is itself produced by initializeSchema.
+var (
+	schemaTemplateOnce sync.Once
+	schemaTemplateData []byte
+	schemaTemplateErr  error
+)
+
+// serializer/deserializer are the modernc.org/sqlite driver-connection capabilities
+// used by the in-memory fast-path. They are defined here (not imported) so the
+// provider does not take a compile-time dependency on driver internals: if a future
+// driver lacks them, the type assertions fail and openAndInit falls back to the
+// full DDL path.
+type serializer interface{ Serialize() ([]byte, error) }
+type deserializer interface{ Deserialize([]byte) error }
+
+// buildSchemaTemplate initialises a throwaway private in-memory database with the
+// full DDL path and returns its serialized page image.
+func buildSchemaTemplate() ([]byte, error) {
+	// Private cache (no cache=shared) and a fixed name: this database is used only
+	// to produce the template and is closed immediately, so it must not collide
+	// with, or be visible to, any test database.
+	db, err := openDB("file:cfgms-schema-template?mode=memory")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	if err := initializeSchema(ctx, db); err != nil {
+		return nil, fmt.Errorf("sqlite: building schema template: %w", err)
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	var data []byte
+	rawErr := conn.Raw(func(dc any) error {
+		s, ok := dc.(serializer)
+		if !ok {
+			return fmt.Errorf("sqlite: driver connection does not support Serialize")
+		}
+		b, err := s.Serialize()
+		if err != nil {
+			return err
+		}
+		data = b
+		return nil
+	})
+	if rawErr != nil {
+		return nil, rawErr
+	}
+	return data, nil
+}
+
+// applySchemaTemplate installs the process-wide schema template into an empty
+// in-memory database. It returns an error (leaving the DB untouched) when the
+// template is unavailable or the driver lacks Deserialize, so the caller can fall
+// back to the full DDL path. If the database is already initialised (another
+// handle to the same shared-cache database ran first) it is a no-op, mirroring
+// the CREATE TABLE IF NOT EXISTS idempotency of initializeSchema — deserialize
+// replaces the whole database, so it must never run over existing data.
+func applySchemaTemplate(ctx context.Context, db *sql.DB) error {
+	schemaTemplateOnce.Do(func() {
+		schemaTemplateData, schemaTemplateErr = buildSchemaTemplate()
+	})
+	if schemaTemplateErr != nil {
+		return schemaTemplateErr
+	}
+
+	already, err := tableExists(ctx, db, "schema_version")
+	if err != nil {
+		return err
+	}
+	if already {
+		return nil
+	}
+
+	// Deserialize must run on the same connection that later queries use. In-memory
+	// databases are pinned to a single pool connection (openDB sets MaxOpenConns(1)),
+	// so checking the connection out here and returning it makes the installed schema
+	// visible to every store that shares this *sql.DB.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+
+	return conn.Raw(func(dc any) error {
+		d, ok := dc.(deserializer)
+		if !ok {
+			return fmt.Errorf("sqlite: driver connection does not support Deserialize")
+		}
+		return d.Deserialize(schemaTemplateData)
+	})
+}
+
 // openAndInit opens a SQLite DB at the given path, applies WAL pragma, and runs schema DDL.
+// In-memory databases (tests only) take the deserialize fast-path; a failure there
+// falls through to the full DDL path so correctness never depends on the optimisation.
 func openAndInit(path string) (*sql.DB, error) {
 	db, err := openDB(path)
 	if err != nil {
 		return nil, err
 	}
 	ctx := context.Background()
+	if isMemoryPath(path) {
+		if err := applySchemaTemplate(ctx, db); err == nil {
+			return db, nil
+		}
+		// Fall through to the full DDL path on any fast-path failure.
+	}
 	if err := initializeSchema(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: schema initialisation failed: %w", err)
