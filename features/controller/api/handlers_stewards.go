@@ -392,20 +392,15 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross-tenant scope check: API-key principals carry a non-empty TenantID; admin mTLS
-	// principals have TenantID="" meaning no scope restriction.
-	// Use path-separator-aware prefix matching so "root/msp-a" cannot match "root/msp-alpha".
+	// principals have TenantID="" meaning no scope restriction (callerTenant == "" → always allowed).
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
-		sameTenant := stewardInfo.TenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(stewardInfo.TenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
-			// 404 instead of 403 to avoid disclosing steward existence across tenants.
-			s.logger.Info("Cross-tenant steward get refused",
-				"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
-				"caller_tenant", logging.SanitizeLogValue(callerTenant))
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
-		}
+	if !isWithinTenantScope(callerTenant, stewardInfo.TenantID) {
+		// 404 instead of 403 to avoid disclosing steward existence across tenants.
+		s.logger.Info("Cross-tenant steward get refused",
+			"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return
 	}
 
 	activeSessions := 0
