@@ -737,11 +737,11 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 		// otherwise valid DNA update), but an out-of-bounds count or size is
 		// rejected outright: that is not the shape a healthy steward produces, and
 		// persisting it would hand the controller a repeatable decode amplifier.
-		if len(transfer.Fragments) > maxDNATransferFragments {
+		if len(transfer.FragmentBytes) > maxDNATransferFragments {
 			return nil, fmt.Errorf("fragment count %d exceeds maximum %d",
-				len(transfer.Fragments), maxDNATransferFragments)
+				len(transfer.FragmentBytes), maxDNATransferFragments)
 		}
-		for _, fb := range transfer.Fragments {
+		for _, fb := range transfer.FragmentBytes {
 			if len(fb) > maxDNAFragmentBytes {
 				return nil, fmt.Errorf("fragment of %d bytes exceeds maximum %d",
 					len(fb), maxDNAFragmentBytes)

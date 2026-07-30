@@ -67,8 +67,13 @@ type DNACollector interface {
 // collector also implements this interface, the client maintains
 // currentDNAFragments and currentDNAAggregateRoot for the partial-sync protocol
 // (ADR-017 §7). The S5 story wires the real multi-fragment collector here.
+//
+// Named CollectFragmentsTracked (not CollectFragments) so a single type can
+// implement both DNACollector.CollectFragments (no error, best-effort) and this
+// tracked variant (error-returning, used for the partial-sync root) without a
+// method-signature collision.
 type FragmentCollector interface {
-	CollectFragments(ctx context.Context) ([]*commonpb.Fragment, error)
+	CollectFragmentsTracked(ctx context.Context) ([]*commonpb.Fragment, error)
 }
 
 // maxRequestedFragmentIDs bounds the fragment_ids list accepted from a SYNC_DNA
@@ -1053,13 +1058,13 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		}
 
 		transfer := &dpTypes.DNATransfer{
-			ID:         fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
-			StewardID:  sid,
-			TenantID:   tid,
-			Timestamp:  time.Now(),
-			Attributes: attrJSON,
-			Fragments:  fragBytes,
-			Delta:      false, // full snapshot
+			ID:            fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
+			StewardID:     sid,
+			TenantID:      tid,
+			Timestamp:     time.Now(),
+			Attributes:    attrJSON,
+			FragmentBytes: fragBytes,
+			Delta:         false, // full snapshot
 			Metadata: map[string]string{
 				"command_id":     cmd.ID,
 				"dna_hash":       dna.ComputeHash(currentDNA),
@@ -1818,7 +1823,7 @@ func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
 
 	// Optional: if the collector supports fragments, update the partial-sync state.
 	if fc, ok := collector.(FragmentCollector); ok {
-		fragments, fragErr := fc.CollectFragments(ctx)
+		fragments, fragErr := fc.CollectFragmentsTracked(ctx)
 		if fragErr != nil {
 			c.logger.Warn("fragment collection failed; partial-sync root not updated", "error", fragErr)
 		} else if len(fragments) > 0 {

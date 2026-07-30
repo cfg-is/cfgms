@@ -468,13 +468,13 @@ func TestSyncDNAHandler_IncludesModuleFragments(t *testing.T) {
 	select {
 	case transfer := <-sess.dnaSent:
 		require.NotNil(t, transfer)
-		require.Len(t, transfer.Fragments, 1,
+		require.Len(t, transfer.FragmentBytes, 1,
 			"the collector's fragment must ride the full-sync DNATransfer")
 		assert.Equal(t, "1", transfer.Metadata["fragment_count"])
 
 		// The wire bytes must proto-decode back to the exact fragment.
 		got := &commonpb.Fragment{}
-		require.NoError(t, proto.Unmarshal(transfer.Fragments[0], got))
+		require.NoError(t, proto.Unmarshal(transfer.FragmentBytes[0], got))
 		assert.Equal(t, "cluster:cfg-lab", got.GetFragmentId())
 		assert.Equal(t, "hyperv", got.GetAuthority())
 		assert.Equal(t, frag.GetCanonicalBytes(), got.GetCanonicalBytes())
@@ -520,7 +520,7 @@ func TestSyncDNAHandler_NilCollector_NoFragments(t *testing.T) {
 	select {
 	case transfer := <-sess.dnaSent:
 		require.NotNil(t, transfer)
-		assert.Empty(t, transfer.Fragments, "no collector means no fragments")
+		assert.Empty(t, transfer.FragmentBytes, "no collector means no fragments")
 		assert.Equal(t, "0", transfer.Metadata["fragment_count"])
 		assert.NotEmpty(t, transfer.Attributes, "flat attributes must still be sent")
 	case <-time.After(2 * time.Second):
@@ -1340,8 +1340,15 @@ func (c *fragmentAndAttrCollector) CollectAttributes(_ context.Context) (map[str
 	return c.attrs, nil
 }
 
-func (c *fragmentAndAttrCollector) CollectFragments(_ context.Context) ([]*commonpb.Fragment, error) {
+func (c *fragmentAndAttrCollector) CollectFragmentsTracked(_ context.Context) ([]*commonpb.Fragment, error) {
 	return c.fragments, nil
+}
+
+// CollectFragments satisfies DNACollector's best-effort fragment surface
+// (used by the sync_dna full-sync path); CollectFragmentsTracked above
+// satisfies the separate error-returning FragmentCollector extension.
+func (c *fragmentAndAttrCollector) CollectFragments(_ context.Context) []*commonpb.Fragment {
+	return c.fragments
 }
 
 var _ DNACollector = (*fragmentAndAttrCollector)(nil)

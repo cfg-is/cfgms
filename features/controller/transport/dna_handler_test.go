@@ -153,10 +153,10 @@ func TestDNAHandler_PersistsFragmentsFromTransfer(t *testing.T) {
 	require.NoError(t, err)
 
 	transfer := &dptypes.DNATransfer{
-		StewardID:  "steward-frag",
-		TenantID:   "t1",
-		Attributes: attrJSON,
-		Fragments:  [][]byte{fragBytes},
+		StewardID:     "steward-frag",
+		TenantID:      "t1",
+		Attributes:    attrJSON,
+		FragmentBytes: [][]byte{fragBytes},
 	}
 
 	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 2), "steward-frag")
@@ -189,7 +189,7 @@ func TestDNAHandler_MalformedFragmentSkipped(t *testing.T) {
 		TenantID:   "t1",
 		Attributes: attrJSON,
 		// 0x08 starts field 1 as a varint but the value bytes are truncated.
-		Fragments: [][]byte{{0x08}, goodBytes},
+		FragmentBytes: [][]byte{{0x08}, goodBytes},
 	}
 
 	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-badfrag")
@@ -224,7 +224,7 @@ func TestReassembleDNA_RejectsExcessiveFragmentCount(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
-		StewardID: "steward-fragflood", TenantID: "t1", Attributes: attrJSON, Fragments: frags,
+		StewardID: "steward-fragflood", TenantID: "t1", Attributes: attrJSON, FragmentBytes: frags,
 	}, 1), "steward-fragflood")
 	require.Error(t, err, "an unbounded fragment count must be rejected, not persisted")
 	assert.Contains(t, err.Error(), "exceeds maximum")
@@ -232,7 +232,7 @@ func TestReassembleDNA_RejectsExcessiveFragmentCount(t *testing.T) {
 	// The boundary itself is still accepted — the cap must not reject legitimate load.
 	dna, err := reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
 		StewardID: "steward-fragmax", TenantID: "t1", Attributes: attrJSON,
-		Fragments: frags[:maxDNATransferFragments],
+		FragmentBytes: frags[:maxDNATransferFragments],
 	}, 1), "steward-fragmax")
 	require.NoError(t, err)
 	assert.Len(t, dna.GetFragments(), maxDNATransferFragments)
@@ -252,7 +252,7 @@ func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
 
 	oversized := make([]byte, maxDNAFragmentBytes+1)
 	_, err = reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
-		StewardID: "s", TenantID: "t1", Attributes: attrJSON, Fragments: [][]byte{oversized},
+		StewardID: "s", TenantID: "t1", Attributes: attrJSON, FragmentBytes: [][]byte{oversized},
 	}), "s"), "s")
 	require.Error(t, err, "an over-cap fragment must never reach the decoder")
 	assert.Contains(t, err.Error(), "exceeds maximum")
@@ -267,7 +267,7 @@ func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
 	require.LessOrEqual(t, len(atLimit), maxDNAFragmentBytes)
 
 	dna, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
-		StewardID: "s", TenantID: "t1", Attributes: attrJSON, Fragments: [][]byte{atLimit},
+		StewardID: "s", TenantID: "t1", Attributes: attrJSON, FragmentBytes: [][]byte{atLimit},
 	}), "s"), "s")
 	require.NoError(t, err, "a fragment at the boundary must be accepted")
 	require.Len(t, dna.GetFragments(), 1)
@@ -339,6 +339,18 @@ func chunksFromPayload(payload []byte, stewardID string) []*transportpb.DNAChunk
 	return []*transportpb.DNAChunk{{
 		StewardId: stewardID, TenantId: "t1", Data: payload, ChunkIndex: 0, TotalChunks: 1,
 	}}
+}
+
+// stubPersister is a minimal DNAPersister used by the ingest-side DoS bound
+// tests to assert that a rejected flood/oversized snapshot never reaches
+// persistence — it records the last DNA it was handed (nil if never called).
+type stubPersister struct {
+	got *common.DNA
+}
+
+func (p *stubPersister) SyncDNA(_ context.Context, dna *common.DNA) (*common.Status, error) {
+	p.got = dna
+	return &common.Status{Code: common.Status_OK}, nil
 }
 
 // TestDNAHandler_MultiChunkReassembly (#2616): a snapshot split across multiple
