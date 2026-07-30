@@ -13,6 +13,7 @@
  *   /modules         → AppShell layout → ModuleReviewQueue
  *   /workflows       → AppShell layout → WorkflowListView
  *   /accounts        → AppShell layout → AccountsView
+ *   /registration    → AppShell layout → RegistrationConsolePage
  *
  * Session presence is inferred from API responses, never from reading
  * cookies (#2495). The fleet view's own data call (GET /api/v1/stewards,
@@ -31,6 +32,7 @@ import WorkflowListView from './workflow/WorkflowListView.tsx'
 import AccountsView from './accounts/AccountsView.tsx'
 import ModuleReviewQueue from './modules/ModuleReviewQueue.tsx'
 import ScriptsView from './scripts/ScriptsView.tsx'
+import RegistrationConsolePage from './registration/RegistrationConsolePage.tsx'
 
 function App() {
   return (
@@ -46,6 +48,7 @@ function App() {
             <Route path="workflows" element={<WorkflowListView />} />
             <Route path="accounts" element={<AccountsView />} />
             <Route path="scripts" element={<ScriptsView />} />
+            <Route path="registration" element={<RegistrationConsolePage />} />
           </Route>
         </Routes>
       </RequireAuth>

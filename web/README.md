@@ -190,6 +190,54 @@ search box doubles as its live filter).
   drawer opened by the hamburger button; a scrim covers the content and
   Escape or a scrim click closes it, matching the mockup harness.
 
+## Registration console (Stories #2934, #2935)
+
+[`src/registration/RegistrationConsolePage.tsx`](src/registration/RegistrationConsolePage.tsx)
+renders the steward enrollment console at `/registration`. The page opens on the
+**Pending** tab by default. The tab strip follows the same roving-tabindex +
+ArrowLeft/Right pattern as `StewardAssetPage.tsx`.
+
+Canonical design:
+[`docs/design/mockups/registration-console.html`](../docs/design/mockups/registration-console.html).
+
+No approve, approve-all, approve-by-CIDR, mint, rotate, revoke, or delete control
+is present — those are Section 2's follow-on epic.
+
+### Pending tab (Story #2934)
+
+[`src/registration/PendingQueueTab.tsx`](src/registration/PendingQueueTab.tsx)
+lists every pending registration in the caller's tenant scope and provides a
+functional **Deny** button per row.
+
+- **List endpoint:** `GET /api/v1/registration/pending` — bare-array response (no
+  `{data:...}` envelope). Shape-validated by `parsePendingRegistrations` before
+  any value reaches the DOM.
+- **Deny endpoint:** `POST /api/v1/registration/{id}/deny` — removes the row from
+  the list on success; surfaces a row-level error without crashing on failure.
+- All steward-supplied values (`pending_id`, `steward_id`, `source_ip`,
+  `registered_at`) render as JSX text nodes only (security A9.1).
+
+### Tokens tab (Story #2935)
+
+[`src/registration/TokensTab.tsx`](src/registration/TokensTab.tsx)
+is a read-only view of registration tokens for the caller's tenant scope.
+`token_prefix` (never the full secret) is the only token identifier rendered.
+The list endpoint contract (`handlers_registration_tokens.go`) omits the `token`
+field from list responses; `parseToken` enforces this client-side by not reading
+that field.
+
+- **List endpoint:** `GET /api/v1/registration/tokens` — `{tokens:[...], total:N}`
+  shape (no `{data:...}` envelope). Shape-validated by `parseTokenList`.
+- **Fields rendered:** `token_prefix`, `tenant_id`, `group`, `created_at`,
+  `expires_at`, computed status (Active / Expired / Revoked).
+- `expires_at` / `revoked_at` are optional (`omitempty` in Go) — renders `—`
+  when absent, matching the `columns.ts` em-dash convention.
+- No mint, rotate, revoke, or delete affordance of any kind.
+
+### IP Trust tab (Story #2936)
+
+Renders a "soon" placeholder — the IP-trust list tab is added by Story #2936.
+
 ## Fleet overview (Story #2497)
 
 [`src/fleet/FleetOverview.tsx`](src/fleet/FleetOverview.tsx) renders the
