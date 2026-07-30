@@ -263,6 +263,11 @@ human every single time:
 - `module:approve` / `module:reject` — an approved bundle is code that executes on
   every managed endpoint. This is the largest blast radius in the system (ADR-006).
 - `publisher-trust:add` — grants an entire publisher standing authority.
+- `registration:approve-by-cidr` — one call admits every pending steward whose source
+  IP falls in a range, and RFC1918 ranges collide across tenants, so the match set is
+  a trust-boundary decision rather than a convenience filter. The read-only preview
+  (`GET /registration/approve-by-cidr/preview`) is *not* presence-gated, so the
+  gesture is spent once, on a match set the operator has already inspected.
 
 Everything else in `permissionAssurance` is gated on level alone. **Growing this
 set is a founder decision, not a reviewer's judgement call** — every addition
@@ -682,7 +687,7 @@ amendment specifies that ceremony and its threat model.
 - **Orthogonal to presence tokens (Decision 4 / #2784).** Elevation raises the *session's
   assurance level*; it does **not** substitute for the per-action human-presence gesture that
   the `RequireUserPresence` catastrophic actions demand. An elevated Strong session still mints
-  a presence token for those two permissions. Elevation and presence are distinct layers.
+  a presence token for each of those permissions. Elevation and presence are distinct layers.
 - **Composes with Amendment 1.** A freshly self-enrolled passkey is immediately usable as the
   assertion credential here — that is how a no-MFA account completes password → self-enroll →
   assert → Strong in a single browser sitting, with no cert.

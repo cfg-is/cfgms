@@ -313,7 +313,8 @@ Routes that require elevated assurance are declared in `permissionAssurance` (`f
 | `registration:delete-token` | `DELETE /api/v1/registration/tokens/{token}` |
 | `registration:revoke-token` | `POST /api/v1/registration/tokens/{token}/revoke` |
 | `registration:rotate-token` | `POST /api/v1/registration/tokens/{tenant_id}/rotate` |
-| `registration:approve` | `POST /api/v1/registration/{id}/approve`, `/approve-all`, `/approve-by-cidr` |
+| `registration:approve` | `POST /api/v1/registration/{id}/approve`, `/approve-all` |
+| `registration:approve-by-cidr` | `POST /api/v1/registration/approve-by-cidr` — **also requires user presence** (see below) |
 | `registration:manage-ip-trust` | `POST /api/v1/registration/ip-trust`, `DELETE /api/v1/registration/ip-trust/{tenant}/{cidr}` |
 | `tenant:create` | `POST /api/v1/tenants` |
 | `refresh:approve` | `POST /api/v1/stewards/refresh/{pending_id}/approve` |
@@ -328,6 +329,15 @@ Routes that require elevated assurance are declared in `permissionAssurance` (`f
 | `module:approve`, `module:reject`, `publisher-trust:add` | _(forward-declared; routes not yet wired)_ |
 
 The canonical source of truth is `permissionAssurance` in `features/controller/api/assurance.go`. The `TestF2_AssuranceGate_ParityWithPermissionRegistry` test asserts at test time that the wired route set and the registry match — any drift is a test failure.
+
+**Presence-gated subset** (`RequireUserPresence: true`, ADR-021 Decision 4): `AssuranceStrong` alone is not sufficient. `requirePermission` additionally requires an `X-Presence-Token` header — a fresh, single-use token minted by `POST /api/v1/webauthn/presence/finish` after a WebAuthn assertion with `userVerification: "required"`. Requests without one receive `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"`.
+
+| Permission | Endpoint | Why presence |
+|------------|----------|--------------|
+| `module:approve`, `module:reject`, `publisher-trust:add` | _(forward-declared; routes not yet wired)_ | An approved bundle or trusted publisher is code that executes on every managed endpoint |
+| `registration:approve-by-cidr` | `POST /api/v1/registration/approve-by-cidr` | A single call admits every pending steward in an IP range; RFC1918 ranges collide across tenants, so the match set is a trust-boundary decision, not a convenience filter |
+
+The read-only dry run for the CIDR match set — `GET /api/v1/registration/approve-by-cidr/preview` — is *not* in this set. It mutates nothing and is gated on `registration:list-pending` (Machine assurance), so an operator can inspect exactly which entries a call would approve before spending a presence gesture on the mutation.
 
 **Rationale:** Endpoints in this set can issue credentials, modify trust anchors, or alter the authorization model itself. Restricting them to `AssuranceStrong` provides a hardware-backed authentication guarantee that cannot be replicated by a compromised or stolen API key or web session. Operators who need these capabilities must authenticate with an admin credential bundle (mTLS client certificate).
 

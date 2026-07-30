@@ -164,11 +164,19 @@ describe('PendingQueueTab — list rendering', () => {
     expect(screen.getByTestId('deny-btn-pend-abc123')).toBeInTheDocument()
   })
 
-  it('renders no approve control of any kind', async () => {
+  it('shows an Approve button for each row', async () => {
     fetchMock.mockResolvedValue(makePendingResponse([makeEntry()]))
     renderTab()
     await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: /approve/i })).toBeNull()
+    expect(screen.getByTestId('approve-btn-pend-abc123')).toBeInTheDocument()
+  })
+
+  it('shows Approve All and Approve by CIDR buttons in the toolbar', async () => {
+    fetchMock.mockResolvedValue(makePendingResponse([makeEntry()]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+    expect(screen.getByTestId('approve-all-btn')).toBeInTheDocument()
+    expect(screen.getByTestId('approve-by-cidr-btn')).toBeInTheDocument()
   })
 
   it('shows an error notice on a non-200 list response', async () => {
@@ -285,5 +293,249 @@ describe('PendingQueueTab — deny', () => {
     await waitFor(() => expect(screen.getAllByTestId('pending-row')).toHaveLength(1))
     expect(screen.getByText('pend-def456')).toBeInTheDocument()
     expect(screen.queryByText('pend-abc123')).toBeNull()
+  })
+})
+
+// ── Approve (per-row) ─────────────────────────────────────────────────────────
+
+describe('PendingQueueTab — approve', () => {
+  it('approve removes the row from the list on success', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-btn-pend-abc123'))
+
+    await waitFor(() => expect(screen.getByTestId('pending-empty')).toBeInTheDocument())
+    expect(screen.queryByTestId('pending-row')).toBeNull()
+    const approveCall = fetchMock.mock.calls[1]!
+    expect(String(approveCall[0])).toContain('/approve')
+    expect((approveCall[1] as RequestInit | undefined)?.method).toBe('POST')
+  })
+
+  it('surfaces a row-level error on a failed approve without crashing', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-btn-pend-abc123'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-error-pend-abc123')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('approve-error-pend-abc123')).toHaveTextContent('403')
+    expect(screen.getAllByTestId('pending-row')).toHaveLength(1)
+  })
+
+  it('surfaces a row-level error on a network failure during approve without crashing', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockRejectedValueOnce(new Error('network error'))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-btn-pend-abc123'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-error-pend-abc123')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('approve-error-pend-abc123')).toHaveTextContent('network error')
+    expect(screen.getAllByTestId('pending-row')).toHaveLength(1)
+  })
+})
+
+// ── Approve All ───────────────────────────────────────────────────────────────
+
+describe('PendingQueueTab — approve all', () => {
+  it('approve-all calls the correct endpoint and refreshes the list on success', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ approved: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(makePendingResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-all-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('pending-empty')).toBeInTheDocument())
+    const approveAllCall = fetchMock.mock.calls[1]!
+    expect(String(approveAllCall[0])).toContain('/approve-all')
+    expect((approveAllCall[1] as RequestInit | undefined)?.method).toBe('POST')
+  })
+
+  it('surfaces a toolbar error on a failed approve-all without crashing', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-all-btn'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-all-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('approve-all-error')).toHaveTextContent('500')
+    expect(screen.getAllByTestId('pending-row')).toHaveLength(1)
+  })
+})
+
+// ── Approve by CIDR ───────────────────────────────────────────────────────────
+
+describe('PendingQueueTab — approve by CIDR', () => {
+  function makeCIDRPreviewResponse(
+    count: number,
+    pending_ids: string[],
+    source_ips: string[],
+    status = 200,
+  ) {
+    return new Response(JSON.stringify({ count, pending_ids, source_ips }), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  it('opens the CIDR modal when Approve by CIDR is clicked', async () => {
+    fetchMock.mockResolvedValue(makePendingResponse([makeEntry()]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+
+    expect(screen.getByTestId('cidr-modal')).toBeInTheDocument()
+  })
+
+  it('closes the modal when Cancel is clicked', async () => {
+    fetchMock.mockResolvedValue(makePendingResponse([makeEntry()]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+    expect(screen.getByTestId('cidr-modal')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('cidr-cancel-btn'))
+    expect(screen.queryByTestId('cidr-modal')).toBeNull()
+  })
+
+  it('confirm button is disabled until preview is loaded', async () => {
+    fetchMock.mockResolvedValue(makePendingResponse([makeEntry()]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+
+    expect(screen.getByTestId('cidr-confirm-btn')).toBeDisabled()
+  })
+
+  it('preview button is disabled when CIDR input is empty', async () => {
+    fetchMock.mockResolvedValue(makePendingResponse([makeEntry()]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+
+    expect(screen.getByTestId('cidr-preview-btn')).toBeDisabled()
+  })
+
+  it('shows preview result and enables confirm after successful preview', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(makeCIDRPreviewResponse(2, ['pend-a', 'pend-b'], ['10.0.0.1', '10.0.0.2']))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+    fireEvent.change(screen.getByTestId('cidr-input'), { target: { value: '10.0.0.0/24' } })
+    fireEvent.click(screen.getByTestId('cidr-preview-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('cidr-preview-result')).toBeInTheDocument())
+    expect(screen.getByTestId('cidr-preview-result')).toHaveTextContent('2 pending registrations will be approved')
+    expect(screen.getByTestId('cidr-confirm-btn')).not.toBeDisabled()
+  })
+
+  it('clears preview and disables confirm when CIDR input changes after preview', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(makeCIDRPreviewResponse(1, ['pend-a'], ['10.0.0.1']))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+    fireEvent.change(screen.getByTestId('cidr-input'), { target: { value: '10.0.0.0/24' } })
+    fireEvent.click(screen.getByTestId('cidr-preview-btn'))
+    await waitFor(() => expect(screen.getByTestId('cidr-preview-result')).toBeInTheDocument())
+
+    // Change CIDR after preview — confirm must be re-disabled.
+    fireEvent.change(screen.getByTestId('cidr-input'), { target: { value: '192.168.0.0/16' } })
+
+    expect(screen.queryByTestId('cidr-preview-result')).toBeNull()
+    expect(screen.getByTestId('cidr-confirm-btn')).toBeDisabled()
+  })
+
+  it('surfaces a preview error without crashing', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(new Response(null, { status: 400 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+    fireEvent.change(screen.getByTestId('cidr-input'), { target: { value: 'bad' } })
+    fireEvent.click(screen.getByTestId('cidr-preview-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('cidr-preview-error')).toBeInTheDocument())
+    expect(screen.getByTestId('cidr-preview-error')).toHaveTextContent('400')
+    expect(screen.getByTestId('cidr-confirm-btn')).toBeDisabled()
+  })
+
+  it('calls the mutation endpoint with the correct CIDR and closes modal on success', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(makeCIDRPreviewResponse(1, ['pend-abc123'], ['10.0.0.1']))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ approved: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(makePendingResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+    fireEvent.change(screen.getByTestId('cidr-input'), { target: { value: '10.0.0.0/24' } })
+    fireEvent.click(screen.getByTestId('cidr-preview-btn'))
+    await waitFor(() => expect(screen.getByTestId('cidr-confirm-btn')).not.toBeDisabled())
+
+    fireEvent.click(screen.getByTestId('cidr-confirm-btn'))
+
+    await waitFor(() => expect(screen.queryByTestId('cidr-modal')).toBeNull())
+    await waitFor(() => expect(screen.getByTestId('pending-empty')).toBeInTheDocument())
+
+    const mutationCall = fetchMock.mock.calls[2]!
+    expect(String(mutationCall[0])).toContain('/approve-by-cidr')
+    expect((mutationCall[1] as RequestInit | undefined)?.method).toBe('POST')
+    const body = JSON.parse((mutationCall[1] as RequestInit).body as string) as { cidr: string }
+    expect(body.cidr).toBe('10.0.0.0/24')
+  })
+
+  it('surfaces a mutation error without crashing', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makePendingResponse([makeEntry()]))
+      .mockResolvedValueOnce(makeCIDRPreviewResponse(1, ['pend-abc123'], ['10.0.0.1']))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('pending-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('approve-by-cidr-btn'))
+    fireEvent.change(screen.getByTestId('cidr-input'), { target: { value: '10.0.0.0/24' } })
+    fireEvent.click(screen.getByTestId('cidr-preview-btn'))
+    await waitFor(() => expect(screen.getByTestId('cidr-confirm-btn')).not.toBeDisabled())
+
+    fireEvent.click(screen.getByTestId('cidr-confirm-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('cidr-approve-error')).toBeInTheDocument())
+    expect(screen.getByTestId('cidr-approve-error')).toHaveTextContent('401')
+    // Modal stays open so the operator can retry.
+    expect(screen.getByTestId('cidr-modal')).toBeInTheDocument()
   })
 })

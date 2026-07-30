@@ -845,12 +845,17 @@ cfg registration ip-trust revoke 10.0.0.0/8 --tenant-id acme-corp
 | `cfg registration pending` | `GET /api/v1/registration/pending` | Lists all quarantined stewards with SOURCE_IP and RDNS |
 | `cfg registration approve <id>` | `POST /api/v1/registration/{id}/approve` | Promotes steward status to `registered` |
 | `cfg registration deny <id>` | `POST /api/v1/registration/{id}/deny` | Removes steward from pending queue |
-| `cfg registration approve-all` | `POST /api/v1/registration/approve-all` | Approves all pending registrations; prints count approved |
-| `cfg registration approve-by-cidr <cidr>` | `POST /api/v1/registration/approve-by-cidr` | Approves pending entries whose source IP falls in the CIDR |
+| `cfg registration approve-all` | `POST /api/v1/registration/approve-all` | Approves all pending registrations in the caller's tenant scope; prints count approved |
+| _(web registration console only)_ | `GET /api/v1/registration/approve-by-cidr/preview?cidr=<cidr>` | Read-only dry run: returns the count, pending IDs, and source IPs that `approve-by-cidr` would approve. Mutates nothing |
+| `cfg registration approve-by-cidr <cidr>` | `POST /api/v1/registration/approve-by-cidr` | Approves pending entries in the caller's tenant scope whose source IP falls in the CIDR. Requires a user-presence step-up (below) |
 | `cfg registration ip-trust add <cidr>` | `POST /api/v1/registration/ip-trust` | Adds a pre-seeded trusted CIDR for `--tenant-id` |
 | `cfg registration ip-trust revoke <cidr>` | `DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}` | Revokes a trusted CIDR for `--tenant-id` |
 
-Required API key permissions: `registration:list-pending`, `registration:approve`, `registration:deny` for individual and bulk approval operations; `registration:manage-ip-trust` for ip-trust subcommands.
+Required API key permissions: `registration:list-pending` for `pending` and for the approve-by-CIDR preview; `registration:approve` for individual approval and `approve-all`; `registration:approve-by-cidr` for `approve-by-cidr`; `registration:deny` for denial; `registration:manage-ip-trust` for ip-trust subcommands.
+
+**Tenant scoping of bulk approval.** `approve-all` and `approve-by-cidr` — and the preview — resolve their target set through `ListPending(ctx, callerTenantID)`, so a caller whose principal carries a tenant (API key or non-root web account) can only approve pending entries belonging to that tenant. A caller with no tenant on its principal (mTLS admin bundle, root-scoped web account) retains fleet-wide reach. Entries outside the caller's scope are never listed, previewed, or mutated.
+
+**Presence step-up on `approve-by-cidr`.** `registration:approve-by-cidr` carries `RequireUserPresence: true` (ADR-021 Decision 4): `AssuranceStrong` alone is not enough, and the request must also carry a fresh, single-use `X-Presence-Token` obtained from `POST /api/v1/webauthn/presence/begin` → `/finish`. Without one the call returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"`. Rationale: one call admits every pending steward in an IP range, and RFC1918 ranges collide across tenants, so the match set is a trust-boundary decision. The preview endpoint is deliberately *not* presence-gated — an operator inspects the exact match set first, then spends one gesture on the mutation. The web console blocks the mutating call until the preview has been shown and confirmed.
 
 The `pending` output includes a `SOURCE_IP` column showing the steward's source IP at registration time, and an `RDNS` column populated by a best-effort reverse DNS lookup at display time (shows `-` on failure or timeout).
 

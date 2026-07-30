@@ -56,6 +56,11 @@ var knownPermissions = map[string]bool{
 	"registration:list-pending": true,
 	"registration:approve":      true,
 	"registration:deny":         true,
+	// Bulk CIDR approval (Issue #2969) — separate from registration:approve because it
+	// additionally carries RequireUserPresence in permissionAssurance. Web accounts must be
+	// able to hold it, so it belongs in this allow-list even though a Machine-assurance API
+	// key can never satisfy its assurance requirement.
+	"registration:approve-by-cidr": true,
 	// IP-trust management (Issue #1698, #2932)
 	"registration:list-ip-trust":   true,
 	"registration:manage-ip-trust": true,

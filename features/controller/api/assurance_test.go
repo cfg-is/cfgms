@@ -87,10 +87,15 @@ func TestPermissionAssurance_SessionListRevoke_Absent(t *testing.T) {
 	}
 }
 
-// TestPermissionAssurance_CatastrophicForwardDeclarations verifies that the three
-// forward-declared catastrophic permissions carry RequireUserPresence: true.
+// TestPermissionAssurance_CatastrophicForwardDeclarations verifies that all
+// catastrophic permissions carry RequireUserPresence: true (Issue #2784, #2969).
 func TestPermissionAssurance_CatastrophicForwardDeclarations(t *testing.T) {
-	catastrophic := []string{"module:approve", "module:reject", "publisher-trust:add"}
+	catastrophic := []string{
+		"module:approve",
+		"module:reject",
+		"publisher-trust:add",
+		"registration:approve-by-cidr", // Issue #2969: bulk CIDR approval
+	}
 	for _, perm := range catastrophic {
 		req, found := permissionAssurance[perm]
 		require.True(t, found, "catastrophic permission %q must be in permissionAssurance", perm)
@@ -99,10 +104,31 @@ func TestPermissionAssurance_CatastrophicForwardDeclarations(t *testing.T) {
 	}
 }
 
+// TestPermissionAssurance_ApproveByCIDRIsGrantable verifies that
+// registration:approve-by-cidr is in the knownPermissions allow-list (Issue #2969).
+// Splitting approve-by-cidr out of registration:approve is only usable if the new
+// permission can actually be granted: handleCreateWebAccount and handleCreateAPIKey
+// reject any permission ID absent from that list with 400 INVALID_PERMISSION, which
+// would make the web console's CIDR approval flow ungrantable.
+func TestPermissionAssurance_ApproveByCIDRIsGrantable(t *testing.T) {
+	assert.True(t, isKnownPermission("registration:approve-by-cidr"),
+		"registration:approve-by-cidr must be grantable to web accounts")
+	// The permission it was split out of remains grantable and unchanged.
+	assert.True(t, isKnownPermission("registration:approve"),
+		"registration:approve must remain grantable for single approve + approve-all")
+	// Sanity: the allow-list still rejects the wildcard.
+	assert.False(t, isKnownPermission("*"), "wildcard must never be a valid permission ID")
+}
+
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
-	catastrophic := map[string]bool{"module:approve": true, "module:reject": true, "publisher-trust:add": true}
+	catastrophic := map[string]bool{
+		"module:approve":               true,
+		"module:reject":                true,
+		"publisher-trust:add":          true,
+		"registration:approve-by-cidr": true, // Issue #2969
+	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {
 			continue
