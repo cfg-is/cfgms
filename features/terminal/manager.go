@@ -20,6 +20,11 @@ type DefaultSessionManager struct {
 	recorder  Recorder
 	cleanupCh chan string
 	stopCh    chan struct{}
+	// stopped records that Stop has already run. Stop closes stopCh, so a second
+	// call would panic on close of a closed channel; shutdown paths legitimately
+	// converge (explicit shutdown plus a deferred safety net), so the second call
+	// must be a no-op rather than a crash.
+	stopped bool
 	// afterCollectHook, if non-nil, is called after the timed-out ID slice is
 	// collected and m.mu is released, but before the termination loop begins.
 	// Used in tests to inject deterministic race conditions.
@@ -40,6 +45,13 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 		return nil, fmt.Errorf("max sessions must be positive")
 	}
 
+	// Recording writes cleartext session content to disk, so the destination must
+	// be an explicit, deployment-owned directory. Reject the misconfiguration at
+	// construction instead of silently falling back to a shared location.
+	if config.RecordSessions && config.RecordingStoragePath == "" {
+		return nil, fmt.Errorf("recording_storage_path is required when record_sessions is enabled")
+	}
+
 	manager := &DefaultSessionManager{
 		config:    config,
 		logger:    logger,
@@ -51,9 +63,7 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 	// Initialize recorder if recording is enabled
 	if config.RecordSessions {
 		recorderConfig := DefaultRecorderConfig()
-		if config.RecordingStoragePath != "" {
-			recorderConfig.StoragePath = config.RecordingStoragePath
-		}
+		recorderConfig.StoragePath = config.RecordingStoragePath
 		recorder, err := NewSessionRecorder(recorderConfig, logger)
 		if err != nil {
 			logger.Warn("Failed to initialize session recorder, continuing without recording", "error", err)
@@ -262,10 +272,16 @@ func (m *DefaultSessionManager) RequestCleanup(sessionID string) {
 	}
 }
 
-// Stop stops the session manager and cleans up resources
+// Stop stops the session manager and cleans up resources. It is idempotent:
+// repeated calls return nil without re-closing stopCh or re-closing sessions.
 func (m *DefaultSessionManager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.stopped {
+		return nil
+	}
+	m.stopped = true
 
 	// Signal cleanup routine to stop
 	close(m.stopCh)

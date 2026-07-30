@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -210,6 +211,14 @@ func newTerminalSessionManager(t *testing.T) terminal.SessionManager {
 	}
 	mgr, err := terminal.NewSessionManager(cfg, logging.NewNoopLogger())
 	require.NoError(t, err)
+	// Stop closes live sessions and the recorder synchronously. t.Cleanup is LIFO
+	// and the storage path came from the t.TempDir() above, so this runs before the
+	// directory is removed — otherwise a session finalizing during teardown can
+	// write its .rec.meta sidecar after RemoveAll listed the directory, and the
+	// cleanup fails with "directory not empty".
+	t.Cleanup(func() {
+		require.NoError(t, mgr.Stop(context.Background()))
+	})
 	return mgr
 }
 
@@ -283,7 +292,7 @@ func TestTerminalHandler_HandleGRPC_RelaysDataToSessionOutput(t *testing.T) {
 
 	ca := newTestCA(t)
 	mgr := newTerminalSessionManager(t)
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
 
 	relay, sess := registerPendingRelay(t, h, mgr, stewardID)
 
@@ -322,7 +331,7 @@ func TestTerminalHandler_HandleGRPC_InputRelayedToStewardStream(t *testing.T) {
 
 	ca := newTestCA(t)
 	mgr := newTerminalSessionManager(t)
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
 
 	relay, sess := registerPendingRelay(t, h, mgr, stewardID)
 
@@ -366,7 +375,7 @@ func TestTerminalHandler_HandleGRPC_InputRelayedToStewardStream(t *testing.T) {
 // a peer certificate is rejected with Unauthenticated. The steward mTLS
 // requirements are unchanged by the browser-path additions.
 func TestTerminalHandler_HandleGRPC_RequiresMTLS(t *testing.T) {
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -389,7 +398,7 @@ func TestTerminalHandler_HandleGRPC_StewardIDMismatch(t *testing.T) {
 
 	ca := newTestCA(t)
 	mgr := newTerminalSessionManager(t)
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
 
 	_, sess := registerPendingRelay(t, h, mgr, targetSteward)
 
@@ -410,7 +419,7 @@ func TestTerminalHandler_HandleGRPC_StewardIDMismatch(t *testing.T) {
 // returns NotFound when the session_id is absent from the relay map.
 func TestTerminalHandler_HandleGRPC_UnknownSessionID(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil, nil)
 
 	peerCtx := peerContextWithCA(t, ca, "steward-x")
 	peerCtx, cancel := context.WithTimeout(peerCtx, 2*time.Second)
@@ -435,7 +444,7 @@ func TestTerminalHandler_HandleGRPC_DuplicateStreamRejected(t *testing.T) {
 
 	ca := newTestCA(t)
 	mgr := newTerminalSessionManager(t)
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, nil, nil, nil)
 
 	_, sess := registerPendingRelay(t, h, mgr, stewardID)
 
@@ -472,7 +481,7 @@ func TestTerminalHandler_HandleGRPC_DuplicateStreamRejected(t *testing.T) {
 // without session_id returns InvalidArgument.
 func TestTerminalHandler_HandleGRPC_EmptySessionID(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil, nil)
 
 	peerCtx := peerContextWithCA(t, ca, "steward-noid")
 	peerCtx, cancel := context.WithTimeout(peerCtx, 2*time.Second)
@@ -494,7 +503,7 @@ func TestTerminalHandler_HandleGRPC_EmptySessionID(t *testing.T) {
 // TestTerminalHandler_ServeWebSocket_MissingStewardID verifies 400 when
 // {steward_id} is absent from the path.
 func TestTerminalHandler_ServeWebSocket_MissingStewardID(t *testing.T) {
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/", nil)
 	req.Host = "localhost"
 	req.Header.Set("Origin", "http://localhost")
@@ -507,7 +516,7 @@ func TestTerminalHandler_ServeWebSocket_MissingStewardID(t *testing.T) {
 // non-same-origin, non-allowlisted Origin. The rejection confirms origin policy
 // is enforced — not client-certificate absence.
 func TestTerminalHandler_ServeWebSocket_ForbiddenOrigin(t *testing.T) {
-	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, newTerminalSessionManager(t), nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/steward-1", nil)
 	req.Host = "app.internal"
 	req.Header.Set("Origin", "https://attacker.example.com")
@@ -525,7 +534,7 @@ func TestTerminalHandler_ServeWebSocket_AllowlistOriginAccepted(t *testing.T) {
 	// command dispatch, so an allowlisted origin must not be rejected with 403
 	// regardless of the (offline) publish outcome.
 	pub, _ := newRealTerminalCommandPublisher(t, "")
-	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, []string{"admin.example.com"})
+	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, []string{"admin.example.com"}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/steward-1", nil)
 	req.Host = "app.internal"
 	req.Header.Set("Origin", "https://admin.example.com")
@@ -548,7 +557,7 @@ func TestTerminalHandler_ServeWebSocket_OfflineSteward(t *testing.T) {
 	// Real publisher with no steward connected: PublishCommand returns the genuine
 	// "steward not connected" error, which the handler must translate to 503.
 	pub, _ := newRealTerminalCommandPublisher(t, "")
-	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/offline-steward", nil)
 	req.Host = "localhost"
@@ -577,7 +586,7 @@ func TestTerminalHandler_ServeWebSocket_DispatchesOpenTerminalCommand(t *testing
 	// Real publisher with a real steward connected over mTLS. The OPEN_TERMINAL
 	// command travels the actual publish path and is captured off the wire.
 	pub, received := newRealTerminalCommandPublisher(t, stewardID)
-	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil)
+	h := NewTerminalHandler(logging.NewNoopLogger(), pub, newTerminalSessionManager(t), nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/terminal/ws/"+stewardID+"?shell=bash&cols=120&rows=40", nil)
 	req.Host = "localhost"
@@ -651,12 +660,54 @@ func TestCreateBrowserSession_SucceedsWithoutClientCert(t *testing.T) {
 			Cols:      80,
 			Rows:      24,
 		},
+		nil, // logger not required for this assertion
 	)
 	require.NoError(t, err, "CreateBrowserSession must not require a client certificate")
 	require.NotNil(t, sess)
 	assert.NotEmpty(t, sess.ID)
 	assert.Equal(t, "admin-browser", sess.UserID)
 	assert.Equal(t, "steward-abc", sess.StewardID)
+}
+
+// TestCreateBrowserSession_AuditFailureIsLogged verifies that a failed audit
+// write is not silently discarded: it must be surfaced via the supplied
+// logger's Warn level so an operator has a signal that the audit trail for a
+// terminal session has a gap. Session creation itself must still succeed —
+// audit failures must not block the terminal from opening.
+func TestCreateBrowserSession_AuditFailureIsLogged(t *testing.T) {
+	storageManager := pkgtesting.SetupTestStorage(t)
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "terminal-test")
+	require.NoError(t, err)
+
+	mgr := newTerminalSessionManager(t)
+	capturingLogger := logging.NewCapturingLogger()
+
+	// Stopping the audit manager first makes every subsequent RecordEvent call
+	// fail deterministically ("audit manager is stopped") without touching the
+	// underlying store, so session creation (which does not depend on the
+	// audit manager) can still be exercised normally.
+	require.NoError(t, auditMgr.Stop(context.Background()))
+
+	sess, err := terminal.CreateBrowserSession(
+		context.Background(),
+		mgr,
+		auditMgr,
+		terminal.BrowserSessionOptions{
+			TenantID:  "tenant-1",
+			UserID:    "admin-browser",
+			StewardID: "steward-abc",
+			Shell:     "bash",
+			Cols:      80,
+			Rows:      24,
+		},
+		capturingLogger,
+	)
+	require.NoError(t, err, "audit failure must not block terminal session creation")
+	require.NotNil(t, sess)
+
+	require.Len(t, capturingLogger.WarnEntries, 1, "audit RecordEvent failure must be logged at Warn level")
+	assert.Contains(t, capturingLogger.WarnMessages[0], "audit")
+	assert.Equal(t, "steward-abc", capturingLogger.WarnEntries[0]["steward_id"])
 }
 
 // ---------------------------------------------------------------------------
@@ -685,7 +736,7 @@ func TestTerminalHandler_AuditAndRecordingBothProduced(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sess, err := terminal.CreateBrowserSession(ctx, mgr, auditMgr, opts)
+	sess, err := terminal.CreateBrowserSession(ctx, mgr, auditMgr, opts, nil)
 	require.NoError(t, err)
 	require.NotNil(t, sess)
 
@@ -693,7 +744,7 @@ func TestTerminalHandler_AuditAndRecordingBothProduced(t *testing.T) {
 	require.NoError(t, sess.HandleOutput(ctx, []byte("$ echo hello\r\nhello\r\n")))
 
 	terminal.EndBrowserSession(ctx, auditMgr,
-		opts.TenantID, opts.UserID, sess.ID, opts.StewardID, "test-cleanup")
+		opts.TenantID, opts.UserID, sess.ID, opts.StewardID, "test-cleanup", nil)
 
 	// Flush ensures all enqueued audit events reach the store before querying.
 	require.NoError(t, auditMgr.Flush(ctx))
@@ -729,4 +780,174 @@ func TestTerminalHandler_AuditAndRecordingBothProduced(t *testing.T) {
 	rec, recErr := mgr.GetSessionRecording(sess.ID)
 	require.NoError(t, recErr)
 	require.NotNil(t, rec, "session recording must exist (recorder wired by DefaultSessionManager with RecordSessions: true)")
+}
+
+// ---------------------------------------------------------------------------
+// [SECURITY] Audited client IP is not forgeable via forwarding headers
+// ---------------------------------------------------------------------------
+
+// TestTerminalClientIP_IgnoresForwardingHeadersFromUntrustedPeer asserts the
+// default posture: with no trusted proxies configured, X-Forwarded-For and
+// X-Real-IP are ignored entirely. terminalClientIP feeds the only source
+// address recorded in the terminal.session.start audit event for an interactive
+// privileged shell, so a client must not be able to choose what gets logged.
+func TestTerminalClientIP_IgnoresForwardingHeadersFromUntrustedPeer(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{name: "no headers"},
+		{name: "forged X-Forwarded-For", headers: map[string]string{"X-Forwarded-For": "10.9.9.9"}},
+		{name: "forged X-Real-IP", headers: map[string]string{"X-Real-IP": "10.9.9.9"}},
+		{name: "both forged", headers: map[string]string{
+			"X-Forwarded-For": "10.9.9.9, 172.16.0.1",
+			"X-Real-IP":       "10.9.9.9",
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/terminal", nil)
+			r.RemoteAddr = "203.0.113.7:44321"
+			for k, v := range tt.headers {
+				r.Header.Set(k, v)
+			}
+
+			// nil trustedProxies is the production default (no
+			// registration.trusted_proxies configured).
+			assert.Equal(t, "203.0.113.7", terminalClientIP(r, nil),
+				"forwarding headers must be ignored when the peer is not a trusted proxy")
+		})
+	}
+}
+
+// TestTerminalClientIP_HonorsForwardingHeadersFromTrustedProxy verifies the
+// legitimate reverse-proxy deployment still records the real browser address.
+func TestTerminalClientIP_HonorsForwardingHeadersFromTrustedProxy(t *testing.T) {
+	trusted := parseTrustedProxyCIDRs([]string{"192.168.10.0/24"}, logging.NewNoopLogger())
+	require.Len(t, trusted, 1)
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{
+			name:    "single hop X-Forwarded-For",
+			headers: map[string]string{"X-Forwarded-For": "198.51.100.23"},
+			want:    "198.51.100.23",
+		},
+		{
+			// nginx's proxy_add_x_forwarded_for APPENDS, so a client-supplied
+			// value survives as the leftmost entry. Selecting the rightmost
+			// non-proxy hop is what makes the result un-forgeable.
+			name:    "client-prepended forgery is discarded",
+			headers: map[string]string{"X-Forwarded-For": "10.9.9.9, 198.51.100.23"},
+			want:    "198.51.100.23",
+		},
+		{
+			// Chained trusted proxies are skipped right-to-left until the first
+			// address the outermost proxy actually observed.
+			name:    "trusted proxy hops are skipped",
+			headers: map[string]string{"X-Forwarded-For": "198.51.100.23, 192.168.10.5, 192.168.10.6"},
+			want:    "198.51.100.23",
+		},
+		{
+			name:    "garbage hops are skipped",
+			headers: map[string]string{"X-Forwarded-For": "198.51.100.23, not-an-ip"},
+			want:    "198.51.100.23",
+		},
+		{
+			name:    "X-Real-IP used when no X-Forwarded-For",
+			headers: map[string]string{"X-Real-IP": "198.51.100.23"},
+			want:    "198.51.100.23",
+		},
+		{
+			name:    "non-IP X-Real-IP falls back to peer",
+			headers: map[string]string{"X-Real-IP": "not-an-ip"},
+			want:    "192.168.10.5",
+		},
+		{
+			name:    "all hops trusted falls back to peer",
+			headers: map[string]string{"X-Forwarded-For": "192.168.10.6"},
+			want:    "192.168.10.5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/terminal", nil)
+			r.RemoteAddr = "192.168.10.5:44321"
+			for k, v := range tt.headers {
+				r.Header.Set(k, v)
+			}
+			assert.Equal(t, tt.want, terminalClientIP(r, trusted))
+		})
+	}
+}
+
+// TestTerminalClientIP_IPv6PeerWithoutHeaders asserts IPv6 peer addresses are
+// split on the correct separator. A LastIndex(":") split would truncate an IPv6
+// literal and record a malformed forensic address.
+func TestTerminalClientIP_IPv6PeerWithoutHeaders(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/terminal", nil)
+	r.RemoteAddr = "[2001:db8::1]:44321"
+	assert.Equal(t, "2001:db8::1", terminalClientIP(r, nil))
+}
+
+// TestParseTrustedProxyCIDRs_SkipsMalformedEntries asserts a bad config line is
+// dropped rather than widening trust or blocking controller startup.
+func TestParseTrustedProxyCIDRs_SkipsMalformedEntries(t *testing.T) {
+	nets := parseTrustedProxyCIDRs(
+		[]string{"not-a-cidr", " 192.168.10.0/24 ", "10.0.0.1"}, logging.NewNoopLogger())
+	require.Len(t, nets, 1, "only the well-formed CIDR must be trusted")
+	assert.True(t, nets[0].Contains(net.ParseIP("192.168.10.7")))
+}
+
+// TestServeWebSocket_AuditsUnforgeableClientIP is the end-to-end assertion: a
+// client sending a forged X-Forwarded-For to a directly-reachable controller has
+// its real TCP peer address recorded in the terminal.session.start audit event.
+func TestServeWebSocket_AuditsUnforgeableClientIP(t *testing.T) {
+	storageManager := pkgtesting.SetupTestStorage(t)
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "terminal-test")
+	require.NoError(t, err)
+
+	mgr := newTerminalSessionManager(t)
+	// No trusted proxies: the controller is reached directly.
+	h := NewTerminalHandler(logging.NewNoopLogger(), nil, mgr, auditMgr, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/tenant-1/stewards/steward-abc/terminal", nil)
+	req.RemoteAddr = "203.0.113.7:44321"
+	req.Header.Set("X-Forwarded-For", "10.9.9.9")
+	// Same-origin is required by the upgrade's origin check, which runs before
+	// session creation.
+	req.Header.Set("Origin", "https://"+req.Host)
+	req = mux.SetURLVars(req, map[string]string{"steward_id": "steward-abc"})
+	ctx := context.WithValue(req.Context(), ctxkeys.UserIDKey, "admin-browser")
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-1")
+	req = req.WithContext(ctx)
+
+	// No WebSocket upgrade headers: the upgrade fails after session creation and
+	// the audit start event has already been recorded, which is what we assert.
+	h.ServeWebSocket(httptest.NewRecorder(), req)
+
+	require.NoError(t, auditMgr.Flush(context.Background()))
+
+	now := time.Now()
+	start := now.Add(-time.Minute)
+	events, err := storageManager.GetAuditStore().GetAuditsByAction(
+		context.Background(), "terminal.session.start", &business.TimeRange{Start: &start})
+	require.NoError(t, err)
+	require.NotEmpty(t, events, "terminal.session.start audit event must be recorded")
+
+	var checked bool
+	for _, ev := range events {
+		if ev.UserID != "admin-browser" {
+			continue
+		}
+		checked = true
+		assert.Equal(t, "203.0.113.7", ev.Details["client_ip"],
+			"audited client_ip must be the TCP peer, never the forged X-Forwarded-For")
+	}
+	assert.True(t, checked, "audit event for the test user must be present")
 }

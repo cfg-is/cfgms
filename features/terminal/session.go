@@ -80,7 +80,7 @@ func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
 		"session_id", logging.RedactedID(sessionID),
 		"steward_id", logging.SanitizeLogValue(req.StewardID),
 		"user_id", logging.SanitizeLogValue(req.UserID),
-		"shell", req.Shell,
+		"shell", logging.SanitizeLogValue(req.Shell),
 		"cols", req.Cols,
 		"rows", req.Rows)
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -81,6 +82,12 @@ type TerminalHandler struct {
 	allowedOrigins []string
 	upgrader       websocket.Upgrader
 
+	// trustedProxies holds the reverse-proxy CIDRs whose forwarding headers may
+	// be believed, parsed once at construction so no request path parses
+	// strings. Empty (the default) means X-Forwarded-For / X-Real-IP are never
+	// trusted and the audited client IP is always the TCP peer.
+	trustedProxies []net.IPNet
+
 	mu     sync.Mutex
 	relays map[string]*terminalRelay // session_id → relay
 
@@ -91,12 +98,19 @@ type TerminalHandler struct {
 
 // NewTerminalHandler creates a TerminalHandler. allowedOrigins lists additional
 // allowed Origin hosts for WebSocket upgrade (same-origin is always accepted).
+//
+// trustedProxyCIDRs lists the reverse proxies permitted to set X-Forwarded-For /
+// X-Real-IP for the audited client IP (controller.cfg
+// registration.trusted_proxies). Pass nil when the controller is reached
+// directly: forwarding headers are then ignored and the TCP peer address is
+// audited, so a client cannot forge the source IP of a privileged shell session.
 func NewTerminalHandler(
 	logger logging.Logger,
 	commandPub TerminalCommandPublisher,
 	sessionMgr terminal.SessionManager,
 	auditMgr *audit.Manager,
 	allowedOrigins []string,
+	trustedProxyCIDRs []string,
 ) *TerminalHandler {
 	h := &TerminalHandler{
 		logger:         logger,
@@ -104,6 +118,7 @@ func NewTerminalHandler(
 		sessionMgr:     sessionMgr,
 		auditMgr:       auditMgr,
 		allowedOrigins: allowedOrigins,
+		trustedProxies: parseTrustedProxyCIDRs(trustedProxyCIDRs, logger),
 		relays:         make(map[string]*terminalRelay),
 	}
 	h.upgrader = websocket.Upgrader{
@@ -268,7 +283,7 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	// conversion below.
 	cols := parseTerminalInt(q.Get("cols"), 80)
 	rows := parseTerminalInt(q.Get("rows"), 24)
-	clientIP := terminalClientIP(r)
+	clientIP := terminalClientIP(r, h.trustedProxies)
 
 	// Create terminal session (includes recording + audit start event).
 	sess, err := terminal.CreateBrowserSession(ctx, h.sessionMgr, h.auditMgr, terminal.BrowserSessionOptions{
@@ -279,7 +294,7 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		Cols:      int(cols),
 		Rows:      int(rows),
 		ClientIP:  clientIP,
-	})
+	}, h.logger)
 	if err != nil {
 		if h.logger != nil {
 			// Sanitize err.Error() explicitly: the error message may embed
@@ -310,6 +325,7 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		terminal.EndBrowserSession(
 			context.Background(), h.auditMgr,
 			tenantID, userID, sess.ID, stewardID, "websocket closed",
+			h.logger,
 		)
 		// Close session to flush the recorder.
 		if h.sessionMgr != nil {
@@ -533,18 +549,90 @@ func parseTerminalInt(s string, def uint16) uint16 {
 	return uint16(v)
 }
 
-// terminalClientIP extracts the client IP from the request (proxy-aware).
-func terminalClientIP(r *http.Request) string {
+// terminalClientIP resolves the client IP recorded in the terminal.session.start
+// audit event. It is the only forensic source address for an interactive
+// privileged shell, so it must not be attacker-controlled.
+//
+// Forwarding headers are consulted ONLY when the TCP peer (r.RemoteAddr) is
+// itself inside trustedProxies. With no trusted proxies configured — the default
+// — X-Forwarded-For and X-Real-IP are ignored entirely and the TCP peer address
+// is always used. This mirrors extractSourceIP (Issue #1695) in
+// features/controller/api, which gates the same headers for the registration
+// IP-trust decision.
+//
+// Within X-Forwarded-For the list is walked right-to-left and the first hop that
+// is not itself a trusted proxy is returned. Leftmost-entry selection would stay
+// forgeable even behind a trusted proxy: the common reverse-proxy configuration
+// appends to X-Forwarded-For rather than replacing it (nginx
+// proxy_add_x_forwarded_for), so a client-supplied header value survives as the
+// leftmost element. Right-to-left is the only selection that yields the address
+// the outermost trusted proxy actually observed.
+func terminalClientIP(r *http.Request, trustedProxies []net.IPNet) string {
+	peerHost := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		peerHost = host
+	}
+
+	if !ipInNets(peerHost, trustedProxies) {
+		return peerHost
+	}
+
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
+		hops := strings.Split(xff, ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			hop := strings.TrimSpace(hops[i])
+			// Reject unparseable hops: a forged header can contain arbitrary
+			// text, which must never be recorded as a source address.
+			if net.ParseIP(hop) == nil {
+				continue
+			}
+			if !ipInNets(hop, trustedProxies) {
+				return hop
+			}
+		}
 	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
+
+	if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" && net.ParseIP(xri) != nil {
+		return xri
 	}
-	addr := r.RemoteAddr
-	if colon := strings.LastIndex(addr, ":"); colon != -1 {
-		addr = addr[:colon]
+
+	return peerHost
+}
+
+// ipInNets reports whether host parses as an IP contained in any of nets.
+func ipInNets(host string, nets []net.IPNet) bool {
+	if len(nets) == 0 {
+		return false
 	}
-	return addr
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for i := range nets {
+		if nets[i].Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseTrustedProxyCIDRs parses trusted-proxy CIDR strings, skipping (and
+// logging) malformed entries so one bad config line cannot prevent the
+// controller from starting. A skipped entry only ever narrows trust: the
+// affected peer falls back to the un-forgeable TCP peer address.
+func parseTrustedProxyCIDRs(cidrs []string, logger logging.Logger) []net.IPNet {
+	var nets []net.IPNet
+	for _, cidr := range cidrs {
+		_, ipNet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
+			if logger != nil {
+				logger.Warn("terminal: invalid trusted_proxy CIDR, ignoring",
+					"cidr", logging.SanitizeLogValue(cidr),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+			continue
+		}
+		nets = append(nets, *ipNet)
+	}
+	return nets
 }

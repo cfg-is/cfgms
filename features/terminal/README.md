@@ -44,6 +44,8 @@ The controller-side relay is wired as of Issue #2761:
 
 ### Audit & Compliance
 - **Session Recording**: All terminal I/O captured for audit
+- **Recording Storage**: `Config.RecordingStoragePath` is **required** when `RecordSessions` is true — `NewSessionManager` fails rather than falling back to a shared path. Recordings hold cleartext keystrokes and output (passwords, tokens, key material), so the controller stores them under its data directory (`<data-dir>/terminal-recordings`) as an owner-only (`0700`) directory holding owner-only (`0600`) files, created with `O_EXCL` and rejected if the path is a symlink.
+- **Audited Client IP**: The `client_ip` detail on `terminal.session.start` is the TCP peer address. `X-Forwarded-For` / `X-Real-IP` are honored **only** when the peer is inside `registration.trusted_proxies` (controller.cfg), and then the rightmost non-proxy hop is used — so a client cannot forge the recorded source IP of a privileged shell. With no trusted proxies configured, forwarding headers are ignored entirely.
 - **Access Logging**: Who accessed which steward and when
 - **Command Filtering**: Optional command validation/blocking
 - **Session Timeout**: Automatic cleanup after inactivity

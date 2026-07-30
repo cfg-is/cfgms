@@ -256,7 +256,7 @@ func TestComposite_Terminal_NilHandler(t *testing.T) {
 func TestComposite_Terminal_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
-	terminalHandler := controllerTransport.NewTerminalHandler(logger, nil, nil, nil, nil)
+	terminalHandler := controllerTransport.NewTerminalHandler(logger, nil, nil, nil, nil, nil)
 	composite := newCompositeTransportServer(cp, logger)
 	composite.SetTerminalHandler(terminalHandler)
 

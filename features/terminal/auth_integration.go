@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -46,6 +47,7 @@ func CreateBrowserSession(
 	manager SessionManager,
 	auditManager *audit.Manager,
 	opts BrowserSessionOptions,
+	logger logging.Logger,
 ) (*Session, error) {
 	req := &SessionRequest{
 		TenantID:  opts.TenantID,
@@ -62,7 +64,7 @@ func CreateBrowserSession(
 	}
 
 	if auditManager != nil {
-		_ = auditManager.RecordEvent(ctx,
+		if auditErr := auditManager.RecordEvent(ctx,
 			audit.NewEventBuilder().
 				Tenant(opts.TenantID).
 				Type(business.AuditEventSystemAccess).
@@ -76,7 +78,12 @@ func CreateBrowserSession(
 					"origin":    "browser",
 					"client_ip": opts.ClientIP,
 				}),
-		)
+		); auditErr != nil && logger != nil {
+			logger.Warn("terminal: audit start record failed",
+				"session_id", logging.RedactedID(sess.ID),
+				"steward_id", logging.SanitizeLogValue(opts.StewardID),
+				"error", logging.SanitizeLogValue(auditErr.Error()))
+		}
 	}
 
 	return sess, nil
@@ -88,11 +95,12 @@ func EndBrowserSession(
 	ctx context.Context,
 	auditManager *audit.Manager,
 	tenantID, userID, sessionID, stewardID, reason string,
+	logger logging.Logger,
 ) {
 	if auditManager == nil {
 		return
 	}
-	_ = auditManager.RecordEvent(ctx,
+	if auditErr := auditManager.RecordEvent(ctx,
 		audit.NewEventBuilder().
 			Tenant(tenantID).
 			Type(business.AuditEventSystemAccess).
@@ -105,7 +113,12 @@ func EndBrowserSession(
 			Details(map[string]interface{}{
 				"reason": reason,
 			}),
-	)
+	); auditErr != nil && logger != nil {
+		logger.Warn("terminal: audit end record failed",
+			"session_id", logging.RedactedID(sessionID),
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(auditErr.Error()))
+	}
 }
 
 // tokenRefreshNotifyTimeout is the maximum time rotateTokensIfNeeded will wait

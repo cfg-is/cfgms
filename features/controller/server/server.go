@@ -177,6 +177,7 @@ type Server struct {
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
 	observeManifestProvider ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
+	terminalSessionMgr      terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
 }
 
 // resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
@@ -1743,17 +1744,37 @@ func (s *Server) Start() error {
 				}
 			}
 		}
-		terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminal.DefaultConfig(), s.logger)
+		// Session recordings capture raw keystrokes and shell output of privileged
+		// admin sessions, so they are stored under the controller's data directory
+		// (same resolution as DNA reports and installer blobs) with owner-only
+		// permissions — never a shared, world-writable location such as /tmp.
+		terminalCfg := terminal.DefaultConfig()
+		terminalCfg.RecordingStoragePath = filepath.Join(resolveDNADataRoot(s.cfg), "terminal-recordings")
+		terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminalCfg, s.logger)
 		if terminalMgrErr != nil {
 			return fmt.Errorf("failed to create terminal session manager: %w", terminalMgrErr)
 		}
+		// Retained so Stop can finalize recordings of sessions still live at
+		// shutdown; without the finalizing .meta sidecar a recording is treated as
+		// unverifiable and discarded on the next start.
+		s.terminalSessionMgr = terminalSessionMgr
 		// Avoid a non-nil interface with a nil pointer (would bypass the nil-check in ServeWebSocket).
 		var terminalCmdPub controllerTransport.TerminalCommandPublisher
 		if s.commandPublisher != nil {
 			terminalCmdPub = s.commandPublisher
 		}
+		// The audited client IP of a privileged shell session must not be
+		// attacker-controlled, so forwarding headers are believed only from the
+		// configured reverse proxies (same list that gates the registration
+		// IP-trust decision, Issue #1695). Unset means headers are ignored and
+		// the TCP peer address is audited.
+		var terminalTrustedProxies []string
+		if s.cfg.Registration != nil {
+			terminalTrustedProxies = s.cfg.Registration.TrustedProxies
+		}
 		terminalHandler := controllerTransport.NewTerminalHandler(
 			s.logger, terminalCmdPub, terminalSessionMgr, s.auditManager, terminalOrigins,
+			terminalTrustedProxies,
 		)
 		composite.SetTerminalHandler(terminalHandler)
 		if s.httpServer != nil {
@@ -1904,6 +1925,15 @@ func (s *Server) Stop() error {
 	// Stop manual-review approval hook background goroutine (Issue #1599)
 	if s.manualReviewHook != nil {
 		s.manualReviewHook.Stop()
+	}
+
+	// Stop the terminal session manager (Issue #2761): closes live shells and the
+	// recorder, flushing each recording and writing its .meta sidecar so sessions
+	// active at shutdown keep a verifiable audit trail.
+	if s.terminalSessionMgr != nil {
+		if err := s.terminalSessionMgr.Stop(context.Background()); err != nil {
+			s.logger.Warn("Failed to stop terminal session manager", "error", err)
+		}
 	}
 
 	// Stop workflow trigger manager (Issue #414)
