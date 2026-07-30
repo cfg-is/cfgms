@@ -330,6 +330,48 @@ a display heuristic (the payload pins no heartbeat contract), anchored at
 fetch time; Go's zero time (`0001-01-01T00:00:00Z`) is treated as "never
 seen".
 
+## Registration console (Story #2934)
+
+[`src/registration/RegistrationConsolePage.tsx`](src/registration/RegistrationConsolePage.tsx)
+— the `/registration` route, accessible from the app shell nav. A three-tab
+console (Pending / Tokens / IP-Trust) using the same roving-tabindex tab-strip
+pattern as `StewardAssetPage.tsx`. Canonical design:
+[`docs/design/mockups/registration-console.html`](../docs/design/mockups/registration-console.html).
+
+Tabs and scope:
+
+| Tab | Story | Scope |
+|-----|-------|-------|
+| Pending | #2934 | Lists pending enrollments; Deny is functional |
+| Tokens | #2935 | Lists registration tokens (read-only) |
+| IP-Trust | #2936 | Lists trusted CIDR ranges (read-only) |
+
+### IP-Trust tab (Story #2936)
+
+[`src/registration/IPTrustTab.tsx`](src/registration/IPTrustTab.tsx) — read-only
+list of trusted CIDR ranges for the caller's tenant scope.
+
+**Endpoint:** `GET /api/v1/registration/ip-trust` (Story #2932). Uses the newer
+`{data: [...]}` array-envelope shape — the one endpoint in this cluster that does
+not use the bare-array shape the Pending tab uses.
+
+**Fields rendered:**
+
+| Field | Wire key | Notes |
+|-------|----------|-------|
+| CIDR | `cidr` | Monospace; key for deduplication |
+| Source | `pre_seeded` | `true` → "Pre-seeded" badge; `false` → "Manual" badge |
+| Trusted since | `trusted_since` | ISO-8601 string |
+| Last activity | `last_activity` | ISO-8601 string |
+| Revoked | `revoked` | `true` → "Revoked" badge in status column |
+
+**Out of scope:** no add or revoke button, disabled state, or any write affordance
+exists in this component — those belong to Section 2's follow-on epic.
+
+All API-supplied values render as JSX text nodes only (security A9.1); the
+`parseIPTrustList` function shape-validates the wire payload before any field
+reaches the DOM.
+
 ## Testing
 
 Vitest with jsdom and Testing Library. Suites:
