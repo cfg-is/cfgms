@@ -100,6 +100,8 @@ func buildCompletenessFixture(t *testing.T, opts completenessFixtureOpts) string
 }
 
 // validManifest returns a complete, valid module.yaml content for the named module.
+// It carries a check-6 (ADR-024 §3) deliberate-omission marker so fixtures
+// exercising other checks aren't incidentally failed by check-6.
 func validManifest(name string) string {
 	return fmt.Sprintf(`name: %s
 version: 0.1.0
@@ -112,6 +114,7 @@ interfaces:
   - Test
 owns:
   - kind: %s
+# observe_when: omitted — test fixture, not subject to ADR-024 tagging
 `, name, name)
 }
 
