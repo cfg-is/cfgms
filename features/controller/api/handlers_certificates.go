@@ -3,14 +3,19 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // RotateSigningCertRequest is the optional JSON body for the rotate endpoint.
@@ -160,7 +165,97 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Apply tenant-scope filter: scoped callers only see certs for stewards
+	// within their own tenant subtree. An unscoped admin (callerTenant == "")
+	// or a missing stewardStore skips filtering entirely.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" && s.stewardStore != nil {
+		scoped, err := s.filterCertsByTenantScope(r.Context(), certificates, callerTenant)
+		if err != nil {
+			// The scope filter could not be evaluated. Returning the unfiltered
+			// list would disclose other tenants' certificates, so fail the request.
+			s.logger.Error("Failed to apply tenant scope to certificate list",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant), "error", err)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
+			return
+		}
+		certificates = scoped
+	}
+
 	s.writeSuccessResponse(w, certificates)
+}
+
+// isWithinTenantScope reports whether targetTenant falls within callerTenant's
+// subtree. Returns true when callerTenant is empty (unscoped admin), when both
+// are equal, or when targetTenant is a descendant (starts with callerTenant+"/").
+func isWithinTenantScope(callerTenant, targetTenant string) bool {
+	if callerTenant == "" {
+		return true
+	}
+	return targetTenant == callerTenant || strings.HasPrefix(targetTenant, callerTenant+"/")
+}
+
+// filterCertsByTenantScope keeps only the certificates a caller scoped to
+// callerTenant is entitled to see. It fails CLOSED, matching the sibling steward
+// scoping in tenantScopedTelemetryWrapper: a certificate is returned only when
+// its owning steward's TenantID is demonstrably inside callerTenant's subtree.
+//
+//   - Empty StewardID: controller-internal cert (CA/signing/server). Not a
+//     tenant-scoped resource, so always kept.
+//   - business.ErrStewardNotFound: the certificate cannot be attributed to any
+//     tenant, so it is DROPPED for scoped callers. A steward that exists only in
+//     the in-memory registry and not in the durable store (Issue #2929) must not
+//     leak its serial, common name and expiry to every other tenant.
+//   - Any other store error: returned to the caller so the request fails instead of
+//     degrading to no filtering at all during a storage outage.
+//
+// callerTenant == "" is an unscoped admin: the certificates are returned unchanged,
+// including unattributable ones. GetSteward lookups are deduped by StewardID
+// within the request.
+func (s *Server) filterCertsByTenantScope(ctx context.Context, certs []CertificateInfo, callerTenant string) ([]CertificateInfo, error) {
+	if callerTenant == "" {
+		// Unscoped admin — no subtree to restrict to.
+		return certs, nil
+	}
+
+	// scopeCache maps StewardID → whether that steward is within the caller's subtree.
+	scopeCache := make(map[string]bool)
+
+	filtered := make([]CertificateInfo, 0, len(certs))
+	for _, c := range certs {
+		if c.StewardID == "" {
+			// No owning steward — controller-internal or signing cert.
+			// Not a tenant-scoped resource; always visible.
+			filtered = append(filtered, c)
+			continue
+		}
+
+		if inScope, cached := scopeCache[c.StewardID]; cached {
+			if inScope {
+				filtered = append(filtered, c)
+			}
+			continue
+		}
+
+		record, err := s.stewardStore.GetSteward(ctx, c.StewardID)
+		if err != nil {
+			if errors.Is(err, business.ErrStewardNotFound) {
+				// No durable record — the cert is not demonstrably within the
+				// caller's subtree. Drop it rather than disclose it.
+				scopeCache[c.StewardID] = false
+				continue
+			}
+			// Genuine store fault: the scope decision cannot be made at all.
+			return nil, fmt.Errorf("steward lookup for tenant scope failed: %w", err)
+		}
+
+		inScope := isWithinTenantScope(callerTenant, record.TenantID)
+		scopeCache[c.StewardID] = inScope
+		if inScope {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered, nil
 }
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision
@@ -195,20 +290,18 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		ValidityDays: int(provisionReq.ValidityDays),
 	}
 
-	// Call provisioning service
+	// Call provisioning service. The service reports every failure as both a
+	// non-nil error and Success == false — the two are never independent — so a
+	// single failure branch covers both, plus a nil-response guard. The service's
+	// Message field carries internal error text (CA state, filesystem paths) and is
+	// deliberately logged rather than returned to the caller.
 	provisionResp, err := s.certProvisioningService.ProvisionCertificate(req)
-	if err != nil {
+	if err != nil || provisionResp == nil || !provisionResp.Success {
 		s.logger.Error("Failed to provision certificate",
 			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
 			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
 			"error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
-		return
-	}
-
-	// Check response success
-	if !provisionResp.Success {
-		s.writeErrorResponse(w, http.StatusBadRequest, provisionResp.Message, "PROVISION_ERROR")
 		return
 	}
 
