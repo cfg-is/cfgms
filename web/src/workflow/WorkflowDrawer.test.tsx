@@ -11,6 +11,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach } from 'vitest'
 import WorkflowDrawer from './WorkflowDrawer.tsx'
 import type { VersionedWorkflow } from './useWorkflows.ts'
+import { TenantScopeProvider } from '../shell/TenantScopeContext.tsx'
 
 afterEach(cleanup)
 
@@ -25,8 +26,16 @@ function makeWorkflow(overrides: Partial<VersionedWorkflow> = {}): VersionedWork
   }
 }
 
-function renderDrawer(workflow = makeWorkflow(), onClose = vi.fn()) {
-  return render(<WorkflowDrawer workflow={workflow} onClose={onClose} />)
+function renderDrawer(
+  workflow = makeWorkflow(),
+  onClose = vi.fn(),
+  rootPath = 'root/msp-a/client-1',
+) {
+  return render(
+    <TenantScopeProvider rootPath={rootPath}>
+      <WorkflowDrawer workflow={workflow} onClose={onClose} />
+    </TenantScopeProvider>,
+  )
 }
 
 describe('WorkflowDrawer — header', () => {
@@ -39,6 +48,18 @@ describe('WorkflowDrawer — header', () => {
   it('shows the version in the meta line', () => {
     renderDrawer()
     expect(screen.getByTestId('drawer-meta')).toHaveTextContent('v1.5.0')
+  })
+
+  it('shows the current tenant scope path in the meta line', () => {
+    renderDrawer(makeWorkflow(), vi.fn(), 'root/msp-a/client-1')
+    expect(screen.getByTestId('drawer-tenant-path')).toHaveTextContent(
+      'root/msp-a/client-1',
+    )
+  })
+
+  it('falls back to "root" for an empty (unnarrowed) tenant scope', () => {
+    renderDrawer(makeWorkflow(), vi.fn(), '')
+    expect(screen.getByTestId('drawer-tenant-path')).toHaveTextContent('root')
   })
 
   it('renders "Open builder" affordance as a stub button', () => {

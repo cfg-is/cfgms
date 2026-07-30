@@ -13,6 +13,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
+import { TenantScopeProvider } from '../shell/TenantScopeContext.tsx'
 import WorkflowListView from './WorkflowListView.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -49,7 +50,9 @@ function renderWorkflowListView() {
   return render(
     <MemoryRouter>
       <AuthProvider>
-        <WorkflowListView />
+        <TenantScopeProvider rootPath="root">
+          <WorkflowListView />
+        </TenantScopeProvider>
       </AuthProvider>
     </MemoryRouter>,
   )
@@ -130,6 +133,7 @@ describe('WorkflowListView — overlay drawer', () => {
     fireEvent.click(screen.getByTestId('workflow-row'))
     expect(screen.getByTestId('workflow-drawer')).toBeInTheDocument()
     expect(screen.getByTestId('drawer-name')).toHaveTextContent('wf-1')
+    expect(screen.getByTestId('drawer-tenant-path')).toHaveTextContent('root')
   })
 
   it('clicking ✕ closes the drawer', async () => {
