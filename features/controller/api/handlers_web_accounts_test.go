@@ -509,6 +509,100 @@ func TestWebAccounts_RootScope_AppearsInList(t *testing.T) {
 	assert.Equal(t, "", found.TenantID, "tenant_id must be empty in list response for root-scoped account")
 }
 
+// ---- Issue #3137: tenant-subtree scope enforcement on GET /api/v1/web/accounts ----
+
+// TestWebAccounts_TenantScope_SiblingExclusion is the [REQUIRED TEST] from Issue #3137:
+// a caller scoped to client-1 must never see an account belonging to sibling tenant client-2.
+func TestWebAccounts_TenantScope_SiblingExclusion(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "client2-user",
+		TenantID: "root/msp-a/client-2",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	rec = postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "client1-user",
+		TenantID: "root/msp-a/client-1",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	client1Principal := &Principal{
+		ID:        "client1-admin",
+		TenantID:  "root/msp-a/client-1",
+		Assurance: session.AssuranceBasic,
+	}
+	_, accounts := listWebAccounts(t, server, client1Principal)
+
+	usernames := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		usernames = append(usernames, a.Username)
+	}
+	assert.Contains(t, usernames, "client1-user", "caller must see own tenant's accounts")
+	assert.NotContains(t, usernames, "client2-user", "caller must NOT see sibling tenant's accounts")
+}
+
+// TestWebAccounts_TenantScope_SubtreeInclusion is the [REQUIRED TEST] from Issue #3137:
+// a caller scoped to root/msp-a DOES see an account belonging to root/msp-a/client-1
+// (subtree inclusion, not exact-match-only).
+func TestWebAccounts_TenantScope_SubtreeInclusion(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "parent-user",
+		TenantID: "root/msp-a",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	rec = postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "child-user",
+		TenantID: "root/msp-a/client-1",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	mspaAdmin := &Principal{
+		ID:        "msp-a-admin",
+		TenantID:  "root/msp-a",
+		Assurance: session.AssuranceBasic,
+	}
+	_, accounts := listWebAccounts(t, server, mspaAdmin)
+
+	usernames := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		usernames = append(usernames, a.Username)
+	}
+	assert.Contains(t, usernames, "parent-user", "parent-tenant admin must see own accounts")
+	assert.Contains(t, usernames, "child-user", "parent-tenant admin must see child tenant accounts (subtree)")
+}
+
+// TestWebAccounts_TenantScope_UnscopedAdminSeesAll verifies that an unscoped mTLS admin
+// (callerTenant == "") still sees all accounts including those in multiple tenants.
+func TestWebAccounts_TenantScope_UnscopedAdminSeesAll(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	for _, req := range []WebAccountRequest{
+		{Username: "scope-all-a", TenantID: "root/msp-a/client-1"},
+		{Username: "scope-all-b", TenantID: "root/msp-a/client-2"},
+		{Username: "scope-all-root", RootScope: true},
+	} {
+		rec := postWebAccount(t, server, admin, req)
+		require.Equal(t, http.StatusCreated, rec.Code)
+	}
+
+	_, accounts := listWebAccounts(t, server, admin)
+	usernames := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		usernames = append(usernames, a.Username)
+	}
+	assert.Contains(t, usernames, "scope-all-a")
+	assert.Contains(t, usernames, "scope-all-b")
+	assert.Contains(t, usernames, "scope-all-root")
+}
+
 // TestWebAccounts_RootScope_DeleteWorks verifies that deleting a root-scoped
 // account succeeds and the account is removed from the store.
 func TestWebAccounts_RootScope_DeleteWorks(t *testing.T) {
