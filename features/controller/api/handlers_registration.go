@@ -499,6 +499,70 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// approveByCIDRPreviewResponse is returned by GET /api/v1/registration/approve-by-cidr/preview.
+type approveByCIDRPreviewResponse struct {
+	Count      int      `json:"count"`
+	PendingIDs []string `json:"pending_ids"`
+	SourceIPs  []string `json:"source_ips"`
+}
+
+// handleApproveByCIDRPreview handles GET /api/v1/registration/approve-by-cidr/preview.
+// Returns a dry-run preview of pending entries whose source IP falls in the given CIDR,
+// without mutating any state. Requires the ?cidr= query parameter.
+// Scoped callers see only their own tenant subtree.
+// The caller must show this preview to the operator before the mutating POST is allowed.
+func (s *Server) handleApproveByCIDRPreview(w http.ResponseWriter, r *http.Request) {
+	if s.pendingStore == nil {
+		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	cidr := r.URL.Query().Get("cidr")
+	if cidr == "" {
+		http.Error(w, "cidr query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		http.Error(w, "invalid CIDR", http.StatusBadRequest)
+		return
+	}
+
+	callerTenant := s.callerTenantID(r)
+	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
+	if err != nil {
+		s.logger.Error("Failed to list pending registrations for approve-by-cidr preview", "error", err)
+		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
+		return
+	}
+
+	pendingIDs := make([]string, 0)
+	sourceIPs := make([]string, 0)
+	for _, e := range entries {
+		if e.Status != business.PendingRegistrationStatusPending {
+			continue
+		}
+		ip := net.ParseIP(e.SourceIP)
+		if ip == nil || !ipNet.Contains(ip) {
+			continue
+		}
+		pendingIDs = append(pendingIDs, e.PendingID)
+		sourceIPs = append(sourceIPs, e.SourceIP)
+	}
+
+	s.logger.Info("CIDR bulk approve preview",
+		"cidr", logging.SanitizeLogValue(cidr), "matched", len(pendingIDs))
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(approveByCIDRPreviewResponse{
+		Count:      len(pendingIDs),
+		PendingIDs: pendingIDs,
+		SourceIPs:  sourceIPs,
+	}); err != nil {
+		s.logger.Error("Failed to encode approve-by-cidr preview response", "error", err)
+	}
+}
+
 // isValidDeviceID returns true if id is exactly 64 lowercase hex characters.
 // The DeviceID is the SHA-256 fingerprint of the steward's Ed25519 identity key (ADR-010 §1).
 func isValidDeviceID(id string) bool {

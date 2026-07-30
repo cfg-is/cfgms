@@ -157,6 +157,9 @@ func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, 
 				// Hierarchical tenant IDs use '/' as a path separator (e.g., "fleet-root/fleet-child-b").
 				// Must match charset:tenant_path_id which allows letters, digits, hyphens, underscores, and '/'.
 				validator.ValidateString(result, fieldName, value, "charset:tenant_path_id", "max_length:256")
+			case "cidr":
+				// CIDR ranges (e.g. "192.168.1.0/24", "2001:db8::/32") — the slash is not in safe_text.
+				validator.ValidateString(result, fieldName, value, "charset:cidr", "max_length:64")
 			default:
 				// Generic query parameter validation
 				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:512", "no_control_chars")

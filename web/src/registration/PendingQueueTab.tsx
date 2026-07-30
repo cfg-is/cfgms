@@ -2,13 +2,24 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Pending registration queue (Story #2934).
+ * Pending registration queue (Story #2934, #2969).
  * Fetches GET /api/v1/registration/pending — bare-array response (no
  * {data:...} envelope, json.NewEncoder raw array). Shape-validated by
  * parsePendingRegistrations before any value reaches the DOM.
  *
  * Deny calls POST /api/v1/registration/{id}/deny and removes the row on
  * success; surfaces a row-level error without crashing on failure.
+ *
+ * Approve calls POST /api/v1/registration/{id}/approve and removes the row
+ * on success; surfaces a row-level error without crashing on failure.
+ *
+ * Approve All calls POST /api/v1/registration/approve-all and refreshes the
+ * list on success.
+ *
+ * Approve by CIDR (Story #2969): operator must preview (GET
+ * /api/v1/registration/approve-by-cidr/preview?cidr=...) before the confirm
+ * button becomes active. The mutation POST requires user-presence step-up,
+ * handled transparently by apiFetch + StepUpModal in AuthContext.
  *
  * Security A9.1: all steward-supplied and operator-influenced values render
  * as JSX text nodes only, never via dangerouslySetInnerHTML.
@@ -30,6 +41,21 @@ interface FetchOutcome {
   key: string
   entries?: PendingEntry[]
   error?: string
+}
+
+interface CIDRPreview {
+  count: number
+  pending_ids: string[]
+  source_ips: string[]
+}
+
+interface CIDRModalState {
+  cidr: string
+  preview: CIDRPreview | null
+  previewLoading: boolean
+  previewError: string | null
+  approveLoading: boolean
+  approveError: string | null
 }
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -94,6 +120,10 @@ export default function PendingQueueTab() {
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
   const [denyErrors, setDenyErrors] = useState<Map<string, string>>(new Map())
+  const [approveErrors, setApproveErrors] = useState<Map<string, string>>(new Map())
+  const [approveAllLoading, setApproveAllLoading] = useState(false)
+  const [approveAllError, setApproveAllError] = useState<string | null>(null)
+  const [cidrModal, setCidrModal] = useState<CIDRModalState | null>(null)
 
   const key = `pending:${attempt}`
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
@@ -154,6 +184,139 @@ export default function PendingQueueTab() {
     }
   }
 
+  async function handleApprove(pendingId: string) {
+    setApproveErrors((prev) => {
+      const next = new Map(prev)
+      next.delete(pendingId)
+      return next
+    })
+    try {
+      const response = await apiFetch(
+        `/api/v1/registration/${encodeURIComponent(pendingId)}/approve`,
+        { method: 'POST' },
+      )
+      if (!response.ok) {
+        setApproveErrors((prev) =>
+          new Map(prev).set(pendingId, `Approve failed — ${response.status}`),
+        )
+        return
+      }
+      setOutcome((prev) => {
+        if (!prev?.entries) return prev
+        return { ...prev, entries: prev.entries.filter((e) => e.pending_id !== pendingId) }
+      })
+    } catch (cause: unknown) {
+      setApproveErrors((prev) =>
+        new Map(prev).set(
+          pendingId,
+          cause instanceof Error && cause.message ? cause.message : 'Approve request failed',
+        ),
+      )
+    }
+  }
+
+  async function handleApproveAll() {
+    setApproveAllError(null)
+    setApproveAllLoading(true)
+    try {
+      const response = await apiFetch('/api/v1/registration/approve-all', { method: 'POST' })
+      if (!response.ok) {
+        setApproveAllError(`Approve all failed — ${response.status}`)
+        return
+      }
+      retry()
+    } catch (cause: unknown) {
+      setApproveAllError(
+        cause instanceof Error && cause.message ? cause.message : 'Approve all request failed',
+      )
+    } finally {
+      setApproveAllLoading(false)
+    }
+  }
+
+  function openCIDRModal() {
+    setCidrModal({
+      cidr: '',
+      preview: null,
+      previewLoading: false,
+      previewError: null,
+      approveLoading: false,
+      approveError: null,
+    })
+  }
+
+  async function handleCIDRPreview() {
+    if (!cidrModal) return
+    const cidr = cidrModal.cidr
+    setCidrModal((prev) =>
+      prev ? { ...prev, previewLoading: true, previewError: null, preview: null } : prev,
+    )
+    try {
+      const response = await apiFetch(
+        `/api/v1/registration/approve-by-cidr/preview?cidr=${encodeURIComponent(cidr)}`,
+      )
+      if (!response.ok) {
+        setCidrModal((prev) =>
+          prev
+            ? { ...prev, previewLoading: false, previewError: `Preview failed — ${response.status}` }
+            : prev,
+        )
+        return
+      }
+      const body = (await response.json()) as CIDRPreview
+      setCidrModal((prev) => (prev ? { ...prev, previewLoading: false, preview: body } : prev))
+    } catch (cause: unknown) {
+      setCidrModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              previewLoading: false,
+              previewError:
+                cause instanceof Error && cause.message
+                  ? cause.message
+                  : 'Preview request failed',
+            }
+          : prev,
+      )
+    }
+  }
+
+  async function handleCIDRApprove() {
+    if (!cidrModal?.preview) return
+    const cidr = cidrModal.cidr
+    setCidrModal((prev) => (prev ? { ...prev, approveLoading: true, approveError: null } : prev))
+    try {
+      const response = await apiFetch('/api/v1/registration/approve-by-cidr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cidr }),
+      })
+      if (!response.ok) {
+        setCidrModal((prev) =>
+          prev
+            ? { ...prev, approveLoading: false, approveError: `Approve failed — ${response.status}` }
+            : prev,
+        )
+        return
+      }
+      setCidrModal(null)
+      retry()
+    } catch (cause: unknown) {
+      setCidrModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              approveLoading: false,
+              approveError:
+                cause instanceof Error && cause.message
+                  ? cause.message
+                  : 'Approve request failed',
+            }
+          : prev,
+      )
+    }
+  }
+
   const current = outcome?.key === key ? outcome : null
   const loading = current === null
   const error = current?.error ?? null
@@ -177,6 +340,28 @@ export default function PendingQueueTab() {
             <span className="cnt" data-testid="pending-count">
               {entries.length} pending
             </span>
+            <button
+              type="button"
+              className="wf-btn-sm"
+              data-testid="approve-all-btn"
+              disabled={approveAllLoading}
+              onClick={() => void handleApproveAll()}
+            >
+              Approve All
+            </button>
+            <button
+              type="button"
+              className="wf-btn-sm"
+              data-testid="approve-by-cidr-btn"
+              onClick={openCIDRModal}
+            >
+              Approve by CIDR
+            </button>
+            {approveAllError !== null && (
+              <span className="wf-form-error" role="alert" data-testid="approve-all-error">
+                {approveAllError}
+              </span>
+            )}
           </div>
           <table className="tbl" data-testid="pending-table">
             <thead>
@@ -207,6 +392,14 @@ export default function PendingQueueTab() {
                     <td>
                       <button
                         type="button"
+                        className="wf-btn-sm"
+                        data-testid={`approve-btn-${entry.pending_id}`}
+                        onClick={() => void handleApprove(entry.pending_id)}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
                         className="wf-btn-sm-danger"
                         data-testid={`deny-btn-${entry.pending_id}`}
                         onClick={() => void handleDeny(entry.pending_id)}
@@ -215,6 +408,19 @@ export default function PendingQueueTab() {
                       </button>
                     </td>
                   </tr>
+                  {approveErrors.has(entry.pending_id) && (
+                    <tr>
+                      <td colSpan={5}>
+                        <span
+                          className="wf-form-error"
+                          data-testid={`approve-error-${entry.pending_id}`}
+                          role="alert"
+                        >
+                          {approveErrors.get(entry.pending_id)}
+                        </span>
+                      </td>
+                    </tr>
+                  )}
                   {denyErrors.has(entry.pending_id) && (
                     <tr>
                       <td colSpan={5}>
@@ -233,6 +439,93 @@ export default function PendingQueueTab() {
             </tbody>
           </table>
         </>
+      )}
+
+      {cidrModal !== null && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Approve by CIDR"
+          data-testid="cidr-modal"
+        >
+          <div className="modal-box">
+            <h3>Approve registrations by CIDR</h3>
+            <p className="modal-desc">
+              Enter a CIDR range to preview which pending registrations match, then confirm to
+              approve them. A user-presence verification will be required before approval.
+            </p>
+            <label className="field-label">
+              CIDR range
+              <input
+                type="text"
+                className="wf-input"
+                data-testid="cidr-input"
+                placeholder="e.g. 192.168.1.0/24"
+                value={cidrModal.cidr}
+                onChange={(e) =>
+                  setCidrModal((prev) =>
+                    prev ? { ...prev, cidr: e.target.value, preview: null } : prev,
+                  )
+                }
+              />
+            </label>
+            <button
+              type="button"
+              className="wf-btn-sm"
+              data-testid="cidr-preview-btn"
+              disabled={!cidrModal.cidr || cidrModal.previewLoading}
+              onClick={() => void handleCIDRPreview()}
+            >
+              {cidrModal.previewLoading ? 'Loading…' : 'Preview'}
+            </button>
+            {cidrModal.previewError !== null && (
+              <span
+                className="wf-form-error"
+                role="alert"
+                data-testid="cidr-preview-error"
+              >
+                {cidrModal.previewError}
+              </span>
+            )}
+            {cidrModal.preview !== null && (
+              <div className="cidr-preview" data-testid="cidr-preview-result">
+                <p>
+                  {cidrModal.preview.count} pending registration
+                  {cidrModal.preview.count !== 1 ? 's' : ''} will be approved.
+                </p>
+              </div>
+            )}
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="wf-btn-sm-danger"
+                data-testid="cidr-cancel-btn"
+                onClick={() => setCidrModal(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="wf-btn-sm"
+                data-testid="cidr-confirm-btn"
+                disabled={cidrModal.preview === null || cidrModal.approveLoading}
+                onClick={() => void handleCIDRApprove()}
+              >
+                {cidrModal.approveLoading ? 'Approving…' : 'Confirm & Approve'}
+              </button>
+            </div>
+            {cidrModal.approveError !== null && (
+              <span
+                className="wf-form-error"
+                role="alert"
+                data-testid="cidr-approve-error"
+              >
+                {cidrModal.approveError}
+              </span>
+            )}
+          </div>
+        </div>
       )}
     </section>
   )

@@ -1013,6 +1013,8 @@ func TestApproveByCIDR_FiltersCorrectly(t *testing.T) {
 	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
 	req.Header.Set("Content-Type", "application/json")
+	// registration:approve-by-cidr requires RequireUserPresence (Issue #2969).
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -1080,6 +1082,8 @@ func TestHandleApproveByCIDR_InvalidCIDR(t *testing.T) {
 	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"not-a-cidr"}`))
 	req.Header.Set("Content-Type", "application/json")
+	// Presence token required even for error paths — gate is enforced before handler logic.
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -1095,6 +1099,112 @@ func TestHandleApproveByCIDR_NoPendingStore(t *testing.T) {
 	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
 	req.Header.Set("Content-Type", "application/json")
+	// Presence token required — gate fires before handler's pendingStore nil check.
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestHandleApproveByCIDR_RequiresPresence verifies that calling approve-by-cidr without
+// a presence token returns 401 with presence="required" in WWW-Authenticate.
+func TestHandleApproveByCIDR_RequiresPresence(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	// No presence token attached — should be rejected before reaching the handler.
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
+		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`,
+		"approve-by-cidr must require a user-presence proof (Issue #2969)")
+}
+
+// TestHandleApproveByCIDRPreview_HappyPath verifies that the preview endpoint returns
+// the count, IDs, and source IPs of matching pending entries without mutating state.
+func TestHandleApproveByCIDRPreview_HappyPath(t *testing.T) {
+	server, ts, pendingStore := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	addPendingEntry(t, pendingStore, "prev-in-1", "stwd-in-1", "tenant-a", "192.168.1.10")
+	addPendingEntry(t, pendingStore, "prev-in-2", "stwd-in-2", "tenant-a", "192.168.1.20")
+	addPendingEntry(t, pendingStore, "prev-out-1", "stwd-out-1", "tenant-a", "10.0.0.5")
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=192.168.1.0/24", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var result approveByCIDRPreviewResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	assert.Equal(t, 2, result.Count)
+	assert.ElementsMatch(t, []string{"prev-in-1", "prev-in-2"}, result.PendingIDs)
+	assert.ElementsMatch(t, []string{"192.168.1.10", "192.168.1.20"}, result.SourceIPs)
+
+	// Verify the store is unmodified — preview must not mutate state.
+	for _, id := range []string{"prev-in-1", "prev-in-2", "prev-out-1"} {
+		e, err := pendingStore.GetPendingByID(context.Background(), id)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusPending, e.Status,
+			"preview must not mutate entry %q", id)
+	}
+}
+
+// TestHandleApproveByCIDRPreview_EmptyResult verifies that the preview returns an empty
+// JSON array (not null) when no entries match.
+func TestHandleApproveByCIDRPreview_EmptyResult(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=10.0.0.0/8", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var result approveByCIDRPreviewResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	assert.Equal(t, 0, result.Count)
+	assert.NotNil(t, result.PendingIDs, "pending_ids must be an empty array, not null")
+	assert.NotNil(t, result.SourceIPs, "source_ips must be an empty array, not null")
+}
+
+// TestHandleApproveByCIDRPreview_InvalidCIDR verifies that a malformed CIDR returns 400.
+func TestHandleApproveByCIDRPreview_InvalidCIDR(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=not-a-cidr", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleApproveByCIDRPreview_MissingCIDR verifies that a missing cidr parameter returns 400.
+func TestHandleApproveByCIDRPreview_MissingCIDR(t *testing.T) {
+	server, ts, _ := newBulkApprovalServer(t)
+	defer ts.Close()
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleApproveByCIDRPreview_NoPendingStore verifies 503 when pendingStore is nil.
+func TestHandleApproveByCIDRPreview_NoPendingStore(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+
+	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=10.0.0.0/8", nil)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 

@@ -61,7 +61,7 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/registration/tokens/test-tenant/rotate", "registration:rotate-token"},
 	{"POST", "/api/v1/registration/reg-123/approve", "registration:approve"},
 	{"POST", "/api/v1/registration/approve-all", "registration:approve"},
-	{"POST", "/api/v1/registration/approve-by-cidr", "registration:approve"},
+	{"POST", "/api/v1/registration/approve-by-cidr", "registration:approve-by-cidr"}, // Issue #2969: presence-gated bulk CIDR approval
 	{"POST", "/api/v1/registration/ip-trust", "registration:manage-ip-trust"},
 	{"DELETE", "/api/v1/registration/ip-trust/test-tenant/192.168.1.0/24", "registration:manage-ip-trust"},
 	{"POST", "/api/v1/tenants", "tenant:create"},
