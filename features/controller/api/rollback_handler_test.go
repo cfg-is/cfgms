@@ -5,13 +5,19 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
@@ -37,8 +43,156 @@ import (
 // t.TempDir(), a real features/rbac Manager over the same storage, and the shipped
 // rollback.DefaultRollbackNotifier. No CFGMS behaviour is substituted or re-implemented.
 type rollbackStack struct {
-	manager rollback.RollbackManager
-	store   rollback.RollbackStore
+	manager    rollback.RollbackManager
+	store      rollback.RollbackStore
+	gitManager configgit.GitManager
+	gitOrigins *fsGitProvider
+}
+
+// fsGitProvider hosts configuration repositories as real go-git repositories on the local
+// filesystem.
+//
+// DefaultGitManager talks to a GitProvider for repository lifecycle and to the
+// RepositoryStore for content, so hosting repositories on disk lets handler tests drive the
+// production Git manager — and through it the production rollback manager's preview,
+// validation and approval logic — against real commits and real diffs. Each repository is
+// created with a baseline commit and a follow-up change commit, giving every target a real
+// commit to roll back to.
+//
+// Hosting-service features (pull requests, webhooks, branch protection) have no filesystem
+// equivalent and are refused rather than silently reported as successful. The rollback
+// paths under test never reach them.
+type fsGitProvider struct {
+	root     string
+	mu       sync.Mutex
+	baseline map[string]string // repository ID -> baseline commit SHA
+}
+
+// errFSGitUnsupported is returned for hosting-service operations the filesystem has no
+// equivalent for.
+var errFSGitUnsupported = errors.New("filesystem git provider: hosting-service operation not supported")
+
+func newFSGitProvider(root string) *fsGitProvider {
+	return &fsGitProvider{root: root, baseline: make(map[string]string)}
+}
+
+func (p *fsGitProvider) CreateRepository(_ context.Context, config configgit.RepositoryConfig) (*configgit.Repository, error) {
+	path := filepath.Join(p.root, config.Name)
+
+	repo, err := gogit.PlainInit(path, false)
+	if err != nil {
+		return nil, fmt.Errorf("init repository %s: %w", config.Name, err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("open worktree for %s: %w", config.Name, err)
+	}
+
+	baseline, err := fsGitCommit(worktree, path, "modules/firewall/config.yaml", "policy: baseline\n", "baseline configuration")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fsGitCommit(worktree, path, "modules/firewall/config.yaml", "policy: current\n", "tighten firewall policy"); err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	p.baseline[config.Name] = baseline
+	p.mu.Unlock()
+
+	return &configgit.Repository{
+		ID:            config.Name,
+		Type:          config.Type,
+		Name:          config.Name,
+		Owner:         config.Owner,
+		Provider:      "filesystem",
+		CloneURL:      path,
+		DefaultBranch: config.InitialBranch,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}, nil
+}
+
+// BaselineSHA returns the commit a rollback of the given repository targets.
+func (p *fsGitProvider) BaselineSHA(repoID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.baseline[repoID]
+}
+
+func (p *fsGitProvider) GetRepository(_ context.Context, _, name string) (*configgit.Repository, error) {
+	path := filepath.Join(p.root, name)
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("repository not found: %s", name)
+	}
+	return &configgit.Repository{ID: name, Name: name, Provider: "filesystem", CloneURL: path}, nil
+}
+
+func (p *fsGitProvider) DeleteRepository(_ context.Context, _, name string) error {
+	return os.RemoveAll(filepath.Join(p.root, name))
+}
+
+func (p *fsGitProvider) CreateBranch(_ context.Context, _, _, _, _ string) error { return nil }
+
+func (p *fsGitProvider) DeleteBranch(_ context.Context, _, _, _ string) error { return nil }
+
+func (p *fsGitProvider) GetDefaultBranch(_ context.Context, _, name string) (string, error) {
+	repo, err := gogit.PlainOpen(filepath.Join(p.root, name))
+	if err != nil {
+		return "", err
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return "", err
+	}
+	return head.Name().Short(), nil
+}
+
+func (p *fsGitProvider) CreatePullRequest(_ context.Context, _, _ string, _ configgit.PullRequestConfig) (string, error) {
+	return "", errFSGitUnsupported
+}
+
+func (p *fsGitProvider) MergePullRequest(_ context.Context, _, _, _ string) error {
+	return errFSGitUnsupported
+}
+
+func (p *fsGitProvider) CreateWebhook(_ context.Context, _, _ string, _ configgit.WebhookConfig) (string, error) {
+	return "", errFSGitUnsupported
+}
+
+func (p *fsGitProvider) DeleteWebhook(_ context.Context, _, _, _ string) error {
+	return errFSGitUnsupported
+}
+
+func (p *fsGitProvider) SetBranchProtection(_ context.Context, _, _ string, _ configgit.BranchProtectionRule) error {
+	return errFSGitUnsupported
+}
+
+func (p *fsGitProvider) RemoveBranchProtection(_ context.Context, _, _, _ string) error {
+	return errFSGitUnsupported
+}
+
+// fsGitCommit writes a file into the worktree and commits it, returning the commit SHA.
+func fsGitCommit(worktree *gogit.Worktree, root, path, content, message string) (string, error) {
+	full := filepath.Join(root, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+		return "", fmt.Errorf("create %s: %w", path, err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	if _, err := worktree.Add(path); err != nil {
+		return "", fmt.Errorf("stage %s: %w", path, err)
+	}
+
+	sha, err := worktree.Commit(message, &gogit.CommitOptions{
+		Author: &object.Signature{Name: "CFGMS", Email: "system@cfgms.local", When: time.Now()},
+	})
+	if err != nil {
+		return "", fmt.Errorf("commit %s: %w", path, err)
+	}
+
+	return sha.String(), nil
 }
 
 // noOpModuleRegistry is the module registry the controller wires into the rollback
@@ -87,16 +241,60 @@ func newRollbackStack(t *testing.T) *rollbackStack {
 
 	store := rollback.NewStorageRollbackStore(storageManager.GetConfigStore())
 	validator := rollback.NewRollbackValidator(&noOpModuleRegistry{}, nil, rbacManager)
-	gitManager := configgit.NewGitManager(nil, gitstorage.NewLocalRepositoryStore("", ""), configgit.GitManagerConfig{
+	origins := newFSGitProvider(filepath.Join(dir, "git-origins"))
+	gitManager := configgit.NewGitManager(origins, gitstorage.NewLocalRepositoryStore("", ""), configgit.GitManagerConfig{
 		DefaultBranch: "main",
 		AutoSync:      false,
 		CacheDir:      filepath.Join(dir, "git-cache"),
 	}, logger)
 
 	return &rollbackStack{
-		manager: rollback.NewRollbackManager(gitManager, validator, store, rollback.NewDefaultRollbackNotifier(logger)),
-		store:   store,
+		manager:    rollback.NewRollbackManager(gitManager, validator, store, rollback.NewDefaultRollbackNotifier(logger)),
+		store:      store,
+		gitManager: gitManager,
+		gitOrigins: origins,
 	}
+}
+
+// seedRepository creates the configuration repository the rollback manager resolves for a
+// target (DefaultRollbackManager.getRepositoryID derives the repository ID from the target
+// type and ID) and returns the commit a rollback targets. Registration goes through the
+// production Git manager, so the repository is cloned into its cache exactly as it is at
+// runtime.
+func (s *rollbackStack) seedRepository(t *testing.T, targetType rollback.TargetType, targetID string) string {
+	t.Helper()
+
+	repoID := fmt.Sprintf("%s-%s-repo", targetType, targetID)
+	if targetType == rollback.TargetTypeMSP {
+		repoID = "msp-global-repo"
+	}
+
+	_, err := s.gitManager.CreateRepository(context.Background(), configgit.RepositoryConfig{
+		Name:          repoID,
+		Owner:         "cfgms",
+		Provider:      "filesystem",
+		InitialBranch: "master",
+	})
+	require.NoError(t, err)
+
+	baseline := s.gitOrigins.BaselineSHA(repoID)
+	require.NotEmpty(t, baseline, "seeded repository must expose a baseline commit")
+	return baseline
+}
+
+// requireRollbackError asserts the handler answered with the given status and error
+// message, and that the production manager recorded no operation for the target.
+func (s *rollbackStack) requireRollbackError(t *testing.T, rec *httptest.ResponseRecorder, status int, message string, targetType rollback.TargetType, targetID string) {
+	t.Helper()
+
+	require.Equal(t, status, rec.Code, "body: %s", rec.Body.String())
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, message, resp["error"])
+
+	assert.Empty(t, s.operationsFor(t, targetType, targetID),
+		"a rejected rollback must not be recorded")
 }
 
 // seedLiveOperation records a live (in-progress) rollback operation for a target in the
@@ -333,6 +531,63 @@ func TestConfigRollback_UnauthenticatedRequestIsRejectedByManager(t *testing.T) 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Empty(t, stack.operationsFor(t, rollback.TargetTypeSteward, "steward-noauth"),
 		"an unauthenticated rollback must not be recorded")
+}
+
+func TestConfigRollback_ApprovalRequired(t *testing.T) {
+	// A client-wide rollback exceeds the production approval threshold
+	// (DefaultRollbackManager.requiresApproval: an estimated 500 affected users against a
+	// threshold of 100), so the real manager refuses a request carrying no approval ID and
+	// the handler translates that refusal to 412.
+	stack := newRollbackStack(t)
+	baseline := stack.seedRepository(t, rollback.TargetTypeClient, "7")
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+
+	body := fmt.Sprintf(
+		`{"target_type":"client","target_id":"7","rollback_type":"full","rollback_to":%q,"reason":"revert bad config"}`,
+		baseline)
+	rec := httptest.NewRecorder()
+
+	handler.ExecuteRollback(rec, newRollbackRequest(body, "admin-cert-cn"))
+
+	stack.requireRollbackError(t, rec, http.StatusPreconditionFailed,
+		"This rollback requires approval", rollback.TargetTypeClient, "7")
+}
+
+func TestConfigRollback_ValidationFailed(t *testing.T) {
+	// A partial rollback that names no configurations fails the production validator
+	// (DefaultRollbackValidator.validateRollbackType), so the handler answers 422.
+	stack := newRollbackStack(t)
+	baseline := stack.seedRepository(t, rollback.TargetTypeDevice, "9")
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+
+	body := fmt.Sprintf(
+		`{"target_type":"device","target_id":"9","rollback_type":"partial","rollback_to":%q,"reason":"revert bad config"}`,
+		baseline)
+	rec := httptest.NewRecorder()
+
+	handler.ExecuteRollback(rec, newRollbackRequest(body, "admin-cert-cn"))
+
+	stack.requireRollbackError(t, rec, http.StatusUnprocessableEntity,
+		rollback.ErrRollbackValidationFailed.Message, rollback.TargetTypeDevice, "9")
+}
+
+func TestConfigRollback_PermissionDenied(t *testing.T) {
+	// An emergency rollback requires the "rollback.emergency" permission. The production
+	// validator asks the real RBAC manager, which holds no such grant for this caller, so
+	// the rollback is denied and the handler answers 403 rather than the generic 422.
+	stack := newRollbackStack(t)
+	baseline := stack.seedRepository(t, rollback.TargetTypeDevice, "11")
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)
+
+	body := fmt.Sprintf(
+		`{"target_type":"device","target_id":"11","rollback_type":"emergency","rollback_to":%q,"reason":"service outage","emergency":true}`,
+		baseline)
+	rec := httptest.NewRecorder()
+
+	handler.ExecuteRollback(rec, newRollbackRequest(body, "admin-cert-cn"))
+
+	stack.requireRollbackError(t, rec, http.StatusForbidden,
+		rollback.ErrRollbackPermissionDenied.Message, rollback.TargetTypeDevice, "11")
 }
 
 func TestConfigRollback_InvalidBody(t *testing.T) {
