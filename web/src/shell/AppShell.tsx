@@ -33,6 +33,7 @@ const NAV_ITEMS = [
   { label: 'Workflows', to: '/workflows', soon: false },
   { label: 'Scripts', to: '/scripts', soon: false },
   { label: 'Registration', to: '/registration', soon: false },
+  { label: 'Refresh Requests', to: '/refresh', soon: false },
   { label: 'Audit', to: '/audit', soon: false },
   { label: 'Accounts', to: '/accounts', soon: false },
 ] as const
