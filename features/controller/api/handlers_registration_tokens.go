@@ -117,7 +117,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		"token_prefix", token.Token[:min(len(token.Token), 6)],
 		"tenant_id", logging.SanitizeLogValue(token.TenantID))
 	s.emitTokenManagementAudit(r, "registration_token.created",
-		token.Token[:min(len(token.Token), 6)], token.TenantID)
+		token.Token[:min(len(token.Token), 6)], token.ID, token.TenantID)
 
 	// Return full token response — create is the one-time mint window where the secret is disclosed.
 	resp := tokenToResponse(token)
@@ -290,7 +290,7 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
 	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Deleted registration token", "token_prefix", tokenPrefix)
-	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.TenantID)
+	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.ID, token.TenantID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -357,7 +357,7 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
 	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Revoked registration token", "token_prefix", tokenPrefix)
-	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.TenantID)
+	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.ID, token.TenantID)
 
 	// Return redacted response — revoke callers do not receive the raw secret.
 	resp := tokenToResponseRedacted(token)
@@ -419,7 +419,7 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	s.logger.Info("Rotated registration token",
 		"token_prefix", tokenPrefix,
 		"tenant_id", logging.SanitizeLogValue(tenantID))
-	s.emitTokenManagementAudit(r, "registration_token.rotated", tokenPrefix, tenantID)
+	s.emitTokenManagementAudit(r, "registration_token.rotated", tokenPrefix, newToken.ID, tenantID)
 
 	// Return full token response — rotate is a mint window where the new secret is disclosed once.
 	resp := tokenToResponse(newToken)
@@ -468,7 +468,9 @@ func tokenToResponseRedacted(token *registration.Token) TokenResponse {
 
 // emitTokenManagementAudit records an audit event for a token management action
 // (create, rotate, revoke, delete). It is a no-op when auditManager is nil.
-func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tenantID string) {
+// tokenID is the stable UUID (registration.Token.ID) — never the secret — recorded
+// as the resource name so the audit trail can be correlated to a token by ID.
+func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tokenID, tenantID string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -486,7 +488,7 @@ func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, 
 		Type(business.AuditEventSystemAccess).
 		Action(action).
 		User(principalID, business.AuditUserTypeHuman).
-		Resource("registration_token", tokenPrefix, "").
+		Resource("registration_token", tokenPrefix, tokenID).
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {

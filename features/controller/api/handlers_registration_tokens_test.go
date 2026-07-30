@@ -959,6 +959,8 @@ func TestCreateRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, resp.TokenID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, resp.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
@@ -987,6 +989,8 @@ func TestDeleteRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, token.ID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, token.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
@@ -1015,6 +1019,8 @@ func TestRevokeRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, token.Token[:6], entry.ResourceID, "audit resource must record the token prefix")
+	assert.Equal(t, token.ID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, token.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
@@ -1050,6 +1056,8 @@ func TestRotateRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, "audit-tenant", entry.TenantID)
 	assert.Equal(t, "registration_token", entry.ResourceType)
 	assert.Equal(t, resp.Token[:6], entry.ResourceID, "audit resource must record the new token prefix")
+	assert.Equal(t, resp.TokenID, entry.ResourceName, "audit resource name must record the stable token id")
+	assert.NotContains(t, entry.ResourceName, resp.Token, "audit resource name must never contain the secret")
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
