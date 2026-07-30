@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -741,6 +743,36 @@ func unjustifiedRoleRequest(method, target, callerTenantID, roleID string, body 
 	return req
 }
 
+// --- Role mutation tenant scoping (Issue #3133) ---
+//
+// The role write handlers derive the tenant from the authenticated session and
+// refuse to touch a role owned by any other tenant. These tests drive the handlers
+// directly with real RBAC components (git/SQLite-backed manager from
+// setupTestServer) so the store state after each call is authoritative.
+
+const testJustification = "test: role mutation for tenant scoping test"
+
+// roleMutationRequest builds a request for a role write handler with the caller's
+// tenant in context, the mux route var set, and the M-AUTH-2 justification header.
+func roleMutationRequest(method, roleID, contextTenantID string, body io.Reader) *http.Request {
+	url := "/api/v1/rbac/roles"
+	if roleID != "" {
+		url += "/" + roleID
+	}
+	req := httptest.NewRequest(method, url, body)
+	req.Header.Set("X-Justification", testJustification)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if contextTenantID != "" {
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, contextTenantID))
+	}
+	if roleID != "" {
+		req = mux.SetURLVars(req, map[string]string{"id": roleID})
+	}
+	return req
+}
+
 // TestHandleRoles_NilService_Returns503 verifies the guard on every role handler for a
 // controller started without an RBAC backend.
 func TestHandleRoles_NilService_Returns503(t *testing.T) {
@@ -775,6 +807,85 @@ func TestHandleRoles_NilService_Returns503(t *testing.T) {
 	}
 }
 
+// roleBody marshals a RoleInfo-shaped request body.
+func roleBody(t *testing.T, fields map[string]any) io.Reader {
+	t.Helper()
+	raw, err := json.Marshal(fields)
+	require.NoError(t, err)
+	return bytes.NewReader(raw)
+}
+
+// storedRole reads a role straight from the RBAC service, bypassing the handlers.
+func storedRole(t *testing.T, server *Server, roleID string) *common.Role {
+	t.Helper()
+	resp, err := server.rbacService.GetRole(context.Background(), &controller.GetRoleRequest{RoleId: roleID})
+	require.NoError(t, err)
+	return resp.Role
+}
+
+// responseData decodes the {"data": {...}} envelope into a map.
+func responseData(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]any)
+	require.True(t, ok, "expected object in Data, got %T", resp.Data)
+	return data
+}
+
+// TestHandleCreateRole_VisibleInTenantList verifies a role created for the caller's
+// own tenant is attributed to that tenant and appears in its role list afterwards.
+func TestHandleCreateRole_VisibleInTenantList(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := roleMutationRequest(http.MethodPost, "", "tenant-a", roleBody(t, map[string]any{
+		"name":        "fleet-viewer",
+		"description": "read only",
+		"permissions": []string{"steward.read"},
+		"tenant_id":   "tenant-a",
+	}))
+	rec := httptest.NewRecorder()
+	server.handleCreateRole(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	data := responseData(t, rec)
+	assert.Equal(t, "tenant-a", data["tenant_id"])
+	roleID, ok := data["id"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, roleID, "server must assign a non-empty role ID")
+
+	// The role the UI refreshes into must be there: ListRoles filters on tenant_id,
+	// so an empty tenant would make the new role invisible to its own creator.
+	listRec := callHandleListRoles(server, "tenant-a", "")
+	require.Equal(t, http.StatusOK, listRec.Code)
+	var listResp APIResponse
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+	assert.Contains(t, roleIDsFromResponse(t, listResp), roleID,
+		"newly created role must appear in the creating tenant's list")
+}
+
+// TestHandleCreateRole_RejectsInvalidFields verifies boundary validation of the
+// operator-supplied name and description.
+func TestHandleCreateRole_RejectsInvalidFields(t *testing.T) {
+	server := setupTestServer(t)
+
+	cases := map[string]map[string]any{
+		"empty name":            {"name": "   "},
+		"over-long name":        {"name": strings.Repeat("n", maxRoleNameLength+1)},
+		"control chars":         {"name": "fleet\nviewer"},
+		"over-long description": {"name": "ok", "description": strings.Repeat("d", maxRoleDescriptionLength+1)},
+	}
+
+	for label, body := range cases {
+		t.Run(label, func(t *testing.T) {
+			req := roleMutationRequest(http.MethodPost, "", "tenant-a", roleBody(t, body))
+			rec := httptest.NewRecorder()
+			server.handleCreateRole(rec, req)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+}
+
 // TestHandleCreateRole_InvalidJSON_Returns400 verifies that a malformed body is rejected
 // before the request reaches the RBAC service.
 func TestHandleCreateRole_InvalidJSON_Returns400(t *testing.T) {
@@ -795,7 +906,7 @@ func TestHandleCreateRole_MissingName_Returns400(t *testing.T) {
 	rec := callHandleCreateRole(server, "client-1", body)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, "MISSING_NAME", errorCodeFromResponse(t, rec))
+	assert.Equal(t, "INVALID_ROLE", errorCodeFromResponse(t, rec))
 }
 
 // TestHandleGetRole_MissingID_Returns400 verifies that an absent {id} path variable is
@@ -1062,4 +1173,135 @@ func TestHandleGetPermission_LogInjectionSanitized(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	assertNoForgedLogRecord(t, capture.captured())
+}
+
+// TestHandleUpdateRole_OwnTenantSucceeds verifies an in-tenant edit applies and keeps
+// the role's tenant attribution.
+func TestHandleUpdateRole_OwnTenantSucceeds(t *testing.T) {
+	server := setupTestServer(t)
+	createRoleForTenant(t, server, "tenant-a", "tenant-a.viewer", "Tenant A Viewer")
+
+	req := roleMutationRequest(http.MethodPut, "tenant-a.viewer", "tenant-a", roleBody(t, map[string]any{
+		"name":        "Tenant A Viewer Updated",
+		"description": "narrowed",
+		"permissions": []string{"steward.read"},
+	}))
+	rec := httptest.NewRecorder()
+	server.handleUpdateRole(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	role := storedRole(t, server, "tenant-a.viewer")
+	assert.Equal(t, "Tenant A Viewer Updated", role.Name)
+	assert.Equal(t, "tenant-a", role.TenantId, "tenant attribution must survive the edit")
+}
+
+// TestHandleUpdateRole_CrossTenantReturns404 verifies an operator holding
+// rbac:update-role in one tenant cannot edit another tenant's role.
+func TestHandleUpdateRole_CrossTenantReturns404(t *testing.T) {
+	server := setupTestServer(t)
+	createRoleForTenant(t, server, "tenant-b", "tenant-b.admin", "Tenant B Admin")
+
+	req := roleMutationRequest(http.MethodPut, "tenant-b.admin", "tenant-a", roleBody(t, map[string]any{
+		"name":        "Hijacked",
+		"permissions": []string{"system.admin"},
+	}))
+	rec := httptest.NewRecorder()
+	server.handleUpdateRole(rec, req)
+
+	// 404, not 403: the response must not confirm the role exists.
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	role := storedRole(t, server, "tenant-b.admin")
+	assert.Equal(t, "Tenant B Admin", role.Name, "cross-tenant edit must not modify the role")
+	assert.NotContains(t, role.PermissionIds, "system.admin")
+	assert.Equal(t, "tenant-b", role.TenantId)
+}
+
+// TestHandleUpdateRole_SystemRoleForbidden verifies the system roles seeded at
+// Initialize (visible to every tenant, owned by none) cannot be edited by a tenant.
+func TestHandleUpdateRole_SystemRoleForbidden(t *testing.T) {
+	server := setupTestServer(t)
+	require.True(t, storedRole(t, server, "system.admin").IsSystemRole)
+
+	req := roleMutationRequest(http.MethodPut, "system.admin", "tenant-a", roleBody(t, map[string]any{
+		"name": "Owned",
+	}))
+	rec := httptest.NewRecorder()
+	server.handleUpdateRole(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "System Administrator", storedRole(t, server, "system.admin").Name)
+}
+
+// TestHandleDeleteRole_OwnTenantSucceeds verifies an in-tenant delete removes the role.
+func TestHandleDeleteRole_OwnTenantSucceeds(t *testing.T) {
+	server := setupTestServer(t)
+	createRoleForTenant(t, server, "tenant-a", "tenant-a.doomed", "Tenant A Doomed")
+
+	req := roleMutationRequest(http.MethodDelete, "tenant-a.doomed", "tenant-a", nil)
+	rec := httptest.NewRecorder()
+	server.handleDeleteRole(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	_, err := server.rbacService.GetRole(context.Background(),
+		&controller.GetRoleRequest{RoleId: "tenant-a.doomed"})
+	assert.Error(t, err, "role must be gone after delete")
+}
+
+// TestHandleDeleteRole_CrossTenantReturns404 verifies an operator holding
+// rbac:delete-role in one tenant cannot delete another tenant's role.
+func TestHandleDeleteRole_CrossTenantReturns404(t *testing.T) {
+	server := setupTestServer(t)
+	createRoleForTenant(t, server, "tenant-b", "tenant-b.survivor", "Tenant B Survivor")
+
+	req := roleMutationRequest(http.MethodDelete, "tenant-b.survivor", "tenant-a", nil)
+	rec := httptest.NewRecorder()
+	server.handleDeleteRole(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, "Tenant B Survivor", storedRole(t, server, "tenant-b.survivor").Name,
+		"cross-tenant delete must leave the role in place")
+}
+
+// TestHandleDeleteRole_SystemRoleForbidden verifies system roles cannot be deleted
+// through a tenant-scoped session.
+func TestHandleDeleteRole_SystemRoleForbidden(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := roleMutationRequest(http.MethodDelete, "steward.service", "tenant-a", nil)
+	rec := httptest.NewRecorder()
+	server.handleDeleteRole(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.NotNil(t, storedRole(t, server, "steward.service"))
+}
+
+// TestHandleGetRole_TenantScoping verifies read-by-ID visibility matches the list:
+// own-subtree roles and system roles are readable, another tenant's role is 404, and
+// an unscoped admin (no caller tenant) is unrestricted.
+func TestHandleGetRole_TenantScoping(t *testing.T) {
+	server := setupTestServer(t)
+	createRoleForTenant(t, server, "tenant-a", "tenant-a.viewer", "Tenant A Viewer")
+	createRoleForTenant(t, server, "tenant-b", "tenant-b.viewer", "Tenant B Viewer")
+
+	cases := []struct {
+		name     string
+		roleID   string
+		tenantID string
+		want     int
+	}{
+		{"own tenant role", "tenant-a.viewer", "tenant-a", http.StatusOK},
+		{"system role", "system.admin", "tenant-a", http.StatusOK},
+		{"other tenant role", "tenant-b.viewer", "tenant-a", http.StatusNotFound},
+		{"unscoped admin", "tenant-b.viewer", "", http.StatusOK},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := roleMutationRequest(http.MethodGet, tc.roleID, tc.tenantID, nil)
+			rec := httptest.NewRecorder()
+			server.handleGetRole(rec, req)
+			assert.Equal(t, tc.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
 }

@@ -713,14 +713,14 @@ Get a specific permission by ID.
 
 #### GET /api/v1/rbac/roles
 
-List roles.
+List roles: the authenticated caller's own tenant roles plus system roles.
 
 **Authentication:** Required  
 **Required permission:** `rbac:list-roles`
 
-**Parameters:**
-
-- `tenant_id` (query, optional): Filter roles by tenant ID
+**Tenant scope:** derived from the authenticated session. A `tenant_id` query
+parameter is ignored — it cannot be used to read another tenant's roles. Requests
+without a session tenant are rejected with `401`.
 
 **Response:**
 
@@ -743,10 +743,18 @@ List roles.
 
 #### POST /api/v1/rbac/roles
 
-Create a new role.
+Create a new role in the authenticated caller's tenant.
 
 **Authentication:** Required  
 **Required permission:** `rbac:create-role`
+
+**Tenant scope:** derived from the authenticated session. `tenant_id` may be omitted;
+when present it must equal the session tenant, otherwise the request is rejected with
+`403 TENANT_MISMATCH`. The role `id` is server-assigned (tenant-prefixed) — a body
+`id` is ignored.
+
+**Validation:** `name` is required, at most 128 characters; `description` at most 512
+characters; neither may contain control characters.
 
 **Request Body:**
 
@@ -754,8 +762,7 @@ Create a new role.
 {
   "name": "Config Manager",
   "description": "Manage configurations",
-  "permissions": ["config.read", "config.write"],
-  "tenant_id": "default"
+  "permissions": ["config.read", "config.write"]
 }
 ```
 
@@ -787,9 +794,13 @@ Get a specific role by ID.
 
 - `id` (path): Role ID
 
+**Tenant scope:** readable roles are the session tenant's own roles plus system
+roles. Another tenant's role returns `404 ROLE_NOT_FOUND` (the response does not
+confirm that it exists).
+
 #### PUT /api/v1/rbac/roles/{id}
 
-Update an existing role.
+Update an existing role owned by the authenticated caller's tenant.
 
 **Authentication:** Required  
 **Required permission:** `rbac:update-role`
@@ -798,11 +809,18 @@ Update an existing role.
 
 - `id` (path): Role ID
 
-**Request Body:** Same structure as POST /api/v1/rbac/roles.
+**Tenant scope:** a role owned by another tenant returns `404 ROLE_NOT_FOUND`; a
+system role returns `403 SYSTEM_ROLE_IMMUTABLE`. A `tenant_id` that differs from the
+session tenant returns `403 TENANT_MISMATCH` — a role's tenant cannot be reassigned
+through an update. Tenant scope, system-role status, hierarchy links and creation
+time are carried over from the stored role.
+
+**Request Body:** `name`, `description` and `permissions`, validated as for
+POST /api/v1/rbac/roles.
 
 #### DELETE /api/v1/rbac/roles/{id}
 
-Delete a role.
+Delete a role owned by the authenticated caller's tenant.
 
 **Authentication:** Required  
 **Required permission:** `rbac:delete-role`
@@ -810,6 +828,9 @@ Delete a role.
 **Parameters:**
 
 - `id` (path): Role ID
+
+**Tenant scope:** a role owned by another tenant returns `404 ROLE_NOT_FOUND`; a
+system role returns `403 SYSTEM_ROLE_IMMUTABLE`.
 
 ### API Key Management
 
