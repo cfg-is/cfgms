@@ -4,7 +4,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +19,97 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// isWithinTenantScope is defined in middleware.go and shared across RBAC and
+// tenant handlers.
+
+// Role field bounds enforced at the API boundary. Role names and descriptions are
+// operator-supplied free text that is rendered in the web UI and written to audit
+// events, so both are length-bounded and rejected when they carry control
+// characters (log/audit-record injection).
+const (
+	maxRoleNameLength        = 128
+	maxRoleDescriptionLength = 512
+)
+
+// Role validation errors. Each message is caller-facing and discloses nothing
+// about controller internals.
+var (
+	errRoleNameRequired       = errors.New("role name is required")
+	errRoleNameTooLong        = fmt.Errorf("role name must be at most %d characters", maxRoleNameLength)
+	errRoleDescriptionTooLong = fmt.Errorf("role description must be at most %d characters", maxRoleDescriptionLength)
+	errRoleControlCharacters  = errors.New("role name and description must not contain control characters")
+)
+
+// validateRoleFields validates operator-supplied role fields and returns the
+// trimmed name and description. The error message is safe to return to the caller.
+func validateRoleFields(name, description string) (string, string, error) {
+	trimmedName := strings.TrimSpace(name)
+	trimmedDescription := strings.TrimSpace(description)
+	if trimmedName == "" {
+		return "", "", errRoleNameRequired
+	}
+	if len(trimmedName) > maxRoleNameLength {
+		return "", "", errRoleNameTooLong
+	}
+	if len(trimmedDescription) > maxRoleDescriptionLength {
+		return "", "", errRoleDescriptionTooLong
+	}
+	if strings.ContainsFunc(trimmedName, isControlRune) || strings.ContainsFunc(trimmedDescription, isControlRune) {
+		return "", "", errRoleControlCharacters
+	}
+	return trimmedName, trimmedDescription, nil
+}
+
+// isControlRune reports whether r is a C0/C1 control character.
+func isControlRune(r rune) bool {
+	return r < 0x20 || (r >= 0x7F && r <= 0x9F)
+}
+
+// roleReadableByTenant reports whether callerTenant may read role. The rule matches
+// the visibility ListRoles applies (own-subtree roles plus system roles), extended
+// with subtree scope and the unscoped ("") admin mTLS path, so a role can never be
+// fetched by ID that the same caller cannot see in the list.
+func roleReadableByTenant(role *common.Role, callerTenant string) bool {
+	return role != nil && (role.IsSystemRole || callerTenant == "" || isWithinTenantScope(callerTenant, role.TenantId))
+}
+
+// loadRoleForWrite loads roleID and confirms callerTenant may act on it, writing the
+// HTTP error response and returning false when it does not.
+//
+// A role outside callerTenant's subtree is reported as 404: confirming its existence
+// to a caller outside that subtree is itself a disclosure. System roles are 403 —
+// they are visible to every tenant but owned by none, so no tenant operator may
+// edit or delete them (the store rejects system-role deletion as well).
+func (s *Server) loadRoleForWrite(w http.ResponseWriter, r *http.Request, roleID, callerTenant, action string) (*common.Role, bool) {
+	resp, err := s.rbacService.GetRole(r.Context(), &controller.GetRoleRequest{RoleId: roleID})
+	if err != nil || resp.Role == nil {
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID),
+			"action", action, "error", logging.SanitizeLogValue(errText))
+		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		return nil, false
+	}
+
+	if resp.Role.IsSystemRole {
+		s.writeErrorResponse(w, http.StatusForbidden, "System roles cannot be "+action, "SYSTEM_ROLE_IMMUTABLE")
+		return nil, false
+	}
+
+	if callerTenant != "" && !isWithinTenantScope(callerTenant, resp.Role.TenantId) {
+		s.logger.Warn("Blocked cross-tenant role write",
+			"role_id", logging.SanitizeLogValue(roleID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant),
+			"action", action)
+		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		return nil, false
+	}
+
+	return resp.Role, true
+}
 
 // handleListPermissions handles GET /api/v1/rbac/permissions
 func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +129,7 @@ func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.ListPermissions(r.Context(), req)
 	if err != nil {
-		s.logger.Error("Failed to list permissions", "error", err)
+		s.logger.Error("Failed to list permissions", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list permissions", "INTERNAL_ERROR")
 		return
 	}
@@ -116,7 +210,7 @@ func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	resp, err := s.rbacService.ListRoles(r.Context(), req)
 	if err != nil {
-		s.logger.Error("Failed to list roles", "error", err)
+		s.logger.Error("Failed to list roles", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list roles", "INTERNAL_ERROR")
 		return
 	}
@@ -152,9 +246,10 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
-	if roleInfo.Name == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Role name is required", "MISSING_NAME")
+	// Validate operator-supplied fields
+	name, description, err := validateRoleFields(roleInfo.Name, roleInfo.Description)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_ROLE")
 		return
 	}
 
@@ -181,8 +276,8 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	req := &controller.CreateRoleRequest{
 		Role: &common.Role{
 			Id:            roleID,
-			Name:          roleInfo.Name,
-			Description:   roleInfo.Description,
+			Name:          name,
+			Description:   description,
 			PermissionIds: roleInfo.Permissions, // Use permission_ids
 			TenantId:      roleInfo.TenantID,
 		},
@@ -244,12 +339,13 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cross-tenant scope check: empty callerTenant means admin mTLS (no restriction).
-	// 404 instead of 403 to avoid disclosing role existence across tenant boundaries.
+	// Tenant scoping: a role outside the caller's subtree must not be readable by ID
+	// unless it is a system role (visible to every tenant, matching ListRoles).
+	// Reported as 404 so the response does not confirm that the role exists.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, resp.Role.TenantId) {
-		s.logger.Info("Cross-tenant role get refused",
-			"role_tenant", logging.SanitizeLogValue(resp.Role.TenantId),
+	if !roleReadableByTenant(resp.Role, callerTenant) {
+		s.logger.Warn("Blocked cross-tenant role read",
+			"role_id", logging.SanitizeLogValue(roleID),
 			"caller_tenant", logging.SanitizeLogValue(callerTenant))
 		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
 		return
@@ -291,27 +387,17 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set the ID from URL
-	roleInfo.ID = roleID
-
-	// Fetch the existing role to get its actual stored tenant for the scope check.
-	// The check MUST use the stored tenant, not the request body's TenantId, to prevent
-	// a caller from bypassing the check by lying about the tenant in the update payload.
-	existing, err := s.rbacService.GetRole(r.Context(), &controller.GetRoleRequest{RoleId: roleID})
+	name, description, err := validateRoleFields(roleInfo.Name, roleInfo.Description)
 	if err != nil {
-		s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_ROLE")
 		return
 	}
 
-	// Cross-tenant scope check: empty callerTenant means admin mTLS (no restriction).
-	// 404 instead of 403 to avoid disclosing role existence across tenant boundaries.
+	// Tenant scoping: the role must exist inside the caller's subtree (or the caller
+	// is an unscoped admin) and must not be a system role before any field is written.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, existing.Role.TenantId) {
-		s.logger.Info("Cross-tenant role update refused",
-			"role_tenant", logging.SanitizeLogValue(existing.Role.TenantId),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
-		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+	existing, ok := s.loadRoleForWrite(w, r, roleID, callerTenant, "modified")
+	if !ok {
 		return
 	}
 
@@ -321,22 +407,29 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	// caller-chosen permission IDs — into another tenant's namespace, and an omitted
 	// TenantId would blank it out of every ListRoles result. Reject an explicit
 	// relocation attempt; otherwise carry the stored tenant forward.
-	if roleInfo.TenantID != "" && roleInfo.TenantID != existing.Role.TenantId {
+	if roleInfo.TenantID != "" && roleInfo.TenantID != existing.TenantId {
 		s.logger.Info("Role tenant relocation refused",
-			"role_tenant", logging.SanitizeLogValue(existing.Role.TenantId),
+			"role_tenant", logging.SanitizeLogValue(existing.TenantId),
 			"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID))
 		s.writeErrorResponse(w, http.StatusBadRequest, "TenantId cannot be changed", "TENANT_IMMUTABLE")
 		return
 	}
 
-	// Create gRPC request
+	// UpdateRole is a whole-record replacement, so every field the API does not
+	// expose is carried over from the stored role: tenant scope, system-role status,
+	// hierarchy links and creation time would otherwise be silently cleared.
 	req := &controller.UpdateRoleRequest{
 		Role: &common.Role{
-			Id:            roleID,
-			Name:          roleInfo.Name,
-			Description:   roleInfo.Description,
-			PermissionIds: roleInfo.Permissions, // Use permission_ids
-			TenantId:      existing.Role.TenantId,
+			Id:              roleID,
+			Name:            name,
+			Description:     description,
+			PermissionIds:   roleInfo.Permissions, // Use permission_ids
+			TenantId:        existing.TenantId,
+			IsSystemRole:    existing.IsSystemRole,
+			ParentRoleId:    existing.ParentRoleId,
+			ChildRoleIds:    existing.ChildRoleIds,
+			InheritanceType: existing.InheritanceType,
+			CreatedAt:       existing.CreatedAt,
 		},
 	}
 
@@ -383,24 +476,10 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch the role to obtain its tenant for the scope check. This fetch is always
-	// required regardless of whether an audit manager is present (authorization must
-	// not depend on an audit-log side effect being active).
-	existing, err := s.rbacService.GetRole(r.Context(), &controller.GetRoleRequest{RoleId: roleID})
-	if err != nil {
-		s.logger.Error("Failed to get role for deletion", "role_id", logging.SanitizeLogValue(roleID), "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
-		return
-	}
-
-	// Cross-tenant scope check: empty callerTenant means admin mTLS (no restriction).
-	// 404 instead of 403 to avoid disclosing role existence across tenant boundaries.
+	// Tenant scoping: only a role inside the caller's subtree (or an unscoped admin)
+	// may be deleted, and system roles may never be deleted.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, existing.Role.TenantId) {
-		s.logger.Info("Cross-tenant role delete refused",
-			"role_tenant", logging.SanitizeLogValue(existing.Role.TenantId),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
-		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+	if _, ok := s.loadRoleForWrite(w, r, roleID, callerTenant, "deleted"); !ok {
 		return
 	}
 

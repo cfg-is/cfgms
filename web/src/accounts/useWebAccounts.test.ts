@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  createRole,
+  updateRole,
+  deleteRole,
+  validateJustification,
+  JUSTIFICATION_MIN_LENGTH,
+  JUSTIFICATION_MAX_LENGTH,
   parseWebAccountInfo,
   parseWebAccountList,
   parseRoleInfo,
   parseRoleList,
+  parsePermissionInfo,
+  parsePermissionList,
 } from './useWebAccounts.ts'
 
 describe('parseWebAccountInfo', () => {
@@ -134,5 +142,210 @@ describe('parseRoleList', () => {
 
   it('returns empty list for empty array', () => {
     expect(parseRoleList([])).toEqual([])
+  })
+})
+
+describe('parsePermissionInfo', () => {
+  it('parses a valid permission record', () => {
+    const raw = {
+      id: 'perm-1',
+      name: 'steward:list',
+      description: 'List stewards',
+      resource_type: 'steward',
+      actions: ['list'],
+    }
+    const result = parsePermissionInfo(raw)
+    expect(result).not.toBeNull()
+    expect(result?.id).toBe('perm-1')
+    expect(result?.name).toBe('steward:list')
+    expect(result?.description).toBe('List stewards')
+    expect(result?.resource_type).toBe('steward')
+    expect(result?.actions).toEqual(['list'])
+  })
+
+  it('returns null for missing id', () => {
+    expect(parsePermissionInfo({ name: 'no-id' })).toBeNull()
+  })
+
+  it('returns null for non-object input', () => {
+    expect(parsePermissionInfo(null)).toBeNull()
+    expect(parsePermissionInfo(42)).toBeNull()
+    expect(parsePermissionInfo('string')).toBeNull()
+  })
+
+  it('coerces missing fields to safe defaults', () => {
+    const result = parsePermissionInfo({ id: 'p1' })
+    expect(result?.name).toBe('')
+    expect(result?.description).toBe('')
+    expect(result?.resource_type).toBe('')
+    expect(result?.actions).toEqual([])
+  })
+
+  it('filters non-string entries from actions', () => {
+    const result = parsePermissionInfo({ id: 'p1', actions: ['list', 42, null, 'read'] })
+    expect(result?.actions).toEqual(['list', 'read'])
+  })
+})
+
+describe('parsePermissionList', () => {
+  it('parses a list of permission records', () => {
+    const raw = [
+      { id: 'p1', name: 'steward:list', description: 'List stewards', resource_type: 'steward', actions: ['list'] },
+      { id: 'p2', name: 'steward:read', description: 'Read steward', resource_type: 'steward', actions: ['read'] },
+    ]
+    const result = parsePermissionList(raw)
+    expect(result).toHaveLength(2)
+    expect(result[0]!.id).toBe('p1')
+    expect(result[1]!.name).toBe('steward:read')
+  })
+
+  it('skips invalid entries', () => {
+    const raw = [
+      { id: 'p1', name: 'perm-a', description: '', resource_type: '', actions: [] },
+      null,
+      42,
+    ]
+    const result = parsePermissionList(raw)
+    expect(result).toHaveLength(1)
+    expect(result[0]!.id).toBe('p1')
+  })
+
+  it('throws for non-array input', () => {
+    expect(() => parsePermissionList(null)).toThrow()
+    expect(() => parsePermissionList({})).toThrow()
+  })
+
+  it('returns empty list for empty array', () => {
+    expect(parsePermissionList([])).toEqual([])
+  })
+})
+
+describe('validateJustification (M-AUTH-2)', () => {
+  it('accepts a justification at the server minimum length', () => {
+    expect(validateJustification('a'.repeat(JUSTIFICATION_MIN_LENGTH))).toBeNull()
+  })
+
+  it('accepts a justification at the server maximum length', () => {
+    expect(validateJustification('a'.repeat(JUSTIFICATION_MAX_LENGTH))).toBeNull()
+  })
+
+  it('rejects an empty or whitespace-only justification', () => {
+    expect(validateJustification('')).toMatch(/required/i)
+    expect(validateJustification('    ')).toMatch(/required/i)
+  })
+
+  it('rejects a justification below the server minimum length', () => {
+    expect(validateJustification('a'.repeat(JUSTIFICATION_MIN_LENGTH - 1))).toMatch(
+      /at least 10 characters/i,
+    )
+  })
+
+  it('measures length after trimming, matching the server', () => {
+    expect(validateJustification('   short   ')).toMatch(/at least 10 characters/i)
+  })
+
+  it('rejects a justification above the server maximum length', () => {
+    expect(validateJustification('a'.repeat(JUSTIFICATION_MAX_LENGTH + 1))).toMatch(
+      /at most 1000 characters/i,
+    )
+  })
+
+  it('rejects control characters that would allow header injection', () => {
+    expect(validateJustification('rotating perms\r\nX-Injected: yes')).toMatch(/plain text/i)
+    expect(validateJustification('rotating perms\u0000 padded')).toMatch(/plain text/i)
+  })
+
+  it('rejects code points the fetch Headers ByteString cannot carry', () => {
+    // A pasted smart quote would otherwise throw inside apiFetch.
+    expect(validateJustification('rotating the operator\u2019s permissions')).toMatch(
+      /plain text/i,
+    )
+  })
+
+  it('accepts Latin-1 accented text', () => {
+    expect(validateJustification('rotation des permissions requise')).toBeNull()
+    expect(validateJustification('r\u00e9vocation des permissions op\u00e9rateur')).toBeNull()
+  })
+})
+
+// ── Role mutation requests (M-AUTH-2 + tenant attribution) ───────────────────
+
+describe('role mutations', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: {} }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function lastRequest(): { headers: Headers; body: unknown } {
+    const call = fetchMock.mock.calls.at(-1)
+    expect(call).toBeDefined()
+    const init = call![1] as RequestInit
+    const raw = init.body
+    return {
+      headers: new Headers(init.headers),
+      body: typeof raw === 'string' ? JSON.parse(raw) : null,
+    }
+  }
+
+  it('sends the justification header on create', async () => {
+    await createRole('fleet-viewer', 'read only', ['p1'], 'granting read-only fleet access')
+    expect(lastRequest().headers.get('X-Justification')).toBe('granting read-only fleet access')
+  })
+
+  it('sends the justification header on update and no browser-supplied tenant', async () => {
+    await updateRole('role-1', 'fleet-viewer', 'read only', ['p1'], 'narrowing fleet permissions')
+    const req = lastRequest()
+    expect(req.headers.get('X-Justification')).toBe('narrowing fleet permissions')
+    expect(req.body).toMatchObject({ name: 'fleet-viewer', permissions: ['p1'] })
+    // The server derives the tenant from the session and carries the stored
+    // role's attribution into the update; a client tenant would be a
+    // cross-tenant write vector.
+    expect(req.body).not.toHaveProperty('tenant_id')
+  })
+
+  it('sends the justification header on delete', async () => {
+    await deleteRole('role-1', 'role superseded by fleet-viewer')
+    expect(lastRequest().headers.get('X-Justification')).toBe('role superseded by fleet-viewer')
+  })
+
+  it('trims the justification before sending it', async () => {
+    await deleteRole('role-1', '   role superseded by fleet-viewer   ')
+    expect(lastRequest().headers.get('X-Justification')).toBe('role superseded by fleet-viewer')
+  })
+
+  it('issues no request when the create justification is unusable', async () => {
+    await expect(createRole('fleet-viewer', '', [], 'short')).rejects.toThrow(/at least 10 characters/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('issues no request when the update justification is unusable', async () => {
+    await expect(updateRole('role-1', 'fleet-viewer', '', [], '')).rejects.toThrow(
+      /required/i,
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('issues no request when the delete justification is unusable', async () => {
+    await expect(deleteRole('role-1', 'brief')).rejects.toThrow(/at least 10 characters/i)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('issues no request when the justification would inject a header', async () => {
+    await expect(
+      deleteRole('role-1', 'superseded role\r\nX-Injected: yes'),
+    ).rejects.toThrow(/plain text/i)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
