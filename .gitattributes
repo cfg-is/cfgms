@@ -35,6 +35,15 @@ go.sum      text eol=lf
 # Markdown — keep LF to avoid noisy diffs on cross-platform commits
 *.md        text eol=lf
 
+# Mockups index: additive row appends from concurrent PRs should resolve
+# automatically. The union driver keeps both sides of a conflicting hunk
+# (identical to the manual resolution performed for #3012/#3020/#3024/#3025),
+# eliminating the merge-queue serialization caused by simultaneous appends.
+# A genuine content conflict (two PRs editing the same row) still produces a
+# visible duplicate that surfaces in review; it does not silently corrupt the
+# table structure.
+docs/design/mockups/README.md merge=union
+
 # Binary catch-all (Git auto-detects but explicit is clearer)
 *.png       binary
 *.jpg       binary
