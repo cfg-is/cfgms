@@ -42,11 +42,23 @@ function bool(value: unknown): boolean {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+export interface SwitchCase {
+  label: string
+  steps: WorkflowStep[]
+}
+
 export interface WorkflowStep {
   id: string
   name: string
   type: string
   config?: Record<string, unknown>
+  // Nested block tree fields — used by WorkflowGraph renderer (Story #3037)
+  steps?: WorkflowStep[]        // children of sequential/parallel/loop containers
+  condition?: string            // expression string for conditional steps
+  switch?: SwitchCase[]         // cases for switch steps
+  loop?: boolean                // true for for/while/foreach container steps
+  fan_out?: boolean
+  fan_in?: boolean
 }
 
 export interface SemanticVersion {
@@ -99,10 +111,21 @@ export interface TriggerItem {
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
 
-function parseStep(value: unknown): WorkflowStep | null {
+function parseSwitchCase(value: unknown): SwitchCase | null {
   if (typeof value !== 'object' || value === null) return null
   const r = value as Record<string, unknown>
   return {
+    label: str(r.label),
+    steps: Array.isArray(r.steps)
+      ? r.steps.flatMap((s) => { const p = parseStep(s); return p ? [p] : [] })
+      : [],
+  }
+}
+
+function parseStep(value: unknown): WorkflowStep | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const step: WorkflowStep = {
     id: str(r.id),
     name: str(r.name),
     type: str(r.type),
@@ -111,6 +134,17 @@ function parseStep(value: unknown): WorkflowStep | null {
         ? (r.config as Record<string, unknown>)
         : {},
   }
+  if (Array.isArray(r.steps)) {
+    step.steps = r.steps.flatMap((s) => { const p = parseStep(s); return p ? [p] : [] })
+  }
+  if (r.condition !== undefined) step.condition = str(r.condition)
+  if (Array.isArray(r.switch)) {
+    step.switch = r.switch.flatMap((c) => { const p = parseSwitchCase(c); return p ? [p] : [] })
+  }
+  if (r.loop !== undefined) step.loop = bool(r.loop)
+  if (r.fan_out !== undefined) step.fan_out = bool(r.fan_out)
+  if (r.fan_in !== undefined) step.fan_in = bool(r.fan_in)
+  return step
 }
 
 function parseSemanticVersion(value: unknown): SemanticVersion {
