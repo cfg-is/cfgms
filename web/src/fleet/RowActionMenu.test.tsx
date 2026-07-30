@@ -337,3 +337,216 @@ describe('tag editor', () => {
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Move to tenant (Story #2972)
+// ---------------------------------------------------------------------------
+
+describe('move to tenant', () => {
+  it('menu shows "Move to tenant" item', () => {
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    expect(screen.getByRole('menuitem', { name: 'Move to tenant' })).toBeInTheDocument()
+  })
+
+  it('clicking "Move to tenant" shows the panel with a tenant ID input', () => {
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to tenant' }))
+    expect(screen.getByRole('textbox', { name: 'New tenant ID' })).toBeInTheDocument()
+  })
+
+  it('move calls POST /stewards/:id/move with the new tenant ID', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: { steward_id: 'stw-1', tenant_id: 'tenant-b', status: 'moved' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to tenant' }))
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'New tenant ID' }), {
+      target: { value: 'tenant-b' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('/api/v1/stewards/stw-1/move')
+    expect((init?.method ?? '').toUpperCase()).toBe('POST')
+    const body = JSON.parse(String(init?.body)) as { new_tenant_id: string }
+    expect(body.new_tenant_id).toBe('tenant-b')
+  })
+
+  it('move encodes special characters in the steward ID', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    render(<RowActionMenu stewardId="stw/sp ec" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to tenant' }))
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'New tenant ID' }), {
+      target: { value: 'tid' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('/api/v1/stewards/stw%2Fsp%20ec/move')
+  })
+
+  it('move success shows a status message', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: { steward_id: 'stw-1', tenant_id: 'tenant-b', status: 'moved' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to tenant' }))
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'New tenant ID' }), {
+      target: { value: 'tenant-b' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+
+    expect(await screen.findByRole('status')).toBeInTheDocument()
+  })
+
+  it('move error shows an alert with the status code', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to tenant' }))
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'New tenant ID' }), {
+      target: { value: 'nonexistent' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('404')
+  })
+
+  it('"Move" is disabled when the tenant input is empty', () => {
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to tenant' }))
+    expect(screen.getByRole('button', { name: 'Move' })).toBeDisabled()
+  })
+
+  it('back button returns to the menu from the move panel', () => {
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to tenant' }))
+
+    expect(screen.getByRole('textbox', { name: 'New tenant ID' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to menu' }))
+
+    expect(screen.getByRole('menuitem', { name: 'Move to tenant' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Decommission (Story #2972)
+// ---------------------------------------------------------------------------
+
+describe('decommission', () => {
+  it('menu shows "Decommission" item', () => {
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    expect(screen.getByRole('menuitem', { name: 'Decommission' })).toBeInTheDocument()
+  })
+
+  it('clicking "Decommission" shows the confirmation panel', () => {
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Decommission' }))
+    expect(screen.getByRole('button', { name: 'Confirm decommission' })).toBeInTheDocument()
+  })
+
+  it('confirming decommission calls DELETE /stewards/:id', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: { id: 'stw-1', status: 'deregistered' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Decommission' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm decommission' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('/api/v1/stewards/stw-1')
+    expect((init?.method ?? '').toUpperCase()).toBe('DELETE')
+  })
+
+  it('decommission encodes special characters in the steward ID', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    render(<RowActionMenu stewardId="stw/sp ec" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Decommission' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm decommission' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('/api/v1/stewards/stw%2Fsp%20ec')
+  })
+
+  it('decommission success shows a status message', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: { id: 'stw-1', status: 'deregistered' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Decommission' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm decommission' }))
+
+    expect(await screen.findByRole('status')).toBeInTheDocument()
+  })
+
+  it('decommission error shows an alert with the status code', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Decommission' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm decommission' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('403')
+  })
+
+  it('back button returns to the menu from the decommission panel', () => {
+    render(<RowActionMenu stewardId="stw-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Decommission' }))
+
+    expect(screen.getByRole('button', { name: 'Confirm decommission' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to menu' }))
+
+    expect(screen.getByRole('menuitem', { name: 'Decommission' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Confirm decommission' })).not.toBeInTheDocument()
+  })
+})
