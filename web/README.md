@@ -452,6 +452,40 @@ All API-supplied values render as JSX text nodes only (security A9.1); the
 `parseIPTrustList` function shape-validates the wire payload before any field
 reaches the DOM.
 
+## Refresh-request queue (Story #2941)
+
+[`src/refresh/RefreshQueuePage.tsx`](src/refresh/RefreshQueuePage.tsx) — the
+`/refresh` route, accessible from the app shell nav as "Refresh Requests". A
+distinct page from the Registration console: refresh requests are a separate
+resource (`/stewards/refresh/*`, device-credential rotation) from steward
+enrollment (`/registration/*`).
+
+**Endpoint:** `GET /api/v1/stewards/refresh/pending` — bare JSON array (no
+`{data:...}` envelope), tenant-scoped from `ctxkeys.TenantID` in the handler.
+
+**Reject endpoint:** `POST /api/v1/stewards/refresh/{pending_id}/reject` —
+removes the row from the list on success; surfaces a row-level error without
+crashing on failure.
+
+**Fields rendered:**
+
+| Field | Wire key | Notes |
+|-------|----------|-------|
+| Pending ID | `pending_id` | Monospace; list key |
+| Device ID | `device_id` | Monospace |
+| Tenant | `tenant_id` | Monospace path |
+| Source IP | `source_ip` | Monospace |
+| Provenance | `provenance_matched_fields` / `provenance_total_fields` | Badge: green when matched == total (full match), amber when matched < total (partial) |
+| Requested | `created_at` | ISO-8601 string |
+
+**Out of scope:** Approve is entirely out of scope for this story — no button,
+no disabled state, no deferred control of any kind. Approve belongs to Section
+2's follow-on epic.
+
+All API-supplied values render as JSX text nodes only (security A9.1); the
+`parsePendingRefreshList` / `parsePendingRefreshEntry` functions shape-validate
+the wire payload before any field reaches the DOM.
+
 ## Testing
 
 Vitest with jsdom and Testing Library. Suites:
