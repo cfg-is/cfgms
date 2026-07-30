@@ -174,6 +174,51 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 	return &token, nil
 }
 
+// GetTokenByID implements RegistrationTokenStore.GetTokenByID (Issue #2970).
+func (s *DatabaseRegistrationTokenStore) GetTokenByID(ctx context.Context, id string) (*business.RegistrationTokenData, error) {
+	if id == "" {
+		return nil, fmt.Errorf("token id cannot be empty")
+	}
+
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	var token business.RegistrationTokenData
+	var expiresAt, revokedAt sql.NullTime
+	var group sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+		FROM cfgms_registration_tokens
+		WHERE id = $1`, id).Scan(
+		&token.Token,
+		&token.TenantID,
+		&token.ControllerURL,
+		&group,
+		&token.CreatedAt,
+		&expiresAt,
+		&token.Revoked,
+		&revokedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("registration token not found")
+		}
+		return nil, fmt.Errorf("failed to get token by id: %w", err)
+	}
+
+	token.ID = id
+	token.Group = group.String
+	if expiresAt.Valid {
+		token.ExpiresAt = &expiresAt.Time
+	}
+	if revokedAt.Valid {
+		token.RevokedAt = &revokedAt.Time
+	}
+
+	return &token, nil
+}
+
 // UpdateToken implements RegistrationTokenStore.UpdateToken
 func (s *DatabaseRegistrationTokenStore) UpdateToken(ctx context.Context, token *business.RegistrationTokenData) error {
 	if token == nil {

@@ -35,6 +35,15 @@ func (a *StorageAdapter) GetToken(ctx context.Context, tokenStr string) (*Token,
 	return dataToToken(data), nil
 }
 
+// GetTokenByID retrieves a token by its stable UUID.
+func (a *StorageAdapter) GetTokenByID(ctx context.Context, id string) (*Token, error) {
+	data, err := a.store.GetTokenByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return dataToToken(data), nil
+}
+
 // ListTokens lists all tokens for a tenant
 func (a *StorageAdapter) ListTokens(ctx context.Context, tenantID string) ([]*Token, error) {
 	filter := &business.RegistrationTokenFilter{
@@ -75,6 +84,7 @@ func (a *StorageAdapter) RotateToken(ctx context.Context, tenantID, group string
 // tokenToData converts a Token to RegistrationTokenData
 func tokenToData(token *Token) *business.RegistrationTokenData {
 	return &business.RegistrationTokenData{
+		ID:            token.ID,
 		Token:         token.Token,
 		TenantID:      token.TenantID,
 		ControllerURL: token.ControllerURL,
@@ -89,6 +99,7 @@ func tokenToData(token *Token) *business.RegistrationTokenData {
 // dataToToken converts a RegistrationTokenData to Token
 func dataToToken(data *business.RegistrationTokenData) *Token {
 	return &Token{
+		ID:            data.ID,
 		Token:         data.Token,
 		TenantID:      data.TenantID,
 		ControllerURL: data.ControllerURL,

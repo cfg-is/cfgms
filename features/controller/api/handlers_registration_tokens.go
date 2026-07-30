@@ -18,7 +18,9 @@ import (
 // TokenResponse represents a registration token in API responses.
 // Token (full secret) is only populated by create and rotate responses.
 // All other endpoints (list, get, revoke) set TokenPrefix only.
+// TokenID is a stable UUID, always set, safe to expose — it is NOT the secret.
 type TokenResponse struct {
+	TokenID       string  `json:"token_id,omitempty"`     // stable UUID — always set (Issue #2970)
 	Token         string  `json:"token,omitempty"`        // full secret — create/rotate only
 	TokenPrefix   string  `json:"token_prefix,omitempty"` // first 6 chars — always set
 	TenantID      string  `json:"tenant_id"`
@@ -247,7 +249,11 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// Look up the token first for tenant scope enforcement and audit.
+	// Try exact match first (mTLS admin with full token), then UUID lookup (web UI).
 	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
+	if err != nil && strings.Contains(err.Error(), "not found") {
+		token, err = s.registrationTokenStore.GetTokenByID(r.Context(), tokenStr)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -268,8 +274,9 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Delete token from store
-	if err := s.registrationTokenStore.DeleteToken(r.Context(), tokenStr); err != nil {
+	// Delete token from store. Always use token.Token (the full secret string) as the
+	// store key, not tokenStr which may be a UUID from a web UI caller.
+	if err := s.registrationTokenStore.DeleteToken(r.Context(), token.Token); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, "Token not found", http.StatusNotFound)
 			return
@@ -280,7 +287,8 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// SanitizeLogValue wraps strings.ReplaceAll so CodeQL's ReplaceSanitizer clears the taint.
-	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
+	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Deleted registration token", "token_prefix", tokenPrefix)
 	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.TenantID)
 
@@ -309,8 +317,12 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Get token from store
+	// Get token from store.
+	// Try exact match first (mTLS admin with full token), then UUID lookup (web UI).
 	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
+	if err != nil && strings.Contains(err.Error(), "not found") {
+		token, err = s.registrationTokenStore.GetTokenByID(r.Context(), tokenStr)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -342,7 +354,8 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	// SanitizeLogValue wraps strings.ReplaceAll so CodeQL's ReplaceSanitizer clears the taint.
-	tokenPrefix := logging.SanitizeLogValue(tokenStr[:min(len(tokenStr), 6)])
+	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
+	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Revoked registration token", "token_prefix", tokenPrefix)
 	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.TenantID)
 
@@ -421,6 +434,7 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 // Use ONLY for create and rotate responses where the secret must be returned once.
 func tokenToResponse(token *registration.Token) TokenResponse {
 	resp := TokenResponse{
+		TokenID:       token.ID,
 		Token:         token.Token,
 		TokenPrefix:   token.Token[:min(len(token.Token), 6)],
 		TenantID:      token.TenantID,

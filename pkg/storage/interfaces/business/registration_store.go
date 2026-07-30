@@ -14,6 +14,9 @@ type RegistrationTokenStore interface {
 	// Token management
 	SaveToken(ctx context.Context, token *RegistrationTokenData) error
 	GetToken(ctx context.Context, tokenStr string) (*RegistrationTokenData, error)
+	// GetTokenByID retrieves a token by its stable UUID (Issue #2970).
+	// Returns "registration token not found" when absent.
+	GetTokenByID(ctx context.Context, id string) (*RegistrationTokenData, error)
 	UpdateToken(ctx context.Context, token *RegistrationTokenData) error
 	DeleteToken(ctx context.Context, tokenStr string) error
 	ListTokens(ctx context.Context, filter *RegistrationTokenFilter) ([]*RegistrationTokenData, error)
@@ -30,6 +33,10 @@ type RegistrationTokenStore interface {
 
 // RegistrationTokenData represents a registration token in the storage layer
 type RegistrationTokenData struct {
+	// ID is a stable UUID for this token (Issue #2970 — web UI identifier).
+	// Never the secret: the Token field is the credential.
+	ID string `json:"id" yaml:"id"`
+
 	// Token is the unique token string (e.g., "abcdefghijklmnopqrstuvwxyz")
 	Token string `json:"token" yaml:"token"`
 

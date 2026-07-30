@@ -160,6 +160,31 @@ func backfillSessionTokenRecords(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillRegistrationTokenID adds the `id` UUID column to a pre-existing
+// registration_tokens table (Issue #2970 — stable non-secret identifier for web UI).
+// Fresh databases (table absent) are skipped. The column is nullable so existing
+// rows remain valid; new rows always receive a generated UUID.
+func backfillRegistrationTokenID(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "registration_tokens")
+	if err != nil {
+		return fmt.Errorf("sqlite: registration_tokens back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	present, err := columnExists(ctx, db, "registration_tokens", "id")
+	if err != nil {
+		return fmt.Errorf("sqlite: registration_tokens id-column probe failed: %w", err)
+	}
+	if present {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE registration_tokens ADD COLUMN id TEXT`); err != nil {
+		return fmt.Errorf("sqlite: registration_tokens back-fill (id) failed: %w", err)
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 // All DDL statements are executed inside a single transaction to reduce WAL
@@ -173,6 +198,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillSessionTokenRecords(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillRegistrationTokenID(ctx, db); err != nil {
 		return err
 	}
 
@@ -337,6 +365,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		// Pre-existing deployments must DROP these columns before upgrading.
 		`CREATE TABLE IF NOT EXISTS registration_tokens (
 			token          TEXT PRIMARY KEY,
+			id             TEXT,
 			tenant_id      TEXT NOT NULL,
 			controller_url TEXT NOT NULL,
 			group_name     TEXT NOT NULL DEFAULT '',
@@ -347,6 +376,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_tenant_id  ON registration_tokens(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_group_name ON registration_tokens(group_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_id         ON registration_tokens(id)`,
 
 		// Stewards — durable fleet registry (ADR-003 §2, Issue #663)
 		// Records are never deleted; deregistered stewards are retained for audit.
