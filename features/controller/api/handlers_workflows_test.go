@@ -1079,3 +1079,117 @@ func TestWorkflowHandler_CancelExecution_SpecialCharsInVars_HandledSafely(t *tes
 		}
 	}
 }
+
+// --- step ID assignment (Issue #3036) ----------------------------------------
+
+// nestedWorkflowBody builds a workflow with a top-level sequential step that
+// contains two task child steps, for testing nested ID assignment.
+func nestedWorkflowBody(name string) []byte {
+	return mustMarshal(CreateWorkflowRequest{
+		Name: name,
+		Steps: []workflow.Step{
+			{
+				Name: "outer",
+				Type: workflow.StepTypeSequential,
+				Steps: []workflow.Step{
+					{Name: "inner-a", Type: workflow.StepTypeTask},
+					{Name: "inner-b", Type: workflow.StepTypeTask},
+				},
+			},
+			{Name: "sibling", Type: workflow.StepTypeTask},
+		},
+	})
+}
+
+// TestWorkflowHandler_GetWorkflow_StepIDsPresent verifies that GET /workflows/{id}
+// returns computed structural IDs on every step including nested children.
+func TestWorkflowHandler_GetWorkflow_StepIDsPresent(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	// Create
+	createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(nestedWorkflowBody("id-test")))
+	createReq = withTenantContext(createReq, "test-tenant")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code)
+
+	// GET
+	req := httptest.NewRequest("GET", "/workflows/id-test", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+
+	// Decode the steps array
+	var steps []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw["steps"], &steps))
+	require.Len(t, steps, 2, "expected 2 top-level steps")
+
+	// Top-level: outer → s0, sibling → s1
+	assertStepID(t, steps[0], "s0", "outer")
+	assertStepID(t, steps[1], "s1", "sibling")
+
+	// Nested: inner-a → s0.s0, inner-b → s0.s1
+	var children []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(steps[0]["steps"], &children))
+	require.Len(t, children, 2, "expected 2 nested steps")
+	assertStepID(t, children[0], "s0.s0", "inner-a")
+	assertStepID(t, children[1], "s0.s1", "inner-b")
+}
+
+// TestWorkflowHandler_ListWorkflows_StepIDsPresent verifies that GET /workflows
+// returns computed IDs on every step in every workflow in the list response.
+func TestWorkflowHandler_ListWorkflows_StepIDsPresent(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	// Create two workflows
+	for _, name := range []string{"list-id-wf1", "list-id-wf2"} {
+		createReq := httptest.NewRequest("POST", "/workflows", bytes.NewReader(nestedWorkflowBody(name)))
+		createReq = withTenantContext(createReq, "test-tenant")
+		createRec := httptest.NewRecorder()
+		router.ServeHTTP(createRec, createReq)
+		require.Equal(t, http.StatusCreated, createRec.Code, "create %s", name)
+	}
+
+	// List
+	req := httptest.NewRequest("GET", "/workflows", nil)
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+
+	var workflows []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body["workflows"], &workflows))
+	require.GreaterOrEqual(t, len(workflows), 2)
+
+	// Every workflow in the list must have IDs on its top-level steps
+	for _, wf := range workflows {
+		var steps []map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(wf["steps"], &steps))
+		for i, step := range steps {
+			var id string
+			require.NoError(t, json.Unmarshal(step["id"], &id), "step %d id must be present", i)
+			assert.NotEmpty(t, id, "step %d id must not be empty", i)
+		}
+	}
+}
+
+// assertStepID is a helper that checks a decoded step map has the expected id and name.
+func assertStepID(t *testing.T, step map[string]json.RawMessage, wantID, wantName string) {
+	t.Helper()
+	var id, name string
+	require.NoError(t, json.Unmarshal(step["id"], &id), "step.id must be present")
+	require.NoError(t, json.Unmarshal(step["name"], &name), "step.name must be present")
+	assert.Equal(t, wantID, id, "step %q: wrong id", wantName)
+	assert.Equal(t, wantName, name, "step with id %q: wrong name", wantID)
+}

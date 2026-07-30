@@ -451,8 +451,8 @@ func TestContinueWithStepExecution(t *testing.T) {
 	assert.Equal(t, StatusCompleted, final.GetStatus())
 
 	results := final.GetStepResults()
-	assert.Contains(t, results, "recovery-step")
-	assert.NotContains(t, results, "skipped-step", "continue_with should skip intervening steps")
+	assert.Contains(t, results, "s2", "recovery-step (s2) result must exist")
+	assert.NotContains(t, results, "s1", "skipped-step (s1) must be skipped by continue_with")
 }
 
 func TestContinueWithStepNotFound(t *testing.T) {
@@ -527,7 +527,8 @@ func TestFallbackStepExecution(t *testing.T) {
 	assert.Equal(t, StatusCompleted, final.GetStatus())
 
 	results := final.GetStepResults()
-	assert.Contains(t, results, "fallback-step")
+	// failing-step is s0; its fallback gets synthetic ID s0.fallback
+	assert.Contains(t, results, "s0.fallback", "fallback step result keyed as parent.fallback")
 }
 
 // TestRetryMaxAttempts verifies that executeStepsWithRetry loops up to
@@ -600,7 +601,7 @@ func TestRetryMaxAttempts(t *testing.T) {
 	assert.Equal(t, StatusCompleted, final.GetStatus(), "workflow should complete successfully after retries")
 
 	stepResults := final.GetStepResults()
-	result, exists := stepResults["http-retry-step"]
+	result, exists := stepResults["s0"] // http-retry-step is the only top-level step → s0
 	require.True(t, exists, "step result must exist")
 	assert.Equal(t, 2, result.RetryCount, "RetryCount should be 2 (failed twice, succeeded on third attempt)")
 }
@@ -644,7 +645,7 @@ func TestRetryNilConfig(t *testing.T) {
 	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when step has no retry config")
 
 	stepResults := final.GetStepResults()
-	result, exists := stepResults["transform-step"]
+	result, exists := stepResults["s0"] // transform-step is the only top-level step → s0
 	require.True(t, exists, "step result must exist")
 	assert.Equal(t, 0, result.RetryCount, "nil retryConfig must prevent the retry loop (RetryCount must be 0)")
 }
@@ -851,4 +852,115 @@ func TestMoveResourceToClusterExecutor_NilReturnsError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when move_resource_to_cluster executor is nil")
 	assert.Contains(t, final.GetError(), "executor not configured")
+}
+
+// TestEngine_StepResults_KeyedByStepID verifies that GetStepResults keys results by
+// the structural step ID ("s0", "s1") and not by step.Name.
+func TestEngine_StepResults_KeyedByStepID(t *testing.T) {
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "step-id-keying-test",
+		Steps: []Step{
+			{
+				Name: "alpha",
+				Type: StepTypeSequential,
+				Steps: []Step{
+					{
+						Name:  "beta",
+						Type:  StepTypeDelay,
+						Delay: &DelayConfig{Duration: 1 * time.Millisecond},
+					},
+				},
+			},
+			{
+				Name:  "gamma",
+				Type:  StepTypeDelay,
+				Delay: &DelayConfig{Duration: 1 * time.Millisecond},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+	waitForWorkflowCompletion(t, execution, 3*time.Second)
+
+	final, err := engine.GetExecution(execution.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, final.GetStatus())
+
+	results := final.GetStepResults()
+
+	// Results must be keyed by structural IDs, not step names.
+	_, hasS0 := results["s0"]
+	_, hasS1 := results["s1"]
+	assert.True(t, hasS0, "expected result keyed by s0 (alpha)")
+	assert.True(t, hasS1, "expected result keyed by s1 (gamma)")
+
+	// Name-based keys must not exist.
+	_, hasAlpha := results["alpha"]
+	_, hasGamma := results["gamma"]
+	assert.False(t, hasAlpha, "result must not be keyed by step name 'alpha'")
+	assert.False(t, hasGamma, "result must not be keyed by step name 'gamma'")
+
+	// Nested step beta is keyed as s0.s0
+	_, hasS0S0 := results["s0.s0"]
+	assert.True(t, hasS0S0, "expected result keyed by s0.s0 (beta)")
+}
+
+// TestEngine_LoopBody_StableID verifies that repeated loop iterations overwrite the
+// same result key (the loop body step's structural ID), so the canvas sees one stable
+// node whose status reflects the most-recent iteration.
+func TestEngine_LoopBody_StableID(t *testing.T) {
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "loop-stable-id-test",
+		Steps: []Step{
+			{
+				Name: "my-loop",
+				Type: StepTypeFor,
+				Loop: &LoopConfig{
+					Type:     LoopTypeFor,
+					Variable: "i",
+					Start:    1,
+					End:      3,
+				},
+				Steps: []Step{
+					{
+						Name:  "body",
+						Type:  StepTypeDelay,
+						Delay: &DelayConfig{Duration: 1 * time.Millisecond},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+	waitForWorkflowCompletion(t, execution, 3*time.Second)
+
+	final, err := engine.GetExecution(execution.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, final.GetStatus())
+
+	results := final.GetStepResults()
+
+	// The loop itself is s0; the body step inside is s0.s0.
+	// After 3 iterations the body result is overwritten to the last-iteration result
+	// — exactly one entry under the stable ID, not three separate keys.
+	_, hasLoop := results["s0"]
+	assert.True(t, hasLoop, "loop step s0 must have a result")
+
+	_, hasBody := results["s0.s0"]
+	assert.True(t, hasBody, "loop body s0.s0 must have a stable result")
+
+	// There must be exactly one entry for the body (most-recent iteration),
+	// not three (one per iteration with a name suffix).
+	for key := range results {
+		assert.False(t, key == "body" || key == "my-loop", "result must not be keyed by step name")
+	}
 }

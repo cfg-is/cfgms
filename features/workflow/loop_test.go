@@ -138,7 +138,7 @@ func TestWorkflowForLoop(t *testing.T) {
 				assert.Contains(t, execution.Error, "exceeded maximum iterations")
 			} else {
 				assert.Equal(t, StatusCompleted, execution.GetStatus())
-				assert.True(t, execution.HasStepResult("for-loop-step"))
+				assert.True(t, execution.HasStepResult("s0"), "for-loop-step result keyed by structural ID s0")
 
 				// Check that the loop variable reached the expected final value
 				finalVarValue, exists := execution.GetVariable(tt.loop.Variable)
@@ -333,7 +333,7 @@ func TestWorkflowForeachLoop(t *testing.T) {
 				assert.Contains(t, execution.Error, "exceeds maximum iterations")
 			} else {
 				assert.Equal(t, StatusCompleted, execution.GetStatus())
-				assert.True(t, execution.HasStepResult("foreach-loop-step"))
+				assert.True(t, execution.HasStepResult("s0"), "foreach-loop-step result keyed by structural ID s0")
 
 				// Check that loop variables were set
 				assert.True(t, execution.HasVariable(tt.loop.Variable))
@@ -505,9 +505,9 @@ func TestNestedLoops(t *testing.T) {
 	}
 
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
-	assert.True(t, execution.HasStepResult("outer-foreach"))
-	assert.True(t, execution.HasStepResult("inner-foreach"))
-	assert.True(t, execution.HasStepResult("nested-delay"))
+	assert.True(t, execution.HasStepResult("s0"), "outer-foreach result keyed by structural ID s0")
+	assert.True(t, execution.HasStepResult("s0.s0"), "inner-foreach result keyed by structural ID s0.s0")
+	assert.True(t, execution.HasStepResult("s0.s0.s0"), "nested-delay result keyed by structural ID s0.s0.s0")
 
 	// Check that both loop variables were set to their final values
 	assert.True(t, execution.HasVariable("outer_item"))

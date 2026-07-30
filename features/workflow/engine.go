@@ -122,6 +122,13 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 
 // ExecuteWorkflow starts execution of a workflow
 func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
+	// Clone steps before assigning IDs so each execution has its own private
+	// copy of the Step structs. Without this, concurrent calls share the same
+	// underlying array and the ID assignment races with goroutines launched for
+	// earlier executions of the same workflow.
+	workflow.Steps = CloneSteps(workflow.Steps)
+	AssignStepIDs(workflow.Steps)
+
 	executionID := generateExecutionID()
 
 	// Create execution context with timeout if specified
@@ -330,9 +337,10 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 								"step", step.Name,
 								"attempt", attempt)
 							lastRetryErr = e.executeStep(ctx, step, execution)
-							if result, exists := execution.GetStepResult(step.Name); exists {
+							retryKey := StepResultKey(step)
+							if result, exists := execution.GetStepResult(retryKey); exists {
 								result.RetryCount = attempt
-								execution.SetStepResult(step.Name, result)
+								execution.SetStepResult(retryKey, result)
 							}
 							if lastRetryErr == nil {
 								break
@@ -386,7 +394,9 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 							"step", step.Name,
 							"fallback", step.ErrorHandling.FallbackStep.Name,
 							"decision", decision.Message)
-						if fallbackErr := e.executeStep(ctx, *step.ErrorHandling.FallbackStep, execution); fallbackErr != nil {
+						fallback := *step.ErrorHandling.FallbackStep
+						fallback.ID = step.ID + ".fallback"
+						if fallbackErr := e.executeStep(ctx, fallback, execution); fallbackErr != nil {
 							e.logger.Error("Fallback step also failed",
 								"step", step.Name,
 								"fallback", step.ErrorHandling.FallbackStep.Name,
@@ -408,7 +418,8 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 
 // executeStep executes a single step based on its type
 func (e *Engine) executeStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
-	execution.SetCurrentStep(step.Name)
+	key := StepResultKey(step)
+	execution.SetCurrentStep(key)
 
 	e.logger.Info("Executing step",
 		"execution_id", execution.ID,
@@ -438,7 +449,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	}
 
 	// Store initial result safely
-	execution.SetStepResult(step.Name, result)
+	execution.SetStepResult(key, result)
 
 	var err error
 	switch step.Type {
@@ -496,7 +507,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var transformResult StepResult
 			transformResult, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
-			execution.SetStepResult(step.Name, transformResult)
+			execution.SetStepResult(key, transformResult)
 		}
 	case StepTypeQueryRingHealth:
 		if e.ringHealthExecutor == nil {
@@ -504,7 +515,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var rhResult StepResult
 			rhResult, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
-			execution.SetStepResult(step.Name, rhResult)
+			execution.SetStepResult(key, rhResult)
 		}
 	case StepTypeSetHARole:
 		if e.setHARoleExecutor == nil {
@@ -512,7 +523,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var haResult StepResult
 			haResult, err = e.setHARoleExecutor.ExecuteSetHARoleStep(ctx, step, execution)
-			execution.SetStepResult(step.Name, haResult)
+			execution.SetStepResult(key, haResult)
 		}
 	case StepTypeMoveResourceToCluster:
 		if e.moveResourceToClusterExecutor == nil {
@@ -520,14 +531,14 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		} else {
 			var moveResult StepResult
 			moveResult, err = e.moveResourceToClusterExecutor.ExecuteMoveResourceToClusterStep(ctx, step, execution)
-			execution.SetStepResult(step.Name, moveResult)
+			execution.SetStepResult(key, moveResult)
 		}
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
 	}
 
 	// Get the current result (which may have been updated by the step execution)
-	currentResult, exists := execution.GetStepResult(step.Name)
+	currentResult, exists := execution.GetStepResult(key)
 	if exists {
 		result = currentResult
 	}
@@ -560,9 +571,9 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	}
 
 	// Add execution trace entry
-	AddExecutionTrace(execution, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
+	AddExecutionTrace(execution, key, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
 
-	execution.SetStepResult(step.Name, result)
+	execution.SetStepResult(key, result)
 	return err
 }
 
@@ -1212,6 +1223,7 @@ func (e *Engine) executeFanOutStep(ctx context.Context, step Step, execution *Wo
 			// Create a copy of the worker template
 			workerStep := config.WorkerTemplate
 			workerStep.Name = fmt.Sprintf("%s_worker_%d", step.Name, index)
+			workerStep.ID = fmt.Sprintf("%s.w%d", step.ID, index)
 
 			// Create new execution context for the worker
 			workerExecution := &WorkflowExecution{
@@ -1251,7 +1263,7 @@ func (e *Engine) executeFanOutStep(ctx context.Context, step Step, execution *Wo
 					}
 				}
 				// Also capture step result
-				if stepResult, exists := workerExecution.GetStepResult(workerStep.Name); exists {
+				if stepResult, exists := workerExecution.GetStepResult(workerStep.ID); exists {
 					result.StepResult = stepResult
 				}
 			}

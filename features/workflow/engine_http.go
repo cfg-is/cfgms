@@ -184,13 +184,14 @@ func (e *Engine) executeDelayStep(ctx context.Context, step Step, execution *Wor
 		"duration", step.Delay.Duration)
 
 	// Set the output for the step result
-	result, exists := execution.GetStepResult(step.Name)
+	delayKey := StepResultKey(step)
+	result, exists := execution.GetStepResult(delayKey)
 	if exists {
 		if result.Output == nil {
 			result.Output = make(map[string]interface{})
 		}
 		result.Output["message"] = message
-		execution.SetStepResult(step.Name, result)
+		execution.SetStepResult(delayKey, result)
 	}
 
 	return nil
