@@ -14,6 +14,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
+import { TenantScopeProvider } from '../shell/TenantScopeContext.tsx'
 import PushPanel from './PushPanel.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -36,6 +37,30 @@ function makeStewPage(total: number) {
     }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
   )
+}
+
+function makeConfigsResponse(configs: object[], status = 200) {
+  return new Response(
+    JSON.stringify({
+      data: configs,
+      timestamp: new Date().toISOString(),
+    }),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+function makeConfigEntry(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    tenant_id: 'root',
+    steward_id: 'sw-1',
+    version: 1,
+    updated_at: '2026-01-01T00:00:00Z',
+    updated_by: 'admin',
+    source: 'git',
+    checksum: 'abc123',
+    tags: [],
+    ...overrides,
+  }
 }
 
 function makePushResponse(pushId: string) {
@@ -61,11 +86,13 @@ function makePushStatus(pushId: string, status: string) {
   )
 }
 
-function renderPushPanel(onClose = vi.fn()) {
+function renderPushPanel(onClose = vi.fn(), rootPath = 'root') {
   return render(
     <MemoryRouter>
       <AuthProvider>
-        <PushPanel onClose={onClose} />
+        <TenantScopeProvider rootPath={rootPath}>
+          <PushPanel onClose={onClose} />
+        </TenantScopeProvider>
       </AuthProvider>
     </MemoryRouter>,
   )
@@ -75,10 +102,12 @@ function fillPushForm(selector = 'name:web*', configId = 'sw-1', tenantId = 'roo
   fireEvent.change(screen.getByRole('textbox', { name: /selector/i }), {
     target: { value: selector },
   })
-  fireEvent.change(screen.getByRole('textbox', { name: /config id/i }), {
+  // Config ID and Tenant ID inputs have role="combobox" (datalist-backed);
+  // query by label so the role does not matter.
+  fireEvent.change(screen.getByLabelText(/config id/i), {
     target: { value: configId },
   })
-  fireEvent.change(screen.getByRole('textbox', { name: /tenant id/i }), {
+  fireEvent.change(screen.getByLabelText(/tenant id/i), {
     target: { value: tenantId },
   })
 }
@@ -87,9 +116,10 @@ describe('PushPanel — rendering', () => {
   it('renders form inputs and action buttons', () => {
     renderPushPanel()
     expect(screen.getByRole('textbox', { name: /selector/i })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: /config id/i })).toBeInTheDocument()
+    // Config ID and Tenant ID are datalist-backed inputs (role="combobox")
+    expect(screen.getByLabelText(/config id/i)).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: /version/i })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: /tenant id/i })).toBeInTheDocument()
+    expect(screen.getByLabelText(/tenant id/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /resolve targets/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /push config/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
@@ -103,7 +133,7 @@ describe('PushPanel — rendering', () => {
 
 describe('PushPanel — confirm-step gating (AC)', () => {
   it('does NOT fire the push API when Push config is clicked — shows confirm dialog first', async () => {
-    fetchMock.mockResolvedValue(makeStewPage(5))
+    fetchMock.mockImplementation(() => Promise.resolve(makeStewPage(5)))
     renderPushPanel()
 
     fillPushForm()
@@ -124,7 +154,7 @@ describe('PushPanel — confirm-step gating (AC)', () => {
   })
 
   it('confirm dialog shows the resolved target count', async () => {
-    fetchMock.mockResolvedValue(makeStewPage(12))
+    fetchMock.mockImplementation(() => Promise.resolve(makeStewPage(12)))
     renderPushPanel()
 
     fillPushForm('os:linux', 'my-config', 'root')
@@ -137,7 +167,7 @@ describe('PushPanel — confirm-step gating (AC)', () => {
   })
 
   it('cancelling the confirm dialog prevents the push from firing', async () => {
-    fetchMock.mockResolvedValue(makeStewPage(3))
+    fetchMock.mockImplementation(() => Promise.resolve(makeStewPage(3)))
     renderPushPanel()
 
     fillPushForm()
@@ -192,9 +222,13 @@ describe('PushPanel — confirm-step gating (AC)', () => {
 
 describe('PushPanel — push status display', () => {
   it('shows push status after a successful push', async () => {
-    fetchMock.mockResolvedValueOnce(makeStewPage(2))
-    fetchMock.mockResolvedValueOnce(makePushResponse('push-xyz'))
-    fetchMock.mockResolvedValue(makePushStatus('push-xyz', 'completed'))
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u === '/api/v1/configs') return Promise.resolve(makeConfigsResponse([]))
+      if (u.startsWith('/api/v1/stewards')) return Promise.resolve(makeStewPage(2))
+      if (u === '/api/v1/config/push') return Promise.resolve(makePushResponse('push-xyz'))
+      return Promise.resolve(makePushStatus('push-xyz', 'completed'))
+    })
 
     renderPushPanel()
     fillPushForm()
@@ -209,13 +243,21 @@ describe('PushPanel — push status display', () => {
   })
 
   it('shows an error when the push API returns non-ok', async () => {
-    fetchMock.mockResolvedValueOnce(makeStewPage(1))
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: 'not the leader' }), {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    )
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u === '/api/v1/configs') {
+        return Promise.resolve(makeConfigsResponse([]))
+      }
+      if (u.startsWith('/api/v1/stewards')) {
+        return Promise.resolve(makeStewPage(1))
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ error: 'not the leader' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    })
 
     renderPushPanel()
     fillPushForm()
@@ -239,7 +281,7 @@ describe('PushPanel — push status display', () => {
 
 describe('PushPanel — resolve targets', () => {
   it('shows resolved count after clicking Resolve targets', async () => {
-    fetchMock.mockResolvedValue(makeStewPage(8))
+    fetchMock.mockImplementation(() => Promise.resolve(makeStewPage(8)))
     renderPushPanel()
 
     fireEvent.change(screen.getByRole('textbox', { name: /selector/i }), {
@@ -458,5 +500,167 @@ describe('PushPanel — per-steward deployment breakdown', () => {
     )
     await waitFor(() => expect(screen.getByText(xssId)).toBeInTheDocument())
     expect((window as unknown as Record<string, unknown>).__xss).toBeUndefined()
+  })
+})
+
+// ── Config ID picker ──────────────────────────────────────────────────────────
+
+describe('PushPanel — Config ID picker', () => {
+  it('shows datalist options sourced from useConfigList', async () => {
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u === '/api/v1/configs') {
+        return Promise.resolve(
+          makeConfigsResponse([
+            makeConfigEntry({ steward_id: 'sw-alpha' }),
+            makeConfigEntry({ steward_id: 'sw-beta' }),
+          ]),
+        )
+      }
+      return Promise.resolve(makeStewPage(0))
+    })
+
+    renderPushPanel()
+
+    await waitFor(() => {
+      const datalist = document.getElementById('push-config-id-options')
+      expect(datalist?.querySelector('option[value="sw-alpha"]')).not.toBeNull()
+      expect(datalist?.querySelector('option[value="sw-beta"]')).not.toBeNull()
+    })
+  })
+
+  it('selecting a Config ID from the picker populates the field used by the push request', async () => {
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u === '/api/v1/configs') {
+        return Promise.resolve(
+          makeConfigsResponse([makeConfigEntry({ steward_id: 'sw-picked' })]),
+        )
+      }
+      if (u.startsWith('/api/v1/stewards')) {
+        return Promise.resolve(makeStewPage(3))
+      }
+      return Promise.resolve(makePushResponse('push-picker-1'))
+    })
+
+    renderPushPanel()
+
+    await waitFor(() => {
+      const datalist = document.getElementById('push-config-id-options')
+      expect(datalist?.querySelector('option[value="sw-picked"]')).not.toBeNull()
+    })
+
+    // Simulate picking from the datalist: browser sets the input value on selection.
+    // Config ID and Tenant ID are datalist-backed (role="combobox"); query by label.
+    fillPushForm('os:linux', 'sw-picked', 'root')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() => {
+      const pushCall = fetchMock.mock.calls.find(
+        (c) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).includes('/api/v1/config/push') &&
+          (c[1] as RequestInit | undefined)?.method === 'POST',
+      )
+      expect(pushCall).toBeDefined()
+      const body = JSON.parse((pushCall![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body.config_id).toBe('sw-picked')
+    })
+  })
+
+  it('allows free-text Config ID entry when no picker options are available', async () => {
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u === '/api/v1/configs') {
+        return Promise.resolve(makeConfigsResponse([]))
+      }
+      if (u.startsWith('/api/v1/stewards')) {
+        return Promise.resolve(makeStewPage(1))
+      }
+      return Promise.resolve(makePushResponse('push-freetext'))
+    })
+
+    renderPushPanel()
+
+    await waitFor(() => {
+      const datalist = document.getElementById('push-config-id-options')
+      expect(datalist).toBeInTheDocument()
+    })
+
+    const datalist = document.getElementById('push-config-id-options')
+    expect(datalist?.querySelectorAll('option')).toHaveLength(0)
+
+    fillPushForm('os:windows', 'my-custom-config-id', 'root')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() => {
+      const pushCall = fetchMock.mock.calls.find(
+        (c) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).includes('/api/v1/config/push') &&
+          (c[1] as RequestInit | undefined)?.method === 'POST',
+      )
+      expect(pushCall).toBeDefined()
+      const body = JSON.parse((pushCall![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body.config_id).toBe('my-custom-config-id')
+    })
+  })
+})
+
+// ── Tenant ID picker ──────────────────────────────────────────────────────────
+
+describe('PushPanel — Tenant ID picker', () => {
+  it('shows datalist options from observed tenant paths', async () => {
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u === '/api/v1/configs') return Promise.resolve(makeConfigsResponse([]))
+      return Promise.resolve(makeStewPage(0))
+    })
+
+    renderPushPanel(vi.fn(), 'root/msp-a')
+
+    const datalist = document.getElementById('push-tenant-id-options')
+    expect(datalist?.querySelector('option[value="root/msp-a"]')).not.toBeNull()
+  })
+
+  it('allows free-text Tenant ID entry regardless of observed paths', async () => {
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u === '/api/v1/configs') return Promise.resolve(makeConfigsResponse([]))
+      if (u.startsWith('/api/v1/stewards')) return Promise.resolve(makeStewPage(1))
+      return Promise.resolve(makePushResponse('push-tenant-freetext'))
+    })
+
+    renderPushPanel(vi.fn(), 'root')
+
+    fillPushForm('os:linux', 'cfg-1', 'root/custom-tenant')
+
+    fireEvent.click(screen.getByRole('button', { name: /resolve targets/i }))
+    await waitFor(() => expect(screen.getByTestId('push-target-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /push config/i }))
+    fireEvent.click(screen.getByTestId('push-confirm-btn'))
+
+    await waitFor(() => {
+      const pushCall = fetchMock.mock.calls.find(
+        (c) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).includes('/api/v1/config/push') &&
+          (c[1] as RequestInit | undefined)?.method === 'POST',
+      )
+      expect(pushCall).toBeDefined()
+      const body = JSON.parse((pushCall![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body.tenant_id).toBe('root/custom-tenant')
+    })
   })
 })
