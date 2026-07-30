@@ -377,8 +377,8 @@ engineering gaps are narrower than this section originally assumed.
 
 - [ ] OpenSSF Scorecard optimization (target score: 9.0+)
 - [ ] Go native fuzzing integration for critical packages
-- [ ] Evaluate and integrate Snyk (if beneficial beyond existing coverage)
-- [ ] Evaluate and integrate SonarCloud (if beneficial beyond staticcheck)
+- [x] Evaluate and integrate Snyk (if beneficial beyond existing coverage) — **DROP**: see [security-workflow-guide.md §9](../development/security-workflow-guide.md#9-snyk--sonarcloud--tool-evaluation)
+- [x] Evaluate and integrate SonarCloud (if beneficial beyond staticcheck) — **DROP**: see [security-workflow-guide.md §9](../development/security-workflow-guide.md#9-snyk--sonarcloud--tool-evaluation)
 - [ ] Security testing automation improvements
 
 **Web Frontend Security** — mostly delivered:
