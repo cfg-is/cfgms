@@ -19,7 +19,7 @@ function makeWorkflow(overrides: Partial<VersionedWorkflow> = {}): VersionedWork
     name: 'onboard-user',
     description: 'Create a user on the DC',
     version: '1.5.0',
-    steps: [{ name: 'step-1', type: 'script', config: {} }],
+    steps: [{ id: 'step-1', name: 'step-1', type: 'script', config: {} }],
     semantic_version: { major: 1, minor: 5, patch: 0, pre_release: '', build_meta: '' },
     ...overrides,
   }
