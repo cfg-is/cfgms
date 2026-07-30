@@ -8,6 +8,8 @@ package types
 
 import (
 	"time"
+
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 )
 
 // DefaultChunkSize is the maximum bytes per gRPC chunk (64 KB).
@@ -79,9 +81,15 @@ type DNATransfer struct {
 
 	// Delta indicates if this is a delta update
 	//
-	// If true, Attributes contains only changed attributes since the
-	// last transfer. If false, contains complete DNA snapshot.
+	// If true and Fragments is non-empty, this is a fragment-delta per ADR-017 §7.
+	// If true and Fragments is nil, Attributes contains changed attributes only.
+	// If false, Attributes contains the complete DNA snapshot.
 	Delta bool `json:"delta"`
+
+	// Fragments carries fragment data for partial-sync delta transfers (ADR-017 §7).
+	// Populated when Delta=true and the steward supports the fragment-based protocol.
+	// When Delta=false, this field is nil and Attributes carries the full snapshot.
+	Fragments []*commonpb.Fragment `json:"fragments,omitempty"`
 
 	// BaseVersion is the DNA version this delta is based on (if Delta=true)
 	BaseVersion string `json:"base_version,omitempty"`

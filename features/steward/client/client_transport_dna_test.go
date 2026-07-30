@@ -9,11 +9,14 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	dna "github.com/cfgis/cfgms/features/steward/dna"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
@@ -994,4 +997,435 @@ func TestStartDNARefreshLoop_NilCollectorWarns(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "must log a warning when dnaCollector is nil")
+}
+
+// ---------------------------------------------------------------------------
+// Partial-sync protocol tests (ADR-017 §7, Issue #2906)
+// ---------------------------------------------------------------------------
+
+// makeClientFragments builds test fragments and returns them along with the
+// computed aggregate root, for seeding TransportClient fragment state.
+func makeClientFragments(t *testing.T, n int) ([]*commonpb.Fragment, string) {
+	t.Helper()
+	frags := make([]*commonpb.Fragment, n)
+	manifest := make([]*commonpb.ManifestEntry, n)
+	for i := 0; i < n; i++ {
+		canonical := []byte(fmt.Sprintf(`{"id":%d,"v":"val%d"}`, i, i))
+		h := dna.FragmentHash(canonical)
+		frags[i] = &commonpb.Fragment{
+			FragmentId:     fmt.Sprintf("frag-%d", i),
+			Authority:      "test",
+			CanonicalBytes: canonical,
+			FragmentHash:   h,
+		}
+		manifest[i] = &commonpb.ManifestEntry{FragmentId: frags[i].FragmentId, FragmentHash: h}
+	}
+	root, err := dna.AggregateRoot(manifest)
+	require.NoError(t, err)
+	return frags, root
+}
+
+// TestSetCurrentDNAFragments_SetsAggregateRoot verifies that setCurrentDNAFragments
+// correctly computes and stores the aggregate root from the fragment manifest
+// (ADR-017 §7 step 1). SendHeartbeat reads currentDNAAggregateRoot directly and
+// includes it in the Heartbeat struct; this test verifies the field is populated.
+func TestSetCurrentDNAFragments_SetsAggregateRoot(t *testing.T) {
+	c := newMinimalClient(t)
+
+	frags, expectedRoot := makeClientFragments(t, 3)
+	c.setCurrentDNAFragments(frags)
+
+	c.dnaMu.RLock()
+	gotRoot := c.currentDNAAggregateRoot
+	gotFrags := c.currentDNAFragments
+	c.dnaMu.RUnlock()
+
+	assert.Equal(t, expectedRoot, gotRoot,
+		"setCurrentDNAFragments must store the AggregateRoot computed from the fragment manifest")
+	require.Len(t, gotFrags, len(frags),
+		"setCurrentDNAFragments must store all provided fragments")
+}
+
+// TestSyncDNAHandler_PartialSync_SendsFragmentDelta verifies that the sync_dna
+// handler sends a fragment delta (Delta=true, Fragments populated) when the
+// command carries fragment_ids and the steward has matching fragments.
+func TestSyncDNAHandler_PartialSync_SendsFragmentDelta(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-partial"
+	c.tenantID = "tenant-1"
+
+	frags, _ := makeClientFragments(t, 3)
+	c.dnaMu.Lock()
+	c.currentDNAFragments = frags
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-partial")
+	require.NoError(t, err)
+
+	// Request all three fragment IDs.
+	requestedIDs := []string{"frag-0", "frag-1", "frag-2"}
+	idsJSON, err := json.Marshal(requestedIDs)
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-partial-1",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-partial",
+		TenantID:  "tenant-1",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{"fragment_ids": string(idsJSON)},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		require.NotNil(t, transfer)
+		assert.True(t, transfer.Delta, "partial sync must set Delta=true")
+		require.Len(t, transfer.Fragments, 3, "all requested fragments must be sent")
+		assert.Equal(t, "cmd-partial-1", transfer.Metadata["command_id"])
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for partial sync_dna handler to call SendDNA")
+	}
+}
+
+// TestSyncDNAHandler_NoFragmentIDs_FullSync_Regression verifies that SYNC_DNA
+// without fragment_ids param still triggers the full-snapshot path (Delta=false).
+// This is the regression guard ensuring the new partial-sync branch is additive.
+func TestSyncDNAHandler_NoFragmentIDs_FullSync_Regression(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-regr"
+	c.tenantID = "tenant-1"
+
+	dnaAttrs := map[string]string{"os": "linux", "hostname": "host-1"}
+	c.dnaMu.Lock()
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
+	c.currentDNAHash = dna.ComputeHash(dnaAttrs)
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-regr")
+	require.NoError(t, err)
+
+	// No fragment_ids → full sync.
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-full-regr",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-regr",
+		TenantID:  "tenant-1",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{}, // no fragment_ids
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		assert.False(t, transfer.Delta, "full sync (no fragment_ids) must set Delta=false")
+		assert.Nil(t, transfer.Fragments, "full sync must not carry fragments")
+		assert.NotEmpty(t, transfer.Attributes, "full sync must carry attributes")
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for full sync_dna to call SendDNA")
+	}
+}
+
+// TestSyncDNAHandler_PartialSync_NoFragmentState_FallsBackToFullSync verifies
+// that when fragment_ids is present but the steward has no currentDNAFragments,
+// the handler falls back to a full sync rather than failing.
+func TestSyncDNAHandler_PartialSync_NoFragmentState_FallsBackToFullSync(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-fallback"
+	c.tenantID = "tenant-1"
+
+	dnaAttrs := map[string]string{"os": "linux"}
+	c.dnaMu.Lock()
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
+	c.currentDNAHash = dna.ComputeHash(dnaAttrs)
+	// currentDNAFragments is nil (no fragment collector).
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-fallback")
+	require.NoError(t, err)
+
+	idsJSON, err := json.Marshal([]string{"frag-0", "frag-1"})
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-fallback",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-fallback",
+		TenantID:  "tenant-1",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{"fragment_ids": string(idsJSON)},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		assert.False(t, transfer.Delta, "fallback must produce a full sync with Delta=false")
+		assert.Nil(t, transfer.Fragments, "fallback must not carry fragments")
+		assert.NotEmpty(t, transfer.Attributes)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for fallback to full sync")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FragmentCollector tests (ADR-017 §7, Issue #2906)
+// ---------------------------------------------------------------------------
+
+// fragmentAndAttrCollector is a real in-process implementation of both DNACollector
+// and FragmentCollector. It returns pre-set attrs and fragments for deterministic
+// test assertions without relying on any external component.
+type fragmentAndAttrCollector struct {
+	attrs     map[string]string
+	fragments []*commonpb.Fragment
+}
+
+func (c *fragmentAndAttrCollector) CollectAttributes(_ context.Context) (map[string]string, error) {
+	return c.attrs, nil
+}
+
+func (c *fragmentAndAttrCollector) CollectFragments(_ context.Context) ([]*commonpb.Fragment, error) {
+	return c.fragments, nil
+}
+
+var _ DNACollector = (*fragmentAndAttrCollector)(nil)
+var _ FragmentCollector = (*fragmentAndAttrCollector)(nil)
+
+// TestRefreshCurrentDNA_FragmentCollector_SetsAggregateRoot verifies that when
+// the wired DNACollector also implements FragmentCollector, RefreshCurrentDNA
+// populates both currentDNAHash and currentDNAAggregateRoot (ADR-017 §7 step 1).
+func TestRefreshCurrentDNA_FragmentCollector_SetsAggregateRoot(t *testing.T) {
+	c := newMinimalClient(t)
+
+	attrs := map[string]string{"hostname": "box-1", "os": "linux"}
+	frags, expectedRoot := makeClientFragments(t, 3)
+
+	collector := &fragmentAndAttrCollector{attrs: attrs, fragments: frags}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+
+	c.dnaMu.RLock()
+	gotHash := c.currentDNAHash
+	gotRoot := c.currentDNAAggregateRoot
+	gotFrags := c.currentDNAFragments
+	c.dnaMu.RUnlock()
+
+	assert.NotEmpty(t, gotHash, "RefreshCurrentDNA must populate currentDNAHash")
+	assert.Equal(t, expectedRoot, gotRoot,
+		"RefreshCurrentDNA must populate currentDNAAggregateRoot from the fragment manifest")
+	require.Len(t, gotFrags, len(frags),
+		"RefreshCurrentDNA must store all collected fragments")
+}
+
+// TestRefreshCurrentDNA_FragmentCollector_EmptyFragmentsLeavesRootUnchanged verifies
+// that when CollectFragments returns zero fragments, RefreshCurrentDNA does not
+// mutate currentDNAAggregateRoot (empty collect must not clobber a known-good root).
+func TestRefreshCurrentDNA_FragmentCollector_EmptyFragmentsLeavesRootUnchanged(t *testing.T) {
+	c := newMinimalClient(t)
+
+	// Seed a known-good root via a non-empty collect.
+	frags, expectedRoot := makeClientFragments(t, 2)
+	c.setCurrentDNAFragments(frags)
+
+	// Now run RefreshCurrentDNA with a collector that returns no fragments.
+	collector := &fragmentAndAttrCollector{
+		attrs:     map[string]string{"os": "linux"},
+		fragments: nil, // empty — root must not change
+	}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+
+	c.dnaMu.RLock()
+	gotRoot := c.currentDNAAggregateRoot
+	c.dnaMu.RUnlock()
+	assert.Equal(t, expectedRoot, gotRoot,
+		"currentDNAAggregateRoot must be unchanged when CollectFragments returns empty")
+}
+
+// TestParseFragmentIDs covers every shape the control plane can deliver the
+// fragment_ids param in, plus the rejection cases.
+//
+// The wire path is lossy in a way that matters: the controller marshals a JSON
+// array into a string param, but the gRPC control-plane provider JSON-decodes
+// any param value that is valid JSON on arrival, so the steward actually receives
+// []interface{}. A handler that only accepts the string form silently disables
+// partial sync on the real control plane.
+func TestParseFragmentIDs(t *testing.T) {
+	want := []string{"frag-0", "file:/etc/hosts", "service:sshd"}
+
+	t.Run("json string as sent by the controller", func(t *testing.T) {
+		raw, err := json.Marshal(want)
+		require.NoError(t, err)
+		got, err := parseFragmentIDs(string(raw))
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("interface slice as delivered over the real control plane", func(t *testing.T) {
+		delivered := make([]interface{}, 0, len(want))
+		for _, id := range want {
+			delivered = append(delivered, id)
+		}
+		got, err := parseFragmentIDs(delivered)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("native string slice", func(t *testing.T) {
+		got, err := parseFragmentIDs(want)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("absent and empty are not errors", func(t *testing.T) {
+		got, err := parseFragmentIDs(nil)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+
+		got, err = parseFragmentIDs("")
+		require.NoError(t, err)
+		assert.Empty(t, got)
+
+		got, err = parseFragmentIDs("[]")
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+
+	t.Run("rejects malformed input", func(t *testing.T) {
+		_, err := parseFragmentIDs("not json")
+		require.Error(t, err)
+
+		_, err = parseFragmentIDs([]interface{}{"frag-0", 42})
+		require.Error(t, err, "non-string elements must be rejected, not coerced")
+
+		_, err = parseFragmentIDs([]interface{}{"frag-0", ""})
+		require.Error(t, err, "empty fragment IDs must be rejected")
+
+		_, err = parseFragmentIDs(map[string]interface{}{"frag-0": true})
+		require.Error(t, err, "unsupported param types must be rejected")
+
+		oversized := make([]string, maxRequestedFragmentIDs+1)
+		for i := range oversized {
+			oversized[i] = fmt.Sprintf("frag-%d", i)
+		}
+		_, err = parseFragmentIDs(oversized)
+		require.Error(t, err, "an unbounded ID list must be rejected")
+	})
+}
+
+// TestSyncDNAHandler_PartialSync_WireDecodedParams verifies the sync_dna handler
+// takes the partial-sync path when fragment_ids arrives in the []interface{} form
+// the real gRPC control plane produces. This is the regression guard for the bug
+// an in-package fake control plane hid: the controller sends a JSON string, the
+// provider re-parses it, and a string-only type assertion made every partial sync
+// fall back to a full snapshot.
+func TestSyncDNAHandler_PartialSync_WireDecodedParams(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-wireparams"
+	c.tenantID = "tenant-1"
+
+	frags, _ := makeClientFragments(t, 3)
+	c.dnaMu.Lock()
+	c.currentDNAFragments = frags
+	// A full snapshot is also available, so a regression falls back silently
+	// instead of erroring — the assertion below is what catches it.
+	c.currentDNAAttrs = map[string]string{"os": "linux"}
+	c.currentDNAHash = dna.ComputeHash(c.currentDNAAttrs)
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-wireparams")
+	require.NoError(t, err)
+
+	// Exactly what stringMapToInterfaceMap yields for a marshalled ID array.
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-wireparams",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-wireparams",
+		TenantID:  "tenant-1",
+		Timestamp: time.Now(),
+		Params: map[string]interface{}{
+			"fragment_ids": []interface{}{"frag-0", "frag-1", "frag-2"},
+		},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		require.NotNil(t, transfer)
+		assert.True(t, transfer.Delta,
+			"wire-decoded fragment_ids must still take the partial-sync path")
+		require.Len(t, transfer.Fragments, 3)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for the partial sync_dna handler to call SendDNA")
+	}
+}
+
+// TestSyncDNAHandler_PartialSync_MalformedFragmentIDs_NoSend verifies that a
+// malformed fragment_ids param fails the command instead of silently degrading to
+// a full snapshot: nothing is sent on the data plane, so the controller observes
+// the failure and can retry with a full sync rather than believing a partial sync
+// satisfied its request.
+func TestSyncDNAHandler_PartialSync_MalformedFragmentIDs_NoSend(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-badparams"
+	c.tenantID = "tenant-1"
+
+	frags, _ := makeClientFragments(t, 2)
+	c.dnaMu.Lock()
+	c.currentDNAFragments = frags
+	// A full snapshot IS available: a regression that ignores the malformed param
+	// would happily send it, which is exactly what this test forbids.
+	c.currentDNAAttrs = map[string]string{"os": "linux"}
+	c.currentDNAHash = dna.ComputeHash(c.currentDNAAttrs)
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-badparams")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-badparams",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-badparams",
+		TenantID:  "tenant-1",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{"fragment_ids": []interface{}{"frag-0", 7}},
+	}}
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		t.Fatalf("no DNA may be sent for a malformed fragment_ids param, got delta=%v", transfer.Delta)
+	case <-time.After(250 * time.Millisecond):
+		// Nothing sent — the command failed as required.
+	}
 }
