@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -64,33 +65,47 @@ import (
 // The factory provides on-demand loading of modules from the discovery registry,
 // caches loaded instances for reuse, handles errors according to the configured
 // error handling policy, and implements centralized logging injection.
+//
+// A ModuleFactory is safe for concurrent use. A single factory is shared by all
+// steward call paths (convergence, command handlers, the Tier-2 observe sweep),
+// and command handlers run one goroutine per command, so every access to the
+// mutable fields below must hold mu. Unsynchronized map access here would be a
+// concurrent map read/write — a fatal, unrecoverable process abort.
 type ModuleFactory struct {
+	// mu guards all mutable factory state: instances, injectionStatus,
+	// stewardID, loggerProvider, secretStore and gate. registry and config are
+	// immutable after construction and may be read without holding mu.
+	mu sync.RWMutex
+
 	// registry contains information about discovered modules
 	registry discovery.ModuleRegistry
 
-	// instances caches loaded module instances for reuse
+	// instances caches loaded module instances for reuse. Guarded by mu.
 	instances map[string]modules.Module
 
 	// config defines error handling behavior
 	config config.ErrorHandlingConfig
 
-	// stewardID identifies the steward this factory belongs to
+	// stewardID identifies the steward this factory belongs to. Guarded by mu.
 	stewardID string
 
-	// logger is the factory's own operational logger
+	// logger is the factory's own operational logger. Set at construction and
+	// never reassigned; logging.Logger implementations are safe for concurrent use.
 	logger logging.Logger
 
-	// loggerProvider creates loggers for module injection
+	// loggerProvider creates loggers for module injection. Guarded by mu.
 	loggerProvider modules.LoggerProvider
 
-	// secretStore is injected into modules that implement SecretStoreInjectable
+	// secretStore is injected into modules that implement SecretStoreInjectable.
+	// Guarded by mu.
 	secretStore secretsif.SecretStore
 
 	// gate is the maintenance gate injected into the patch module for reboot-window
 	// enforcement. When nil, the patch module uses the fail-closed default (nil manager → deny).
+	// Guarded by mu.
 	gate maintinterfaces.Gate
 
-	// injectionStatus tracks logger injection status for each module
+	// injectionStatus tracks logger injection status for each module. Guarded by mu.
 	injectionStatus map[string]modules.LoggerInjectionStatus
 }
 
@@ -145,7 +160,15 @@ func NewWithStewardID(registry discovery.ModuleRegistry, errorConfig config.Erro
 //
 // This allows built-in modules (file, directory, firewall, etc.) to work
 // even when no external modules are discovered on the filesystem.
+//
+// LoadModule is safe for concurrent use: the whole load is serialized under mu
+// so that a cache hit, module construction, dependency injection and the cache
+// write are atomic with respect to other callers. Serializing construction also
+// guarantees every caller receives the same cached instance for a given name.
 func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	// Check if module is already loaded
 	if instance, exists := f.instances[moduleName]; exists {
 		return instance, nil
@@ -202,6 +225,8 @@ var builtinModuleConstructors = map[string]func() modules.Module{
 // The hyperv module is handled specially so a durable provision store can be
 // wired via the factory logger (required for the fallback warn path).
 // The patch module is handled specially so the maintenance gate can be injected.
+//
+// Callers must hold f.mu (it reads f.gate and f.stewardID via newPatchModule).
 func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, error) {
 	if moduleName == "hyperv" {
 		return f.newHypervModule(), nil
@@ -220,6 +245,8 @@ func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, er
 // GateWindowAdapter when a maintenance gate is available. When no gate has been
 // set (f.gate == nil), the patch module starts without a window manager; any
 // patch config that declares a maintenance.window will then be denied fail-closed.
+//
+// Callers must hold f.mu (it reads f.gate and f.stewardID).
 func (f *ModuleFactory) newPatchModule() modules.Module {
 	m := patch.New()
 	if f.gate == nil {
@@ -239,6 +266,8 @@ func (f *ModuleFactory) newPatchModule() modules.Module {
 // reboot-window enforcement. Must be called before the first LoadModule("patch")
 // for the gate to take effect. Parallels SetSecretStore.
 func (f *ModuleFactory) SetMaintenanceGate(gate maintinterfaces.Gate) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.gate = gate
 }
 
@@ -246,6 +275,8 @@ func (f *ModuleFactory) SetMaintenanceGate(gate maintinterfaces.Gate) {
 // If the store cannot be created (e.g. the path is not writable on this boot),
 // it falls back to the module's built-in in-memory store — steward startup
 // never crashes over a non-critical store init failure.
+//
+// Callers must hold f.mu (invoked from the LoadModule critical section).
 func (f *ModuleFactory) newHypervModule() modules.Module {
 	store := f.newHypervProvisionStore()
 	if store == nil {
@@ -335,6 +366,9 @@ func (f *ModuleFactory) CreateModuleInstance(moduleName string) (modules.Module,
 
 // GetLoadedModules returns a list of currently loaded module names
 func (f *ModuleFactory) GetLoadedModules() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
 	modules := make([]string, 0, len(f.instances))
 	for name := range f.instances {
 		modules = append(modules, name)
@@ -347,16 +381,22 @@ func (f *ModuleFactory) GetLoadedModules() []string {
 // Used in tests to inject real test implementations and in production to pre-wire
 // modules that need special construction (e.g. modules with injected dependencies).
 func (f *ModuleFactory) RegisterModule(name string, mod modules.Module) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.instances[name] = mod
 }
 
 // UnloadModule removes a module instance from the cache
 func (f *ModuleFactory) UnloadModule(moduleName string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.instances, moduleName)
 }
 
 // UnloadAllModules removes all module instances from the cache
 func (f *ModuleFactory) UnloadAllModules() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.instances = make(map[string]modules.Module)
 }
 
@@ -368,6 +408,8 @@ func (f *ModuleFactory) GetModuleInfo(moduleName string) (discovery.ModuleInfo, 
 
 // SetStewardID updates the steward ID for this factory and reinitializes the logger provider
 func (f *ModuleFactory) SetStewardID(stewardID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.stewardID = stewardID
 	f.loggerProvider = &StewardLoggerProvider{
 		stewardID: stewardID,
@@ -376,10 +418,14 @@ func (f *ModuleFactory) SetStewardID(stewardID string) {
 
 // SetSecretStore sets the secret store for module injection.
 func (f *ModuleFactory) SetSecretStore(store secretsif.SecretStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.secretStore = store
 }
 
 // attemptSecretStoreInjection tries to inject a secret store into a module if it supports injection.
+//
+// Callers must hold f.mu (it reads f.secretStore).
 func (f *ModuleFactory) attemptSecretStoreInjection(instance modules.Module, moduleName string) {
 	injectable, ok := instance.(modules.SecretStoreInjectable)
 	if !ok || f.secretStore == nil {
@@ -392,7 +438,9 @@ func (f *ModuleFactory) attemptSecretStoreInjection(instance modules.Module, mod
 	}
 }
 
-// attemptLoggerInjection tries to inject a logger into a module if it supports injection
+// attemptLoggerInjection tries to inject a logger into a module if it supports injection.
+//
+// Callers must hold f.mu (it reads f.stewardID / f.loggerProvider and writes f.injectionStatus).
 func (f *ModuleFactory) attemptLoggerInjection(instance modules.Module, moduleName string) {
 	// Initialize injection status
 	status := modules.LoggerInjectionStatus{
@@ -446,6 +494,9 @@ func (f *ModuleFactory) attemptLoggerInjection(instance modules.Module, moduleNa
 
 // InjectLogger implements modules.CentralLoggingManager.InjectLogger
 func (f *ModuleFactory) InjectLogger(module modules.Module, moduleName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	injectable, supportsInjection := module.(modules.LoggingInjectable)
 	if !supportsInjection {
 		return false, nil // Not an error, just doesn't support injection
@@ -491,6 +542,9 @@ func (f *ModuleFactory) GetModuleLogger(module modules.Module) (logging.Logger, 
 
 // ListModulesWithLoggers implements modules.CentralLoggingManager.ListModulesWithLoggers
 func (f *ModuleFactory) ListModulesWithLoggers() map[string]modules.LoggerInjectionStatus {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
 	// Return a copy to prevent external modification
 	result := make(map[string]modules.LoggerInjectionStatus)
 	for name, status := range f.injectionStatus {

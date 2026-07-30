@@ -35,12 +35,14 @@ import (
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	modulecache "github.com/cfgis/cfgms/features/controller/modules/cache"
+	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	hypervcompletion "github.com/cfgis/cfgms/features/modules/hyperv/completion"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
@@ -90,6 +92,46 @@ import (
 // buildVersionCheck is a compile-time constant to verify code version in Docker
 const buildVersionCheck = "story-362-config-signing-enabled"
 
+// ObserveManifestProvider is the interface through which the controller server
+// accesses module manifests for the Tier-2 observe-module resolution step
+// (Issue #3104, ADR-024 Amendment 1 §3). It wraps the module cache in production
+// and an in-memory stub in tests. Nil = feature disabled.
+type ObserveManifestProvider interface {
+	// ListObservableManifests returns all module manifests that declare at least
+	// one observe_when predicate and are eligible for Tier-2 dispatch.
+	ListObservableManifests() ([]*modules.ModuleMetadata, error)
+}
+
+// moduleCacheManifestProvider adapts *modulecache.ModuleCache as
+// ObserveManifestProvider. Only approved bundles are returned; manifests with no
+// observe_when predicates are silently filtered out.
+type moduleCacheManifestProvider struct {
+	cache *modulecache.ModuleCache
+}
+
+var _ ObserveManifestProvider = (*moduleCacheManifestProvider)(nil)
+
+func (p *moduleCacheManifestProvider) ListObservableManifests() ([]*modules.ModuleMetadata, error) {
+	entries, err := p.cache.List()
+	if err != nil {
+		return nil, fmt.Errorf("list module cache: %w", err)
+	}
+	var result []*modules.ModuleMetadata
+	for _, entry := range entries {
+		if entry.Status != modulecache.ApprovalStatusApproved {
+			continue
+		}
+		b, getErr := p.cache.Get(entry.Addr)
+		if getErr != nil {
+			continue
+		}
+		if b.Manifest != nil && len(b.Manifest.ObserveWhen) > 0 {
+			result = append(result, b.Manifest)
+		}
+	}
+	return result, nil
+}
+
 // Server represents the controller server component (gRPC-over-QUIC based)
 type Server struct {
 	mu                      sync.RWMutex
@@ -133,6 +175,7 @@ type Server struct {
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
 	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
+	observeManifestProvider ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
 }
 
 // resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
@@ -1254,6 +1297,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Workflow engine wired to HTTP API server")
 	}
 
+	// Wire Tier-2 observe-module manifest provider from the module cache.
+	// When the cache failed to initialize, moduleCache is nil and Tier-2 is disabled.
+	// (Issue #3104, ADR-024 Amendment 1 §3)
+	if moduleCache != nil {
+		srv.observeManifestProvider = &moduleCacheManifestProvider{cache: moduleCache}
+		logger.Info("Tier-2 observe manifest provider wired to module cache")
+	}
+
 	// Issue #1695: Wire the registration approval hook based on registration.workflow.
 	// ip-trust is the new default and does not require the workflow engine.
 	{
@@ -2240,6 +2291,8 @@ func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplan
 		return s.handleDNAEvent(ctx, event)
 	case controlplaneTypes.EventConfigApplied:
 		return s.handleConfigAppliedEvent(ctx, event)
+	case controlplaneTypes.EventObserveSweepRequest:
+		return s.handleObserveSweepRequest(ctx, event)
 	default:
 		// Log unhandled event types for debugging
 		s.logger.Debug("Received event from steward",
@@ -2335,6 +2388,96 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 	}
 
 	// TODO: Store status report in database/audit log for MSP admin visibility
+
+	return nil
+}
+
+// handleObserveSweepRequest processes EventObserveSweepRequest from a steward.
+// It extracts the baseline DNA, resolves the observe-module set via the manifest
+// provider, and sends CommandObserveModules back to the originating steward.
+// (Issue #3104, ADR-024 Amendment 1 §3)
+func (s *Server) handleObserveSweepRequest(ctx context.Context, event *controlplaneTypes.Event) error {
+	s.mu.RLock()
+	provider := s.observeManifestProvider
+	publisher := s.commandPublisher
+	s.mu.RUnlock()
+
+	if provider == nil {
+		s.logger.Debug("Tier-2 observe sweep request received but provider not configured",
+			"steward_id", event.StewardID)
+		return nil
+	}
+	if publisher == nil {
+		s.logger.Warn("Tier-2 observe sweep request: command publisher not available",
+			"steward_id", event.StewardID)
+		return nil
+	}
+
+	// Extract baseline DNA from the event details.
+	var baselineDNA map[string]string
+	if details := event.Details; details != nil {
+		if raw, ok := details["baseline_dna"].(string); ok && raw != "" {
+			if err := json.Unmarshal([]byte(raw), &baselineDNA); err != nil {
+				s.logger.Warn("Tier-2 observe sweep: failed to parse baseline_dna",
+					"steward_id", event.StewardID, "error", err)
+				return nil
+			}
+		}
+	}
+
+	// Resolve the observe-module set from the baseline DNA.
+	manifests, err := provider.ListObservableManifests()
+	if err != nil {
+		s.logger.Warn("Tier-2 observe sweep: failed to list manifests",
+			"steward_id", event.StewardID, "error", err)
+		return nil
+	}
+
+	names := resolution.ResolveObserveModules(baselineDNA, manifests)
+	if len(names) == 0 {
+		s.logger.Debug("Tier-2 observe sweep: no modules resolved",
+			"steward_id", event.StewardID)
+		return nil
+	}
+
+	// Build ObserveModuleSpec list from resolved names and their ownership declarations.
+	nameSet := make(map[string]bool, len(names))
+	for _, n := range names {
+		nameSet[n] = true
+	}
+	var specs []controlplaneTypes.ObserveModuleSpec
+	for _, m := range manifests {
+		if !nameSet[m.Name] {
+			continue
+		}
+		for _, own := range m.Owns {
+			specs = append(specs, controlplaneTypes.ObserveModuleSpec{
+				Name: m.Name,
+				Kind: own.Kind,
+			})
+		}
+	}
+	if len(specs) == 0 {
+		// All resolved modules have no ownership declarations — nothing to observe.
+		s.logger.Debug("Tier-2 observe sweep: resolved modules have no ownership declarations",
+			"steward_id", event.StewardID, "names", names)
+		return nil
+	}
+
+	specsJSON, err := json.Marshal(specs)
+	if err != nil {
+		return fmt.Errorf("tier-2 observe sweep: marshal specs: %w", err)
+	}
+
+	if _, err := publisher.PublishCommand(ctx, event.StewardID, controlplaneTypes.CommandObserveModules, map[string]interface{}{
+		"modules": string(specsJSON),
+	}); err != nil {
+		return fmt.Errorf("tier-2 observe sweep: publish command: %w", err)
+	}
+
+	s.logger.Info("Tier-2 observe sweep dispatched",
+		"steward_id", event.StewardID,
+		"module_count", len(specs))
 
 	return nil
 }

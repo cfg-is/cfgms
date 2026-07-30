@@ -1235,4 +1235,14 @@ Do not conflate the two. `required_modules:` is a deployment-time cfg contract; 
 
 ### Purity guarantee
 
-`ResolveObserveModules` is a pure function — no I/O, no RPC, no side effects. Wiring the result into a steward-facing RPC (the observation pull path) is the responsibility of the sibling steward observation loop story.
+`ResolveObserveModules` is a pure function — no I/O, no RPC, no side effects. Wiring the result into a steward-facing command is done by the server's `handleObserveSweepRequest` handler (see below).
+
+### Tier-2 observe RPC (Issue #3104, ADR-024 Amendment 1)
+
+The observe-resolution path is triggered by the steward's Tier-2 convergence cycle:
+
+1. **Steward → Controller:** On every Nth convergence tick (N = the steward's `steward.observe_sweep_n` config key, default 10), the steward publishes `EventObserveSweepRequest` carrying its current baseline DNA attribute map in `Details["baseline_dna"]`.
+2. **Controller:** `handleObserveSweepRequest` in `features/controller/server/` receives the event, calls `ResolveObserveModules(baselineDNA, manifests)`, and — if any modules matched — sends `CommandObserveModules` back to the originating steward. The command's `params["modules"]` field carries a JSON array of `{name, kind}` specs.
+3. **Steward:** `handleObserveModules` receives the command, loads each module via the signed/trust-verified pull path, runs `Get()` read-only, and merges the resulting fragments into the existing DNA fragment set via `setCurrentDNAFragments`.
+
+If no modules match (empty resolution result), no command is sent — the steward's DNA update is skipped for that Tier-2 cycle. If the manifest provider is unavailable, the handler returns without sending a command (non-fatal).
