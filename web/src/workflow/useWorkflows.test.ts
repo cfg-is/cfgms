@@ -408,3 +408,39 @@ describe('useTriggerList', () => {
     expect(result.current.error).toBeNull()
   })
 })
+
+// ── parseStep id field (Issue #3036) ─────────────────────────────────────────
+// parseStep is internal; test via parseVersionedWorkflow which calls it for each step.
+
+describe('WorkflowStep id field', () => {
+  it('round-trips a server-supplied step id', () => {
+    const wf = parseVersionedWorkflow({
+      name: 'wf-id',
+      steps: [{ id: 's0.s1', name: 'my-step', type: 'task' }],
+      semantic_version: { major: 1, minor: 0, patch: 0, pre_release: '', build_meta: '' },
+    })
+    expect(wf).not.toBeNull()
+    expect(wf!.steps).toHaveLength(1)
+    expect(wf!.steps[0]!.id).toBe('s0.s1')
+  })
+
+  it('coerces a missing step id to empty string', () => {
+    const wf = parseVersionedWorkflow({
+      name: 'wf-no-id',
+      steps: [{ name: 'my-step', type: 'task' }],
+      semantic_version: { major: 1, minor: 0, patch: 0, pre_release: '', build_meta: '' },
+    })
+    expect(wf).not.toBeNull()
+    expect(wf!.steps[0]!.id).toBe('')
+  })
+
+  it('coerces a non-string step id to empty string', () => {
+    const wf = parseVersionedWorkflow({
+      name: 'wf-bad-id',
+      steps: [{ id: 42, name: 'my-step', type: 'task' }],
+      semantic_version: { major: 1, minor: 0, patch: 0, pre_release: '', build_meta: '' },
+    })
+    expect(wf).not.toBeNull()
+    expect(wf!.steps[0]!.id).toBe('')
+  })
+})

@@ -125,6 +125,10 @@ func (h *WorkflowHandler) handleListWorkflows(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	for i := range workflows {
+		workflow.AssignStepIDs(workflows[i].Steps)
+	}
+
 	h.sendJSON(w, http.StatusOK, map[string]interface{}{
 		"workflows": workflows,
 		"count":     len(workflows),
@@ -218,6 +222,7 @@ func (h *WorkflowHandler) handleGetWorkflow(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	workflow.AssignStepIDs(vw.Steps)
 	h.sendJSON(w, http.StatusOK, vw)
 }
 

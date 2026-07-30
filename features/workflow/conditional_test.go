@@ -515,6 +515,6 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
-	assert.True(t, execution.HasStepResult("conditional-step"))
-	assert.True(t, execution.HasStepResult("inner-step"))
+	assert.True(t, execution.HasStepResult("s0"), "conditional-step result keyed by structural ID s0")
+	assert.True(t, execution.HasStepResult("s0.s0"), "inner-step result keyed by structural ID s0.s0")
 }

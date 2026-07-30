@@ -43,6 +43,7 @@ function bool(value: unknown): boolean {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface WorkflowStep {
+  id: string
   name: string
   type: string
   config?: Record<string, unknown>
@@ -102,6 +103,7 @@ function parseStep(value: unknown): WorkflowStep | null {
   if (typeof value !== 'object' || value === null) return null
   const r = value as Record<string, unknown>
   return {
+    id: str(r.id),
     name: str(r.name),
     type: str(r.type),
     config:

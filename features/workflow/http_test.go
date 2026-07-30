@@ -423,12 +423,12 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
 
-	// Verify all steps completed successfully
+	// Verify all steps completed successfully (keyed by structural ID: s0=authenticate, s1=create-user, s2=wait-propagation, s3=send-notification)
 	stepResults := finalExecution.GetStepResults()
-	assert.Equal(t, StatusCompleted, stepResults["authenticate"].Status)
-	assert.Equal(t, StatusCompleted, stepResults["create-user"].Status)
-	assert.Equal(t, StatusCompleted, stepResults["wait-propagation"].Status)
-	assert.Equal(t, StatusCompleted, stepResults["send-notification"].Status)
+	assert.Equal(t, StatusCompleted, stepResults["s0"].Status, "authenticate (s0)")
+	assert.Equal(t, StatusCompleted, stepResults["s1"].Status, "create-user (s1)")
+	assert.Equal(t, StatusCompleted, stepResults["s2"].Status, "wait-propagation (s2)")
+	assert.Equal(t, StatusCompleted, stepResults["s3"].Status, "send-notification (s3)")
 
 	// Verify variables were set correctly
 	assert.Equal(t, 200, finalExecution.Variables["authenticate_status_code"])

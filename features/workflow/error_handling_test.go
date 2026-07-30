@@ -341,9 +341,9 @@ func TestExecutionTrace(t *testing.T) {
 	}
 
 	// Add execution trace entries
-	AddExecutionTrace(execution, "step1", StepTypeTask, StatusCompleted, 100*time.Millisecond, execution.GetVariables(), "", 0)
-	AddExecutionTrace(execution, "step2", StepTypeDelay, StatusFailed, 50*time.Millisecond, execution.GetVariables(), "step1", 0)
-	AddExecutionTrace(execution, "step3", StepTypeTask, StatusCompleted, 75*time.Millisecond, execution.GetVariables(), "step2", 2)
+	AddExecutionTrace(execution, "s0", "step1", StepTypeTask, StatusCompleted, 100*time.Millisecond, execution.GetVariables(), "", 0)
+	AddExecutionTrace(execution, "s1", "step2", StepTypeDelay, StatusFailed, 50*time.Millisecond, execution.GetVariables(), "step1", 0)
+	AddExecutionTrace(execution, "s2", "step3", StepTypeTask, StatusCompleted, 75*time.Millisecond, execution.GetVariables(), "step2", 2)
 
 	executionTrace := execution.GetExecutionTrace()
 	require.Len(t, executionTrace, 3)

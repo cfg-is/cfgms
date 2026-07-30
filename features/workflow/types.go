@@ -78,6 +78,11 @@ type Step struct {
 	// Name is the unique identifier for this step within the workflow
 	Name string `yaml:"name" json:"name"`
 
+	// ID is the stable structural identity for this step, computed from its
+	// position in the step tree (e.g. "s0", "s0.s1"). Never persisted; always
+	// recomputed by AssignStepIDs on every read/execute pass.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+
 	// Type defines the step execution type (task, sequential, parallel, conditional)
 	Type StepType `yaml:"type" json:"type"`
 
@@ -422,23 +427,23 @@ func (we *WorkflowExecution) GetVariables() map[string]interface{} {
 }
 
 // SetStepResult safely sets a step result
-func (we *WorkflowExecution) SetStepResult(stepName string, result StepResult) {
+func (we *WorkflowExecution) SetStepResult(stepID string, result StepResult) {
 	we.mutex.Lock()
 	defer we.mutex.Unlock()
 	if we.StepResults == nil {
 		we.StepResults = make(map[string]StepResult)
 	}
-	we.StepResults[stepName] = result
+	we.StepResults[stepID] = result
 }
 
 // GetStepResult safely gets a step result
-func (we *WorkflowExecution) GetStepResult(stepName string) (StepResult, bool) {
+func (we *WorkflowExecution) GetStepResult(stepID string) (StepResult, bool) {
 	we.mutex.RLock()
 	defer we.mutex.RUnlock()
 	if we.StepResults == nil {
 		return StepResult{}, false
 	}
-	result, exists := we.StepResults[stepName]
+	result, exists := we.StepResults[stepID]
 	return result, exists
 }
 
@@ -489,13 +494,13 @@ func (we *WorkflowExecution) GetStepResults() map[string]StepResult {
 }
 
 // HasStepResult safely checks if a step result exists
-func (we *WorkflowExecution) HasStepResult(stepName string) bool {
+func (we *WorkflowExecution) HasStepResult(stepID string) bool {
 	we.mutex.RLock()
 	defer we.mutex.RUnlock()
 	if we.StepResults == nil {
 		return false
 	}
-	_, exists := we.StepResults[stepName]
+	_, exists := we.StepResults[stepID]
 	return exists
 }
 
@@ -511,10 +516,10 @@ func (we *WorkflowExecution) HasVariable(varName string) bool {
 }
 
 // SetCurrentStep safely sets the current step
-func (we *WorkflowExecution) SetCurrentStep(stepName string) {
+func (we *WorkflowExecution) SetCurrentStep(stepID string) {
 	we.mutex.Lock()
 	defer we.mutex.Unlock()
-	we.CurrentStep = stepName
+	we.CurrentStep = stepID
 }
 
 // GetCurrentStep safely gets the current step
@@ -990,8 +995,11 @@ type StackFrame struct {
 
 // ExecutionStep represents a step in the execution trace
 type ExecutionStep struct {
-	// StepName is the name of the executed step
+	// StepName is the human-readable name of the executed step
 	StepName string `json:"step_name"`
+
+	// StepID is the stable structural ID (position-derived) for canvas join
+	StepID string `json:"step_id,omitempty"`
 
 	// StepType is the type of step
 	StepType StepType `json:"step_type"`
