@@ -135,3 +135,234 @@ func TestDatabaseRegistrationStore_RotateToken_Race(t *testing.T) {
 	}
 	assert.Equal(t, 1, validCount, "exactly one valid token must exist after all rotations")
 }
+
+func TestDatabaseRegistrationStore_SaveAndGetByID(t *testing.T) {
+	store := newTestRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &business.RegistrationTokenData{
+		ID:            "aaaaaaaa-0000-4000-8000-000000000001",
+		Token:         "db-byid-token",
+		TenantID:      "tenant-byid",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+
+	// The id must round-trip through the id-addressed lookup used by the web UI.
+	byID, err := store.GetTokenByID(ctx, token.ID)
+	require.NoError(t, err)
+	assert.Equal(t, token.Token, byID.Token)
+	assert.Equal(t, token.ID, byID.ID)
+	assert.Equal(t, "tenant-byid", byID.TenantID)
+	assert.Equal(t, "prod", byID.Group)
+
+	// ...and through the token-addressed lookup and the list endpoint.
+	byToken, err := store.GetToken(ctx, token.Token)
+	require.NoError(t, err)
+	assert.Equal(t, token.ID, byToken.ID)
+
+	listed, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "tenant-byid"})
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, token.ID, listed[0].ID)
+}
+
+func TestDatabaseRegistrationStore_GetTokenByID_NotFound(t *testing.T) {
+	store := newTestRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &business.RegistrationTokenData{
+		ID:            "aaaaaaaa-0000-4000-8000-000000000002",
+		Token:         "db-byid-nf",
+		TenantID:      "tenant-byid",
+		ControllerURL: "grpc://controller:7443",
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+
+	// An unknown id must be reported as not-found (404 at the API), never as a
+	// driver error that the handler would turn into a 500.
+	_, err := store.GetTokenByID(ctx, "aaaaaaaa-0000-4000-8000-0000000000ff")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+
+	// The secret string must not resolve through the id column.
+	_, err = store.GetTokenByID(ctx, token.Token)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+
+	_, err = store.GetTokenByID(ctx, "")
+	require.Error(t, err)
+}
+
+func TestDatabaseRegistrationStore_SaveToken_AssignsIDWhenMissing(t *testing.T) {
+	store := newTestRegistrationStore(t)
+	ctx := context.Background()
+
+	token := &business.RegistrationTokenData{
+		Token:         "db-no-id",
+		TenantID:      "tenant-noid",
+		ControllerURL: "grpc://controller:7443",
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveToken(ctx, token))
+	require.NotEmpty(t, token.ID, "SaveToken must assign an id when the caller supplies none")
+	assignedID := token.ID
+
+	byID, err := store.GetTokenByID(ctx, assignedID)
+	require.NoError(t, err)
+	assert.Equal(t, "db-no-id", byID.Token)
+
+	// Upserting the same token must not reassign the id.
+	resaved := &business.RegistrationTokenData{
+		Token:         "db-no-id",
+		TenantID:      "tenant-noid",
+		ControllerURL: "grpc://controller:7443",
+		CreatedAt:     token.CreatedAt,
+	}
+	require.NoError(t, store.SaveToken(ctx, resaved))
+	assert.Equal(t, assignedID, resaved.ID, "token id must be stable across saves")
+}
+
+// TestDatabaseRegistrationStore_SaveToken_HealsEmptyStoredID covers a row whose stored id
+// is the empty string rather than NULL (an out-of-band write, or a row the back-fill has
+// not run against yet). Such a row is unaddressable by GetTokenByID, so the next save must
+// heal it instead of preserving the empty value forever.
+func TestDatabaseRegistrationStore_SaveToken_HealsEmptyStoredID(t *testing.T) {
+	store := newTestRegistrationStore(t)
+	ctx := context.Background()
+
+	seed := &business.RegistrationTokenData{
+		Token:         "db-empty-id",
+		TenantID:      "tenant-noid",
+		ControllerURL: "grpc://controller:7443",
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveToken(ctx, seed))
+
+	// Force the stored id to the empty string, bypassing the store's own assignment.
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE cfgms_registration_tokens SET id = '' WHERE token = $1`, "db-empty-id")
+	require.NoError(t, err)
+
+	stale, err := store.GetToken(ctx, "db-empty-id")
+	require.NoError(t, err)
+	require.Empty(t, stale.ID, "precondition: the row is unaddressable by id")
+
+	resaved := &business.RegistrationTokenData{
+		Token:         "db-empty-id",
+		TenantID:      "tenant-noid",
+		ControllerURL: "grpc://controller:7443",
+		CreatedAt:     seed.CreatedAt,
+	}
+	require.NoError(t, store.SaveToken(ctx, resaved))
+	require.NotEmpty(t, resaved.ID, "an empty stored id must be healed, not preserved")
+
+	byID, err := store.GetTokenByID(ctx, resaved.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "db-empty-id", byID.Token)
+}
+
+func TestDatabaseRegistrationStore_RotateToken_AssignsID(t *testing.T) {
+	store := newTestRegistrationStore(t)
+	ctx := context.Background()
+
+	seed := &business.RegistrationTokenData{
+		Token:         "db-rotate-id-seed",
+		TenantID:      "tenant-rotate-id",
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveToken(ctx, seed))
+
+	rotated, err := store.RotateToken(ctx, "tenant-rotate-id", "prod")
+	require.NoError(t, err)
+	require.NotEmpty(t, rotated.ID, "rotation must mint an id for the new token")
+	assert.NotEqual(t, seed.ID, rotated.ID)
+
+	got, err := store.GetTokenByID(ctx, rotated.ID)
+	require.NoError(t, err)
+	assert.Equal(t, rotated.Token, got.Token)
+	assert.True(t, got.IsValid())
+
+	old, err := store.GetTokenByID(ctx, seed.ID)
+	require.NoError(t, err)
+	assert.True(t, old.Revoked)
+}
+
+// TestDatabaseRegistrationStore_BackfillLegacyRows verifies that a table created before
+// Issue #2970 gains the id column and that every pre-existing row is assigned a UUID —
+// without it, legacy tokens report an empty token_id and can never be revoked or deleted
+// from the web UI.
+func TestDatabaseRegistrationStore_BackfillLegacyRows(t *testing.T) {
+	db := setupTestDatabase(t)
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+
+	// Legacy schema: no id column.
+	_, err := db.ExecContext(ctx, `
+		CREATE TABLE cfgms_registration_tokens (
+			token VARCHAR(255) PRIMARY KEY,
+			tenant_id VARCHAR(255) NOT NULL,
+			controller_url VARCHAR(1000) NOT NULL,
+			group_name VARCHAR(255) DEFAULT '',
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+			revoked BOOLEAN NOT NULL DEFAULT FALSE,
+			revoked_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+		)`)
+	require.NoError(t, err)
+
+	for _, tok := range []string{"legacy-a", "legacy-b"} {
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO cfgms_registration_tokens (token, tenant_id, controller_url, created_at)
+			VALUES ($1, 'tenant-legacy', 'grpc://controller:7443', NOW())`, tok)
+		require.NoError(t, err)
+	}
+
+	schemas := NewDatabaseSchemas()
+	require.NoError(t, schemas.CreateRegistrationTokensTable(ctx, db))
+
+	store := &DatabaseRegistrationTokenStore{db: db, config: nil, schemas: schemas}
+	ids := make(map[string]string, 2)
+	for _, tok := range []string{"legacy-a", "legacy-b"} {
+		got, err := store.GetToken(ctx, tok)
+		require.NoError(t, err)
+		require.NotEmpty(t, got.ID, "legacy row %q must be assigned a UUID", tok)
+		assert.Regexp(t,
+			`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+			got.ID, "backfilled id must be a UUID v4")
+
+		byID, err := store.GetTokenByID(ctx, got.ID)
+		require.NoError(t, err, "backfilled token must be addressable by id")
+		assert.Equal(t, tok, byID.Token)
+
+		ids[tok] = got.ID
+	}
+	assert.NotEqual(t, ids["legacy-a"], ids["legacy-b"], "each legacy row gets a distinct id")
+
+	// Re-running schema init must be idempotent — ids stay stable.
+	require.NoError(t, schemas.CreateRegistrationTokensTable(ctx, db))
+	for tok, id := range ids {
+		got, err := store.GetToken(ctx, tok)
+		require.NoError(t, err)
+		assert.Equal(t, id, got.ID, "re-running the migration must not reassign %q", tok)
+	}
+}
+
+func TestDatabaseGenerateTokenID(t *testing.T) {
+	const iterations = 100
+	pattern := `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
+	seen := make(map[string]struct{}, iterations)
+	for i := 0; i < iterations; i++ {
+		id, err := generateTokenID()
+		require.NoError(t, err)
+		assert.Regexp(t, pattern, id)
+		_, dup := seen[id]
+		require.False(t, dup, "generateTokenID must not repeat an id")
+		seen[id] = struct{}{}
+	}
+}

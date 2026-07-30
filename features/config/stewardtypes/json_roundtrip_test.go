@@ -33,6 +33,7 @@ func TestStewardConfig_JSONKeysAreSnakeCase(t *testing.T) {
 			Upgrade:                     UpgradeConfig{DesiredVersion: "v0.9.7"},
 			RegistrationPollTimeout:     time.Hour,
 			DNARefreshInterval:          "30m",
+			ObserveSweepN:               intPtr(10),
 		},
 		Resources: []ResourceConfig{{Name: "r1", Module: "file", Config: map[string]interface{}{"path": "/tmp/x"}}},
 	}
@@ -52,6 +53,7 @@ func TestStewardConfig_JSONKeysAreSnakeCase(t *testing.T) {
 		`"allow_public_ca"`, `"require_signed_adhoc"`, `"module_trust"`, `"additional_publishers"`,
 		`"signed_command_replay_window"`, `"signed_command_max_params_bytes"`, `"drift_mode"`,
 		`"upgrade"`, `"desired_version"`, `"registration_poll_timeout"`, `"dna_refresh_interval"`,
+		`"observe_sweep_n"`,
 	}
 	for _, k := range wantKeys {
 		if !strings.Contains(got, k) {
@@ -65,6 +67,7 @@ func TestStewardConfig_JSONKeysAreSnakeCase(t *testing.T) {
 		`"ModuleLoadFailure"`, `"ResourceFailure"`, `"ConfigurationError"`, `"ScriptSigning"`,
 		`"ModuleTrust"`, `"SecretsDir"`, `"DesiredVersion"`, `"RegistrationPollTimeout"`,
 		`"DNARefreshInterval"`, `"AllowPublicCA"`, `"TrustMode"`, `"PublicKeyRef"`,
+		`"ObserveSweepN"`,
 	}
 	for _, k := range leaked {
 		if strings.Contains(got, k) {

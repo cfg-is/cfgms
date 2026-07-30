@@ -53,7 +53,20 @@ const (
 	// and bridge the stream to a local PTY for an interactive admin session. (Issue #2760)
 	// Params: session_id (string), shell (string), cols (int32), rows (int32).
 	CommandOpenTerminal CommandType = "open_terminal"
+
+	// CommandObserveModules pushes the controller's resolved observe-module set to the steward
+	// in response to an EventObserveSweepRequest. (Issue #3104, ADR-024 Amendment 1 §3)
+	// Params: "modules" (JSON array of ObserveModuleSpec: {name, kind}).
+	CommandObserveModules CommandType = "observe_modules"
 )
+
+// ObserveModuleSpec identifies a module+kind pair resolved by the controller for
+// Tier-2 whole-domain observation (Issue #3104, ADR-024 Amendment 1 §3).
+// Carried in CommandObserveModules params as a JSON array under "modules".
+type ObserveModuleSpec struct {
+	Name string `json:"name"` // module name (e.g. "hyperv")
+	Kind string `json:"kind"` // ownership kind for fragment assembly (e.g. "hyperv")
+}
 
 // Command represents a command sent from controller to steward.
 //
@@ -140,6 +153,12 @@ const (
 	// auto-rolled-back to the previous version after the new binary failed its
 	// startup window. (Epic #1930, Issue #1943)
 	EventStewardUpgradeRolledBack EventType = "steward.upgrade.rolled_back"
+
+	// EventObserveSweepRequest initiates a Tier-2 whole-domain observe sweep. The steward
+	// sends this event carrying its baseline DNA; the controller resolves the observe-module
+	// set and responds with CommandObserveModules. (Issue #3104, ADR-024 Amendment 1 §3)
+	// Details keys: "baseline_dna" (map[string]string JSON).
+	EventObserveSweepRequest EventType = "observe_sweep_request"
 )
 
 // Event represents an event published from steward to controller.

@@ -30,7 +30,9 @@ import (
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -1281,12 +1283,16 @@ func connectWithApprovedRegistration(
 	var scriptSigning stewardconfig.ScriptSigningConfig
 	var upgradeAllowDowngrade bool
 	var dnaRefreshInterval time.Duration
+	// Tier-2 observe sweep cadence: the config default applies when no config file
+	// is present, so the sweep is active on a purely controller-managed steward.
+	observeSweepN := stewardconfig.DefaultObserveSweepN
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		scriptSigning = cfg.Steward.ScriptSigning
 		upgradeAllowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
 		dnaRefreshInterval = stewardconfig.GetDNARefreshInterval(cfg)
+		observeSweepN = stewardconfig.GetObserveSweepN(cfg)
 	}
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
@@ -1314,6 +1320,8 @@ func connectWithApprovedRegistration(
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:          dnaRefreshInterval,
 		DNACollector:                dnaAdapter,
+		ObserveSweepN:               observeSweepN,
+		ObserveModuleLoader:         newObserveModuleLoader(reg.StewardID, secretStore, logger),
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1434,11 +1442,13 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	var commandMaxParamsBytes int
 	var upgradeAllowDowngradeReconnect bool
 	var dnaRefreshIntervalReconnect time.Duration
+	observeSweepNReconnect := stewardconfig.DefaultObserveSweepN
 	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
 		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
 		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
 		upgradeAllowDowngradeReconnect = cfg.Steward.Upgrade.AllowDowngrade
 		dnaRefreshIntervalReconnect = stewardconfig.GetDNARefreshInterval(cfg)
+		observeSweepNReconnect = stewardconfig.GetObserveSweepN(cfg)
 	}
 
 	// Build the composite DNA collector early so we can wire the executor into it
@@ -1462,6 +1472,8 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:          dnaRefreshIntervalReconnect,
 		DNACollector:                dnaAdapterReconnect,
+		ObserveSweepN:               observeSweepNReconnect,
+		ObserveModuleLoader:         newObserveModuleLoader(id.StewardID, secretStore, logger),
 		Logger:                      logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
@@ -1546,6 +1558,31 @@ func buildTestPublisherTrustStore(logger logging.Logger) trust.TrustStore {
 		logger.Info("Test mode: overriding steward binary publisher trust store (Issue #1948)")
 	}
 	return ts
+}
+
+// newObserveModuleLoader builds the module loader used by the Tier-2 whole-domain
+// observe sweep (Issue #3104, ADR-024 Amendment 1 §3).
+//
+// It returns a factory.ModuleFactory — the same trust-verified, on-demand module
+// load path the convergence executor uses — with an empty discovery registry, so
+// a module resolved by the controller is pulled on first use and then served from
+// the factory's instance cache on every later sweep. The observe sweep only calls
+// Get, so the factory's error policy is the executor's default (a load failure is
+// logged and skipped rather than aborting the sweep).
+//
+// The secret store is injected so observe modules implementing SecretStoreInjectable
+// are usable without a separate wiring path.
+func newObserveModuleLoader(stewardID string, secretStore secretsif.SecretStore, logger logging.Logger) *factory.ModuleFactory {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.NewWithStewardID(discovery.ModuleRegistry{}, errCfg, stewardID, logger)
+	if secretStore != nil {
+		f.SetSecretStore(secretStore)
+	}
+	return f
 }
 
 // hasValidClientCert reports whether certs contains at least one non-expired client certificate.

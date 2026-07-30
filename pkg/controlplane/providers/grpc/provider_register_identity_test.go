@@ -99,6 +99,17 @@ func (s *inMemoryTokenStore) RotateToken(_ context.Context, tenantID, group stri
 	return newTok, nil
 }
 
+func (s *inMemoryTokenStore) GetTokenByID(_ context.Context, id string) (*business.RegistrationTokenData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, t := range s.tokens {
+		if t.ID == id {
+			return t, nil
+		}
+	}
+	return nil, fmt.Errorf("registration token not found")
+}
+
 func (s *inMemoryTokenStore) Initialize(_ context.Context) error { return nil }
 func (s *inMemoryTokenStore) Close() error                       { return nil }
 

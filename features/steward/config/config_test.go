@@ -1257,3 +1257,91 @@ resources:
 	assert.Empty(t, cfg.Steward.DriftMode,
 		"DriftMode must be cleared after loading from local file (security invariant)")
 }
+
+// --- observe_sweep_n (Issue #3104, ADR-024 Amendment 1 §3) ---
+
+func TestLoadConfiguration_ObserveSweepN_ParsesExplicitValue(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  observe_sweep_n: 3
+
+resources:
+  - name: test-resource
+    module: file
+    config:
+      path: /tmp/x
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Steward.ObserveSweepN)
+	assert.Equal(t, 3, GetObserveSweepN(cfg))
+}
+
+func TestLoadConfiguration_ObserveSweepN_ZeroDisablesSweep(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  observe_sweep_n: 0
+
+resources:
+  - name: test-resource
+    module: file
+    config:
+      path: /tmp/x
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, 0, GetObserveSweepN(cfg),
+		"observe_sweep_n: 0 must disable the Tier-2 sweep, not fall back to the default")
+}
+
+func TestLoadConfiguration_ObserveSweepN_AbsentUsesDefault(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+
+resources:
+  - name: test-resource
+    module: file
+    config:
+      path: /tmp/x
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Steward.ObserveSweepN)
+	assert.Equal(t, DefaultObserveSweepN, GetObserveSweepN(cfg))
+}
+
+func TestLoadConfiguration_ObserveSweepN_NegativeRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  observe_sweep_n: -1
+
+resources:
+  - name: test-resource
+    module: file
+    config:
+      path: /tmp/x
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "observe_sweep_n")
+}

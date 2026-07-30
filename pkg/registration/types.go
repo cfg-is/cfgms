@@ -12,6 +12,9 @@ import "time"
 // Tokens are perennial: they survive multiple registrations and are never consumed on use.
 // Rotation atomically revokes the old token and issues a new one.
 type Token struct {
+	// ID is a stable UUID for this token (Issue #2970 — web UI identifier).
+	ID string `json:"id"`
+
 	// Token is the unique token string (e.g., "abcdefghijklmnopqrstuvwxyz")
 	Token string `json:"token"`
 

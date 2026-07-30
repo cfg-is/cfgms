@@ -20,15 +20,31 @@ func NewStorageAdapter(store business.RegistrationTokenStore) *StorageAdapter {
 	return &StorageAdapter{store: store}
 }
 
-// SaveToken saves a registration token by converting to storage format
+// SaveToken saves a registration token by converting to storage format.
+// A store that assigns a stable ID to a token saved without one (Issue #2970) has
+// that ID written back onto the caller's token, matching memoryStore, so the caller
+// can address the token by ID immediately after saving.
 func (a *StorageAdapter) SaveToken(ctx context.Context, token *Token) error {
 	data := tokenToData(token)
-	return a.store.SaveToken(ctx, data)
+	if err := a.store.SaveToken(ctx, data); err != nil {
+		return err
+	}
+	token.ID = data.ID
+	return nil
 }
 
 // GetToken retrieves a token and converts from storage format
 func (a *StorageAdapter) GetToken(ctx context.Context, tokenStr string) (*Token, error) {
 	data, err := a.store.GetToken(ctx, tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	return dataToToken(data), nil
+}
+
+// GetTokenByID retrieves a token by its stable UUID.
+func (a *StorageAdapter) GetTokenByID(ctx context.Context, id string) (*Token, error) {
+	data, err := a.store.GetTokenByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +91,7 @@ func (a *StorageAdapter) RotateToken(ctx context.Context, tenantID, group string
 // tokenToData converts a Token to RegistrationTokenData
 func tokenToData(token *Token) *business.RegistrationTokenData {
 	return &business.RegistrationTokenData{
+		ID:            token.ID,
 		Token:         token.Token,
 		TenantID:      token.TenantID,
 		ControllerURL: token.ControllerURL,
@@ -89,6 +106,7 @@ func tokenToData(token *Token) *business.RegistrationTokenData {
 // dataToToken converts a RegistrationTokenData to Token
 func dataToToken(data *business.RegistrationTokenData) *Token {
 	return &Token{
+		ID:            data.ID,
 		Token:         data.Token,
 		TenantID:      data.TenantID,
 		ControllerURL: data.ControllerURL,

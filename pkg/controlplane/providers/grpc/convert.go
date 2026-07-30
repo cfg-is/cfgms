@@ -34,7 +34,8 @@ var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
 	types.CommandRelayResponse:     transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE, // Issue #1994
 	types.CommandPushSigningCert:   transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT,
 	types.CommandPushStewardBinary: transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY,
-	types.CommandOpenTerminal:      transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL, // Issue #2760
+	types.CommandOpenTerminal:      transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL,   // Issue #2760
+	types.CommandObserveModules:    transportpb.CommandType_COMMAND_TYPE_OBSERVE_MODULES, // Issue #3104
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
@@ -46,7 +47,8 @@ var protoToCommandType = map[transportpb.CommandType]types.CommandType{
 	transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE:      types.CommandRelayResponse, // Issue #1994
 	transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT:   types.CommandPushSigningCert,
 	transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY: types.CommandPushStewardBinary,
-	transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL:       types.CommandOpenTerminal, // Issue #2760
+	transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL:       types.CommandOpenTerminal,   // Issue #2760
+	transportpb.CommandType_COMMAND_TYPE_OBSERVE_MODULES:     types.CommandObserveModules, // Issue #3104
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {
@@ -180,6 +182,7 @@ var eventTypeToProto = map[types.EventType]transportpb.EventType{
 	types.EventStewardUpgradeSwapped:    transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED,
 	types.EventStewardUpgradeCommitted:  transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED,
 	types.EventStewardUpgradeRolledBack: transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK,
+	types.EventObserveSweepRequest:      transportpb.EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST, // Issue #3104
 }
 
 // protoToEventType maps proto enum to semantic EventType.
@@ -193,13 +196,14 @@ var protoToEventType = map[transportpb.EventType]types.EventType{
 	transportpb.EventType_EVENT_TYPE_COMMAND_COMPLETED: types.EventCommandCompleted,
 	transportpb.EventType_EVENT_TYPE_COMMAND_FAILED:    types.EventCommandFailed,
 	// Issue #1997: reverse mapping for the wire-crossing events added above.
-	transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED:    types.EventScriptCompleted,
-	transportpb.EventType_EVENT_TYPE_DNA_CHANGED:         types.EventDNAChanged,
-	transportpb.EventType_EVENT_TYPE_RELAY_REQUEST:       types.EventRelayRequest,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED:  types.EventStewardUpgradeDownloaded,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED:     types.EventStewardUpgradeSwapped,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED:   types.EventStewardUpgradeCommitted,
-	transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK: types.EventStewardUpgradeRolledBack,
+	transportpb.EventType_EVENT_TYPE_SCRIPT_COMPLETED:      types.EventScriptCompleted,
+	transportpb.EventType_EVENT_TYPE_DNA_CHANGED:           types.EventDNAChanged,
+	transportpb.EventType_EVENT_TYPE_RELAY_REQUEST:         types.EventRelayRequest,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_DOWNLOADED:    types.EventStewardUpgradeDownloaded,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_SWAPPED:       types.EventStewardUpgradeSwapped,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_COMMITTED:     types.EventStewardUpgradeCommitted,
+	transportpb.EventType_EVENT_TYPE_UPGRADE_ROLLED_BACK:   types.EventStewardUpgradeRolledBack,
+	transportpb.EventType_EVENT_TYPE_OBSERVE_SWEEP_REQUEST: types.EventObserveSweepRequest, // Issue #3104
 }
 
 // severityToProto maps semantic severity string to proto enum.

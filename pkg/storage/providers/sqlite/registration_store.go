@@ -44,20 +44,38 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 	if token.CreatedAt.IsZero() {
 		token.CreatedAt = nowUTC()
 	}
+	// Every persisted token carries a stable, non-secret UUID (Issue #2970) so the
+	// web UI can address it without holding the secret.
+	if token.ID == "" {
+		id, err := generateTokenID()
+		if err != nil {
+			return fmt.Errorf("failed to generate token id: %w", err)
+		}
+		token.ID = id
+	}
 
-	_, err := s.db.ExecContext(ctx, `
+	// The id is assigned once and never reassigned: on conflict the stored id wins and
+	// excluded.id only fills in a row that has none. NULLIF treats an empty stored id as
+	// absent — the same "missing" predicate the back-fill uses (id IS NULL OR id = '') —
+	// so a row that reaches this path unaddressable is healed rather than kept that way.
+	// RETURNING keeps the caller's in-memory ID identical to the persisted one.
+	var storedID sql.NullString
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO registration_tokens
-			(token, tenant_id, controller_url, group_name, created_at,
+			(token, id, tenant_id, controller_url, group_name, created_at,
 			 expires_at, revoked, revoked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(token) DO UPDATE SET
+			id = COALESCE(NULLIF(registration_tokens.id, ''), excluded.id),
 			tenant_id = excluded.tenant_id,
 			controller_url = excluded.controller_url,
 			group_name = excluded.group_name,
 			expires_at = excluded.expires_at,
 			revoked = excluded.revoked,
-			revoked_at = excluded.revoked_at`,
+			revoked_at = excluded.revoked_at
+		RETURNING id`,
 		token.Token,
+		nullableStr(token.ID),
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
@@ -65,19 +83,32 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 		nullTime(token.ExpiresAt),
 		boolToInt(token.Revoked),
 		nullTime(token.RevokedAt),
-	)
+	).Scan(&storedID)
 	if err != nil {
 		return fmt.Errorf("failed to save registration token: %w", err)
 	}
+	token.ID = storedID.String
 	return nil
 }
 
 // GetToken retrieves a registration token by its token string.
 func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT token, tenant_id, controller_url, group_name, created_at,
+		SELECT token, id, tenant_id, controller_url, group_name, created_at,
 		       expires_at, revoked, revoked_at
 		FROM registration_tokens WHERE token = ?`, tokenStr)
+	return scanToken(row)
+}
+
+// GetTokenByID retrieves a registration token by its stable UUID (Issue #2970).
+func (s *SQLiteRegistrationTokenStore) GetTokenByID(ctx context.Context, id string) (*business.RegistrationTokenData, error) {
+	if id == "" {
+		return nil, fmt.Errorf("registration token not found")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT token, id, tenant_id, controller_url, group_name, created_at,
+		       expires_at, revoked, revoked_at
+		FROM registration_tokens WHERE id = ?`, id)
 	return scanToken(row)
 }
 
@@ -125,7 +156,7 @@ func (s *SQLiteRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr
 
 // ListTokens returns registration tokens matching an optional filter.
 func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
-	query := `SELECT token, tenant_id, controller_url, group_name, created_at,
+	query := `SELECT token, id, tenant_id, controller_url, group_name, created_at,
 	                 expires_at, revoked, revoked_at
 	          FROM registration_tokens WHERE 1=1`
 	var args []interface{}
@@ -205,12 +236,17 @@ func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID
 	now := nowUTC()
 	nowStr := formatTime(now)
 
+	newID, err := generateTokenID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token ID: %w", err)
+	}
+
 	// Insert the new token.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO registration_tokens
-			(token, tenant_id, controller_url, group_name, created_at, revoked)
-		VALUES (?, ?, ?, ?, ?, 0)`,
-		newTokenStr, tenantID, controllerURL, group, nowStr,
+			(token, id, tenant_id, controller_url, group_name, created_at, revoked)
+		VALUES (?, ?, ?, ?, ?, ?, 0)`,
+		newTokenStr, newID, tenantID, controllerURL, group, nowStr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert new token: %w", err)
@@ -233,6 +269,7 @@ func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID
 	committed = true
 
 	return &business.RegistrationTokenData{
+		ID:            newID,
 		Token:         newTokenStr,
 		TenantID:      tenantID,
 		ControllerURL: controllerURL,
@@ -246,11 +283,12 @@ func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID
 func scanToken(row *sql.Row) (*business.RegistrationTokenData, error) {
 	t := &business.RegistrationTokenData{}
 	var createdStr string
+	var id sql.NullString
 	var expiresAt, revokedAt sql.NullString
 	var revoked int
 
 	err := row.Scan(
-		&t.Token, &t.TenantID, &t.ControllerURL, &t.Group,
+		&t.Token, &id, &t.TenantID, &t.ControllerURL, &t.Group,
 		&createdStr, &expiresAt, &revoked, &revokedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -259,21 +297,24 @@ func scanToken(row *sql.Row) (*business.RegistrationTokenData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan registration token: %w", err)
 	}
+	t.ID = id.String
 	return populateToken(t, createdStr, revoked, expiresAt, revokedAt)
 }
 
 func scanTokenRow(rows *sql.Rows) (*business.RegistrationTokenData, error) {
 	t := &business.RegistrationTokenData{}
 	var createdStr string
+	var id sql.NullString
 	var expiresAt, revokedAt sql.NullString
 	var revoked int
 
 	if err := rows.Scan(
-		&t.Token, &t.TenantID, &t.ControllerURL, &t.Group,
+		&t.Token, &id, &t.TenantID, &t.ControllerURL, &t.Group,
 		&createdStr, &expiresAt, &revoked, &revokedAt,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan registration token row: %w", err)
 	}
+	t.ID = id.String
 	return populateToken(t, createdStr, revoked, expiresAt, revokedAt)
 }
 
@@ -290,6 +331,14 @@ func populateToken(
 	return t, nil
 }
 
+// nullableStr returns nil for an empty string (allowing SQL NULL storage).
+func nullableStr(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // generateTokenString produces a random base32-encoded token string (16 bytes / 128-bit entropy).
 func generateTokenString() (string, error) {
 	b := make([]byte, 16)
@@ -297,6 +346,18 @@ func generateTokenString() (string, error) {
 		return "", fmt.Errorf("failed to read random bytes: %w", err)
 	}
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)), nil
+}
+
+// generateTokenID produces a UUID v4 string for use as a stable non-secret token identifier.
+func generateTokenID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to read random bytes for token ID: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // ensure SQLiteRegistrationTokenStore satisfies the interface at compile time

@@ -2,26 +2,28 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * TokensTab test suite (Story #2935): list rendering, data states, parse
- * helpers, and the required token-prefix security assertion.
+ * TokensTab test suite (Story #2935, #2970): list rendering, data states,
+ * parse helpers, mint/rotate/revoke/delete actions, SecretOnceModal, and
+ * token-prefix security assertions.
  *
- * Required AC: rendered token rows must never contain a full-length token
- * string in the DOM — only the prefix. Tests assert on textContent only,
- * never on innerHTML (security A9.1).
+ * Required AC (Story #2970):
+ *   - mint/rotate/revoke/delete wired behind apiFetch (step-up handled by AuthProvider)
+ *   - minted/rotated secret shown exactly once in SecretOnceModal; dismissed by clearing state
+ *   - secret never stored in a durable location; absent from DOM after dismiss
+ *   - secret never rendered in the token table — only token_prefix appears
  *
  * The GET /api/v1/registration/tokens response is {tokens:[...], total:N}
- * — no {data:...} envelope — per handlers_registration_tokens.go:160.
+ * — no {data:...} envelope — per handlers_registration_tokens.go.
  *
  * expires_at / revoked_at are optional (Go omitempty on pointer types)
  * — absent fields render as an em-dash placeholder, matching columns.ts.
- *
- * No mint, rotate, revoke, or delete affordance exists in this component.
  */
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
-import TokensTab, { parseToken, parseTokenList } from './TokensTab.tsx'
+import TokensTab, { SecretOnceModal, parseToken, parseTokenList } from './TokensTab.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -39,6 +41,7 @@ afterEach(() => {
 
 function makeToken(overrides: Partial<Record<string, unknown>> = {}) {
   return {
+    token_id: 'aaaaaaaa-0000-4000-8000-000000000001',
     token_prefix: 'reg_a1b2c3',
     tenant_id: 'root/msp-a/prod',
     group: 'prod bulk enroll',
@@ -51,6 +54,13 @@ function makeToken(overrides: Partial<Record<string, unknown>> = {}) {
 
 function makeTokensResponse(tokens: object[], status = 200) {
   return new Response(JSON.stringify({ tokens, total: tokens.length }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
   })
@@ -83,6 +93,7 @@ describe('parseToken', () => {
   it('parses a full entry', () => {
     const token = parseToken(makeToken())
     expect(token).toEqual({
+      token_id: 'aaaaaaaa-0000-4000-8000-000000000001',
       token_prefix: 'reg_a1b2c3',
       tenant_id: 'root/msp-a/prod',
       group: 'prod bulk enroll',
@@ -119,6 +130,15 @@ describe('parseToken', () => {
     expect(token?.revoked).toBe(true)
   })
 
+  it('parses token_id when present', () => {
+    const token = parseToken({
+      token_prefix: 'reg_xyz',
+      tenant_id: 'root',
+      token_id: 'aaaaaaaa-0000-4000-8000-000000000099',
+    })
+    expect(token?.token_id).toBe('aaaaaaaa-0000-4000-8000-000000000099')
+  })
+
   it('does not expose a token field even if wire data contains one', () => {
     const WIRE_FULL = 'reg_a1b2c3d4e5f6g7h8i9j0k1l2m3n4'
     const parsed = parseToken({ token_prefix: 'reg_a1b2c3', token: WIRE_FULL, tenant_id: 'root' })
@@ -142,6 +162,7 @@ describe('parseTokenList', () => {
     const list = parseTokenList({ tokens: [makeToken()], total: 1 })
     expect(list).toHaveLength(1)
     expect(list[0]?.token_prefix).toBe('reg_a1b2c3')
+    expect(list[0]?.token_id).toBe('aaaaaaaa-0000-4000-8000-000000000001')
   })
 
   it('drops tokens without a token_prefix', () => {
@@ -169,7 +190,11 @@ describe('TokensTab — list rendering', () => {
     fetchMock.mockResolvedValue(
       makeTokensResponse([
         makeToken(),
-        makeToken({ token_prefix: 'reg_9f8e7d', group: 'client-1 onboarding' }),
+        makeToken({
+          token_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+          token_prefix: 'reg_9f8e7d',
+          group: 'client-1 onboarding',
+        }),
       ]),
     )
     renderTab()
@@ -298,14 +323,319 @@ describe('TokensTab — status badges', () => {
   })
 })
 
+// ── Mint ──────────────────────────────────────────────────────────────────────
+
+describe('TokensTab — mint', () => {
+  it('renders a mint form in the empty state', async () => {
+    fetchMock.mockResolvedValue(makeTokensResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-empty')).toBeInTheDocument())
+    expect(screen.getByTestId('mint-form')).toBeInTheDocument()
+    expect(screen.getByTestId('mint-btn')).toBeInTheDocument()
+  })
+
+  it('renders a mint form when tokens exist', async () => {
+    fetchMock.mockResolvedValue(makeTokensResponse([makeToken()]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+    expect(screen.getByTestId('mint-form')).toBeInTheDocument()
+  })
+
+  it('posts to the tokens endpoint and shows SecretOnceModal with the minted secret', async () => {
+    const SECRET = 'reg_mintedtoken1234567890abcde'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([]))                // initial GET
+      .mockResolvedValueOnce(jsonResponse({ token: SECRET, token_id: 'uuid-1', token_prefix: 'reg_min' }, 201))  // POST
+      .mockResolvedValueOnce(makeTokensResponse([makeToken()]))     // reload GET
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByTestId('mint-controller-url'), { target: { value: 'https://ctrl.example.com' } })
+    fireEvent.click(screen.getByTestId('mint-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('secret-once-modal')).toBeInTheDocument())
+    expect(screen.getByTestId('secret-value')).toHaveTextContent(SECRET)
+    // POST was called
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/registration/tokens',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('shows SecretOnceModal with action label "Minted"', async () => {
+    const SECRET = 'reg_mintedtoken1234567890abcde'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ token: SECRET }, 201))
+      .mockResolvedValueOnce(makeTokensResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+    fireEvent.change(screen.getByTestId('mint-controller-url'), { target: { value: 'https://ctrl.example.com' } })
+    fireEvent.click(screen.getByTestId('mint-btn'))
+    await waitFor(() => expect(screen.getByTestId('secret-once-modal')).toBeInTheDocument())
+    expect(screen.getByRole('dialog')).toHaveTextContent(/minted/i)
+  })
+
+  it('shows mint error on non-201 response', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([]))
+      .mockResolvedValueOnce(new Response('bad', { status: 400 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+    fireEvent.change(screen.getByTestId('mint-controller-url'), { target: { value: 'https://ctrl.example.com' } })
+    fireEvent.click(screen.getByTestId('mint-btn'))
+    await waitFor(() => expect(screen.getByTestId('mint-error')).toBeInTheDocument())
+    expect(screen.getByTestId('mint-error')).toHaveTextContent('400')
+  })
+
+  it('validates that controller URL is required', async () => {
+    fetchMock.mockResolvedValue(makeTokensResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+    // fireEvent.submit bypasses HTML5 required validation so React's own check runs.
+    fireEvent.submit(screen.getByTestId('mint-form'))
+    await waitFor(() => expect(screen.getByTestId('mint-error')).toBeInTheDocument())
+    expect(screen.getByTestId('mint-error')).toHaveTextContent(/required/i)
+  })
+})
+
+// ── Rotate ────────────────────────────────────────────────────────────────────
+
+describe('TokensTab — rotate', () => {
+  it('sends POST to the rotate endpoint and shows SecretOnceModal with rotated secret', async () => {
+    const TOKEN_ID = 'aaaaaaaa-0000-4000-8000-000000000001'
+    const SECRET = 'reg_rotatedtoken1234567890abcde'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([makeToken({ token_id: TOKEN_ID })]))
+      .mockResolvedValueOnce(jsonResponse({ token: SECRET, token_id: 'uuid-new', token_prefix: 'reg_rot' }, 201))
+      .mockResolvedValueOnce(makeTokensResponse([makeToken({ token_id: 'uuid-new', token_prefix: 'reg_rot' })]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId(`rotate-btn-${TOKEN_ID}`))
+
+    await waitFor(() => expect(screen.getByTestId('secret-once-modal')).toBeInTheDocument())
+    expect(screen.getByTestId('secret-value')).toHaveTextContent(SECRET)
+    expect(screen.getByRole('dialog')).toHaveTextContent(/rotated/i)
+  })
+
+  it('shows action error on rotate failure', async () => {
+    const TOKEN_ID = 'aaaaaaaa-0000-4000-8000-000000000001'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([makeToken({ token_id: TOKEN_ID })]))
+      .mockResolvedValueOnce(new Response('err', { status: 409 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId(`rotate-btn-${TOKEN_ID}`))
+    await waitFor(() => expect(screen.getByTestId(`action-error-${TOKEN_ID}`)).toBeInTheDocument())
+    expect(screen.getByTestId(`action-error-${TOKEN_ID}`)).toHaveTextContent('409')
+  })
+})
+
+// ── Revoke ────────────────────────────────────────────────────────────────────
+
+describe('TokensTab — revoke', () => {
+  it('sends POST /{token_id}/revoke and reloads', async () => {
+    const TOKEN_ID = 'aaaaaaaa-0000-4000-8000-000000000001'
+    const revokedToken = makeToken({ token_id: TOKEN_ID, revoked: true })
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([makeToken({ token_id: TOKEN_ID })]))
+      .mockResolvedValueOnce(jsonResponse({ token_id: TOKEN_ID, revoked: true }, 200))
+      .mockResolvedValueOnce(makeTokensResponse([revokedToken]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId(`revoke-btn-${TOKEN_ID}`))
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/v1/registration/tokens/${TOKEN_ID}/revoke`,
+        expect.objectContaining({ method: 'POST' }),
+      ),
+    )
+    // After reload the row shows Revoked
+    await waitFor(() => expect(screen.getByTestId('token-status')).toHaveTextContent('Revoked'))
+  })
+
+  it('shows action error on revoke failure', async () => {
+    const TOKEN_ID = 'aaaaaaaa-0000-4000-8000-000000000001'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([makeToken({ token_id: TOKEN_ID })]))
+      .mockResolvedValueOnce(new Response('err', { status: 500 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId(`revoke-btn-${TOKEN_ID}`))
+    await waitFor(() => expect(screen.getByTestId(`action-error-${TOKEN_ID}`)).toBeInTheDocument())
+    expect(screen.getByTestId(`action-error-${TOKEN_ID}`)).toHaveTextContent('500')
+  })
+})
+
+// ── Delete ────────────────────────────────────────────────────────────────────
+
+describe('TokensTab — delete', () => {
+  it('sends DELETE /{token_id} and removes the row', async () => {
+    const TOKEN_ID = 'aaaaaaaa-0000-4000-8000-000000000001'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([makeToken({ token_id: TOKEN_ID })]))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(makeTokensResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId(`delete-btn-${TOKEN_ID}`))
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/v1/registration/tokens/${TOKEN_ID}`,
+        expect.objectContaining({ method: 'DELETE' }),
+      ),
+    )
+    // After reload, empty state
+    await waitFor(() => expect(screen.getByTestId('tokens-empty')).toBeInTheDocument())
+  })
+
+  it('shows action error on delete failure', async () => {
+    const TOKEN_ID = 'aaaaaaaa-0000-4000-8000-000000000001'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([makeToken({ token_id: TOKEN_ID })]))
+      .mockResolvedValueOnce(new Response('err', { status: 500 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId(`delete-btn-${TOKEN_ID}`))
+    await waitFor(() => expect(screen.getByTestId(`action-error-${TOKEN_ID}`)).toBeInTheDocument())
+    expect(screen.getByTestId(`action-error-${TOKEN_ID}`)).toHaveTextContent('500')
+  })
+})
+
+// ── Tokens without a stable id ────────────────────────────────────────────────
+
+describe('TokensTab — token without token_id', () => {
+  it('disables revoke and delete and never builds a degenerate URL', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeTokensResponse([makeToken({ token_id: '', token_prefix: 'reg_leg' })]),
+    )
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+
+    // Row state is keyed by token_prefix when there is no id.
+    expect(screen.getByTestId('revoke-btn-reg_leg')).toBeDisabled()
+    expect(screen.getByTestId('delete-btn-reg_leg')).toBeDisabled()
+    // Rotate addresses the tenant, not the token id — it stays available.
+    expect(screen.getByTestId('rotate-btn-reg_leg')).toBeEnabled()
+
+    fireEvent.click(screen.getByTestId('revoke-btn-reg_leg'))
+    fireEvent.click(screen.getByTestId('delete-btn-reg_leg'))
+
+    // Only the initial list GET was issued — no `/tokens//revoke` and no `/tokens/`.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/registration/tokens')
+  })
+
+  it('keeps per-row state separate for two tokens without an id', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        makeTokensResponse([
+          makeToken({ token_id: '', token_prefix: 'reg_one' }),
+          makeToken({ token_id: '', token_prefix: 'reg_two' }),
+        ]),
+      )
+      .mockResolvedValueOnce(new Response('err', { status: 409 }))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('rotate-btn-reg_one'))
+
+    await waitFor(() => expect(screen.getByTestId('action-error-reg_one')).toBeInTheDocument())
+    expect(screen.queryByTestId('action-error-reg_two')).toBeNull()
+  })
+})
+
+// ── SecretOnceModal ───────────────────────────────────────────────────────────
+
+describe('SecretOnceModal', () => {
+  it('renders the secret value and a copy button', () => {
+    const onDismiss = vi.fn()
+    render(
+      <SecretOnceModal
+        secret="reg_secretvalue12345678901234"
+        action="minted"
+        onDismiss={onDismiss}
+      />,
+    )
+    expect(screen.getByTestId('secret-value')).toHaveTextContent('reg_secretvalue12345678901234')
+    expect(screen.getByTestId('copy-secret-btn')).toBeInTheDocument()
+  })
+
+  it('calls onDismiss when the dismiss button is clicked', async () => {
+    const onDismiss = vi.fn()
+    render(
+      <SecretOnceModal
+        secret="reg_secretvalue12345678901234"
+        action="minted"
+        onDismiss={onDismiss}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('dismiss-secret-btn'))
+    expect(onDismiss).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows "Minted" heading for minted action', () => {
+    render(
+      <SecretOnceModal
+        secret="reg_secretvalue12345678901234"
+        action="minted"
+        onDismiss={() => {}}
+      />,
+    )
+    expect(screen.getByRole('heading')).toHaveTextContent(/minted/i)
+  })
+
+  it('shows "Rotated" heading for rotated action', () => {
+    render(
+      <SecretOnceModal
+        secret="reg_secretvalue12345678901234"
+        action="rotated"
+        onDismiss={() => {}}
+      />,
+    )
+    expect(screen.getByRole('heading')).toHaveTextContent(/rotated/i)
+  })
+
+  it('includes a one-time warning message', () => {
+    render(
+      <SecretOnceModal
+        secret="reg_secretvalue12345678901234"
+        action="minted"
+        onDismiss={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('secret-once-warning')).toBeInTheDocument()
+    expect(screen.getByTestId('secret-once-warning')).toHaveTextContent(/not be shown again/i)
+  })
+
+  it('is dismissed — secret absent from DOM after onDismiss is called', async () => {
+    const SECRET = 'reg_secretvalue12345678901234'
+    function Wrapper() {
+      const [show, setShow] = useState(true)
+      return show ? (
+        <SecretOnceModal secret={SECRET} action="minted" onDismiss={() => setShow(false)} />
+      ) : (
+        <div data-testid="dismissed" />
+      )
+    }
+    render(<Wrapper />)
+    expect(screen.getByTestId('secret-value')).toHaveTextContent(SECRET)
+    fireEvent.click(screen.getByTestId('dismiss-secret-btn'))
+    await waitFor(() => expect(screen.getByTestId('dismissed')).toBeInTheDocument())
+    expect(document.body.textContent).not.toContain(SECRET)
+  })
+})
+
 // ── Security: prefix-only guarantee (required AC) ─────────────────────────────
 
 describe('TokensTab — token prefix security (required AC)', () => {
   it('renders only the token_prefix, never a full-length token string', async () => {
     const PREFIX = 'reg_x9y8z7'
-    // Simulates wire data that includes the full `token` field (as create/rotate
-    // would return). The list endpoint contract omits it, but this test verifies
-    // the component does not render it even if the wire unexpectedly includes it.
     const WIRE_FULL = 'reg_x9y8z7w6v5u4t3s2r1q0p9o8n7m6l5k4j3i2h1g0f9e8d7c6b5a4'
     fetchMock.mockResolvedValue(
       makeTokensResponse([
@@ -317,11 +647,7 @@ describe('TokensTab — token prefix security (required AC)', () => {
 
     const rows = screen.getAllByTestId('token-row')
     expect(rows).toHaveLength(1)
-
-    // The prefix appears in the token-prefix cell
     expect(within(rows[0]!).getByTestId('token-prefix')).toHaveTextContent(PREFIX)
-
-    // The full wire value must not appear anywhere in the DOM
     expect(document.body.textContent).not.toContain(WIRE_FULL)
   })
 
@@ -330,8 +656,8 @@ describe('TokensTab — token prefix security (required AC)', () => {
     const FULL_B = 'reg_bbbbbb2222222222222222222222222222222222222222222222222222'
     fetchMock.mockResolvedValue(
       makeTokensResponse([
-        makeToken({ token_prefix: 'reg_aaaaaa', token: FULL_A }),
-        makeToken({ token_prefix: 'reg_bbbbbb', token: FULL_B }),
+        makeToken({ token_prefix: 'reg_aaaaaa', token: FULL_A, token_id: 'uuid-a' }),
+        makeToken({ token_prefix: 'reg_bbbbbb', token: FULL_B, token_id: 'uuid-b' }),
       ]),
     )
     renderTab()
@@ -342,35 +668,21 @@ describe('TokensTab — token prefix security (required AC)', () => {
     expect(screen.getAllByTestId('token-prefix')[0]).toHaveTextContent('reg_aaaaaa')
     expect(screen.getAllByTestId('token-prefix')[1]).toHaveTextContent('reg_bbbbbb')
   })
-})
 
-// ── No write affordances ──────────────────────────────────────────────────────
-
-describe('TokensTab — no write affordances', () => {
-  it('renders no mint, rotate, revoke, or delete button', async () => {
-    fetchMock.mockResolvedValue(makeTokensResponse([makeToken()]))
+  it('secret shown in SecretOnceModal is absent from DOM after dismiss', async () => {
+    const SECRET = 'reg_mintonce1234567890abcde'
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ token: SECRET }, 201))
+      .mockResolvedValueOnce(makeTokensResponse([]))
     renderTab()
-    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
-
-    expect(screen.queryByRole('button', { name: /mint/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /rotate/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /revoke/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /delete/i })).toBeNull()
-  })
-
-  it('renders no write controls even in the loading state', () => {
-    fetchMock.mockReturnValue(new Promise(() => {}))
-    renderTab()
-    expect(screen.queryByRole('button', { name: /mint/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /rotate/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /revoke/i })).toBeNull()
-  })
-
-  it('renders no write controls in the empty state', async () => {
-    fetchMock.mockResolvedValue(makeTokensResponse([]))
-    renderTab()
-    await waitFor(() => expect(screen.getByTestId('tokens-empty')).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: /mint/i })).toBeNull()
-    expect(screen.queryByRole('button')).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+    fireEvent.change(screen.getByTestId('mint-controller-url'), { target: { value: 'https://ctrl.example.com' } })
+    fireEvent.click(screen.getByTestId('mint-btn'))
+    await waitFor(() => expect(screen.getByTestId('secret-once-modal')).toBeInTheDocument())
+    expect(document.body.textContent).toContain(SECRET)
+    fireEvent.click(screen.getByTestId('dismiss-secret-btn'))
+    await waitFor(() => expect(screen.queryByTestId('secret-once-modal')).toBeNull())
+    expect(document.body.textContent).not.toContain(SECRET)
   })
 })

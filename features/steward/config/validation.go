@@ -28,6 +28,14 @@ func GetDNARefreshInterval(cfg StewardConfig) time.Duration {
 	return stewardtypes.GetDNARefreshInterval(cfg)
 }
 
+// DefaultObserveSweepN re-exports the shared Tier-2 observe sweep cadence default.
+const DefaultObserveSweepN = stewardtypes.DefaultObserveSweepN
+
+// GetObserveSweepN delegates to the shared stewardtypes implementation.
+func GetObserveSweepN(cfg StewardConfig) int {
+	return stewardtypes.GetObserveSweepN(cfg)
+}
+
 // GetConfiguredModules delegates to the shared stewardtypes implementation.
 func GetConfiguredModules(config StewardConfig) []string {
 	return stewardtypes.GetConfiguredModules(config)
