@@ -462,7 +462,7 @@ func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, 
 				if recErr := sess.RecordInput(ctx, msg.Data); recErr != nil {
 					if h.logger != nil {
 						h.logger.Warn("terminal: recording browser input failed; ending session",
-							"session_id", logging.RedactedID(relay.sessionID), "error", recErr)
+							"session_id", logging.RedactedID(relay.sessionID), "error", logging.SanitizeLogValue(recErr.Error()))
 					}
 					return
 				}
@@ -486,7 +486,7 @@ func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, 
 					if recErr := sess.RecordResize(ctx, req.Cols, req.Rows); recErr != nil {
 						if h.logger != nil {
 							h.logger.Warn("terminal: recording browser resize failed; ending session",
-								"session_id", logging.RedactedID(relay.sessionID), "error", recErr)
+								"session_id", logging.RedactedID(relay.sessionID), "error", logging.SanitizeLogValue(recErr.Error()))
 						}
 						return
 					}
