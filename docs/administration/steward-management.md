@@ -85,3 +85,42 @@ cfg steward move steward-abc --to-tenant dest-tenant
 # Move with an explicit controller URL
 cfg steward move steward-abc --to-tenant msp-a/client-1 --url https://controller.example.com
 ```
+
+**Web console**
+
+Move is available from the per-row action menu (kebab → Move to tenant) and the bulk selection bar.
+Both paths use the browser session and require AssuranceStrong (ADR-021 §S3). If the current
+session is below Strong, the web client triggers an elevation step-up ceremony before the request
+is issued — no explicit step-up button is needed.
+
+Bulk move fans out one `POST /api/v1/stewards/:id/move` call per selected steward. Each call is
+individually authorized and audited server-side; there is no batch endpoint that would bypass
+per-steward tenant scoping. Per-item success and failure are reported inline.
+
+---
+
+## Steward Decommission
+
+Permanently decommission (tombstone) a steward. The steward's durable record is tombstoned,
+its in-memory status is set to `deregistered`, and its active QUIC/gRPC session is dropped.
+
+**Authentication and authorization**
+
+Decommission requires AssuranceStrong (ADR-021). The caller must have `steward:decommission`
+permission on the steward's tenant.
+
+**Audit trail**
+
+Every decommission produces an audit record with severity `high`, containing the steward ID,
+admin identity, source IP, and request ID.
+
+**Web console**
+
+Decommission is available from the per-row action menu (kebab → Decommission) and the bulk
+selection bar (Decommission selected → Confirm decommission). Both paths require
+AssuranceStrong; the step-up elevation ceremony fires automatically if the current session
+is below Strong.
+
+Bulk decommission fans out one `DELETE /api/v1/stewards/:id` call per selected steward. Each
+call is individually authorized and audited server-side; no batch endpoint is used. Per-item
+success and failure are reported inline.

@@ -2,12 +2,15 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Per-row action menu (Story #2938) — mockup `.rowkebab` / `.pop .row` pattern
- * from `asset-live-activity.html` lines 204-205/500, applied to FleetTable.
+ * Per-row action menu (Story #2938, #2972) — mockup `.rowkebab` / `.pop .row`
+ * pattern from `asset-live-activity.html` lines 204-205/500, applied to
+ * FleetTable.
  *
  * The component is structured as an ordered MenuItemSpec list so later entries
- * can be appended without restructuring the JSX. Only tag edit is wired in
- * this story — move-tenant and decommission are out of scope (Section 2).
+ * can be appended without restructuring the JSX. Story #2972 adds move-tenant
+ * and decommission behind CFGMS-StepUp (elevation path, AssuranceStrong);
+ * step-up fires automatically via apiFetch on a 401 with WWW-Authenticate:
+ * CFGMS-StepUp — no special handling is needed in this component.
  *
  * Popover lifecycle (Escape + outside-click) is a verbatim reuse of the
  * pattern established by ColumnPicker.tsx and SavedViews.tsx.
@@ -180,9 +183,160 @@ function TagEditor({
   )
 }
 
+function MoveTenantPanel({
+  stewardId,
+  onBack,
+}: {
+  stewardId: string
+  onBack: () => void
+}) {
+  const [tenantId, setTenantId] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  async function move() {
+    const tid = tenantId.trim()
+    if (!tid) return
+    setBusy(true)
+    setError(null)
+    try {
+      const resp = await apiFetch(
+        `/api/v1/stewards/${encodeURIComponent(stewardId)}/move`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_tenant_id: tid }),
+        },
+      )
+      if (!resp.ok) {
+        setError(`Failed to move steward (${resp.status})`)
+        return
+      }
+      setDone(true)
+    } catch {
+      setError('Failed to move steward')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="row-move-panel">
+      <div className="rtag-hd">
+        <button type="button" className="rtag-back" aria-label="Back to menu" onClick={onBack}>
+          ←
+        </button>
+        <span className="rtag-title">Move to tenant</span>
+      </div>
+      {error !== null && (
+        <div className="rtag-err" role="alert">
+          {error}
+        </div>
+      )}
+      {done ? (
+        <div className="rmove-ok" role="status">
+          Moved successfully
+        </div>
+      ) : (
+        <div className="rtag-row">
+          <input
+            type="text"
+            className="rtag-in"
+            placeholder="tenant-id"
+            aria-label="New tenant ID"
+            value={tenantId}
+            disabled={busy}
+            onChange={(e) => setTenantId(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void move()
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="rtag-btn"
+            disabled={busy || !tenantId.trim()}
+            onClick={() => void move()}
+          >
+            Move
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DecommissionPanel({
+  stewardId,
+  onBack,
+}: {
+  stewardId: string
+  onBack: () => void
+}) {
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  async function decommission() {
+    setBusy(true)
+    setError(null)
+    try {
+      const resp = await apiFetch(
+        `/api/v1/stewards/${encodeURIComponent(stewardId)}`,
+        { method: 'DELETE' },
+      )
+      if (!resp.ok) {
+        setError(`Failed to decommission (${resp.status})`)
+        return
+      }
+      setDone(true)
+    } catch {
+      setError('Failed to decommission')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="row-decommission-panel">
+      <div className="rtag-hd">
+        <button type="button" className="rtag-back" aria-label="Back to menu" onClick={onBack}>
+          ←
+        </button>
+        <span className="rtag-title">Decommission</span>
+      </div>
+      {error !== null && (
+        <div className="rtag-err" role="alert">
+          {error}
+        </div>
+      )}
+      {done ? (
+        <div className="rdecom-ok" role="status">
+          Decommissioned
+        </div>
+      ) : (
+        <div className="rdecom-confirm">
+          <p className="rdecom-warn">This cannot be undone.</p>
+          <button
+            type="button"
+            className="rtag-btn rtag-btn-danger"
+            disabled={busy}
+            onClick={() => void decommission()}
+          >
+            Confirm decommission
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function RowActionMenu({ stewardId }: { stewardId: string }) {
   const [open, setOpen] = useState(false)
-  const [mode, setMode] = useState<'menu' | 'tags'>('menu')
+  const [mode, setMode] = useState<'menu' | 'tags' | 'move' | 'decommission'>('menu')
   const wrapRef = useRef<HTMLDivElement>(null)
 
   /* Escape and outside-click lifecycle — verbatim reuse of ColumnPicker.tsx pattern. */
@@ -211,6 +365,8 @@ export default function RowActionMenu({ stewardId }: { stewardId: string }) {
   /* Ordered spec list — append later entries here without restructuring the JSX. */
   const MENU_ITEMS: MenuItemSpec[] = [
     { id: 'tags', label: 'Edit tags', onActivate: () => setMode('tags') },
+    { id: 'move', label: 'Move to tenant', onActivate: () => setMode('move') },
+    { id: 'decommission', label: 'Decommission', onActivate: () => setMode('decommission') },
   ]
 
   return (
@@ -261,6 +417,12 @@ export default function RowActionMenu({ stewardId }: { stewardId: string }) {
             ))}
           {mode === 'tags' && (
             <TagEditor stewardId={stewardId} onBack={() => setMode('menu')} />
+          )}
+          {mode === 'move' && (
+            <MoveTenantPanel stewardId={stewardId} onBack={() => setMode('menu')} />
+          )}
+          {mode === 'decommission' && (
+            <DecommissionPanel stewardId={stewardId} onBack={() => setMode('menu')} />
           )}
         </div>
       )}
