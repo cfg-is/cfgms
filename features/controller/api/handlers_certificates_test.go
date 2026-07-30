@@ -30,7 +30,10 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// setupCertTestServer creates a server wired with a real cert manager for certificate handler tests.
+// setupCertTestServer creates a server wired with a real cert manager and a real
+// steward store for certificate handler tests. The steward store mirrors the
+// production composition (server.go wires it whenever the storage provider
+// supplies one) and is required by the list endpoint for any tenant-scoped caller.
 func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 	t.Helper()
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
@@ -75,6 +78,7 @@ func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 		nil, // No blob store for basic tests
 	)
 	require.NoError(t, err)
+	server.SetStewardStore(storageManager.GetStewardStore())
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -429,6 +433,127 @@ func TestHandleListCertificates_TenantScope_ExcludesSiblingTenant(t *testing.T) 
 	assert.True(t, foundClient1, "client-1 certificate must be included in the response")
 }
 
+// TestHandleListCertificates_StewardFilter_TenantScope_ExcludesSiblingTenantByCommonName
+// covers the ?steward_id= branch under a tenant-scoped caller. The filter matches on
+// COMMON NAME, which is independent of the owning steward (provisioning accepts an
+// explicit common_name while ClientID stays the steward ID). A client-1 caller asking
+// for the sibling tenant's certificate by its common name must receive nothing: the
+// scope decision has to resolve the certificate's recorded owner, not the caller's
+// query param.
+func TestHandleListCertificates_StewardFilter_TenantScope_ExcludesSiblingTenantByCommonName(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	// Issued the way the provisioning service does it: common name diverges from
+	// the steward ID recorded as ClientID.
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2.example.com",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates?steward_id=steward-client2.example.com", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, "steward-client2",
+		"a client-1 caller must not learn anything about client-2's certificate via its common name")
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&resp))
+	assert.Empty(t, resp.Data,
+		"sibling-tenant certificate must be filtered out of the steward_id-filtered response")
+}
+
+// TestHandleListCertificates_StewardFilter_TenantScope_IncludesOwnTenantByCommonName
+// is the positive counterpart: the ?steward_id= branch must still return the caller's
+// own certificate when the common name diverges from the owning steward ID, and must
+// label it with the authoritative owner (ClientID) rather than the query param.
+func TestHandleListCertificates_StewardFilter_TenantScope_IncludesOwnTenantByCommonName(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1.example.com",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates?steward_id=steward-client1.example.com", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "steward-client1.example.com", resp.Data[0].CommonName)
+	assert.Equal(t, "steward-client1", resp.Data[0].StewardID,
+		"the response must report the certificate's recorded owner, not the query param")
+}
+
+// TestHandleListCertificates_StewardFilter_TenantScope_DivergentCNNotOwnerLabelled
+// pins the labelling rule that the scope decision depends on: even for an unscoped
+// admin, a certificate returned by the common-name filter carries its recorded
+// ClientID as StewardID. Without this, filterCertsByTenantScope would evaluate a
+// caller-supplied string.
+func TestHandleListCertificates_StewardFilter_TenantScope_DivergentCNNotOwnerLabelled(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"certificate:list"})
+
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-gamma.example.com",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-gamma",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates?steward_id=steward-gamma.example.com", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "steward-gamma", resp.Data[0].StewardID)
+}
+
 // TestHandleListCertificates_TenantScope_InternalCertVisibleToAll verifies that a
 // controller-internal certificate with no ClientID still appears in every caller's
 // list regardless of tenant scope.
@@ -481,13 +606,12 @@ func TestHandleListCertificates_TenantScope_InternalCertVisibleToAll(t *testing.
 	assert.True(t, foundInternal, "controller-internal cert (no ClientID) must appear regardless of tenant scope")
 }
 
-// TestHandleListCertificates_TenantScope_StewardNotInStore_CertDropped verifies the
-// fail-closed rule for unattributable certificates: a cert whose ClientID has no
-// steward record in the durable store cannot be shown to belong to the caller's
-// subtree, so a scoped caller must NOT receive it. A steward registered over the
-// gRPC path exists only in the in-memory registry (Issue #2929); keeping such certs
-// visible would disclose every other tenant's serial, hostname and expiry.
-func TestHandleListCertificates_TenantScope_StewardNotInStore_CertDropped(t *testing.T) {
+// TestHandleListCertificates_TenantScope_StewardNotInStore_CertKept verifies the
+// story AC for unattributable certificates: a cert whose ClientID has no steward
+// record in the durable store has no tenant owner to check against, so it remains
+// visible to a tenant-scoped caller (same as a controller-internal cert with no
+// ClientID at all).
+func TestHandleListCertificates_TenantScope_StewardNotInStore_CertKept(t *testing.T) {
 	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
 
 	// Issue a cert for a steward that is NOT registered in the stewardStore.
@@ -512,16 +636,18 @@ func TestHandleListCertificates_TenantScope_StewardNotInStore_CertDropped(t *tes
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
+	found := false
 	for _, c := range resp.Data {
-		assert.NotEqual(t, "unregistered-steward", c.StewardID,
-			"cert whose owning steward has no durable record must not reach a tenant-scoped caller")
+		if c.StewardID == "unregistered-steward" {
+			found = true
+		}
 	}
+	assert.True(t, found, "cert whose owning steward has no durable record must remain visible to a tenant-scoped caller")
 }
 
 // TestHandleListCertificates_TenantScope_StewardNotInStore_VisibleToUnscopedAdmin
-// verifies the other half of the fail-closed rule: dropping unattributable certs
-// applies only to scoped callers. An unscoped admin (mTLS admin cert → TenantID "")
-// still sees the cert, so operators can find and clean up orphaned certificates.
+// verifies that unattributable certs also remain visible to an unscoped admin
+// (mTLS admin cert → TenantID ""), which never filters at all.
 func TestHandleListCertificates_TenantScope_StewardNotInStore_VisibleToUnscopedAdmin(t *testing.T) {
 	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
 
@@ -624,6 +750,113 @@ func TestHandleListCertificates_TenantScope_StoreFault_Returns500(t *testing.T) 
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
 	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+}
+
+// TestHandleListCertificates_TenantScope_NilStewardStore_Returns503 verifies the
+// endpoint fails CLOSED when the controller was composed without a steward store.
+// Without that store, subtree membership cannot be evaluated for a tenant-scoped
+// caller, so returning the list at all would disclose every tenant's serials,
+// common names and expiry dates. The composition is reachable: server.go wires the
+// store only when the storage provider supplies one, and a provider answering
+// CreateStewardStore with business.ErrNotSupported leaves it nil.
+func TestHandleListCertificates_TenantScope_NilStewardStore_Returns503(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	// Two stewards in sibling tenants, both with issued certs.
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+	for _, id := range []string{"steward-client1", "steward-client2"} {
+		_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName:   id,
+			Organization: "Test CFGMS",
+			ClientID:     id,
+			ValidityDays: 365,
+		})
+		require.NoError(t, err)
+	}
+
+	// Reproduce the unwired composition: no steward store on the server.
+	server.SetStewardStore(nil)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"a tenant-scoped caller must never receive an unfiltered certificate list")
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, "steward-client2",
+		"unevaluable scope must not leak the sibling tenant's certificate")
+	assert.NotContains(t, body, "steward-client1",
+		"unevaluable scope must not return partial certificate data")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleListCertificates_TenantScope_NilStewardStore_UnscopedAdminStillListed
+// verifies the fail-closed guard is scoped to tenant-scoped callers only: an
+// unscoped admin (mTLS admin cert → TenantID "") has no subtree to restrict to and
+// still receives the full list when no steward store is wired.
+func TestHandleListCertificates_TenantScope_NilStewardStore_UnscopedAdminStillListed(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	server.SetStewardStore(nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"unscoped admin must not be blocked by the tenant-scope store requirement")
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	found := false
+	for _, c := range resp.Data {
+		if c.StewardID == "steward-client1" {
+			found = true
+		}
+	}
+	assert.True(t, found, "unscoped admin must still receive the full certificate list")
 }
 
 // setupRotationTestServer creates a server wired with a real cert manager and
