@@ -294,6 +294,12 @@ func newRecordedTestSession(t *testing.T) (*Session, *DefaultSessionRecorder) {
 
 	session.SetRecorder(recorder)
 	require.NoError(t, recorder.StartRecording(session.ID, session.GetMetadata()))
+	// Close the recording file before t.TempDir()'s cleanup removes the directory:
+	// on Windows an open file cannot be unlinked, so a still-recording session fails
+	// RemoveAll. Idempotent — tests that already call EndRecording get ErrNoActiveRecording here.
+	t.Cleanup(func() {
+		_ = recorder.EndRecording(session.ID)
+	})
 	return session, recorder
 }
 
