@@ -14,6 +14,7 @@
 // Configuration is read from environment variables:
 //
 //	CFGMS_SECRETS_SOPS_STORAGE_ROOT   – flatfile root directory (sops backend)
+//	CFGMS_SECRETS_SOPS_KEY_FILE       – external AES-256 key file (sops backend)
 //	CFGMS_SECRETS_OPENBAO_ADDR        – OpenBao address (openbao backend; fallback: OPENBAO_ADDR)
 //	CFGMS_SECRETS_OPENBAO_TOKEN       – OpenBao token (openbao backend; fallback: OPENBAO_TOKEN)
 //	CFGMS_MIGRATE_CA_STORAGE_PATH     – path holding ca.key/ca.crt (enables CA sub-step)
@@ -72,10 +73,15 @@ func openSecretBackend(name string) (secretsinterfaces.SecretStore, error) {
 		if root == "" {
 			return nil, fmt.Errorf("CFGMS_SECRETS_SOPS_STORAGE_ROOT must be set for sops backend")
 		}
+		keyFile := os.Getenv("CFGMS_SECRETS_SOPS_KEY_FILE")
+		if keyFile == "" {
+			return nil, fmt.Errorf("CFGMS_SECRETS_SOPS_KEY_FILE must be set for sops backend")
+		}
 		return secretsinterfaces.CreateSecretStoreFromConfig("sops", map[string]interface{}{
 			"storage_provider": "flatfile",
 			"storage_config":   map[string]interface{}{"root": root},
 			"cache_enabled":    false,
+			"key_file":         keyFile,
 		})
 	case "openbao":
 		cfg := map[string]interface{}{}

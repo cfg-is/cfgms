@@ -264,6 +264,8 @@ func (s *DatabaseCommandStore) ListCommandRecords(ctx context.Context, filter *b
 		args = append(args, filter.Limit)
 		if filter.Offset > 0 {
 			argN++
+			// #nosec G202 -- only the generated PostgreSQL placeholder number is
+			// formatted into SQL; the caller's offset remains a bound argument.
 			query += fmt.Sprintf(" OFFSET $%d", argN)
 			args = append(args, filter.Offset)
 		}

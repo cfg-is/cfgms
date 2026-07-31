@@ -36,7 +36,7 @@ import (
 // supplies one) and is required by the list endpoint for any tenant-scoped caller.
 func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -863,7 +863,7 @@ func TestHandleListCertificates_TenantScope_NilStewardStore_UnscopedAdminStillLi
 // signing rotation service for rotate-endpoint tests.
 func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.SigningRotationService) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -921,7 +921,7 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 // returns 403 for any sub-Strong-assurance principal, even when rbacService is nil.
 //
 // (a) API-key principal → 403 (AssuranceMachine, does not meet AssuranceStrong bar).
-// (b) rbacService == nil + non-Strong-assurance cert → 403.
+// (b) rbacService == nil + non-Strong-assurance cert → 503 (fail closed).
 // The defense-in-depth Assurance < AssuranceStrong guard must block both before any
 // rotation logic runs, mirroring the certificate:rotate permissionAssurance entry.
 func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
@@ -942,10 +942,8 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 	})
 
 	t.Run("nil_rbac_non_admin_principal_rejected", func(t *testing.T) {
-		// Build a server with rbacService == nil to exercise the RBAC-nil bypass path.
-		// requirePermission skips the check when rbacService is nil; the defense-in-depth
-		// Assurance < AssuranceStrong guard in the handler must be the sole gate.
-		t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+		// Build a server with rbacService == nil to verify authorization fails closed.
+		setTestSecretsEnv(t)
 		cfg := config.DefaultConfig()
 		cfg.Certificate.EnableCertManagement = false
 		logger := logging.NewNoopLogger()
@@ -970,15 +968,13 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 			}
 		})
 
-		// Use an API-key principal (AssuranceMachine). With rbacService == nil,
-		// requirePermission skips the RBAC check — the Assurance < AssuranceStrong guard
-		// in the handler must be the sole gate.
+		// A valid credential cannot compensate for a missing authorization service.
 		apiKey := NewTestKey(t, nilRBACServer, []string{"certificate:rotate"})
 		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
 		req.Header.Set("X-API-Key", apiKey)
 		rec := httptest.NewRecorder()
 		nilRBACServer.router.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	})
 }
 

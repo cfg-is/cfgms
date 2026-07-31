@@ -29,6 +29,7 @@ import (
 	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -76,6 +77,22 @@ func TestBuildRootCommandFlags(t *testing.T) {
 func TestBuildRootCommandNoModeFlag(t *testing.T) {
 	cmd := buildRootCommand()
 	assert.Nil(t, cmd.Flags().Lookup("mode"), "mode flag must not be registered")
+}
+
+func TestPublicBetaSecurityProfileCannotBeDowngraded(t *testing.T) {
+	saved := SecurityProfile
+	SecurityProfile = securityProfilePublicBeta
+	t.Cleanup(func() { SecurityProfile = saved })
+
+	t.Setenv("CFGMS_SECURITY_PROFILE", securityProfileDevelopment)
+	enabled, err := publicBetaSecurityEnabled()
+	require.False(t, enabled)
+	require.ErrorContains(t, err, "cannot downgrade")
+
+	t.Setenv("CFGMS_SECURITY_PROFILE", "")
+	enabled, err = publicBetaSecurityEnabled()
+	require.NoError(t, err)
+	assert.True(t, enabled)
 }
 
 func TestInstallCommandEnforcesRequiredRegtoken(t *testing.T) {
@@ -230,7 +247,7 @@ func TestTryReconnectWithStoredIdentity_NoStoredIdentity_FallsThrough(t *testing
 	// No identity file on disk — first run. The function returns (nil, nil) so
 	// the caller falls through to HTTP registration without logging an error.
 	dir := t.TempDir()
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, logging.NewLogger("error"))
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	assert.Nil(t, tc)
 	assert.NoError(t, err)
 }
@@ -248,7 +265,7 @@ func TestTryReconnectWithStoredIdentity_MissingServerCert_RejectsAndFallsBack(t 
 		CACertPEM:        "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----",
 	}))
 
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, logging.NewLogger("error"))
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	assert.Nil(t, tc)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing controller server/signing certificate")
@@ -261,7 +278,7 @@ func TestTryReconnectWithStoredIdentity_CorruptIdentity_FallsThrough(t *testing.
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, identityFileName), []byte("{not json"), 0600))
 
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, logging.NewLogger("error"))
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceCompileBaked, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	assert.Nil(t, tc)
 	assert.NoError(t, err)
 }
@@ -281,7 +298,7 @@ func TestTryReconnectWithStoredIdentity_TrustDowngrade_ReturnsError(t *testing.T
 		ServerCertPEM:    "-----BEGIN CERTIFICATE-----\nserver\n-----END CERTIFICATE-----",
 	}))
 
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceTOFU, logging.NewLogger("error"))
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), dir, "token", trustSourceTOFU, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	assert.Nil(t, tc)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "trust downgrade rejected")
@@ -535,7 +552,7 @@ func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
 		ServerCertPEM:    "fake-server",
 	}
 
-	_, err = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, logging.NewLogger("error"))
+	_, err = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	require.ErrorIs(t, err, registration.ErrRefreshPending,
 		"HTTP 202 from refresh/complete must return ErrRefreshPending, not a fatal error")
 }
@@ -591,7 +608,7 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 
 	// refreshAndConnect will fail at connectWithApprovedRegistration (no real transport),
 	// but saveIdentity is invoked before the transport attempt so the identity file is written.
-	_, _ = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, logging.NewLogger("error"))
+	_, _ = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 
 	// The identity file saved by connectWithApprovedRegistration must carry the
 	// DeviceID and IdentityKeyPub from the key store.  An empty DeviceID here
@@ -768,7 +785,7 @@ func TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError(t *testing.T)
 		CACert:           "not-a-valid-pem", // invalid PEM → computeCAPEMFingerprint fails → pinTOFUCA returns error
 	}
 
-	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceTOFU, "", logger)
+	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceTOFU, "", stewardconfig.StewardConfig{}, false, logger)
 	require.Error(t, err, "must return a hard error when TOFU CA pin fails")
 
 	// Identity MUST NOT be saved when pinTOFUCA fails.
@@ -880,6 +897,7 @@ func TestRunSteward_ControllerUnreachable_StartsDegraded(t *testing.T) {
 	var connectAttempts atomic.Int32
 	alwaysFails := connectFuncT(func(ctx context.Context, token, url string,
 		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		publicBeta bool,
 		logger logging.Logger) (*client.TransportClient, error) {
 		connectAttempts.Add(1)
 		return nil, fmt.Errorf("controller unreachable: connection refused")
@@ -915,6 +933,7 @@ func TestRunSteward_EarlyLoggerBeforeProviderInit(t *testing.T) {
 	// (return nil on ctx cancel) even when the logging provider is unavailable.
 	neverConnects := connectFuncT(func(ctx context.Context, token, url string,
 		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		publicBeta bool,
 		logger logging.Logger) (*client.TransportClient, error) {
 		return nil, fmt.Errorf("no controller")
 	})
@@ -960,6 +979,7 @@ func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 
 	neverConnects := connectFuncT(func(ctx context.Context, token, url string,
 		trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore,
+		publicBeta bool,
 		logger logging.Logger) (*client.TransportClient, error) {
 		// Return an error so the retry loop keeps running until ctx is done.
 		// This also exercises the degraded-mode path implicitly.

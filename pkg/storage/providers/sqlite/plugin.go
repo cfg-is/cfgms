@@ -106,6 +106,8 @@ func (p *SQLiteProvider) Available() (bool, error) {
 
 	// Probe write access with a temporary marker file
 	probe := filepath.Join(dir, ".cfgms_sqlite_probe")
+	// #nosec G304 -- dir is the validated administrator-configured SQLite
+	// storage directory and probe is a fixed temporary filename beneath it.
 	f, err := os.Create(probe)
 	if err != nil {
 		return false, fmt.Errorf("sqlite: directory %s is not writable: %w", dir, err)

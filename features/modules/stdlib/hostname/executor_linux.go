@@ -69,10 +69,14 @@ func (e *linuxExecutor) getState() (hostnameState, error) {
 // applies it at runtime via the injected setHostname function.
 // Parent directories are created if needed (handles missing /etc on bare containers).
 func (e *linuxExecutor) setState(desired hostnameState) error {
-	if err := os.MkdirAll(filepath.Dir(e.hostnameFile), 0o755); err != nil { // #nosec G301 - /etc is world-traversable by convention
+	// #nosec G301 -- this creates the conventional /etc parent, which must be
+	// world-traversable; the system hostname is public configuration.
+	if err := os.MkdirAll(filepath.Dir(e.hostnameFile), 0o755); err != nil {
 		return fmt.Errorf("create hostname file parent: %w", err)
 	}
-	if err := os.WriteFile(e.hostnameFile, []byte(desired.Hostname+"\n"), 0o644); err != nil { // #nosec G306 - /etc/hostname is world-readable by convention
+	// #nosec G306 -- /etc/hostname is public system identity and conventionally
+	// world-readable; no credential or tenant-private data is stored.
+	if err := os.WriteFile(e.hostnameFile, []byte(desired.Hostname+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write /etc/hostname: %w", err)
 	}
 	if err := e.setHostname(desired.Hostname); err != nil {

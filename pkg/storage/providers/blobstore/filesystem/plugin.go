@@ -267,8 +267,16 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 	}
 
 	var results []blob.BlobInfo
+	metadataRoot, err := os.OpenRoot(searchDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return results, nil
+		}
+		return nil, fmt.Errorf("list blobs: open metadata root: %w", err)
+	}
+	defer func() { _ = metadataRoot.Close() }()
 
-	err := filepath.WalkDir(searchDir, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(searchDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -279,7 +287,11 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 			return nil
 		}
 
-		metaBytes, err := os.ReadFile(path)
+		relativePath, err := filepath.Rel(searchDir, path)
+		if err != nil {
+			return fmt.Errorf("list blobs: resolve metadata path: %w", err)
+		}
+		metaBytes, err := metadataRoot.ReadFile(relativePath)
 		if err != nil {
 			return fmt.Errorf("list blobs: failed to read metadata: %w", err)
 		}

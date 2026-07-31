@@ -38,7 +38,8 @@ func TestHTTPClient_ExecuteRequest(t *testing.T) {
 	}()
 
 	client := NewHTTPClient(HTTPClientConfig{
-		Timeout: 10 * time.Second,
+		Timeout:              10 * time.Second,
+		AllowPrivateNetworks: true,
 	})
 
 	httpConfig := &HTTPConfig{
@@ -77,7 +78,7 @@ func TestHTTPClient_ExecuteRequest_WithRetry(t *testing.T) {
 		server.Close() // Test server close doesn't return error
 	}()
 
-	client := NewHTTPClient(HTTPClientConfig{})
+	client := NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
 
 	httpConfig := &HTTPConfig{
 		URL:    server.URL,
@@ -114,6 +115,7 @@ func TestEngine_ExecuteHTTPStep(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	engine.httpClient = NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
 
 	workflow := Workflow{
 		Name: "http-test-workflow",
@@ -179,6 +181,7 @@ func TestEngine_ExecuteAPIStep(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	engine.httpClient = NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
 
 	// Mock the Microsoft Graph API URL by overriding the buildMicrosoftGraphRequest method
 	// For this test, we'll create a simpler API config that uses our test server
@@ -240,6 +243,7 @@ func TestEngine_ExecuteWebhookStep(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	engine.httpClient = NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
 
 	workflow := Workflow{
 		Name: "webhook-test-workflow",
@@ -287,6 +291,7 @@ func TestEngine_ExecuteDelayStep(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	engine.httpClient = NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
 
 	workflow := Workflow{
 		Name: "delay-test-workflow",
@@ -359,6 +364,7 @@ func TestEngine_ComplexAPIWorkflow(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewNoopLogger()
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	engine.httpClient = NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
 
 	workflow := Workflow{
 		Name: "complex-api-workflow",

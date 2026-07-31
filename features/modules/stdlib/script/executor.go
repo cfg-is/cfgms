@@ -334,6 +334,8 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), err
 		if err != nil {
 			return "", noop, err
 		}
+		// #nosec G302 -- the temporary script must be executable; 0700 grants
+		// access only to its owning steward process.
 		if err := os.Chmod(tmpPath, 0700); err != nil {
 			cleanup()
 			return "", noop, fmt.Errorf("chmod temp script: %w", err)

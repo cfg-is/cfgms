@@ -122,7 +122,7 @@ func TestHandleGetTenant_Exists(t *testing.T) {
 
 func TestHandleGetTenant_NotFound(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"tenant:read"})
+	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:read"}, "nonexistent-tenant", 5*time.Minute)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/nonexistent-tenant", nil)
 	req.Header.Set("X-API-Key", apiKey)
@@ -148,7 +148,7 @@ func TestHandleGetTenant_MissingPermission(t *testing.T) {
 
 func TestHandleSuspendTenant_Success(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "suspendable-tenant", 5*time.Minute)
 
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspendable-tenant"})
@@ -177,7 +177,7 @@ func TestHandleSuspendTenant_Success(t *testing.T) {
 
 func TestHandleSuspendTenant_NotFound(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "nonexistent-tenant", 5*time.Minute)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
 	req.Header.Set("X-API-Key", apiKey)

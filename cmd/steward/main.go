@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"os/signal"
@@ -56,6 +57,45 @@ import (
 // --controller-url at install time (ADR-013 §3, Issue #1517).
 var ControllerURL string
 
+// SecurityProfile is stamped by release builds. Canonical public-beta builds
+// set this to "public-beta"; direct `go build` remains an explicitly
+// non-public development build.
+var SecurityProfile = "development"
+
+const (
+	securityProfileDevelopment = "development"
+	securityProfileTest        = "test"
+	securityProfilePublicBeta  = "public-beta"
+)
+
+func publicBetaSecurityEnabled() (bool, error) {
+	compiled := strings.TrimSpace(SecurityProfile)
+	if compiled == "" {
+		compiled = securityProfileDevelopment
+	}
+	envProfile := strings.TrimSpace(os.Getenv("CFGMS_SECURITY_PROFILE"))
+
+	valid := func(profile string) bool {
+		switch profile {
+		case securityProfileDevelopment, securityProfileTest, securityProfilePublicBeta:
+			return true
+		default:
+			return false
+		}
+	}
+	if !valid(compiled) {
+		return false, fmt.Errorf("invalid compiled security profile %q", compiled)
+	}
+	if envProfile != "" && !valid(envProfile) {
+		return false, fmt.Errorf("invalid CFGMS_SECURITY_PROFILE %q", envProfile)
+	}
+	if compiled == securityProfilePublicBeta &&
+		envProfile != "" && envProfile != securityProfilePublicBeta {
+		return false, fmt.Errorf("CFGMS_SECURITY_PROFILE cannot downgrade compiled public-beta security profile to %q", envProfile)
+	}
+	return compiled == securityProfilePublicBeta || envProfile == securityProfilePublicBeta, nil
+}
+
 // TrustSource identifies the enrollment channel that established the trust anchor.
 // Higher values denote stronger assurance. A steward never silently accepts a
 // weaker source than it was built or enrolled for (ADR-013 §3, Issue #1517).
@@ -76,6 +116,7 @@ type connectFuncT func(
 	trustSrc TrustSource,
 	installCAPEM string,
 	ks *identity.FileKeyStore,
+	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error)
 
@@ -222,10 +263,14 @@ func pinTOFUCA(caPath, caPEM string, id *StewardIdentity) error {
 	}
 	id.CAPinFingerprint = fp
 	if caPath != "" {
+		// #nosec G301 -- the steward service must traverse this directory to
+		// read the public TOFU-pinned CA certificate; it contains no private key.
 		if err := os.MkdirAll(filepath.Dir(caPath), 0755); err != nil {
 			return fmt.Errorf("create TOFU CA cert directory: %w", err)
 		}
-		if err := os.WriteFile(caPath, []byte(caPEM), 0444); err != nil { //#nosec G306 -- 0444 intentional: CA is public material, immutable after TOFU pin
+		// #nosec G306 -- a CA certificate is public verification material; 0444
+		// makes the TOFU pin service-readable and immutable by the service user.
+		if err := os.WriteFile(caPath, []byte(caPEM), 0444); err != nil {
 			return fmt.Errorf("write TOFU CA cert: %w", err)
 		}
 	}
@@ -379,6 +424,10 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 
 	// ── gRPC transport registration flow ─────────────────────────────────────
 	if regToken != "" {
+		publicBeta, profileErr := publicBetaSecurityEnabled()
+		if profileErr != nil {
+			return profileErr
+		}
 		logger.Info("Using registration token for auto-registration (gRPC transport mode)",
 			"operation", "registration_init",
 			"token_prefix", logging.RedactedID(regToken))
@@ -414,7 +463,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		installCACertPath := resolveRegistrationCACertPath(logger)
 		var installCAPEM string
 		if installCACertPath != "" {
-			if caData, caErr := os.ReadFile(installCACertPath); caErr == nil { //#nosec G304 -- path from resolveRegistrationCACertPath
+			// #nosec G304 -- path is returned by resolveRegistrationCACertPath
+			// from the explicit installer CA option or fixed service CA path.
+			if caData, caErr := os.ReadFile(installCACertPath); caErr == nil {
 				installCAPEM = string(caData)
 			}
 		}
@@ -436,7 +487,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 				if runCtx.Err() != nil {
 					return
 				}
-				tc, connErr := cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, logger)
+				tc, connErr := cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, publicBeta, logger)
 				if connErr == nil {
 					subsysState.markHealthy("controller")
 					connectedCh <- tc
@@ -911,6 +962,8 @@ func resolveRegistrationCACertPath(logger logging.Logger) string {
 func doResolveRegistrationCACertPath(logger logging.Logger, platformPath string) string {
 	// Priority 1: explicit env var override.
 	if envPath := os.Getenv("CFGMS_HTTP_CA_CERT_PATH"); envPath != "" {
+		// #nosec G703 -- this process-start environment value is controlled by
+		// the steward administrator/service definition, not a remote request.
 		if _, err := os.Stat(envPath); err == nil {
 			return envPath
 		}
@@ -978,10 +1031,37 @@ type approvedRegistration struct {
 //
 // trustSrc and installCAPEM implement the ADR-013 §3 trust anchoring model (Issue #1517).
 // installCAPEM is non-empty only for install-pinned mode; TOFU and compile-baked pass "".
-func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore, logger logging.Logger) (*client.TransportClient, error) {
+func loadConnectedRuntimeConfig(publicBeta bool) (stewardconfig.StewardConfig, error) {
+	cfg, err := stewardconfig.LoadConfiguration("")
+	if err != nil {
+		if !errors.Is(err, stewardconfig.ErrNoConfiguration) {
+			if publicBeta {
+				return cfg, fmt.Errorf("public-beta connected configuration is invalid: %w", err)
+			}
+			return cfg, nil
+		}
+		if publicBeta {
+			cfg.Steward.ScriptSigning = stewardconfig.ScriptSigningConfig{
+				Policy:             stewardconfig.ScriptSigningPolicyOptional,
+				RequireSignedAdhoc: true,
+			}
+		}
+		return cfg, nil
+	}
+	if publicBeta && !cfg.Steward.ScriptSigning.RequireSignedAdhoc {
+		return cfg, fmt.Errorf("public-beta connected configuration rejects require_signed_adhoc: false or omitted")
+	}
+	return cfg, nil
+}
+
+func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
 	certStoreDir := defaultCertStoreDir()
+	runtimeCfg, err := loadConnectedRuntimeConfig(publicBeta)
+	if err != nil {
+		return nil, err
+	}
 
 	// Downgrade guard: reject if stored enrollment had stronger trust assurance.
 	if storedID, loadErr := loadIdentity(certStoreDir); loadErr == nil && storedID != nil {
@@ -991,7 +1071,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	}
 
 	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
-	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, logger); tc != nil {
+	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, runtimeCfg, publicBeta, logger); tc != nil {
 		return tc, nil
 	} else if reconnErr != nil {
 		logger.Warn("Stored-identity reconnect failed; checking for expired-cert refresh path", "error", reconnErr)
@@ -1008,7 +1088,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			})
 			if certMgrErr == nil {
 				if certs, listErr := certMgr.ListCertificates(); listErr == nil && hasExpiredClientCert(certs) {
-					tc, refreshErr := refreshAndConnect(ctx, storedID, ks, certStoreDir, token, controllerURL, logger)
+					tc, refreshErr := refreshAndConnect(ctx, storedID, ks, certStoreDir, token, controllerURL, runtimeCfg, publicBeta, logger)
 					if refreshErr == nil {
 						return tc, nil
 					}
@@ -1043,8 +1123,8 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 
 	// Load the approval poll timeout from optional local config (default: 24h).
 	pollTimeout := 24 * time.Hour
-	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil && cfg.Steward.RegistrationPollTimeout > 0 {
-		pollTimeout = cfg.Steward.RegistrationPollTimeout
+	if runtimeCfg.Steward.RegistrationPollTimeout > 0 {
+		pollTimeout = runtimeCfg.Steward.RegistrationPollTimeout
 	}
 
 	// Resume a pending registration from a previous run if one exists.
@@ -1063,7 +1143,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		if approved != nil {
 			enrichApprovedWithDeviceIdentity(approved, ks)
 			_ = clearPendingState(certStoreDir)
-			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, logger)
+			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
 		}
 		// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
 		logger.Info("Persisted pending record expired on controller; performing fresh registration")
@@ -1118,7 +1198,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		}
 		enrichApprovedWithDeviceIdentity(approved, ks)
 		_ = clearPendingState(certStoreDir)
-		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, logger)
+		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
 	}
 
 	// Immediate approval (HTTP 200): proceed directly to transport setup.
@@ -1140,7 +1220,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		SigningCert:      regResp.SigningCert,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, logger)
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
 }
 
 // pollForApproval polls GET /api/v1/registration/status/{pendingID} with exponential
@@ -1233,6 +1313,8 @@ func connectWithApprovedRegistration(
 	certStoreDir, token string,
 	trustSrc TrustSource,
 	installCAPEM string,
+	runtimeCfg stewardconfig.StewardConfig,
+	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
 	// Persist the identity record so that a subsequent restart can reconnect
@@ -1283,17 +1365,12 @@ func connectWithApprovedRegistration(
 	var scriptSigning stewardconfig.ScriptSigningConfig
 	var upgradeAllowDowngrade bool
 	var dnaRefreshInterval time.Duration
-	// Tier-2 observe sweep cadence: the config default applies when no config file
-	// is present, so the sweep is active on a purely controller-managed steward.
-	observeSweepN := stewardconfig.DefaultObserveSweepN
-	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
-		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
-		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
-		scriptSigning = cfg.Steward.ScriptSigning
-		upgradeAllowDowngrade = cfg.Steward.Upgrade.AllowDowngrade
-		dnaRefreshInterval = stewardconfig.GetDNARefreshInterval(cfg)
-		observeSweepN = stewardconfig.GetObserveSweepN(cfg)
-	}
+	commandReplayWindow = runtimeCfg.Steward.SignedCommandReplayWindow
+	commandMaxParamsBytes = runtimeCfg.Steward.SignedCommandMaxParamsBytes
+	scriptSigning = runtimeCfg.Steward.ScriptSigning
+	upgradeAllowDowngrade = runtimeCfg.Steward.Upgrade.AllowDowngrade
+	dnaRefreshInterval = stewardconfig.GetDNARefreshInterval(runtimeCfg)
+	observeSweepN := stewardconfig.GetObserveSweepN(runtimeCfg)
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
 	// offline queue encryption (Issue #920).
@@ -1315,6 +1392,7 @@ func connectWithApprovedRegistration(
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
 		ScriptSigning:               scriptSigning,
+		PublicBeta:                  publicBeta,
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
@@ -1377,7 +1455,7 @@ func connectWithApprovedRegistration(
 // HTTP registration (first run or manually cleared identity).
 // Returns (nil, err) when a stored identity exists but reconnect fails — caller
 // should log the error and fall back to HTTP registration.
-func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, trustSrc TrustSource, logger logging.Logger) (*client.TransportClient, error) {
+func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, trustSrc TrustSource, runtimeCfg stewardconfig.StewardConfig, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	id, err := loadIdentity(certStoreDir)
 	if err != nil {
 		// corrupt/unreadable identity: log and treat as absent so the caller falls through
@@ -1442,14 +1520,11 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	var commandMaxParamsBytes int
 	var upgradeAllowDowngradeReconnect bool
 	var dnaRefreshIntervalReconnect time.Duration
-	observeSweepNReconnect := stewardconfig.DefaultObserveSweepN
-	if cfg, cfgErr := stewardconfig.LoadConfiguration(""); cfgErr == nil {
-		commandReplayWindow = cfg.Steward.SignedCommandReplayWindow
-		commandMaxParamsBytes = cfg.Steward.SignedCommandMaxParamsBytes
-		upgradeAllowDowngradeReconnect = cfg.Steward.Upgrade.AllowDowngrade
-		dnaRefreshIntervalReconnect = stewardconfig.GetDNARefreshInterval(cfg)
-		observeSweepNReconnect = stewardconfig.GetObserveSweepN(cfg)
-	}
+	commandReplayWindow = runtimeCfg.Steward.SignedCommandReplayWindow
+	commandMaxParamsBytes = runtimeCfg.Steward.SignedCommandMaxParamsBytes
+	upgradeAllowDowngradeReconnect = runtimeCfg.Steward.Upgrade.AllowDowngrade
+	dnaRefreshIntervalReconnect = stewardconfig.GetDNARefreshInterval(runtimeCfg)
+	observeSweepNReconnect := stewardconfig.GetObserveSweepN(runtimeCfg)
 
 	// Build the composite DNA collector early so we can wire the executor into it
 	// after InitializeConfigExecutor creates it (Issue #2435).
@@ -1467,6 +1542,8 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		SecretStore:                 secretStore,
 		SignedCommandReplayWindow:   commandReplayWindow,
 		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
+		ScriptSigning:               runtimeCfg.Steward.ScriptSigning,
+		PublicBeta:                  publicBeta,
 		CertStoreDir:                certStoreDir,
 		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
@@ -1635,6 +1712,8 @@ func refreshAndConnect(
 	id *StewardIdentity,
 	ks *identity.FileKeyStore,
 	certStoreDir, token, controllerURL string,
+	runtimeCfg stewardconfig.StewardConfig,
+	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
 	if controllerURL == "" {
@@ -1683,7 +1762,13 @@ func refreshAndConnect(
 	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer completeCancel()
 
-	completeResp, err := httpClient.RefreshComplete(completeCtx, ks.DeviceID(), id.TenantID, challenge.Nonce, int64(challenge.ServerTS), pop)
+	if challenge.ServerTS > math.MaxInt64 {
+		return nil, fmt.Errorf("refresh challenge server timestamp exceeds int64 range")
+	}
+	// #nosec G115 -- the controller-provided uint64 timestamp is explicitly
+	// rejected above unless it fits the signed protocol field.
+	serverTS := int64(challenge.ServerTS)
+	completeResp, err := httpClient.RefreshComplete(completeCtx, ks.DeviceID(), id.TenantID, challenge.Nonce, serverTS, pop)
 	if err != nil {
 		return nil, err // ErrRefreshPending or ErrRefreshRejected propagated to caller
 	}
@@ -1723,7 +1808,7 @@ func refreshAndConnect(
 	if refreshTrustSrc == 0 {
 		refreshTrustSrc = trustSourceCompileBaked
 	}
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, "", logger)
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, "", runtimeCfg, publicBeta, logger)
 }
 
 // buildCertManagerAndSecretStore initialises a cert.Manager (holding the

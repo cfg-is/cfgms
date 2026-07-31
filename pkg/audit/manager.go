@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -89,11 +90,13 @@ const SystemTenantID = "system"
 // TODO(#751): controller identity as a real tenant — replace with proper user identity.
 const SystemUserID = "system"
 
-// defaultQueueCapacity bounds the internal write queue so that a slow or stalled
-// audit store cannot grow memory without bound. When the queue is full, new
-// entries are dropped with a warning log — audit recording MUST NOT block
-// application code paths.
-const defaultQueueCapacity = 1024
+// The queue bounds memory while applying backpressure rather than dropping
+// security records. The drain batches writes so a burst does not turn into one
+// transaction and one chain-head lookup per event.
+const (
+	defaultQueueCapacity  = 1024
+	defaultDrainBatchSize = 256
+)
 
 // ChainBreak describes a single integrity violation found by VerifyChain.
 type ChainBreak struct {
@@ -118,9 +121,14 @@ type Manager struct {
 	// at startup unless a secrets store is provided.
 	hmacKey []byte
 
-	// queue is the bounded write channel feeding the drain goroutine. Entries
-	// that cannot be enqueued within a non-blocking send are dropped (logged).
+	// queue is the bounded write channel feeding the drain goroutine. When it is
+	// full, producers wait for capacity or their context cancellation; entries
+	// are never silently dropped.
 	queue chan *business.AuditEntry
+
+	// chainHeads is owned exclusively by drainLoop. It avoids a durable
+	// GetLastAuditEntry query for every event while preserving per-tenant order.
+	chainHeads map[string]auditChainHead
 
 	// flushReq / flushAck implement a channel-based rendezvous with drainLoop.
 	// A caller sends an ack-channel on flushReq, drainLoop empties the queue
@@ -137,18 +145,23 @@ type Manager struct {
 	// stopOnce guarantees Stop is idempotent.
 	stopOnce sync.Once
 
-	// logger is used for internal diagnostics (queue full, drain errors).
+	// logger is used for internal storage and drain diagnostics.
 	logger *slog.Logger
+}
+
+type auditChainHead struct {
+	sequence uint64
+	checksum string
 }
 
 // managerOption is a functional option for NewManager.
 type managerOption func(*Manager, context.Context) error
 
 // WithSecretsStore configures the Manager to load its HMAC signing key from
-// the provided secrets store (key name: "audit/hmac-key"). If the key does not
-// exist it is generated and stored. When not provided, a random in-process key
-// is used instead — per-entry integrity is preserved within the process run but
-// the key is not durable across restarts.
+// the provided secrets store (tenant "audit", key "hmac-key"). If the key does
+// not exist it is generated and stored. Corrupt or unavailable durable storage
+// fails construction; silently rotating or using an ephemeral key would make
+// previously persisted chains unverifiable.
 func WithSecretsStore(store secretsInterfaces.SecretStore) managerOption {
 	return func(m *Manager, ctx context.Context) error {
 		const keyName = "audit/hmac-key"
@@ -159,19 +172,24 @@ func WithSecretsStore(store secretsInterfaces.SecretStore) managerOption {
 				m.hmacKey = raw
 				return nil
 			}
+			return fmt.Errorf("stored audit HMAC key is invalid")
 		}
-		// Key absent or undecodable — generate and persist.
+		if err != nil && !errors.Is(err, secretsInterfaces.ErrSecretNotFound) {
+			return fmt.Errorf("load audit HMAC key: %w", err)
+		}
+		// Key is absent — generate and persist before accepting audit events.
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			return fmt.Errorf("failed to generate audit HMAC key: %w", err)
 		}
 		if err := store.StoreSecret(ctx, &secretsInterfaces.SecretRequest{
-			Key:         keyName,
+			Key:         "hmac-key",
 			Value:       hex.EncodeToString(key),
 			Description: "HMAC signing key for audit chain integrity",
+			TenantID:    "audit",
+			CreatedBy:   "controller",
 		}); err != nil {
-			m.logger.Warn("failed to persist audit HMAC key; using in-process key",
-				"error", err)
+			return fmt.Errorf("persist audit HMAC key: %w", err)
 		}
 		m.hmacKey = key
 		return nil
@@ -196,13 +214,14 @@ func NewManager(store business.AuditStore, source string, opts ...managerOption)
 	}
 
 	m := &Manager{
-		store:    store,
-		source:   source,
-		queue:    make(chan *business.AuditEntry, defaultQueueCapacity),
-		flushReq: make(chan chan struct{}),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-		logger:   slog.Default().With("component", "audit", "source", source),
+		store:      store,
+		source:     source,
+		queue:      make(chan *business.AuditEntry, defaultQueueCapacity),
+		chainHeads: make(map[string]auditChainHead),
+		flushReq:   make(chan chan struct{}),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		logger:     slog.Default().With("component", "audit", "source", source),
 	}
 
 	ctx := context.Background()
@@ -236,7 +255,7 @@ func (m *Manager) drainLoop() {
 	for {
 		select {
 		case entry := <-m.queue:
-			m.writeEntry(entry)
+			m.writeBatch(m.collectBatch(entry))
 
 		case ack := <-m.flushReq:
 			// Drain every entry currently in the queue. New entries that arrive
@@ -262,56 +281,79 @@ func (m *Manager) drainRemaining() {
 	for {
 		select {
 		case entry := <-m.queue:
-			m.writeEntry(entry)
+			m.writeBatch(m.collectBatch(entry))
 		default:
 			return
 		}
 	}
 }
 
-// writeEntry assigns chain fields and persists a single entry to the underlying
-// store. Called exclusively from the drain goroutine so sequence numbers are
-// assigned in-order without database-side sequences. Errors are logged but do
-// not stop the drain loop.
-func (m *Manager) writeEntry(entry *business.AuditEntry) {
-	ctx := context.Background()
+func (m *Manager) collectBatch(first *business.AuditEntry) []*business.AuditEntry {
+	batch := make([]*business.AuditEntry, 0, defaultDrainBatchSize)
+	batch = append(batch, first)
+	for len(batch) < defaultDrainBatchSize {
+		select {
+		case entry := <-m.queue:
+			batch = append(batch, entry)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
 
-	// Assign sequence number and previous checksum from the last stored entry
-	// for this tenant. Because writeEntry is called only from the single drain
-	// goroutine, no concurrent writer can interleave here.
-	last, err := m.store.GetLastAuditEntry(ctx, entry.TenantID)
-	if err != nil {
-		m.logger.Warn("failed to fetch last audit entry for chain linking; using sequence 1",
-			"error", err,
-			"tenant_id", entry.TenantID,
-		)
-		entry.SequenceNumber = 1
-		entry.PreviousChecksum = ""
-	} else if last == nil || last.SequenceNumber == 0 {
-		entry.SequenceNumber = 1
-		entry.PreviousChecksum = ""
-	} else {
-		entry.SequenceNumber = last.SequenceNumber + 1
-		entry.PreviousChecksum = last.Checksum
+// writeBatch assigns chain fields and persists a group in one store call.
+// Called exclusively from drainLoop, so the in-memory chain heads require no
+// additional locking and cannot be interleaved by another Manager writer.
+func (m *Manager) writeBatch(entries []*business.AuditEntry) {
+	ctx := context.Background()
+	pendingHeads := make(map[string]auditChainHead)
+
+	for _, entry := range entries {
+		head, ok := pendingHeads[entry.TenantID]
+		if !ok {
+			head, ok = m.chainHeads[entry.TenantID]
+		}
+		if !ok {
+			last, err := m.store.GetLastAuditEntry(ctx, entry.TenantID)
+			if err != nil {
+				m.logger.Warn("audit batch deferred because chain head could not be read",
+					"error", err,
+					"tenant_id", entry.TenantID,
+					"batch_size", len(entries),
+				)
+				return
+			}
+			if last != nil {
+				head = auditChainHead{sequence: last.SequenceNumber, checksum: last.Checksum}
+			}
+		}
+
+		entry.SequenceNumber = head.sequence + 1
+		entry.PreviousChecksum = head.checksum
+		entry.Checksum = m.generateChecksum(entry)
+		pendingHeads[entry.TenantID] = auditChainHead{
+			sequence: entry.SequenceNumber,
+			checksum: entry.Checksum,
+		}
 	}
 
-	entry.Checksum = m.generateChecksum(entry)
-
-	if err := m.store.StoreAuditEntry(ctx, entry); err != nil {
-		m.logger.Warn("audit write failed",
+	if err := m.store.StoreAuditBatch(ctx, entries); err != nil {
+		m.logger.Warn("audit batch write failed",
 			"error", err,
-			"entry_id", entry.ID,
-			"action", entry.Action,
-			"resource_type", entry.ResourceType,
+			"batch_size", len(entries),
 		)
+		return
+	}
+	for tenantID, head := range pendingHeads {
+		m.chainHeads[tenantID] = head
 	}
 }
 
-// enqueue attempts a non-blocking send on the queue. Returns nil on success or
-// an error if the manager is stopped or the queue is full. On queue full, the
-// entry is dropped with a warning log so that application code is never blocked
-// by a slow audit store.
-func (m *Manager) enqueue(entry *business.AuditEntry) error {
+// enqueue waits for bounded queue capacity, manager shutdown, or caller
+// cancellation. Backpressure is preferable to silently losing authorization
+// evidence; memory remains bounded by defaultQueueCapacity.
+func (m *Manager) enqueue(ctx context.Context, entry *business.AuditEntry) error {
 	select {
 	case <-m.stop:
 		return fmt.Errorf("audit manager is stopped")
@@ -323,16 +365,8 @@ func (m *Manager) enqueue(entry *business.AuditEntry) error {
 		return nil
 	case <-m.stop:
 		return fmt.Errorf("audit manager is stopped")
-	default:
-		// Queue is full — drop the entry and log a warning. Dropping is
-		// intentional: audit recording MUST NOT stall caller goroutines.
-		m.logger.Warn("audit queue full, dropping entry",
-			"entry_id", entry.ID,
-			"action", entry.Action,
-			"resource_type", entry.ResourceType,
-			"queue_capacity", defaultQueueCapacity,
-		)
-		return fmt.Errorf("audit queue full (capacity=%d): entry dropped", defaultQueueCapacity)
+	case <-ctx.Done():
+		return fmt.Errorf("audit enqueue cancelled while waiting for capacity: %w", ctx.Err())
 	}
 }
 
@@ -353,7 +387,7 @@ func (m *Manager) RecordEvent(ctx context.Context, event *AuditEventBuilder) err
 		return fmt.Errorf("audit validation failed: %w", err)
 	}
 
-	return m.enqueue(entry)
+	return m.enqueue(ctx, entry)
 }
 
 // RecordBatch records multiple audit events. Each event is enqueued individually;
@@ -383,7 +417,7 @@ func (m *Manager) RecordBatch(ctx context.Context, events []*AuditEventBuilder) 
 
 	// Enqueue in order so the drain loop preserves batch ordering.
 	for i, entry := range entries {
-		if err := m.enqueue(entry); err != nil {
+		if err := m.enqueue(ctx, entry); err != nil {
 			return fmt.Errorf("failed to enqueue entry %d: %w", i, err)
 		}
 	}

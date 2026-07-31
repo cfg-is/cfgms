@@ -3,6 +3,10 @@
 package authdefense
 
 import (
+	"bufio"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -13,12 +17,69 @@ import (
 // statusCapture wraps http.ResponseWriter to capture the response status code
 type statusCapture struct {
 	http.ResponseWriter
-	code int
+	code        int
+	wroteHeader bool
 }
 
 func (sc *statusCapture) WriteHeader(code int) {
+	if sc.wroteHeader {
+		return
+	}
+	sc.wroteHeader = true
 	sc.code = code
 	sc.ResponseWriter.WriteHeader(code)
+}
+
+func (sc *statusCapture) Write(data []byte) (int, error) {
+	if !sc.wroteHeader {
+		sc.WriteHeader(http.StatusOK)
+	}
+	return sc.ResponseWriter.Write(data)
+}
+
+// Unwrap allows net/http.ResponseController to discover optional interfaces on
+// the underlying writer.
+func (sc *statusCapture) Unwrap() http.ResponseWriter {
+	return sc.ResponseWriter
+}
+
+// Hijack preserves WebSocket and other HTTP upgrade support.
+func (sc *statusCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := sc.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+// Flush preserves streaming response support.
+func (sc *statusCapture) Flush() {
+	if !sc.wroteHeader {
+		sc.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := sc.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Push preserves HTTP/2 server push support where the underlying writer has it.
+func (sc *statusCapture) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := sc.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+// ReadFrom keeps io.Copy on the underlying optimized path while recording the
+// implicit success status.
+func (sc *statusCapture) ReadFrom(src io.Reader) (int64, error) {
+	if !sc.wroteHeader {
+		sc.WriteHeader(http.StatusOK)
+	}
+	if readerFrom, ok := sc.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(src)
+	}
+	return io.Copy(sc.ResponseWriter, src)
 }
 
 // Middleware returns an HTTP middleware that enforces the three-tier defense.

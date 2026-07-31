@@ -26,6 +26,9 @@ func TestLoadWithPath_ParsesCanonicalExample(t *testing.T) {
 
 	// Assert concrete values sourced from controller.cfg to confirm the file was read and parsed.
 	assert.Equal(t, "0.0.0.0:9080", cfg.ListenAddr, "listen_addr must match controller.cfg")
+	assert.Equal(t, "127.0.0.1:9090", cfg.MetricsListenAddr, "metrics_listen_addr must stay private")
+	require.NoError(t, ValidatePrivateListenerAddress(cfg.MetricsListenAddr))
+	assert.Equal(t, "/var/lib/cfgms/certs", cfg.CertPath, "cert_path must match controller.cfg")
 	assert.Equal(t, "0.0.0.0:4433", cfg.Transport.ListenAddr, "transport.listen_addr must match controller.cfg")
 	assert.Equal(t, "controller.example.com", cfg.Certificate.Server.CommonName, "certificate.server.common_name must match controller.cfg")
 	assert.Equal(t, "flatfile", cfg.Storage.Provider, "storage.provider defaults to flatfile when not specified")

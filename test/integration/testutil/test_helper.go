@@ -127,7 +127,7 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	}
 
 	// Create cert storage directory
-	err := os.MkdirAll(certStoragePath, 0755)
+	err := os.MkdirAll(certStoragePath, 0700)
 	require.NoError(t, err)
 
 	controllerCfg := &config.Config{
@@ -161,12 +161,12 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	}
 
 	// Create controller data directory
-	err = os.MkdirAll(controllerCfg.DataDir, 0755)
+	err = os.MkdirAll(controllerCfg.DataDir, 0700)
 	require.NoError(t, err)
 
 	// Create storage directory
 	storageDir := filepath.Join(tempDir, "storage-git")
-	err = os.MkdirAll(storageDir, 0755)
+	err = os.MkdirAll(storageDir, 0700)
 	require.NoError(t, err)
 
 	// Pre-initialize if not already initialized (Story #410: first-run init guard)

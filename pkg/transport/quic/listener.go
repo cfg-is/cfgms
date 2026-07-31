@@ -7,12 +7,53 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
 )
+
+const (
+	defaultMaxConnections  = 50000
+	defaultReadyQueueSize  = 64
+	defaultStreamOpenLimit = 5 * time.Second
+)
+
+// ListenerLimits bounds resources owned by a public QUIC listener.
+type ListenerLimits struct {
+	// MaxConnections is the maximum number of handshaken connections, including
+	// peers waiting to open their first stream and connections already handed to gRPC.
+	MaxConnections int
+	// ReadyQueueSize limits completed connections waiting for net.Listener.Accept.
+	ReadyQueueSize int
+	// StreamOpenTimeout limits both the wait for a peer's first stream and the
+	// time that completed stream may wait for the consumer's Accept call.
+	StreamOpenTimeout time.Duration
+}
+
+func defaultListenerLimits() ListenerLimits {
+	return ListenerLimits{
+		MaxConnections:    defaultMaxConnections,
+		ReadyQueueSize:    defaultReadyQueueSize,
+		StreamOpenTimeout: defaultStreamOpenLimit,
+	}
+}
+
+// LimitsForMaxConnections returns the standard listener budgets with the
+// supplied deployment connection ceiling.
+func LimitsForMaxConnections(maxConnections int) ListenerLimits {
+	queueSize := defaultReadyQueueSize
+	if maxConnections < queueSize {
+		queueSize = maxConnections
+	}
+	return ListenerLimits{
+		MaxConnections:    maxConnections,
+		ReadyQueueSize:    queueSize,
+		StreamOpenTimeout: defaultStreamOpenLimit,
+	}
+}
 
 // defaultQuicConfig returns the default QUIC configuration for the transport adapter.
 //
@@ -93,13 +134,15 @@ func requireAddressValidation(info *quicgo.ClientInfo) (*quicgo.Config, error) {
 // for the first stream. Each connection has a 5-second deadline to open its
 // first stream; peers that stall are disconnected and do not block other peers.
 type Listener struct {
-	ql     *quicgo.Listener
-	tr     *quicgo.Transport // non-nil: Listen() owns this transport's UDP socket
-	cfg    *quicgo.Config    // effective config after Listen() injection
-	ctx    context.Context
-	cancel context.CancelFunc
-	conns  chan net.Conn  // buffered queue of ready connections
-	wg     sync.WaitGroup // tracks acceptLoop and acceptStream goroutines
+	ql                *quicgo.Listener
+	tr                *quicgo.Transport // non-nil: Listen() owns this transport's UDP socket
+	cfg               *quicgo.Config    // effective config after Listen() injection
+	ctx               context.Context
+	cancel            context.CancelFunc
+	conns             chan net.Conn // buffered queue of ready connections
+	slots             chan struct{} // one token per accepted QUIC connection
+	streamOpenTimeout time.Duration
+	wg                sync.WaitGroup // tracks acceptLoop and acceptStream goroutines
 }
 
 // Compile-time check that Listener implements net.Listener.
@@ -118,6 +161,23 @@ var _ net.Listener = (*Listener)(nil)
 // requireAddressValidation then gates the now-verified connection. Caller-provided
 // GetConfigForClient callbacks are preserved unchanged.
 func Listen(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*Listener, error) {
+	return ListenWithLimits(addr, tlsConfig, quicConfig, defaultListenerLimits())
+}
+
+// ListenWithLimits is Listen with an explicit connection and queue budget.
+func ListenWithLimits(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config, limits ListenerLimits) (*Listener, error) {
+	if err := validateServerTLSConfig(tlsConfig); err != nil {
+		return nil, err
+	}
+	if limits.MaxConnections < 1 {
+		return nil, fmt.Errorf("quic: max connections must be at least 1")
+	}
+	if limits.ReadyQueueSize < 1 || limits.ReadyQueueSize > limits.MaxConnections {
+		return nil, fmt.Errorf("quic: ready queue size must be between 1 and max connections")
+	}
+	if limits.StreamOpenTimeout <= 0 {
+		return nil, fmt.Errorf("quic: stream open timeout must be positive")
+	}
 	if quicConfig == nil {
 		quicConfig = defaultQuicConfig()
 	}
@@ -152,12 +212,14 @@ func Listen(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*Lis
 
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &Listener{
-		ql:     ql,
-		tr:     tr,
-		cfg:    quicConfig,
-		ctx:    ctx,
-		cancel: cancel,
-		conns:  make(chan net.Conn, 64),
+		ql:                ql,
+		tr:                tr,
+		cfg:               quicConfig,
+		ctx:               ctx,
+		cancel:            cancel,
+		conns:             make(chan net.Conn, limits.ReadyQueueSize),
+		slots:             make(chan struct{}, limits.MaxConnections),
+		streamOpenTimeout: limits.StreamOpenTimeout,
 	}
 	l.wg.Add(1)
 	go func() {
@@ -176,6 +238,12 @@ func (l *Listener) acceptLoop() {
 		if err != nil {
 			return
 		}
+		select {
+		case l.slots <- struct{}{}:
+		default:
+			_ = quicConn.CloseWithError(2, "connection limit reached")
+			continue
+		}
 		l.wg.Add(1)
 		go l.acceptStream(quicConn)
 	}
@@ -186,7 +254,14 @@ func (l *Listener) acceptLoop() {
 // On timeout the QUIC connection is closed so the peer is not left dangling.
 func (l *Listener) acceptStream(quicConn *quicgo.Conn) {
 	defer l.wg.Done()
-	ctx, cancel := context.WithTimeout(l.ctx, 5*time.Second)
+	releaseSlot := true
+	defer func() {
+		if releaseSlot {
+			<-l.slots
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(l.ctx, l.streamOpenTimeout)
 	defer cancel()
 	stream, err := quicConn.AcceptStream(ctx)
 	if err != nil {
@@ -195,10 +270,16 @@ func (l *Listener) acceptStream(quicConn *quicgo.Conn) {
 	}
 	local := newAddr(quicConn.LocalAddr().String())
 	remote := newAddr(quicConn.RemoteAddr().String())
+	conn := newConnWithCloseHook(quicConn, stream, local, remote, func() { <-l.slots })
+	queueTimer := time.NewTimer(l.streamOpenTimeout)
+	defer queueTimer.Stop()
 	select {
-	case l.conns <- newConn(quicConn, stream, local, remote):
+	case l.conns <- conn:
+		releaseSlot = false
 	case <-l.ctx.Done():
 		_ = quicConn.CloseWithError(1, "listener closed")
+	case <-queueTimer.C:
+		_ = quicConn.CloseWithError(2, "listener accept queue timeout")
 	}
 }
 
@@ -240,4 +321,9 @@ func (l *Listener) Close() error {
 // Addr returns the listener's network address.
 func (l *Listener) Addr() net.Addr {
 	return l.ql.Addr()
+}
+
+// ActiveConnections returns the number of QUIC connections consuming a slot.
+func (l *Listener) ActiveConnections() int {
+	return len(l.slots)
 }

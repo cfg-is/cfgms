@@ -28,6 +28,8 @@ func NewDockerComposeHelper() *DockerComposeHelper {
 func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 	// Step 1: Clean up any existing containers
 	fmt.Println("Step 1/3: Cleaning up existing Docker resources...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
 	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
@@ -42,6 +44,8 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 
 	// Step 2: Build the steward image
 	fmt.Println("Step 2/3: Building steward Docker image...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
@@ -55,6 +59,8 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 
 	// Step 3: Start the standalone steward
 	fmt.Println("Step 3/3: Starting standalone steward...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
@@ -73,6 +79,8 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 // StopStandalone stops the standalone steward and cleans up resources
 func (h *DockerComposeHelper) StopStandalone(ctx context.Context) error {
 	fmt.Println("Stopping standalone steward and cleaning up...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and file/project arguments come from the local test harness.
 	stopCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
@@ -92,6 +100,8 @@ func (h *DockerComposeHelper) ExecInContainer(ctx context.Context, command ...st
 	args := []string{"compose", "-f", h.ComposeFile, "-p", h.ProjectName, "exec", "-T", "steward-true-standalone"}
 	args = append(args, command...)
 
+	// #nosec G204 -- integration-only Docker invocation; args are assembled by
+	// this isolated harness from its local Compose file and project name.
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
@@ -99,6 +109,8 @@ func (h *DockerComposeHelper) ExecInContainer(ctx context.Context, command ...st
 
 // GetLogs retrieves logs from the standalone steward container
 func (h *DockerComposeHelper) GetLogs(ctx context.Context) (string, error) {
+	// #nosec G204 -- integration-only Docker Compose invocation with a fixed
+	// executable/service and harness-owned file/project arguments.
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", h.ComposeFile, "-p", h.ProjectName, "logs", "steward-true-standalone")
 	output, err := cmd.CombinedOutput()
 	return string(output), err

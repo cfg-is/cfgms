@@ -182,6 +182,8 @@ func (r *GitSourceResolver) cloneRepo(ctx context.Context, publisher, name, vers
 func parseBundleFromDir(cloneDir, version string) (*bundle.Bundle, error) {
 	// Read module.yaml.
 	metaPath := filepath.Join(cloneDir, "module.yaml")
+	// #nosec G304 -- cloneDir is a controller-created temporary Git checkout
+	// and module.yaml is a fixed filename beneath it.
 	metaData, err := os.ReadFile(metaPath)
 	if err != nil {
 		return nil, fmt.Errorf("read module.yaml: %w", err)
@@ -212,6 +214,8 @@ func parseBundleFromDir(cloneDir, version string) (*bundle.Bundle, error) {
 			}
 			relPath := filepath.Join("binaries", e.Name())
 			binaries[e.Name()] = relPath
+			// #nosec G304 -- entryPath comes from ReadDir of cloneDir/binaries
+			// and was lstat-verified as a regular, non-symlink file above.
 			content, readErr := os.ReadFile(entryPath)
 			if readErr != nil {
 				return nil, fmt.Errorf("read binary %q: %w", e.Name(), readErr)
@@ -234,6 +238,8 @@ func parseBundleFromDir(cloneDir, version string) (*bundle.Bundle, error) {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 				continue
 			}
+			// #nosec G304 -- e.Name comes from ReadDir of cloneDir/signatures
+			// and is restricted to non-directory .yaml entries.
 			sigData, readErr := os.ReadFile(filepath.Join(sigDir, e.Name()))
 			if readErr != nil {
 				continue

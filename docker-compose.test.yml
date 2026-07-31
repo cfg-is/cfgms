@@ -716,11 +716,15 @@ services:
       # Allows E2E upgrade tests to sign binaries with the known zero-seed private key.
       # Active only when CFGMS_SEED_TEST_API_KEYS=1.
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
     user: root
+    entrypoint: []
     command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
       - fleet_controller_certs:/app/certs
+      - fleet_controller_data:/app/data
       - ./test/e2e/fleet/configs/controller.cfg:/app/controller.cfg:ro
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
     healthcheck:
       test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
       interval: 10s
@@ -927,6 +931,10 @@ volumes:
     # CA must persist across container restarts (no tmpfs)
     # Stewards hold client certs issued by this CA — cert validity requires persistence
     # Mounted by the controller only — never by stewards (holds ca.key).
+  fleet_controller_data:
+    driver: local
+    # SQLite, flat-file state, and the admin bundle must survive controller
+    # restart/recreation alongside the persistent CA.
   fleet_steward1_data:
     driver: local
     driver_opts:

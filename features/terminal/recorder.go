@@ -15,8 +15,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -96,6 +98,11 @@ type DefaultSessionRecorder struct {
 // existing resilience stance where recording errors never fail terminal I/O).
 const recordQueueDepth = 4096
 
+// recordingSessionIDPattern permits only the opaque identifier alphabet emitted
+// by the terminal session manager. Recording IDs become filenames, so path
+// separators and dot components must never reach filesystem operations.
+var recordingSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
 // recordChunk is one queued recording frame awaiting durable write. The data is
 // an owned copy, so the caller may reuse its buffer immediately after enqueue.
 type recordChunk struct {
@@ -139,6 +146,8 @@ type recordingWriter struct {
 func computeEventChecksum(key []byte, sequence int64, previous []byte, content []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	seqBytes := make([]byte, 8)
+	// #nosec G115 -- sequence is a monotonic, 1-based counter; the conversion
+	// preserves its non-negative value for the checksum wire encoding.
 	binary.BigEndian.PutUint64(seqBytes, uint64(sequence))
 	mac.Write(seqBytes)
 	mac.Write(previous)
@@ -157,6 +166,9 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...R
 	}
 	if config.MaxRecordingMB <= 0 {
 		config.MaxRecordingMB = 100
+	}
+	if int64(config.MaxRecordingMB) > math.MaxUint32/(1024*1024) {
+		return nil, fmt.Errorf("max recording size exceeds uint32 frame format")
 	}
 	if err := os.MkdirAll(config.StoragePath, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
@@ -197,6 +209,10 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...R
 
 // StartRecording starts recording a new session.
 func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *SessionMetadata) error {
+	if !recordingSessionIDPattern.MatchString(sessionID) {
+		return fmt.Errorf("invalid recording session ID")
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -207,7 +223,13 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 	filename := fmt.Sprintf("%s.rec", sessionID)
 	filePath := filepath.Join(r.storagePath, filename)
 
-	file, err := os.Create(filePath)
+	recordingRoot, err := os.OpenRoot(r.storagePath)
+	if err != nil {
+		return fmt.Errorf("failed to open recording root: %w", err)
+	}
+	defer func() { _ = recordingRoot.Close() }()
+
+	file, err := recordingRoot.Create(filename)
 	if err != nil {
 		return fmt.Errorf("failed to create recording file: %w", err)
 	}
@@ -222,7 +244,7 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 		events:           make([]RecordEvent, 0),
 		metadata:         metadata,
 		startTime:        time.Now(),
-		maxSize:          int64(r.config.MaxRecordingMB * 1024 * 1024),
+		maxSize:          int64(r.config.MaxRecordingMB) * 1024 * 1024,
 		queue:            make(chan recordChunk, recordQueueDepth),
 		stop:             make(chan struct{}),
 		drained:          make(chan struct{}),
@@ -599,12 +621,16 @@ func (w *recordingWriter) writeData(data []byte, direction DataDirection) error 
 	if err != nil {
 		return fmt.Errorf("failed to compress event: %w", err)
 	}
+	if len(content) > math.MaxUint32 {
+		return fmt.Errorf("recording frame exceeds uint32 length prefix")
+	}
 
 	// Sequence is 1-based; advance before computing HMAC.
 	w.sequence++
 	checksum := computeEventChecksum(w.hmacKey, w.sequence, w.previousChecksum, content)
 
 	var lenBuf [4]byte
+	// #nosec G115 -- content length is explicitly bounded by MaxUint32 above.
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(content)))
 
 	if _, err := w.file.Write(lenBuf[:]); err != nil {

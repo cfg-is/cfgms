@@ -113,6 +113,27 @@ func TestDataRecording(t *testing.T) {
 	assert.True(t, len(recording.Events) > 0)
 }
 
+func TestSessionRecorderRejectsPathLikeSessionIDs(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	storagePath := t.TempDir()
+	recorder, err := NewSessionRecorder(&RecorderConfig{
+		StoragePath:    storagePath,
+		MaxRecordingMB: 1,
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+
+	for _, sessionID := range []string{"", "../escape", `..\\escape`, "nested/session", ".hidden"} {
+		t.Run(sessionID, func(t *testing.T) {
+			err := recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID})
+			require.ErrorContains(t, err, "invalid recording session ID")
+		})
+	}
+
+	_, err = os.Stat(filepath.Join(filepath.Dir(storagePath), "escape.rec"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestRecordingMetadata(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{

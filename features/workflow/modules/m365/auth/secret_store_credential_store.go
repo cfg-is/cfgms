@@ -53,6 +53,8 @@ func isNotFoundError(err error) bool {
 }
 
 func (s *SecretStoreCredentialStore) StoreToken(tenantID string, token *AccessToken) error {
+	// #nosec G117 -- token JSON is immediately stored in the secrets provider;
+	// it is never logged, returned, or persisted in a general-purpose store.
 	data, err := json.Marshal(token)
 	if err != nil {
 		return fmt.Errorf("marshal token: %w", err)
@@ -89,6 +91,8 @@ func (s *SecretStoreCredentialStore) DeleteToken(tenantID string) error {
 }
 
 func (s *SecretStoreCredentialStore) StoreConfig(tenantID string, config *OAuth2Config) error {
+	// #nosec G117 -- OAuth client-secret JSON is intentionally serialized only
+	// for the tenant-scoped SecretStore value.
 	data, err := json.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -117,6 +121,8 @@ func (s *SecretStoreCredentialStore) GetConfig(tenantID string) (*OAuth2Config, 
 }
 
 func (s *SecretStoreCredentialStore) StoreDelegatedToken(tenantID, userID string, token *AccessToken) error {
+	// #nosec G117 -- delegated token JSON is immediately stored under a
+	// sanitized tenant/user SecretStore key and never exposed as ordinary data.
 	data, err := json.Marshal(token)
 	if err != nil {
 		return fmt.Errorf("marshal delegated token: %w", err)

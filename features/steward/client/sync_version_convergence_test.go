@@ -17,29 +17,29 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
 
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // buildSignedConfigBytesWithVersion returns a marshalled SignedConfig whose steward
-// block carries the given desired_version, suitable for driving syncConfigNow through
-// the (unverified) config-apply path.
-func buildSignedConfigBytesWithVersion(t *testing.T, stewardID, desiredVersion string) []byte {
+// block carries the given desired_version. The caller wraps it in the controller's
+// detached transport signature before driving syncConfigNow.
+func buildSignedConfigBytesWithVersion(
+	t *testing.T,
+	signer signature.Signer,
+	stewardID,
+	desiredVersion string,
+) []byte {
 	t.Helper()
-	protoConfig := &controllerpb.SignedConfig{
-		Config: &controllerpb.StewardConfig{
-			Steward: &controllerpb.StewardSettings{
-				Id:             stewardID,
-				DesiredVersion: desiredVersion,
-			},
+	return marshalSignedConfig(t, signer, &controllerpb.StewardConfig{
+		Steward: &controllerpb.StewardSettings{
+			Id:             stewardID,
+			DesiredVersion: desiredVersion,
 		},
-	}
-	data, err := proto.Marshal(protoConfig)
-	require.NoError(t, err)
-	return data
+	})
 }
 
 // TestSyncConfigNow_TriggersVersionConvergence proves that when syncConfigNow
@@ -51,11 +51,11 @@ func TestSyncConfigNow_TriggersVersionConvergence(t *testing.T) {
 	const stewardID = "steward-delivery-converge"
 	const desiredVersion = "v99.0.0" // clearly newer than any dev build
 
-	configData := buildSignedConfigBytesWithVersion(t, stewardID, desiredVersion)
+	_, signer, certPEM := newSigningCA(t)
+	configData := buildSignedConfigBytesWithVersion(t, signer, stewardID, desiredVersion)
 	sess := &configReturnSession{
 		testDataPlaneSession: *newTestSession(),
-		data:                 configData,
-		version:              "v-delivery-1",
+		transfer:             buildSignedConfigTransfer(t, signer, configData, "v-delivery-1"),
 	}
 
 	exec, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: newTestLogger(t)})
@@ -63,6 +63,7 @@ func TestSyncConfigNow_TriggersVersionConvergence(t *testing.T) {
 
 	capture := newEventCapture()
 	c := newMinimalClientWithCP(t, sess, exec, capture, stewardID, "tenant-delivery-converge")
+	c.signingCertPEMs = []string{certPEM}
 
 	// Wire the version-convergence preconditions: a staged binary matching the
 	// desired version and an injected swap func so no real binary I/O occurs.
@@ -96,11 +97,11 @@ func TestSyncConfigNow_NoVersionConvergenceWhenVersionMatches(t *testing.T) {
 	const stewardID = "steward-delivery-noop"
 	runningVersion := version.Short()
 
-	configData := buildSignedConfigBytesWithVersion(t, stewardID, runningVersion)
+	_, signer, certPEM := newSigningCA(t)
+	configData := buildSignedConfigBytesWithVersion(t, signer, stewardID, runningVersion)
 	sess := &configReturnSession{
 		testDataPlaneSession: *newTestSession(),
-		data:                 configData,
-		version:              "v-delivery-noop-1",
+		transfer:             buildSignedConfigTransfer(t, signer, configData, "v-delivery-noop-1"),
 	}
 
 	exec, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: newTestLogger(t)})
@@ -108,6 +109,7 @@ func TestSyncConfigNow_NoVersionConvergenceWhenVersionMatches(t *testing.T) {
 
 	capture := newEventCapture()
 	c := newMinimalClientWithCP(t, sess, exec, capture, stewardID, "tenant-delivery-noop")
+	c.signingCertPEMs = []string{certPEM}
 
 	swapCalled := false
 	c.mu.Lock()

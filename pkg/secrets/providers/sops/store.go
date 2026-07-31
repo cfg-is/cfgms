@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package sops implements SOPS-based secret store
-// M-AUTH-1: SecretStore implementation using git ConfigStore with SOPS encryption
+// Package sops implements authenticated envelope-encrypted secret storage.
 package sops
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -24,21 +32,46 @@ type SOPSSecretStoreConfig struct {
 	CacheEnabled    bool                   // Enable secret caching
 	CacheTTL        int                    // Cache TTL in seconds
 	CacheMaxSize    int                    // Maximum cache size
-	KMSKeyID        string                 // KMS key ID for encryption (optional)
+	KeyFile         string                 // External 32-byte or base64-encoded AES key file
 }
 
-// SOPSSecretStore implements SecretStore using git ConfigStore with SOPS encryption
-// M-AUTH-1: Secrets are stored as ConfigEntry objects in git, automatically encrypted by SOPS
+// SOPSSecretStore stores encrypted ConfigEntry objects in a configured
+// ConfigStore. The historical provider name is retained for compatibility.
 type SOPSSecretStore struct {
 	configStore  cfgconfig.ConfigStore // Underlying config store (git with SOPS)
 	cache        *cache.Cache          // Secret cache
 	config       *SOPSSecretStoreConfig
 	providerName string
+	aead         cipher.AEAD
+}
+
+type encryptedEnvelope struct {
+	Version    int    `json:"version"`
+	Algorithm  string `json:"algorithm"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
 }
 
 // NewSOPSSecretStore creates a new SOPS-based secret store
-// M-AUTH-1: Create secret store that leverages existing git+SOPS infrastructure
+// M-AUTH-1: Create an envelope-encrypted store backed by the configured
+// ConfigStore. The encryption key must be provisioned separately from data.
 func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error) {
+	if config == nil {
+		return nil, fmt.Errorf("secret store config is required")
+	}
+	key, err := loadExternalKey(config)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("initialize AES cipher: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("initialize AES-GCM: %w", err)
+	}
+
 	// Create ConfigStore using storage provider
 	configStore, err := storageif.CreateConfigStoreFromConfig(config.StorageProvider, config.StorageConfig)
 	if err != nil {
@@ -49,6 +82,7 @@ func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error)
 		configStore:  configStore,
 		config:       config,
 		providerName: config.StorageProvider,
+		aead:         aead,
 	}
 
 	// Initialize cache if enabled
@@ -65,15 +99,117 @@ func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error)
 	return store, nil
 }
 
+func loadExternalKey(config *SOPSSecretStoreConfig) ([]byte, error) {
+	if strings.TrimSpace(config.KeyFile) == "" {
+		return nil, fmt.Errorf("external encryption key file is required")
+	}
+
+	keyPath, err := filepath.Abs(config.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("resolve encryption key file: %w", err)
+	}
+	if root, ok := config.StorageConfig["root"].(string); ok && strings.TrimSpace(root) != "" {
+		rootPath, rootErr := filepath.Abs(root)
+		if rootErr != nil {
+			return nil, fmt.Errorf("resolve secret storage root: %w", rootErr)
+		}
+		rel, relErr := filepath.Rel(rootPath, keyPath)
+		if relErr != nil {
+			return nil, fmt.Errorf("compare key and storage paths: %w", relErr)
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+			return nil, fmt.Errorf("encryption key file must be stored separately from secret data")
+		}
+	}
+
+	info, err := os.Lstat(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat encryption key file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("encryption key file must not be a symbolic link")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("encryption key file must be a regular file")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("encryption key file permissions must not grant group or other access")
+	}
+
+	// #nosec G304 -- keyPath is explicit administrator configuration and has
+	// just been lstat-validated as a private regular, non-symlink file.
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read encryption key file: %w", err)
+	}
+	if len(keyData) != 32 {
+		encoded := bytes.TrimSpace(keyData)
+		decoded, decodeErr := base64.StdEncoding.DecodeString(string(encoded))
+		if decodeErr != nil || len(decoded) != 32 {
+			return nil, fmt.Errorf("encryption key file must contain exactly 32 raw bytes or a base64-encoded 32-byte key")
+		}
+		keyData = decoded
+	}
+	return keyData, nil
+}
+
+func (s *SOPSSecretStore) encrypt(plaintext []byte, tenantID, key string) ([]byte, error) {
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate encryption nonce: %w", err)
+	}
+	aad := []byte(tenantID + "\x00" + key)
+	ciphertext := s.aead.Seal(nil, nonce, plaintext, aad)
+	return json.Marshal(&encryptedEnvelope{
+		Version:    1,
+		Algorithm:  "AES-256-GCM",
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+	})
+}
+
+func (s *SOPSSecretStore) decrypt(encrypted []byte, tenantID, key string) ([]byte, error) {
+	var envelope encryptedEnvelope
+	if err := json.Unmarshal(encrypted, &envelope); err != nil {
+		return nil, fmt.Errorf("secret ciphertext is not a valid encrypted envelope")
+	}
+	if envelope.Version != 1 || envelope.Algorithm != "AES-256-GCM" {
+		return nil, fmt.Errorf("unsupported secret encryption envelope")
+	}
+	nonce, err := base64.StdEncoding.DecodeString(envelope.Nonce)
+	if err != nil || len(nonce) != s.aead.NonceSize() {
+		return nil, fmt.Errorf("invalid secret encryption nonce")
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(envelope.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("invalid secret ciphertext encoding")
+	}
+	aad := []byte(tenantID + "\x00" + key)
+	plaintext, err := s.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("secret ciphertext authentication failed")
+	}
+	return plaintext, nil
+}
+
 // StoreSecret stores a secret
-// M-AUTH-1: Stores secret as ConfigEntry, automatically encrypted by SOPS
+// M-AUTH-1: Stores an authenticated encrypted envelope as ConfigEntry data.
 func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.SecretRequest) error {
 	// Validate request
+	if req == nil {
+		return fmt.Errorf("secret request cannot be nil")
+	}
 	if req.Key == "" {
 		return fmt.Errorf("secret key cannot be empty")
 	}
+	if len(req.Key) > 256 {
+		return fmt.Errorf("secret key exceeds 256 character limit")
+	}
 	if req.TenantID == "" {
 		return fmt.Errorf("tenant ID cannot be empty")
+	}
+	if len(req.Value) > 1<<20 {
+		return fmt.Errorf("secret value exceeds 1048576 byte limit")
 	}
 
 	// Create secret metadata
@@ -102,8 +238,12 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 	if err != nil {
 		return fmt.Errorf("failed to marshal secret: %w", err)
 	}
+	encryptedData, err := s.encrypt(secretData, req.TenantID, req.Key)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt secret: %w", err)
+	}
 
-	// Store as ConfigEntry (will be automatically encrypted by SOPS)
+	// Store the encrypted envelope as a ConfigEntry.
 	configKey := &cfgconfig.ConfigKey{
 		TenantID:  req.TenantID,
 		Namespace: "secrets", // Use "secrets" namespace for all secrets
@@ -113,7 +253,7 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 
 	configEntry := &cfgconfig.ConfigEntry{
 		Key:       configKey,
-		Data:      secretData,
+		Data:      encryptedData,
 		Format:    cfgconfig.ConfigFormatJSON, // Secrets are stored as JSON
 		CreatedBy: req.CreatedBy,
 		UpdatedBy: req.CreatedBy,
@@ -125,7 +265,7 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 		configEntry.Tags = append(configEntry.Tags, fmt.Sprintf("type:%s", secretType))
 	}
 
-	// Store in ConfigStore (SOPS encryption happens here)
+	// Store only the authenticated encrypted envelope in the ConfigStore.
 	if err := s.configStore.StoreConfig(ctx, configEntry); err != nil {
 		return fmt.Errorf("failed to store secret: %w", err)
 	}
@@ -192,9 +332,14 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 		return nil, fmt.Errorf("failed to retrieve secret: %w", err)
 	}
 
-	// Parse secret from JSON (SOPS decryption happens in ConfigStore.GetConfig)
+	plaintext, err := s.decrypt(configEntry.Data, tenantID, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt secret: %w", err)
+	}
+
+	// Parse the authenticated plaintext only after decryption succeeds.
 	var secret secretsif.Secret
-	if err := json.Unmarshal(configEntry.Data, &secret); err != nil {
+	if err := json.Unmarshal(plaintext, &secret); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal secret: %w", err)
 	}
 
@@ -277,10 +422,17 @@ func (s *SOPSSecretStore) ListSecrets(ctx context.Context, filter *secretsif.Sec
 	// Convert to secret metadata
 	var metadata []*secretsif.SecretMetadata
 	for _, config := range configs {
+		if config.Key == nil {
+			continue
+		}
+		plaintext, decryptErr := s.decrypt(config.Data, config.Key.TenantID, config.Key.Name)
+		if decryptErr != nil {
+			return nil, fmt.Errorf("failed to decrypt secret metadata: %w", decryptErr)
+		}
 		// Parse secret to get metadata
 		var secret secretsif.Secret
-		if err := json.Unmarshal(config.Data, &secret); err != nil {
-			continue // Skip invalid secrets
+		if err := json.Unmarshal(plaintext, &secret); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal secret metadata: %w", err)
 		}
 
 		// Apply additional filters
@@ -337,8 +489,7 @@ func (s *SOPSSecretStore) GetSecrets(ctx context.Context, keys []string) (map[st
 	for _, key := range keys {
 		secret, err := s.GetSecret(ctx, key)
 		if err != nil {
-			// Skip secrets that don't exist or have errors
-			continue
+			return nil, fmt.Errorf("failed to retrieve secret %s: %w", key, err)
 		}
 		result[key] = secret
 	}
@@ -380,9 +531,14 @@ func (s *SOPSSecretStore) GetSecretVersion(ctx context.Context, key string, vers
 		return nil, fmt.Errorf("failed to retrieve secret version: %w", err)
 	}
 
+	plaintext, err := s.decrypt(configEntry.Data, tenantID, secretKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt secret version: %w", err)
+	}
+
 	// Parse secret from JSON
 	var secret secretsif.Secret
-	if err := json.Unmarshal(configEntry.Data, &secret); err != nil {
+	if err := json.Unmarshal(plaintext, &secret); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal secret: %w", err)
 	}
 
@@ -415,10 +571,14 @@ func (s *SOPSSecretStore) ListSecretVersions(ctx context.Context, key string) ([
 	// Convert to secret versions
 	var versions []*secretsif.SecretVersion
 	for _, config := range history {
+		plaintext, decryptErr := s.decrypt(config.Data, tenantID, secretKey)
+		if decryptErr != nil {
+			return nil, fmt.Errorf("failed to decrypt secret version history: %w", decryptErr)
+		}
 		// Parse secret to get created info
 		var secret secretsif.Secret
-		if err := json.Unmarshal(config.Data, &secret); err != nil {
-			continue
+		if err := json.Unmarshal(plaintext, &secret); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal secret version history: %w", err)
 		}
 
 		versions = append(versions, &secretsif.SecretVersion{

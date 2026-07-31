@@ -311,6 +311,8 @@ func (cs *CronScheduler) executeDueTrigger(ctx context.Context, scheduled *sched
 	}
 
 	// Execute the workflow
+	// #nosec G118 -- scheduled workflow execution intentionally outlives this
+	// scheduler tick and applies the trigger's configured timeout when present.
 	go func() {
 		execCtx := context.WithValue(context.Background(), TenantIDContextKey, tenantID)
 		if trigger.Timeout > 0 {

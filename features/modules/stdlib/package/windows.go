@@ -112,6 +112,8 @@ func (m *wingetManager) Install(ctx context.Context, name, version string) error
 	// restriction, not a winget flaw. Packages whose winget manifest is MSIX-only
 	// (e.g. Microsoft.PowerShell) therefore need a machine-scoped provider such as
 	// chocolatey; that is what the per-resource provider allowlist is for.
+	// #nosec G204 -- m.bin is a verified winget candidate; package name and
+	// version are option-injection-safe by Config validation; no shell is used.
 	cmd := exec.CommandContext(ctx, m.bin, "install",
 		"--silent", "--disable-interactivity",
 		"--accept-source-agreements", "--accept-package-agreements", name)
@@ -137,6 +139,8 @@ func (m *wingetManager) Install(ctx context.Context, name, version string) error
 }
 
 func (m *wingetManager) Remove(ctx context.Context, name string) error {
+	// #nosec G204 -- m.bin is a verified winget candidate and name is validated
+	// against leading options before this shell-free argument vector.
 	cmd := exec.CommandContext(ctx, m.bin, "uninstall", "--accept-source-agreements", name)
 	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
@@ -150,6 +154,8 @@ func (m *wingetManager) GetInstalledVersion(ctx context.Context, name string) (s
 	// Positional query matches by id/name/moniker (the same resolution Install
 	// uses), so a package referenced by its winget Id (e.g. Microsoft.PowerShell)
 	// resolves — unlike `--name`, which only matches the display-name column.
+	// #nosec G204 -- m.bin is a verified winget candidate and name is validated
+	// against leading options before this shell-free argument vector.
 	cmd := exec.CommandContext(ctx, m.bin, "list", name, "--accept-source-agreements")
 	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
@@ -180,6 +186,8 @@ func (m *wingetManager) GetInstalledVersion(ctx context.Context, name string) (s
 }
 
 func (m *wingetManager) ListInstalled(ctx context.Context) (map[string]string, error) {
+	// #nosec G204 -- m.bin is a verified winget candidate and every argument is
+	// a fixed literal; no caller-controlled command or shell is involved.
 	cmd := exec.CommandContext(ctx, m.bin, "list", "--accept-source-agreements")
 	cmd.Env = m.env
 	output, err := cmd.CombinedOutput()
@@ -246,6 +254,8 @@ func (m *chocolateyManager) Install(ctx context.Context, name, version string) e
 	if version != "latest" {
 		args = append(args, "--version", version)
 	}
+	// #nosec G204 -- executable is fixed, no shell is used, and package,
+	// version, and configured source name are validated before this call.
 	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -256,6 +266,8 @@ func (m *chocolateyManager) Install(ctx context.Context, name, version string) e
 
 func (m *chocolateyManager) Remove(ctx context.Context, name string) error {
 	args := append([]string{"uninstall", "-y", name}, m.sourceArgs()...)
+	// #nosec G204 -- executable is fixed, no shell is used, and the package
+	// name is validated against option injection before this call.
 	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -270,6 +282,8 @@ func (m *chocolateyManager) GetInstalledVersion(ctx context.Context, name string
 	// of what is INSTALLED, so it must NOT carry --source: `choco list --source`
 	// searches the feed for AVAILABLE packages, which would report a not-installed
 	// package as present.
+	// #nosec G204 -- executable/options are fixed, name is validated against
+	// leading-option injection, and no shell is used.
 	cmd := exec.CommandContext(ctx, "choco", "list", name, "--exact", "--limit-output")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -291,6 +305,7 @@ func (m *chocolateyManager) GetInstalledVersion(ctx context.Context, name string
 
 func (m *chocolateyManager) ListInstalled(ctx context.Context) (map[string]string, error) {
 	// Installed query — no --source (see GetInstalledVersion).
+	// #nosec G204 -- executable and complete argument vector are fixed literals.
 	cmd := exec.CommandContext(ctx, "choco", "list")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -315,6 +330,8 @@ func (m *chocolateyManager) ListInstalled(ctx context.Context) (map[string]strin
 func (m *chocolateyManager) GetVersion(ctx context.Context, name string) (string, error) {
 	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
 	args := append([]string{"list", "--exact", name}, m.sourceArgs()...)
+	// #nosec G204 -- executable is fixed, no shell is used, and package/source
+	// inputs are validated before forming this argument vector.
 	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -337,6 +354,8 @@ func (m *chocolateyManager) GetVersion(ctx context.Context, name string) (string
 func (m *chocolateyManager) IsInstalled(ctx context.Context, name string) (bool, error) {
 	// Chocolatey 2.x removed --local-only; `choco list` defaults to installed/local.
 	args := append([]string{"list", "--exact", name}, m.sourceArgs()...)
+	// #nosec G204 -- executable is fixed, no shell is used, and package/source
+	// inputs are validated before forming this argument vector.
 	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -347,6 +366,8 @@ func (m *chocolateyManager) IsInstalled(ctx context.Context, name string) (bool,
 
 func (m *chocolateyManager) Update(ctx context.Context, name string) error {
 	args := append([]string{"upgrade", "-y", name}, m.sourceArgs()...)
+	// #nosec G204 -- executable is fixed, no shell is used, and package/source
+	// inputs are validated before forming this argument vector.
 	cmd := exec.CommandContext(ctx, "choco", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

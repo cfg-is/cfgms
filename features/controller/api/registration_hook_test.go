@@ -501,12 +501,13 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
 }
 
-// TestHandleRegister_HookError_FailsOpen verifies that when the approval hook returns an
-// error, handleRegister falls back to approve (fail-open) and continues with normal
-// registration processing (not 403 Forbidden).
-func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
+// TestHandleRegister_HookError_Quarantines verifies that admission-service
+// failures cannot grant a certificate or unrestricted fleet access.
+func TestHandleRegister_HookError_Quarantines(t *testing.T) {
 	server, tokenStore := setupTestServerWithTokenStore(t)
 	server.SetApprovalHook(&errorHook{})
+	server.SetPendingStore(pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore())
+	server.cfg.Transport.ExternalAddress = "controller.example.com"
 
 	// Create a valid token in the store.
 	token := &registration.Token{
@@ -529,12 +530,12 @@ func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
 
 	server.router.ServeHTTP(rec, req)
 
-	// The hook error causes fail-open: the request should not be rejected (403).
-	// Without a cert manager, the handler returns 500 at certificate generation.
-	// Either way it must NOT be 403 Forbidden (which would mean the hook error was
-	// incorrectly treated as a rejection).
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"hook error must fail open — not treated as a rejection")
+	assert.Equal(t, http.StatusAccepted, rec.Code,
+		"hook error must quarantine without issuing a certificate")
+	var response RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	assert.Equal(t, business.PendingRegistrationStatusPending, response.Status)
+	assert.NotEmpty(t, response.PendingID)
 }
 
 // --- ManualReviewApprovalHook ---

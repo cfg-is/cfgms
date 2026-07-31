@@ -388,6 +388,8 @@ func (s *Supervisor) writeFlagFile(name, version string) error {
 	if s.CertStoreDir == "" {
 		return nil
 	}
+	// #nosec G301 -- this store contains only public CA certificates needed by
+	// the unprivileged steward service, so directory traversal is intentional.
 	if err := os.MkdirAll(s.CertStoreDir, 0o755); err != nil {
 		return err
 	}

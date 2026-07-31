@@ -315,6 +315,8 @@ func runWorkflow(cmd *cobra.Command, args []string) error {
 	}
 
 	filePath := args[0]
+	// #nosec G304 -- the CLI operator explicitly selects the local workflow
+	// definition to submit; this command only reads that requested file.
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read workflow file %q: %w", filePath, err)

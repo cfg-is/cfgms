@@ -79,12 +79,13 @@ func (s *DatabasePendingRegistrationStore) AddPending(ctx context.Context, entry
 	if status == "" {
 		status = business.PendingRegistrationStatusPending
 	}
+	tokenLookupKey := business.RegistrationTokenLookupKey(entry.TokenStr)
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO cfgms_pending_registrations
 			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		entry.PendingID, entry.StewardID, entry.TenantID, entry.TokenStr, entry.SourceIP,
+		entry.PendingID, entry.StewardID, entry.TenantID, tokenLookupKey, entry.SourceIP,
 		registeredAt, entry.ExpiresAt, entry.ClaimedAt, status,
 	)
 	if err != nil {
@@ -104,11 +105,13 @@ func (s *DatabasePendingRegistrationStore) GetPendingByID(ctx context.Context, p
 	return scanDBPendingEntry(row)
 }
 
-// GetPendingByToken retrieves the entry whose token_str matches.
+// GetPendingByToken retrieves the entry whose token lookup key matches the raw
+// token. The plaintext branch is read-only migration compatibility.
 func (s *DatabasePendingRegistrationStore) GetPendingByToken(ctx context.Context, tokenStr string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-		FROM cfgms_pending_registrations WHERE token_str = $1 LIMIT 1`, tokenStr)
+		FROM cfgms_pending_registrations WHERE token_str IN ($1, $2) LIMIT 1`,
+		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	return scanDBPendingEntry(row)
 }
 

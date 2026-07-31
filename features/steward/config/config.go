@@ -114,6 +114,10 @@ var envVarPattern = regexp.MustCompile(`\$\{([^}:]+)\}`)
 // envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
 var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
 
+// ErrNoConfiguration reports that none of the default steward configuration
+// search paths contained a file.
+var ErrNoConfiguration = errors.New("no configuration file found")
+
 // validateEnvVars checks that all referenced environment variables (without defaults) are set.
 // This provides fail-safe behavior: if a config references ${VAR} and VAR is not set,
 // the application fails fast instead of silently using an empty value.
@@ -191,7 +195,7 @@ func LoadConfiguration(configPath string) (StewardConfig, error) {
 		}
 	}
 
-	return config, fmt.Errorf("no configuration file found in search paths")
+	return config, fmt.Errorf("%w in search paths", ErrNoConfiguration)
 }
 
 // loadFromPath loads configuration from a specific file path

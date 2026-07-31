@@ -77,6 +77,8 @@ func (e *linuxExecutor) list() ([]certEntry, error) {
 			continue
 		}
 
+		// #nosec G304 -- name comes from ReadDir of the fixed OS trust root and
+		// only .crt/.pem entries are read; no caller supplies a path component.
 		data, err := os.ReadFile(filepath.Join(e.trustStoreRoot, name))
 		if err != nil {
 			continue // skip unreadable files
@@ -112,6 +114,8 @@ func (e *linuxExecutor) install(certDER []byte) error {
 	filename := "cfgms-" + fp + ".crt"
 	destPath := filepath.Join(e.trustStoreRoot, filename)
 
+	// #nosec G301 -- the OS CA trust directory must be traversable by all
+	// processes that validate TLS; it contains public certificates only.
 	if err := os.MkdirAll(e.trustStoreRoot, 0755); err != nil {
 		return fmt.Errorf("create trust store root %s: %w", e.trustStoreRoot, err)
 	}
@@ -121,7 +125,9 @@ func (e *linuxExecutor) install(certDER []byte) error {
 		Bytes: certDER,
 	})
 
-	if err := os.WriteFile(destPath, pemData, 0644); err != nil { // #nosec G306 - CA certs are public material
+	// #nosec G306 -- CA certificates are public verification material and must
+	// be readable by unprivileged TLS clients using the system trust store.
+	if err := os.WriteFile(destPath, pemData, 0644); err != nil {
 		return fmt.Errorf("write certificate %s: %w", destPath, err)
 	}
 

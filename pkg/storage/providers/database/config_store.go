@@ -380,6 +380,8 @@ func (s *DatabaseConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig
 	orderClause := buildConfigOrderByClause(filter)
 	limitClause := buildConfigLimitOffsetClause(filter)
 
+	// #nosec G202 -- helper-produced clauses use fixed/allowlisted structure and
+	// bind every caller-controlled value through args.
 	query := baseQuery + " " + whereClause + " " + orderClause + limitClause
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

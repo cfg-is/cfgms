@@ -1099,6 +1099,8 @@ System health overview including service status and resource utilisation.
 
 System performance metrics.
 
+**Listener:** Private metrics HTTPS listener only; the public product listener returns `404`
+
 **Authentication:** Required  
 **Required permission:** `monitoring:read-metrics`
 
@@ -1180,6 +1182,8 @@ Health status for a specific component.
 #### GET /api/v1/monitoring/components/{component}/metrics
 
 Metrics for a specific component.
+
+**Listener:** Private metrics HTTPS listener only; the public product listener returns `404`
 
 **Authentication:** Required  
 **Required permission:** `monitoring:read-component-metrics`

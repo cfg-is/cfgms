@@ -56,8 +56,8 @@ type RegistrationInput struct {
 // RegistrationApprovalHook evaluates whether a registration request should be approved.
 //
 // The hook is called after token validation and before certificate issuance.
-// Returning an error is non-fatal: the registration handler logs the error and
-// falls back to approve so that transient hook failures do not block registrations.
+// Returning an error causes the registration handler to quarantine the request.
+// Admission-service failures must never grant unrestricted fleet access.
 type RegistrationApprovalHook interface {
 	Evaluate(ctx context.Context, input RegistrationInput) (decision ApprovalDecision, reason string, err error)
 }

@@ -54,7 +54,8 @@ func cfgBinary() string {
 	return "cfg"
 }
 
-// adminBundle mirrors the YAML structure of /etc/cfgms/admin.bundle.yaml.
+// adminBundle mirrors the YAML structure of the fleet controller's persisted
+// /app/data/admin.bundle.yaml.
 type adminBundle struct {
 	CertPEM       string `yaml:"cert_pem"`
 	KeyPEM        string `yaml:"key_pem"`
@@ -154,7 +155,7 @@ func (s *FleetTestSuite) distributeControllerCAToStewards(t *testing.T) {
 func (s *FleetTestSuite) rebuildClients(t *testing.T) error {
 	t.Helper()
 
-	bundleYAML, err := s.dockerExec(t, "fleet-controller", "cat", "/etc/cfgms/admin.bundle.yaml")
+	bundleYAML, err := s.dockerExec(t, "fleet-controller", "cat", "/app/data/admin.bundle.yaml")
 	if err != nil {
 		return fmt.Errorf("read admin bundle: %w", err)
 	}

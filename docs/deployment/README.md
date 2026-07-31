@@ -9,6 +9,11 @@ Two fully-commented config files to copy and customize:
 - [`controller.cfg`](controller.cfg) — canonical controller boot config. Copy to `/etc/cfgms/controller.cfg`.
 - [`steward.cfg`](steward.cfg) — canonical steward boot config. Copy to `/etc/cfgms/steward.cfg` on each endpoint.
 
+The canonical public-beta controller and service/container definitions select
+`security_profile: public-beta` and require signed ad-hoc execution. Do not
+remove or downgrade those settings; startup is intentionally blocked when the
+controller CA or command-signing certificate cannot be loaded.
+
 ## Deployment Modes
 
 ### [Single Controller](single-controller/walkthrough.md)
@@ -18,6 +23,16 @@ One controller with a controller-steward managing the node. Stewards across your
 **Use when**: You're setting up CFGMS for the first time, running a lab, or managing a fleet from a single controller.
 
 **You'll deploy**: controller binary, controller-steward, config files, systemd service.
+
+### [Hardened Container](container/README.md)
+
+Single-node controller deployment with a separate fail-closed initialization
+job, fixed non-root identity, read-only root filesystem, dropped capabilities,
+resource limits, explicit persistent volumes, public HTTPS/QUIC product ports,
+and a distinct host-loopback-only HTTPS metrics listener.
+
+**Use when**: You deploy the controller with Docker Compose and can enforce the
+host's default seccomp plus an AppArmor or SELinux policy.
 
 ### [Fleet Deployment](fleet/walkthrough.md)
 

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
@@ -40,11 +41,19 @@ func AggregateRoot(manifest []*commonpb.ManifestEntry) (string, error) {
 	var lenBuf [4]byte
 	for _, entry := range sorted {
 		idBytes := []byte(entry.GetFragmentId())
+		if len(idBytes) > math.MaxUint32 {
+			return "", fmt.Errorf("fragment ID exceeds uint32 length")
+		}
+		// #nosec G115 -- fragment ID length is explicitly bounded above.
 		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(idBytes)))
 		_, _ = h.Write(lenBuf[:])
 		_, _ = h.Write(idBytes)
 
 		hashBytes := []byte(entry.GetFragmentHash())
+		if len(hashBytes) > math.MaxUint32 {
+			return "", fmt.Errorf("fragment hash exceeds uint32 length")
+		}
+		// #nosec G115 -- fragment hash length is explicitly bounded above.
 		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(hashBytes)))
 		_, _ = h.Write(lenBuf[:])
 		_, _ = h.Write(hashBytes)

@@ -46,6 +46,24 @@ type auditCapturingLogger struct {
 	entries []auditLogEntry
 }
 
+func TestSecurityHeadersMiddlewareCoversAPIErrorResponses(t *testing.T) {
+	srv := setupTestServer(t)
+	handler := srv.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "denied", http.StatusUnauthorized)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, "max-age=31536000; includeSubDomains", rec.Header().Get("Strict-Transport-Security"))
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"))
+	assert.Equal(t, "no-referrer", rec.Header().Get("Referrer-Policy"))
+	assert.Equal(t, "camera=(), microphone=(), geolocation=()", rec.Header().Get("Permissions-Policy"))
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
 type auditLogEntry struct {
 	level string
 	msg   string
@@ -594,8 +612,8 @@ func TestMTLSAuth_NoCert_FallsBackToAPIKey(t *testing.T) {
 	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance)
 }
 
-// TestHasPermission_AdminPrincipal verifies that hasPermission returns true for any
-// permissionID when the principal has Assurance >= AssuranceBasic.
+// TestHasPermission_AdminPrincipal verifies that an administrator principal with
+// the explicit nil-permissions marker is authorized for every permission.
 func TestHasPermission_AdminPrincipal(t *testing.T) {
 	server := setupTestServer(t)
 	admin := &Principal{Assurance: session.AssuranceBasic}
@@ -603,6 +621,20 @@ func TestHasPermission_AdminPrincipal(t *testing.T) {
 	assert.True(t, server.hasPermission(admin, "steward:read"))
 	assert.True(t, server.hasPermission(admin, "rbac:delete-role"))
 	assert.True(t, server.hasPermission(admin, "some-future:permission"))
+}
+
+// TestHasPermission_WebAccountPermissions verifies that human assurance does not
+// erase the explicit, least-privilege grants configured on a web account.
+func TestHasPermission_WebAccountPermissions(t *testing.T) {
+	server := setupTestServer(t)
+	web := &Principal{
+		Assurance:   session.AssuranceBasic,
+		Permissions: []string{"steward:list"},
+	}
+
+	assert.True(t, server.hasPermission(web, "steward:list"))
+	assert.False(t, server.hasPermission(web, "steward:write-config"))
+	assert.False(t, server.hasPermission(web, "rbac:create-role"))
 }
 
 // TestHasPermission_WildcardStringRejected verifies that an API-key principal with
@@ -668,7 +700,7 @@ func TestMTLSAuth_AuditFields_APIKeyAuth(t *testing.T) {
 // so that extractAdminPrincipal can check the revocation list.
 func setupTestServerWithCertMgr(t *testing.T, certManager *cert.Manager) *Server {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -836,7 +868,7 @@ func TestAuthMiddleware_SetsUserIDKey_CertAuth(t *testing.T) {
 // TenantIsolationEngine. Uses real CFGMS components — no mocks.
 func setupTestServerWithIsolationEngine(t *testing.T) *Server {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -916,6 +948,35 @@ func requestWithTargetTenant(method, path, targetTenant, apiKey string) *http.Re
 	req := httptest.NewRequest(method, path, nil)
 	req.Header.Set("X-API-Key", apiKey)
 	return req.WithContext(context.WithValue(req.Context(), targetTenantContextKey, targetTenant))
+}
+
+func TestTenantIsolation_SubtreeBoundaryEnforcedWithoutIsolationEngine(t *testing.T) {
+	server := setupTestServer(t) // isolation engine is deliberately not wired
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:list"}, "msp-a/client-1", 5*time.Minute)
+	handler := server.authenticationMiddleware(
+		server.requirePermission("steward", "list")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})))
+
+	for _, tc := range []struct {
+		name         string
+		targetTenant string
+		wantStatus   int
+	}{
+		{name: "same tenant", targetTenant: "msp-a/client-1", wantStatus: http.StatusOK},
+		{name: "child tenant", targetTenant: "msp-a/client-1/group-a", wantStatus: http.StatusOK},
+		{name: "sibling tenant", targetTenant: "msp-a/client-2", wantStatus: http.StatusForbidden},
+		{name: "parent tenant", targetTenant: "msp-a", wantStatus: http.StatusForbidden},
+		{name: "prefix collision", targetTenant: "msp-a/client-10", wantStatus: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := requestWithTargetTenant(http.MethodGet, "/api/v1/stewards", tc.targetTenant, apiKey)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, tc.wantStatus, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
 }
 
 // TestTenantIsolation_AgentDevKey verifies that requirePermission enforces tenant

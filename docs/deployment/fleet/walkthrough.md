@@ -387,6 +387,12 @@ Configuration executor initialized  tenant_id=default
 >     - "10.0.0.0/8"
 > ```
 >
+> Configure every proxy hop in that list and configure the edge proxy to append
+> the address it actually observed (or replace any client-supplied header). The
+> controller evaluates the chain right-to-left and uses the first untrusted hop;
+> malformed chains fall back to the TCP peer. The same source identity protects
+> anonymous installer and steward-binary download budgets.
+>
 > When `trusted_proxies` is empty (the default), `X-Forwarded-For` is never
 > trusted — this prevents an attacker from spoofing a trusted source IP.
 
@@ -465,13 +471,16 @@ cfg steward status <STEWARD_ID> --json
 
 ### Controller-side visibility
 
-The controller's transport metrics show connected steward count:
+Product metrics are available only on the controller's private listener. Run
+this on the controller host (or through an authenticated host-local tunnel):
 
 ```bash
-cfg controller metrics --url=https://<CONTROLLER_IP>:9080
+curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: ${CFGMS_MONITORING_API_KEY}" \
+  https://localhost:9090/api/v1/monitoring/metrics
 ```
 
-Look for `Connected Stewards: 2` in the Transport section.
+The same metrics path on `https://<CONTROLLER_IP>:9080` must return `404`.
 
 ---
 
@@ -756,8 +765,10 @@ sudo journalctl -u cfgms-steward -f
 # Controller health
 cfg controller status --url=https://<CONTROLLER_IP>:9080
 
-# Controller transport metrics (shows connected steward count)
-cfg controller metrics --url=https://<CONTROLLER_IP>:9080
+# Controller metrics (run on controller; private listener)
+curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: ${CFGMS_MONITORING_API_KEY}" \
+  https://localhost:9090/api/v1/monitoring/metrics
 
 # Controller logs
 sudo journalctl -u cfgms-controller -n 50 --no-pager

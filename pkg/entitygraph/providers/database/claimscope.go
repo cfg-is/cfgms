@@ -204,6 +204,8 @@ func replacePriorSubjects(ctx context.Context, tx *sql.Tx, source, scopeKey stri
 		phParts = append(phParts, fmt.Sprintf("($1, $2, $%d)", i+3))
 		args = append(args, s)
 	}
+	// #nosec G202 -- phParts contains only generated numeric $N placeholders;
+	// source, scope key, and every subject remain bound arguments.
 	query := `INSERT INTO eg_claim_scope_prior (source, claim_scope_key, subject)
               VALUES ` + strings.Join(phParts, ", ") + ` ON CONFLICT DO NOTHING`
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {

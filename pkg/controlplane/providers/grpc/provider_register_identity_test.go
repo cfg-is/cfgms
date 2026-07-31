@@ -6,8 +6,11 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +24,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -113,8 +118,67 @@ func (s *inMemoryTokenStore) GetTokenByID(_ context.Context, id string) (*busine
 func (s *inMemoryTokenStore) Initialize(_ context.Context) error { return nil }
 func (s *inMemoryTokenStore) Close() error                       { return nil }
 
+func (s *inMemoryTokenStore) ConsumeToken(_ context.Context, tokenStr string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	token, ok := s.tokens[tokenStr]
+	if !ok || !token.IsValid() {
+		return fmt.Errorf("token is invalid, expired, or already used")
+	}
+	now := time.Now()
+	token.Revoked = true
+	token.RevokedAt = &now
+	return nil
+}
+
 // compile-time assertion
 var _ business.RegistrationTokenStore = (*inMemoryTokenStore)(nil)
+var _ business.RegistrationTokenConsumer = (*inMemoryTokenStore)(nil)
+
+func verifiedPeerContext(commonName string) context.Context {
+	leaf := &x509.Certificate{Subject: pkix.Name{CommonName: commonName}}
+	state := tls.ConnectionState{
+		HandshakeComplete: true,
+		PeerCertificates:  []*x509.Certificate{leaf},
+		VerifiedChains:    [][]*x509.Certificate{{leaf}},
+	}
+	return peer.NewContext(context.Background(), &peer.Peer{
+		AuthInfo: credentials.TLSInfo{State: state},
+	})
+}
+
+func TestRegister_ConsumesTokenAtomically(t *testing.T) {
+	store := newInMemoryTokenStore()
+	require.NoError(t, store.SaveToken(context.Background(), &business.RegistrationTokenData{
+		Token: "one-use-token", TenantID: "tenant-a",
+	}))
+	provider := New(ModeServer)
+	provider.registrationTokenStore = store
+	provider.requireSecurityStores = true
+	server := &transportServer{provider: provider}
+	request := &controllerpb.RegisterRequest{
+		Version: "1.0.0",
+		Credentials: &commonpb.Credentials{
+			ClientId: "one-use-token",
+			TenantId: "tenant-a",
+		},
+	}
+
+	const contenders = 16
+	var successes atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := server.Register(verifiedPeerContext("steward-atomic"), request); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), successes.Load())
+}
 
 // dialAndRegister dials the server over QUIC+mTLS and invokes the Register RPC.
 func dialAndRegister(t *testing.T, serverAddr string, clientTLS *tls.Config, req *controllerpb.RegisterRequest) (*controllerpb.RegisterResponse, error) {

@@ -3,20 +3,12 @@ name: Security Scanning Workflow
 on:
   pull_request:
     branches: [ main, develop ]
-    # CONSERVATIVE: Only skip for pure documentation changes
-    # Security scans still run if ANY code changes are present
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
-      - 'LICENSE'
-      - '.gitignore'
-      - '.editorconfig'
   merge_group:
   push:
     branches:
       - main  # Run on main for release security validation
-      # NOTE: Removed develop - security scans already run on PR before merge (no redundant post-merge scanning)
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       scan_type:
@@ -41,31 +33,35 @@ env:
 permissions: {}
 
 jobs:
-  # PR-time stub for the `trivy-scan` required context (#2595).
-  # QUEUE-REAL: the real Trivy scan runs in the merge queue (merge_group) and on
-  # push to main — see the trivy-scan job below. This posts the required check
-  # green on code PRs; docs-only PRs are covered by documentation.yml's stub.
-  # Same check-name as the real job; mutually exclusive by event.
-  trivy-scan-pr-stub:
-    name: trivy-scan
-    permissions: {}
+  source-security-contract:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     steps:
-      - name: PR-time stub (real scan runs in the merge queue)
-        run: |
-          echo "trivy-scan: real image/dependency scan runs in the merge queue (merge_group) per #2595."
-          echo "This PR-time stub posts the required context; the authoritative scan runs against the merge commit."
+    - name: Checkout code
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      with:
+        persist-credentials: false
 
-  # Parallel security scanning jobs for optimal performance
-  # QUEUE-REAL (#2595): runs in the merge queue and on main, not on pull_request.
+    - name: Reject committed compiled artifacts
+      run: bash scripts/check-binary-artifacts.sh
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Enforce HTTP route security classifications
+      run: go test ./features/controller/api -run '^TestEveryHTTPRouteHasSecurityClassification$'
+
+  # Required on PR, merge queue, main, and manual release validation. A skipped
+  # scan is treated as a failed gate by security-validation below.
   trivy-scan:
     permissions:
       contents: read
       security-events: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
@@ -101,9 +97,8 @@ jobs:
         # assigns them severity UNKNOWN. Filtering on CRITICAL,HIGH alone silently
         # dropped CVE-2026-46600 (golang.org/x/net) and CVE-2026-56852
         # (golang.org/x/text) from this gate for four days while the non-blocking
-        # container scans reported them. LOW and MEDIUM remain excluded: they are a
-        # separate policy question and would change the failure rate of this gate.
-        if trivy fs . --scanners vuln,secret,misconfig --severity UNKNOWN,CRITICAL,HIGH --exit-code 1; then
+        # container scans reported them. Public-beta policy also blocks MEDIUM.
+        if trivy fs . --scanners vuln,secret,misconfig --severity UNKNOWN,CRITICAL,HIGH,MEDIUM --exit-code 1; then
           echo "status=passed" >> $GITHUB_OUTPUT
           echo "issues-found=false" >> $GITHUB_OUTPUT
         else
@@ -130,18 +125,14 @@ jobs:
     - name: Fail on security findings
       if: steps.scan.outputs.issues-found == 'true'
       run: |
-        echo "❌ Trivy scan found CRITICAL/HIGH vulnerabilities — see scan output above"
+        echo "❌ Trivy scan found UNKNOWN/MEDIUM/HIGH/CRITICAL findings — see scan output above"
         exit 1
 
-  # PR-REAL (#2595): advisory, non-required static analysis — fast, cheap, and
-  # deterministic on the diff. Developer/agent feedback matters more here than
-  # re-validating an unchanged dependency graph against the merge commit.
   nancy-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
@@ -170,24 +161,19 @@ jobs:
     
     - name: Run Nancy Scan
       id: scan
+      env:
+        GUIDE_TOKEN: ${{ secrets.GUIDE_TOKEN }}
       run: |
         echo "📦 Running Nancy Go Dependency Scan"
-        
-        if make security-deps; then
-          echo "status=passed" >> $GITHUB_OUTPUT
-          echo "issues-found=false" >> $GITHUB_OUTPUT
-        else
-          echo "status=failed" >> $GITHUB_OUTPUT
-          echo "issues-found=true" >> $GITHUB_OUTPUT
-        fi
+        make security-deps
+        echo "status=passed" >> "$GITHUB_OUTPUT"
+        echo "issues-found=false" >> "$GITHUB_OUTPUT"
 
-  # PR-REAL (#2595): advisory, non-required — see nancy-scan comment above.
   gosec-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
@@ -227,16 +213,10 @@ jobs:
         else
           gosec -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
         fi
-        gosec_exit_code=$?
-
-        # Run regular scan for status checking (this honors our configuration)
-        if make security-gosec; then
-          echo "status=passed" >> $GITHUB_OUTPUT
-          echo "issues-found=false" >> $GITHUB_OUTPUT
-        else
-          echo "status=failed" >> $GITHUB_OUTPUT
-          echo "issues-found=true" >> $GITHUB_OUTPUT
-        fi
+        # Public-beta gate: any medium-or-higher finding fails the job.
+        gosec -conf .gosec.json -severity medium -confidence medium ./...
+        echo "status=passed" >> "$GITHUB_OUTPUT"
+        echo "issues-found=false" >> "$GITHUB_OUTPUT"
 
     # DISABLED: Upload gosec SARIF to GitHub Security tab
     # This was triggering duplicate GitHub Advanced Security gosec checks
@@ -260,13 +240,11 @@ jobs:
         path: sarif-results/
         retention-days: 30
 
-  # PR-REAL (#2595): advisory, non-required — see nancy-scan comment above.
   staticcheck-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       status: ${{ steps.scan.outputs.status }}
       issues-found: ${{ steps.scan.outputs.issues-found }}
@@ -291,27 +269,25 @@ jobs:
       continue-on-error: true
 
     - name: Install staticcheck
-      run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      run: GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.1
     
     - name: Run staticcheck Scan
       id: scan
       run: |
         echo "🔍 Running Staticcheck Advanced Analysis"
-        
-        if make security-staticcheck; then
-          echo "status=passed" >> $GITHUB_OUTPUT
-          echo "issues-found=false" >> $GITHUB_OUTPUT
-        else
-          echo "status=failed" >> $GITHUB_OUTPUT
-          echo "issues-found=true" >> $GITHUB_OUTPUT
-        fi
+        # Staticcheck discovers staticcheck.conf by walking up from each package.
+        # Current releases no longer accept the removed -config flag.
+        staticcheck ./...
+        echo "status=passed" >> "$GITHUB_OUTPUT"
+        echo "issues-found=false" >> "$GITHUB_OUTPUT"
 
   # Consolidated security validation job
   security-validation:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    needs: [trivy-scan, nancy-scan, gosec-scan, staticcheck-scan]
+    needs: [source-security-contract, trivy-scan, nancy-scan, gosec-scan, staticcheck-scan]
+    if: always()
     timeout-minutes: 5
     outputs:
       trivy-status: ${{ needs.trivy-scan.outputs.status }}
@@ -342,6 +318,11 @@ jobs:
         NANCY_ISSUES: ${{ needs.nancy-scan.outputs.issues-found }}
         GOSEC_ISSUES: ${{ needs.gosec-scan.outputs.issues-found }}
         STATICCHECK_ISSUES: ${{ needs.staticcheck-scan.outputs.issues-found }}
+        SOURCE_RESULT: ${{ needs.source-security-contract.result }}
+        TRIVY_RESULT: ${{ needs.trivy-scan.result }}
+        NANCY_RESULT: ${{ needs.nancy-scan.result }}
+        GOSEC_RESULT: ${{ needs.gosec-scan.result }}
+        STATICCHECK_RESULT: ${{ needs.staticcheck-scan.result }}
       run: |
         echo "📊 Parallel Security Scan Summary"
         echo "================================="
@@ -353,15 +334,28 @@ jobs:
         echo "  • staticcheck: $STATICCHECK_STATUS"
         echo ""
 
-        # Determine if any issues were found
+        # Cancellation, initialization failure, and skipped scans are failures,
+        # not implicit approvals.
+        if [ "$SOURCE_RESULT" != "success" ] || \
+           [ "$TRIVY_RESULT" != "success" ] || \
+           [ "$NANCY_RESULT" != "success" ] || \
+           [ "$GOSEC_RESULT" != "success" ] || \
+           [ "$STATICCHECK_RESULT" != "success" ]; then
+          echo "issues-found=true" >> "$GITHUB_OUTPUT"
+          echo "❌ One or more required security scans failed, skipped, or were cancelled"
+          exit 1
+        fi
+
+        # Determine if any scanner explicitly reported findings.
         if [ "$TRIVY_ISSUES" = "true" ] || \
            [ "$NANCY_ISSUES" = "true" ] || \
            [ "$GOSEC_ISSUES" = "true" ] || \
            [ "$STATICCHECK_ISSUES" = "true" ]; then
-          echo "issues-found=true" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> "$GITHUB_OUTPUT"
           echo "❌ Security issues detected across tools"
+          exit 1
         else
-          echo "issues-found=false" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> "$GITHUB_OUTPUT"
           echo "✅ All security scans passed"
         fi
     
@@ -379,7 +373,7 @@ jobs:
 
         # Install gosec and staticcheck
         go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-        go install honnef.co/go/tools/cmd/staticcheck@2026.1
+        GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.1
     
     - name: Generate Remediation Report on Failure
       if: steps.summary.outputs.issues-found == 'true'
@@ -412,7 +406,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     needs: security-validation
-    if: github.ref == 'refs/heads/main'
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     steps:
     - name: Production Deployment Decision
       env:
@@ -421,6 +415,7 @@ jobs:
         GOSEC_STATUS: ${{ needs.security-validation.outputs.gosec-status }}
         STATICCHECK_STATUS: ${{ needs.security-validation.outputs.staticcheck-status }}
         ISSUES_FOUND: ${{ needs.security-validation.outputs.issues-found }}
+        VALIDATION_RESULT: ${{ needs.security-validation.result }}
       run: |
         echo "🚪 PRODUCTION DEPLOYMENT GATE"
         echo "============================"
@@ -432,7 +427,7 @@ jobs:
         echo "  • staticcheck: $STATICCHECK_STATUS"
         echo ""
 
-        if [ "$ISSUES_FOUND" = "true" ]; then
+        if [ "$VALIDATION_RESULT" != "success" ] || [ "$ISSUES_FOUND" != "false" ]; then
           echo "❌ PRODUCTION DEPLOYMENT BLOCKED"
           echo "   Critical security issues must be resolved before deployment"
           echo ""
@@ -461,6 +456,7 @@ jobs:
         GOSEC_DISPLAY: ${{ needs.security-validation.outputs.gosec-status == 'passed' && '✅ Passed' || '❌ Failed' }}
         STATICCHECK_DISPLAY: ${{ needs.security-validation.outputs.staticcheck-status == 'passed' && '✅ Passed' || '❌ Failed' }}
         ISSUES_FOUND: ${{ needs.security-validation.outputs.issues-found }}
+        VALIDATION_RESULT: ${{ needs.security-validation.result }}
       run: |
         echo "## Security Scan Summary 🛡️" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
@@ -473,7 +469,7 @@ jobs:
         echo "| staticcheck | $STATICCHECK_DISPLAY |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
-        if [ "$ISSUES_FOUND" = "true" ]; then
+        if [ "$VALIDATION_RESULT" != "success" ] || [ "$ISSUES_FOUND" != "false" ]; then
           echo "### 🤖 Automated Remediation" >> $GITHUB_STEP_SUMMARY
           echo "Security issues detected! Use Claude Code for automated fixes:" >> $GITHUB_STEP_SUMMARY
           echo "1. Download the \`security-scan-results\` artifact" >> $GITHUB_STEP_SUMMARY

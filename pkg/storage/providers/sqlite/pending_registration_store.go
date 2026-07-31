@@ -52,6 +52,7 @@ func (s *SQLitePendingRegistrationStore) AddPending(ctx context.Context, entry *
 	if status == "" {
 		status = business.PendingRegistrationStatusPending
 	}
+	tokenLookupKey := business.RegistrationTokenLookupKey(entry.TokenStr)
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO cfgms_pending_registrations
@@ -60,7 +61,7 @@ func (s *SQLitePendingRegistrationStore) AddPending(ctx context.Context, entry *
 		entry.PendingID,
 		entry.StewardID,
 		entry.TenantID,
-		entry.TokenStr,
+		tokenLookupKey,
 		entry.SourceIP,
 		formatTime(registeredAt),
 		formatTime(entry.ExpiresAt),
@@ -85,12 +86,14 @@ func (s *SQLitePendingRegistrationStore) GetPendingByID(ctx context.Context, pen
 	return scanPendingEntry(row)
 }
 
-// GetPendingByToken retrieves the entry whose token_str matches the given token.
+// GetPendingByToken retrieves the entry whose token lookup key matches the raw
+// token. The plaintext branch is read-only migration compatibility.
 // Returns ErrPendingRegistrationNotFound if no matching record exists.
 func (s *SQLitePendingRegistrationStore) GetPendingByToken(ctx context.Context, tokenStr string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-		FROM cfgms_pending_registrations WHERE token_str = ? LIMIT 1`, tokenStr)
+		FROM cfgms_pending_registrations WHERE token_str IN (?, ?) LIMIT 1`,
+		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	return scanPendingEntry(row)
 }
 

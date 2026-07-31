@@ -20,6 +20,10 @@
 # CFGMS_HA_ELECTION_TIMEOUT=15s
 # CFGMS_HA_HEARTBEAT_INTERVAL=3s
 
+# Each node must also set a top-level private Raft listener in its controller
+# YAML. This address is never published by the Internet-facing load balancer:
+# internal_listen_addr: "10.0.1.11:9444"
+
 # Node 2: US Central
 # Environment variables for second controller:
 # CFGMS_HA_MODE=cluster

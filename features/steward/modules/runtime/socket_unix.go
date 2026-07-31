@@ -48,7 +48,9 @@ func makeSocketPath(runtimeDir, moduleName string, id int64) (string, error) {
 		return "", fmt.Errorf("create module socket dir %q: %w", sockDir, err)
 	}
 	// Re-assert mode in case the directory already existed with looser permissions.
-	if err := os.Chmod(sockDir, 0o700); err != nil { // #nosec G302 -- 0700 on a directory is intentional hardening; execute bit is required for traversal
+	// #nosec G302 -- this is a directory; 0700 is restrictive and its execute
+	// bit is required for the owning process to traverse to the Unix socket.
+	if err := os.Chmod(sockDir, 0o700); err != nil {
 		return "", fmt.Errorf("chmod module socket dir %q: %w", sockDir, err)
 	}
 

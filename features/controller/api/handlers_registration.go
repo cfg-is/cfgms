@@ -5,8 +5,11 @@ package api
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -240,10 +243,6 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Invalid or expired registration token", http.StatusUnauthorized)
 		return
 	}
-	if !token.IsValid() {
-		http.Error(w, "Registration token is revoked or expired", http.StatusUnauthorized)
-		return
-	}
 
 	// Retrieve the pending entry.
 	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
@@ -257,6 +256,18 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Bind the bearer token to this exact pending entry without persisting the
+	// bearer secret. Accept the raw comparison only for pre-migration rows.
+	tokenLookupKey := business.RegistrationTokenLookupKey(tokenStr)
+	if entry.TokenStr != tokenLookupKey && entry.TokenStr != tokenStr {
+		http.Error(w, "forbidden: token does not match pending entry", http.StatusForbidden)
+		return
+	}
+	if !token.IsValid() {
+		http.Error(w, "Registration token is revoked or expired", http.StatusUnauthorized)
+		return
+	}
+
 	// Tenant isolation: a token from a different tenant cannot observe this entry.
 	if entry.TenantID != token.TenantID {
 		http.Error(w, "forbidden: token tenant does not match pending entry tenant", http.StatusForbidden)
@@ -267,6 +278,8 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 
 	switch entry.Status {
 	case business.PendingRegistrationStatusPending:
+		// #nosec G117 -- this status-only instance leaves ClientKey empty; no
+		// credential is serialized on the pending branch.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "pending"})
 
 	case business.PendingRegistrationStatusApproved:
@@ -285,7 +298,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 			http.Error(w, "Failed to claim registration", http.StatusInternalServerError)
 			return
 		}
-		resp, err := s.buildClaimResponse(r.Context(), entry)
+		resp, err := s.buildClaimResponse(r.Context(), entry, tokenStr)
 		if err != nil {
 			s.logger.Error("Failed to generate cert for claimed registration",
 				"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", logging.SanitizeLogValue(entry.StewardID), "error", err)
@@ -294,6 +307,8 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		// #nosec G117 -- this authenticated, tenant-bound, atomically one-time
+		// claim response is the intended TLS delivery channel for the new key.
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			s.logger.Error("Failed to encode registration status response", "error", err)
 		}
@@ -302,25 +317,28 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusGone)
 
 	case business.PendingRegistrationStatusDenied:
+		// #nosec G117 -- this status-only instance leaves ClientKey empty.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "denied"})
 
 	case business.PendingRegistrationStatusExpired:
+		// #nosec G117 -- this status-only instance leaves ClientKey empty.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "expired"})
 
 	default:
+		// #nosec G117 -- this status-only instance leaves ClientKey empty.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: entry.Status})
 	}
 }
 
 // buildClaimResponse generates the cert and builds the RegistrationStatusResponse.
 // Mirrors the approved path in handleRegister (lines ~286–365).
-func (s *Server) buildClaimResponse(ctx context.Context, entry *business.PendingRegistrationEntry) (*RegistrationStatusResponse, error) {
+func (s *Server) buildClaimResponse(ctx context.Context, entry *business.PendingRegistrationEntry, tokenStr string) (*RegistrationStatusResponse, error) {
 	if s.certManager == nil {
 		return nil, fmt.Errorf("certificate manager not initialized")
 	}
 
 	// Re-fetch the token to obtain Group and ControllerURL.
-	tok, err := s.registrationTokenStore.GetToken(ctx, entry.TokenStr)
+	tok, err := s.registrationTokenStore.GetToken(ctx, tokenStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve token for claim: %w", err)
 	}
@@ -658,7 +676,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Perennial tokens survive registration; log the use for auditability.
+	// Log token use without exposing the bearer value.
 	s.logger.Info("Token used for registration",
 		"token_prefix", logging.RedactedID(req.Token),
 		"tenant_id", token.TenantID,
@@ -674,6 +692,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "identity_key_pub is required and must be a base64-encoded 32-byte Ed25519 public key", http.StatusBadRequest)
 		return
 	}
+	claimID := registrationClaimID(req.DeviceID, identityKeyBytes)
 
 	// Reject duplicate DeviceID within the same tenant. Cross-tenant collision is allowed —
 	// each tenant namespace is independent (matching the tenant-isolation pattern at line ~221).
@@ -688,8 +707,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Issue #422: Run registration approval hook.
-	// Hook errors are non-fatal: we log and fall back to approve so transient failures
-	// do not block legitimate registrations.
+	// Hook failures must not grant unrestricted access. Quarantine keeps certificate
+	// issuance behind an explicit operator decision while preserving a recoverable
+	// path for a legitimate steward when the admission service is unavailable.
 	{
 		input := RegistrationInput{
 			Token:    token,
@@ -697,87 +717,102 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		decision, reason, hookErr := s.approvalHook.Evaluate(r.Context(), input)
 		if hookErr != nil {
-			s.logger.Warn("Registration approval hook error, defaulting to approve",
+			s.logger.Warn("Registration approval hook error, quarantining",
 				"error", hookErr,
 				"tenant_id", token.TenantID)
-		} else {
-			switch decision {
-			case DecisionReject:
-				s.logger.Warn("Registration rejected by approval workflow",
-					"tenant_id", token.TenantID,
-					"reason", logging.SanitizeLogValue(reason))
-				// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
-				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
-					business.AuditEventSecurityEvent, "registration_rejected",
-					business.AuditResultDenied, business.AuditSeverityCritical, nil)
-				http.Error(w, "Registration rejected", http.StatusForbidden)
-				return
-			case DecisionQuarantine:
-				// Issue #1693: quarantine returns 202 with no cert — cert issuance is gated on approval.
-				// Issue #1696: store the pending entry durably instead of in-memory sync.Map.
-				pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
-				s.logger.Info("Registration quarantined by approval workflow",
-					"tenant_id", token.TenantID,
-					"pending_id", pendingID)
-
-				quarantineTransportAddr, taErr := s.getTransportAddress()
-				if taErr != nil {
-					s.logger.Error("Transport address not configured; steward cannot reconnect after approval",
-						"steward_id", stewardID, "error", taErr)
-					http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
-					return
-				}
-				if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", initialAttrs); err != nil {
-					s.logger.Error("Failed to register quarantined steward in controller service",
-						"steward_id", stewardID, "error", err)
-				}
-
-				if s.pendingStore != nil {
-					pendingEntry := &business.PendingRegistrationEntry{
-						PendingID:    pendingID,
-						StewardID:    stewardID,
-						TenantID:     token.TenantID,
-						TokenStr:     req.Token,
-						SourceIP:     extractSourceIP(r, s.trustedProxies),
-						RegisteredAt: time.Now().UTC(),
-						ExpiresAt:    time.Now().UTC().Add(5 * 24 * time.Hour),
-						Status:       business.PendingRegistrationStatusPending,
-					}
-					if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
-						s.logger.Error("Failed to persist pending registration",
-							"pending_id", pendingID, "steward_id", stewardID, "error", err)
-					}
-				} else {
-					s.logger.Warn("Pending store not available; registration queue is not durable",
-						"pending_id", pendingID)
-				}
-
-				// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
-				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
-					business.AuditEventAuthentication, "registration_quarantined",
-					business.AuditResultSuccess, business.AuditSeverityHigh,
-					map[string]interface{}{"quarantined": true})
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusAccepted)
-				if err := json.NewEncoder(w).Encode(RegistrationPendingResponse{
-					PendingID: pendingID,
-					StewardID: stewardID,
-					TenantID:  token.TenantID,
-					Group:     token.Group,
-					Status:    "pending",
-				}); err != nil {
-					s.logger.Error("Failed to encode pending registration response", "error", err)
-				}
+			decision = DecisionQuarantine
+			reason = "admission service unavailable"
+		}
+		switch decision {
+		case DecisionReject:
+			s.logger.Warn("Registration rejected by approval workflow",
+				"tenant_id", token.TenantID,
+				"reason", logging.SanitizeLogValue(reason))
+			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
+				business.AuditEventSecurityEvent, "registration_rejected",
+				business.AuditResultDenied, business.AuditSeverityCritical, nil)
+			http.Error(w, "Registration rejected", http.StatusForbidden)
+			return
+		case DecisionQuarantine:
+			// Issue #1693: quarantine returns 202 with no cert — cert issuance is gated on approval.
+			// Issue #1696: store the pending entry durably instead of in-memory sync.Map.
+			if s.pendingStore == nil {
+				s.logger.Error("Cannot quarantine registration without durable pending store",
+					"tenant_id", token.TenantID)
+				http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
 				return
 			}
+
+			quarantineTransportAddr, taErr := s.getTransportAddress()
+			if taErr != nil {
+				s.logger.Error("Transport address not configured; steward cannot reconnect after approval",
+					"steward_id", stewardID, "error", taErr)
+				http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
+				return
+			}
+
+			created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
+			if claimErr != nil {
+				if errors.Is(claimErr, business.ErrRegistrationTokenAlreadyClaimed) {
+					http.Error(w, "Registration token has already been claimed", http.StatusConflict)
+					return
+				}
+				s.logger.Error("Failed to atomically claim registration token", "error", claimErr)
+				http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if !created {
+				existing, existingErr := s.pendingStore.GetPendingByToken(r.Context(), req.Token)
+				if existingErr == nil && existing != nil &&
+					(existing.Status == business.PendingRegistrationStatusPending ||
+						existing.Status == business.PendingRegistrationStatusApproved) {
+					s.writePendingRegistrationResponse(w, existing, token.Group)
+					return
+				}
+				http.Error(w, "Registration token claim is already in progress or completed", http.StatusConflict)
+				return
+			}
+
+			pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
+			pendingEntry := &business.PendingRegistrationEntry{
+				PendingID:    pendingID,
+				StewardID:    stewardID,
+				TenantID:     token.TenantID,
+				TokenStr:     req.Token,
+				SourceIP:     extractSourceIP(r, s.trustedProxies),
+				RegisteredAt: time.Now().UTC(),
+				ExpiresAt:    time.Now().UTC().Add(5 * 24 * time.Hour),
+				Status:       business.PendingRegistrationStatusPending,
+			}
+			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
+				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
+					s.logger.Error("Failed to release registration token claim after pending-store failure",
+						"pending_id", pendingID, "error", releaseErr)
+				}
+				s.logger.Error("Failed to persist pending registration",
+					"pending_id", pendingID, "steward_id", stewardID, "error", err)
+				http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+
+			s.logger.Info("Registration quarantined by approval workflow",
+				"tenant_id", token.TenantID,
+				"pending_id", pendingID)
+			if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", initialAttrs); err != nil {
+				s.logger.Error("Failed to register quarantined steward in controller service",
+					"steward_id", stewardID, "error", err)
+			}
+
+			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
+				business.AuditEventAuthentication, "registration_quarantined",
+				business.AuditResultSuccess, business.AuditSeverityHigh,
+				map[string]interface{}{"quarantined": true, "reason": reason})
+			s.writePendingRegistrationResponse(w, pendingEntry, token.Group)
+			return
 		}
 	}
-
-	// Approve path: generate mTLS certificates and return the full registration response.
-	s.logger.Info("Steward registered successfully",
-		"steward_id", stewardID,
-		"tenant_id", token.TenantID,
-		"group", token.Group)
 
 	// Build response with connection details
 	approveTransportAddr, taErr := s.getTransportAddress()
@@ -803,22 +838,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate client certificate for steward
+	// Resolve every fallible prerequisite before claiming the token. Failures up
+	// to this point are safe for the steward to retry.
 	validityDays := 365 // Default validity
 	if s.cfg.Certificate != nil && s.cfg.Certificate.ClientCertValidityDays > 0 {
 		validityDays = s.cfg.Certificate.ClientCertValidityDays
-	}
-
-	clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName:   stewardID,
-		Organization: "CFGMS Stewards",
-		ClientID:     stewardID,
-		ValidityDays: validityDays,
-	})
-	if err != nil {
-		s.logger.Error("Failed to generate client certificate", "error", err, "steward_id", stewardID)
-		http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
-		return
 	}
 
 	// Get CA certificate (required for certificate chain validation)
@@ -850,6 +874,40 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			"steward_id", stewardID)
 	}
 
+	// This is the REST issuance boundary. Exactly one caller can create the
+	// durable claim, even across controller processes. Same-device retries are
+	// recognized by the store but cannot issue a second private key/certificate.
+	created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
+	if claimErr != nil {
+		if errors.Is(claimErr, business.ErrRegistrationTokenAlreadyClaimed) {
+			http.Error(w, "Registration token has already been claimed", http.StatusConflict)
+			return
+		}
+		s.logger.Error("Failed to atomically claim registration token", "error", claimErr)
+		http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !created {
+		http.Error(w, "Registration token claim is already in progress or completed", http.StatusConflict)
+		return
+	}
+
+	clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   stewardID,
+		Organization: "CFGMS Stewards",
+		ClientID:     stewardID,
+		ValidityDays: validityDays,
+	})
+	if err != nil {
+		if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
+			s.logger.Error("Failed to release registration token claim after certificate failure",
+				"steward_id", stewardID, "error", releaseErr)
+		}
+		s.logger.Error("Failed to generate client certificate", "error", err, "steward_id", stewardID)
+		http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
+		return
+	}
+
 	// Return certificates in response (ALWAYS - required for mTLS)
 	resp.ClientCert = string(clientCert.CertificatePEM)
 	resp.ClientKey = string(clientCert.PrivateKeyPEM)
@@ -873,6 +931,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Generated client certificate for steward",
 		"steward_id", stewardID,
 		"validity_days", validityDays)
+	s.logger.Info("Steward registered successfully",
+		"steward_id", stewardID,
+		"tenant_id", token.TenantID,
+		"group", token.Group)
 
 	if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, resp.TransportAddress, "registered", initialAttrs); err != nil {
 		s.logger.Error("Failed to register steward in controller service",
@@ -909,8 +971,34 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Return response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	// #nosec G117 -- successful authenticated registration intentionally returns
+	// the freshly issued client key once over the required TLS endpoint.
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.logger.Error("Failed to encode registration response", "error", err)
+	}
+}
+
+// registrationClaimID binds a REST claim to the stable device identity without
+// storing either the device identifier or public key in the token-claim table.
+func registrationClaimID(deviceID string, identityKey []byte) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(deviceID))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(identityKey)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *Server) writePendingRegistrationResponse(w http.ResponseWriter, entry *business.PendingRegistrationEntry, group string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	if err := json.NewEncoder(w).Encode(RegistrationPendingResponse{
+		PendingID: entry.PendingID,
+		StewardID: entry.StewardID,
+		TenantID:  entry.TenantID,
+		Group:     group,
+		Status:    entry.Status,
+	}); err != nil {
+		s.logger.Error("Failed to encode pending registration response", "error", err)
 	}
 }
 
@@ -950,32 +1038,49 @@ func replaceBindAddress(addr, externalAddress string) (string, error) {
 
 // extractSourceIP returns the source IP from the HTTP request.
 // It honors X-Forwarded-For only when the TCP peer (r.RemoteAddr) is within
-// trustedProxies. When trustedProxies is empty or the peer is not in the list,
-// the TCP peer address is always used — XFF is untrusted and ignored.
+// trustedProxies. The chain is evaluated from right to left so a client-supplied
+// leftmost value cannot bypass source controls when a trusted proxy appends the
+// real upstream address. When trustedProxies is empty, the peer is untrusted, or
+// the chain is malformed, the TCP peer address is used.
 func extractSourceIP(r *http.Request, trustedProxies []net.IPNet) string {
 	peerHost := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		peerHost = host
 	}
 
-	if len(trustedProxies) > 0 {
-		peerIP := net.ParseIP(peerHost)
-		if peerIP != nil {
-			for i := range trustedProxies {
-				if trustedProxies[i].Contains(peerIP) {
-					if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-						if idx := strings.Index(xff, ","); idx != -1 {
-							return strings.TrimSpace(xff[:idx])
-						}
-						return strings.TrimSpace(xff)
-					}
-					break
-				}
-			}
+	peerIP := net.ParseIP(peerHost)
+	if peerIP == nil || !isTrustedProxyIP(peerIP, trustedProxies) {
+		return peerHost
+	}
+
+	xffValues := r.Header.Values("X-Forwarded-For")
+	if len(xffValues) == 0 {
+		return peerHost
+	}
+	xff := strings.Join(xffValues, ",")
+	hops := strings.Split(xff, ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := net.ParseIP(strings.TrimSpace(hops[i]))
+		if hop == nil {
+			return peerHost
+		}
+		if !isTrustedProxyIP(hop, trustedProxies) {
+			return hop.String()
 		}
 	}
 
-	return peerHost
+	// Every forwarded hop is trusted. The leftmost entry is the originating
+	// trusted peer and remains the most specific available source identity.
+	return net.ParseIP(strings.TrimSpace(hops[0])).String()
+}
+
+func isTrustedProxyIP(ip net.IP, trustedProxies []net.IPNet) bool {
+	for i := range trustedProxies {
+		if trustedProxies[i].Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // emitRegistrationManagementAudit records an audit event for a registration management action

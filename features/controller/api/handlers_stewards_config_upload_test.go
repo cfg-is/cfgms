@@ -197,6 +197,66 @@ resources:
 		"valid config must be accepted; body: %s", rec.Body.String())
 }
 
+// TestProductionBuildRejectsTestConfigOverwrite is the regression guard for the
+// unauthenticated base-router overwrite reproduced during the public-beta audit.
+// Test administration routes must be absent from a normal controller build even
+// when the historical runtime opt-in environment variable is set.
+func TestProductionBuildRejectsTestConfigOverwrite(t *testing.T) {
+	server := setupTestServer(t)
+	t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
+	const stewardID = "security-audit-steward"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "test-tenant", "addr", "active"))
+
+	writeKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
+	readKey := NewEphemeralTestKey(t, server, []string{"steward:read-config"}, "test-tenant", 5*time.Minute)
+
+	configBody := func(content string) []byte {
+		return []byte(`
+steward:
+  id: security-audit-steward
+  mode: controller
+  logging:
+    level: info
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+modules:
+  file: file
+resources:
+  - name: audit-canary
+    module: file
+    config:
+      path: /tmp/audit-canary
+      content: ` + content + "\n")
+	}
+
+	seedReq := httptest.NewRequest(http.MethodPut, "/api/v1/stewards/"+stewardID+"/config", bytes.NewReader(configBody("authorized-original")))
+	seedReq.Header.Set("X-API-Key", writeKey)
+	seedReq.Header.Set("Content-Type", "application/yaml")
+	seedRec := httptest.NewRecorder()
+	server.router.ServeHTTP(seedRec, seedReq)
+	require.Equal(t, http.StatusOK, seedRec.Code, "authorized seed write failed: %s", seedRec.Body.String())
+
+	overwriteReq := httptest.NewRequest(http.MethodPut, "/api/v1/test/stewards/"+stewardID+"/config", bytes.NewReader(configBody("unauthenticated-overwrite")))
+	overwriteReq.Header.Set("Content-Type", "application/yaml")
+	overwriteRec := httptest.NewRecorder()
+	server.router.ServeHTTP(overwriteRec, overwriteReq)
+	require.Equal(t, http.StatusNotFound, overwriteRec.Code,
+		"production builds must not register test routes, regardless of environment: %s", overwriteRec.Body.String())
+
+	readReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/"+stewardID+"/config", nil)
+	readReq.Header.Set("X-API-Key", readKey)
+	readRec := httptest.NewRecorder()
+	server.router.ServeHTTP(readRec, readReq)
+	require.Equal(t, http.StatusOK, readRec.Code, "authenticated readback failed: %s", readRec.Body.String())
+	assert.Contains(t, readRec.Body.String(), "authorized-original",
+		"rejected request must leave the authorized configuration intact")
+	assert.NotContains(t, readRec.Body.String(), "unauthenticated-overwrite",
+		"rejected request must not mutate durable configuration")
+}
+
 // TestHandleUpdateStewardConfig_StorageError_Returns500 verifies that a genuine
 // storage-layer failure (not a validation failure) still returns HTTP 500 with
 // code STORAGE_ERROR after the Issue #2482 fix — i.e. the fix does not convert

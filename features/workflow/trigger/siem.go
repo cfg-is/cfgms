@@ -709,6 +709,8 @@ func (sp *SIEMProcessor) fireTrigger(ctx context.Context, triggerID string, trig
 	}
 
 	// Execute workflow asynchronously
+	// #nosec G118 -- SIEM-triggered execution intentionally outlives event
+	// ingestion and applies the trigger's configured timeout when present.
 	go func() {
 		execCtx := context.WithValue(context.Background(), TenantIDContextKey, tenantID)
 		if trigger.Timeout > 0 {

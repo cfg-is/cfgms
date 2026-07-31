@@ -159,6 +159,8 @@ func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfa
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
 
+	// #nosec G202 -- where is composed solely from fixed predicates and "?"
+	// placeholders; all filter values are passed separately through args.
 	q := `SELECT ep.from_subject, ep.to_subject, ep.edge_type, ep.source, ep.observed_at, ep.payload_hash, pc.payload
 		  FROM eg_edge_projection ep
 		  LEFT JOIN eg_entity_index fi ON fi.subject = ep.from_subject

@@ -78,7 +78,7 @@ func SetupTestCertsWithConfig(t *testing.T, config *CertConfig) (certDir string,
 		config.CertDir = tempDir
 	} else {
 		// Create the specified directory
-		err = os.MkdirAll(config.CertDir, 0755)
+		err = os.MkdirAll(config.CertDir, 0700)
 		require.NoError(t, err)
 	}
 
@@ -289,6 +289,8 @@ func VerifyTLSConnection(certDir string) error {
 		return err
 	}
 
+	// #nosec G304 -- test-only helper reads a fixed filename beneath the
+	// caller's t.TempDir-backed certificate fixture directory.
 	caCert, err := os.ReadFile(filepath.Join(certDir, "ca.crt"))
 	if err != nil {
 		return err

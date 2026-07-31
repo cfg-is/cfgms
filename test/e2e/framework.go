@@ -255,7 +255,7 @@ func (f *E2ETestFramework) initializeCertificates() error {
 	f.metrics.ComponentStartTimes["certificates"] = time.Now()
 
 	certPath := filepath.Join(f.tempDir, "certs")
-	if err := os.MkdirAll(certPath, 0755); err != nil {
+	if err := os.MkdirAll(certPath, 0700); err != nil {
 		return fmt.Errorf("failed to create cert directory: %w", err)
 	}
 
@@ -380,7 +380,7 @@ func (f *E2ETestFramework) initializeController() error {
 
 	// Create storage directories
 	storageDir := filepath.Join(f.tempDir, "storage-flatfile")
-	if err := os.MkdirAll(storageDir, 0755); err != nil {
+	if err := os.MkdirAll(storageDir, 0700); err != nil {
 		return fmt.Errorf("failed to create storage directory: %w", err)
 	}
 

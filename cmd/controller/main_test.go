@@ -5,9 +5,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -238,11 +241,18 @@ func TestGetLogProviderConfig_FailsWithoutPassword(t *testing.T) {
 // newTestSecretStore creates a real SOPS-backed SecretStore rooted in t.TempDir().
 func newTestSecretStore(t *testing.T) secretsif.SecretStore {
 	t.Helper()
-	dir := t.TempDir()
+	base := t.TempDir()
+	dir := filepath.Join(base, "data")
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	keyPath := filepath.Join(base, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600))
 	store, err := secretsif.CreateSecretStoreFromConfig("sops", map[string]interface{}{
 		"storage_provider": "flatfile",
 		"storage_config":   map[string]interface{}{"root": dir},
 		"cache_enabled":    false,
+		"key_file":         keyPath,
 	})
 	require.NoError(t, err, "creating test secret store")
 	t.Cleanup(func() { _ = store.Close() })

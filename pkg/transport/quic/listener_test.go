@@ -4,6 +4,7 @@
 package quic
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -247,6 +248,53 @@ func TestListener_SlowHandshakePeerDoesNotBlockOthers(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Accept blocked for >2s: slow-peer stalled the accept loop")
 	}
+}
+
+// TestListener_MaxConnectionsIncludesSlowPeers proves that peers which finish
+// TLS but never open the gRPC stream still consume the configured connection
+// budget and cannot create an unbounded goroutine set.
+func TestListener_MaxConnectionsIncludesSlowPeers(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+	limits := ListenerLimits{
+		MaxConnections:    1,
+		ReadyQueueSize:    1,
+		StreamOpenTimeout: 2 * time.Second,
+	}
+	lis, err := ListenWithLimits("127.0.0.1:0", tlsPair.server, nil, limits)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+
+	peer1, err := quicgo.DialAddr(t.Context(), lis.Addr().String(), tlsPair.client, nil)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return lis.ActiveConnections() == 1 },
+		time.Second, 10*time.Millisecond)
+
+	// A second handshake may appear successful client-side before the server's
+	// CONNECTION_CLOSE arrives, but it must never allocate a second slot.
+	peer2Ctx, cancelPeer2 := context.WithTimeout(t.Context(), time.Second)
+	defer cancelPeer2()
+	peer2, _ := quicgo.DialAddr(peer2Ctx, lis.Addr().String(), tlsPair.client, nil)
+	if peer2 != nil {
+		_ = peer2.CloseWithError(0, "")
+	}
+	assert.Equal(t, 1, lis.ActiveConnections())
+
+	require.NoError(t, peer1.CloseWithError(0, ""))
+	require.Eventually(t, func() bool { return lis.ActiveConnections() == 0 },
+		3*time.Second, 10*time.Millisecond)
+}
+
+func TestListenWithLimits_RejectsInvalidBudgets(t *testing.T) {
+	tlsPair := newTestTLSPair(t)
+	_, err := ListenWithLimits("127.0.0.1:0", tlsPair.server, nil, ListenerLimits{})
+	require.ErrorContains(t, err, "max connections")
+
+	_, err = ListenWithLimits("127.0.0.1:0", tlsPair.server, nil, ListenerLimits{
+		MaxConnections:    1,
+		ReadyQueueSize:    2,
+		StreamOpenTimeout: time.Second,
+	})
+	require.ErrorContains(t, err, "ready queue size")
 }
 
 // TestListener_CloseUnblocksAccept verifies that Close causes a blocked Accept

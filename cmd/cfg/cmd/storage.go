@@ -207,7 +207,7 @@ func runStorageMigrate(cmd *cobra.Command, args []string) error {
 // When dryRun is true each step reads from source and counts records without writing.
 func migrateToFlatfile(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, dryRun bool) ([]migrate.Report, error) {
 	// Ensure target directories exist
-	if err := os.MkdirAll(migrateFlatfileRoot, 0755); err != nil {
+	if err := os.MkdirAll(migrateFlatfileRoot, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create flatfile root directory: %w", err)
 	}
 

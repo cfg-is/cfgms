@@ -34,7 +34,8 @@ func newClientFromFlags(url, apiKey, caCertPath string, insecure bool) (*APIClie
 	var caCertPEM []byte
 	if caCertPath != "" {
 		var err error
-		// #nosec G304 - CA certificate path is intentionally provided by user via CLI flag or env var
+		// #nosec G304 G703 -- this local administrative CLI intentionally reads
+		// the CA path explicitly selected by its operator; it does not serve remote input.
 		caCertPEM, err = os.ReadFile(caCertPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
@@ -187,6 +188,8 @@ func findBundlePath(bundleEnvVal string) (string, error) {
 	candidates = append(candidates, systemBundlePathFn())
 
 	for _, p := range candidates {
+		// #nosec G703 -- candidates are explicit operator CLI/env choices or
+		// platform-owned configuration paths used by this local administrative CLI.
 		if _, statErr := os.Stat(p); statErr == nil {
 			return p, nil
 		} else if !os.IsNotExist(statErr) {

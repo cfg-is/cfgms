@@ -32,6 +32,8 @@ If no file is found, built-in defaults are used and environment variable overrid
 | `cert_path` | string | `"certs/"` | optional | Legacy TLS certificate directory (superseded by `certificate` block) | config.go:78 |
 | `data_dir` | string | `"data/"` | optional | Data storage root directory | config.go:81 |
 | `log_level` | string | `"info"` | optional | Log verbosity shorthand; overridden by `logging.level` if both set | config.go:84 |
+| `security_profile` | string | `"development"` | optional | Deployment security profile: `development`, `test`, or fail-closed `public-beta` | config.go |
+| `execution.require_signed_adhoc` | boolean | `false` | required in public-beta | Require operator content signatures and controller-signed command envelopes for ad-hoc execution | config.go |
 | `certificate` | object | see [`certificate`](#certificate) | optional | Certificate lifecycle config | config.go:87 |
 | `storage` | object | see [`storage`](#storage) | optional | Storage provider config | config.go:90 |
 | `logging` | object | see [`logging`](#logging-controller) | optional | Logging provider config | config.go:93 |
@@ -42,6 +44,8 @@ If no file is found, built-in defaults are used and environment variable overrid
 
 | Env var | Overrides field |
 |---|---|
+| `CFGMS_SECURITY_PROFILE` | `security_profile` (cannot downgrade `public-beta`) |
+| `CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC` | `execution.require_signed_adhoc` (must remain `true` in `public-beta`) |
 | `CFGMS_LISTEN_ADDR` | `listen_addr` |
 | `CFGMS_HTTP_LISTEN_ADDR` | `listen_addr` (same field, last one wins) |
 | `CFGMS_EXTERNAL_URL` | `external_url` |

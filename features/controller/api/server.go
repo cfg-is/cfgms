@@ -6,11 +6,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +65,11 @@ type Server struct {
 	cfg                            *config.Config
 	logger                         logging.Logger
 	httpServer                     *http.Server
+	metricsHTTPServer              *http.Server
+	internalHTTPServer             *http.Server
 	router                         *mux.Router
+	metricsRouter                  *mux.Router
+	internalRouter                 *mux.Router
 	apiRouter                      *mux.Router // /api/v1 subrouter; used by Set* methods for lazy route registration
 	controllerService              *service.ControllerService
 	configService                  *service.ConfigurationServiceV2
@@ -82,6 +88,8 @@ type Server struct {
 	corsConfig                     *CORSConfig                           // CORS configuration
 	signerCertSerial               string                                // Story #378: Serial of cert used for config signing
 	authDefense                    *authdefense.AuthDefenseSystem        // Story #380: Three-tier auth defense
+	publicDownloadGuard            *publicDownloadGuard                  // PB-015: successful anonymous-download rate/concurrency budgets
+	publicDownloadCache            *publicDownloadCache                  // PB-015: bounded/coalesced installer and steward-binary response cache
 	rollbackManager                rollback.RollbackManager              // Story #416: Rollback system
 	reportsHandler                 *reportapi.Handler                    // Story #416: Reports engine
 	workflowHandler                *WorkflowHandler                      // Story #414: Workflow engine REST API
@@ -254,8 +262,10 @@ func New(
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
 		blobStore:               blobStore,                // Issue #1702: installer artifact storage
 		nonceCache:              newNonceCache(),          // Issue #2096: nonce store for registration-refresh
-		popVerifier:             ed25519PoPVerifier{},     // Issue #2096: default PoP verifier; override in tests
-		sessionCfg:              session.DefaultConfig(),  // Issue #2232: ADR-014 session lifecycle tunables
+		publicDownloadGuard:     newPublicDownloadGuard(defaultPublicDownloadGuardConfig()),
+		publicDownloadCache:     newPublicDownloadCache(),
+		popVerifier:             ed25519PoPVerifier{},    // Issue #2096: default PoP verifier; override in tests
+		sessionCfg:              session.DefaultConfig(), // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
 	}
@@ -374,6 +384,8 @@ func New(
 					tenantStewards = append(tenantStewards, st)
 				}
 			}
+			// #nosec G118 -- save-deploy fan-out is an explicitly asynchronous,
+			// tenant-bounded callback and publisher operations enforce deadlines.
 			go func() {
 				result := push.Fanout(context.Background(), cfg, tenantStewards, commandPublisher, logger)
 				logger.Info("Save=deploy fan-out complete",
@@ -419,15 +431,29 @@ func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 // setupRouter initializes the HTTP router with all routes and middleware
 func (s *Server) setupRouter() {
 	s.router = mux.NewRouter()
+	s.metricsRouter = mux.NewRouter()
+	s.internalRouter = mux.NewRouter()
 
 	// Add middleware
+	s.router.Use(s.securityHeadersMiddleware)
+	s.router.Use(s.authDefense.Middleware) // Per-source budget covers public and authenticated surfaces.
+	s.router.Use(s.requestBodyLimitMiddleware)
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.contentTypeMiddleware)
 
+	// The private metrics listener retains the same source budgets, browser
+	// hardening, authentication, and request validation as the public API.
+	// It intentionally has no SPA fallback or non-metrics product routes.
+	s.metricsRouter.Use(s.securityHeadersMiddleware)
+	s.metricsRouter.Use(s.authDefense.Middleware)
+	s.metricsRouter.Use(s.requestBodyLimitMiddleware)
+	s.metricsRouter.Use(s.loggingMiddleware)
+	s.metricsRouter.Use(s.contentTypeMiddleware)
+	registerPrivateMetricsRoutes(s, s.metricsRouter)
+
 	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
-	api.Use(s.authDefense.Middleware)   // Story #380: rate limiting before auth
 	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
 	// requireTier(TierAny) removed: it was a no-op passthrough (Issue #2780 migrates to assurance-based enforcement).
 	api.Use(s.validationMiddleware)
@@ -443,7 +469,6 @@ func (s *Server) setupRouter() {
 	//   POST /api/v1/stewards/{device_id}/refresh/complete    (PoP-auth in handler)
 	//   GET  /api/v1/installer/download/{platform}/{arch}
 	//   GET  /api/v1/public/steward-binaries/{version}/{platform}/{arch}
-	//   POST /raft/message                                     (internal mTLS peer CN in handler)
 
 	// Health check (no auth required) — liveness / object-presence.
 	s.router.HandleFunc("/api/v1/health", s.handleHealth).Methods("GET", "OPTIONS")
@@ -458,15 +483,11 @@ func (s *Server) setupRouter() {
 	// Registration status poll (no API-key auth — authenticated by regtoken Bearer header)
 	s.router.HandleFunc("/api/v1/registration/status/{pending_id}", s.handleRegistrationStatus).Methods("GET")
 
-	// Test-mode config upload (no auth required - for integration tests only)
-	// Use separate path to avoid conflict with authenticated subrouter
-	// TODO: Remove or protect this endpoint in production
-	s.router.HandleFunc("/api/v1/test/stewards/{id}/config", s.handleUpdateStewardConfig).Methods("PUT", "OPTIONS")
-
-	// Issue #2098: Test-mode admin endpoints — active only when CFGMS_ENABLE_TEST_ENDPOINTS=true.
-	// Fleet E2E tests use these instead of sqlite3 CLI (not installed in Alpine container).
-	s.router.HandleFunc("/api/v1/test/stewards/{id}/status", s.handleTestSetStewardStatus).Methods("PUT")
-	s.router.HandleFunc("/api/v1/test/audit/count", s.handleTestAuditCount).Methods("GET")
+	// Integration-test administration routes are registered only in binaries
+	// compiled with -tags=cfgms_test_endpoints. The production implementation
+	// of registerTestRoutes is a no-op, so an environment variable can never
+	// expose these handlers in a release binary.
+	registerTestRoutes(s)
 
 	// Registration-refresh endpoints (unauthenticated — authenticated by device key PoP).
 	// Registered on the base router like /api/v1/register (Issue #2096).
@@ -543,19 +564,30 @@ func (s *Server) setupRouter() {
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.
-	s.router.HandleFunc("/api/v1/installer/download/{platform}/{arch}", s.handleDownloadInstallPackage).Methods("GET")
+	s.router.Handle(
+		"/api/v1/installer/download/{platform}/{arch}",
+		s.publicDownloadGuard.middleware(s.trustedProxies, http.HandlerFunc(s.handleDownloadInstallPackage)),
+	).Methods("GET")
 
 	// Steward binary public download — no auth required (Issue #1948).
 	// The binary's Ed25519 signature authenticates content at the steward side.
 	// Steward mTLS certs lack the admin marker required by the authenticated GET endpoint.
-	s.router.HandleFunc("/api/v1/public/steward-binaries/{version}/{platform}/{arch}", s.handleGetStewardBinaryPublic).Methods("GET")
+	s.router.Handle(
+		"/api/v1/public/steward-binaries/{version}/{platform}/{arch}",
+		s.publicDownloadGuard.middleware(s.trustedProxies, http.HandlerFunc(s.handleGetStewardBinaryPublic)),
+	).Methods("GET")
 
 	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
 	// No route is pre-registered here; the endpoint only exists when a git-sync
 	// handler is explicitly wired in after server creation.
 
-	// Raft message endpoint: mTLS peer CN verification is enforced inside HandleMessage
-	s.router.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
+	// Raft messages are deliberately absent from the public product router.
+	// Cluster mode serves this handler on the separately configured private
+	// mTLS-only listener created by Start.
+	s.internalRouter.Use(s.requestBodyLimitMiddleware)
+	s.internalRouter.Use(s.loggingMiddleware)
+	s.internalRouter.Use(s.contentTypeMiddleware)
+	s.internalRouter.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
 	// Raft status endpoint: requires HA read-status permission via API authentication
 	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
 
@@ -593,49 +625,183 @@ func (s *Server) Start() error {
 
 	// Determine listen address for HTTP server (different from gRPC)
 	httpAddr := s.getHTTPListenAddr()
-
-	// Create HTTP server
-	s.httpServer = &http.Server{
-		Addr:         httpAddr,
-		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	metricsAddr := s.cfg.MetricsListenAddr
+	if err := config.ValidatePrivateListenerAddress(metricsAddr); err != nil {
+		return fmt.Errorf("invalid private metrics listener: %w", err)
 	}
 
-	// Configure TLS if available
-	if s.shouldUseTLS() {
-		tlsConfig, err := s.setupTLS()
+	// Public API TLS is mandatory. Certificate discovery and validation happen
+	// synchronously before a listener goroutine is started, so unreadable,
+	// malformed, expired, or identity-mismatched material cannot silently
+	// downgrade the controller to plaintext HTTP.
+	tlsConfig, err := s.setupTLS()
+	if err != nil {
+		return fmt.Errorf("refusing to start public API without valid TLS: %w", err)
+	}
+	if err := s.validatePublicAPITLSConfig(tlsConfig); err != nil {
+		return fmt.Errorf("refusing to start public API without valid TLS: %w", err)
+	}
+
+	var internalAddr string
+	var internalTLSConfig *tls.Config
+	if s.cfg.HA.IsClusterMode() {
+		internalAddr = s.cfg.InternalListenAddr
+		if err := validatePrivateListenAddr(internalAddr); err != nil {
+			return fmt.Errorf("invalid internal Raft listener: %w", err)
+		}
+		internalTLSConfig, err = s.internalRaftTLSConfig(tlsConfig)
 		if err != nil {
-			s.logger.Warn("Failed to setup TLS for HTTP server, starting without TLS", "error", err)
-		} else if tlsConfig != nil {
-			s.httpServer.TLSConfig = tlsConfig
+			return fmt.Errorf("refusing to start internal Raft listener without mTLS: %w", err)
+		}
+	}
+
+	// Bind synchronously so Start cannot report success while a listener is
+	// unavailable. The TLS wrappers use the already preflighted configurations.
+	publicListener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return fmt.Errorf("bind public API listener: %w", err)
+	}
+	metricsListener, err := net.Listen("tcp", metricsAddr)
+	if err != nil {
+		_ = publicListener.Close()
+		return fmt.Errorf("bind private metrics listener: %w", err)
+	}
+	var internalListener net.Listener
+	if internalTLSConfig != nil {
+		internalListener, err = net.Listen("tcp", internalAddr)
+		if err != nil {
+			_ = publicListener.Close()
+			_ = metricsListener.Close()
+			return fmt.Errorf("bind private Raft listener: %w", err)
+		}
+	}
+
+	// Create HTTPS server only after TLS preflight and listener binding succeed.
+	s.httpServer = &http.Server{
+		Addr:              publicListener.Addr().String(),
+		Handler:           s.router,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		TLSConfig:         tlsConfig,
+	}
+	metricsTLSConfig := tlsConfig.Clone()
+	metricsTLSConfig.MinVersion = tls.VersionTLS13
+	s.metricsHTTPServer = &http.Server{
+		Addr:              metricsListener.Addr().String(),
+		Handler:           s.metricsRouter,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		TLSConfig:         metricsTLSConfig,
+	}
+	if internalTLSConfig != nil {
+		s.internalHTTPServer = &http.Server{
+			Addr:              internalListener.Addr().String(),
+			Handler:           s.internalRouter,
+			ReadTimeout:       15 * time.Second,
+			ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+			TLSConfig:         internalTLSConfig,
 		}
 	}
 
 	// Start server in goroutine
+	publicServer := s.httpServer
+	publicTLSListener := tls.NewListener(publicListener, tlsConfig)
+	metricsServer := s.metricsHTTPServer
+	metricsTLSListener := tls.NewListener(metricsListener, metricsTLSConfig)
 	go func() {
-		s.mu.RLock()
-		server := s.httpServer
-		s.mu.RUnlock()
-
-		if server != nil {
-			var err error
-			if server.TLSConfig != nil {
-				s.logger.Info("Starting HTTPS REST API server", "address", httpAddr)
-				err = server.ListenAndServeTLS("", "") // Certificates in TLSConfig
-			} else {
-				s.logger.Info("Starting HTTP REST API server", "address", httpAddr)
-				err = server.ListenAndServe()
-			}
-
-			if err != nil && err != http.ErrServerClosed {
-				s.logger.Error("HTTP server failed", "error", err)
-			}
+		s.logger.Info("Starting HTTPS REST API server", "address", publicServer.Addr)
+		if serveErr := publicServer.Serve(publicTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
+			s.logger.Error("HTTP server failed", "error", serveErr)
 		}
 	}()
+	go func() {
+		s.logger.Info("Starting private HTTPS metrics server", "address", metricsServer.Addr)
+		if serveErr := metricsServer.Serve(metricsTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
+			s.logger.Error("Private metrics server failed", "error", serveErr)
+		}
+	}()
+	if s.internalHTTPServer != nil {
+		internalServer := s.internalHTTPServer
+		internalTLSListener := tls.NewListener(internalListener, internalTLSConfig)
+		go func() {
+			s.logger.Info("Starting private mTLS Raft server", "address", internalServer.Addr)
+			if serveErr := internalServer.Serve(internalTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
+				s.logger.Error("Private Raft server failed", "error", serveErr)
+			}
+		}()
+	}
 
-	s.logger.Info("REST API server started", "address", httpAddr)
+	s.logger.Info("REST API server started", "address", publicServer.Addr, "private_metrics_address", metricsServer.Addr)
+	return nil
+}
+
+func validatePrivateListenAddr(address string) error {
+	return config.ValidatePrivateListenerAddress(address)
+}
+
+func (s *Server) internalRaftTLSConfig(publicTLS *tls.Config) (*tls.Config, error) {
+	if publicTLS == nil || len(publicTLS.Certificates) == 0 {
+		return nil, fmt.Errorf("server certificate is unavailable")
+	}
+	internalTLS := publicTLS.Clone()
+	internalTLS.MinVersion = tls.VersionTLS13
+	internalTLS.ClientAuth = tls.RequireAndVerifyClientCert
+	if internalTLS.ClientCAs == nil {
+		internalTLS.ClientCAs = x509.NewCertPool()
+	}
+	if s.haManager != nil {
+		if haCA := s.haManager.GetCACertPEM(); len(haCA) > 0 {
+			if !internalTLS.ClientCAs.AppendCertsFromPEM(haCA) {
+				return nil, fmt.Errorf("HA peer CA is invalid")
+			}
+		}
+	}
+	if len(internalTLS.ClientCAs.Subjects()) == 0 {
+		return nil, fmt.Errorf("no trusted client CA is configured")
+	}
+	return internalTLS, nil
+}
+
+// validatePublicAPITLSConfig binds the loaded certificate to the configured
+// public API identity. Go's server-side TLS stack validates the key pair during
+// handshakes but does not verify that a server certificate covers the hostname
+// clients are told to use.
+func (s *Server) validatePublicAPITLSConfig(tlsConfig *tls.Config) error {
+	if tlsConfig == nil || len(tlsConfig.Certificates) == 0 {
+		return fmt.Errorf("TLS configuration has no server certificate")
+	}
+
+	leaf, err := cert.ValidateServerCertificate(tlsConfig.Certificates[0], time.Now())
+	if err != nil {
+		return err
+	}
+
+	if s.cfg == nil || s.cfg.ExternalURL == "" {
+		return fmt.Errorf("external_url is required to verify the public API certificate identity")
+	}
+	publicURL, err := url.Parse(s.cfg.ExternalURL)
+	if err != nil {
+		return fmt.Errorf("invalid external_url: %w", err)
+	}
+	if !strings.EqualFold(publicURL.Scheme, "https") {
+		return fmt.Errorf("external_url must use https")
+	}
+	hostname := publicURL.Hostname()
+	if hostname == "" {
+		return fmt.Errorf("external_url must include a hostname")
+	}
+	if err := leaf.VerifyHostname(hostname); err != nil {
+		return fmt.Errorf("public API certificate does not match external_url hostname %q: %w", hostname, err)
+	}
 	return nil
 }
 
@@ -712,6 +878,18 @@ func (s *Server) Close(ctx context.Context) error {
 		if s.httpServer != nil {
 			if err := s.httpServer.Shutdown(ctx); err != nil && firstErr == nil {
 				s.logger.Error("Failed to shutdown HTTP server gracefully", "error", err)
+				firstErr = err
+			}
+		}
+		if s.metricsHTTPServer != nil {
+			if err := s.metricsHTTPServer.Shutdown(ctx); err != nil && firstErr == nil {
+				s.logger.Error("Failed to shutdown private metrics server gracefully", "error", err)
+				firstErr = err
+			}
+		}
+		if s.internalHTTPServer != nil {
+			if err := s.internalHTTPServer.Shutdown(ctx); err != nil && firstErr == nil {
+				s.logger.Error("Failed to shutdown private Raft server gracefully", "error", err)
 				firstErr = err
 			}
 		}
@@ -1405,6 +1583,19 @@ func (s *Server) GetListenAddr() string {
 	return s.getHTTPListenAddr()
 }
 
+// GetMetricsListenAddr returns the dedicated private metrics server address.
+func (s *Server) GetMetricsListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.metricsHTTPServer != nil {
+		return s.metricsHTTPServer.Addr
+	}
+	if s.cfg == nil {
+		return ""
+	}
+	return s.cfg.MetricsListenAddr
+}
+
 // startAPIKeyCleanup starts a background goroutine to clean up expired API keys.
 // The goroutine exits when Close is called.
 func (s *Server) startAPIKeyCleanup() {
@@ -1499,22 +1690,33 @@ func (s *Server) configureCORS() {
 // is configured, while server.New continues to call it internally unchanged.
 func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	logger := logging.ForComponent("controller")
-	// Determine secrets storage path
+	if cfg == nil || cfg.Storage == nil {
+		return nil, fmt.Errorf("storage configuration is required for secret storage")
+	}
+
+	// Determine the explicit secret-data path. Production must never fall back
+	// to a shared temporary directory.
 	secretsPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
 	if secretsPath == "" {
-		// Use temporary directory for testing/development
-		tmpDir := os.TempDir()
-		secretsPath = filepath.Join(tmpDir, "cfgms-secrets-test")
-		logger.Debug("Using temporary secrets storage for testing", "path", secretsPath)
+		if strings.TrimSpace(cfg.DataDir) == "" {
+			return nil, fmt.Errorf("secret storage path is required: configure data_dir or CFGMS_SECRETS_REPO_PATH")
+		}
+		secretsPath = filepath.Join(cfg.DataDir, "secrets")
+	}
+
+	keyFile := strings.TrimSpace(os.Getenv("CFGMS_SECRETS_KEY_FILE"))
+	if keyFile == "" {
+		return nil, fmt.Errorf("CFGMS_SECRETS_KEY_FILE is required; plaintext secret storage is prohibited")
 	}
 
 	// Create secrets provider configuration
-	// M-AUTH-1: Use global storage provider for secrets (flatfile or database)
+	// M-AUTH-1: Encrypt before handing bytes to flat-file or database storage.
 	secretsConfig := map[string]interface{}{
 		"storage_provider": cfg.Storage.Provider, // Use controller's global storage provider
 		"cache_enabled":    true,
 		"cache_ttl":        300,  // 5 minutes
 		"cache_max_size":   1000, // Cache up to 1000 secrets
+		"key_file":         keyFile,
 	}
 
 	// Pass storage config based on provider type
@@ -1528,12 +1730,6 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 		}
 	}
 
-	// Optional: KMS key ID for SOPS encryption
-	if kmsKeyID := os.Getenv("CFGMS_SOPS_KMS_KEY"); kmsKeyID != "" {
-		secretsConfig["kms_key_id"] = kmsKeyID
-		logger.Info("Using KMS key for secrets encryption", "key_id", kmsKeyID)
-	}
-
 	// Create secret store using SOPS provider
 	store, err := secretsif.CreateSecretStoreFromConfig("sops", secretsConfig)
 	if err != nil {
@@ -1544,15 +1740,15 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := store.HealthCheck(ctx); err != nil {
-		logger.Warn("Secret store health check failed", "error", err)
-		// Don't fail on health check - store may still be usable
+		_ = store.Close()
+		return nil, fmt.Errorf("secret store health check failed: %w", err)
 	}
 
 	logger.Info("Secret store initialized",
 		"provider", "sops",
 		"backend", cfg.Storage.Provider,
 		"secrets_path", secretsPath,
-		"encryption", "SOPS (AES-256-GCM)")
+		"encryption", "AES-256-GCM envelope")
 	return store, nil
 }
 

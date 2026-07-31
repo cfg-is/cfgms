@@ -158,7 +158,14 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 	}
 
 	issuedAt := time.Now().UTC()
-	serverTS := uint64(issuedAt.UnixNano())
+	issuedAtNanos := issuedAt.UnixNano()
+	if issuedAtNanos <= 0 {
+		http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
+		return
+	}
+	// #nosec G115 -- current UTC UnixNano is checked positive above; the
+	// conversion is lossless through time.Time's supported 2262 limit.
+	serverTS := uint64(issuedAtNanos)
 
 	cacheKey := nonceCacheKeyPrefix + deviceID
 	if err := s.nonceCache.Set(cacheKey, &nonceEntry{
@@ -402,6 +409,8 @@ func (s *Server) handleRefreshByPolicy(
 			map[string]interface{}{"decision": "approved", "reason": "auto_accept"})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		// #nosec G117 -- authenticated refresh intentionally delivers the newly
+		// issued key over TLS after policy, identity, and provenance checks.
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			s.logger.Error("Failed to encode refresh complete response", "error", err)
 		}
@@ -458,6 +467,8 @@ func (s *Server) handleRefreshQueueEntry(
 		})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
+	// #nosec G117 -- this queued response contains only status and pending ID;
+	// the embedded response type's ClientKey field remains empty.
 	if err := json.NewEncoder(w).Encode(RefreshCompleteResponse{
 		Status:    "queued",
 		PendingID: pendingID,
@@ -718,6 +729,8 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #nosec G117 -- the claim bundle is stored only in the pending-refresh
+	// secure store for one-time authenticated retrieval; it is not logged.
 	bundle, err := json.Marshal(certResp)
 	if err != nil {
 		s.logger.Error("Failed to marshal claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
@@ -750,6 +763,8 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	// #nosec G117 -- an authenticated administrator approved this one-time TLS
+	// delivery of the freshly issued client key to the approval caller.
 	if err := json.NewEncoder(w).Encode(AdminRefreshApproveResponse{
 		Status:      "approved",
 		PendingID:   pendingID,

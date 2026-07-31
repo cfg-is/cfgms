@@ -5,6 +5,7 @@ package dna
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,6 +92,9 @@ func encodeTopLevel(m map[string]interface{}) ([]byte, error) {
 // canonEncodeMap encodes a map[string]interface{} as sorted length-prefix entries.
 // Used for both the top-level state and nested map values.
 func canonEncodeMap(m map[string]interface{}) ([]byte, error) {
+	if len(m) > math.MaxUint32 {
+		return nil, fmt.Errorf("canonical map has too many entries")
+	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -98,12 +102,17 @@ func canonEncodeMap(m map[string]interface{}) ([]byte, error) {
 	sort.Strings(keys)
 
 	buf := make([]byte, 4)
+	// #nosec G115 -- map length is explicitly bounded by MaxUint32 above.
 	binary.BigEndian.PutUint32(buf, uint32(len(keys)))
 
 	for _, k := range keys {
 		// Key: uint32 length + bytes.
 		kb := []byte(k)
+		if len(kb) > math.MaxUint32 {
+			return nil, fmt.Errorf("canonical map key exceeds uint32 length")
+		}
 		var klen [4]byte
+		// #nosec G115 -- key length is explicitly bounded by MaxUint32 above.
 		binary.BigEndian.PutUint32(klen[:], uint32(len(kb)))
 		buf = append(buf, klen[:]...)
 		buf = append(buf, kb...)
@@ -154,12 +163,12 @@ func canonEncodeValue(v interface{}) ([]byte, error) {
 		return canonEncodeUint64(val), nil
 
 	case float32:
-		return canonEncodeFloat(float64(val)), nil
+		return canonEncodeFloat(float64(val))
 	case float64:
-		return canonEncodeFloat(val), nil
+		return canonEncodeFloat(val)
 
 	case string:
-		return canonEncodeStringTag(canonTagString, []byte(val)), nil
+		return canonEncodeStringTag(canonTagString, []byte(val))
 
 	case map[string]interface{}:
 		inner, err := canonEncodeMap(val)
@@ -196,7 +205,7 @@ func canonEncodeValue(v interface{}) ([]byte, error) {
 		// []OrganizationalUnit — struct %v wraps each element in {}, providing
 		// a higher collision bar than plain string slices, but new slice-of-struct
 		// types appearing in AsMap() implementations should be given explicit cases.
-		return canonEncodeStringTag(canonTagOther, []byte(fmt.Sprintf("%v", val))), nil
+		return canonEncodeStringTag(canonTagOther, []byte(fmt.Sprintf("%v", val)))
 	}
 }
 
@@ -204,7 +213,11 @@ func canonEncodeValue(v interface{}) ([]byte, error) {
 // Element order is preserved (slices are ordered, unlike maps); each element is
 // encoded recursively via canonEncodeValue so the full type-tag machinery applies.
 func canonEncodeSlice(elems []interface{}) ([]byte, error) {
+	if len(elems) > math.MaxUint32 {
+		return nil, fmt.Errorf("canonical slice has too many elements")
+	}
 	var count [4]byte
+	// #nosec G115 -- element count is explicitly bounded by MaxUint32 above.
 	binary.BigEndian.PutUint32(count[:], uint32(len(elems)))
 	buf := append([]byte{canonTagSlice}, count[:]...)
 	for i, elem := range elems {
@@ -221,6 +234,8 @@ func canonEncodeSlice(elems []interface{}) ([]byte, error) {
 func canonEncodeInt64(v int64) []byte {
 	buf := make([]byte, 9)
 	buf[0] = canonTagInt
+	// #nosec G115 -- this is the specified two's-complement bit encoding of
+	// the signed int64, not a numeric narrowing or range conversion.
 	binary.BigEndian.PutUint64(buf[1:], uint64(v))
 	return buf
 }
@@ -237,18 +252,22 @@ func canonEncodeUint64(v uint64) []byte {
 // We use strconv.FormatFloat with format 'g' and precision -1 (shortest
 // round-trip representation) rather than stdlib JSON to avoid depending on
 // float-formatting behaviour that has shifted across Go patch releases.
-func canonEncodeFloat(v float64) []byte {
+func canonEncodeFloat(v float64) ([]byte, error) {
 	s := strconv.FormatFloat(v, 'g', -1, 64)
 	return canonEncodeStringTag(canonTagFloat, []byte(s))
 }
 
 // canonEncodeStringTag encodes a byte slice as [tag][uint32 length][bytes].
-func canonEncodeStringTag(tag byte, s []byte) []byte {
+func canonEncodeStringTag(tag byte, s []byte) ([]byte, error) {
+	if len(s) > math.MaxUint32 {
+		return nil, fmt.Errorf("canonical value exceeds uint32 length")
+	}
 	buf := make([]byte, 1+4+len(s))
 	buf[0] = tag
+	// #nosec G115 -- byte length is explicitly bounded by MaxUint32 above.
 	binary.BigEndian.PutUint32(buf[1:5], uint32(len(s)))
 	copy(buf[5:], s)
-	return buf
+	return buf, nil
 }
 
 // isEphemeralKey reports whether a map key represents a run-local value that

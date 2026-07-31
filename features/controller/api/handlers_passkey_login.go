@@ -319,7 +319,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 
 	// Issue a Basic session, then immediately elevate to Strong (ADR-021 Decision 3).
 	// A login-time passkey assertion is phishing-resistant and earns Strong directly.
-	issuedSess, _, issueErr := mgr.Issue(r.Context(), acct.Username, "web", acct.TenantID)
+	issuedSess, _, issueErr := mgr.Issue(r.Context(), acct.ID, "web", acct.TenantID)
 	if issueErr != nil {
 		s.logger.Error("Passkey login finish: failed to issue session",
 			"username", logging.SanitizeLogValue(acct.Username),
@@ -364,6 +364,8 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	})
 
 	// Set the CSRF cookie (NOT HttpOnly — JS reads it to set X-CSRF-Token on mutations).
+	// #nosec G124 -- this double-submit CSRF cookie must be readable by browser
+	// code; Secure and SameSite=Strict prevent transport and cross-site exposure.
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieCSRFSession,
 		Value:    csrfToken,
@@ -383,6 +385,8 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	// #nosec G124 -- the pre-session CSRF deletion cookie intentionally mirrors
+	// the readable cookie's attributes so the browser removes the correct cookie.
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieCSRFPre,
 		Value:    "",

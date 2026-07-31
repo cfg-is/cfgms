@@ -581,10 +581,13 @@ paths:
   /monitoring/metrics:
     get:
       summary: Get performance metrics
-      description: Returns current performance metrics for the system
+      description: Returns current performance metrics from the dedicated private metrics listener. The public product listener returns 404 for this path.
       operationId: getMetrics
       tags:
         - Monitoring
+      servers:
+        - url: https://localhost:9090/api/v1
+          description: Private metrics listener; replace localhost only with an explicitly configured private address
       responses:
         '200':
           description: Performance metrics

@@ -85,6 +85,8 @@ func createLogDir(dir string, uid, gid int) error {
 		return fmt.Errorf("failed to create log directory %s: %w", dir, err)
 	}
 	// Chmod explicitly to enforce 0750 regardless of process umask.
+	// #nosec G302 -- this is a log directory; owner/group traversal is required
+	// while "other" has no access, and log files retain stricter modes.
 	if err := os.Chmod(dir, 0750); err != nil {
 		return fmt.Errorf("failed to set permissions on log directory %s: %w", dir, err)
 	}
@@ -158,6 +160,8 @@ func (m *linuxManager) Install(token, controllerURL, caCertPEM, expectedFingerpr
 	// reuses the launcher's own "swap" surface, so the on-disk layout is identical
 	// to what a subsequent push-upgrade produces.
 	fmt.Printf("Staging steward %s under %s...\n", ver, linuxLauncherRoot)
+	// #nosec G204 -- launcher path/root are fixed constants, version is parsed
+	// semver, binary path is manager-owned, and no shell interprets arguments.
 	if out, err := exec.Command(linuxLauncherPath, "swap", "--root", linuxLauncherRoot, ver, m.binaryPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to stage steward binary via launcher: %w\n%s", err, out)
 	}
@@ -314,6 +318,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=CFGMS_LOG_DIR=/var/log/cfgms
+Environment=CFGMS_SECURITY_PROFILE=public-beta
 ExecStart=%s
 Restart=always
 RestartSec=10

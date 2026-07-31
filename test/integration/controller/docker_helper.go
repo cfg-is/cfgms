@@ -74,6 +74,8 @@ func (h *DockerComposeHelper) StartController(ctx context.Context) error {
 
 	// Build and start containers
 	fmt.Println("Step 2/3: Building Docker images...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local test harness.
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -88,6 +90,8 @@ func (h *DockerComposeHelper) StartController(ctx context.Context) error {
 	}
 
 	fmt.Println("Step 3/3: Starting controller and steward...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local test harness.
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -117,6 +121,8 @@ func (h *DockerComposeHelper) WaitForControllerReady(ctx context.Context) error 
 		}
 
 		// Try to reach the controller's HTTPS endpoint
+		// #nosec G204 -- integration-only health probe; curl/options are fixed
+		// and the address comes from the harness-created controller container.
 		checkCmd := exec.CommandContext(ctx, "curl", "-sk", "--max-time", "2",
 			"-o", "/dev/null", "-w", "%{http_code}",
 			fmt.Sprintf("https://%s/health", h.controllerAddr))
@@ -144,6 +150,8 @@ func (h *DockerComposeHelper) StopController(ctx context.Context) error {
 	}
 
 	fmt.Println("Stopping controller and cleaning up...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local test harness.
 	stopCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
@@ -195,6 +203,8 @@ func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context) (string, error
 // Uses -k to accept self-signed certificates from auto-generated cert manager
 func (h *DockerComposeHelper) CurlController(ctx context.Context, endpoint string) (string, error) {
 	url := fmt.Sprintf("https://%s%s", h.controllerAddr, endpoint)
+	// #nosec G204 -- integration-only HTTPS probe; curl/options are fixed and
+	// URL host/path are formed from harness-controlled test inputs.
 	cmd := exec.CommandContext(ctx, "curl", "-sk", "--max-time", "5", url)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
@@ -202,6 +212,8 @@ func (h *DockerComposeHelper) CurlController(ctx context.Context, endpoint strin
 
 // IsContainerRunning checks if a specific container is running
 func (h *DockerComposeHelper) IsContainerRunning(containerName string) bool {
+	// #nosec G204 -- integration-only Docker inspection; the harness owns the
+	// container name and passes it as one argv to a fixed executable.
 	cmd := exec.Command("docker", "inspect", "--format={{.State.Running}}", containerName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

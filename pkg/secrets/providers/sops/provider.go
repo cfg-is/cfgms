@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package sops implements SOPS-based secrets provider for CFGMS
-// M-AUTH-1: Secure secret storage using Mozilla SOPS with git backend
+// Package sops implements authenticated envelope-encrypted secret storage.
 package sops
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
-// SOPSProvider implements the SecretProvider interface using SOPS encryption
-// This provider uses git ConfigStore as the backend, which automatically handles SOPS encryption
+// SOPSProvider retains its historical registration name for configuration
+// compatibility. Encryption is performed directly with AES-256-GCM and an
+// external key file; it does not shell out to Mozilla SOPS.
 type SOPSProvider struct{}
 
 // Name returns the provider name
@@ -19,9 +20,9 @@ func (p *SOPSProvider) Name() string {
 	return "sops"
 }
 
-// Description returns a human-readable description
+// Description returns a human-readable description.
 func (p *SOPSProvider) Description() string {
-	return "SOPS-based secure secret storage with git backend and AES-256-GCM encryption"
+	return "AES-256-GCM envelope-encrypted secret storage with an external key file"
 }
 
 // GetVersion returns the provider version
@@ -32,10 +33,10 @@ func (p *SOPSProvider) GetVersion() string {
 // GetCapabilities returns the provider's capabilities
 func (p *SOPSProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
-		SupportsVersioning:     true,            // Git provides version history
+		SupportsVersioning:     true,            // Backing ConfigStore provides history
 		SupportsRotation:       true,            // We implement secret rotation
 		SupportsEncryption:     true,            // SOPS provides AES-256-GCM encryption
-		SupportsAuditTrail:     true,            // Git commits provide full audit trail
+		SupportsAuditTrail:     true,            // Backing ConfigStore records versions
 		SupportsLeasing:        false,           // SOPS doesn't support dynamic leasing
 		SupportsRenewal:        false,           // No lease renewal support
 		SupportsRevocation:     true,            // Can delete secrets immediately
@@ -44,7 +45,7 @@ func (p *SOPSProvider) GetCapabilities() interfaces.ProviderCapabilities {
 		SupportsAccessPolicies: false,           // Access control handled by git/RBAC
 		MaxSecretSize:          1 * 1024 * 1024, // 1MB max secret size
 		MaxKeyLength:           256,             // 256 character key names
-		EncryptionAlgorithm:    "AES-256-GCM",   // SOPS uses AES-256-GCM
+		EncryptionAlgorithm:    "AES-256-GCM",
 	}
 }
 
@@ -52,10 +53,9 @@ func (p *SOPSProvider) GetCapabilities() interfaces.ProviderCapabilities {
 // multiple CFGMS controller nodes in cluster mode.
 func (p *SOPSProvider) ClusterCapable() bool { return false }
 
-// Available checks if SOPS and git are available
+// Available reports provider registration availability. External key and
+// backing-store availability are checked fail-closed during creation.
 func (p *SOPSProvider) Available() (bool, error) {
-	// Check if we can access storage provider (git provider should be registered)
-	// The actual availability check happens when creating the store
 	return true, nil
 }
 
@@ -115,9 +115,13 @@ func parseStoreConfig(config map[string]interface{}) (*SOPSSecretStoreConfig, er
 		storeConfig.CacheMaxSize = cacheMaxSize
 	}
 
-	// Parse SOPS key ID (optional)
-	if kmsKeyID, ok := config["kms_key_id"].(string); ok {
-		storeConfig.KMSKeyID = kmsKeyID
+	// The key file must be provisioned separately from the data store (for
+	// example through a systemd encrypted credential or a container secret).
+	if keyFile, ok := config["key_file"].(string); ok {
+		storeConfig.KeyFile = strings.TrimSpace(keyFile)
+	}
+	if storeConfig.KeyFile == "" {
+		return nil, fmt.Errorf("key_file is required; plaintext secret storage is prohibited")
 	}
 
 	return storeConfig, nil

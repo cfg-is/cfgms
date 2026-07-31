@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -123,6 +124,33 @@ func TestExtractZip(t *testing.T) {
 		err = extractZip(buf.Bytes(), destDir)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid nupkg entry path")
+	})
+
+	t.Run("rejects a Windows-style zip-slip entry on every platform", func(t *testing.T) {
+		var buf bytes.Buffer
+		w := zip.NewWriter(&buf)
+		f, err := w.Create(`..\evil.ps1`)
+		require.NoError(t, err)
+		_, err = f.Write([]byte("malicious"))
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+
+		err = extractZip(buf.Bytes(), t.TempDir())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid nupkg entry path")
+	})
+
+	t.Run("rejects cumulative uncompressed content over the limit", func(t *testing.T) {
+		data := buildTestNupkg(t, map[string]string{
+			"one": strings.Repeat("A", 2048),
+			"two": strings.Repeat("B", 2048),
+		})
+		// The compressed archive fits, but its expanded content does not.
+		limit := int64(len(data) + 32)
+		require.Less(t, limit, int64(4096))
+		err := extractZipWithLimit(data, t.TempDir(), limit)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds")
 	})
 
 	t.Run("invalid archive bytes produce a clear error", func(t *testing.T) {

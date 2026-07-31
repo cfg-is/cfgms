@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"time"
 )
 
 // LoadTLSCertificate loads a TLS certificate from PEM-encoded certificate and key
@@ -40,6 +41,47 @@ func CertPoolFromPEM(caCertPEM []byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// ValidateServerCertificate rejects certificates that cannot currently be used
+// for TLS server authentication. tls.X509KeyPair only proves that the PEM and
+// private key are syntactically valid and match; it does not reject certificates
+// that are expired, not yet valid, or scoped only for a different EKU.
+func ValidateServerCertificate(cert tls.Certificate, now time.Time) (*x509.Certificate, error) {
+	if len(cert.Certificate) == 0 {
+		return nil, fmt.Errorf("server certificate chain is empty")
+	}
+
+	leaf := cert.Leaf
+	if leaf == nil {
+		var err error
+		leaf, err = x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse server certificate: %w", err)
+		}
+	}
+
+	if now.Before(leaf.NotBefore) {
+		return nil, fmt.Errorf("server certificate is not valid before %s", leaf.NotBefore.UTC().Format(time.RFC3339))
+	}
+	if !now.Before(leaf.NotAfter) {
+		return nil, fmt.Errorf("server certificate expired at %s", leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+
+	if len(leaf.ExtKeyUsage) > 0 {
+		serverAuth := false
+		for _, usage := range leaf.ExtKeyUsage {
+			if usage == x509.ExtKeyUsageServerAuth || usage == x509.ExtKeyUsageAny {
+				serverAuth = true
+				break
+			}
+		}
+		if !serverAuth {
+			return nil, fmt.Errorf("server certificate does not permit TLS server authentication")
+		}
+	}
+
+	return leaf, nil
+}
+
 // CreateServerTLSConfig creates a TLS config for a server with mTLS support
 // Parameters:
 // - serverCertPEM: Server certificate in PEM format
@@ -56,6 +98,9 @@ func CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM []byte, minVer
 	cert, err := LoadTLSCertificate(serverCertPEM, serverKeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate: %w", err)
+	}
+	if _, err := ValidateServerCertificate(cert, time.Now()); err != nil {
+		return nil, err
 	}
 
 	tlsConfig := &tls.Config{
@@ -130,6 +175,9 @@ func CreateBasicTLSConfig(certPEM, keyPEM []byte, minVersion uint16) (*tls.Confi
 		cert, err := LoadTLSCertificate(certPEM, keyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load certificate: %w", err)
+		}
+		if _, err := ValidateServerCertificate(cert, time.Now()); err != nil {
+			return nil, err
 		}
 
 		return &tls.Config{

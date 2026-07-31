@@ -11,6 +11,7 @@ bin/
 /cfgcli
 /controller
 /steward
+/cmd/controller/controller
 
 # Test binary, built with 'go test -c'
 *.test
@@ -109,6 +110,12 @@ docs/product/v*-epic.md
 # Security audit reports (WIP)
 docs/security/audits/*-wip.md
 docs/security/audits/draft-*.md
+
+# Private pre-RC security records. All repository branches are public; keep
+# finding ledgers and handoffs local unless they have been disclosure-reviewed.
+/docs/security/audits/public-beta-controller-auth-findings.md
+/docs/security/audits/public-beta-security-review.md
+/docs/security/audits/public-beta-pre-rc-handoff.md
 
 # Internal planning docs
 MIGRATION_PLAN.md

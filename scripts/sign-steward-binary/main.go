@@ -52,6 +52,8 @@ func run(args []string, out io.Writer) error {
 	}
 	path, version, platform, arch := args[0], args[1], args[2], args[3]
 
+	// #nosec G304 G703 -- this isolated build/release tool intentionally reads
+	// the artifact path supplied by its trusted local operator.
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read binary: %w", err)
@@ -74,6 +76,8 @@ func run(args []string, out io.Writer) error {
 	sig := ed25519.Sign(priv, []byte(message))
 
 	sigPath := path + ".sig"
+	// #nosec G703 -- the isolated release tool writes only beside the exact
+	// artifact path supplied by its trusted local operator.
 	if err := os.WriteFile(sigPath, sig, 0o600); err != nil {
 		return fmt.Errorf("write signature: %w", err)
 	}

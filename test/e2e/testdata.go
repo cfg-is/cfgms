@@ -303,6 +303,8 @@ func (g *TestDataGenerator) generateMACAddress() string {
 func (g *TestDataGenerator) generateLargeContent(sizeBytes int) string {
 	content := make([]byte, sizeBytes)
 	for i := range content {
+		// #nosec G115 -- cryptoRandInt(94) returns 0..93; adding 32 yields
+		// printable ASCII 32..125 in this isolated test-data generator.
 		content[i] = byte(g.cryptoRandInt(94) + 32) // Printable ASCII
 	}
 	return string(content)

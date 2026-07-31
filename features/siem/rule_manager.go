@@ -167,8 +167,14 @@ func (rm *RuleManagerImpl) loadRulesFromDirectory(ctx context.Context, dirPath, 
 		"directory_path", dirPath,
 		"format", format)
 
+	ruleRoot, err := os.OpenRoot(dirPath)
+	if err != nil {
+		return fmt.Errorf("open rule directory root: %w", err)
+	}
+	defer func() { _ = ruleRoot.Close() }()
+
 	var loadedFiles int
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -193,7 +199,11 @@ func (rm *RuleManagerImpl) loadRulesFromDirectory(ctx context.Context, dirPath, 
 			return nil // Continue with other files
 		}
 
-		data, err := os.ReadFile(safePath) // #nosec G304 -- Path validated and sanitized by validateAndCleanPath above
+		relativePath, err := filepath.Rel(dirPath, safePath)
+		if err != nil {
+			return nil
+		}
+		data, err := ruleRoot.ReadFile(relativePath)
 		if err != nil {
 			logger.ErrorCtx(ctx, "Failed to read rule file",
 				"file", safePath,

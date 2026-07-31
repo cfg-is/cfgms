@@ -67,6 +67,7 @@ resources:
         log_level: info
         data_dir: /var/lib/myapp
         listen_addr: "0.0.0.0:8080"
+        metrics_listen_addr: "127.0.0.1:9090"
 
   # ── Required packages ────────────────────────────────────────────────────────
 

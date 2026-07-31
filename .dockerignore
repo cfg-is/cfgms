@@ -6,6 +6,8 @@
 
 # VCS metadata (~140MB) — builds never run git against the repo
 .git
+.agents
+.codex
 
 # Claude Code agent state, incl. worktree checkouts (~400MB+).
 # Exception: the agent image bakes harness-owned config into the image so a
@@ -27,6 +29,18 @@ web/coverage
 
 # Local test/build residue
 tmp/
+test/secrets/
+docker-compose.test.override.yml
 *.log
 coverage.out
 coverage.html
+
+# Compiled/debug artifacts and local credentials must never enter a build
+# context, even when they are untracked.
+cmd/controller/controller
+*.key
+*.pem
+*.p12
+*.pfx
+*.db
+*.sqlite

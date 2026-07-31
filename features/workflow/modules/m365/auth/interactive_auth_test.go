@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,27 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+func TestInteractiveAuthenticator_CallbackEscapesProviderError(t *testing.T) {
+	ia := &InteractiveAuthenticator{callbackAddr: ":0"}
+	results := make(chan authResult, 1)
+	ia.setupCallbackHandler("expected-state", "verifier", "tenant", results)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/callback?error=%3Cscript%3Ealert%281%29%3C%2Fscript%3E&error_description=%3Cimg+src%3Dx+onerror%3Dalert%282%29%3E",
+		nil)
+	rec := httptest.NewRecorder()
+	ia.server.Handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+	body := rec.Body.String()
+	require.NotContains(t, body, "<script>")
+	require.NotContains(t, body, "<img")
+	require.True(t, strings.Contains(body, "&lt;script&gt;") && strings.Contains(body, "&lt;img"),
+		"provider-controlled HTML must be escaped in the callback response")
+	require.Error(t, (<-results).err)
+}
 
 // TestInteractiveAuthenticator_warning_logsToLogger verifies that a failure to
 // retrieve user roles is routed through the injected logger (not written to

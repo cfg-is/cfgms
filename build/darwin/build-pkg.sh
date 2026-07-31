@@ -9,8 +9,9 @@
 #   - Xcode Command Line Tools (pkgbuild + productbuild, always present on macOS)
 #   - xcrun notarytool (Xcode 13+, for notarization)
 #
-# Code signing (optional):
-#   Set APPLE_SIGNING_IDENTITY to a Developer ID Installer certificate name
+# Code signing (required when CFGMS_RELEASE_BUILD=1):
+#   Set APPLE_APPLICATION_SIGNING_IDENTITY to a Developer ID Application
+#   certificate and APPLE_SIGNING_IDENTITY to a Developer ID Installer name
 #   (e.g. "Developer ID Installer: ACME Corp (XXXXXXXXXX)") to sign the pkg.
 #   Without it the pkg is produced unsigned and a warning is printed.
 #
@@ -45,6 +46,7 @@ VERSION="0.0.0"
 BINARY_PATH=""
 CONTROLLER_URL=""
 PUBLISHER_KEY=""
+RELEASE_BUILD="${CFGMS_RELEASE_BUILD:-0}"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -59,9 +61,39 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Strip leading 'v' from version for pkgbuild (requires N.N.N format).
+if [[ "$RELEASE_BUILD" == 1 ]]; then
+    if ! [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$ ]]; then
+        echo "ERROR: CFGMS_RELEASE_BUILD requires a canonical v-prefixed semantic version." >&2
+        exit 1
+    fi
+    if [[ "$VERSION" == *-* ]]; then
+        IFS='.' read -r -a prerelease_parts <<< "${VERSION#*-}"
+        for identifier in "${prerelease_parts[@]}"; do
+            if [[ "$identifier" =~ ^[0-9]+$ && ${#identifier} -gt 1 && "$identifier" == 0* ]]; then
+                echo "ERROR: numeric prerelease identifiers cannot have leading zeroes." >&2
+                exit 1
+            fi
+        done
+    fi
+    for required in PUBLISHER_KEY APPLE_APPLICATION_SIGNING_IDENTITY APPLE_SIGNING_IDENTITY APPLE_NOTARIZATION_PROFILE; do
+        if [[ -z "${!required:-}" ]]; then
+            echo "ERROR: CFGMS_RELEASE_BUILD requires $required." >&2
+            exit 1
+        fi
+    done
+    KEY_HEX="$(printf '%s' "$PUBLISHER_KEY" | openssl base64 -d -A | od -An -tx1 | tr -d ' \n')"
+    if [[ ${#KEY_HEX} -ne 64 || "$KEY_HEX" =~ ^0+$ ]]; then
+        echo "ERROR: PUBLISHER_KEY must be a non-zero 32-byte Ed25519 public key." >&2
+        exit 1
+    fi
+fi
+
+# Strip the tag prefix and prerelease suffix for pkgbuild's numeric N.N.N
+# receipt version. The full semantic version remains embedded in the binary
+# and bound by the release signatures/attestations.
 PKG_VERSION="${VERSION#v}"
-if ! [[ "$PKG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9] ]]; then
+PKG_VERSION="${PKG_VERSION%%-*}"
+if ! [[ "$PKG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     PKG_VERSION="0.0.0"
 fi
 
@@ -84,9 +116,9 @@ if [[ -z "$BINARY_PATH" ]]; then
 
     VERSION_FLAG="-X github.com/cfgis/cfgms/pkg/version.Version=$VERSION"
     if [[ -n "$CONTROLLER_URL" ]]; then
-        LD_FLAGS="-s -w -X main.ControllerURL=$CONTROLLER_URL $VERSION_FLAG"
+        LD_FLAGS="-s -w -X main.ControllerURL=$CONTROLLER_URL -X main.SecurityProfile=public-beta $VERSION_FLAG"
     else
-        LD_FLAGS="-s -w $VERSION_FLAG"
+        LD_FLAGS="-s -w -X main.SecurityProfile=public-beta $VERSION_FLAG"
     fi
     if [[ -n "$PUBLISHER_KEY" ]]; then
         LD_FLAGS="$LD_FLAGS -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$PUBLISHER_KEY"
@@ -174,14 +206,42 @@ MODULES_PAYLOAD_DIR="$PAYLOAD_DIR/usr/local/lib/cfgms/modules"
 mkdir -p "$MODULES_PAYLOAD_DIR"
 for module_bin in "${STDLIB_MODULES[@]}"; do
     src="$REPO_ROOT/bin/$module_bin-darwin-$ARCH"
+    module_name="${module_bin#cfgms-module-}"
+    if [[ ! -f "$src" ]]; then
+        GOOS=darwin GOARCH="$ARCH" CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "$LAUNCHER_LD_FLAGS" \
+            -o "$src" \
+            "$REPO_ROOT/features/modules/stdlib/$module_name/cmd"
+    fi
     if [[ -f "$src" ]]; then
         cp "$src" "$MODULES_PAYLOAD_DIR/$module_bin"
         chmod 755 "$MODULES_PAYLOAD_DIR/$module_bin"
         echo "  Module: $MODULES_PAYLOAD_DIR/$module_bin"
+    elif [[ "$RELEASE_BUILD" == 1 ]]; then
+        echo "ERROR: release module binary not found after build: $src" >&2
+        exit 1
     else
         echo "  Warning: stdlib module binary not found: $src (skipping)" >&2
     fi
 done
+
+# The executable payload is signed before pkgbuild so Gatekeeper verifies the
+# installed binaries as well as the outer installer package.
+if [[ -n "${APPLE_APPLICATION_SIGNING_IDENTITY:-}" ]]; then
+    echo ""
+    echo "Signing executable payloads with: $APPLE_APPLICATION_SIGNING_IDENTITY"
+    while IFS= read -r -d '' executable; do
+        codesign --force --options runtime --timestamp \
+            --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" "$executable"
+        codesign --verify --strict --verbose=2 "$executable"
+    done < <(find "$PAYLOAD_DIR/usr/local" -type f -perm -0100 -print0)
+elif [[ "$RELEASE_BUILD" == 1 ]]; then
+    echo "ERROR: release executable payloads cannot be unsigned." >&2
+    exit 1
+else
+    echo "WARNING: APPLE_APPLICATION_SIGNING_IDENTITY not set — payload binaries are unsigned." >&2
+fi
 
 # Copy the postinstall script.
 cp "$SCRIPT_DIR/scripts/postinstall" "$SCRIPTS_DIR/postinstall"
@@ -235,7 +295,8 @@ if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
         "$SIGNED_PKG"
 
     mv "$SIGNED_PKG" "$OUTPUT_PKG"
-    echo "  Pkg signed."
+    pkgutil --check-signature "$OUTPUT_PKG"
+    echo "  Pkg signed and verified."
 else
     echo ""
     echo "WARNING: APPLE_SIGNING_IDENTITY not set — pkg is unsigned." >&2
@@ -254,6 +315,7 @@ if [[ -n "${APPLE_NOTARIZATION_PROFILE:-}" ]]; then
         --wait
 
     xcrun stapler staple "$OUTPUT_PKG"
+    xcrun stapler validate "$OUTPUT_PKG"
     echo "  Pkg notarized and stapled."
 else
     echo ""

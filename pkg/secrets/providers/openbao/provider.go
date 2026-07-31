@@ -85,6 +85,8 @@ func (p *OpenBaoProvider) Available() (bool, error) {
 		addr = "http://127.0.0.1:8200"
 	}
 
+	// #nosec G704 -- OPENBAO_ADDR is an administrator-controlled secrets-backend
+	// endpoint, not request data; contacting private/loopback OpenBao is required.
 	resp, err := httpClient.Get(addr + "/v1/sys/health")
 	if err != nil {
 		return false, fmt.Errorf("OpenBao health check failed: %w", err)

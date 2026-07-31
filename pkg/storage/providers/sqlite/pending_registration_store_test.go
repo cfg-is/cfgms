@@ -48,7 +48,7 @@ func TestPendingRegistrationStore_AddAndGetByID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pr-1", got.PendingID)
 	assert.Equal(t, "tenant-1", got.TenantID)
-	assert.Equal(t, "cfgms_reg_tok_pr-1", got.TokenStr)
+	assert.Equal(t, business.RegistrationTokenLookupKey("cfgms_reg_tok_pr-1"), got.TokenStr)
 	assert.Equal(t, business.PendingRegistrationStatusPending, got.Status)
 	assert.WithinDuration(t, entry.ExpiresAt, got.ExpiresAt, time.Second)
 	assert.Nil(t, got.ClaimedAt)

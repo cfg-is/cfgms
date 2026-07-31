@@ -9,8 +9,9 @@ package registration
 import "time"
 
 // Token represents a registration token for steward deployment.
-// Tokens are perennial: they survive multiple registrations and are never consumed on use.
-// Rotation atomically revokes the old token and issues a new one.
+// Newly issued tokens expire after a short default lifetime unless an explicit
+// lifetime is provided. Legacy records without ExpiresAt remain readable for
+// migration and must be rotated before public exposure.
 type Token struct {
 	// ID is a stable UUID for this token (Issue #2970 — web UI identifier).
 	ID string `json:"id"`

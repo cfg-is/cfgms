@@ -86,6 +86,8 @@ func resolveWingetFullPath(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	for _, bin := range wingetCandidates(programFiles) {
+		// #nosec G204 -- candidates are fully-qualified winget.exe paths under
+		// ProgramFiles/WindowsApps and the sole argument is a fixed probe flag.
 		cmd := exec.CommandContext(ctx, bin, "--version")
 		cmd.Env = wingetAugmentedEnv(bin)
 		if _, err := cmd.Output(); err == nil {
