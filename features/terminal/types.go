@@ -107,9 +107,10 @@ type Config struct {
 	SessionTimeout time.Duration `json:"session_timeout"`
 	MaxSessions    int           `json:"max_sessions"`
 	RecordSessions bool          `json:"record_sessions"`
-	// RecordingStoragePath overrides the recorder's on-disk storage directory.
-	// When empty, DefaultRecorderConfig's path is used. Callers that need
-	// isolated storage (per-tenant deployments, tests) set this explicitly so
+	// RecordingStoragePath is the recorder's on-disk storage directory. It is
+	// REQUIRED when RecordSessions is true — there is no implicit fallback,
+	// because recordings hold cleartext secrets and must never land in a shared
+	// or world-writable location. Callers derive it from their data directory so
 	// concurrent managers never share a single fixed directory.
 	RecordingStoragePath string `json:"recording_storage_path,omitempty"`
 }
@@ -135,12 +136,27 @@ type SessionManager interface {
 	GetActiveSessions() []*Session
 	RecordData(sessionID string, data []byte, direction DataDirection) error
 	GetSessionRecording(sessionID string) (*SessionRecording, error)
+	// Stop closes every live session and the recorder, which finalizes each
+	// recording (its .meta sidecar carries the HMAC chain head). It is part of the
+	// contract because a manager that is never stopped leaves recordings without
+	// that sidecar, and an unsidecarred recording is discarded as unverifiable on
+	// the next start — losing the audit trail of the sessions that were live at
+	// shutdown. Stop is idempotent.
+	Stop(ctx context.Context) error
 }
 
 // Recorder interface defines session recording operations
 type Recorder interface {
 	RecordData(sessionID string, data []byte, direction DataDirection) error
+	// EndRecording finalizes the recording of exactly one session. Per-session
+	// teardown MUST use this and never Close: one recorder instance is shared by
+	// every session of a manager (CreateSession wires m.recorder into each
+	// Session), so Close on a session-teardown path would finalize the recordings
+	// of all other live privileged shells as well, truncating their audit trail.
+	EndRecording(sessionID string) error
 	GetRecording(sessionID string) (*SessionRecording, error)
+	// Close finalizes every active recording. It is a manager-shutdown operation
+	// only (SessionManager.Stop), never a per-session operation.
 	Close() error
 }
 
@@ -172,10 +188,16 @@ func DefaultConfig() *Config {
 	}
 }
 
-// DefaultRecorderConfig returns the default recorder configuration
+// DefaultRecorderConfig returns the default recorder configuration.
+//
+// StoragePath is deliberately empty and has no built-in fallback: recordings
+// contain every keystroke and output byte of privileged shells (passwords, tokens,
+// key material), so the directory MUST be an explicit deployment-owned path under
+// the component's data directory. Defaulting to a shared, predictable, world-
+// writable location such as /tmp would leak cleartext secrets to any local account
+// and let a pre-created directory or symlink hijack the files.
 func DefaultRecorderConfig() *RecorderConfig {
 	return &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}

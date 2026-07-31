@@ -116,13 +116,15 @@ func waitForLogEntry(t *testing.T, capLogger *kvCapturingLogger, msg string) (st
 func TestWebSocketHandlerCreation(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
@@ -132,13 +134,15 @@ func TestWebSocketHandlerCreation(t *testing.T) {
 func TestWebSocketUpgrade(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
@@ -173,13 +177,15 @@ func TestWebSocketUpgrade(t *testing.T) {
 func TestWebSocketMessageHandling(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
@@ -234,13 +240,15 @@ func TestWebSocketMessageHandling(t *testing.T) {
 func TestWebSocketAuthentication(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
@@ -321,13 +329,15 @@ func TestWebSocketAuthentication(t *testing.T) {
 func TestWebSocketBidirectionalCommunication(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
@@ -389,13 +399,15 @@ func TestWebSocketBidirectionalCommunication(t *testing.T) {
 func TestWebSocketSessionCleanup(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
@@ -432,13 +444,15 @@ func TestWebSocketSessionCleanup(t *testing.T) {
 func TestWebSocketConcurrentConnections(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    10,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          10,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, logger, nil)
 	require.NoError(t, err)
@@ -485,13 +499,15 @@ func TestWebSocketConcurrentConnections(t *testing.T) {
 func TestWebSocketOriginCheck(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	const queryParams = "?steward_id=test-steward&user_id=test-user&shell=bash"
 
@@ -683,13 +699,15 @@ func (l *failListener) setAllFailWrites(v bool) {
 func TestWebSocketStewardOutputRelay(t *testing.T) {
 	capLogger := &kvCapturingLogger{}
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, capLogger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, capLogger, nil)
 	require.NoError(t, err)
@@ -743,16 +761,13 @@ func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
 		SessionTimeout: 30 * time.Minute,
 		MaxSessions:    100,
 		RecordSessions: true,
-		// Isolate recording I/O in a per-test directory. Without this the
-		// recorder writes every relayed byte to a single fixed path shared by
-		// every manager in the process, so concurrent test binaries contend on
-		// the same files and HandleOutput's synchronous record step stalls —
-		// masquerading as an output-channel block.
+		// Isolate recording I/O in a per-test directory.
 		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, capLogger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, capLogger, nil)
 	require.NoError(t, err)
@@ -817,9 +832,10 @@ func TestWebSocketSlowClientDoesNotBlockOutput(t *testing.T) {
 // "WebSocket terminal session established" passes session_id through RedactedID.
 func TestWebSocketSessionIDRedaction_Established(t *testing.T) {
 	capLogger := &kvCapturingLogger{}
-	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true, RecordingStoragePath: t.TempDir()}
 	manager, err := NewSessionManager(config, capLogger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, capLogger, nil)
 	require.NoError(t, err)
@@ -852,9 +868,10 @@ func TestWebSocketSessionIDRedaction_Established(t *testing.T) {
 // "WebSocket terminal session ended" passes session_id through RedactedID.
 func TestWebSocketSessionIDRedaction_Ended(t *testing.T) {
 	capLogger := &kvCapturingLogger{}
-	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true, RecordingStoragePath: t.TempDir()}
 	manager, err := NewSessionManager(config, capLogger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, capLogger, nil)
 	require.NoError(t, err)
@@ -894,9 +911,10 @@ func TestWebSocketSessionIDRedaction_Ended(t *testing.T) {
 // Warn is emitted.
 func TestWebSocketSessionIDRedaction_ReadError(t *testing.T) {
 	capLogger := &kvCapturingLogger{}
-	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true, RecordingStoragePath: t.TempDir()}
 	manager, err := NewSessionManager(config, capLogger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, capLogger, nil)
 	require.NoError(t, err)
@@ -934,9 +952,10 @@ func TestWebSocketSessionIDRedaction_ReadError(t *testing.T) {
 // A Resize message with invalid JSON triggers the error path.
 func TestWebSocketSessionIDRedaction_HandleMessageError(t *testing.T) {
 	capLogger := &kvCapturingLogger{}
-	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true, RecordingStoragePath: t.TempDir()}
 	manager, err := NewSessionManager(config, capLogger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, capLogger, nil)
 	require.NoError(t, err)
@@ -980,9 +999,10 @@ func TestWebSocketSessionIDRedaction_HandleMessageError(t *testing.T) {
 // can fire and fail.
 func TestWebSocketSessionIDRedaction_PingFailure(t *testing.T) {
 	capLogger := &kvCapturingLogger{}
-	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true}
+	config := &Config{SessionTimeout: 30 * time.Minute, MaxSessions: 100, RecordSessions: true, RecordingStoragePath: t.TempDir()}
 	manager, err := NewSessionManager(config, capLogger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	handler, err := NewWebSocketHandler(manager, capLogger, nil)
 	require.NoError(t, err)

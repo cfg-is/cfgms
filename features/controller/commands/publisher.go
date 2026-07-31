@@ -135,7 +135,7 @@ func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID stri
 
 	p.logger.Info("Sent command to steward",
 		"command_id", commandID,
-		"steward_id", stewardID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"type", cmdType,
 		"signed", sc.Signature != nil)
 
@@ -167,7 +167,7 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 
 	p.logger.Info("Sent command to steward",
 		"command_id", commandID,
-		"steward_id", stewardID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"type", cmdType,
 		"signed", sc.Signature != nil)
 

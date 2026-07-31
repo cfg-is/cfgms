@@ -17,8 +17,109 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// BrowserSessionOptions configures a browser-originated terminal session.
+// The browser principal has been pre-authenticated via session cookie (ADR-018)
+// and authorized via requirePermission("terminal", "create") + AssuranceStrong
+// gate. No mTLS or client-certificate checks are performed here — those belong
+// exclusively to the steward-leg path (AuthenticatedTerminalManager).
+type BrowserSessionOptions struct {
+	UserID    string
+	TenantID  string
+	StewardID string
+	Shell     string
+	Cols      int
+	Rows      int
+	ClientIP  string
+}
+
+// CreateBrowserSession creates a terminal session for a browser-authenticated
+// principal and emits an audit start record. Authentication and RBAC are handled
+// upstream by the API middleware; this function does not check client certificates.
+//
+// The steward-leg's mTLS requirements (RequireMTLS, ClientCertRequired, IPBinding,
+// TLSFingerprintCheck) in AuthenticatedTerminalManager remain unchanged.
+func CreateBrowserSession(
+	ctx context.Context,
+	manager SessionManager,
+	auditManager *audit.Manager,
+	opts BrowserSessionOptions,
+	logger logging.Logger,
+) (*Session, error) {
+	req := &SessionRequest{
+		TenantID:  opts.TenantID,
+		StewardID: opts.StewardID,
+		UserID:    opts.UserID,
+		Shell:     opts.Shell,
+		Cols:      opts.Cols,
+		Rows:      opts.Rows,
+	}
+
+	sess, err := manager.CreateSession(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("terminal session creation failed: %w", err)
+	}
+
+	if auditManager != nil {
+		if auditErr := auditManager.RecordEvent(ctx,
+			audit.NewEventBuilder().
+				Tenant(opts.TenantID).
+				Type(business.AuditEventSystemAccess).
+				Action("terminal.session.start").
+				User(opts.UserID, business.AuditUserTypeHuman).
+				Session(sess.ID).
+				Resource("terminal", opts.StewardID, "").
+				Result(business.AuditResultSuccess).
+				Severity(business.AuditSeverityMedium).
+				Details(map[string]interface{}{
+					"origin":    "browser",
+					"client_ip": opts.ClientIP,
+				}),
+		); auditErr != nil && logger != nil {
+			logger.Warn("terminal: audit start record failed",
+				"session_id", logging.RedactedID(sess.ID),
+				"steward_id", logging.SanitizeLogValue(opts.StewardID),
+				"error", logging.SanitizeLogValue(auditErr.Error()))
+		}
+	}
+
+	return sess, nil
+}
+
+// EndBrowserSession records the terminal session end audit event.
+// Call this when the browser WebSocket closes, regardless of reason.
+func EndBrowserSession(
+	ctx context.Context,
+	auditManager *audit.Manager,
+	tenantID, userID, sessionID, stewardID, reason string,
+	logger logging.Logger,
+) {
+	if auditManager == nil {
+		return
+	}
+	if auditErr := auditManager.RecordEvent(ctx,
+		audit.NewEventBuilder().
+			Tenant(tenantID).
+			Type(business.AuditEventSystemAccess).
+			Action("terminal.session.end").
+			User(userID, business.AuditUserTypeHuman).
+			Session(sessionID).
+			Resource("terminal", stewardID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityMedium).
+			Details(map[string]interface{}{
+				"reason": reason,
+			}),
+	); auditErr != nil && logger != nil {
+		logger.Warn("terminal: audit end record failed",
+			"session_id", logging.RedactedID(sessionID),
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(auditErr.Error()))
+	}
+}
 
 // tokenRefreshNotifyTimeout is the maximum time rotateTokensIfNeeded will wait
 // to deliver a token-refresh message before dropping it for a slow client.

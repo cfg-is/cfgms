@@ -271,6 +271,190 @@ func TestSessionRecordingIntegration(t *testing.T) {
 	assert.Contains(t, string(recording.Data), "drwxr-xr-x")
 }
 
+// newRecordedTestSession returns a session wired to a real recorder writing into
+// an isolated temp directory, with the recording already started.
+func newRecordedTestSession(t *testing.T) (*Session, *DefaultSessionRecorder) {
+	t.Helper()
+
+	logger := logging.NewNoopLogger()
+	session, err := NewSession(&SessionRequest{
+		StewardID: "test-steward-001",
+		UserID:    "test-user",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}, logger)
+	require.NoError(t, err)
+
+	recorder, err := NewSessionRecorder(&RecorderConfig{
+		StoragePath:    t.TempDir(),
+		MaxRecordingMB: 10,
+	}, logger)
+	require.NoError(t, err)
+
+	session.SetRecorder(recorder)
+	require.NoError(t, recorder.StartRecording(session.ID, session.GetMetadata()))
+	// Close the recording file before t.TempDir()'s cleanup removes the directory:
+	// on Windows an open file cannot be unlinked, so a still-recording session fails
+	// RemoveAll. Idempotent — tests that already call EndRecording get ErrNoActiveRecording here.
+	t.Cleanup(func() {
+		_ = recorder.EndRecording(session.ID)
+	})
+	return session, recorder
+}
+
+// TestSessionHandleOutput_FailsClosedWhenRecordingCannotBeWritten asserts the
+// fail-closed contract on the output path (Issue #2761): if a frame cannot be
+// recorded, the shell must not keep serving. Previously the recording error was
+// discarded, so a session whose recording had been finalized underneath it (e.g.
+// by a cross-session recorder close) relayed privileged output that landed in no
+// audit trail at all.
+func TestSessionHandleOutput_FailsClosedWhenRecordingCannotBeWritten(t *testing.T) {
+	session, recorder := newRecordedTestSession(t)
+	ctx := context.Background()
+
+	require.NoError(t, session.HandleOutput(ctx, []byte("recorded-output\n")))
+	// Drain the relay channel so the assertion below observes only new frames.
+	select {
+	case <-session.OutputChan():
+	case <-time.After(time.Second):
+		t.Fatal("first output frame was not relayed")
+	}
+
+	// Finalize the recording out from under the still-live session. Any further
+	// frame auto-restarts recording, whose O_EXCL create fails on the existing file.
+	require.NoError(t, recorder.EndRecording(session.ID))
+
+	err := session.HandleOutput(ctx, []byte("SECRET-UNRECORDED\n"))
+	require.Error(t, err, "output that cannot be recorded must not be served")
+	assert.True(t, session.IsClosed(), "session must fail closed when its recording cannot be written")
+
+	select {
+	case data := <-session.OutputChan():
+		t.Fatalf("unrecorded output was relayed to the client: %q", data)
+	default:
+	}
+
+	recording, err := recorder.GetRecording(session.ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(recording.Data), "recorded-output")
+	assert.NotContains(t, string(recording.Data), "SECRET-UNRECORDED")
+}
+
+// TestSessionWriteData_FailsClosedWhenRecordingCannotBeWritten asserts the same
+// fail-closed contract on the input path: unrecorded keystrokes must never reach
+// the shell.
+func TestSessionWriteData_FailsClosedWhenRecordingCannotBeWritten(t *testing.T) {
+	session, recorder := newRecordedTestSession(t)
+	ctx := context.Background()
+
+	// Finalize the recording underneath the live session: the next keystroke cannot
+	// be recorded because auto-restart hits the existing O_EXCL recording file.
+	require.NoError(t, recorder.EndRecording(session.ID))
+
+	err := session.WriteData(ctx, []byte("SECRET-COMMAND\n"))
+	require.Error(t, err, "input that cannot be recorded must not reach the shell")
+	assert.Contains(t, err.Error(), "session recording failed",
+		"WriteData must fail on the recording error, before touching the shell")
+	assert.True(t, session.IsClosed(), "session must fail closed when its recording cannot be written")
+
+	recording, err := recorder.GetRecording(session.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, string(recording.Data), "SECRET-COMMAND")
+}
+
+// TestSessionRecordInput_PersistsKeystrokesWithoutExecutor asserts that the
+// controller relay path — which has no local PTY, so it cannot use WriteData —
+// still lands operator keystrokes and resizes in the recording (Issue #2761).
+// Without this the recording of a privileged shell would contain only the bytes
+// the endpoint chose to return.
+func TestSessionRecordInput_PersistsKeystrokesWithoutExecutor(t *testing.T) {
+	session, recorder := newRecordedTestSession(t)
+	ctx := context.Background()
+
+	require.NoError(t, session.RecordInput(ctx, []byte("whoami\n")))
+	require.NoError(t, session.RecordResize(ctx, 120, 40))
+	require.NoError(t, session.HandleOutput(ctx, []byte("root\r\n")))
+
+	require.NoError(t, recorder.EndRecording(session.ID))
+
+	recording, err := recorder.GetRecording(session.ID)
+	require.NoError(t, err)
+	data := string(recording.Data)
+	assert.Contains(t, data, "whoami\n", "operator keystrokes must be recorded")
+	assert.Contains(t, data, "\x1b[8;40;120t", "resize must be recorded as an input event")
+	assert.Contains(t, data, "root\r\n", "shell output must still be recorded")
+	assert.False(t, session.IsClosed(), "successful input recording must leave the session live")
+}
+
+// TestSessionRecordInput_FailsClosedWhenRecordingCannotBeWritten asserts the
+// fail-closed contract on the relay input path: a keystroke that cannot be
+// recorded terminates the session, so the caller tears the relay down instead of
+// forwarding unrecorded input to the endpoint's shell.
+func TestSessionRecordInput_FailsClosedWhenRecordingCannotBeWritten(t *testing.T) {
+	session, recorder := newRecordedTestSession(t)
+	ctx := context.Background()
+
+	// Finalize the recording underneath the live session: the next frame cannot be
+	// recorded because auto-restart hits the existing O_EXCL recording file.
+	require.NoError(t, recorder.EndRecording(session.ID))
+
+	err := session.RecordInput(ctx, []byte("SECRET-COMMAND\n"))
+	require.Error(t, err, "input that cannot be recorded must not be relayed")
+	assert.Contains(t, err.Error(), "session recording failed")
+	assert.True(t, session.IsClosed(), "session must fail closed when input cannot be recorded")
+
+	// A closed session rejects every further frame, including resizes.
+	require.Error(t, session.RecordResize(ctx, 120, 40))
+
+	recording, err := recorder.GetRecording(session.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, string(recording.Data), "SECRET-COMMAND")
+}
+
+// TestSessionRecordResize_RejectsInvalidDimensions asserts non-positive
+// dimensions are rejected rather than written to the audit trail as a
+// nonsensical control sequence.
+func TestSessionRecordResize_RejectsInvalidDimensions(t *testing.T) {
+	session, _ := newRecordedTestSession(t)
+	ctx := context.Background()
+
+	require.Error(t, session.RecordResize(ctx, 0, 24))
+	require.Error(t, session.RecordResize(ctx, 80, -1))
+	assert.False(t, session.IsClosed(), "a rejected resize must not terminate the session")
+}
+
+// TestSessionClose_DoesNotCloseSharedRecorder asserts that closing one session
+// leaves the shared recorder usable for every other session: Session.Close must
+// end only its own recording.
+func TestSessionClose_DoesNotCloseSharedRecorder(t *testing.T) {
+	sessionA, recorder := newRecordedTestSession(t)
+	ctx := context.Background()
+
+	logger := logging.NewNoopLogger()
+	sessionB, err := NewSession(&SessionRequest{
+		StewardID: "test-steward-001",
+		UserID:    "test-user-b",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}, logger)
+	require.NoError(t, err)
+	sessionB.SetRecorder(recorder)
+	require.NoError(t, recorder.StartRecording(sessionB.ID, sessionB.GetMetadata()))
+
+	require.NoError(t, sessionA.Close(ctx))
+
+	require.NoError(t, sessionB.HandleOutput(ctx, []byte("still-recording\n")),
+		"closing one session must not finalize another session's recording")
+	require.NoError(t, recorder.EndRecording(sessionB.ID),
+		"session B's recording must still be active after session A closed")
+
+	recordingB, err := recorder.GetRecording(sessionB.ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(recordingB.Data), "still-recording")
+}
+
 // TestNewSession_RedactsSessionID verifies that NewSession never logs the raw
 // session UUID and always logs the redacted prefix form under the session_id key.
 func TestNewSession_RedactsSessionID(t *testing.T) {
