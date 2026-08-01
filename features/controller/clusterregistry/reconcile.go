@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
 
 // DeadOwnerStaleThreshold is the age of a steward's last heartbeat after which
@@ -47,8 +48,8 @@ const (
 type DeclaredResource struct {
 	// ClusterName is the failover cluster name this resource belongs to.
 	ClusterName string
-	// RoleName is the resource/role name within the cluster. It must match the
-	// suffix of the cluster:<ClusterName>.resource_owner.<RoleName> DNA key.
+	// RoleName is the resource/role name within the cluster. It must match a key of
+	// the resource_owner map inside the cluster:<ClusterName> DNA fragment.
 	RoleName string
 }
 
@@ -75,7 +76,7 @@ type ReconciliationResult struct {
 //   - present-with-live-owner: the resource exists in the registry and its owner
 //     has a recent heartbeat.
 //   - declared-but-missing: the resource is declared in config but has no owner
-//     in any member steward's DNA (create-coverage gap).
+//     in any member steward's cluster fragment (create-coverage gap).
 //   - orphan-dead-owner: the resource has a registry entry but its owner steward
 //     has not sent a heartbeat within DeadOwnerStaleThreshold.
 //   - split-brain: two or more cluster members report different owner values for
@@ -85,9 +86,9 @@ type ReconciliationResult struct {
 //   - declared: the resources that should exist (from the cascaded config).
 //   - reg: the actual cluster state (from BuildRegistry over the same stewards).
 //   - stewards: the raw steward slice (same slice used to build reg). Used to
-//     detect split-brain by comparing each member's resource_owner.* DNA keys.
+//     detect split-brain by comparing each member's cluster:* fragment resource_owner map.
 //   - isOwnerLive: caller-supplied liveness check; receives the owner value from
-//     the DNA attribute (typically a cluster node name or steward ID) and returns
+//     the fragment's resource_owner map (typically a cluster node name or steward ID) and returns
 //     true when that owner has a sufficiently recent heartbeat.
 //
 // Results preserve the order of declared. If declared is empty, Reconcile returns
@@ -166,9 +167,9 @@ func reconcileOne(
 	}
 }
 
-// buildRoleClaimSets scans each steward's DNA attributes for
-// cluster:<name>.resource_owner.<role> keys and collects all distinct owner
-// values reported by different stewards for each (cluster, role) pair.
+// buildRoleClaimSets scans each steward's cluster:* DNA fragments and collects
+// all distinct owner values reported by different stewards for each (cluster,
+// role) pair.
 //
 // Returns map[clusterName]map[roleName][]distinctOwnerValues.
 // len(distinctOwnerValues) > 1 for a given role signals split-brain.
@@ -176,38 +177,45 @@ func buildRoleClaimSets(stewards []fleet.StewardData) map[string]map[string][]st
 	claimSets := make(map[string]map[string][]string)
 
 	for _, steward := range stewards {
-		for key, value := range steward.DNAAttributes {
-			if !strings.HasPrefix(key, clusterKeyPrefix) {
+		for _, frag := range steward.DNAFragments {
+			if frag == nil || !strings.HasPrefix(frag.FragmentId, clusterFragmentPrefix) {
 				continue
 			}
-			rest := key[len(clusterKeyPrefix):]
-			dotIdx := strings.Index(rest, ".")
-			if dotIdx <= 0 {
+			clusterName := frag.FragmentId[len(clusterFragmentPrefix):]
+			if clusterName == "" {
 				continue
 			}
-			clusterName := rest[:dotIdx]
-			field := rest[dotIdx+1:]
-			if !strings.HasPrefix(field, resourceOwnerPrefix) {
+
+			data, err := sdna.DecodeCanonicalFragment(frag.CanonicalBytes)
+			if err != nil {
 				continue
 			}
-			roleName := field[len(resourceOwnerPrefix):]
-			if roleName == "" || value == "" {
+
+			owners, ok := data["resource_owner"].(map[string]interface{})
+			if !ok {
 				continue
 			}
 
 			if claimSets[clusterName] == nil {
 				claimSets[clusterName] = make(map[string][]string)
 			}
-			// Append only if this distinct owner value isn't already recorded.
-			alreadySeen := false
-			for _, existing := range claimSets[clusterName][roleName] {
-				if existing == value {
-					alreadySeen = true
-					break
+
+			for role, ownerV := range owners {
+				owner, ok := ownerV.(string)
+				if !ok || role == "" || owner == "" {
+					continue
 				}
-			}
-			if !alreadySeen {
-				claimSets[clusterName][roleName] = append(claimSets[clusterName][roleName], value)
+				// Append only if this distinct owner value isn't already recorded.
+				alreadySeen := false
+				for _, existing := range claimSets[clusterName][role] {
+					if existing == owner {
+						alreadySeen = true
+						break
+					}
+				}
+				if !alreadySeen {
+					claimSets[clusterName][role] = append(claimSets[clusterName][role], owner)
+				}
 			}
 		}
 	}

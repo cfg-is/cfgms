@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/config"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -508,6 +510,49 @@ func (e *Executor) runTargetedReconcile(ctx context.Context, stopCh <-chan struc
 
 	e.logger.Info("Monitor event for unmanaged resource (not in cfg, skipping)",
 		"resource_id", logging.SanitizeLogValue(resourceID))
+}
+
+// CollectModuleFragments returns ADR-017 fragments for cluster:* resourceIDs
+// observed in the monitor change-event cache (Issue #2908).
+//
+// Only cluster:* resourceIDs are emitted as fragments; all other resourceIDs
+// continue to publish via the flat CollectModuleDNAAttributes path.
+// The authority for each fragment is resolved from the active monitorEntries by
+// resourceID; entries that left monitoring between the event and this call
+// receive an empty authority (negligible: the fragment is still well-formed).
+//
+// Fragment construction goes through sdna.NewFragment so canonical bytes and
+// fragment hash are produced by the same code path the controller-side registry
+// parses (FragmentId is the resourceID verbatim, e.g. "cluster:cfg-lab";
+// Authority is the module bundle name, e.g. "hyperv").
+func (e *Executor) CollectModuleFragments(_ context.Context) []*commonpb.Fragment {
+	const clusterPrefix = "cluster:"
+
+	// Resolve resourceID → authority from current monitor entries (best-effort).
+	e.monitorMu.Lock()
+	authority := make(map[string]string, len(e.monitorEntries))
+	for _, entry := range e.monitorEntries {
+		authority[entry.resourceID] = bundleNameFromModuleRef(entry.resource.Module)
+	}
+	e.monitorMu.Unlock()
+
+	e.monitorStateMu.Lock()
+	defer e.monitorStateMu.Unlock()
+
+	var frags []*commonpb.Fragment
+	for resourceID, snap := range e.monitorState {
+		if !strings.HasPrefix(resourceID, clusterPrefix) {
+			continue
+		}
+		frag, err := sdna.NewFragment(resourceID, authority[resourceID], sdna.MapState(snap))
+		if err != nil {
+			e.logger.Warn("CollectModuleFragments: canonicalize failed",
+				"resource_id", logging.SanitizeLogValue(resourceID), "error", err)
+			continue
+		}
+		frags = append(frags, frag)
+	}
+	return frags
 }
 
 // flattenDNAValue flattens one value into out under key, per the convention

@@ -16,11 +16,12 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/commands"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -47,6 +48,52 @@ type CommandPublisher interface {
 // narrow interface DNAHandler depends on — so production wiring cannot drift onto
 // an unsigned dispatch path without breaking the build.
 var _ CommandPublisher = (*commands.Publisher)(nil)
+
+// Ingest-side DoS bounds for a sync_dna snapshot.
+//
+// Stewards run on hosts that may be compromised (CLAUDE.md threat model), so every
+// count and length a steward controls is bounded before the controller allocates,
+// decodes, or persists it. The gRPC maxRecvMsgSize
+// (pkg/dataplane/providers/grpc/limits.go) bounds a single DNAChunk message, NOT
+// the snapshot: HandleGRPC reassembles an unbounded stream of ≤64 KB chunks, so
+// without these bounds one RPC can drive the controller to arbitrary heap use.
+//
+// These mirror the equivalent validation the data plane provider already applies
+// in its own reassembler (chunksToDNATransfer: assembled payload ≤ maxRecvMsgSize).
+const (
+	// maxReassembledDNABytes caps the concatenated chunk payload. 8 MB matches the
+	// data plane maxRecvMsgSize; a real full snapshot (a few hundred flat attributes
+	// plus curated fragments) is orders of magnitude smaller.
+	maxReassembledDNABytes = 8 * 1024 * 1024
+
+	// maxDNAChunks caps how many chunks one snapshot may span. A byte cap alone does
+	// not bound the chunk slice itself: a flood of 1-byte chunks costs a DNAChunk
+	// struct each. At the 64 KB send-side chunk size 8 MB is 128 chunks, so 256
+	// leaves 2x headroom over any legitimate snapshot.
+	maxDNAChunks = 256
+
+	// maxDNATransferFragments caps the ADR-017 fragments accepted on one snapshot.
+	// Real producers emit a handful (4 host:* kinds from PartitionHostFacts plus one
+	// cluster:* fragment per monitored cluster), and every persisted fragment is
+	// re-decoded by clusterregistry.BuildRegistry on every cluster API read — an
+	// unbounded count is therefore a repeatable amplifier, not a one-shot cost.
+	maxDNATransferFragments = 1024
+
+	// maxDNAFragmentBytes caps a single proto-marshalled Fragment. It is deliberately
+	// far below dna.MaxCanonicalFragmentSize: that constant is the decoder's own
+	// backstop, and because DecodeCanonicalFragment amplifies canonical bytes roughly
+	// 19x in live heap, the ingest bound — not the backstop — is the one that has to
+	// be tight. Real fragments are curated key subsets measured in kilobytes (the
+	// largest realistic shape, a cluster resource_owner map for a few thousand
+	// resources, is well under 100 KB), so 1 MB is an order of magnitude of headroom.
+	maxDNAFragmentBytes = 1 * 1024 * 1024
+)
+
+// Compile-time assertion that the ingest bound can never be looser than the
+// decoder's own backstop: if maxDNAFragmentBytes is raised above
+// dna.MaxCanonicalFragmentSize this constant expression goes negative and the
+// package fails to build.
+const _ = uint(sdna.MaxCanonicalFragmentSize - maxDNAFragmentBytes)
 
 // DNAPersister persists a fully-reassembled DNA snapshot received over the data
 // plane. It is implemented by *service.ControllerService (SyncDNA), which stores
@@ -171,7 +218,7 @@ func (h *DNAHandler) HandleHeartbeatRoot(ctx context.Context, stewardID, claimed
 		return
 	}
 
-	storedRoot, err := stewarddna.AggregateRoot(manifest)
+	storedRoot, err := sdna.AggregateRoot(manifest)
 	if err != nil {
 		h.logger.Warn("partial-sync: failed to compute stored root",
 			"steward_id", safeStewardID, "error", err)
@@ -224,7 +271,7 @@ func (h *DNAHandler) HandleHeartbeatRoot(ctx context.Context, stewardID, claimed
 const aggregateRootHexLen = 64
 
 // isValidAggregateRoot reports whether s is a well-formed aggregate root: exactly
-// 64 lowercase hexadecimal characters, the only encoding stewarddna.AggregateRoot
+// 64 lowercase hexadecimal characters, the only encoding sdna.AggregateRoot
 // produces (ADR-017 §6).
 //
 // The root arrives from the steward as an arbitrary, unbounded string. Validating
@@ -303,8 +350,11 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		return h.handleDeltaGRPC(ctx, stream, firstChunk, peerID)
 	}
 
-	// Full-snapshot path (existing, unchanged).
+	// Bound accumulation as chunks arrive so a hostile stream can never buffer more
+	// than maxReassembledDNABytes / maxDNAChunks before it is rejected. Checking only
+	// after the stream drains would already have paid the memory cost.
 	chunks := []*transportpb.DNAChunk{firstChunk}
+	payloadBytes := len(firstChunk.GetData())
 	for {
 		chunk, recvErr := stream.Recv()
 		if recvErr == io.EOF {
@@ -313,6 +363,15 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		if recvErr != nil {
 			return fmt.Errorf("failed to receive DNA chunk: %w", recvErr)
 		}
+		if len(chunks) >= maxDNAChunks {
+			return status.Errorf(codes.ResourceExhausted,
+				"DNA snapshot exceeds the %d chunk limit", maxDNAChunks)
+		}
+		if payloadBytes+len(chunk.GetData()) > maxReassembledDNABytes {
+			return status.Errorf(codes.ResourceExhausted,
+				"DNA snapshot exceeds the %d byte limit", maxReassembledDNABytes)
+		}
+		payloadBytes += len(chunk.GetData())
 		chunks = append(chunks, chunk)
 	}
 
@@ -338,7 +397,8 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		return status.Errorf(codes.Unavailable, "DNA persist rejected: %s", persistStatus.Message)
 	}
 
-	h.logger.Info("DNA sync persisted", "peer_id", peerID, "attributes", dna.GetAttributeCount())
+	h.logger.Info("DNA sync persisted", "peer_id", peerID,
+		"attributes", dna.GetAttributeCount(), "fragments", len(dna.GetFragments()))
 
 	return stream.SendAndClose(&transportpb.DNASyncResponse{
 		Accepted: true,
@@ -446,7 +506,7 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 	prospective := mergeManifest(storedManifest, receivedFragments)
 
 	// Recompute aggregate root from server-side state — never trust steward-asserted root.
-	computedRoot, err := stewarddna.AggregateRoot(prospective)
+	computedRoot, err := sdna.AggregateRoot(prospective)
 	if err != nil {
 		return status.Errorf(codes.Internal, "failed to compute merged aggregate root: %v", err)
 	}
@@ -576,7 +636,7 @@ func verifyFragmentLeaves(received []*common.Fragment) error {
 		if len(f.GetCanonicalBytes()) == 0 {
 			return fmt.Errorf("fragment %q carries no canonical_bytes to bind its hash to", fragmentID)
 		}
-		if stewarddna.FragmentHash(f.GetCanonicalBytes()) != f.GetFragmentHash() {
+		if sdna.FragmentHash(f.GetCanonicalBytes()) != f.GetFragmentHash() {
 			return fmt.Errorf("fragment %q asserted hash does not match its canonical_bytes", fragmentID)
 		}
 	}
@@ -600,7 +660,7 @@ func mergeManifest(stored []*common.ManifestEntry, received []*common.Fragment) 
 	for _, f := range received {
 		merged[f.GetFragmentId()] = &common.ManifestEntry{
 			FragmentId:   f.GetFragmentId(),
-			FragmentHash: stewarddna.FragmentHash(f.GetCanonicalBytes()),
+			FragmentHash: sdna.FragmentHash(f.GetCanonicalBytes()),
 		}
 	}
 	result := make([]*common.ManifestEntry, 0, len(merged))
@@ -625,10 +685,18 @@ func reassembleDNATransfer(chunks []*transportpb.DNAChunk, stewardID string) (*d
 		return chunks[i].GetChunkIndex() < chunks[j].GetChunkIndex()
 	})
 
+	if len(chunks) > maxDNAChunks {
+		return nil, fmt.Errorf("chunk count %d exceeds maximum %d", len(chunks), maxDNAChunks)
+	}
+
 	var payload []byte
 	for i, c := range chunks {
 		if int(c.GetChunkIndex()) != i {
 			return nil, fmt.Errorf("non-contiguous chunk sequence: expected index %d, got %d", i, c.GetChunkIndex())
+		}
+		// Bounded before the append so the concatenation itself cannot exceed the cap.
+		if len(payload)+len(c.GetData()) > maxReassembledDNABytes {
+			return nil, fmt.Errorf("reassembled payload exceeds maximum %d bytes", maxReassembledDNABytes)
 		}
 		payload = append(payload, c.GetData()...)
 	}
@@ -656,9 +724,33 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 	}
 
 	attrs := map[string]string{}
+	var frags []*common.Fragment
 	if len(transfer.Attributes) > 0 {
 		if err := json.Unmarshal(transfer.Attributes, &attrs); err != nil {
 			return nil, fmt.Errorf("unmarshal DNA attributes: %w", err)
+		}
+		// ADR-017 fragments ride alongside the flat attribute map (#2908).
+		//
+		// Fragment count and per-fragment size are bounded BEFORE any decode. A
+		// malformed fragment is skipped (the flat attributes remain authoritative
+		// for steward identity, and rejecting the sync would black-hole an
+		// otherwise valid DNA update), but an out-of-bounds count or size is
+		// rejected outright: that is not the shape a healthy steward produces, and
+		// persisting it would hand the controller a repeatable decode amplifier.
+		if len(transfer.FragmentBytes) > maxDNATransferFragments {
+			return nil, fmt.Errorf("fragment count %d exceeds maximum %d",
+				len(transfer.FragmentBytes), maxDNATransferFragments)
+		}
+		for _, fb := range transfer.FragmentBytes {
+			if len(fb) > maxDNAFragmentBytes {
+				return nil, fmt.Errorf("fragment of %d bytes exceeds maximum %d",
+					len(fb), maxDNAFragmentBytes)
+			}
+			frag := &common.Fragment{}
+			if err := proto.Unmarshal(fb, frag); err != nil {
+				continue
+			}
+			frags = append(frags, frag)
 		}
 	}
 
@@ -666,5 +758,6 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 		Id:             stewardID,
 		Attributes:     attrs,
 		AttributeCount: int32(len(attrs)), //nolint:gosec // attribute counts are far below int32 max
+		Fragments:      frags,
 	}, nil
 }

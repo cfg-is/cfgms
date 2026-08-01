@@ -17,17 +17,38 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/health"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// seedClusterSteward registers a steward and sets its DNA to carry the given
-// cluster DNA attributes. Used by cluster handler tests.
-func seedClusterSteward(t *testing.T, server *Server, id, tenantID string, dnaAttrs map[string]string) {
+// seedClusterSteward registers a steward and sets its DNA to carry the given flat
+// attributes plus the given ADR-017 fragments. Cluster membership and role ownership
+// live in cluster:<name> fragments (Issue #2908) — dnaAttrs carries only host facts
+// such as "hostname", which the reconciliation handler uses for owner liveness.
+func seedClusterSteward(t *testing.T, server *Server, id, tenantID string, dnaAttrs map[string]string, frags ...*commonpb.Fragment) {
 	t.Helper()
 	require.NoError(t, server.controllerService.RegisterSteward(id, tenantID, "addr", "active"))
-	ok := server.controllerService.SetStewardDNA(id, &commonpb.DNA{Id: id, Attributes: dnaAttrs})
+	ok := server.controllerService.SetStewardDNA(id, &commonpb.DNA{
+		Id:         id,
+		Attributes: dnaAttrs,
+		Fragments:  frags,
+	})
 	require.True(t, ok, "SetStewardDNA must return true for a registered steward")
+}
+
+// clusterFragment builds a cluster:<name> DNA fragment carrying the given
+// resource_owner role→owner map. Construction goes through sdna.NewFragment — the
+// same production path the steward's monitor bridge uses — so these fixtures decode
+// through the real clusterregistry parse path with no hand-rolled bytes.
+func clusterFragment(t *testing.T, clusterName string, owners map[string]string) *commonpb.Fragment {
+	t.Helper()
+	frag, err := sdna.NewFragment("cluster:"+clusterName, "hyperv", sdna.MapState{
+		"name":           clusterName,
+		"resource_owner": owners,
+	})
+	require.NoError(t, err)
+	return frag
 }
 
 // withClusterTenant returns a copy of req with callerTenant injected via ctxkeys.TenantID,
@@ -42,14 +63,10 @@ func withClusterTenant(req *http.Request, callerTenant string) *http.Request {
 func TestHandleListClusters_HappyPath(t *testing.T) {
 	server := setupTestServer(t)
 
-	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
-		"cluster:cfg-lab.member_nodes":       "CFG-70-02,CFG-AB-02",
-		"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-	})
-	seedClusterSteward(t, server, "steward-b", "default", map[string]string{
-		"cluster:cfg-lab.member_nodes":       "CFG-70-02,CFG-AB-02",
-		"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-	})
+	seedClusterSteward(t, server, "steward-a", "default", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}))
+	seedClusterSteward(t, server, "steward-b", "default", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters", nil)
 	// No tenant in context → root admin scope (sees everything).
@@ -75,15 +92,11 @@ func TestHandleListClusters_TenantIsolation(t *testing.T) {
 	server := setupTestServer(t)
 
 	// Steward in tenant-a has cluster cfg-lab.
-	seedClusterSteward(t, server, "steward-a", "tenant-a", map[string]string{
-		"cluster:cfg-lab.member_nodes":       "node-a",
-		"cluster:cfg-lab.resource_owner.csv": "node-a",
-	})
+	seedClusterSteward(t, server, "steward-a", "tenant-a", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-a"}))
 	// Steward in tenant-b has cluster cfg-prod.
-	seedClusterSteward(t, server, "steward-b", "tenant-b", map[string]string{
-		"cluster:cfg-prod.member_nodes":       "node-b",
-		"cluster:cfg-prod.resource_owner.cno": "node-b",
-	})
+	seedClusterSteward(t, server, "steward-b", "tenant-b", nil,
+		clusterFragment(t, "cfg-prod", map[string]string{"cno": "node-b"}))
 
 	// Caller scoped to tenant-a: must only see cfg-lab, not cfg-prod.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters", nil)
@@ -105,9 +118,8 @@ func TestHandleListClusters_TenantIsolation(t *testing.T) {
 func TestHandleListClusters_AncestorTenantSeesDescendants(t *testing.T) {
 	server := setupTestServer(t)
 
-	seedClusterSteward(t, server, "steward-child", "root/msp-a/client-1", map[string]string{
-		"cluster:cfg-lab.member_nodes": "node-child",
-	})
+	seedClusterSteward(t, server, "steward-child", "root/msp-a/client-1", nil,
+		clusterFragment(t, "cfg-lab", nil))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters", nil)
 	req = withClusterTenant(req, "root/msp-a")
@@ -143,11 +155,11 @@ func TestHandleListClusters_EmptyResult(t *testing.T) {
 func TestHandleGetCluster_HappyPath(t *testing.T) {
 	server := setupTestServer(t)
 
-	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
-		"cluster:cfg-lab.member_nodes":       "CFG-70-02",
-		"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-		"cluster:cfg-lab.resource_owner.cno": "CFG-AB-02",
-	})
+	seedClusterSteward(t, server, "steward-a", "default", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{
+			"csv": "CFG-70-02",
+			"cno": "CFG-AB-02",
+		}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab", nil)
 	req = withVars(req, map[string]string{"name": "cfg-lab"})
@@ -170,9 +182,8 @@ func TestHandleGetCluster_NotFound(t *testing.T) {
 	server := setupTestServer(t)
 
 	// A cluster that exists but belongs to tenant-b.
-	seedClusterSteward(t, server, "steward-b", "tenant-b", map[string]string{
-		"cluster:cfg-prod.member_nodes": "node-b",
-	})
+	seedClusterSteward(t, server, "steward-b", "tenant-b", nil,
+		clusterFragment(t, "cfg-prod", nil))
 
 	t.Run("unknown cluster name returns 404", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/no-such-cluster", nil)
@@ -240,10 +251,9 @@ func TestHandleClusterReconciliation_PresentWithLiveOwner(t *testing.T) {
 
 	// Steward publishes resource_owner.vm1 = "CFG-70-02" and its own hostname so
 	// the handler's isOwnerLive closure can match hostname → last heartbeat.
-	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
-		"cluster:cfg-lab.resource_owner.vm1": "CFG-70-02",
-		"hostname":                           "CFG-70-02",
-	})
+	seedClusterSteward(t, server, "steward-a", "default",
+		map[string]string{"hostname": "CFG-70-02"},
+		clusterFragment(t, "cfg-lab", map[string]string{"vm1": "CFG-70-02"}))
 	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "vm1")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
@@ -273,9 +283,8 @@ func TestHandleClusterReconciliation_DeclaredButMissing(t *testing.T) {
 	server := setupTestServer(t)
 
 	// Cluster member exists but has not published resource_owner.vm2.
-	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
-		"cluster:cfg-lab.member_nodes": "node-a",
-	})
+	seedClusterSteward(t, server, "steward-a", "default", nil,
+		clusterFragment(t, "cfg-lab", nil))
 	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "vm2")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
@@ -305,10 +314,9 @@ func TestHandleClusterReconciliation_DeclaredButMissing(t *testing.T) {
 func TestHandleClusterReconciliation_DeadOwner(t *testing.T) {
 	server := setupTestServer(t)
 
-	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
-		"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-		"hostname":                           "CFG-70-02",
-	})
+	seedClusterSteward(t, server, "steward-a", "default",
+		map[string]string{"hostname": "CFG-70-02"},
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}))
 	// Backdate the heartbeat past DeadOwnerStaleThreshold (60 s).
 	ok := server.controllerService.RecordHeartbeat("steward-a", "", time.Now().Add(-2*time.Minute))
 	require.True(t, ok, "RecordHeartbeat must find the registered steward")
@@ -343,12 +351,10 @@ func TestHandleClusterReconciliation_SplitBrain(t *testing.T) {
 	server := setupTestServer(t)
 
 	// Both stewards claim to own "csv" but report different owner values.
-	seedClusterSteward(t, server, "node-a", "default", map[string]string{
-		"cluster:cfg-lab.resource_owner.csv": "node-a",
-	})
-	seedClusterSteward(t, server, "node-b", "default", map[string]string{
-		"cluster:cfg-lab.resource_owner.csv": "node-b",
-	})
+	seedClusterSteward(t, server, "node-a", "default", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-a"}))
+	seedClusterSteward(t, server, "node-b", "default", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-b"}))
 	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "csv")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
@@ -379,9 +385,8 @@ func TestHandleClusterReconciliation_SplitBrain(t *testing.T) {
 func TestHandleClusterReconciliation_NotFound(t *testing.T) {
 	server := setupTestServer(t)
 
-	seedClusterSteward(t, server, "steward-b", "tenant-b", map[string]string{
-		"cluster:cfg-prod.member_nodes": "node-b",
-	})
+	seedClusterSteward(t, server, "steward-b", "tenant-b", nil,
+		clusterFragment(t, "cfg-prod", nil))
 
 	t.Run("unknown cluster name returns 404", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/no-such-cluster/reconciliation", nil)
@@ -421,9 +426,8 @@ func TestHandleClusterReconciliation_MissingName(t *testing.T) {
 func TestHandleClusterReconciliation_NoDeclaredResources(t *testing.T) {
 	server := setupTestServer(t)
 
-	seedClusterSteward(t, server, "steward-a", "default", map[string]string{
-		"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-	})
+	seedClusterSteward(t, server, "steward-a", "default", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}))
 	// No seedClusterPoliciesConfig call → declared set is empty.
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)

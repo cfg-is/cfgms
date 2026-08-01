@@ -21,6 +21,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/mux"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
@@ -406,12 +407,17 @@ func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 		if info.DNA != nil {
 			attrs = info.DNA.Attributes
 		}
+		var frags []*commonpb.Fragment
+		if info.DNA != nil {
+			frags = info.DNA.Fragments
+		}
 		result = append(result, fleet.StewardData{
 			ID:            info.ID,
 			TenantID:      info.TenantID,
 			Status:        info.Status,
 			LastHeartbeat: info.LastHeartbeat,
 			DNAAttributes: attrs,
+			DNAFragments:  frags,
 		})
 	}
 	return result

@@ -80,10 +80,15 @@ func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
 		if s.DNA != nil {
 			attrs = s.DNA.Attributes
 		}
+		var frags []*common.Fragment
+		if s.DNA != nil {
+			frags = s.DNA.Fragments
+		}
 		fleetData = append(fleetData, fleet.StewardData{
 			ID:            s.ID,
 			TenantID:      s.TenantID,
 			DNAAttributes: attrs,
+			DNAFragments:  frags,
 		})
 	}
 	reg := clusterregistry.BuildRegistry(fleetData)

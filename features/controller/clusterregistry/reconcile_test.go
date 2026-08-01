@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 )
@@ -29,15 +30,15 @@ func liveSet(live ...string) func(string) bool {
 	return func(ownerID string) bool { return set[ownerID] }
 }
 
-// makeClusterSteward builds a StewardData with the given DNA attributes.
+// makeClusterSteward builds a StewardData with the given cluster fragments.
 // LastHeartbeat is set to time.Now() (live).
-func makeClusterSteward(id string, dna map[string]string) fleet.StewardData {
+func makeClusterSteward(id string, frags ...*commonpb.Fragment) fleet.StewardData {
 	return fleet.StewardData{
 		ID:            id,
 		TenantID:      "default",
 		Status:        "active",
 		LastHeartbeat: time.Now(),
-		DNAAttributes: dna,
+		DNAFragments:  frags,
 	}
 }
 
@@ -45,9 +46,8 @@ func makeClusterSteward(id string, dna map[string]string) fleet.StewardData {
 // healthy case: a declared role exists in the registry with a single live owner.
 func TestReconcile_HappyPath_PresentWithLiveOwner(t *testing.T) {
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.resource_owner.vm1": "node-a",
-		}),
+		makeClusterSteward("node-a",
+			clusterFragment(t, "cfg-lab", map[string]string{"vm1": "node-a"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{
@@ -70,12 +70,10 @@ func TestReconcile_HappyPath_PresentWithLiveOwner(t *testing.T) {
 func TestReconcile_CreateCoverageGap_DeclaredButMissing(t *testing.T) {
 	// Cluster members exist but neither has published resource_owner for "vm2".
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.member_nodes": "node-a,node-b",
-		}),
-		makeClusterSteward("node-b", map[string]string{
-			"cluster:cfg-lab.member_nodes": "node-a,node-b",
-		}),
+		makeClusterSteward("node-a", memberOnlyFragment(t, "cfg-lab",
+			map[string]interface{}{"member_nodes": []string{"node-a", "node-b"}})),
+		makeClusterSteward("node-b", memberOnlyFragment(t, "cfg-lab",
+			map[string]interface{}{"member_nodes": []string{"node-a", "node-b"}})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{
@@ -96,9 +94,8 @@ func TestReconcile_CreateCoverageGap_DeclaredButMissing(t *testing.T) {
 // case: a role has a registry entry but the owner's heartbeat is stale.
 func TestReconcile_DeadOwner_OrphanDeadOwner(t *testing.T) {
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.resource_owner.csv": "node-a",
-		}),
+		makeClusterSteward("node-a",
+			clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-a"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{
@@ -119,12 +116,10 @@ func TestReconcile_DeadOwner_OrphanDeadOwner(t *testing.T) {
 func TestReconcile_SplitBrain(t *testing.T) {
 	// node-a reports that it owns "csv"; node-b simultaneously reports it owns "csv".
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.resource_owner.csv": "node-a",
-		}),
-		makeClusterSteward("node-b", map[string]string{
-			"cluster:cfg-lab.resource_owner.csv": "node-b",
-		}),
+		makeClusterSteward("node-a",
+			clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-a"})),
+		makeClusterSteward("node-b",
+			clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-b"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{
@@ -143,12 +138,11 @@ func TestReconcile_SplitBrain(t *testing.T) {
 // owner value is NOT split-brain — they both agree on who owns the role.
 func TestReconcile_SameOwnerAgreed(t *testing.T) {
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.resource_owner.csv": "node-a",
-		}),
-		makeClusterSteward("node-b", map[string]string{
-			"cluster:cfg-lab.resource_owner.csv": "node-a", // agrees: node-a owns csv
-		}),
+		makeClusterSteward("node-a",
+			clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-a"})),
+		makeClusterSteward("node-b",
+			// node-b agrees: node-a owns csv
+			clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-a"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{
@@ -168,15 +162,15 @@ func TestReconcile_SameOwnerAgreed(t *testing.T) {
 // roles in different states.
 func TestReconcile_MultipleRoles(t *testing.T) {
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.resource_owner.vm1": "node-a",
-			"cluster:cfg-lab.resource_owner.vm2": "node-a",
-			// vm3 is declared but not yet created (no resource_owner.vm3).
-		}),
-		makeClusterSteward("node-b", map[string]string{
+		makeClusterSteward("node-a",
+			clusterFragment(t, "cfg-lab", map[string]string{
+				"vm1": "node-a",
+				"vm2": "node-a",
+				// vm3 is declared but not yet created (no resource_owner.vm3).
+			})),
+		makeClusterSteward("node-b",
 			// node-b claims vm2 (split-brain with node-a).
-			"cluster:cfg-lab.resource_owner.vm2": "node-b",
-		}),
+			clusterFragment(t, "cfg-lab", map[string]string{"vm2": "node-b"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{
@@ -209,9 +203,8 @@ func TestReconcile_MultipleRoles(t *testing.T) {
 // empty (non-nil) result slice — no declared resources, nothing to reconcile.
 func TestReconcile_EmptyDeclared(t *testing.T) {
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.resource_owner.csv": "node-a",
-		}),
+		makeClusterSteward("node-a",
+			clusterFragment(t, "cfg-lab", map[string]string{"csv": "node-a"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 
@@ -225,9 +218,8 @@ func TestReconcile_EmptyDeclared(t *testing.T) {
 // and the result is orphan-dead-owner.
 func TestReconcile_UnknownOwnerTreatedAsDead(t *testing.T) {
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
-			"cluster:cfg-lab.resource_owner.csv": "unknown-node",
-		}),
+		makeClusterSteward("node-a",
+			clusterFragment(t, "cfg-lab", map[string]string{"csv": "unknown-node"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{
@@ -247,10 +239,9 @@ func TestReconcile_UnknownOwnerTreatedAsDead(t *testing.T) {
 // cluster are not affected by entries in a different cluster.
 func TestReconcile_CrossClusterIsolation(t *testing.T) {
 	stewards := []fleet.StewardData{
-		makeClusterSteward("node-a", map[string]string{
+		makeClusterSteward("node-a",
 			// Only cfg-prod has resource_owner.vm1; cfg-lab does not.
-			"cluster:cfg-prod.resource_owner.vm1": "node-a",
-		}),
+			clusterFragment(t, "cfg-prod", map[string]string{"vm1": "node-a"})),
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	declared := []clusterregistry.DeclaredResource{

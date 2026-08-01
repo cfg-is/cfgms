@@ -9,33 +9,72 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
 
-// TestClusterRegistry_ParsesDNAAttributes_MultiSteward is the required AC test.
+// ─── fragment helpers ─────────────────────────────────────────────────────────
+
+// clusterFragment builds a cluster:<name> fragment with the given resource_owner
+// map and any extra state fields. Construction goes through sdna.NewFragment —
+// the same production path the steward's monitor bridge uses — so the canonical
+// bytes and hash are never hand-rolled.
+func clusterFragment(t *testing.T, clusterName string, owners map[string]string, extra ...map[string]interface{}) *commonpb.Fragment {
+	t.Helper()
+	state := sdna.MapState{
+		"name":           clusterName,
+		"resource_owner": owners,
+	}
+	for _, m := range extra {
+		for k, v := range m {
+			state[k] = v
+		}
+	}
+	frag, err := sdna.NewFragment("cluster:"+clusterName, "hyperv", state)
+	require.NoError(t, err)
+	return frag
+}
+
+// memberOnlyFragment builds a cluster:<name> fragment with no resource_owner entries.
+// Used for stewards that are cluster members but do not own any roles.
+func memberOnlyFragment(t *testing.T, clusterName string, extra ...map[string]interface{}) *commonpb.Fragment {
+	t.Helper()
+	return clusterFragment(t, clusterName, map[string]string{}, extra...)
+}
+
+// ─── tests ────────────────────────────────────────────────────────────────────
+
+// TestClusterRegistry_ParsesDNAFragments_MultiSteward is the required AC test.
 // It asserts both the forward view (cluster → members → role owners) and the
 // reverse MemberClusters(stewardID) lookup against the same fixture data.
-func TestClusterRegistry_ParsesDNAAttributes_MultiSteward(t *testing.T) {
+func TestClusterRegistry_ParsesDNAFragments_MultiSteward(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{
 			ID:       "steward-a",
 			TenantID: "default",
 			DNAAttributes: map[string]string{
-				"cluster:cfg-lab.member_nodes":       "CFG-70-02,CFG-AB-02",
-				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-				"cluster:cfg-lab.resource_owner.cno": "CFG-AB-02",
-				"hostname":                           "CFG-70-02",
+				"hostname": "CFG-70-02",
+			},
+			DNAFragments: []*commonpb.Fragment{
+				clusterFragment(t, "cfg-lab", map[string]string{
+					"csv": "CFG-70-02",
+					"cno": "CFG-AB-02",
+				}, map[string]interface{}{"member_nodes": []string{"CFG-70-02", "CFG-AB-02"}}),
 			},
 		},
 		{
 			ID:       "steward-b",
 			TenantID: "default",
 			DNAAttributes: map[string]string{
-				"cluster:cfg-lab.member_nodes":       "CFG-70-02,CFG-AB-02",
-				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-				"cluster:cfg-lab.resource_owner.cno": "CFG-AB-02",
-				"hostname":                           "CFG-AB-02",
+				"hostname": "CFG-AB-02",
+			},
+			DNAFragments: []*commonpb.Fragment{
+				clusterFragment(t, "cfg-lab", map[string]string{
+					"csv": "CFG-70-02",
+					"cno": "CFG-AB-02",
+				}, map[string]interface{}{"member_nodes": []string{"CFG-70-02", "CFG-AB-02"}}),
 			},
 		},
 	}
@@ -80,7 +119,7 @@ func TestClusterRegistry_EmptyInput(t *testing.T) {
 	assert.Empty(t, reg.MemberClusters("any"))
 }
 
-func TestClusterRegistry_NoClusterKeys(t *testing.T) {
+func TestClusterRegistry_NoClusterFragments(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{
 			ID:       "steward-a",
@@ -89,6 +128,7 @@ func TestClusterRegistry_NoClusterKeys(t *testing.T) {
 				"hostname": "myhost",
 				"os":       "linux",
 			},
+			// No DNAFragments — steward is not a cluster member.
 		},
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
@@ -96,31 +136,29 @@ func TestClusterRegistry_NoClusterKeys(t *testing.T) {
 	assert.Empty(t, reg.MemberClusters("steward-a"))
 }
 
-func TestClusterRegistry_MalformedKeySkipped(t *testing.T) {
+func TestClusterRegistry_MalformedFragmentSkipped(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{
 			ID:       "steward-a",
 			TenantID: "default",
-			DNAAttributes: map[string]string{
-				// Malformed: no dot separator → should be silently skipped.
-				"cluster:badkey": "val",
-				// Malformed: empty cluster name → should be silently skipped.
-				"cluster:.member_nodes": "x",
-				// Valid key alongside the bad ones.
-				"cluster:cfg-lab.member_nodes":       "CFG-70-02",
-				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
+			DNAFragments: []*commonpb.Fragment{
+				// Malformed: empty cluster name (cluster: with no name after prefix).
+				{FragmentId: "cluster:", CanonicalBytes: []byte{0x00}},
+				// Malformed: non-cluster fragment — should be silently skipped.
+				{FragmentId: "host:cpu", CanonicalBytes: []byte{0x00}},
+				// Malformed: canonical bytes that cannot be decoded.
+				{FragmentId: "cluster:bad-bytes", CanonicalBytes: []byte{0xFF, 0xFF}},
+				// Valid cluster fragment alongside the bad ones.
+				clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}),
 			},
 		},
 	}
 	reg := clusterregistry.BuildRegistry(stewards)
 	clusters := reg.Clusters()
-	// Only the valid cluster should appear; malformed keys are silently dropped.
+	// Only the valid cluster should appear; malformed fragments are silently dropped.
 	assert.Len(t, clusters, 1)
 	_, ok := clusters["cfg-lab"]
 	assert.True(t, ok)
-	// Bad keys must not have leaked into the registry.
-	_, badPresent := clusters["badkey"]
-	assert.False(t, badPresent)
 }
 
 func TestClusterRegistry_MultipleClusters(t *testing.T) {
@@ -128,11 +166,9 @@ func TestClusterRegistry_MultipleClusters(t *testing.T) {
 		{
 			ID:       "steward-a",
 			TenantID: "default",
-			DNAAttributes: map[string]string{
-				"cluster:cfg-lab.member_nodes":        "CFG-70-02",
-				"cluster:cfg-lab.resource_owner.csv":  "CFG-70-02",
-				"cluster:cfg-prod.member_nodes":       "CFG-70-02",
-				"cluster:cfg-prod.resource_owner.cno": "CFG-70-02",
+			DNAFragments: []*commonpb.Fragment{
+				clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}),
+				clusterFragment(t, "cfg-prod", map[string]string{"cno": "CFG-70-02"}),
 			},
 		},
 	}
@@ -155,17 +191,16 @@ func TestClusterRegistry_MultipleClusters(t *testing.T) {
 }
 
 func TestClusterRegistry_StewardDeduplication(t *testing.T) {
-	// A steward with multiple cluster:name.* keys for the same cluster should
-	// appear exactly once as a member, even though multiple keys trigger it.
+	// A steward with a single cluster fragment — the registry must record it exactly once.
 	stewards := []fleet.StewardData{
 		{
 			ID:       "steward-a",
 			TenantID: "default",
-			DNAAttributes: map[string]string{
-				"cluster:cfg-lab.member_nodes":       "CFG-70-02",
-				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
-				"cluster:cfg-lab.resource_owner.cno": "CFG-70-02",
-				"cluster:cfg-lab.found":              "true",
+			DNAFragments: []*commonpb.Fragment{
+				clusterFragment(t, "cfg-lab", map[string]string{
+					"csv": "CFG-70-02",
+					"cno": "CFG-70-02",
+				}),
 			},
 		},
 	}
@@ -183,34 +218,36 @@ func TestClusterRegistry_Cluster_NotFound(t *testing.T) {
 
 // TestBuildRegistry_NonCNOSteward_HasClusterMembership is the AC5 acceptance
 // test for issue #2891. It verifies that clusterregistry.BuildRegistry correctly
-// includes non-CNO cluster members (stewards that carry cluster:* DNA produced
-// by the whole-domain observe path without a declared hyperv.cluster resource).
+// includes non-CNO cluster members (stewards that carry a cluster:* fragment
+// produced by the whole-domain observe path without owning any roles).
 //
 // Fixture: steward-1 is NODE1 (CNO owner), steward-2 is NODE2 (non-CNO member).
-// Both stewards publish cluster:cfg-lab.* DNA — steward-2 via observeLocalCluster
+// Both stewards publish cluster:cfg-lab fragments — steward-2 via observeLocalCluster
 // (no declared resource). The registry must list both as members.
 func TestBuildRegistry_NonCNOSteward_HasClusterMembership(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{
 			ID:       "steward-1",
 			TenantID: "default",
-			DNAAttributes: map[string]string{
-				// Produced by observeLocalCluster on the CNO owner (NODE1).
-				"cluster:cfg-lab.member_nodes":          "NODE1,NODE2",
-				"cluster:cfg-lab.cno_owner_node":        "NODE1",
-				"cluster:cfg-lab.found":                 "true",
-				"cluster:cfg-lab.resource_owner.web-01": "NODE1",
+			DNAFragments: []*commonpb.Fragment{
+				clusterFragment(t, "cfg-lab", map[string]string{"web-01": "NODE1"},
+					map[string]interface{}{
+						"member_nodes":   []string{"NODE1", "NODE2"},
+						"cno_owner_node": "NODE1",
+						"found":          true,
+					}),
 			},
 		},
 		{
 			ID:       "steward-2",
 			TenantID: "default",
-			DNAAttributes: map[string]string{
-				// Produced by observeLocalCluster on the non-CNO member (NODE2).
-				// No declared hyperv.cluster resource — pure domain observe output.
-				"cluster:cfg-lab.member_nodes":   "NODE1,NODE2",
-				"cluster:cfg-lab.cno_owner_node": "NODE1",
-				"cluster:cfg-lab.found":          "true",
+			DNAFragments: []*commonpb.Fragment{
+				// Non-CNO member: has a cluster fragment but no resource_owner entries.
+				memberOnlyFragment(t, "cfg-lab", map[string]interface{}{
+					"member_nodes":   []string{"NODE1", "NODE2"},
+					"cno_owner_node": "NODE1",
+					"found":          true,
+				}),
 			},
 		},
 	}
@@ -238,15 +275,18 @@ func TestBuildRegistry_NonCNOSteward_HasClusterMembership(t *testing.T) {
 }
 
 func TestClusterRegistry_RoleOwnerNotOverwrittenByNonOwnerField(t *testing.T) {
-	// Non resource_owner fields (e.g., member_nodes, found) must not pollute RoleOwners.
+	// Fragment has non-resource_owner fields (member_nodes, found) alongside csv.
+	// Only csv should appear in RoleOwners; the other fields are fragment payload, not roles.
 	stewards := []fleet.StewardData{
 		{
 			ID:       "steward-a",
 			TenantID: "default",
-			DNAAttributes: map[string]string{
-				"cluster:cfg-lab.member_nodes":       "CFG-70-02",
-				"cluster:cfg-lab.found":              "true",
-				"cluster:cfg-lab.resource_owner.csv": "CFG-70-02",
+			DNAFragments: []*commonpb.Fragment{
+				clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"},
+					map[string]interface{}{
+						"member_nodes": []string{"CFG-70-02"},
+						"found":        true,
+					}),
 			},
 		},
 	}

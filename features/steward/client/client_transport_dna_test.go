@@ -18,6 +18,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	dna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/features/steward/execution"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
@@ -25,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 // ---------------------------------------------------------------------------
@@ -65,6 +67,15 @@ func (s *inMemoryDNACollector) CollectAttributes(_ context.Context) (map[string]
 		out[k] = v
 	}
 	return out, nil
+}
+
+// CollectFragments satisfies the DNACollector fragment surface (#2908). This
+// collector is attribute-only by design (see the type comment): the fragment
+// wire path is covered end to end in
+// features/controller/transport/dna_handler_test.go and
+// cmd/steward/dna_adapter_test.go against the real producers.
+func (s *inMemoryDNACollector) CollectFragments(_ context.Context) []*commonpb.Fragment {
+	return nil
 }
 
 func (s *inMemoryDNACollector) setAttrs(attrs map[string]string) {
@@ -382,6 +393,137 @@ func TestSyncDNAHandler_SendsFullDNAOverDataPlane(t *testing.T) {
 		assert.Equal(t, "cmd-sync-dna-1", transfer.Metadata["command_id"])
 		assert.Equal(t, "2", transfer.Metadata["attr_count"])
 	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for sync_dna handler to call SendDNA")
+	}
+}
+
+// fragmentDNACollector is a real DNACollector that returns both attributes and
+// ADR-017 fragments. It is not a mock: the fragments it returns are built by the
+// production constructor dna.NewFragment (same code path *execution.Executor's
+// CollectModuleFragments uses), so canonical bytes and fragment hash are genuine.
+type fragmentDNACollector struct {
+	attrs map[string]string
+	frags []*commonpb.Fragment
+}
+
+func (f *fragmentDNACollector) CollectAttributes(_ context.Context) (map[string]string, error) {
+	out := make(map[string]string, len(f.attrs))
+	for k, v := range f.attrs {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (f *fragmentDNACollector) CollectFragments(_ context.Context) []*commonpb.Fragment {
+	return f.frags
+}
+
+// TestSyncDNAHandler_IncludesModuleFragments is the REQUIRED wiring test for
+// #2908: the sync_dna handler must carry the collector's ADR-017 fragments on the
+// DNATransfer. Before this wiring the full-sync path sent only flat attributes,
+// so DNA.Fragments was never populated on the controller and the cluster registry
+// (clusterregistry.BuildRegistry) was always empty in production.
+func TestSyncDNAHandler_IncludesModuleFragments(t *testing.T) {
+	// Build a genuine cluster fragment through the production constructor.
+	frag, err := dna.NewFragment("cluster:cfg-lab", "hyperv",
+		execution.NewConfigState(map[string]interface{}{
+			"name":           "cfg-lab",
+			"cno_owner_node": "CFG-70-02",
+			"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
+			"resource_owner": map[string]string{"web-01": "CFG-70-02"},
+		}))
+	require.NoError(t, err)
+	require.NotEmpty(t, frag.GetCanonicalBytes())
+
+	c := newMinimalClient(t)
+	c.stewardID = "steward-frag"
+	c.tenantID = "tenant-frag"
+
+	dnaAttrs := map[string]string{"hostname": "cfg-70-02", "os": "windows"}
+	c.dnaMu.Lock()
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
+	c.currentDNAHash = dna.ComputeHash(dnaAttrs)
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	c.dnaCollector = &fragmentDNACollector{attrs: dnaAttrs, frags: []*commonpb.Fragment{frag}}
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-frag")
+	require.NoError(t, err)
+
+	require.NoError(t, handler.HandleCommand(context.Background(), &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        "cmd-sync-dna-frag",
+			Type:      cpTypes.CommandSyncDNA,
+			StewardID: "steward-frag",
+			TenantID:  "tenant-frag",
+			Timestamp: time.Now(),
+			Params:    map[string]interface{}{},
+		},
+	}))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		require.NotNil(t, transfer)
+		require.Len(t, transfer.FragmentBytes, 1,
+			"the collector's fragment must ride the full-sync DNATransfer")
+		assert.Equal(t, "1", transfer.Metadata["fragment_count"])
+
+		// The wire bytes must proto-decode back to the exact fragment.
+		got := &commonpb.Fragment{}
+		require.NoError(t, proto.Unmarshal(transfer.FragmentBytes[0], got))
+		assert.Equal(t, "cluster:cfg-lab", got.GetFragmentId())
+		assert.Equal(t, "hyperv", got.GetAuthority())
+		assert.Equal(t, frag.GetCanonicalBytes(), got.GetCanonicalBytes())
+		assert.Equal(t, frag.GetFragmentHash(), got.GetFragmentHash())
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sync_dna handler to call SendDNA")
+	}
+}
+
+// TestSyncDNAHandler_NilCollector_NoFragments: with no DNA collector wired the
+// full sync still succeeds and simply carries no fragments (degrade-safe).
+func TestSyncDNAHandler_NilCollector_NoFragments(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-nofrag"
+	c.tenantID = "tenant-nofrag"
+
+	dnaAttrs := map[string]string{"hostname": "h", "os": "linux"}
+	c.dnaMu.Lock()
+	c.currentDNAAttrs = copyStringMap(dnaAttrs)
+	c.currentDNAHash = dna.ComputeHash(dnaAttrs)
+	c.dnaMu.Unlock()
+
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dataPlaneSession = sess
+	// dnaCollector intentionally nil
+	c.mu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-nofrag")
+	require.NoError(t, err)
+
+	require.NoError(t, handler.HandleCommand(context.Background(), &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        "cmd-sync-dna-nofrag",
+			Type:      cpTypes.CommandSyncDNA,
+			StewardID: "steward-nofrag",
+			TenantID:  "tenant-nofrag",
+			Timestamp: time.Now(),
+			Params:    map[string]interface{}{},
+		},
+	}))
+
+	select {
+	case transfer := <-sess.dnaSent:
+		require.NotNil(t, transfer)
+		assert.Empty(t, transfer.FragmentBytes, "no collector means no fragments")
+		assert.Equal(t, "0", transfer.Metadata["fragment_count"])
+		assert.NotEmpty(t, transfer.Attributes, "flat attributes must still be sent")
+	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for sync_dna handler to call SendDNA")
 	}
 }
@@ -1198,8 +1340,15 @@ func (c *fragmentAndAttrCollector) CollectAttributes(_ context.Context) (map[str
 	return c.attrs, nil
 }
 
-func (c *fragmentAndAttrCollector) CollectFragments(_ context.Context) ([]*commonpb.Fragment, error) {
+func (c *fragmentAndAttrCollector) CollectFragmentsTracked(_ context.Context) ([]*commonpb.Fragment, error) {
 	return c.fragments, nil
+}
+
+// CollectFragments satisfies DNACollector's best-effort fragment surface
+// (used by the sync_dna full-sync path); CollectFragmentsTracked above
+// satisfies the separate error-returning FragmentCollector extension.
+func (c *fragmentAndAttrCollector) CollectFragments(_ context.Context) []*commonpb.Fragment {
+	return c.fragments
 }
 
 var _ DNACollector = (*fragmentAndAttrCollector)(nil)
