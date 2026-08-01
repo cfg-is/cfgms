@@ -68,7 +68,7 @@ What becomes easier or harder by making this decision?
 | [019](019-third-party-module-inclusion-and-trust.md) | Third-Party Module Inclusion and Delegated Publisher Trust | 2026-07-04 | Proposed |
 | [020](020-dna-required-field-declaration.md) | DNA Required-Field Declaration — per-configuration-type contract, module-manifest sourced | 2026-07-13 | Accepted |
 | [021](021-identity-assurance-levels.md) | Identity Assurance Levels and Step-Up Authentication | 2026-07-16 | Accepted |
-| [025](025-tenant-access-boundary.md) | SaaS-Operator ↔ MSP Tenant Access Boundary | 2026-07-30 | Accepted |
+| [025](025-tenant-access-boundary.md) | SaaS-Operator ↔ MSP Tenant Access Boundary (incl. Amendment 1: ancestry-based boundary check, not path-prefix matching) | 2026-07-30 | Accepted |
 | [027](027-tenant-suspension-archive-and-cascading-deletion.md) | Tenant Suspension, Archive, and Cascading Deletion Lifecycle | 2026-07-31 | Accepted |
 
 ### Superseded/Deprecated
