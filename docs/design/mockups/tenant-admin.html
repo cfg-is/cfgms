@@ -1,0 +1,576 @@
+<style>
+  :root {
+    --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff;
+    --shadow:0 18px 50px -22px rgba(60,45,30,.4); --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){ :root{
+    --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a;
+    --shadow:0 22px 60px -26px rgba(0,0,0,.8); } }
+  :root[data-theme="light"]{ --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(60,45,30,.4); }
+  :root[data-theme="dark"]{ --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
+  *{box-sizing:border-box;}
+  body{margin:0; min-height:100dvh; background:var(--bg); color:var(--text); display:flex; flex-direction:column;
+    font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+  .topbar{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:11px 16px; background:var(--chrome);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5;}
+  .brand{display:flex; align-items:baseline; gap:8px; margin-right:auto;}
+  .brand b{font-size:14px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;}
+  .brand span{font-size:11px; color:var(--text-dim); letter-spacing:.04em;}
+  .seg{display:inline-flex; position:relative; background:var(--chrome-2); border:1px solid var(--border); border-radius:10px; padding:3px;}
+  .seg button{position:relative; z-index:1; appearance:none; border:0; background:transparent; color:var(--text-dim);
+    font:inherit; font-size:12.5px; font-weight:600; padding:6px 13px; border-radius:7px; cursor:pointer; transition:color .18s ease;}
+  .seg button[aria-pressed="true"]{color:var(--accent-ink);}
+  .seg .thumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); background:var(--accent); border-radius:7px;
+    transition:transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index:0;}
+  .seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .dims{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; color:var(--text-dim);
+    font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .stage{flex:1; display:flex; align-items:flex-start; justify-content:center; padding:22px 16px 30px; overflow:auto;}
+  .frame-wrap{position:relative; margin:0 auto; border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow);
+    border:1px solid var(--border); background:var(--chrome); transition:width .22s ease, height .22s ease;}
+  .frame{display:block; border:0; transform-origin:0 0; background:transparent;}
+  .hint{text-align:center; color:var(--text-dim); font-size:12.5px; line-height:1.6; padding:0 20px 30px; max-width:760px; margin:0 auto;}
+  .hint b{color:var(--text);}
+</style>
+
+<div class="topbar">
+  <div class="brand"><b>CFGMS</b><span>tenant admin — cascade lifecycle &amp; access boundary</span></div>
+  <div class="seg" role="group" aria-label="Preview viewport">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-dev="desktop" aria-pressed="true">Desktop</button>
+    <button data-dev="tablet" aria-pressed="false">Tablet</button>
+    <button data-dev="mobile" aria-pressed="false">Mobile</button>
+  </div>
+  <div class="seg themeseg" role="group" aria-label="Theme">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="dims" id="dims">—</div>
+</div>
+
+<div class="stage">
+  <div class="frame-wrap" id="wrap"><iframe class="frame" id="frame" title="CFGMS tenant admin mockup"></iframe></div>
+</div>
+
+<p class="hint">
+  <b>Tenant admin</b> (Issue #3131) — built against <b>ADR-025</b> (SaaS-operator ↔ MSP access
+  boundary) and <b>ADR-027</b> (cascade suspend/restore + Suspend→Hold→Delete pipeline). Use the
+  <b>Session</b> switcher inside the frame: <b>MSP admin</b> shows the full cascade-suspend and
+  delete-pipeline demo inside one MSP's own subtree; <b>Root — no grant</b> shows the ADR-025
+  boundary/empty state; <b>Root — break-glass active</b> shows the same subtree unlocked under a
+  time-boxed, audited elevation. In the MSP admin view: <b>Restore</b> on <code>client-2</code>
+  demonstrates that an independently-suspended descendant survives an ancestor restore;
+  <b>Request delete</b> on <code>client-3</code> demonstrates the "not fully suspended" rejection;
+  <code>client-4</code> shows the hold countdown; <code>client-5</code> shows the dual-control
+  approve step (toggle "I requested this" to see it lock). Both themes.
+</p>
+
+<script>
+  const DEVICES = { desktop:{w:1360,h:960}, tablet:{w:900,h:1100}, mobile:{w:390,h:960} };
+  let current = "desktop", themeMode = "auto";
+  const frame = document.getElementById("frame"), wrap = document.getElementById("wrap");
+  const stage = document.querySelector(".stage"), dims = document.getElementById("dims");
+  const devSeg = document.querySelector(".seg:not(.themeseg)"), themeSeg = document.querySelector(".themeseg");
+  const devBtns = [...devSeg.querySelectorAll("button")], themeBtns = [...themeSeg.querySelectorAll("button")];
+  function posThumb(seg){ const t=seg.querySelector(".thumb"); const a=seg.querySelector('button[aria-pressed="true"]')||seg.querySelector("button"); t.style.width=a.offsetWidth+"px"; t.style.transform="translateX("+(a.offsetLeft-3)+"px)"; }
+
+  const MOCK_CSS = `
+    :root{
+      --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
+      --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+      --accent:#4a6b7c; --accent-ink:#ffffff;
+      --state-ok:#507055; --state-ok-bg:#e8f0e9; --state-warn:#8f4f2e; --state-warn-bg:#f7e8db;
+      --state-crit:#965044; --state-crit-bg:#f2e5e3; --state-neutral:#6b5c4d; --state-neutral-bg:#e8e0d8;
+      --radius:9px; --radius-sm:7px; --radius-lg:13px; --radius-pill:20px;
+    }
+    :root[data-theme="dark"]{
+      --bg-primary:#1a1a1a; --bg-surface:#242426; --bg-elevated:#31313a; --bg-sunk:#101010; --border:#52525c;
+      --text-primary:#c8b8a6; --text-secondary:#a89888; --text-faint:#9a8974;
+      --accent:#7b9fb0; --accent-ink:#16202a;
+      --state-ok:#7fa985; --state-ok-bg:#1a2e1d; --state-warn:#d4864f; --state-warn-bg:#332518;
+      --state-crit:#d0846f; --state-crit-bg:#2d1f1c; --state-neutral:#a89888; --state-neutral-bg:#2a2520;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0; height:100%;}
+    body{background:var(--bg-primary); color:var(--text-primary); font-size:13.5px; line-height:1.45;
+      font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+    .mono{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace;}
+    .content{padding:20px 24px 40px; display:flex; flex-direction:column; gap:14px; max-width:1120px; margin:0 auto;}
+    .htitle{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+    .htitle h1{margin:0; font-size:19px; font-weight:700; letter-spacing:-.01em;}
+    .htitle p{margin:3px 0 0; color:var(--text-secondary); font-size:13.5px;}
+
+    .sessseg{display:inline-flex; position:relative; background:var(--bg-surface); border:1px solid var(--border);
+      border-radius:10px; padding:3px; flex:none;}
+    .sessseg button{position:relative; z-index:1; appearance:none; border:0; background:transparent; color:var(--text-faint);
+      font:inherit; font-size:11.5px; font-weight:600; padding:7px 12px; border-radius:7px; cursor:pointer; white-space:nowrap;}
+    .sessseg button.active{color:var(--accent-ink);}
+    .sessseg .sthumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); background:var(--accent); border-radius:7px;
+      transition:transform .2s ease, width .2s ease; z-index:0;}
+    .whoami{font-size:11px; color:var(--text-faint);}
+    .whoami b{color:var(--text-secondary); font-family:'JetBrains Mono',Menlo,monospace; font-weight:600;}
+
+    .bgbanner{display:flex; align-items:center; gap:10px; padding:9px 14px; border-radius:var(--radius);
+      background:var(--state-warn-bg); border:1px solid var(--state-warn); color:var(--state-warn); font-size:12.5px;}
+    .bgbanner b{font-weight:700;}
+    .bgbanner .timer{font-family:'JetBrains Mono',Menlo,monospace; font-variant-numeric:tabular-nums; font-weight:700;}
+    .bgbanner .end{margin-left:auto; appearance:none; border:1px solid var(--state-warn); background:transparent;
+      color:var(--state-warn); font:inherit; font-size:11.5px; font-weight:600; padding:5px 11px; border-radius:7px; cursor:pointer;}
+
+    .panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+    .ptool{display:flex; align-items:center; gap:9px; padding:10px 13px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+    .ptool .cnt{margin-left:auto; font-size:11.5px; color:var(--text-faint); font-variant-numeric:tabular-nums;}
+
+    table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+    .tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint);
+      font-weight:600; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+    .tbl td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top;}
+    .tbl tbody tr:last-child > td, .tbl tbody tr.lastrow > td{border-bottom:0;}
+    .tbl tbody tr:hover > td{background:var(--bg-elevated);}
+
+    .treecell{display:flex; align-items:center; gap:8px; white-space:nowrap;}
+    .indent{flex:none;}
+    .nm{font-family:'JetBrains Mono',Menlo,monospace; font-size:12.5px; font-weight:600;}
+    .path{color:var(--text-faint); font-size:11px;}
+    .devcount{color:var(--text-secondary); font-size:12px; font-variant-numeric:tabular-nums;}
+
+    .pill{display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:var(--radius-pill);
+      font-size:11px; font-weight:700; white-space:nowrap;}
+    .pill-ok{background:var(--state-ok-bg); color:var(--state-ok);}
+    .pill-susp{background:var(--state-neutral-bg); color:var(--state-neutral);}
+    .pill-warn{background:var(--state-warn-bg); color:var(--state-warn);}
+    .pill-crit{background:var(--state-crit-bg); color:var(--state-crit);}
+    .prov{display:block; margin-top:3px; font-size:10.5px; color:var(--text-faint);}
+    .prov b{color:var(--text-secondary); font-weight:600;}
+
+    .rowacts{display:flex; gap:6px; flex-wrap:wrap;}
+    .wf-btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink);
+      font:inherit; font-size:11px; font-weight:600; padding:5px 11px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn:disabled{opacity:.45; cursor:not-allowed;}
+    .wf-btn-secondary{appearance:none; border:1px solid var(--border); background:transparent; color:var(--text-secondary);
+      font:inherit; font-size:11px; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit);
+      font:inherit; font-size:11px; font-weight:600; padding:5px 11px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn-ghost{appearance:none; border:1px dashed var(--border); background:transparent; color:var(--text-faint);
+      font:inherit; font-size:11px; padding:5px 10px; border-radius:var(--radius-sm); cursor:not-allowed; white-space:nowrap;}
+
+    .subrow > td{background:var(--bg-sunk); padding:0;}
+    .subrow-inner{padding:10px 14px 12px 14px;}
+
+    .msg-crit{display:flex; align-items:flex-start; gap:8px; margin-top:8px; padding:9px 11px; border-radius:8px;
+      background:var(--state-crit-bg); color:var(--state-crit); font-size:12px;}
+    .msg-crit b{font-family:'JetBrains Mono',Menlo,monospace;}
+    .msg-crit svg{flex:none; margin-top:1px;}
+
+    .hold-card{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:9px 11px; border-radius:8px;
+      background:var(--state-warn-bg); color:var(--state-warn); font-size:12px;}
+    .hold-card .clock{font-family:'JetBrains Mono',Menlo,monospace; font-weight:700; font-variant-numeric:tabular-nums; font-size:13px;}
+
+    .elig-card{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:9px 11px; border-radius:8px;
+      background:var(--state-crit-bg); color:var(--state-crit); font-size:12px;}
+    .elig-card .who{color:var(--text-secondary); font-size:11.5px;}
+    .elig-card .who b{font-family:'JetBrains Mono',Menlo,monospace; color:var(--text-primary);}
+    .selfchk{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-faint); margin-left:auto;}
+    .selfchk input{accent-color:var(--accent);}
+
+    /* boundary / empty state */
+    .boundary-row > td{background:var(--bg-sunk);}
+    .boundary{display:flex; align-items:center; gap:12px; padding:8px 2px;}
+    .boundary .lock{flex:none; width:30px; height:30px; border-radius:8px; background:var(--state-neutral-bg);
+      color:var(--state-neutral); display:grid; place-items:center;}
+    .boundary .btext{flex:1; min-width:0;}
+    .boundary .btext .t1{font-weight:600; font-size:12.5px;}
+    .boundary .btext .t2{color:var(--text-faint); font-size:11.5px; margin-top:2px;}
+    .boundary-empty{display:flex; flex-direction:column; align-items:center; gap:12px; padding:52px 20px; text-align:center;}
+    .boundary-empty .lock{width:44px; height:44px; border-radius:12px; background:var(--state-neutral-bg); color:var(--state-neutral);
+      display:grid; place-items:center;}
+    .boundary-empty h3{margin:0; font-size:15px; font-weight:700;}
+    .boundary-empty p{margin:0; max-width:440px; color:var(--text-secondary); font-size:12.5px; line-height:1.55;}
+    .boundary-empty .actrow{display:flex; gap:8px; margin-top:4px; flex-wrap:wrap; justify-content:center;}
+
+    .toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(10px); opacity:0; pointer-events:none;
+      background:var(--bg-elevated); border:1px solid var(--border); color:var(--text-primary); padding:9px 16px; border-radius:9px;
+      font-size:12.5px; font-weight:600; box-shadow:0 8px 24px rgba(0,0,0,.2); transition:opacity .18s ease, transform .18s ease; z-index:120; max-width:88vw;}
+    .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+    @media (max-width:700px){
+      .tbl thead{display:none;}
+      .tbl td{padding:8px 10px;}
+      .tbl td:not(:first-child){padding-left:26px;}
+      .rowacts{width:100%;}
+      .htitle{flex-direction:column;}
+      .elig-card .selfchk{margin-left:0; width:100%;}
+    }
+  `;
+
+  const LOCK_ICO = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+  const LOCK_ICO_LG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+  const WARN_ICO = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>';
+
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // ---- seed data: one MSP's subtree, each branch demonstrating one ADR-027 concern ----
+  function seedTree(){
+    return [
+      { id:'msp-a', parent:null, name:'msp-a', path:'root/msp-a', depth:0, devices:214, direct:false, cascadeFrom:null, del:null },
+      { id:'client-1', parent:'msp-a', name:'client-1', path:'root/msp-a/client-1', depth:1, devices:0, direct:false, cascadeFrom:null, del:null },
+      { id:'client-2', parent:'msp-a', name:'client-2', path:'root/msp-a/client-2', depth:1, devices:0, direct:true, cascadeFrom:null, del:null },
+      { id:'c2-fin', parent:'client-2', name:'finance-servers', path:'root/msp-a/client-2/finance-servers', depth:2, devices:18, direct:true, cascadeFrom:'client-2', del:null },
+      { id:'c2-wk', parent:'client-2', name:'workstations', path:'root/msp-a/client-2/workstations', depth:2, devices:64, direct:false, cascadeFrom:'client-2', del:null },
+      { id:'client-3', parent:'msp-a', name:'client-3', path:'root/msp-a/client-3', depth:1, devices:0, direct:true, cascadeFrom:null, del:null },
+      { id:'c3-dev', parent:'client-3', name:'dev-servers', path:'root/msp-a/client-3/dev-servers', depth:2, devices:9, direct:false, cascadeFrom:null, del:null },
+      { id:'client-4', parent:'msp-a', name:'client-4', path:'root/msp-a/client-4', depth:1, devices:31,
+        direct:true, cascadeFrom:null,
+        del:{ state:'hold', requestedBy:'msp-a-ops', requestedAt:'2026-07-24', eligibleInMs: 1000*60*60*24*11 + 1000*60*60*6 } },
+      { id:'client-5', parent:'msp-a', name:'client-5', path:'root/msp-a/client-5', depth:1, devices:47,
+        direct:true, cascadeFrom:null,
+        del:{ state:'eligible', requestedBy:'msp-a-owner', requestedAt:'2026-06-28' } },
+    ];
+  }
+
+  const CURRENT_USER = 'msp-a-ops';
+  let tree = seedTree();
+  let expanded = {};
+  let rejectMsg = {}; // id -> message
+  let selfApprove = false; // demo toggle for client-5's dual-control lock
+  let session = 'msp'; // 'msp' | 'root-nogrant' | 'root-bg'
+  let bgSecondsLeft = 3*3600 + 42*60;
+
+  function byId(id){ return tree.filter(function(n){ return n.id===id; })[0]; }
+  function children(id){ return tree.filter(function(n){ return n.parent===id; }); }
+  function descendants(id){
+    var out = [];
+    children(id).forEach(function(c){ out.push(c); out = out.concat(descendants(c.id)); });
+    return out;
+  }
+  function isSuspended(n){ return n.direct || !!n.cascadeFrom; }
+  function subtreeIds(id){ return [id].concat(descendants(id).map(function(n){ return n.id; })); }
+  function subtreeFullySuspended(id){ return subtreeIds(id).every(function(nid){ return isSuspended(byId(nid)); }); }
+  function firstUnsuspendedDescendant(id){
+    var d = descendants(id).filter(function(n){ return !isSuspended(n); });
+    return d.length ? d[0] : null;
+  }
+
+  function fmtDur(ms){
+    if (ms<=0) return '0m';
+    var d = Math.floor(ms/86400000); ms -= d*86400000;
+    var h = Math.floor(ms/3600000); ms -= h*3600000;
+    var m = Math.floor(ms/60000);
+    return (d>0?d+'d ':'')+(h>0||d>0?h+'h ':'')+m+'m';
+  }
+  function fmtClock(sec){
+    var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+    function p(x){ return String(x).padStart(2,'0'); }
+    return p(h)+':'+p(m)+':'+p(s);
+  }
+
+  function suspensionPillHtml(n){
+    if (!isSuspended(n)) return '<span class="pill pill-ok">Active</span>';
+    var provBits = [];
+    if (n.direct) provBits.push('Direct');
+    if (n.cascadeFrom) provBits.push('Cascade from <b>'+esc(byId(n.cascadeFrom).name)+'</b>');
+    return '<span class="pill pill-susp">Suspended</span><span class="prov">'+provBits.join(' + ')+'</span>';
+  }
+
+  function delBadge(n){
+    if (!n.del) return '';
+    if (n.del.state==='hold') return '<span class="pill pill-warn">Delete: Hold</span>';
+    if (n.del.state==='eligible') return '<span class="pill pill-crit">Delete: Eligible</span>';
+    return '';
+  }
+
+  function rowActionsHtml(n){
+    var acts = [];
+    if (n.del && n.del.state==='hold'){
+      acts.push('<button class="wf-btn-secondary" data-cancel-del="'+n.id+'">Cancel delete</button>');
+    } else if (n.del && n.del.state==='eligible'){
+      var locked = selfApprove && n.del.requestedBy===CURRENT_USER;
+      acts.push('<button class="wf-btn-danger" data-approve-del="'+n.id+'"'+(locked?' disabled title="You requested this deletion — a different principal must approve"':'')+'>Approve deletion</button>');
+      acts.push('<button class="wf-btn-secondary" data-cancel-del="'+n.id+'">Deny</button>');
+    } else {
+      if (isSuspended(n)) {
+        acts.push('<button class="wf-btn-secondary" data-restore="'+n.id+'">Restore'+(descendants(n.id).length?' subtree':'')+'</button>');
+        acts.push('<button class="wf-btn-secondary" data-request-del="'+n.id+'">Request delete</button>');
+      } else {
+        acts.push('<button class="wf-btn-secondary" data-suspend="'+n.id+'">Suspend'+(descendants(n.id).length?' subtree':'')+'</button>');
+      }
+    }
+    return '<div class="rowacts">'+acts.join('')+'</div>';
+  }
+
+  function rowHtml(n){
+    var kids = children(n.id);
+    var out = '<tr class="'+(n.depth===0?'':'')+'" data-row="'+n.id+'">'
+      + '<td><div class="treecell"><span class="indent" style="width:'+(n.depth*18)+'px; display:inline-block;"></span>'
+      +   '<span class="nm">'+esc(n.name)+'</span></div><div class="path">'+esc(n.path)+'</div></td>'
+      + '<td><span class="devcount">'+(n.devices? n.devices.toLocaleString()+' devices' : (kids.length? '—' : '0 devices'))+'</span></td>'
+      + '<td>'+suspensionPillHtml(n)+(delBadge(n)?'<br>'+delBadge(n):'')+'</td>'
+      + '<td>'+rowActionsHtml(n)+'</td>'
+      + '</tr>';
+    if (rejectMsg[n.id] || (n.del && n.del.state==='hold') || (n.del && n.del.state==='eligible')){
+      out += subrowHtml(n);
+    }
+    kids.forEach(function(c){ out += rowHtml(c); });
+    return out;
+  }
+
+  function subrowHtml(n){
+    var inner = '';
+    if (rejectMsg[n.id]){
+      inner += '<div class="msg-crit">'+WARN_ICO+'<span>'+rejectMsg[n.id]+'</span></div>';
+    }
+    if (n.del && n.del.state==='hold'){
+      inner += '<div class="hold-card"><span>Deletion requested by <b class="mono">'+esc(n.del.requestedBy)+'</b> on '+n.del.requestedAt+'.</span>'
+        + '<span class="clock" id="clock-'+n.id+'">Eligible in '+fmtDur(n.del.eligibleInMs)+'</span></div>';
+    }
+    if (n.del && n.del.state==='eligible'){
+      inner += '<div class="elig-card"><span>Hold period elapsed — ready for terminal delete. <span class="who">Requested by <b>'+esc(n.del.requestedBy)+'</b> on '+n.del.requestedAt+'.</span></span>'
+        + '<label class="selfchk"><input type="checkbox" id="selfchk-'+n.id+'"'+(selfApprove?' checked':'')+'> Simulate: I am '+esc(n.del.requestedBy)+'</label></div>';
+    }
+    return '<tr class="subrow"><td colspan="4"><div class="subrow-inner">'+inner+'</div></td></tr>';
+  }
+
+  function boundaryRowHtml(n, grant){
+    if (grant) return rowHtml(n);
+    return '<tr class="boundary-row"><td colspan="4"><div class="boundary">'
+      + '<span class="lock">'+LOCK_ICO+'</span>'
+      + '<div class="btext"><div class="t1">'+esc(n.path)+' — access boundary</div>'
+      + '<div class="t2">No active client-granted access or break-glass session into this MSP\'s subtree. '
+      + (n.devices? n.devices.toLocaleString()+' devices, ' : '')+(descendants(n.id).length+1)+' tenants hidden.</div></div>'
+      + '<button class="wf-btn-ghost" title="Break-glass invocation — separate story">Request break-glass →</button>'
+      + '</div></td></tr>';
+  }
+
+  function renderTable(){
+    var tbody = document.getElementById('tbody');
+    if (session==='msp'){
+      tbody.innerHTML = rowHtml(byId('msp-a'));
+    } else if (session==='root-nogrant'){
+      tbody.innerHTML =
+        '<tr><td><div class="treecell"><span class="nm">root</span></div><div class="path">root</div></td>'
+        + '<td><span class="devcount">—</span></td><td><span class="pill pill-ok">Active</span></td><td></td></tr>'
+        + boundaryRowHtml(byId('msp-a'), false)
+        + boundaryRowHtml({id:'msp-b-stub', path:'root/msp-b', devices:186}, false);
+    } else if (session==='root-bg'){
+      tbody.innerHTML =
+        '<tr><td><div class="treecell"><span class="nm">root</span></div><div class="path">root</div></td>'
+        + '<td><span class="devcount">—</span></td><td><span class="pill pill-ok">Active</span></td><td></td></tr>'
+        + rowHtml(byId('msp-a'))
+        + boundaryRowHtml({id:'msp-b-stub', path:'root/msp-b', devices:186}, false);
+    }
+  }
+
+  function updateBanner(){
+    var el = document.getElementById('sessbody');
+    var banner = document.getElementById('bgbanner');
+    if (session==='root-bg'){
+      banner.style.display = 'flex';
+      document.getElementById('bgtimer').textContent = fmtClock(bgSecondsLeft);
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+
+  function renderEmptyNotice(){
+    var wrap = document.getElementById('emptywrap');
+    if (session==='root-nogrant'){
+      wrap.style.display = 'block';
+      wrap.innerHTML = '<div class="panel"><div class="boundary-empty">'
+        + '<span class="lock">'+LOCK_ICO_LG+'</span>'
+        + '<h3>No default access into MSP tenants</h3>'
+        + '<p>Per ADR-025, a root-scoped session has no standing visibility into an MSP\'s subtree. '
+        + 'The tenants above are walled off until the MSP grants support access from inside their own '
+        + 'tenant, or you invoke a time-boxed, justified break-glass session — both are logged and '
+        + 'visible to the MSP.</p>'
+        + '<div class="actrow"><button class="wf-btn-ghost" title="Separate story">Request break-glass →</button>'
+        + '<span class="whoami">Preferred path: ask the MSP to enable "Allow support access" in their own tenant.</span></div>'
+        + '</div></div>';
+    } else {
+      wrap.style.display = 'none';
+      wrap.innerHTML = '';
+    }
+  }
+
+  function toast(msg){
+    var el = document.getElementById('toast');
+    el.textContent = msg; el.classList.add('show');
+    setTimeout(function(){ el.classList.remove('show'); }, 2200);
+  }
+
+  function renderAll(){
+    renderTable();
+    updateBanner();
+    document.querySelectorAll('.sessseg button').forEach(function(b){
+      b.classList.toggle('active', b.getAttribute('data-sess')===session);
+    });
+    var thumb = document.querySelector('.sessseg .sthumb');
+    var active = document.querySelector('.sessseg button.active');
+    if (thumb && active){ thumb.style.width = active.offsetWidth+'px'; thumb.style.transform = 'translateX('+active.offsetLeft+'px)'; }
+    document.getElementById('mainpanel').style.display = (session==='root-nogrant') ? 'none' : 'block';
+    renderEmptyNotice();
+  }
+
+  const MOCK_HTML = `
+    <div class="content">
+      <div class="htitle">
+        <div><h1>Tenants</h1><p>Tenant hierarchy, cascade suspension, and the delete pipeline.</p></div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <div class="sessseg" role="group" aria-label="Session">
+            <span class="sthumb" aria-hidden="true"></span>
+            <button data-sess="msp" class="active">MSP admin</button>
+            <button data-sess="root-nogrant">Root — no grant</button>
+            <button data-sess="root-bg">Root — break-glass active</button>
+          </div>
+          <span class="whoami" id="whoami">Signed in as <b>${CURRENT_USER}</b></span>
+        </div>
+      </div>
+
+      <div id="bgbanner" class="bgbanner" style="display:none;">
+        <span>${WARN_ICO}</span>
+        <span><b>Break-glass access active</b> — root/msp-a · reason: "customer escalation INC-4821"</span>
+        <span class="timer">expires in <span id="bgtimer">03:42:00</span></span>
+        <button class="end" id="bg-end">End session</button>
+      </div>
+
+      <div id="emptywrap"></div>
+
+      <div class="panel" id="mainpanel">
+        <div class="ptool"><span class="cnt" id="tenant-count">root/msp-a subtree — 9 tenants</span></div>
+        <table class="tbl">
+          <thead><tr><th>Tenant</th><th>Devices</th><th>Status</th><th></th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  `;
+
+  const MOCK_JS = `
+    var LOCK_ICO = ${JSON.stringify(LOCK_ICO)};
+    var LOCK_ICO_LG = ${JSON.stringify(LOCK_ICO_LG)};
+    var WARN_ICO = ${JSON.stringify(WARN_ICO)};
+    var CURRENT_USER = ${JSON.stringify(CURRENT_USER)};
+    var tree = ${JSON.stringify(seedTree())};
+    var rejectMsg = {};
+    var selfApprove = false;
+    var session = 'msp';
+    var bgSecondsLeft = ${bgSecondsLeft};
+
+    ${esc.toString()}
+    ${byId.toString()}
+    ${children.toString()}
+    ${descendants.toString()}
+    ${isSuspended.toString()}
+    ${subtreeIds.toString()}
+    ${subtreeFullySuspended.toString()}
+    ${firstUnsuspendedDescendant.toString()}
+    ${fmtDur.toString()}
+    ${fmtClock.toString()}
+    ${suspensionPillHtml.toString()}
+    ${delBadge.toString()}
+    ${rowActionsHtml.toString()}
+    ${rowHtml.toString()}
+    ${subrowHtml.toString()}
+    ${boundaryRowHtml.toString()}
+    ${renderTable.toString()}
+    ${updateBanner.toString()}
+    ${renderEmptyNotice.toString()}
+    ${toast.toString()}
+    ${renderAll.toString()}
+
+    document.body.addEventListener('click', function(e){
+      var b;
+      if (b = e.target.closest('button[data-suspend]')){
+        var n = byId(b.getAttribute('data-suspend'));
+        n.direct = true;
+        descendants(n.id).forEach(function(d){ d.cascadeFrom = n.id; });
+        toast('Suspended '+n.path+' and its subtree');
+        renderAll(); return;
+      }
+      if (b = e.target.closest('button[data-restore]')){
+        var n = byId(b.getAttribute('data-restore'));
+        var stayed = [];
+        n.direct = false;
+        descendants(n.id).forEach(function(d){
+          if (d.cascadeFrom === n.id) d.cascadeFrom = null;
+          if (isSuspended(d)) stayed.push(d.name);
+        });
+        toast(stayed.length ? 'Restored '+n.path+' — '+stayed.join(', ')+' independently suspended, unaffected' : 'Restored '+n.path+' and its subtree');
+        renderAll(); return;
+      }
+      if (b = e.target.closest('button[data-request-del]')){
+        var n = byId(b.getAttribute('data-request-del'));
+        if (!subtreeFullySuspended(n.id)){
+          var off = firstUnsuspendedDescendant(n.id);
+          rejectMsg[n.id] = 'Cannot request deletion — <b>'+esc(off.path)+'</b> is not suspended. Suspend the entire subtree first.';
+          toast('Delete rejected — subtree not fully suspended');
+        } else {
+          rejectMsg[n.id] = null;
+          n.del = { state:'hold', requestedBy:CURRENT_USER, requestedAt:'today', eligibleInMs: 1000*60*60*24*30 };
+          toast('Delete requested — hold period started');
+        }
+        renderAll(); return;
+      }
+      if (b = e.target.closest('button[data-cancel-del]')){
+        var n = byId(b.getAttribute('data-cancel-del'));
+        n.del = null;
+        toast('Deletion cancelled — '+n.path+' returned to Suspended');
+        renderAll(); return;
+      }
+      if (b = e.target.closest('button[data-approve-del]')){
+        var n = byId(b.getAttribute('data-approve-del'));
+        toast('Approved — '+n.path+' and its subtree permanently deleted');
+        tree = tree.filter(function(t){ return subtreeIds(n.id).indexOf(t.id)===-1; });
+        renderAll(); return;
+      }
+      if (b = e.target.closest('.sessseg button')){
+        session = b.getAttribute('data-sess');
+        renderAll(); return;
+      }
+      if (b = e.target.closest('#bg-end')){
+        session = 'root-nogrant';
+        toast('Break-glass session ended');
+        renderAll(); return;
+      }
+    });
+    document.body.addEventListener('change', function(e){
+      if (e.target.id && e.target.id.indexOf('selfchk-')===0){
+        selfApprove = e.target.checked;
+        renderAll();
+      }
+    });
+
+    setInterval(function(){
+      if (session==='root-bg' && bgSecondsLeft>0){ bgSecondsLeft--; updateBanner(); }
+    }, 1000);
+
+    renderAll();
+  `;
+
+  function currentTheme(){ if(themeMode!=="auto") return themeMode; const d=document.documentElement.getAttribute("data-theme"); return d || (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"); }
+  function srcdoc(t){ return '<!doctype html><html lang="en" data-theme="'+t+'"><head><meta charset="utf-8">'+
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><style>'+MOCK_CSS+'</style></head><body>'+
+    MOCK_HTML+'<script>'+MOCK_JS+'<\/script></body></html>'; }
+  function layout(){ const d=DEVICES[current]; frame.style.width=d.w+"px"; frame.style.height=d.h+"px";
+    const avail=stage.clientWidth-32; const s=Math.min(1,avail/d.w); frame.style.transform="scale("+s+")";
+    wrap.style.width=(d.w*s)+"px"; wrap.style.height=(d.h*s)+"px"; dims.textContent=d.w+" × "+d.h+" · "+Math.round(s*100)+"%"; }
+  function render(){ frame.srcdoc=srcdoc(currentTheme()); layout(); }
+  devBtns.forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.dev;
+    devBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(devSeg); layout(); }));
+  themeBtns.forEach(b=>b.addEventListener("click",()=>{ themeMode=b.dataset.themeMode;
+    themeBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(themeSeg);
+    if(themeMode==="auto"){ document.documentElement.removeAttribute("data-theme"); render(); }
+    else { document.documentElement.setAttribute("data-theme",themeMode); } }));
+  new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{ if(themeMode==="auto") render(); });
+  window.addEventListener("resize",()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); });
+  window.addEventListener("orientationchange",()=>setTimeout(()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); },200));
+  render(); posThumb(devSeg); posThumb(themeSeg);
+</script>
