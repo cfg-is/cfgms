@@ -208,9 +208,14 @@ For each `acceptance-review <PR_NUM>`:
       Refusal reasons and recovery:
       - `pr_not_found` / `pr_state_<X>` — PR is closed/merged or doesn't exist
       - `fork_branch_<owner>` — PR is from a fork; reviews of fork PRs aren't supported (no push rights)
+      - `external_author_<login>:<trust>` — PR author isn't a trusted push+/maintain/admin collaborator (Issue #1786); a quarantine comment is posted automatically. A maintainer must apply `human-reviewed:ok` (see `docs/development/external-contributors.md`) before it's picked up again.
       - `no_story_link` — PR has no `Fixes #N` and no `feature/story-N` branch; manually associate or skip
-      - `already_in_flight` — review container `cfg-agent-review-pr-<N>` already exists; another review is running. Use `/isoagents` to check on it.
-      - `container_exists` — a stale container exists; run `./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews` first
+      - `no_project_item_for_story_<N>` — story number resolved but no matching project item was found; check the project board for the story
+      - `already_in_flight` — review container `cfg-agent-review-pr-<N>` is still running; another review is genuinely in progress. Use `/isoagents` to check on it — do not run cleanup.
+      - `container_exists` — a review container for this PR exists but has exited (crashed or was killed); run `./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews` first, then retry
+      - `resources` — host resource admission gate is full (RAM/disk/CPU); the reviewer will be picked up next cycle or by a host with capacity
+      - `lease_held` — another host is already reviewing/fixing/rebasing this PR (the cross-host `pr-<N>` lease is held); wait for it to release
+      - `lease_error` — lease acquisition failed unexpectedly (e.g. lease-store unavailable); check `./scripts/pipeline-helper.sh lease-acquire` directly
 
    d. **Tell the user**:
       "Acceptance Reviewer dispatched headless for PR #<NUM>. Container: cfg-agent-review-pr-<NUM>. The review comment will appear on the PR when it's done (~5-15 min). Use `/isoagents` to check progress."

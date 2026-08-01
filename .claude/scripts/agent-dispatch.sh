@@ -628,6 +628,25 @@ sanitize_branch() {
   echo "$1" | sed 's|/|--|g'
 }
 
+# Classify an existing cfg-agent-review-pr-<N> container's `docker ps`
+# `.State` value into the REVIEW_REFUSED reason review-pr should emit.
+#
+# Args: <docker_state>  (e.g. "running", "exited", "restarting", "created")
+# Stdout: "already_in_flight" (still alive — caller should just wait) or
+#   "container_exists" (leftover from a crash — caller should run
+#   `cleanup-stale-reviews` first)
+#
+# Split out so the running-vs-leftover distinction is a plain lookup instead
+# of an inline conditional a caller has to re-derive from `docker ps` output —
+# and so it's unit-testable without a live docker daemon.
+_classify_review_container_state() {
+  local state="$1"
+  case "$state" in
+    running|restarting|created) echo "already_in_flight" ;;
+    *)                          echo "container_exists" ;;
+  esac
+}
+
 # Resolve which story or project item a PR belongs to from its branch name
 # and body. Branch name is authoritative; body extraction is a legacy fallback
 # only used when the branch follows neither the story- nor item- convention.
@@ -2007,8 +2026,9 @@ PYEOF
 
     # Container conflict gate: refuse if the review container already exists.
     # (Same-host fast path; the cross-host interlock is the pr-<N> lease below.)
-    if docker ps -a --filter "name=^/${container_name}$" --format "{{.Names}}" 2>/dev/null | grep -qx "$container_name"; then
-      echo "REVIEW_REFUSED:${pr_num}:container_exists"
+    existing_state=$(docker ps -a --filter "name=^/${container_name}$" --format "{{.State}}" 2>/dev/null | head -1)
+    if [[ -n "$existing_state" ]]; then
+      echo "REVIEW_REFUSED:${pr_num}:$(_classify_review_container_state "$existing_state")"
       exit 3
     fi
 
@@ -2458,6 +2478,14 @@ PROMPT_EOF
     # branch + body and prints its result. Safe (no docker, no gh, no writes).
     [[ $# -eq 2 ]] || { echo "_test-resolve-pr requires <branch> <body>"; exit 1; }
     resolve_pr_story_or_item "$1" "$2"
+    ;;
+
+  _test-classify-container-state)
+    # Hidden test hook for review_pr_detection.test.sh. Calls
+    # _classify_review_container_state() with the supplied docker `.State`
+    # value and prints its result. Safe (no docker, no gh, no writes).
+    [[ $# -eq 1 ]] || { echo "_test-classify-container-state requires <state>"; exit 1; }
+    _classify_review_container_state "$1"
     ;;
 
   _test-mint-creds)

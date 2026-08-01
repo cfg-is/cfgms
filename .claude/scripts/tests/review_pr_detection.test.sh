@@ -185,5 +185,40 @@ assert_author_trust_with_release \
   "external:"
 
 echo
+echo "--- review-pr: container-conflict classification (already_in_flight vs container_exists) ---"
+
+assert_container_classification() {
+  local description="$1"
+  local docker_state="$2"
+  local expected="$3"
+  ran=$((ran + 1))
+  local actual
+  actual=$("$DISPATCH" _test-classify-container-state "$docker_state")
+  if [[ "$actual" == "$expected" ]]; then
+    printf '  ok    %s\n' "$description"
+  else
+    printf '  FAIL  %s\n        state=%q\n        expected=%q\n        actual=%q\n' \
+      "$description" "$docker_state" "$expected" "$actual"
+    fail=$((fail + 1))
+  fi
+}
+
+# Still alive — the caller should wait, not clean up.
+assert_container_classification "running container → already_in_flight" \
+  "running" "already_in_flight"
+assert_container_classification "restarting container → already_in_flight" \
+  "restarting" "already_in_flight"
+assert_container_classification "created (not yet started) → already_in_flight" \
+  "created" "already_in_flight"
+
+# Leftover from a crash — the caller should run cleanup-stale-reviews.
+assert_container_classification "exited container → container_exists" \
+  "exited" "container_exists"
+assert_container_classification "dead container → container_exists" \
+  "dead" "container_exists"
+assert_container_classification "paused container → container_exists" \
+  "paused" "container_exists"
+
+echo
 echo "ran ${ran} assertions; failures: ${fail}"
 exit "$fail"

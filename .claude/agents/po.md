@@ -598,20 +598,20 @@ agent, fresh budget. No retry counter is incremented at the cron level.
 **Find PRs that need review.** A PR is review-eligible when:
 - branch is `feature/story-*`
 - state is OPEN
-- has no comment from `cfg-agent` with "acceptance review" in the body
-- no review container (`cfg-agent-review-pr-<N>`) is currently running (the dispatch script checks this)
+- has no *trusted* review comment — the machine sentinel `<!-- cfgms-acceptance-review -->` or a `## Acceptance Review` heading, posted by a push+/maintain/admin author (`is_trusted_review_comment` in `po-cycle-preflight.py`; a naive substring match on "acceptance review" is NOT sufficient — it false-positives on unrelated cfg-agent comments like the draft-skip notice, whose body is "Acceptance Reviewer — skipping draft PR.")
+- no review container (`cfg-agent-review-pr-<N>`) with state `running`/`restarting`/`created` (an `exited` one is stale, not in-flight — see the `already_in_flight` vs `container_exists` distinction in `dispatch.md` §4e)
 - story does NOT have project status `Fix` (waiting on dev fix; review re-runs after fix lands)
 
 Sorted by creation timestamp ascending (oldest first) — FIFO order minimizes
 rebase churn.
 
-```bash
-gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
-  --json number,headRefName,createdAt,comments \
-  --jq '[.[] | select(([.comments[] | select(.author.login == "cfg-agent") | select(.body | test("acceptance review"; "i"))] | length == 0))] | sort_by(.createdAt)'
-```
-
-Cross-check the story's project status: skip any story with status `Fix`. Use `preflight` data (`review_recommendations`) to filter — the preflight already tracks Fix-status stories and excludes them from `spawn_acceptance_reviewer` actions.
+**Don't hand-roll this query.** All of the above is already computed by
+`po-cycle-preflight.py` and surfaced as `review_recommendations` entries with
+`action: "spawn_acceptance_reviewer"`, sorted FIFO. Read that output
+(`po-act.sh state '.review_recommendations'`) rather than reconstructing the
+eligibility check with a fresh `gh pr list --jq` — the preflight is the
+authoritative implementation and the one that's kept in sync with the dispatch
+script; a hand-written filter drifts.
 
 **Dispatch reviews for ALL eligible PRs each cycle, in parallel.** Iterate the
 `spawn_acceptance_reviewer` PRs in FIFO order (oldest `createdAt` first) and
