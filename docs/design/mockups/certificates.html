@@ -1,0 +1,387 @@
+<style>
+  :root {
+    --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff;
+    --shadow:0 18px 50px -22px rgba(60,45,30,.4); --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){ :root{
+    --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a;
+    --shadow:0 22px 60px -26px rgba(0,0,0,.8); } }
+  :root[data-theme="light"]{ --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(60,45,30,.4); }
+  :root[data-theme="dark"]{ --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
+  *{box-sizing:border-box;}
+  body{margin:0; min-height:100dvh; background:var(--bg); color:var(--text); display:flex; flex-direction:column;
+    font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+  .topbar{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:11px 16px; background:var(--chrome);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5;}
+  .brand{display:flex; align-items:baseline; gap:8px; margin-right:auto;}
+  .brand b{font-size:14px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;}
+  .brand span{font-size:11px; color:var(--text-dim); letter-spacing:.04em;}
+  .seg{display:inline-flex; position:relative; background:var(--chrome-2); border:1px solid var(--border); border-radius:10px; padding:3px;}
+  .seg button{position:relative; z-index:1; appearance:none; border:0; background:transparent; color:var(--text-dim);
+    font:inherit; font-size:12.5px; font-weight:600; padding:6px 13px; border-radius:7px; cursor:pointer; transition:color .18s ease;}
+  .seg button[aria-pressed="true"]{color:var(--accent-ink);}
+  .seg .thumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); background:var(--accent); border-radius:7px;
+    transition:transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index:0;}
+  .seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .dims{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; color:var(--text-dim);
+    font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .stage{flex:1; display:flex; align-items:flex-start; justify-content:center; padding:22px 16px 30px; overflow:auto;}
+  .frame-wrap{position:relative; margin:0 auto; border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow);
+    border:1px solid var(--border); background:var(--chrome); transition:width .22s ease, height .22s ease;}
+  .frame{display:block; border:0; transform-origin:0 0; background:transparent;}
+  .hint{text-align:center; color:var(--text-dim); font-size:12.5px; line-height:1.6; padding:0 20px 30px; max-width:680px; margin:0 auto;}
+  .hint b{color:var(--text);}
+</style>
+
+<div class="topbar">
+  <div class="brand"><b>CFGMS</b><span>certificate lifecycle</span></div>
+  <div class="seg" role="group" aria-label="Preview viewport">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-dev="desktop" aria-pressed="true">Desktop</button>
+    <button data-dev="tablet" aria-pressed="false">Tablet</button>
+    <button data-dev="mobile" aria-pressed="false">Mobile</button>
+  </div>
+  <div class="seg themeseg" role="group" aria-label="Theme">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="dims" id="dims">—</div>
+</div>
+
+<div class="stage">
+  <div class="frame-wrap" id="wrap"><iframe class="frame" id="frame" title="CFGMS certificate lifecycle mockup"></iframe></div>
+</div>
+
+<p class="hint">
+  <b>Certificate lifecycle</b> (Issue #3135) — list from <b>GET /api/v1/certificates</b> with a
+  days-remaining column driving amber/red near-expiry warning states. <b>+ Provision</b> opens the
+  issue form inline; <b>Revoke</b> opens a confirm modal (needs #3129); <b>Rotate signing CA</b> is
+  a distinct, fleet-impact-worded confirm — it types-to-confirm since it affects every steward's
+  trust chain. Both themes.
+</p>
+
+<script>
+  const DEVICES = { desktop:{w:1360,h:940}, tablet:{w:900,h:1040}, mobile:{w:390,h:900} };
+  let current = "desktop", themeMode = "auto";
+  const frame = document.getElementById("frame"), wrap = document.getElementById("wrap");
+  const stage = document.querySelector(".stage"), dims = document.getElementById("dims");
+  const devSeg = document.querySelector(".seg:not(.themeseg)"), themeSeg = document.querySelector(".themeseg");
+  const devBtns = [...devSeg.querySelectorAll("button")], themeBtns = [...themeSeg.querySelectorAll("button")];
+  function posThumb(seg){ const t=seg.querySelector(".thumb"); const a=seg.querySelector('button[aria-pressed="true"]')||seg.querySelector("button"); t.style.width=a.offsetWidth+"px"; t.style.transform="translateX("+(a.offsetLeft-3)+"px)"; }
+
+  const MOCK_CSS = `
+    :root{
+      --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
+      --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+      --accent:#4a6b7c; --accent-ink:#ffffff;
+      --state-ok:#507055; --state-ok-bg:#e8f0e9; --state-warn:#8f4f2e; --state-warn-bg:#f7e8db;
+      --state-crit:#965044; --state-crit-bg:#f2e5e3; --state-neutral:#6b5c4d; --state-neutral-bg:#e8e0d8;
+      --radius:9px; --radius-sm:7px; --radius-lg:13px; --radius-pill:20px;
+    }
+    :root[data-theme="dark"]{
+      --bg-primary:#1a1a1a; --bg-surface:#242426; --bg-elevated:#31313a; --bg-sunk:#101010; --border:#52525c;
+      --text-primary:#c8b8a6; --text-secondary:#a89888; --text-faint:#9a8974;
+      --accent:#7b9fb0; --accent-ink:#16202a;
+      --state-ok:#7fa985; --state-ok-bg:#1a2e1d; --state-warn:#d4864f; --state-warn-bg:#332518;
+      --state-crit:#d0846f; --state-crit-bg:#2d1f1c; --state-neutral:#a89888; --state-neutral-bg:#2a2520;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0; height:100%;}
+    body{background:var(--bg-primary); color:var(--text-primary); font-size:13.5px; line-height:1.45;
+      font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+    .mono{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace;}
+    .content{padding:20px 24px; display:flex; flex-direction:column; gap:16px; max-width:1080px; margin:0 auto;}
+    .htitle{display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap;}
+    .htitle h1{margin:0; font-size:19px; font-weight:700; letter-spacing:-.01em;}
+    .htitle p{margin:3px 0 0; color:var(--text-secondary); font-size:13.5px;}
+
+    .wf-btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink);
+      font:inherit; font-size:11.5px; font-weight:600; padding:7px 14px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn-secondary{appearance:none; border:1px solid var(--border); background:transparent; color:var(--text-secondary);
+      font:inherit; font-size:11.5px; padding:7px 12px; border-radius:var(--radius-sm); cursor:pointer;}
+    .wf-btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit);
+      font:inherit; font-size:11.5px; font-weight:600; padding:7px 14px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn-rotate{appearance:none; border:1px solid var(--state-warn); background:var(--state-warn-bg); color:var(--state-warn);
+      font:inherit; font-size:11.5px; font-weight:600; padding:7px 14px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn:disabled,.wf-btn-danger:disabled{opacity:.5; cursor:not-allowed;}
+    .wf-btn-sm{appearance:none; border:1px solid var(--border); background:transparent; color:var(--text-secondary);
+      font:inherit; font-size:11px; padding:4px 9px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn-sm:hover{border-color:var(--accent); color:var(--accent);}
+    .wf-btn-sm-danger{appearance:none; border:1px solid var(--state-crit); background:transparent; color:var(--state-crit);
+      font:inherit; font-size:11px; padding:4px 9px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+    .wf-btn-sm-danger:hover{background:var(--state-crit-bg);}
+    .wf-btn-sm[disabled]{opacity:.4; cursor:not-allowed;}
+
+    .panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+    .ptool{display:flex; align-items:center; gap:9px; padding:10px 13px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+    .ptool .cnt{margin-left:auto; font-size:11.5px; color:var(--text-faint); font-variant-numeric:tabular-nums;}
+
+    table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+    .tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint);
+      font-weight:600; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+    .tbl td{padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:middle; white-space:nowrap;}
+    .tbl tbody tr:last-child > td{border-bottom:0;}
+    .tbl tbody tr:hover td{background:var(--bg-elevated);}
+    .tbl tr.revoked{opacity:.55;}
+    .nm{font-family:'JetBrains Mono',Menlo,monospace; font-size:12.5px; font-weight:600;}
+    .mut{color:var(--text-secondary); font-size:12.5px;}
+    .mono2{font-family:'JetBrains Mono',Menlo,monospace; color:var(--text-secondary); font-size:12px;}
+
+    .pill{display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:600; white-space:nowrap;}
+    .pill .dot{width:6px; height:6px; border-radius:50%; background:currentColor;}
+    .pill.ok{background:var(--state-ok-bg); color:var(--state-ok);}
+    .pill.warn{background:var(--state-warn-bg); color:var(--state-warn);}
+    .pill.crit{background:var(--state-crit-bg); color:var(--state-crit);}
+    .pill.neutral{background:var(--state-neutral-bg); color:var(--text-secondary);}
+    .days{font-family:'JetBrains Mono',Menlo,monospace; font-size:12px;}
+    .days.warn{color:var(--state-warn); font-weight:700;}
+    .days.crit{color:var(--state-crit); font-weight:700;}
+
+    .wf-form-panel{background:var(--bg-sunk); border-bottom:1px solid var(--border); padding:14px;}
+    .wf-form{display:flex; flex-direction:column; gap:12px;}
+    .wf-form-row{display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;}
+    .wf-form-field{display:flex; flex-direction:column; gap:4px;}
+    .wf-form-label{font-size:10.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint);}
+    .wf-form-field input, .wf-form-field select{font:inherit; font-size:12.5px; color:var(--text-primary); background:var(--bg-surface);
+      border:1px solid var(--border); border-radius:var(--radius-sm); padding:6px 8px; width:220px; min-width:0;}
+    .wf-form-field input.wide{width:300px;}
+    .wf-form-actions{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+    .wf-form-error{font-size:11.5px; color:var(--state-crit);}
+
+    .wf-overlay{position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; place-items:center; z-index:100;}
+    .wf-overlay.open{display:grid;}
+    .wf-modal{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px;
+      max-width:460px; width:calc(100% - 48px); box-shadow:0 8px 32px rgba(0,0,0,.25);}
+    .wf-modal h3{margin:0 0 8px; font-size:15.5px; font-weight:700;}
+    .wf-modal p{margin:0 0 6px; font-size:12.5px; color:var(--text-secondary);}
+    .wf-modal-actions{display:flex; gap:8px; justify-content:flex-end; margin-top:18px;}
+    .wf-modal.rotate-modal{border-color:var(--state-warn);}
+    .rotate-warn{display:flex; gap:10px; padding:11px 12px; border-radius:9px; background:var(--state-warn-bg); color:var(--state-warn); margin:10px 0 4px; align-items:flex-start;}
+    .rotate-warn svg{flex:none; margin-top:1px;}
+    .rotate-warn b{font-family:'JetBrains Mono',Menlo,monospace;}
+    .confirm-check{display:flex; align-items:flex-start; gap:9px; margin-top:14px; font-size:12px; color:var(--text-secondary); cursor:pointer;}
+    .confirm-check input{margin-top:2px;}
+
+    .toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(10px); opacity:0; pointer-events:none;
+      background:var(--bg-elevated); border:1px solid var(--border); color:var(--text-primary); padding:9px 16px; border-radius:9px;
+      font-size:12.5px; font-weight:600; box-shadow:0 8px 24px rgba(0,0,0,.2); transition:opacity .18s ease, transform .18s ease; z-index:120;}
+    .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+    @media (max-width:760px){
+      .panel{overflow-x:auto;}
+      .htitle{flex-direction:column;}
+    }
+  `;
+
+  const WARN_ICO = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>';
+  const PLUS = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+  const ROTATE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>';
+
+  // days_until_expiration drives the pill: >30 ok, 8-30 warn, <=7 crit, revoked/expired distinct.
+  const CERTS = [
+    { serial:'7f:3a:9c:01', subject:'dc-01.acme-corp', tenant:'root/msp-a', issued:'2026-01-14', expires:'2027-01-14', days:168, status:'valid' },
+    { serial:'a1:c4:20:5e', subject:'sql-primary.acme-corp', tenant:'root/msp-a', issued:'2025-08-02', expires:'2026-08-16', days:17, status:'valid' },
+    { serial:'0e:9b:71:33', subject:'web-ingest-04.acme-corp', tenant:'root/msp-a', issued:'2025-07-30', expires:'2026-08-06', days:7, status:'valid' },
+    { serial:'44:2d:88:aa', subject:'client-1-vpn-gw', tenant:'root/msp-a/client-1', issued:'2025-06-01', expires:'2026-06-01', days:-1, status:'expired' },
+    { serial:'9c:11:5f:70', subject:'reception-07.client-1', tenant:'root/msp-a/client-1', issued:'2026-03-11', expires:'2027-03-11', days:224, status:'valid' },
+    { serial:'b2:60:44:19', subject:'edge-fw-02.initech', tenant:'root/msp-b', issued:'2025-05-20', expires:'2026-05-20', days:-1, status:'revoked' },
+  ];
+
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  const MOCK_HTML = `
+    <div class="content">
+      <div class="htitle">
+        <div><h1>Certificates</h1><p>Provision, monitor expiry, revoke, and rotate the signing CA for mTLS across the fleet.</p></div>
+        <button class="wf-btn-rotate" id="btn-rotate">${ROTATE} Rotate signing CA</button>
+      </div>
+
+      <div class="panel">
+        <div class="ptool">
+          <button class="wf-btn" id="btn-provision">${PLUS} Provision certificate</button>
+          <span class="cnt" id="cert-count">6 certificates</span>
+        </div>
+        <div id="provision-slot"></div>
+        <table class="tbl">
+          <thead><tr><th>Serial</th><th>Subject</th><th>Tenant</th><th>Issued</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="wf-overlay" id="revoke-overlay">
+      <div class="wf-modal">
+        <h3>Revoke certificate?</h3>
+        <p>This revokes the certificate for <b class="mono" id="rv-subject">dc-01.acme-corp</b>
+          (serial <b class="mono" id="rv-serial">7f:3a:9c:01</b>). Anything presenting it will be rejected
+          on its next mTLS handshake.</p>
+        <p>This action cannot be undone.</p>
+        <div class="wf-modal-actions">
+          <button class="wf-btn-secondary" id="rv-cancel">Cancel</button>
+          <button class="wf-btn-danger" id="rv-confirm">Revoke certificate</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="wf-overlay" id="rotate-overlay">
+      <div class="wf-modal rotate-modal">
+        <h3>Rotate the signing CA?</h3>
+        <div class="rotate-warn">${WARN_ICO}<span><b>This affects every steward in the fleet.</b> A new CA is generated and every future
+          certificate is issued under it. Existing steward certs keep working until they're renewed, but any
+          out-of-band trust bundles referencing the current CA fingerprint must be updated.</span></div>
+        <p>Type <b class="mono">ROTATE</b> to confirm.</p>
+        <div class="wf-form-field"><input type="text" id="rotate-input" placeholder="ROTATE" style="width:100%;"></div>
+        <div class="wf-modal-actions">
+          <button class="wf-btn-secondary" id="rotate-cancel">Cancel</button>
+          <button class="wf-btn-danger" id="rotate-confirm" disabled>Rotate signing CA</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  `;
+
+  const MOCK_JS = `
+    var WARN_ICO = ${JSON.stringify(WARN_ICO)};
+    var CERTS = ${JSON.stringify(CERTS)};
+    var showingProvision = false;
+
+    function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function byId(serial){ return CERTS.filter(function(c){ return c.serial===serial; })[0]; }
+
+    var tbody = document.getElementById('tbody');
+    var provisionSlot = document.getElementById('provision-slot');
+    var certCount = document.getElementById('cert-count');
+
+    function daysCell(c){
+      if (c.status==='revoked' || c.status==='expired' || c.days<0) return '';
+      var cls = c.days<=7 ? 'crit' : (c.days<=30 ? 'warn' : '');
+      return cls ? '<span class="days '+cls+'">'+c.days+'d left</span>' : '<span class="days">'+c.days+'d left</span>';
+    }
+    function statusPill(c){
+      if (c.status==='revoked') return '<span class="pill neutral"><span class="dot"></span>Revoked</span>';
+      if (c.status==='expired') return '<span class="pill crit"><span class="dot"></span>Expired</span>';
+      if (c.days<=7) return '<span class="pill crit"><span class="dot"></span>Valid</span>';
+      if (c.days<=30) return '<span class="pill warn"><span class="dot"></span>Valid</span>';
+      return '<span class="pill ok"><span class="dot"></span>Valid</span>';
+    }
+
+    function provisionFormHtml(){
+      return '<div class="wf-form">'
+        + '<div class="wf-form-row">'
+        +   '<div class="wf-form-field"><span class="wf-form-label">Subject / CN *</span><input type="text" id="p-subject" placeholder="new-host.acme-corp"></div>'
+        +   '<div class="wf-form-field"><span class="wf-form-label">Tenant</span><input type="text" id="p-tenant" placeholder="root/msp-a"></div>'
+        +   '<div class="wf-form-field"><span class="wf-form-label">Validity (days)</span><input type="text" id="p-validity" value="365"></div>'
+        + '</div>'
+        + '<div class="wf-form-actions">'
+        +   '<button class="wf-btn" id="p-save">Provision certificate</button>'
+        +   '<button class="wf-btn-secondary" id="p-cancel">Cancel</button>'
+        + '</div>'
+        + '</div>';
+    }
+
+    function render(){
+      certCount.textContent = CERTS.length + ' certificate' + (CERTS.length!==1?'s':'');
+      provisionSlot.innerHTML = showingProvision ? '<div class="wf-form-panel">'+provisionFormHtml()+'</div>' : '';
+      tbody.innerHTML = CERTS.map(function(c){
+        var revokedCls = c.status==='revoked' ? ' revoked' : '';
+        var canRevoke = c.status==='valid';
+        return '<tr class="'+revokedCls.trim()+'">'
+          + '<td><span class="mono2">'+esc(c.serial)+'</span></td>'
+          + '<td><span class="nm">'+esc(c.subject)+'</span></td>'
+          + '<td><span class="mono2">'+esc(c.tenant)+'</span></td>'
+          + '<td><span class="mut">'+esc(c.issued)+'</span></td>'
+          + '<td><span class="mut">'+esc(c.expires)+'</span> '+daysCell(c)+'</td>'
+          + '<td>'+statusPill(c)+'</td>'
+          + '<td>'+(canRevoke ? '<button class="wf-btn-sm-danger" data-revoke="'+c.serial+'">Revoke</button>' : '<button class="wf-btn-sm" disabled>Revoke</button>')+'</td>'
+          + '</tr>';
+      }).join('');
+    }
+
+    function toast(msg){
+      var el = document.getElementById('toast');
+      el.textContent = msg; el.classList.add('show');
+      setTimeout(function(){ el.classList.remove('show'); }, 1800);
+    }
+
+    document.getElementById('btn-provision').addEventListener('click', function(){ showingProvision=!showingProvision; render(); });
+    provisionSlot.addEventListener('click', function(e){
+      if (e.target.id==='p-cancel'){ showingProvision=false; render(); }
+      if (e.target.id==='p-save'){
+        var subj = document.getElementById('p-subject').value.trim();
+        if (!subj){ document.getElementById('p-subject').style.borderColor='var(--state-crit)'; return; }
+        CERTS.unshift({ serial: (Math.random().toString(16).slice(2,10).match(/.{1,2}/g)||[]).join(':'), subject: subj,
+          tenant: document.getElementById('p-tenant').value.trim() || 'root', issued:'2026-07-30', expires:'2027-07-30', days:365, status:'valid' });
+        toast('Provisioned certificate for '+subj);
+        showingProvision=false;
+        render();
+      }
+    });
+
+    var rvOverlay = document.getElementById('revoke-overlay');
+    var pendingSerial = null;
+    tbody.addEventListener('click', function(e){
+      var b = e.target.closest('button[data-revoke]');
+      if (!b) return;
+      pendingSerial = b.getAttribute('data-revoke');
+      var c = byId(pendingSerial);
+      document.getElementById('rv-subject').textContent = c.subject;
+      document.getElementById('rv-serial').textContent = c.serial;
+      rvOverlay.classList.add('open');
+    });
+    document.getElementById('rv-cancel').addEventListener('click', function(){ rvOverlay.classList.remove('open'); });
+    rvOverlay.addEventListener('click', function(e){ if (e.target===rvOverlay) rvOverlay.classList.remove('open'); });
+    document.getElementById('rv-confirm').addEventListener('click', function(){
+      var c = byId(pendingSerial);
+      c.status = 'revoked'; c.days = -1;
+      rvOverlay.classList.remove('open');
+      toast('Revoked '+c.subject);
+      render();
+    });
+
+    var rotOverlay = document.getElementById('rotate-overlay');
+    document.getElementById('btn-rotate').addEventListener('click', function(){
+      document.getElementById('rotate-input').value='';
+      document.getElementById('rotate-confirm').disabled = true;
+      rotOverlay.classList.add('open');
+    });
+    document.getElementById('rotate-cancel').addEventListener('click', function(){ rotOverlay.classList.remove('open'); });
+    rotOverlay.addEventListener('click', function(e){ if (e.target===rotOverlay) rotOverlay.classList.remove('open'); });
+    document.getElementById('rotate-input').addEventListener('input', function(e){
+      document.getElementById('rotate-confirm').disabled = (e.target.value.trim() !== 'ROTATE');
+    });
+    document.getElementById('rotate-confirm').addEventListener('click', function(){
+      if (document.getElementById('rotate-confirm').disabled) return;
+      rotOverlay.classList.remove('open');
+      toast('Signing CA rotated — new certificates now issue under the new CA');
+    });
+
+    render();
+  `;
+
+  function currentTheme(){ if(themeMode!=="auto") return themeMode; const d=document.documentElement.getAttribute("data-theme"); return d || (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"); }
+  function srcdoc(t){ return '<!doctype html><html lang="en" data-theme="'+t+'"><head><meta charset="utf-8">'+
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><style>'+MOCK_CSS+'</style></head><body>'+
+    MOCK_HTML+'<script>'+MOCK_JS+'<\/script></body></html>'; }
+  function layout(){ const d=DEVICES[current]; frame.style.width=d.w+"px"; frame.style.height=d.h+"px";
+    const avail=stage.clientWidth-32; const s=Math.min(1,avail/d.w); frame.style.transform="scale("+s+")";
+    wrap.style.width=(d.w*s)+"px"; wrap.style.height=(d.h*s)+"px"; dims.textContent=d.w+" × "+d.h+" · "+Math.round(s*100)+"%"; }
+  function render(){ frame.srcdoc=srcdoc(currentTheme()); layout(); }
+  devBtns.forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.dev;
+    devBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(devSeg); layout(); }));
+  themeBtns.forEach(b=>b.addEventListener("click",()=>{ themeMode=b.dataset.themeMode;
+    themeBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(themeSeg);
+    if(themeMode==="auto"){ document.documentElement.removeAttribute("data-theme"); render(); }
+    else { document.documentElement.setAttribute("data-theme",themeMode); } }));
+  new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{ if(themeMode==="auto") render(); });
+  window.addEventListener("resize",()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); });
+  window.addEventListener("orientationchange",()=>setTimeout(()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); },200));
+  render(); posThumb(devSeg); posThumb(themeSeg);
+</script>

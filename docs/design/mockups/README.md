@@ -32,6 +32,7 @@ principles, and token rationale these mockups express.
 | [`asset-live-activity.html`](asset-live-activity.html) | The asset live-activity tab — real-time process table and service list driven by the telemetry WebSocket; includes the `.rowkebab` per-row action menu pattern (applied to fleet rows in Story #2938). Both themes. | **Reference** |
 | [`asset-shell.html`](asset-shell.html) | The asset interactive shell tab — terminal emulator panel with WebSocket-backed session, command history, and resize handling. Both themes. | **Reference** |
 | [`fleet-bulk.html`](fleet-bulk.html) | Fleet **bulk selection + actions** (Epic #2931 · #2939) — a checkbox column + select-all-on-page and a bulk-action bar layered on the fleet table: **Edit tags** live (one authorized call per steward), **Decommission** deferred ("SOON"). Selection clears on page/filter/sort. Both themes. | **Reference** |
+| [`certificates.html`](certificates.html) | **Certificate lifecycle** (Epic #2858 · #3135) — list with days-remaining/amber/red expiry warnings, inline provision form, per-row revoke confirm, and a fleet-impact-worded, type-`ROTATE`-to-confirm signing-CA rotation modal. Both themes. | **Reference** |
 
 > These are design references, not production code. The shipped UI is
 > React + TypeScript + Vite (Epic #2344), built against
