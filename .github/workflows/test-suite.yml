@@ -141,31 +141,16 @@ jobs:
   # are covered by documentation.yml's own stub instead (this workflow is
   # paths-ignored for docs).
   #
-  # runs-on routing (#2337, epic #565): fork-gated self-hosted routing — internal
-  # events (push, merge_group, non-fork pull_request) run on the CFGMS-managed
-  # self-hosted Linux runner; fork PRs and workflow_dispatch (no fork property)
-  # stay on GitHub-hosted. The full label set targets the Linux runner specifically
-  # — a bare 'self-hosted' would also match the Windows runner.
-  #
-  # SECURITY: this expression is convenience routing, NOT the security
-  # boundary — a fork PR executes the FORK's copy of this file and could
-  # rewrite it. The enforcing control is the repository Actions setting
-  # "Require approval for ALL external contributors" (fork-PR workflow runs
-  # need maintainer approval before any runner is assigned). Do not weaken
-  # that setting while self-hosted runners are attached to this public repo.
+  # runs-on routing (#2337 routed this to self-hosted; reverted 2026-08-01):
+  # self-hosted Linux execution measured 2-3.5x faster than hosted
+  # (2026-07-09), but the runner pool's capacity couldn't keep pace with
+  # merge-queue volume — all self-hosted runners went offline and blocked
+  # the merge queue for 8+ hours (PRs #2896, #3155, #3157, #3159 stuck
+  # queued). Reverted to unconditional ubuntu-latest, matching unit-tests
+  # (#2501) and the Windows native-build move (#2559): this repo no longer
+  # depends on self-hosted CI runner uptime.
   integration-tests:
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && '"ubuntu-latest"' || '["self-hosted", "Linux", "cfgms"]') }}
-    # Hermetic container: the self-hosted runner VM is a CFGMS-managed steward
-    # endpoint — without a container, host state (platform CA path, launcher
-    # state) would leak into tests; self-hosted path only.
-    # The whole container object is conditional: 'null' on the hosted/fork path
-    # (no container at all — hosted runners are already hermetic), the golang
-    # image on the self-hosted path. Options: --user 1000 matches the runner
-    # user (workspace writable; chmod-based failure-injection tests work);
-    # /etc/passwd + /etc/group read-only so UID 1000 resolves to a named user
-    # (os/user lookups); /opt/ci-tools carries static host-staged binaries the
-    # golang image lacks but hosted runners ship (jq for the script tests).
-    container: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true || github.event_name == 'workflow_dispatch') && 'null' || '{"image":"golang:1.26.5-bookworm","options":"--user 1000:1000 -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro -v /opt/ci-tools:/opt/ci-tools:ro"}') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     # always() is required here: unit-tests is intentionally skipped on
     # merge_group (PR-real design above), and GitHub's default implicit
@@ -177,17 +162,11 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - name: Mark workspace safe for git (container UID differs from host mount)
-      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-    - name: Add host-staged CI tools to PATH (no-op unless /opt/ci-tools is mounted)
-      run: if [ -d /opt/ci-tools ]; then echo /opt/ci-tools >> "$GITHUB_PATH"; fi
-
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-    
+
     - name: Cache Go modules
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -198,10 +177,10 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-go-modules-
       continue-on-error: true
-    
+
     - name: Install dependencies
       run: go mod download
-    
+
     - name: Start Linux resource sampler (self-hosted only, best-effort)
       if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
       continue-on-error: true
