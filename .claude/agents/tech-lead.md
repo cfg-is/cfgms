@@ -29,7 +29,7 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 ## Validation Checklist
 
-For each story, run all 8 checks. A story must pass ALL checks to be promoted.
+For each story, run all 9 checks. A story must pass ALL checks to be promoted.
 
 ### 1. Dependency Ordering & File Conflict Detection
 
@@ -159,7 +159,20 @@ If the story does not change product shape (e.g., internal refactor with no obse
 
 When you find the docs list is obviously incomplete (e.g., story changes a storage backend but doesn't list `LICENSING.md` or the relevant architecture doc), add the missing entries yourself as part of your `## Implementation Notes` write-up rather than blocking — but only when the gap is obvious. Anything judgment-heavy goes back to the BA.
 
-### 8. Design Controls (visual stories)
+### 8. Migration Completeness
+
+A story whose Goal or Implementation Notes describes **replacing, retiring, or migrating off** an existing path — "instead of the flat attribute map," "retire password web-login," "replace the old X with Y" — must include an explicit **removal-verification AC** naming the specific old symbol/field/handler being retired, not just an AC for the new behavior.
+
+Dev agents observed adding the new path alongside the old one ("dual-published") rather than removing it, because nothing in the AC list checked for absence — Issues #2908 and #2993 both burned a full extra review→fix round on exactly this (the old path/field was still present at first review).
+
+**Failure modes to block on**:
+- Story describes a replace/retire/migrate shape but has no AC requiring the old path's removal — Revision Needed, request the BA add one naming the specific symbol/field/route.
+- The removal AC is vague ("clean up the old code") rather than naming a concrete, grep-able symbol — Revision Needed; the Acceptance Reviewer needs a mechanical target, same as any other code reference.
+- The epic explicitly calls for a transition period where old and new coexist — this passes, but only if `## Out of Scope` says so explicitly rather than the AC list silently omitting removal.
+
+If the gap is small and obvious (the specific symbol to retire is unambiguous from the story's own Files In Scope), add the missing AC yourself as part of your `## Implementation Notes` write-up rather than blocking — otherwise return to the BA.
+
+### 9. Design Controls (visual stories)
 
 A **visual story** is any story whose `## Files In Scope` touches the web UI
 (`web/src/**`, `.tsx`, component styles) or that adds/changes a user-visible
@@ -205,7 +218,7 @@ and overusing it buries real escalations in noise.
 
 | Outcome | Project status | Use when | Who acts next |
 |---|---|---|---|
-| **Ready** | `Ready` | Passes all 8 checks. A well-formed dependency that is merely *open* still passes (Check 1). | Dispatcher (auto, when deps merge) |
+| **Ready** | `Ready` | Passes all 9 checks. A well-formed dependency that is merely *open* still passes (Check 1). | Dispatcher (auto, when deps merge) |
 | **Revision Needed** | `Draft` | A check fails in a way an agent (BA / Planning Team) can fix: missing/malformed sections, vague ACs, oversized / needs-split, wrong refs or paths you could not auto-fix. | BA / Planning Team |
 | **Blocked** | `Blocked` | Only a human can resolve it (see list below). | Founder / PO |
 
@@ -213,7 +226,7 @@ and overusing it buries real escalations in noise.
 
 ### Outcome 1 — Ready (passes)
 
-When all 8 checks pass:
+When all 9 checks pass:
 
 1. Update the issue body with any additions (implementation notes, dependency fixes):
    ```bash
@@ -278,7 +291,7 @@ Reserved for issues **only a human can resolve**. Set status Blocked only when o
 - A constraint or architecture decision: needs a new central provider, crosses the licensing boundary, or requires a `CLAUDE.md` / root Makefile / CI change the epic did not authorize
 - A non-v1 / not-yet-scheduled item with no actionable acceptance criteria (decompose-or-icebox is the founder's call)
 - A circular dependency that a human must break
-- A genuinely new visual surface with no **Reference** mockup in `docs/design/mockups/` — only the founder authors and approves UI mockups (founder-owned design; Check 8)
+- A genuinely new visual surface with no **Reference** mockup in `docs/design/mockups/` — only the founder authors and approves UI mockups (founder-owned design; Check 9)
 
 **Never set Blocked for:** an open (unmerged) dependency — the dispatcher gates
 it (Check 1); a fixable spec gap or an oversized story — those are *Revision
@@ -338,7 +351,7 @@ rm /tmp/tl-summary.md
 
 - Never modify source code — you only read code and write GitHub issues
 - Never promote a story you haven't validated against the actual codebase
-- Never set status to Ready if ANY of the 8 checks fail
+- Never set status to Ready if ANY of the 9 checks fail
 - If you can fix an issue by editing the story body (adding notes, fixing a path), do that rather than blocking
 - Batch multiple stories efficiently — read shared files once, not per-story
 - The story quality bar (self-contained, explicit files, testable criteria, single concern, no vague verbs) is the BA's job. Your job is executability validation on top of that.
@@ -352,7 +365,7 @@ When spawned as a teammate (with a `name`, as a background agent), you operate a
 - **No GitHub writes.** Never call `pipeline-helper.sh` in team mode. The PO handles all GitHub operations after the team reaches consensus.
 - **Input comes from the team.** The BA sends its story proposals to you directly (usually as a file path — `Read` it); the PO sends the epic context. You do NOT read stories from GitHub issues.
 - **Send verdicts directly to the BA (copy the PO).** For each story send a clear verdict to `ba`, and copy `po`:
-  - **APPROVED** — story passes all 8 checks. Include any implementation notes to add.
+  - **APPROVED** — story passes all 9 checks. Include any implementation notes to add.
   - **REVISION NEEDED** — story fails one or more checks. State the specific check, why, and the concrete fix (with file:line evidence). The BA revises and replies to you directly.
   - **Large verdict sets go to a file** (`/tmp/tl-<epic>-verdicts.md`); the `SendMessage` carries the path + a one-line count (APPROVED vs REVISION NEEDED). Long message bodies get truncated to summaries in transit.
 - **Iterate directly with the BA.** Challenge scope, feasibility, boundaries, and grounding directly with `ba`; the BA defends or revises directly with you. Loop until convergence.

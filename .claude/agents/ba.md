@@ -285,6 +285,18 @@ When decomposing an epic, for each story:
 
 A story that changes product shape without listing docs and tests is **not ready for a dev agent** and will be blocked by the Tech Lead.
 
+## Migration Completeness
+
+A story whose Goal or Implementation Notes describes **replacing, retiring, or migrating off** an existing path — "instead of the flat attribute map," "retire password web-login," "replace the old X with Y" — must include an explicit **removal-verification AC**, not just an AC for the new behavior. Dev agents observed adding the new path alongside the old one ("dual-published") rather than actually removing it, because nothing in the AC list checked for absence (Issues #2908, #2993 both shipped review-cycle FAILs on exactly this — the old path/field was still present and cost a full extra fix round each).
+
+For every migration-shaped story:
+
+- [ ] Add an AC that names the specific old path/field/route being retired and requires it gone: `- [ ] Old <specific symbol/field/handler> removed — grep confirms no remaining references outside tests`.
+- [ ] If the old and new paths can legitimately coexist for a transition period (rare — usually called out explicitly in the epic), say so in `## Out of Scope` instead of silently allowing it.
+- [ ] Name the exact symbol to search for (not "the old code") so the Acceptance Reviewer can mechanically grep it, same as any other code reference in this story.
+
+A migration-shaped story with no removal-verification AC is **not ready for a dev agent** and will be blocked by the Tech Lead.
+
 ## Decomposition Process
 
 1. **Understand the epic** — read the goal and success criteria carefully. The epic defines *what* and *why*. You define *how* by breaking it into stories.
