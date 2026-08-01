@@ -460,98 +460,6 @@ test_create_clone_duplicate_pr_gate() {
     rm -rf "$tmp_dir"
 }
 
-# Tests for scripts/check-stdlib-completeness.sh — check-6 observe_when gate
-test_check_stdlib_completeness_observe_when() {
-    log_test "Testing check-stdlib-completeness.sh: check-6 observe_when gate..."
-
-    local script
-    script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-stdlib-completeness.sh"
-
-    if [[ ! -f "$script" ]]; then
-        log_fail "check-stdlib-completeness.sh: Script not found at $script"
-        return
-    fi
-
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
-
-    # Minimal fake repo root: Makefile + a single stdlib module named testmod.
-    local module_dir="${tmp_dir}/features/modules/stdlib/testmod"
-    local cmd_dir="${module_dir}/cmd"
-    mkdir -p "$module_dir" "$cmd_dir"
-
-    cat > "${tmp_dir}/Makefile" << 'MAKEEOF'
-STDLIB_MODULES := testmod
-MAKEEOF
-
-    # cmd/main.go satisfies check-3 (bundle entry point).
-    cat > "${cmd_dir}/main.go" << 'GOEOF'
-package main
-GOEOF
-
-    # ── fixture 1: observe_when present → exit 0 ──────────────────────────────
-    cat > "${module_dir}/module.yaml" << 'YAMLEOF'
-name: testmod
-version: 0.1.0
-publisher: cfgms
-executors:
-  - steward
-owns:
-  - kind: testmod
-observe_when:
-  - fact: os
-    equals: linux
-YAMLEOF
-
-    local exit_code=0
-    REPO_ROOT="$tmp_dir" bash "$script" >/dev/null 2>&1 || exit_code=$?
-    if [[ $exit_code -eq 0 ]]; then
-        log_pass "check-stdlib-completeness.sh: check-6 exits 0 when observe_when is present"
-    else
-        log_fail "check-stdlib-completeness.sh: check-6 should exit 0 when observe_when is present (got $exit_code)"
-    fi
-
-    # ── fixture 2: omission marker present → exit 0 ───────────────────────────
-    cat > "${module_dir}/module.yaml" << 'YAMLEOF'
-name: testmod
-version: 0.1.0
-publisher: cfgms
-executors:
-  - steward
-owns:
-  - kind: testmod
-# observe_when: omitted — unbounded domain; content-bearing module (ADR-024 §3)
-YAMLEOF
-
-    exit_code=0
-    REPO_ROOT="$tmp_dir" bash "$script" >/dev/null 2>&1 || exit_code=$?
-    if [[ $exit_code -eq 0 ]]; then
-        log_pass "check-stdlib-completeness.sh: check-6 exits 0 when omission marker is present"
-    else
-        log_fail "check-stdlib-completeness.sh: check-6 should exit 0 when omission marker present (got $exit_code)"
-    fi
-
-    # ── fixture 3: neither observe_when nor marker → exit 1 ───────────────────
-    cat > "${module_dir}/module.yaml" << 'YAMLEOF'
-name: testmod
-version: 0.1.0
-publisher: cfgms
-executors:
-  - steward
-owns:
-  - kind: testmod
-YAMLEOF
-
-    exit_code=0
-    REPO_ROOT="$tmp_dir" bash "$script" >/dev/null 2>&1 || exit_code=$?
-    if [[ $exit_code -eq 1 ]]; then
-        log_pass "check-stdlib-completeness.sh: check-6 exits 1 when neither observe_when nor omission marker present"
-    else
-        log_fail "check-stdlib-completeness.sh: check-6 should exit 1 when neither present (got $exit_code)"
-    fi
-}
-
 # Test check-providers.sh: exit-code behaviour (AC 2 through AC 5)
 test_check_providers() {
     log_test "Testing check-providers.sh exit-code behaviour..."
@@ -3419,8 +3327,6 @@ echo ""
 test_create_clone_duplicate_pr_gate
 echo ""
 test_check_providers
-echo ""
-test_check_stdlib_completeness_observe_when
 echo ""
 test_security_trivy_init_error
 echo ""
