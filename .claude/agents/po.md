@@ -319,7 +319,7 @@ separate call needed.
   - `merge-queue` — queue state as JSON
   - `block <ISSUE> <reason>` — set project status Blocked, post escalation comment
   - `release-story <ITEM_ID>` — release a §7 self-dispatch story lease after the PR is up
-  - `cycle-start [cron|cycle]` / `cycle-end` — bracket a cycle's per-step manifest (Issue #3053); see §4.0/§4.1 Step 11 below. Every other subcommand above auto-records a step into it — with the work/no-op/error outcome it actually produced, classified from its own status markers — while a cycle is open. Nested `Agent`/`Skill` spawns (Tech Lead, BA, pin-refresh-runner, pipeline-sweep-runner, reviewers) are read out of this session's transcript by `cycle-end` and land in the manifest's `agents[]` with their roles and measured cost. **Nothing else to call, and nothing to narrate:** never report step outcomes, spawned agents or token counts into the manifest by hand — self-reported numbers were measured 31.5x low, which is why the record is taken from transcripts instead.
+  - `cycle-start [cron|cycle|pipeline]` / `cycle-end` — bracket a cycle's per-step manifest (Issue #3053); see §4.0/§4.1 Step 11 below. Every other subcommand above auto-records a step into it — with the work/no-op/error outcome it actually produced, classified from its own status markers — while a cycle is open. Nested `Agent`/`Skill` spawns (Tech Lead, BA, pin-refresh-runner, pipeline-sweep-runner, reviewers) are read out of this session's transcript by `cycle-end` and land in the manifest's `agents[]` with their roles and measured cost. **Nothing else to call, and nothing to narrate:** never report step outcomes, spawned agents or token counts into the manifest by hand — self-reported numbers were measured 31.5x low, which is why the record is taken from transcripts instead.
   - `cycle-report [N]` — average cost per cycle step (with its work/no-op split) and per nested agent role, across the last N completed cycles
 - `./scripts/pipeline-helper.sh lease-{acquire,release,status,list,gc}` — distributed-lease primitive (multi-host coordination, §4.-1). `lease-acquire <key> [ttl]` prints `ACQUIRED`/`RECLAIMED` (rc0), `HELD` (rc1), or `ACQUIRE_ERROR` (rc2). Used directly only for the inline-op leases below; container-op leases are managed by the dispatch helpers.
 - `./.claude/scripts/po-cycle-preflight.py` — the underlying preflight (called by `po-act.sh preflight`). Accepts `--stdout` for raw JSON or `--path` for the cache path.
@@ -330,7 +330,9 @@ separate call needed.
 Open this cycle's step manifest first (Issue #3053) — every `po-act.sh`
 subcommand from here through Step 11's `cycle-end` auto-records itself into
 it, so cost becomes attributable per step instead of only to the cycle as a
-whole. Pass `cron` for `/po cron`, `cycle` for `/po cycle`:
+whole. Pass `cron` for `/po cron`, `cycle` for `/po cycle`, `pipeline` for
+`/pipeline` (the dedicated cron-cycle entry point, same cycle as `/po cron`
+with its own segment for cost reporting):
 
 ```bash
 ./.claude/scripts/po-act.sh cycle-start cron

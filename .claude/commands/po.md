@@ -54,6 +54,8 @@ Agent tool:
 
 Then relay the subagent's cycle summary to the founder. If the subagent reports a blocker only the main session can resolve (e.g. an epic that needs the Planning Team), surface it as a `/po cycle` / `/po decompose <#>` recommendation.
 
+**For the recurring cron/loop invocation (e.g. `/loop 20m /po cron`), prefer `.claude/commands/pipeline.md` instead.** It runs the identical cycle but as its own top-level command, so usage/cost reporting attributes it to a dedicated `/pipeline` segment instead of folding it into general `/po` traffic. `/po cron` still works unchanged for existing automation.
+
 ### Path C — lightweight conversation (spawn the PO subagent)
 
 For `status` (default), `intent <topic>`, `next`, `unblock #NNN`, or any natural-language pipeline query, spawn the PO agent so it stays in role for the rest of the session:
