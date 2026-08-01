@@ -4,6 +4,10 @@
 
 **Date:** 2026-07-30
 
+**Amended:** 2026-08-01 — [Amendment 1](#amendment-1-2026-08-01--boundary-check-must-use-ancestry-lookup-not-path-prefix-matching):
+Decision 1's boundary mechanism (`strings.HasPrefix` on tenant IDs) cannot work — tenant IDs
+are not paths — and is replaced with an `IsTenantAncestor`-based check.
+
 **Deciders:** Founder, Architecture
 
 **Related:** Epic [#2858](https://github.com/cfg-is/cfgms/issues/2858) (web tenant & access
@@ -239,3 +243,102 @@ not a backdoor into tenant administration.
 4. **The exact carve-out allowlist's final shape** — the category list in Decision 4 is
    founder-confirmed at the level described; the precise audit-event-type enum is an
    implementation detail for the story that builds it.
+
+---
+
+## Amendment 1 (2026-08-01) — Boundary check must use ancestry lookup, not path-prefix matching
+
+Surfaced during adversarial BA/Tech Lead/Security review of story #3158 (the ADR-027
+backend), independently verified from three angles before this amendment was drafted.
+
+### A1.1 — The premise this ADR (and the code it cited) inherited is wrong
+
+Decision 1 suspends the existing `id == callerTenant || strings.HasPrefix(id,
+callerTenant+"/")` rule specifically for `root` — but that rule assumes tenant IDs are
+slash-delimited paths (`root/msp-a/client-1`), matching CLAUDE.md's own Multi-Tenancy
+description. **They are not.** A tenant ID is validated as a single DNS-label-style token
+(`k8sNameRegex = ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, `features/tenant/manager.go:414`, ≤63
+chars, `generateTenantID` strips everything but `[a-zA-Z0-9_-]`) — it can never contain a
+`/`. Hierarchy is carried entirely by a separate `ParentID` field, resolved via
+`IsTenantAncestor`/`GetTenantPath`, never by string concatenation.
+
+The already-merged `isWithinTenantScope` (`features/controller/api/middleware.go:232-239`,
+landed via #3147/#3148) makes the consequence concrete:
+
+```go
+func isWithinTenantScope(callerTenant, resourceTenant string) bool {
+	if callerTenant == "" {
+		return true
+	}
+	return resourceTenant == callerTenant ||
+		strings.HasPrefix(resourceTenant, callerTenant+"/")
+}
+```
+
+The `HasPrefix` branch can **never evaluate true** against real tenant IDs — it is dead
+code today, and every existing handler cited in this ADR's Context (`handlers_stewards.go`,
+`handlers_push.go`, `handlers_fleet.go`, `handlers_ip_trust.go`) that relies on the same
+prefix-match shape has the identical gap. Decision 1 as originally written
+(`strings.HasPrefix(target, rootPath+"/")`) would have inherited the same dead mechanism —
+a faithful implementation of the original text would silently enforce nothing.
+
+### A1.2 — Corrected Decision 1: ancestry via `IsTenantAncestor`, not string comparison
+
+The boundary check must call `IsTenantAncestor(ctx, callerTenant, resourceTenant)`
+(`business.TenantStore` interface method, `pkg/storage/interfaces/business/tenant_store.go:31`;
+exposed at the manager layer via `features/tenant/manager.go:277-279`) to determine
+descendant relationship, not string matching. This is a materially different shape than the
+original text implied: ancestry resolution requires a `context.Context` and a store
+round-trip, not a pure string function. **#3125's shared subtree-check helper (Decision 3)
+must be built with this dependency from the start** — it cannot stay the zero-dependency
+pure function `isWithinTenantScope` is today.
+
+The exact-match branch (`resourceTenant == callerTenant`) and the empty-`callerTenant`
+branch (unscoped access) are unaffected by this amendment — only the prefix-match branch is
+replaced.
+
+CLAUDE.md's Multi-Tenancy section description ("path-based identification
+(`root/msp-a/client-1/servers`)") is inaccurate against the current implementation. This
+amendment does not correct CLAUDE.md itself (out of this ADR's scope, and CLAUDE.md changes
+need their own story justification per repo convention) — flagging here so the discrepancy
+isn't silently rediscovered again.
+
+### A1.3 — Open question this amendment does NOT resolve: identifying a "root-scoped caller" at all
+
+Even with A1.2's fix, Decision 1 and Decision 3 both presuppose the enforcement point can
+tell "a principal genuinely scoped to the `root` tenant" apart from "a principal with no
+tenant scope at all." Today it cannot: mTLS admin principals — the primary SaaS-operator
+access path — are constructed with `TenantID: ""` unconditionally
+(`features/controller/api/middleware.go:205-225`, deliberate per that code's own comment,
+tied to a prior incident (CFG-70-02) where hardcoding a fallback tenant broke cross-tenant
+admin reads). `isWithinTenantScope`'s empty-`callerTenant` branch already treats that as
+"unrestricted access," which is correct for today's actual unscoped-superadmin case — but
+it means no principal in the system currently presents as "scoped to `root`" in the sense
+Decision 1 requires, so the boundary has nothing to trigger on in practice even once A1.2
+ships.
+
+This is a real, unresolved design question, not a mechanical bug — options include (a)
+introducing a genuinely `root`-scoped principal type distinct from unscoped-superadmin, (b)
+treating empty-`callerTenant` as equivalent to `root`-scoped for boundary purposes (changes
+today's "unrestricted access" semantics for every existing empty-`callerTenant` caller,
+including cross-tenant admin reads the CFG-70-02 fix depends on), or (c) something narrower
+scoped to specific admin-session types. **Left open for #3125 (or a follow-on decision) to
+resolve before Decision 1 can be considered actually enforced** — added as Remaining Tunable
+5 below.
+
+### Consequences of the amendment
+
+- #3125 cannot deliver a working ADR-025 boundary check by simply calling the existing
+  `isWithinTenantScope` — it must extend/replace it with an `IsTenantAncestor`-based version
+  per A1.2, and cannot mark Decision 1 "implemented" until A1.3 is also resolved.
+- #3158 (and any other story whose acceptance criteria assume the boundary check works)
+  should treat that criterion as blocked on #3125 resolving both A1.2 and A1.3, not merely
+  on #3125 merging.
+- No change to this ADR's actual policy (Decisions 2, 4; Non-Goals; Consequences) — only the
+  Decision 1 mechanism and the newly-surfaced A1.3 gap.
+
+### New Remaining Tunable (added by this amendment)
+
+5. **How to identify a `root`-scoped caller distinctly from an unscoped superadmin (A1.3)**
+   — genuinely open; the implementing story must propose an approach for founder sign-off
+   rather than assume one.
