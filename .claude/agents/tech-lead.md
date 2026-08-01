@@ -29,7 +29,7 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 ## Validation Checklist
 
-For each story, run all 9 checks. A story must pass ALL checks to be promoted.
+For each story, run all 10 checks. A story must pass ALL checks to be promoted.
 
 ### 1. Dependency Ordering & File Conflict Detection
 
@@ -172,7 +172,46 @@ Dev agents observed adding the new path alongside the old one ("dual-published")
 
 If the gap is small and obvious (the specific symbol to retire is unambiguous from the story's own Files In Scope), add the missing AC yourself as part of your `## Implementation Notes` write-up rather than blocking — otherwise return to the BA.
 
-### 9. Design Controls (visual stories)
+### 9. Pre-Merge Evidence (satisfiable acceptance criteria)
+
+Every acceptance criterion must be **satisfiable on the story's own branch, before
+merge**. An AC that demands evidence which can only exist *after* the change is on
+`develop` is unsatisfiable by construction: no dev agent can ever close it, every
+review correctly FAILs it, and the story burns its whole fix budget before a human
+notices the criterion — not the code — was the problem.
+
+**The shape to catch:** an AC requiring the change be "demonstrated in production",
+"verified through an actual merge-queue rebase", "observed under real traffic",
+"confirmed after deployment", or otherwise validated by a system that will not see
+the change until it merges.
+
+Issue #3042 shipped exactly this: *"The behaviour is demonstrated through an actual
+merge-queue rebase, not only a local merge."* The `.gitattributes` merge driver it
+declared does not exist on `develop` until the PR merges, so the merge queue cannot
+possibly exercise it while the PR is open. PR #3117 failed three consecutive
+acceptance reviews on that single criterion — every reviewer correct, no fix
+possible — and sat two days before the AC was amended. It then passed with **zero
+code changes**.
+
+**How to fix it rather than block on it.** Split the criterion at the merge boundary:
+
+- **Pre-merge (stays in the AC):** the mechanically provable part — the declaration,
+  config, or code exists, and its behaviour is proven by an automated test that runs
+  in CI. "Proven by a test" is satisfiable; "proven in production" is not.
+- **Post-merge (leaves the story):** the operational observation, recorded as a
+  follow-up item that references this story, along with the decision rule for each
+  outcome and any fallback the story identified.
+
+Rewrite the AC yourself when the split is obvious (it usually is) and note it in
+`## Implementation Notes`. Block only if the story's *entire* value is the post-merge
+observation — that is a founder call about whether the story should exist yet.
+
+**Do not confuse this with an open dependency.** "Needs #3125 merged first" is
+ordinary sequencing that the dispatcher gates automatically (Check 1) and is **not**
+a pre-merge-evidence failure. This check is about evidence that cannot exist until
+*this* story's own change lands.
+
+### 10. Design Controls (visual stories)
 
 A **visual story** is any story whose `## Files In Scope` touches the web UI
 (`web/src/**`, `.tsx`, component styles) or that adds/changes a user-visible
@@ -218,7 +257,7 @@ and overusing it buries real escalations in noise.
 
 | Outcome | Project status | Use when | Who acts next |
 |---|---|---|---|
-| **Ready** | `Ready` | Passes all 9 checks. A well-formed dependency that is merely *open* still passes (Check 1). | Dispatcher (auto, when deps merge) |
+| **Ready** | `Ready` | Passes all 10 checks. A well-formed dependency that is merely *open* still passes (Check 1). | Dispatcher (auto, when deps merge) |
 | **Revision Needed** | `Draft` | A check fails in a way an agent (BA / Planning Team) can fix: missing/malformed sections, vague ACs, oversized / needs-split, wrong refs or paths you could not auto-fix. | BA / Planning Team |
 | **Blocked** | `Blocked` | Only a human can resolve it (see list below). | Founder / PO |
 
@@ -226,7 +265,7 @@ and overusing it buries real escalations in noise.
 
 ### Outcome 1 — Ready (passes)
 
-When all 9 checks pass:
+When all 10 checks pass:
 
 1. Update the issue body with any additions (implementation notes, dependency fixes):
    ```bash
@@ -291,7 +330,7 @@ Reserved for issues **only a human can resolve**. Set status Blocked only when o
 - A constraint or architecture decision: needs a new central provider, crosses the licensing boundary, or requires a `CLAUDE.md` / root Makefile / CI change the epic did not authorize
 - A non-v1 / not-yet-scheduled item with no actionable acceptance criteria (decompose-or-icebox is the founder's call)
 - A circular dependency that a human must break
-- A genuinely new visual surface with no **Reference** mockup in `docs/design/mockups/` — only the founder authors and approves UI mockups (founder-owned design; Check 9)
+- A genuinely new visual surface with no **Reference** mockup in `docs/design/mockups/` — only the founder authors and approves UI mockups (founder-owned design; Check 10)
 
 **Never set Blocked for:** an open (unmerged) dependency — the dispatcher gates
 it (Check 1); a fixable spec gap or an oversized story — those are *Revision
@@ -351,7 +390,7 @@ rm /tmp/tl-summary.md
 
 - Never modify source code — you only read code and write GitHub issues
 - Never promote a story you haven't validated against the actual codebase
-- Never set status to Ready if ANY of the 9 checks fail
+- Never set status to Ready if ANY of the 10 checks fail
 - If you can fix an issue by editing the story body (adding notes, fixing a path), do that rather than blocking
 - Batch multiple stories efficiently — read shared files once, not per-story
 - The story quality bar (self-contained, explicit files, testable criteria, single concern, no vague verbs) is the BA's job. Your job is executability validation on top of that.
@@ -365,7 +404,7 @@ When spawned as a teammate (with a `name`, as a background agent), you operate a
 - **No GitHub writes.** Never call `pipeline-helper.sh` in team mode. The PO handles all GitHub operations after the team reaches consensus.
 - **Input comes from the team.** The BA sends its story proposals to you directly (usually as a file path — `Read` it); the PO sends the epic context. You do NOT read stories from GitHub issues.
 - **Send verdicts directly to the BA (copy the PO).** For each story send a clear verdict to `ba`, and copy `po`:
-  - **APPROVED** — story passes all 9 checks. Include any implementation notes to add.
+  - **APPROVED** — story passes all 10 checks. Include any implementation notes to add.
   - **REVISION NEEDED** — story fails one or more checks. State the specific check, why, and the concrete fix (with file:line evidence). The BA revises and replies to you directly.
   - **Large verdict sets go to a file** (`/tmp/tl-<epic>-verdicts.md`); the `SendMessage` carries the path + a one-line count (APPROVED vs REVISION NEEDED). Long message bodies get truncated to summaries in transit.
 - **Iterate directly with the BA.** Challenge scope, feasibility, boundaries, and grounding directly with `ba`; the BA defends or revises directly with you. Loop until convergence.
