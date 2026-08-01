@@ -9,19 +9,18 @@
  * Tab slots: Run (F3), Schedule (#2986), Preview (F4) are placeholder panes;
  * sibling stories mount their content here.
  *
- * Deferred: tracked as a private backlog draft under epic #2859 (item
- * PVTI_lADOCrV4cc4BX5ezzg0p32k — materializes to a numbered issue at
- * dispatch). The header's last-run status pill needs per-workflow execution
- * data, which the Run tab (F3) also owns; wiring a second, independent fetch
- * here ahead of F3 risks duplicating/conflicting with that story's data flow,
- * so it's tracked as follow-up instead of implemented in this shell story.
+ * Last-run status pill: derived from useWorkflowExecutions(workflow.name) —
+ * the same fetch the Run tab (F3) will also mount — picking whichever
+ * execution has the latest start_time (the endpoint documents no ordering).
+ * A workflow with no executions yet renders a neutral "Never run" pill.
  *
- * Security A9.1: workflow.name and workflow.description originate from
- * user-supplied content and are rendered as JSX text nodes only —
- * never dangerouslySetInnerHTML.
+ * Security A9.1: workflow.name, workflow.description, and execution status
+ * originate from user-supplied / controller content and are rendered as
+ * JSX text nodes only — never dangerouslySetInnerHTML.
  */
 import { useState } from 'react'
-import type { VersionedWorkflow } from './useWorkflows.ts'
+import type { VersionedWorkflow, WorkflowExecution } from './useWorkflows.ts'
+import { useWorkflowExecutions } from './useWorkflows.ts'
 import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 
 type DrawerTab = 'run' | 'schedule' | 'preview'
@@ -31,6 +30,31 @@ interface WorkflowDrawerProps {
   onClose: () => void
 }
 
+function lastRunTone(status: string): string {
+  switch (status) {
+    case 'completed':
+      return 'ok'
+    case 'failed':
+    case 'cancelled':
+      return 'crit'
+    case 'running':
+    case 'pending':
+    case 'paused':
+      return 'warn'
+    default:
+      return 'neutral'
+  }
+}
+
+function mostRecentExecution(
+  executions: WorkflowExecution[],
+): WorkflowExecution | null {
+  return executions.reduce<WorkflowExecution | null>((latest, ex) => {
+    if (!latest) return ex
+    return Date.parse(ex.start_time) > Date.parse(latest.start_time) ? ex : latest
+  }, null)
+}
+
 export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>('run')
   const { scope } = useTenantScope()
@@ -38,6 +62,8 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
   // request's scoped tenant (workflowStoreForRequest), so the current scope
   // is the correct tenant path for any workflow in this list.
   const tenantPath = scope || 'root'
+  const { executions } = useWorkflowExecutions(workflow.name)
+  const lastRun = mostRecentExecution(executions)
 
   return (
     <aside
@@ -70,6 +96,14 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
         <div className="meta" data-testid="drawer-meta">
           {workflow.version && <>v{workflow.version} · </>}
           <span data-testid="drawer-tenant-path">{tenantPath}</span>
+          {' · '}
+          <span
+            className={`pill ${lastRun ? lastRunTone(lastRun.status) : 'neutral'}`}
+            data-testid="drawer-last-run-pill"
+          >
+            <span className="dot" />
+            {lastRun ? lastRun.status : 'Never run'}
+          </span>
         </div>
       </div>
 

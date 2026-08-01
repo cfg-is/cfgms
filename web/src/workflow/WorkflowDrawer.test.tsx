@@ -3,17 +3,46 @@
 
 /*
  * WorkflowDrawer test suite (Story #3039): drawer renders correctly, tabs
- * switch visible pane, close button fires onClose, and user content is
- * rendered as safe text nodes (Security A9.1).
+ * switch visible pane, close button fires onClose, the last-run status pill
+ * reflects the most recent execution, and user content is rendered as safe
+ * text nodes (Security A9.1).
  */
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach } from 'vitest'
 import WorkflowDrawer from './WorkflowDrawer.tsx'
 import type { VersionedWorkflow } from './useWorkflows.ts'
 import { TenantScopeProvider } from '../shell/TenantScopeContext.tsx'
 
-afterEach(cleanup)
+const fetchMock = vi.fn<typeof fetch>()
+
+function makeExecutionsResponse(executions: object[], status = 200) {
+  return new Response(
+    JSON.stringify({ executions, count: executions.length }),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+function makeExecution(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'exec-1',
+    workflow_name: 'onboard-user',
+    status: 'completed',
+    start_time: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+beforeEach(() => {
+  vi.stubGlobal('fetch', fetchMock)
+  fetchMock.mockReset()
+  fetchMock.mockResolvedValue(makeExecutionsResponse([]))
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  cleanup()
+})
 
 function makeWorkflow(overrides: Partial<VersionedWorkflow> = {}): VersionedWorkflow {
   return {
@@ -117,6 +146,49 @@ describe('WorkflowDrawer — tab bar', () => {
     expect(screen.getByTestId('drawer-tab-run')).toHaveClass('on')
     expect(screen.getByTestId('drawer-pane-run')).toBeInTheDocument()
     expect(screen.queryByTestId('drawer-pane-schedule')).toBeNull()
+  })
+})
+
+describe('WorkflowDrawer — last-run status pill', () => {
+  it('shows a neutral "Never run" pill when the workflow has no executions', async () => {
+    fetchMock.mockResolvedValue(makeExecutionsResponse([]))
+    renderDrawer()
+    const pill = await screen.findByTestId('drawer-last-run-pill')
+    expect(pill).toHaveClass('pill', 'neutral')
+    expect(pill).toHaveTextContent('Never run')
+  })
+
+  it('shows the most recent execution status, chosen by start_time not array order', async () => {
+    fetchMock.mockResolvedValue(
+      makeExecutionsResponse([
+        makeExecution({
+          id: 'exec-newer',
+          status: 'completed',
+          start_time: '2026-01-03T00:00:00Z',
+        }),
+        makeExecution({
+          id: 'exec-older',
+          status: 'failed',
+          start_time: '2026-01-01T00:00:00Z',
+        }),
+      ]),
+    )
+    renderDrawer()
+    const pill = await screen.findByTestId('drawer-last-run-pill')
+    expect(pill).toHaveClass('pill', 'ok')
+    expect(pill).toHaveTextContent('completed')
+  })
+
+  it('maps a failed last run to the crit tone', async () => {
+    fetchMock.mockResolvedValue(
+      makeExecutionsResponse([
+        makeExecution({ status: 'failed', start_time: '2026-01-01T00:00:00Z' }),
+      ]),
+    )
+    renderDrawer()
+    const pill = await screen.findByTestId('drawer-last-run-pill')
+    expect(pill).toHaveClass('pill', 'crit')
+    expect(pill).toHaveTextContent('failed')
   })
 })
 
