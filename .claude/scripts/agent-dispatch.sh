@@ -628,6 +628,63 @@ sanitize_branch() {
   echo "$1" | sed 's|/|--|g'
 }
 
+# _review_refusal_hint <reason>
+#   Static reason -> recovery-hint lookup for review-pr's REVIEW_REFUSED
+#   output. Keeping this table in code (not in dispatch.md/po.md prose) means
+#   the explanation ships in the same line the caller already has to read to
+#   decide what to do next — no standing doc token cost paid every cycle for
+#   refusals that mostly don't happen — and it can't drift out of sync with
+#   the reasons the script actually emits the way the prose version did.
+#   Every reason token below is a fixed, unconditional fact about what
+#   happened; genuinely diagnostic questions ("why did CI fail on this PR",
+#   "why was this PR evicted from the merge queue") are deliberately NOT
+#   handled here — those need an agent to read logs/timelines and judge, so
+#   they stay on the `po-act.sh diagnose` / `investigate_queue_failures` path.
+# Args: <reason>  (a REVIEW_REFUSED reason token, wildcard suffixes allowed)
+# Stdout: a short recovery hint, or empty string if none is defined.
+_review_refusal_hint() {
+  local reason="$1"
+  case "$reason" in
+    pr_not_found)
+      echo "PR does not exist, or the API lookup failed." ;;
+    pr_state_*)
+      echo "PR is not OPEN (closed or merged) — nothing to review." ;;
+    fork_branch_*)
+      echo "PR is from a fork — fork PR reviews aren't supported (no push rights)." ;;
+    external_author_*)
+      echo "author isn't a trusted push+/maintain/admin collaborator; a quarantine comment was posted. Needs a maintainer to apply human-reviewed:ok before this is retried." ;;
+    no_story_link)
+      echo "no Fixes/Closes/Resolves #N in the body and no feature/story-N branch — manually associate a story or skip." ;;
+    no_project_item_for_story_*)
+      echo "story number resolved but no matching project item was found — check the project board." ;;
+    already_in_flight)
+      echo "a review container for this PR is still running — another review is genuinely in progress. Check /isoagents; no action needed." ;;
+    container_exists)
+      echo "a review container for this PR exists but has exited — run './.claude/scripts/agent-dispatch.sh cleanup-stale-reviews', then retry." ;;
+    lease_held)
+      echo "another host holds the pr-<N> lease (reviewing/fixing/rebasing this PR) — wait for it to release." ;;
+    lease_error)
+      echo "lease acquisition failed unexpectedly — check './scripts/pipeline-helper.sh lease-acquire' directly." ;;
+    *)
+      echo "" ;;
+  esac
+}
+
+# _emit_review_refused <pr_num> <reason>
+#   Prints "REVIEW_REFUSED:<pr>:<reason>" with its hint appended when one
+#   exists, then exits 3. Centralizes the format so every review-pr refusal
+#   site stays consistent and self-explanatory without a doc lookup.
+_emit_review_refused() {
+  local pr_num="$1" reason="$2" hint
+  hint=$(_review_refusal_hint "$reason")
+  if [[ -n "$hint" ]]; then
+    echo "REVIEW_REFUSED:${pr_num}:${reason}: ${hint}"
+  else
+    echo "REVIEW_REFUSED:${pr_num}:${reason}"
+  fi
+  exit 3
+}
+
 # Classify an existing cfg-agent-review-pr-<N> container's `docker ps`
 # `.State` value into the REVIEW_REFUSED reason review-pr should emit.
 #
@@ -1970,8 +2027,7 @@ PYEOF
     # Validate PR + auto-detect story number.
     pr_meta=$(gh pr view "$pr_num" --repo cfg-is/cfgms \
       --json state,headRefName,body,labels,headRepositoryOwner,author 2>/dev/null) || {
-      echo "REVIEW_REFUSED:${pr_num}:pr_not_found"
-      exit 3
+      _emit_review_refused "$pr_num" "pr_not_found"
     }
     state=$(echo "$pr_meta" | jq -r '.state')
     pr_branch=$(echo "$pr_meta" | jq -r '.headRefName')
@@ -1981,12 +2037,10 @@ PYEOF
     pr_author_login=$(echo "$pr_meta" | jq -r '.author.login // empty')
 
     if [[ "$state" != "OPEN" ]]; then
-      echo "REVIEW_REFUSED:${pr_num}:pr_state_${state}"
-      exit 3
+      _emit_review_refused "$pr_num" "pr_state_${state}"
     fi
     if [[ -n "$fork_owner" && "$fork_owner" != "cfg-is" ]]; then
-      echo "REVIEW_REFUSED:${pr_num}:fork_branch_${fork_owner}"
-      exit 3
+      _emit_review_refused "$pr_num" "fork_branch_${fork_owner}"
     fi
 
     # External-author gate (Issue #1786): check trust BEFORE any git fetch/checkout.
@@ -1994,8 +2048,7 @@ PYEOF
     author_trust=$(_check_author_permission "$pr_author_login" "$pr_num" "$pr_labels")
     if [[ "$author_trust" != "internal" ]]; then
       _post_quarantine_comment "$pr_num" "$pr_author_login"
-      echo "REVIEW_REFUSED:${pr_num}:external_author_${pr_author_login}:${author_trust}"
-      exit 3
+      _emit_review_refused "$pr_num" "external_author_${pr_author_login}:${author_trust}"
     fi
 
     validate_branch "$pr_branch"
@@ -2016,8 +2069,7 @@ PYEOF
         story_num="${resolution#STORY:}"
         ;;
       REFUSED:*)
-        echo "REVIEW_REFUSED:${pr_num}:${resolution#REFUSED:}"
-        exit 3
+        _emit_review_refused "$pr_num" "${resolution#REFUSED:}"
         ;;
     esac
 
@@ -2028,8 +2080,7 @@ PYEOF
     # (Same-host fast path; the cross-host interlock is the pr-<N> lease below.)
     existing_state=$(docker ps -a --filter "name=^/${container_name}$" --format "{{.State}}" 2>/dev/null | head -1)
     if [[ -n "$existing_state" ]]; then
-      echo "REVIEW_REFUSED:${pr_num}:$(_classify_review_container_state "$existing_state")"
-      exit 3
+      _emit_review_refused "$pr_num" "$(_classify_review_container_state "$existing_state")"
     fi
 
     PROJECT_QUEUE="${REPO_ROOT}/scripts/project-queue.sh"
@@ -2078,8 +2129,7 @@ for i in items:
         done
       fi
       if [[ -z "$item_id" ]]; then
-        echo "REVIEW_REFUSED:${pr_num}:no_story_link"
-        exit 3
+        _emit_review_refused "$pr_num" "no_story_link"
       fi
     else
       # Story PR: look up project item_id via add-issue.
@@ -2090,8 +2140,7 @@ for i in items:
       # item_id leaves the reviewer reading some other item's body and
       # potentially mutating the wrong status (see issue #1806).
       if [[ -z "$item_id" ]]; then
-        echo "REVIEW_REFUSED:${pr_num}:no_project_item_for_story_${story_num}"
-        exit 3
+        _emit_review_refused "$pr_num" "no_project_item_for_story_${story_num}"
       fi
     fi
 
@@ -2115,8 +2164,8 @@ for i in items:
     review_lease_out=$(bash "$PIPELINE_HELPER" lease-acquire "pr-${pr_num}" "${CFGMS_LEASE_TTL_PR:-21600}" 2>/dev/null || true)
     case "$review_lease_out" in
       ACQUIRED:*|RECLAIMED:*) ;;
-      HELD:*) echo "REVIEW_REFUSED:${pr_num}:lease_held"; exit 3 ;;
-      *)      echo "REVIEW_REFUSED:${pr_num}:lease_error"; exit 3 ;;
+      HELD:*) _emit_review_refused "$pr_num" "lease_held" ;;
+      *)      _emit_review_refused "$pr_num" "lease_error" ;;
     esac
     REVIEW_LEASE_RELEASE_ON_EXIT="pr-${pr_num}"
     trap '[ -n "${REVIEW_LEASE_RELEASE_ON_EXIT:-}" ] && bash "$PIPELINE_HELPER" lease-release "$REVIEW_LEASE_RELEASE_ON_EXIT" >/dev/null 2>&1; true' EXIT
@@ -2486,6 +2535,15 @@ PROMPT_EOF
     # value and prints its result. Safe (no docker, no gh, no writes).
     [[ $# -eq 1 ]] || { echo "_test-classify-container-state requires <state>"; exit 1; }
     _classify_review_container_state "$1"
+    ;;
+
+  _test-review-refusal-hint)
+    # Hidden test hook for review_pr_detection.test.sh. Calls
+    # _review_refusal_hint() with the supplied reason token and prints its
+    # result (empty string for reasons with no fixed hint). Safe (no docker,
+    # no gh, no writes).
+    [[ $# -eq 1 ]] || { echo "_test-review-refusal-hint requires <reason>"; exit 1; }
+    _review_refusal_hint "$1"
     ;;
 
   _test-mint-creds)
