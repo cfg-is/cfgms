@@ -159,12 +159,26 @@ jobs:
     - name: Install Nancy
       run: make install-nancy
     
+    # Nancy v2 authenticates to Sonatype Guide with GUIDE_TOKEN; it cannot scan
+    # anonymously. GitHub withholds secrets from pull_request runs originating in
+    # a fork, so the token is unavailable there through no fault of the
+    # contributor. Skipping on fork PRs is not a bypass: merge_group runs have
+    # the secret, so nothing reaches develop without a real dependency scan.
+    # A missing token on a same-repo run is a misconfiguration and fails closed.
     - name: Run Nancy Scan
       id: scan
       env:
         GUIDE_TOKEN: ${{ secrets.GUIDE_TOKEN }}
+        IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
       run: |
         echo "📦 Running Nancy Go Dependency Scan"
+        if [ -z "${GUIDE_TOKEN:-}" ] && [ "$IS_FORK_PR" = "true" ]; then
+          echo "⏭️  Fork pull request: GUIDE_TOKEN is unavailable to fork runs."
+          echo "   Dependency scanning runs against this change in the merge queue."
+          echo "status=skipped-fork" >> "$GITHUB_OUTPUT"
+          echo "issues-found=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         make security-deps
         echo "status=passed" >> "$GITHUB_OUTPUT"
         echo "issues-found=false" >> "$GITHUB_OUTPUT"
@@ -323,6 +337,7 @@ jobs:
         NANCY_RESULT: ${{ needs.nancy-scan.result }}
         GOSEC_RESULT: ${{ needs.gosec-scan.result }}
         STATICCHECK_RESULT: ${{ needs.staticcheck-scan.result }}
+        IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
       run: |
         echo "📊 Parallel Security Scan Summary"
         echo "================================="
@@ -333,6 +348,18 @@ jobs:
         echo "  • gosec: $GOSEC_STATUS"
         echo "  • staticcheck: $STATICCHECK_STATUS"
         echo ""
+
+        # A fork PR cannot reach the Sonatype Guide token. That skip is only
+        # acceptable on a fork PR, and only because the merge queue re-scans
+        # with the secret before anything merges. Anywhere else it is a failure.
+        if [ "$NANCY_STATUS" = "skipped-fork" ]; then
+          if [ "$IS_FORK_PR" != "true" ]; then
+            echo "❌ Nancy reported a fork skip outside a fork pull request"
+            echo "issues-found=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "ℹ️  Nancy skipped: fork PRs have no GUIDE_TOKEN; the merge queue scans this change."
+        fi
 
         # Cancellation, initialization failure, and skipped scans are failures,
         # not implicit approvals.
