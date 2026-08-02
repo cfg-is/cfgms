@@ -5,6 +5,8 @@ package fleet
 import (
 	"context"
 	"time"
+
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 )
 
 // StewardData is the minimal steward information needed for fleet queries.
@@ -14,7 +16,8 @@ type StewardData struct {
 	TenantID      string
 	Status        string
 	LastHeartbeat time.Time
-	DNAAttributes map[string]string // Flattened DNA attributes (hostname, os, arch, platform, tags, ...)
+	DNAAttributes map[string]string    // Flattened DNA attributes (hostname, os, arch, platform, tags, ...)
+	DNAFragments  []*commonpb.Fragment // ADR-017 fragments (cluster:* and host:* fragment-shaped state)
 }
 
 // StewardProvider is the source of steward data for fleet queries.

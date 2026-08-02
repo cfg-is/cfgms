@@ -1,0 +1,354 @@
+<style>
+  :root {
+    --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff;
+    --shadow:0 18px 50px -22px rgba(60,45,30,.4); --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){ :root{
+    --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a;
+    --shadow:0 22px 60px -26px rgba(0,0,0,.8); } }
+  :root[data-theme="light"]{ --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
+    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(60,45,30,.4); }
+  :root[data-theme="dark"]{ --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
+  *{box-sizing:border-box;}
+  body{margin:0; min-height:100dvh; background:var(--bg); color:var(--text); display:flex; flex-direction:column;
+    font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+  .topbar{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:11px 16px; background:var(--chrome);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5;}
+  .brand{display:flex; align-items:baseline; gap:8px; margin-right:auto;}
+  .brand b{font-size:14px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;}
+  .brand span{font-size:11px; color:var(--text-dim); letter-spacing:.04em;}
+  .seg{display:inline-flex; position:relative; background:var(--chrome-2); border:1px solid var(--border); border-radius:10px; padding:3px;}
+  .seg button{position:relative; z-index:1; appearance:none; border:0; background:transparent; color:var(--text-dim);
+    font:inherit; font-size:12.5px; font-weight:600; padding:6px 13px; border-radius:7px; cursor:pointer; transition:color .18s ease;}
+  .seg button[aria-pressed="true"]{color:var(--accent-ink);}
+  .seg .thumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); background:var(--accent); border-radius:7px;
+    transition:transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index:0;}
+  .seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .dims{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; color:var(--text-dim);
+    font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .stage{flex:1; display:flex; align-items:flex-start; justify-content:center; padding:22px 16px 30px; overflow:auto;}
+  .frame-wrap{position:relative; margin:0 auto; border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow);
+    border:1px solid var(--border); background:var(--chrome); transition:width .22s ease, height .22s ease;}
+  .frame{display:block; border:0; transform-origin:0 0; background:transparent;}
+  .hint{text-align:center; color:var(--text-dim); font-size:12.5px; line-height:1.6; padding:0 20px 30px; max-width:680px; margin:0 auto;}
+  .hint b{color:var(--text);}
+</style>
+
+<div class="topbar">
+  <div class="brand"><b>CFGMS</b><span>subject-role assignment</span></div>
+  <div class="seg" role="group" aria-label="Preview viewport">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-dev="desktop" aria-pressed="true">Desktop</button>
+    <button data-dev="tablet" aria-pressed="false">Tablet</button>
+    <button data-dev="mobile" aria-pressed="false">Mobile</button>
+  </div>
+  <div class="seg themeseg" role="group" aria-label="Theme">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="dims" id="dims">—</div>
+</div>
+
+<div class="stage">
+  <div class="frame-wrap" id="wrap"><iframe class="frame" id="frame" title="CFGMS subject-role assignment mockup"></iframe></div>
+</div>
+
+<p class="hint">
+  <b>Subject-role assignment</b> (Issue #3134) — extends <b>AccountsView</b>'s account row with
+  an expand-row (the same pattern <b>RolesView</b> uses for permissions), so an admin never leaves
+  Accounts to see or change what roles a subject holds. <b>Click a row</b> to expand it, use the
+  role picker + <b>Assign</b> to grant a role, the <b>×</b> chip to open a revoke confirm. Click
+  <b>Assign</b> on <b>fleet-admin</b>'s <b>operator</b> row to see the 403 escalation-prevention
+  message (distinct from a generic failure). Both themes.
+</p>
+
+<script>
+  const DEVICES = { desktop:{w:1320,h:900}, tablet:{w:900,h:1040}, mobile:{w:390,h:900} };
+  let current = "desktop", themeMode = "auto";
+  const frame = document.getElementById("frame"), wrap = document.getElementById("wrap");
+  const stage = document.querySelector(".stage"), dims = document.getElementById("dims");
+  const devSeg = document.querySelector(".seg:not(.themeseg)"), themeSeg = document.querySelector(".themeseg");
+  const devBtns = [...devSeg.querySelectorAll("button")], themeBtns = [...themeSeg.querySelectorAll("button")];
+  function posThumb(seg){ const t=seg.querySelector(".thumb"); const a=seg.querySelector('button[aria-pressed="true"]')||seg.querySelector("button"); t.style.width=a.offsetWidth+"px"; t.style.transform="translateX("+(a.offsetLeft-3)+"px)"; }
+
+  const MOCK_CSS = `
+    :root{
+      --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
+      --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+      --accent:#4a6b7c; --accent-ink:#ffffff;
+      --state-ok:#507055; --state-ok-bg:#e8f0e9; --state-warn:#8f4f2e; --state-warn-bg:#f7e8db;
+      --state-crit:#965044; --state-crit-bg:#f2e5e3; --state-neutral:#6b5c4d; --state-neutral-bg:#e8e0d8;
+      --radius:9px; --radius-sm:7px; --radius-lg:13px; --radius-pill:20px;
+    }
+    :root[data-theme="dark"]{
+      --bg-primary:#1a1a1a; --bg-surface:#242426; --bg-elevated:#31313a; --bg-sunk:#101010; --border:#52525c;
+      --text-primary:#c8b8a6; --text-secondary:#a89888; --text-faint:#9a8974;
+      --accent:#7b9fb0; --accent-ink:#16202a;
+      --state-ok:#7fa985; --state-ok-bg:#1a2e1d; --state-warn:#d4864f; --state-warn-bg:#332518;
+      --state-crit:#d0846f; --state-crit-bg:#2d1f1c; --state-neutral:#a89888; --state-neutral-bg:#2a2520;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0; height:100%;}
+    body{background:var(--bg-primary); color:var(--text-primary); font-size:13.5px; line-height:1.45;
+      font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+    .mono{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace;}
+    .content{padding:20px 24px; display:flex; flex-direction:column; gap:16px; max-width:980px; margin:0 auto;}
+    .htitle h1{margin:0; font-size:19px; font-weight:700; letter-spacing:-.01em;}
+    .htitle p{margin:3px 0 0; color:var(--text-secondary); font-size:13.5px;}
+
+    .wf-tabs{display:flex; gap:2px; border-bottom:1px solid var(--border);}
+    .wf-tab{appearance:none; border:0; background:transparent; font:inherit; font-size:13px; font-weight:600;
+      color:var(--text-faint); padding:10px 14px; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px;}
+    .wf-tab.active{color:var(--accent); border-bottom-color:var(--accent);}
+
+    .panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+    .ptool{display:flex; align-items:center; gap:9px; padding:10px 13px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+    .ptool .cnt{margin-left:auto; font-size:11.5px; color:var(--text-faint); font-variant-numeric:tabular-nums;}
+
+    table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+    .tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint);
+      font-weight:600; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+    .tbl td{padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:middle;}
+    .tbl tbody tr:last-child > td{border-bottom:0;}
+    .tbl tbody tr.subject-row{cursor:pointer;}
+    .tbl tbody tr.subject-row:hover td{background:var(--bg-elevated);}
+    .tbl tbody tr.subject-row.expanded td{background:var(--bg-elevated);}
+    .nm{font-family:'JetBrains Mono',Menlo,monospace; font-size:12.5px; font-weight:600;}
+    .mut{color:var(--text-secondary); font-size:12.5px;}
+    .mono2{font-family:'JetBrains Mono',Menlo,monospace; color:var(--text-secondary); font-size:12px;}
+    .chev{display:inline-block; transition:transform .15s ease; color:var(--text-faint); margin-right:8px;}
+    tr.expanded .chev{transform:rotate(90deg);}
+
+    .rolechips{display:flex; flex-wrap:wrap; gap:6px;}
+    .chip{display:inline-flex; align-items:center; gap:7px; padding:4px 6px 4px 10px; border-radius:var(--radius-pill);
+      background:var(--bg-elevated); font-size:11.5px; font-weight:600; color:var(--text-primary); white-space:nowrap;}
+    .chip button{appearance:none; border:0; background:transparent; color:var(--text-faint); width:16px; height:16px;
+      border-radius:50%; display:grid; place-items:center; cursor:pointer; font-size:12px; line-height:1;}
+    .chip button:hover{background:var(--state-crit-bg); color:var(--state-crit);}
+    .chip.empty{background:transparent; color:var(--text-faint); font-weight:500;}
+
+    .expand-panel{background:var(--bg-sunk); padding:0;}
+    .expand-inner{padding:14px 16px 16px;}
+    .exp-label{font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); margin-bottom:8px;}
+    .assign-row{display:flex; align-items:flex-end; gap:10px; margin-top:14px; flex-wrap:wrap;}
+    .wf-form-field{display:flex; flex-direction:column; gap:4px;}
+    .wf-form-label{font-size:10.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint);}
+    .wf-form-field select{font:inherit; font-size:12.5px; color:var(--text-primary); background:var(--bg-surface);
+      border:1px solid var(--border); border-radius:var(--radius-sm); padding:6px 8px; width:260px;}
+    .wf-btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink);
+      font:inherit; font-size:11.5px; font-weight:600; padding:6px 14px; border-radius:var(--radius-sm); cursor:pointer;}
+    .wf-btn:disabled{opacity:.5; cursor:not-allowed;}
+    .wf-btn-secondary{appearance:none; border:1px solid var(--border); background:transparent; color:var(--text-secondary);
+      font:inherit; font-size:11.5px; padding:6px 12px; border-radius:var(--radius-sm); cursor:pointer;}
+    .wf-btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit);
+      font:inherit; font-size:11.5px; font-weight:600; padding:6px 14px; border-radius:var(--radius-sm); cursor:pointer;}
+    .assign-error{font-size:11.5px; color:var(--state-crit); display:flex; align-items:center; gap:6px;}
+    .assign-error b{font-family:'JetBrains Mono',Menlo,monospace;}
+    .assign-403{display:none; margin-top:12px; padding:10px 12px; border-radius:8px; background:var(--state-crit-bg); color:var(--state-crit); font-size:12px; align-items:flex-start; gap:8px;}
+    .assign-403.show{display:flex;}
+    .assign-403 svg{flex:none; margin-top:1px;}
+
+    /* revoke confirm */
+    .wf-overlay{position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; place-items:center; z-index:100;}
+    .wf-overlay.open{display:grid;}
+    .wf-modal{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px;
+      max-width:420px; width:calc(100% - 48px); box-shadow:0 8px 32px rgba(0,0,0,.25);}
+    .wf-modal h3{margin:0 0 8px; font-size:15.5px; font-weight:700;}
+    .wf-modal p{margin:0 0 6px; font-size:12.5px; color:var(--text-secondary);}
+    .wf-modal-actions{display:flex; gap:8px; justify-content:flex-end; margin-top:18px;}
+
+    .toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(10px); opacity:0; pointer-events:none;
+      background:var(--bg-elevated); border:1px solid var(--border); color:var(--text-primary); padding:9px 16px; border-radius:9px;
+      font-size:12.5px; font-weight:600; box-shadow:0 8px 24px rgba(0,0,0,.2); transition:opacity .18s ease, transform .18s ease; z-index:120;}
+    .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+    @media (max-width:700px){
+      .tbl thead{display:none;}
+      .tbl td{padding:9px 12px;}
+      .assign-row{flex-direction:column; align-items:stretch;}
+      .wf-form-field select{width:100%;}
+    }
+  `;
+
+  const CHEVRON = '<svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+  const WARN_ICO = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>';
+
+  const ALL_ROLES = ['operator', 'fleet-viewer', 'security-reviewer', 'tenant-admin', 'cert-admin'];
+
+  const SUBJECTS = [
+    { id:'s1', username:'fleet-admin', tenant:'root', roles:['operator'] },
+    { id:'s2', username:'msp-a-ops', tenant:'root/msp-a', roles:['fleet-viewer', 'security-reviewer'] },
+    { id:'s3', username:'client-1-readonly', tenant:'root/msp-a/client-1', roles:[] },
+    { id:'s4', username:'break-glass', tenant:'root', roles:['operator', 'tenant-admin', 'cert-admin'] },
+  ];
+
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  const MOCK_HTML = `
+    <div class="content">
+      <div class="htitle"><h1>Accounts</h1><p>Manage web admin accounts, and view and assign the roles each one holds.</p></div>
+      <div class="wf-tabs" role="tablist">
+        <button class="wf-tab" role="tab">Accounts</button>
+        <button class="wf-tab active" role="tab" aria-selected="true">Roles</button>
+      </div>
+      <div class="panel">
+        <div class="ptool"><span class="cnt" id="subject-count">4 accounts</span></div>
+        <table class="tbl">
+          <thead><tr><th>Username</th><th>Tenant</th><th>Roles</th><th></th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="wf-overlay" id="revoke-overlay">
+      <div class="wf-modal">
+        <h3>Revoke role?</h3>
+        <p>This removes <b class="mono" id="rv-role">operator</b> from <b class="mono" id="rv-subject">fleet-admin</b>. They will lose any access that role alone granted.</p>
+        <div class="wf-modal-actions">
+          <button class="wf-btn-secondary" id="rv-cancel">Cancel</button>
+          <button class="wf-btn-danger" id="rv-confirm">Revoke role</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  `;
+
+  const MOCK_JS = `
+    var CHEVRON = ${JSON.stringify(CHEVRON)};
+    var WARN_ICO = ${JSON.stringify(WARN_ICO)};
+    var ALL_ROLES = ${JSON.stringify(ALL_ROLES)};
+    var SUBJECTS = ${JSON.stringify(SUBJECTS)};
+    var expandedId = null;
+    var assignError = {}; // subjectId -> {type:'403'|'generic', msg}
+
+    function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function byId(id){ return SUBJECTS.filter(function(s){ return s.id===id; })[0]; }
+
+    var tbody = document.getElementById('tbody');
+
+    function chipsHtml(s){
+      if (s.roles.length===0) return '<span class="chip empty">No roles assigned</span>';
+      return s.roles.map(function(r){
+        return '<span class="chip">'+esc(r)+'<button data-revoke="'+r+'" data-subject="'+s.id+'" aria-label="Revoke '+esc(r)+'">&times;</button></span>';
+      }).join('');
+    }
+
+    function optionsHtml(s){
+      var avail = ALL_ROLES.filter(function(r){ return s.roles.indexOf(r)===-1; });
+      if (avail.length===0) return '<option value="">All roles already assigned</option>';
+      return avail.map(function(r){ return '<option value="'+r+'">'+esc(r)+'</option>'; }).join('');
+    }
+
+    function render(){
+      tbody.innerHTML = SUBJECTS.map(function(s){
+        var expanded = expandedId===s.id;
+        var row = '<tr class="subject-row'+(expanded?' expanded':'')+'" data-id="'+s.id+'">'
+          + '<td>'+CHEVRON+'<span class="nm">'+esc(s.username)+'</span></td>'
+          + '<td><span class="mono2">'+esc(s.tenant)+'</span></td>'
+          + '<td><div class="rolechips">'+chipsHtml(s)+'</div></td>'
+          + '<td><span class="mut" style="color:var(--accent); font-weight:600;">'+(expanded?'Close':'Manage ›')+'</span></td>'
+          + '</tr>';
+        if (expanded) {
+          var err = assignError[s.id];
+          row += '<tr class="expand-row"><td colspan="4" class="expand-panel"><div class="expand-inner">'
+            + '<div class="exp-label">Assign a role to '+esc(s.username)+'</div>'
+            + '<div class="assign-row">'
+            +   '<div class="wf-form-field"><span class="wf-form-label">Role</span><select id="assign-select">'+optionsHtml(s)+'</select></div>'
+            +   '<button class="wf-btn" data-assign="'+s.id+'">Assign role</button>'
+            + '</div>'
+            + '<div class="assign-403'+(err?' show':'')+'" id="err-'+s.id+'">'+WARN_ICO+'<span>'+(err?err.msg:'')+'</span></div>'
+            + '</div></td></tr>';
+        }
+        return row;
+      }).join('');
+    }
+
+    function toast(msg){
+      var el = document.getElementById('toast');
+      el.textContent = msg; el.classList.add('show');
+      setTimeout(function(){ el.classList.remove('show'); }, 1800);
+    }
+
+    tbody.addEventListener('click', function(e){
+      var revokeBtn = e.target.closest('button[data-revoke]');
+      if (revokeBtn){
+        e.stopPropagation();
+        openRevoke(revokeBtn.getAttribute('data-subject'), revokeBtn.getAttribute('data-revoke'));
+        return;
+      }
+      var assignBtn = e.target.closest('button[data-assign]');
+      if (assignBtn){
+        e.stopPropagation();
+        var sid = assignBtn.getAttribute('data-assign');
+        var s = byId(sid);
+        var sel = document.getElementById('assign-select');
+        var role = sel ? sel.value : '';
+        if (!role) return;
+        // demo escalation-prevention: break-glass and fleet-admin's operator subject
+        // can't self-grant tenant-admin/cert-admin from this UI — surfaces the 403 distinctly.
+        if ((sid==='s1' || sid==='s4') && (role==='tenant-admin' || role==='cert-admin')){
+          assignError[sid] = { msg: '403 Forbidden — assigning "'+role+'" here would let this account escalate its own privileges. Ask a break-glass operator to grant it.' };
+          render();
+          return;
+        }
+        assignError[sid] = null;
+        s.roles.push(role);
+        toast('Assigned '+role+' to '+s.username);
+        render();
+        return;
+      }
+      var row = e.target.closest('tr.subject-row');
+      if (row){
+        var id = row.getAttribute('data-id');
+        expandedId = (expandedId===id ? null : id);
+        render();
+      }
+    });
+
+    var rvOverlay = document.getElementById('revoke-overlay');
+    var pending = null;
+    function openRevoke(subjectId, role){
+      pending = { subjectId: subjectId, role: role };
+      document.getElementById('rv-role').textContent = role;
+      document.getElementById('rv-subject').textContent = byId(subjectId).username;
+      rvOverlay.classList.add('open');
+    }
+    document.getElementById('rv-cancel').addEventListener('click', function(){ rvOverlay.classList.remove('open'); });
+    rvOverlay.addEventListener('click', function(e){ if (e.target===rvOverlay) rvOverlay.classList.remove('open'); });
+    document.getElementById('rv-confirm').addEventListener('click', function(){
+      var s = byId(pending.subjectId);
+      s.roles = s.roles.filter(function(r){ return r!==pending.role; });
+      rvOverlay.classList.remove('open');
+      toast('Revoked '+pending.role+' from '+s.username);
+      render();
+    });
+
+    render();
+  `;
+
+  function currentTheme(){ if(themeMode!=="auto") return themeMode; const d=document.documentElement.getAttribute("data-theme"); return d || (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"); }
+  function srcdoc(t){ return '<!doctype html><html lang="en" data-theme="'+t+'"><head><meta charset="utf-8">'+
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><style>'+MOCK_CSS+'</style></head><body>'+
+    MOCK_HTML+'<script>'+MOCK_JS+'<\/script></body></html>'; }
+  function layout(){ const d=DEVICES[current]; frame.style.width=d.w+"px"; frame.style.height=d.h+"px";
+    const avail=stage.clientWidth-32; const s=Math.min(1,avail/d.w); frame.style.transform="scale("+s+")";
+    wrap.style.width=(d.w*s)+"px"; wrap.style.height=(d.h*s)+"px"; dims.textContent=d.w+" × "+d.h+" · "+Math.round(s*100)+"%"; }
+  function render(){ frame.srcdoc=srcdoc(currentTheme()); layout(); }
+  devBtns.forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.dev;
+    devBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(devSeg); layout(); }));
+  themeBtns.forEach(b=>b.addEventListener("click",()=>{ themeMode=b.dataset.themeMode;
+    themeBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(themeSeg);
+    if(themeMode==="auto"){ document.documentElement.removeAttribute("data-theme"); render(); }
+    else { document.documentElement.setAttribute("data-theme",themeMode); } }));
+  new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{ if(themeMode==="auto") render(); });
+  window.addEventListener("resize",()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); });
+  window.addEventListener("orientationchange",()=>setTimeout(()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); },200));
+  render(); posThumb(devSeg); posThumb(themeSeg);
+</script>

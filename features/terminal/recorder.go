@@ -13,12 +13,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sync"
 	"time"
 
@@ -142,6 +144,67 @@ type recordingWriter struct {
 	closeErr  error
 }
 
+// recordingFileMode is the mode for recording and metadata files. Recordings hold
+// every keystroke and output byte of a privileged shell (credentials, tokens, key
+// material), so they are owner-read/write only and never group- or world-readable.
+const recordingFileMode = 0o600
+
+// recordingDirMode is the mode for the recording storage directory: owner-only, so
+// no other local account can list or read session recordings.
+const recordingDirMode = 0o700
+
+// createRecordingFile creates a recording artifact at path with owner-only
+// permissions, failing if the path already exists. O_EXCL is required, not
+// cosmetic: os.Create follows symlinks and truncates, so a local user able to
+// pre-create <session>.rec (or its .meta) as a symlink could otherwise have the
+// controller truncate an arbitrary file it can write. O_EXCL also guarantees a
+// completed recording is never silently overwritten by a session ID collision.
+// The file is created through an *os.Root rather than by absolute path, so a
+// name derived from a session ID cannot resolve outside the storage directory
+// even if the ID pattern is later loosened. O_EXCL and the root confinement
+// cover different attacks and are both required: the root stops traversal out
+// of the directory, O_EXCL stops clobbering or following anything already
+// sitting at that name inside it.
+func createRecordingFile(root *os.Root, name string) (*os.File, error) {
+	return root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, recordingFileMode)
+}
+
+// ensureSecureRecordingDir creates the recording storage directory and asserts it
+// is a real, owner-only directory owned by this process's user.
+//
+// os.MkdirAll returns nil for a pre-existing path without re-applying the mode, so
+// on a shared or predictable parent directory an unprivileged local user can
+// pre-create the storage directory world-readable (harvesting every recording) or
+// as a symlink into a directory it controls. Lstat rejects the symlink case, and
+// Chmod re-asserts owner-only permissions — it fails with EPERM when the directory
+// belongs to another user, which surfaces the pre-creation attack as a hard error.
+func ensureSecureRecordingDir(path string) error {
+	if err := os.MkdirAll(path, recordingDirMode); err != nil {
+		return fmt.Errorf("failed to create storage directory: %w", err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("failed to inspect storage directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("recording storage path is a symlink, refusing to use it: %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("recording storage path is not a directory: %s", path)
+	}
+
+	// Windows permission bits are synthetic and Chmod there only toggles the
+	// read-only attribute, so the comparison would never converge.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != recordingDirMode {
+		if err := os.Chmod(path, recordingDirMode); err != nil {
+			return fmt.Errorf("failed to restrict permissions on storage directory: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // computeEventChecksum binds (sequence, previous, content) under the HMAC key.
 func computeEventChecksum(key []byte, sequence int64, previous []byte, content []byte) []byte {
 	mac := hmac.New(sha256.New, key)
@@ -170,8 +233,11 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...R
 	if int64(config.MaxRecordingMB) > math.MaxUint32/(1024*1024) {
 		return nil, fmt.Errorf("max recording size exceeds uint32 frame format")
 	}
-	if err := os.MkdirAll(config.StoragePath, 0750); err != nil {
-		return nil, fmt.Errorf("failed to create storage directory: %w", err)
+	// ensureSecureRecordingDir supersedes a plain MkdirAll: it also rejects a
+	// symlinked storage path and re-asserts owner-only permissions, which a
+	// pre-created directory would otherwise keep.
+	if err := ensureSecureRecordingDir(config.StoragePath); err != nil {
+		return nil, err
 	}
 
 	recorder := &DefaultSessionRecorder{
@@ -229,7 +295,7 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 	}
 	defer func() { _ = recordingRoot.Close() }()
 
-	file, err := recordingRoot.Create(filename)
+	file, err := createRecordingFile(recordingRoot, filename)
 	if err != nil {
 		return fmt.Errorf("failed to create recording file: %w", err)
 	}
@@ -291,6 +357,12 @@ func (r *DefaultSessionRecorder) RecordData(sessionID string, data []byte, direc
 	return nil
 }
 
+// ErrNoActiveRecording reports that EndRecording was asked to finalize a session
+// that has no in-flight recording — it was already finalized, or never started.
+// Session teardown paths use errors.Is to distinguish this benign case from a
+// genuine finalization failure.
+var ErrNoActiveRecording = errors.New("no active recording for session")
+
 // EndRecording ends recording for a session.
 func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 	r.mu.Lock()
@@ -298,7 +370,7 @@ func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 
 	writer, exists := r.activeWrites[sessionID]
 	if !exists {
-		return fmt.Errorf("no active recording for session: %s", sessionID)
+		return fmt.Errorf("%w: %s", ErrNoActiveRecording, sessionID)
 	}
 
 	if err := writer.close(); err != nil {
@@ -681,8 +753,19 @@ func (w *recordingWriter) finalize() error {
 
 	closeErr := w.file.Close()
 
-	metadataPath := w.file.Name() + ".meta"
-	metaFile, createErr := os.Create(metadataPath)
+	// finalize runs long after StartRecording returned, so it opens its own root
+	// over the storage directory rather than reusing that call's. The sidecar
+	// gets the same confinement and O_EXCL treatment as the recording itself.
+	metadataRoot, rootErr := os.OpenRoot(filepath.Dir(w.file.Name()))
+	if rootErr != nil {
+		if closeErr != nil {
+			return closeErr
+		}
+		return fmt.Errorf("failed to open recording root: %w", rootErr)
+	}
+	defer func() { _ = metadataRoot.Close() }()
+
+	metaFile, createErr := createRecordingFile(metadataRoot, filepath.Base(w.file.Name())+".meta")
 	if createErr != nil {
 		if closeErr != nil {
 			return closeErr

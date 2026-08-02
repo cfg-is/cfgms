@@ -185,5 +185,152 @@ assert_author_trust_with_release \
   "external:"
 
 echo
+echo "--- review-pr: container-conflict classification (already_in_flight vs container_exists) ---"
+
+assert_container_classification() {
+  local description="$1"
+  local docker_state="$2"
+  local expected="$3"
+  local exit_code="${4-}"
+  ran=$((ran + 1))
+  local actual
+  actual=$("$DISPATCH" _test-classify-container-state "$docker_state" "$exit_code")
+  if [[ "$actual" == "$expected" ]]; then
+    printf '  ok    %s\n' "$description"
+  else
+    printf '  FAIL  %s\n        state=%q\n        expected=%q\n        actual=%q\n' \
+      "$description" "$docker_state" "$expected" "$actual"
+    fail=$((fail + 1))
+  fi
+}
+
+# Still alive — the caller should wait, not clean up.
+assert_container_classification "running container → already_in_flight" \
+  "running" "already_in_flight"
+assert_container_classification "restarting container → already_in_flight" \
+  "restarting" "already_in_flight"
+assert_container_classification "created (not yet started) → already_in_flight" \
+  "created" "already_in_flight"
+
+# Exited 0 — review finished, comment posted, lease released. Nothing to
+# preserve, so the caller reaps it and proceeds instead of refusing. Without
+# this, cleanup-stale-reviews' 30-minute threshold made a PR un-re-reviewable
+# for 30 minutes after every successful review (hit on PR #3150).
+assert_container_classification "exited 0 → reap_clean" \
+  "exited" "reap_clean" "0"
+
+# Exited non-zero — a crash. Keep it for diagnosis and refuse.
+assert_container_classification "exited 1 → container_exists" \
+  "exited" "container_exists" "1"
+assert_container_classification "exited 137 (OOM-kill) → container_exists" \
+  "exited" "container_exists" "137"
+# Unknown exit code must fall back to the conservative answer, never reap.
+assert_container_classification "exited, exit code unknown → container_exists" \
+  "exited" "container_exists"
+assert_container_classification "dead container → container_exists" \
+  "dead" "container_exists"
+assert_container_classification "paused container → container_exists" \
+  "paused" "container_exists"
+# A live container is never reaped, whatever stale exit code docker reports.
+assert_container_classification "running with stale exit code 0 → already_in_flight" \
+  "running" "already_in_flight" "0"
+
+echo
+echo "--- review-pr: refusal-reason hint coverage (every emitted reason has a hint) ---"
+
+assert_has_hint() {
+  local description="$1"
+  local reason="$2"
+  ran=$((ran + 1))
+  local actual
+  actual=$("$DISPATCH" _test-review-refusal-hint "$reason")
+  if [[ -n "$actual" ]]; then
+    printf '  ok    %s\n' "$description"
+  else
+    printf '  FAIL  %s\n        reason=%q\n        expected a non-empty hint, got none\n' \
+      "$description" "$reason"
+    fail=$((fail + 1))
+  fi
+}
+
+# One assertion per reason token review-pr can actually emit (agent-dispatch.sh
+# REVIEW_REFUSED sites) — catches a new refusal reason landing without a hint.
+assert_has_hint "pr_not_found" "pr_not_found"
+assert_has_hint "pr_state_<X> (wildcard)" "pr_state_CLOSED"
+assert_has_hint "fork_branch_<owner> (wildcard)" "fork_branch_someuser"
+assert_has_hint "external_author_<login>:<trust> (wildcard)" "external_author_bob:external"
+assert_has_hint "no_story_link" "no_story_link"
+assert_has_hint "no_project_item_for_story_<N> (wildcard)" "no_project_item_for_story_1234"
+assert_has_hint "already_in_flight" "already_in_flight"
+assert_has_hint "container_exists" "container_exists"
+assert_has_hint "lease_held" "lease_held"
+assert_has_hint "lease_error" "lease_error"
+assert_has_hint "no_new_commit_since_review" "no_new_commit_since_review"
+
+echo
+echo "--- review-pr: stale-head guard (_review_is_stale) ---"
+
+# _review_is_stale reads `gh pr view --json comments,commits`. Stub `gh` on PATH
+# so the guard is exercised against fixture payloads, no network.
+STALE_STUB_DIR=$(mktemp -d)
+trap 'rm -rf "$STALE_STUB_DIR"' EXIT
+cat > "$STALE_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+# Only `gh pr view ... --json comments,commits` is used by _review_is_stale.
+cat "$GH_FIXTURE"
+STUB
+chmod +x "$STALE_STUB_DIR/gh"
+
+assert_staleness() {
+  local description="$1" fixture="$2" expected="$3"
+  ran=$((ran + 1))
+  local actual
+  # NOTE: agent-dispatch.sh guards its main dispatch with BASH_SOURCE[0] == $0.
+  # The script path must therefore be interpolated into the command string, NOT
+  # passed as bash -c's $0 argument — doing the latter makes the guard true and
+  # runs the CLI (usage + exit 1) instead of just defining functions.
+  actual=$(GH_FIXTURE="$fixture" PATH="$STALE_STUB_DIR:$PATH" \
+    bash -c "source '$DISPATCH' 2>/dev/null
+             _check_author_permission() { echo internal; }
+             if _review_is_stale 1; then echo stale; else echo reviewable; fi" \
+    2>/dev/null | tail -1) || true
+  if [[ "$actual" == "$expected" ]]; then
+    printf '  ok    %s\n' "$description"
+  else
+    printf '  FAIL  %s\n        expected=%q got=%q\n' "$description" "$expected" "$actual"
+    fail=$((fail + 1))
+  fi
+}
+
+write_fixture() {
+  printf '%s' "$2" > "$STALE_STUB_DIR/$1.json"
+  echo "$STALE_STUB_DIR/$1.json"
+}
+
+# Review present, no commit after it → stale (the #3115/#3117/#3121 waste case).
+f=$(write_fixture stale '{"comments":[{"createdAt":"2026-07-30T10:00:00Z","author":{"login":"jrdnr"},"body":"<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL"}],"commits":[{"committedDate":"2026-07-30T09:00:00Z"}]}')
+assert_staleness "review present, no newer commit → stale" "$f" "stale"
+
+# Commit landed after the review → reviewable (the normal fix-cycle re-review).
+f=$(write_fixture fresh '{"comments":[{"createdAt":"2026-07-30T10:00:00Z","author":{"login":"jrdnr"},"body":"<!-- cfgms-acceptance-review -->\n## Acceptance Review — FAIL"}],"commits":[{"committedDate":"2026-07-30T11:00:00Z"}]}')
+assert_staleness "commit newer than review → reviewable" "$f" "reviewable"
+
+# No review comment yet → reviewable (first review must never be blocked).
+f=$(write_fixture noreview '{"comments":[],"commits":[{"committedDate":"2026-07-30T09:00:00Z"}]}')
+assert_staleness "no acceptance review yet → reviewable" "$f" "reviewable"
+
+# Non-review chatter must not count as a review (else any comment wedges the PR).
+f=$(write_fixture chatter '{"comments":[{"createdAt":"2026-07-30T10:00:00Z","author":{"login":"jrdnr"},"body":"Acceptance Reviewer — skipping draft PR."}],"commits":[{"committedDate":"2026-07-30T09:00:00Z"}]}')
+assert_staleness "non-review comment ignored → reviewable" "$f" "reviewable"
+
+# Latest of several commits wins, not document order.
+f=$(write_fixture multi '{"comments":[{"createdAt":"2026-07-30T10:00:00Z","author":{"login":"jrdnr"},"body":"<!-- cfgms-acceptance-review -->"}],"commits":[{"committedDate":"2026-07-30T11:30:00Z"},{"committedDate":"2026-07-30T08:00:00Z"}]}')
+assert_staleness "newest commit compared, not last listed → reviewable" "$f" "reviewable"
+
+# Malformed payload → fails open rather than stranding the PR.
+f=$(write_fixture broken '{"comments":[],"commits":[]}')
+assert_staleness "missing commit data → fails open (reviewable)" "$f" "reviewable"
+
+echo
 echo "ran ${ran} assertions; failures: ${fail}"
 exit "$fail"

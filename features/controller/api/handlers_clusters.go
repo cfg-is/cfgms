@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
@@ -63,8 +64,13 @@ func (s *Server) stewardsInTenantScope(callerTenant string) []fleet.StewardData 
 			}
 		}
 		var attrs map[string]string
+		var frags []*commonpb.Fragment
 		if info.DNA != nil {
 			attrs = info.DNA.Attributes
+			// Fragments carry cluster:<name> membership and resource_owner state
+			// (ADR-017); clusterregistry.BuildRegistry parses them, so dropping
+			// them here would make every cluster invisible to the read endpoints.
+			frags = info.DNA.Fragments
 		}
 		result = append(result, fleet.StewardData{
 			ID:            info.ID,
@@ -72,6 +78,7 @@ func (s *Server) stewardsInTenantScope(callerTenant string) []fleet.StewardData 
 			Status:        info.Status,
 			LastHeartbeat: info.LastHeartbeat,
 			DNAAttributes: attrs,
+			DNAFragments:  frags,
 		})
 	}
 	return result
@@ -80,8 +87,8 @@ func (s *Server) stewardsInTenantScope(callerTenant string) []fleet.StewardData 
 // handleListClusters handles GET /api/v1/clusters.
 //
 // Returns all clusters visible to the authenticated caller, derived on demand
-// from cluster:<name>.* DNA attributes in each steward's already-durable
-// DNA.Attributes. The result is eventually consistent — it reflects whatever
+// from the cluster:<name> ADR-017 fragments in each steward's already-durable
+// DNA.Fragments. The result is eventually consistent — it reflects whatever
 // DNA was last published by the steward's DNARefreshLoop (default 30 min).
 //
 // Tenant scoping mirrors handleListStewards: the caller's tenant from the
@@ -153,7 +160,7 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 // Returns the reconciliation status for each declared clustered resource in the
 // named cluster. The declared set is sourced from the cluster-policies config
 // stored under the caller's tenant (via InheritanceResolver's cluster-policies
-// namespace). The actual set is derived from steward DNA attributes via
+// namespace). The actual set is derived from steward DNA fragments via
 // clusterregistry.BuildRegistry.
 //
 // Four outcomes are possible per resource (Issue #2704):

@@ -86,11 +86,31 @@ gh pr diff <PR_NUM> --repo cfg-is/cfgms
 # CI status
 gh pr checks <PR_NUM> --repo cfg-is/cfgms
 
-# Story body and review cycle status from the private project
+# Story body from the private project
 ./scripts/project-queue.sh get-item <ITEM_ID>
 # Returns .body (acceptance criteria text) and .status
-# .status == "Fix" means FIX_CYCLE; any other status means FIRST_REVIEW
+
+# Which review round is this? COUNT PRIOR REVIEWS — never infer it from status.
+gh pr view <PR_NUM> --repo cfg-is/cfgms --json comments \
+  --jq '[.comments[] | select(.body | test("<!-- cfgms-acceptance-review -->"; "i"))] | length'
 ```
+
+**Determining the review round (this decides whether a failure escalates to `Blocked`).**
+
+The round is `prior_review_count + 1`, where `prior_review_count` is the number of
+existing `<!-- cfgms-acceptance-review -->` comments on the PR. First review ⇒ 0 prior
+⇒ this is round 1.
+
+**Do NOT infer the round from the project item's status.** Status `Fix` does not imply a
+prior acceptance review: a **CI-driven** fix cycle sets `Fix` too. Reading status as the
+round counter makes the genuinely-first acceptance review believe it is the second, so its
+first real finding escalates straight to `Blocked` and the story never gets the fix cycle
+it was owed. This is not hypothetical — it is what happened to PR #3121, whose fix agent
+ran 38 minutes *before* any acceptance-review comment existed and which was then Blocked on
+review round one.
+
+Count the comments. A PR with no prior `<!-- cfgms-acceptance-review -->` comment is
+**always** a first review, whatever its project status says.
 
 Also read `CLAUDE.md` for architecture rules and testing standards.
 
@@ -267,7 +287,7 @@ Mark the story as done in the project queue:
 ./scripts/project-queue.sh update-field <ITEM_ID> status Done
 ```
 
-### Any Findings — First Review
+### Any Findings — Round 1 (no prior `<!-- cfgms-acceptance-review -->` comment)
 
 Update project item status and post findings:
 
@@ -275,7 +295,7 @@ Update project item status and post findings:
 ./scripts/project-queue.sh update-field <ITEM_ID> status Fix
 ```
 
-### Any Findings — Second Review (Fix Cycle)
+### Any Findings — Round 2 (exactly one prior `<!-- cfgms-acceptance-review -->` comment)
 
 Escalate to founder and clean up the agent container (the dev agent is done regardless):
 
@@ -339,7 +359,10 @@ If there are zero findings, the Findings table should say "None" and the Accepta
 - Never skip acceptance criteria verification — every checkbox must be checked against the diff AND the Code-Reference Verification table
 - **Any FAIL row in Code-Reference Verification forces `## Acceptance Review — FAIL`.** The reviewer CANNOT issue PASS while any reference is failing or unverified. "New functions added + tests pass" is NOT sufficient when the AC names a specific symbol that must change.
 - **Diff-blindness rule**: when an AC names existing code that must change, verify the post-change state by fetching the file from the PR's HEAD ref. Searching only `gh pr diff` will miss unchanged stubs (they're absent from the diff by definition).
-- The fix cycle gets exactly one attempt. First failure = `status Fix`. Second failure = `status Blocked`. No third attempt.
+- **Grounding rule — never assert that something does not exist without searching for it.** Before writing any claim of the form "there is no X", "the type doesn't carry Y", "this would require a new Z", or "this can't be done without <bigger change>", grep the **whole file and the whole package**, not the region you happened to read. A false non-existence claim is worse than no claim: the fix agent treats your review as authoritative and will defer or over-build on it. PR #3115 lost two review rounds and two days because a review asserted the data for a UI element "would require a separate executions fetch" after reading lines 72-110 of a file whose line 353 already exported exactly that fetch hook. If you have not run the search, do not make the claim — say "I did not verify whether X exists" instead.
+- **Never offer a remedy the fix agent cannot perform.** A fix-pr agent can change code, tests, and docs on the PR branch. It **cannot** obtain a Tech Lead sign-off, get a founder decision, change acceptance criteria, merge a dependency, or file an issue. Offering "implement it, or get an explicit Tech Lead scope-down" as the alternative to work you have declared impossible leaves it no reachable action — it will take the unreachable option and be failed on the attempt, which is exactly what happened on #3115. State remedies the agent can actually execute; if the only real remedy is a human decision, say so plainly and escalate rather than dressing it up as an option for the agent.
+- **When an AC cannot be satisfied on this branch at all, say so explicitly and recommend against a fix cycle.** Some ACs demand evidence that cannot exist pre-merge (see the Tech Lead's pre-merge-evidence check). Dispatching a fix agent at an unsatisfiable AC burns a cycle and can escalate a false `Blocked`. Report the gap accurately, then add a clear recommendation that the PO amend the AC or land the PR — a FAIL verdict plus "this is not fixable here" is a legitimate and useful review outcome.
+- The fix cycle gets exactly one attempt. **Round 1** failure = `status Fix`. **Round 2** failure = `status Blocked`. No third attempt. The round is `prior <!-- cfgms-acceptance-review --> comment count + 1` (see Phase 1) — **never** the project status, which a CI-driven fix cycle also sets to `Fix`.
 - Merge enqueue uses `--squash` — merge queue handles the rest (rebase + re-validation + actual merge)
 - **A PASS verdict is not self-executing.** The PR moves only when `po-act.sh enqueue` runs and prints `ENQUEUED:<PR>`. Never write the verdict as though the merge happened without that line in hand — a PASS that was never enqueued is indistinguishable, from the outside, from a review that never ran.
 - Clean up the agent container/worktree only after a confirmed `ENQUEUED:<PR>` — the agent infrastructure is no longer needed at that point

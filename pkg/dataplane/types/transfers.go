@@ -79,6 +79,11 @@ type DNATransfer struct {
 	// or protobuf. The provider handles compression automatically.
 	Attributes []byte `json:"attributes"`
 
+	// FragmentBytes contains ADR-017 fragment snapshots for cluster:* resources,
+	// carried on the full-sync path (Delta=false).
+	// Each element is a proto-marshaled commonpb.Fragment.
+	FragmentBytes [][]byte `json:"fragment_bytes,omitempty"`
+
 	// Delta indicates if this is a delta update
 	//
 	// If true and Fragments is non-empty, this is a fragment-delta per ADR-017 §7.

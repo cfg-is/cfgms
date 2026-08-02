@@ -10,6 +10,27 @@ import (
 	"time"
 )
 
+// NewCertPoolFromPEM builds an x509.CertPool from one or more PEM-encoded CA
+// certificates. It is the single construction point for CA pools in CFGMS: every
+// TLS config helper below routes through it, and callers that need a verification
+// pool for chain building outside a tls.Config (e.g. verifying operator-signed
+// inline command certificates chain to the controller CA) use it instead of
+// duplicating x509.NewCertPool + AppendCertsFromPEM.
+//
+// It returns an error when caCertPEM is empty or contains no parseable
+// certificate, so a caller can never silently end up holding an empty pool that
+// rejects every chain it is asked to verify.
+func NewCertPoolFromPEM(caCertPEM []byte) (*x509.CertPool, error) {
+	if len(caCertPEM) == 0 {
+		return nil, fmt.Errorf("no CA certificate PEM provided")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+	return pool, nil
+}
+
 // LoadTLSCertificate loads a TLS certificate from PEM-encoded certificate and key
 func LoadTLSCertificate(certPEM, keyPEM []byte) (tls.Certificate, error) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
@@ -110,9 +131,9 @@ func CreateServerTLSConfig(serverCertPEM, serverKeyPEM, caCertPEM []byte, minVer
 
 	// Configure client authentication if CA cert is provided
 	if caCertPEM != nil {
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCertPEM) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
+		caCertPool, poolErr := NewCertPoolFromPEM(caCertPEM)
+		if poolErr != nil {
+			return nil, poolErr
 		}
 
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
@@ -153,9 +174,9 @@ func CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM []byte, server
 
 	// Load CA certificate for server verification
 	if caCertPEM != nil {
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCertPEM) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
+		caCertPool, poolErr := NewCertPoolFromPEM(caCertPEM)
+		if poolErr != nil {
+			return nil, poolErr
 		}
 		tlsConfig.RootCAs = caCertPool
 	}
@@ -217,9 +238,9 @@ func (m *Manager) CreateOnDemandClientTLSConfig(caCertPEM []byte, minVersion uin
 		},
 	}
 	if len(caCertPEM) > 0 {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caCertPEM) {
-			return nil, fmt.Errorf("failed to append CA certificate to pool")
+		pool, poolErr := NewCertPoolFromPEM(caCertPEM)
+		if poolErr != nil {
+			return nil, fmt.Errorf("failed to append CA certificate to pool: %w", poolErr)
 		}
 		tlsConfig.RootCAs = pool
 	}

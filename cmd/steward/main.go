@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
@@ -1968,11 +1969,13 @@ func publishUpgradeLifecycleEvent(ctx context.Context, tc upgradeEventPublisher,
 }
 
 // moduleDNASource is the narrow surface the composite DNA collector needs to
-// fold monitored-module state into the DNA attribute set (#2423). Satisfied by
-// (*steward.Steward).CollectModuleDNAAttributes; nil when the running mode has
-// no monitor-running steward engine (see newDNACollectorAdapter call sites).
+// fold monitored-module state into the DNA attribute set (#2423) and to emit
+// ADR-017 fragments for cluster:* resources (#2908). Satisfied by
+// (*steward.Steward); nil when the running mode has no monitor-running steward
+// engine (see newDNACollectorAdapter call sites).
 type moduleDNASource interface {
 	CollectModuleDNAAttributes(ctx context.Context) map[string]string
+	CollectModuleFragments(ctx context.Context) []*commonpb.Fragment
 }
 
 // dnaCollectorAdapter adapts dna.Collector to the client.DNACollector interface
@@ -2030,4 +2033,18 @@ func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string
 		}
 	}
 	return attrs, nil
+}
+
+// CollectFragments returns the ADR-017 fragments produced by the wired module
+// DNA source (cluster:* resources). Fragments ride the sync_dna full-snapshot
+// path so the controller-side cluster registry has real state to parse (#2908).
+// Returns nil when no module source is wired (hardware-facts-only mode).
+func (a *dnaCollectorAdapter) CollectFragments(ctx context.Context) []*commonpb.Fragment {
+	a.mu.RLock()
+	moduleSrc := a.modules
+	a.mu.RUnlock()
+	if moduleSrc == nil {
+		return nil
+	}
+	return moduleSrc.CollectModuleFragments(ctx)
 }

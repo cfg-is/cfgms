@@ -5,6 +5,7 @@ package terminal
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -561,4 +562,135 @@ func TestGetRecordingNewFormat(t *testing.T) {
 			assert.Equal(t, 3, len(recording.Events), "event count must match")
 		})
 	}
+}
+
+// TestRecordingArtifactsAreOwnerOnly asserts that the storage directory and both
+// recording artifacts (.rec and .rec.meta) are owner-only. Recordings contain raw
+// keystrokes and shell output of privileged sessions — passwords, tokens and key
+// material — so world- or group-readable modes are a cleartext-secret disclosure.
+func TestRecordingArtifactsAreOwnerOnly(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	storageDir := filepath.Join(t.TempDir(), "recordings")
+	config := &RecorderConfig{
+		StoragePath:    storageDir,
+		MaxRecordingMB: 100,
+	}
+
+	recorder, err := NewSessionRecorder(config, logger)
+	require.NoError(t, err)
+
+	sessionID := "perm-check-session"
+	require.NoError(t, recorder.RecordData(sessionID, []byte("secret-password\n"), DataDirectionInput))
+	require.NoError(t, recorder.EndRecording(sessionID))
+	require.NoError(t, recorder.Close())
+
+	recPath := filepath.Join(storageDir, sessionID+".rec")
+
+	// Windows permission bits are synthetic, so the mode assertions only apply
+	// to POSIX platforms; existence is still verified everywhere.
+	for _, path := range []string{recPath, recPath + ".meta"} {
+		info, statErr := os.Stat(path)
+		require.NoError(t, statErr, "artifact must exist: %s", path)
+		if runtime.GOOS != "windows" {
+			assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
+				"recording artifact must be owner read/write only: %s", path)
+		}
+	}
+
+	dirInfo, err := os.Stat(storageDir)
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm(),
+			"recording storage directory must be owner-only")
+	}
+}
+
+// TestRecorderTightensPreExistingPermissiveDir covers the case where a local user
+// pre-creates the storage directory world-readable/writable: os.MkdirAll returns nil
+// for an existing path without re-applying the mode, so the recorder must re-assert
+// owner-only permissions itself.
+func TestRecorderTightensPreExistingPermissiveDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Permission bits are synthetic on Windows; the POSIX assertion below
+		// does not apply there. Nothing to verify, so return without failing.
+		return
+	}
+
+	logger := testutil.NewMockLogger(true)
+	storageDir := filepath.Join(t.TempDir(), "preexisting")
+	require.NoError(t, os.MkdirAll(storageDir, 0o777))
+	require.NoError(t, os.Chmod(storageDir, 0o777))
+
+	_, err := NewSessionRecorder(&RecorderConfig{StoragePath: storageDir, MaxRecordingMB: 100}, logger)
+	require.NoError(t, err)
+
+	info, err := os.Stat(storageDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(),
+		"pre-existing permissive storage directory must be tightened to owner-only")
+}
+
+// TestRecorderRejectsSymlinkStorageDir covers the symlink-hijack vector: a local
+// user pre-creates the (predictable) storage path as a symlink into a directory it
+// controls. MkdirAll follows the link and succeeds, so the recorder must reject it.
+func TestRecorderRejectsSymlinkStorageDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Symlink creation on Windows requires elevated privileges.
+		return
+	}
+
+	logger := testutil.NewMockLogger(true)
+	base := t.TempDir()
+	attackerDir := filepath.Join(base, "attacker")
+	require.NoError(t, os.MkdirAll(attackerDir, 0o700))
+	linkPath := filepath.Join(base, "recordings")
+	require.NoError(t, os.Symlink(attackerDir, linkPath))
+
+	recorder, err := NewSessionRecorder(&RecorderConfig{StoragePath: linkPath, MaxRecordingMB: 100}, logger)
+	require.Error(t, err)
+	assert.Nil(t, recorder)
+	assert.Contains(t, err.Error(), "symlink")
+}
+
+// TestStartRecordingRefusesExistingPath asserts recording files are created with
+// O_EXCL. Without it, os.Create follows a symlink planted at <session>.rec and
+// truncates the target, giving a local user arbitrary file truncation as the
+// controller process; it would also silently overwrite an existing recording.
+func TestStartRecordingRefusesExistingPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Symlink creation on Windows requires elevated privileges.
+		return
+	}
+
+	logger := testutil.NewMockLogger(true)
+	base := t.TempDir()
+	storageDir := filepath.Join(base, "recordings")
+
+	recorder, err := NewSessionRecorder(&RecorderConfig{StoragePath: storageDir, MaxRecordingMB: 100}, logger)
+	require.NoError(t, err)
+	defer func() { _ = recorder.Close() }()
+
+	victimPath := filepath.Join(base, "victim.txt")
+	victimContent := []byte("must not be truncated")
+	require.NoError(t, os.WriteFile(victimPath, victimContent, 0o600))
+
+	sessionID := "symlink-target-session"
+	require.NoError(t, os.Symlink(victimPath, filepath.Join(storageDir, sessionID+".rec")))
+
+	err = recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID})
+	require.Error(t, err, "StartRecording must refuse a pre-existing recording path")
+
+	got, err := os.ReadFile(victimPath)
+	require.NoError(t, err)
+	assert.Equal(t, victimContent, got, "symlink target must not be truncated")
+}
+
+// TestDefaultRecorderConfigHasNoImplicitStoragePath locks in the absence of a
+// built-in storage path. A shared default (previously /tmp/cfgms-recordings) puts
+// cleartext session recordings in a predictable, world-writable directory.
+func TestDefaultRecorderConfigHasNoImplicitStoragePath(t *testing.T) {
+	cfg := DefaultRecorderConfig()
+	require.NotNil(t, cfg)
+	assert.Empty(t, cfg.StoragePath,
+		"recorder must have no implicit storage path; callers supply a deployment-owned directory")
 }

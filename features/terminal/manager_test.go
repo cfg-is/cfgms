@@ -5,6 +5,9 @@ package terminal
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -81,6 +84,33 @@ func (l *kvCapturingLogger) anyKVKeyHasValue(key, value string) bool {
 	return false
 }
 
+// stopManagerOnCleanup registers manager.Stop as a test cleanup.
+//
+// Recording-enabled managers own a recorder whose per-session writer runs on its
+// own goroutine and writes the <session>.rec.meta sidecar when the session
+// finalizes. If the test returns while a session is still closing, that sidecar
+// can be created after t.TempDir()'s RemoveAll has listed the directory, so the
+// final unlinkat fails with "directory not empty" (and on Windows an open .rec
+// handle cannot be unlinked at all). Stop closes every session and the recorder
+// synchronously, draining those writers.
+//
+// Registration order matters: t.Cleanup is LIFO and the storage path comes from a
+// t.TempDir() call made earlier, so this Stop always runs before the directory is
+// removed. Stop is idempotent, so tests that also stop the manager explicitly are
+// safe.
+func stopManagerOnCleanup(t *testing.T, manager SessionManager) {
+	t.Helper()
+	mgr, ok := manager.(*DefaultSessionManager)
+	if !ok {
+		return
+	}
+	t.Cleanup(func() {
+		if err := mgr.Stop(context.Background()); err != nil {
+			t.Errorf("session manager Stop during cleanup failed: %v", err)
+		}
+	})
+}
+
 func TestSessionManagerCreation(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 
@@ -92,9 +122,10 @@ func TestSessionManagerCreation(t *testing.T) {
 		{
 			name: "with valid config",
 			config: &Config{
-				SessionTimeout: 30 * time.Minute,
-				MaxSessions:    100,
-				RecordSessions: true,
+				SessionTimeout:       30 * time.Minute,
+				MaxSessions:          100,
+				RecordSessions:       true,
+				RecordingStoragePath: t.TempDir(),
 			},
 			wantErr: false,
 		},
@@ -112,6 +143,18 @@ func TestSessionManagerCreation(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			// Recording writes cleartext session content to disk, so an empty
+			// storage path must fail loudly instead of falling back to a shared,
+			// predictable, world-writable location such as /tmp.
+			name: "recording enabled without storage path",
+			config: &Config{
+				SessionTimeout: 30 * time.Minute,
+				MaxSessions:    100,
+				RecordSessions: true,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -123,21 +166,83 @@ func TestSessionManagerCreation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, manager)
+				stopManagerOnCleanup(t, manager)
 			}
 		})
 	}
 }
 
+// TestSessionManagerCreation_FailsClosedWhenRecorderInitFails asserts that a
+// recorder that cannot be initialized (here: the storage path is a pre-existing
+// regular file, so ensureSecureRecordingDir's MkdirAll fails) must fail
+// NewSessionManager entirely rather than warn and return a manager that runs
+// unrecorded. Recording is the audit trail for privileged interactive shells, so
+// a construction-time recorder failure must not be silently absorbed.
+func TestSessionManagerCreation_FailsClosedWhenRecorderInitFails(t *testing.T) {
+	storagePath := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(storagePath, []byte("occupied"), 0o600))
+
+	manager, err := NewSessionManager(&Config{
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: storagePath,
+	}, testutil.NewMockLogger(true))
+
+	require.Error(t, err, "recorder init failure must fail construction, not degrade to unrecorded operation")
+	assert.Nil(t, manager)
+}
+
+// TestCreateSession_FailsClosedWhenRecordingCannotStart asserts that a session
+// whose recording cannot be started (here: the storage directory is made
+// read-only after construction, so StartRecording's file create fails for any
+// session ID) must fail CreateSession entirely rather than warn and serve an
+// unrecorded privileged shell.
+func TestCreateSession_FailsClosedWhenRecordingCannotStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory write-permission enforcement differs on Windows")
+	}
+
+	storagePath := t.TempDir()
+	manager, err := NewSessionManager(&Config{
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: storagePath,
+	}, testutil.NewMockLogger(true))
+	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
+
+	// Make the storage directory read-only so any subsequent StartRecording
+	// file-create fails, regardless of the (random) session ID generated below.
+	require.NoError(t, os.Chmod(storagePath, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(storagePath, 0o700) })
+
+	session, err := manager.CreateSession(context.Background(), &SessionRequest{
+		TenantID:  "test-tenant",
+		StewardID: "test-steward",
+		UserID:    "test-user",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	})
+
+	require.Error(t, err, "a session whose recording cannot start must not be created")
+	assert.Nil(t, session)
+}
+
 func TestSessionLifecycle(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 	require.NotNil(t, manager)
 
 	ctx := context.Background()
@@ -173,16 +278,63 @@ func TestSessionLifecycle(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestSessionManagerStopFinalizesRecordingsAndIsIdempotent covers the shutdown
+// contract the controller relies on (Issue #2761): Stop must finalize the
+// recording of a session that is still live — the .rec.meta sidecar carries the
+// HMAC chain head, and a recording without it is discarded as unverifiable on the
+// next start — and a second Stop must be a no-op rather than panicking on a
+// re-closed stop channel, because shutdown paths converge (explicit Stop plus a
+// deferred safety net).
+func TestSessionManagerStopFinalizesRecordingsAndIsIdempotent(t *testing.T) {
+	storagePath := t.TempDir()
+	config := &Config{
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          10,
+		RecordSessions:       true,
+		RecordingStoragePath: storagePath,
+	}
+
+	manager, err := NewSessionManager(config, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	session, err := manager.CreateSession(ctx, &SessionRequest{
+		TenantID:  "test-tenant",
+		StewardID: "test-steward-001",
+		UserID:    "test-user",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.RecordData(session.ID, []byte("whoami\n"), DataDirectionInput))
+
+	// Stop with the session still live: the recording must be finalized, not left
+	// dangling for the next start to delete.
+	require.NoError(t, manager.Stop(ctx))
+
+	metaPath := filepath.Join(storagePath, session.ID+".rec.meta")
+	metaBytes, readErr := os.ReadFile(metaPath) // #nosec G304 -- test-owned temp path
+	require.NoError(t, readErr, "Stop must finalize the recording of a live session")
+	assert.Contains(t, string(metaBytes), "first_checksum",
+		"finalized metadata must carry the HMAC chain head")
+
+	// Second Stop must not panic on the already-closed stop channel.
+	require.NoError(t, manager.Stop(ctx))
+}
+
 func TestSessionConcurrency(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    5, // Limited for testing
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          5, // Limited for testing
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	ctx := context.Background()
 
@@ -256,13 +408,15 @@ func TestSessionTimeout(t *testing.T) {
 func TestMaxSessionsLimit(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    2, // Very limited for testing
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          2, // Very limited for testing
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	ctx := context.Background()
 
@@ -529,13 +683,15 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 func TestSessionRecording(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &Config{
-		SessionTimeout: 30 * time.Minute,
-		MaxSessions:    100,
-		RecordSessions: true,
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          100,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
 	}
 
 	manager, err := NewSessionManager(config, logger)
 	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
 
 	ctx := context.Background()
 
@@ -565,6 +721,67 @@ func TestSessionRecording(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, recording)
 	assert.Contains(t, string(recording.Data), "hello world")
+}
+
+// TestTerminateSession_DoesNotTruncateOtherSessionsRecordings is the regression
+// test for the cross-session recording kill (Issue #2761): one SessionManager
+// serves every browser terminal on the controller and hands the SAME recorder to
+// every session, so a per-session teardown that closed the recorder finalized the
+// recordings of all other live privileged shells. Their later output then hit an
+// auto-start whose O_EXCL create failed, and they kept serving unrecorded.
+//
+// Terminating session A must leave session B recording, and B's post-A output must
+// appear in B's recording.
+func TestTerminateSession_DoesNotTruncateOtherSessionsRecordings(t *testing.T) {
+	manager, err := NewSessionManager(&Config{
+		SessionTimeout:       30 * time.Minute,
+		MaxSessions:          10,
+		RecordSessions:       true,
+		RecordingStoragePath: t.TempDir(),
+	}, logging.NewNoopLogger())
+	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
+
+	ctx := context.Background()
+	newReq := func(user string) *SessionRequest {
+		return &SessionRequest{
+			TenantID:  "test-tenant",
+			StewardID: "test-steward-001",
+			UserID:    user,
+			Shell:     shell.GetDefaultShell(),
+			Cols:      80,
+			Rows:      24,
+		}
+	}
+
+	sessionA, err := manager.CreateSession(ctx, newReq("admin-a"))
+	require.NoError(t, err)
+	sessionB, err := manager.CreateSession(ctx, newReq("admin-b"))
+	require.NoError(t, err)
+
+	require.NoError(t, sessionB.HandleOutput(ctx, []byte("before-A-close\n")))
+
+	// Admin A closes their terminal tab.
+	require.NoError(t, manager.TerminateSession(ctx, sessionA.ID))
+
+	// B is untouched and must keep capturing its audit trail.
+	assert.True(t, sessionB.IsActive(), "terminating another session must not close this one")
+	require.NoError(t, sessionB.HandleOutput(ctx, []byte("SECRET-AFTER-A-CLOSE\n")),
+		"a live session must keep recording after an unrelated session is terminated")
+
+	require.NoError(t, manager.TerminateSession(ctx, sessionB.ID))
+
+	recordingB, err := manager.GetSessionRecording(sessionB.ID)
+	require.NoError(t, err)
+	require.NotNil(t, recordingB)
+	assert.Contains(t, string(recordingB.Data), "before-A-close")
+	assert.Contains(t, string(recordingB.Data), "SECRET-AFTER-A-CLOSE",
+		"output produced after another session closed must still be in this session's recording")
+
+	// A's own recording is finalized independently.
+	recordingA, err := manager.GetSessionRecording(sessionA.ID)
+	require.NoError(t, err)
+	require.NotNil(t, recordingA)
 }
 
 func TestCreateSession_TenantIDRequired(t *testing.T) {

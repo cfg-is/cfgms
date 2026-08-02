@@ -67,6 +67,131 @@ test_license_checker() {
     fi
 }
 
+# Test: mockups index structural check (Issue #3042 AC4/AC5)
+# check-mockups-index.sh is the loud-failure backstop for the union-merge
+# driver on docs/design/mockups/README.md: union silently keeps both sides
+# of ANY conflicting hunk, so a same-row edit and a same-row addition are
+# indistinguishable to it. This must pass on the real README today and must
+# reject a duplicated row/header, or the backstop itself is a no-op.
+test_check_mockups_index() {
+    log_test "Testing mockups index structural check..."
+
+    if [ ! -f scripts/check-mockups-index.sh ]; then
+        log_fail "check-mockups-index.sh: Not found (Issue #3042 AC4/AC5 requires it)"
+        return
+    fi
+
+    if bash scripts/check-mockups-index.sh docs/design/mockups/README.md >/dev/null 2>&1; then
+        log_pass "check-mockups-index.sh: Passes against the real, deduplicated index"
+    else
+        log_fail "check-mockups-index.sh: Rejected the real index (should be clean)"
+    fi
+
+    local tmp_dupe
+    tmp_dupe=$(mktemp)
+    cp docs/design/mockups/README.md "$tmp_dupe"
+    # Duplicate the first row — this is exactly what a union-merged same-row
+    # edit leaves behind.
+    sed -n '/^| \[`/{p;q}' docs/design/mockups/README.md >> "$tmp_dupe"
+
+    if bash scripts/check-mockups-index.sh "$tmp_dupe" >/dev/null 2>&1; then
+        log_fail "check-mockups-index.sh: Did not detect a duplicated row"
+    else
+        log_pass "check-mockups-index.sh: Detects a duplicated row (fails loudly)"
+    fi
+
+    rm -f "$tmp_dupe"
+}
+
+# Test: union-merge driver rebase mechanics (Issue #3042 AC2/AC3)
+# Automates the manual rebase simulation from PR #3117's verification section
+# so the git-mechanics claim (distinct additive rows rebase clean; a same-row
+# edit lands as a detectable duplicate rather than corrupting structure) is
+# checked on every run instead of once, by hand, before merge.
+test_mockups_index_union_merge_rebase() {
+    log_test "Testing union-merge driver rebase mechanics..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local repo_dir="${tmp_dir}/repo"
+
+    git init -q -b develop "$repo_dir"
+    git -C "$repo_dir" config user.email "test@test.com"
+    git -C "$repo_dir" config user.name "Test"
+
+    cat > "${repo_dir}/.gitattributes" <<'EOF'
+README.md merge=union
+EOF
+    cat > "${repo_dir}/README.md" <<'EOF'
+# Mockups
+
+| File | What it is | Status |
+|------|------------|--------|
+| [`a.html`](a.html) | first | **Reference** |
+
+> trailing note
+EOF
+    git -C "$repo_dir" add .gitattributes README.md
+    git -C "$repo_dir" commit -q -m base
+
+    # Two branches each append a distinct row (AC2/AC3: additive case).
+    git -C "$repo_dir" checkout -q -b branchA
+    sed -i '/a.html/a | [`b.html`](b.html) | second | **Reference** |' "${repo_dir}/README.md"
+    git -C "$repo_dir" add README.md
+    git -C "$repo_dir" commit -q -m "add b"
+
+    git -C "$repo_dir" checkout -q develop
+    git -C "$repo_dir" checkout -q -b branchC
+    sed -i '/a.html/a | [`c.html`](c.html) | third | **Reference** |' "${repo_dir}/README.md"
+    git -C "$repo_dir" add README.md
+    git -C "$repo_dir" commit -q -m "add c"
+
+    git -C "$repo_dir" checkout -q develop
+    git -C "$repo_dir" merge -q branchA --ff-only
+
+    git -C "$repo_dir" checkout -q branchC
+    if git -C "$repo_dir" rebase develop >/dev/null 2>&1; then
+        log_pass "union rebase: distinct-row branches rebase without manual resolution"
+    else
+        log_fail "union rebase: distinct-row branches failed to rebase cleanly"
+        git -C "$repo_dir" rebase --abort >/dev/null 2>&1 || true
+    fi
+
+    if grep -q 'b.html' "${repo_dir}/README.md" && grep -q 'c.html' "${repo_dir}/README.md"; then
+        log_pass "union rebase: both distinct rows present after rebase"
+    else
+        log_fail "union rebase: result is missing one of the distinct rows"
+    fi
+
+    # Two branches edit the SAME row (AC4: union cannot tell this apart from
+    # the additive case — it keeps both sides as a duplicate rather than
+    # conflicting). This is the known limitation check-mockups-index.sh guards.
+    git -C "$repo_dir" checkout -q develop
+    git -C "$repo_dir" checkout -q -b branchD
+    sed -i 's/first/first-edited-D/' "${repo_dir}/README.md"
+    git -C "$repo_dir" add README.md
+    git -C "$repo_dir" commit -q -m "edit row (D)"
+
+    git -C "$repo_dir" checkout -q develop
+    git -C "$repo_dir" checkout -q -b branchE
+    sed -i 's/first/first-edited-E/' "${repo_dir}/README.md"
+    git -C "$repo_dir" add README.md
+    git -C "$repo_dir" commit -q -m "edit row (E)"
+
+    git -C "$repo_dir" checkout -q develop
+    git -C "$repo_dir" merge -q branchD --ff-only
+    git -C "$repo_dir" checkout -q branchE
+    git -C "$repo_dir" rebase develop >/dev/null 2>&1
+
+    if bash scripts/check-mockups-index.sh "${repo_dir}/README.md" >/dev/null 2>&1; then
+        log_fail "union rebase: same-row edit produced a duplicate that check-mockups-index.sh missed"
+    else
+        log_pass "union rebase: same-row edit's silent duplicate is caught by check-mockups-index.sh"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 # Test: log-injection linter wrapper (Issue #1771 AC #1)
 # The wrapper is a thin shim over `go run ./scripts/lint-log-injection`. Both
 # the Makefile target and the pre-commit hook invoke the Go binary directly,
@@ -3316,6 +3441,10 @@ echo ""
 test_syntax
 echo ""
 test_license_checker
+echo ""
+test_check_mockups_index
+echo ""
+test_mockups_index_union_merge_rebase
 echo ""
 test_log_injection_linter
 echo ""

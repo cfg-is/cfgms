@@ -61,6 +61,10 @@ import (
 // inject a stub returning deterministic attribute maps without real I/O.
 type DNACollector interface {
 	CollectAttributes(ctx context.Context) (map[string]string, error)
+
+	// CollectFragments returns ADR-017 fragments for cluster:* resources from the
+	// module monitor cache. Returns nil when no module source is wired.
+	CollectFragments(ctx context.Context) []*commonpb.Fragment
 }
 
 // ObserveModuleLoader loads steward modules by name for the Tier-2 whole-domain
@@ -74,8 +78,13 @@ type ObserveModuleLoader interface {
 // collector also implements this interface, the client maintains
 // currentDNAFragments and currentDNAAggregateRoot for the partial-sync protocol
 // (ADR-017 §7). The S5 story wires the real multi-fragment collector here.
+//
+// Named CollectFragmentsTracked (not CollectFragments) so a single type can
+// implement both DNACollector.CollectFragments (no error, best-effort) and this
+// tracked variant (error-returning, used for the partial-sync root) without a
+// method-signature collision.
 type FragmentCollector interface {
-	CollectFragments(ctx context.Context) ([]*commonpb.Fragment, error)
+	CollectFragmentsTracked(ctx context.Context) ([]*commonpb.Fragment, error)
 }
 
 // maxRequestedFragmentIDs bounds the fragment_ids list accepted from a SYNC_DNA
@@ -935,10 +944,21 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	signingConfig := stewardconfig.BuildModuleSigningConfig(scriptSigning)
 
 	// controllerCARoots verifies operator-signed inline command certs chain to the
-	// controller CA — the same CA bundle used for mTLS.
+	// controller CA — the same CA bundle used for mTLS. Left nil when no usable CA
+	// PEM is available, which the handler treats as "skip operator-cert CA
+	// verification". validControllerCARoots checks each root is a currently-valid
+	// CA before building the pool, and builds it through pkg/cert (the central
+	// certificate provider) rather than assembling an x509 pool locally.
 	controllerCARoots, rootsErr := validControllerCARoots(caCertPEM, time.Now())
-	if rootsErr != nil && c.publicBeta {
-		return nil, fmt.Errorf("public-beta connected execution requires valid controller signing roots: %w", rootsErr)
+	if rootsErr != nil {
+		if c.publicBeta {
+			return nil, fmt.Errorf("public-beta connected execution requires valid controller signing roots: %w", rootsErr)
+		}
+		// Outside public beta an unusable bundle disables operator-cert chaining
+		// rather than failing the connection. Say so, so a misconfigured CA is
+		// diagnosable instead of silently reducing verification.
+		c.logger.Warn("Controller CA PEM unusable for operator certificate verification",
+			"error", rootsErr)
 	}
 
 	// A required-signature policy without roots would accept an otherwise valid
@@ -1133,17 +1153,38 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			return fmt.Errorf("failed to serialize DNA attributes: %w", err)
 		}
 
+		// Collect module fragments (cluster:* resources) for the full DNA sync.
+		// Without this the controller-side cluster registry (BuildRegistry) is
+		// always empty in production because DNA.Fragments is never populated.
+		c.mu.RLock()
+		collector := c.dnaCollector
+		c.mu.RUnlock()
+		var fragBytes [][]byte
+		if collector != nil {
+			for _, frag := range collector.CollectFragments(ctx) {
+				b, mErr := proto.Marshal(frag)
+				if mErr != nil {
+					c.logger.Warn("sync_dna: failed to marshal fragment, skipping",
+						"fragment_id", logging.SanitizeLogValue(frag.GetFragmentId()), "error", mErr)
+					continue
+				}
+				fragBytes = append(fragBytes, b)
+			}
+		}
+
 		transfer := &dpTypes.DNATransfer{
-			ID:         fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
-			StewardID:  sid,
-			TenantID:   tid,
-			Timestamp:  time.Now(),
-			Attributes: attrJSON,
-			Delta:      false, // full snapshot
+			ID:            fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
+			StewardID:     sid,
+			TenantID:      tid,
+			Timestamp:     time.Now(),
+			Attributes:    attrJSON,
+			FragmentBytes: fragBytes,
+			Delta:         false, // full snapshot
 			Metadata: map[string]string{
-				"command_id": cmd.ID,
-				"dna_hash":   dna.ComputeHash(currentDNA),
-				"attr_count": fmt.Sprintf("%d", len(currentDNA)),
+				"command_id":     cmd.ID,
+				"dna_hash":       dna.ComputeHash(currentDNA),
+				"attr_count":     fmt.Sprintf("%d", len(currentDNA)),
+				"fragment_count": fmt.Sprintf("%d", len(fragBytes)),
 			},
 		}
 
@@ -1903,7 +1944,7 @@ func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
 
 	// Optional: if the collector supports fragments, update the partial-sync state.
 	if fc, ok := collector.(FragmentCollector); ok {
-		fragments, fragErr := fc.CollectFragments(ctx)
+		fragments, fragErr := fc.CollectFragmentsTracked(ctx)
 		if fragErr != nil {
 			c.logger.Warn("fragment collection failed; partial-sync root not updated", "error", fragErr)
 		} else if len(fragments) > 0 {
@@ -2186,6 +2227,22 @@ func (c *TransportClient) CollectModuleDNAAttributes(ctx context.Context) map[st
 		return nil
 	}
 	return executor.CollectModuleDNAAttributes(ctx)
+}
+
+// CollectModuleFragments delegates to the CURRENT config executor's ADR-017
+// fragment collector (cluster:* resources, #2908). It delegates through the
+// stable client for the same reason CollectModuleDNAAttributes does:
+// InitializeConfigExecutor replaces c.configExecutor on every connect/reconnect,
+// so a captured *Executor reference would go stale. Returns nil before the
+// executor exists.
+func (c *TransportClient) CollectModuleFragments(ctx context.Context) []*commonpb.Fragment {
+	c.mu.RLock()
+	executor := c.configExecutor
+	c.mu.RUnlock()
+	if executor == nil {
+		return nil
+	}
+	return executor.CollectModuleFragments(ctx)
 }
 
 // SetTenantID sets the tenant ID (used after HTTP registration).

@@ -23,6 +23,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/mux"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
@@ -158,6 +159,7 @@ type Server struct {
 	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
+	terminalHandler                http.Handler                          // Issue #2761: terminal WebSocket relay handler
 }
 
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
@@ -417,12 +419,17 @@ func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 		if info.DNA != nil {
 			attrs = info.DNA.Attributes
 		}
+		var frags []*commonpb.Fragment
+		if info.DNA != nil {
+			frags = info.DNA.Fragments
+		}
 		result = append(result, fleet.StewardData{
 			ID:            info.ID,
 			TenantID:      info.TenantID,
 			Status:        info.Status,
 			LastHeartbeat: info.LastHeartbeat,
 			DNAAttributes: attrs,
+			DNAFragments:  frags,
 		})
 	}
 	return result
@@ -591,21 +598,8 @@ func (s *Server) setupRouter() {
 	// Raft status endpoint: requires HA read-status permission via API authentication
 	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
 
-	// TODO(#997): Wire terminal WebSocket handler when HTTP route is added (gated on epic #750).
-	// When the terminal route is registered, parse CFGMS_TERMINAL_ALLOWED_ORIGINS and pass the
-	// resulting slice to terminal.NewWebSocketHandler as the third argument. Parsing pattern
-	// mirrors CFGMS_ALLOWED_ORIGINS (comma-separated, strings.TrimSpace per entry, empty filtered):
-	//
-	//   var terminalOrigins []string
-	//   if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
-	//       for _, o := range strings.Split(raw, ",") {
-	//           if trimmed := strings.TrimSpace(o); trimmed != "" {
-	//               terminalOrigins = append(terminalOrigins, trimmed)
-	//           }
-	//       }
-	//   }
-	//   terminalHandler, err := terminal.NewWebSocketHandler(sessionManager, s.logger, terminalOrigins)
-	//   // then register: api.Handle("/terminal/ws/{steward_id}", ...).Methods("GET")
+	// Terminal WebSocket relay is registered by routes_terminal.go (Issue #2761).
+	// The handler is wired via SetTerminalHandler after server construction.
 
 	// SPA catch-all: lowest-precedence handler for the embedded web UI (Issue #2494).
 	// All /api/* and /raft/* routes registered above take precedence via gorilla/mux
@@ -1291,6 +1285,16 @@ func (s *Server) SetTelemetryHandler(h http.Handler) {
 		s.requirePermission("steward", "telemetry")(s.tenantScopedTelemetryWrapper(h)),
 	).Methods("GET")
 	s.logger.Info("Telemetry WebSocket endpoint registered at /api/v1/telemetry/ws/{id}")
+}
+
+// SetTerminalHandler wires the terminal WebSocket relay handler (Issue #2761).
+// The route GET /api/v1/terminal/ws/{steward_id} is already registered by
+// routes_terminal.go; this call stores the handler so that the route closure can
+// dispatch to it. Call after New() and before Start().
+func (s *Server) SetTerminalHandler(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.terminalHandler = h
 }
 
 // tenantScopedTelemetryWrapper wraps a WebSocket handler with cross-tenant isolation.

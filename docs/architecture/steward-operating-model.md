@@ -345,27 +345,43 @@ Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **
 1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
 2. **Drift baseline** — managed fragments whose state diverges from desired trigger drift correction
 
-#### Monitored module resource state as DNA attributes
+#### Monitored module resource state — flat attributes and cluster fragments
 
-DNA attributes also include a namespaced snapshot of every actively-monitored
-module resource's latest observed state: the steward's monitor fan-in caches
-the newest `ChangeEvent` details per resource (last-write-wins, no history),
-and the DNA collector merges the flattened result with the hardware-fact
-attributes on the same refresh tick — the same delta-compressed publish path,
-no separate channel, no coupling to heartbeat timing.
+The steward's monitor fan-in caches the newest `ChangeEvent` details per
+resource (last-write-wins, no history). Two output paths are derived from the
+same cache:
+
+**Flat attribute path (non-cluster resources):**  `Executor.CollectModuleDNAAttributes`
+merges flattened resource state with the hardware-fact attributes on the same
+refresh tick — the same delta-compressed publish path, no separate channel.
 
 Flattening and namespacing convention:
 
 - every key is `<resourceID>.<field>` with the resource ID **verbatim** —
-  including its colon, with no module-name prefix (the resource ID is the
-  module's own `ChangeEvent` scheme): `cluster:cfg-lab.cno_owner_node`
-- nested map keys join with `.` — `cluster:cfg-lab.resource_owner.web-01`
-- slice values join with `,` — `cluster:cfg-lab.member_nodes` =
-  `CFG-70-02,CFG-AB-02,CFG-C3-02`
+  including its colon, with no module-name prefix
+- nested map keys join with `.` — `resource_owner.web-01`
+- slice values join with `,`
 - any other value stringifies (`true`, `3`)
 
+**Fragment path (cluster:* resources, Issue #2908):**  `Executor.CollectModuleFragments`
+produces one `cluster:<Name>` ADR-017 fragment per cached cluster:* resource.
+Each fragment's `CanonicalBytes` encode the full `ClusterStatus.AsMap()` payload
+(including `resource_owner`, `member_nodes`, `cno_owner_node`, `found`) using the
+deterministic `CanonicalizeFragment` binary encoding. The controller cluster
+registry (`features/controller/clusterregistry`) reads from `StewardData.DNAFragments`
+and decodes the canonical bytes via `DecodeCanonicalFragment` to extract role
+ownership.
+
+> **Wire protocol note:** Fragment transmission steward→controller via
+> `DNATransfer` / `reassembleDNA` is deferred to a follow-on story; the fragment
+> wire shape is defined but not yet wired. The identity check
+> (`firstChunk.GetStewardId() != peerID` in `dna_handler.go`) applies to the
+> full DNA sync and continues to protect all DNA — including any future fragment
+> payloads — from spoofing.
+
 A resource that leaves monitoring (module close, steward shutdown) is evicted
-from the cache, so its keys disappear from the next collected map — the delta
+from the cache, so its flat keys disappear from the next collected map and its
+fragment disappears from the next `CollectModuleFragments` call — the delta
 publish signals the removal. The snapshot is **eventually consistent** by
 design: it rides the DNA refresh interval, and any safety-critical decision
 (e.g. cluster ownership gating) always uses live module queries, never this

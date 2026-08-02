@@ -8,12 +8,28 @@ allowed-tools: Bash
 
 # Usage Report Skill
 
-You answer questions about pipeline token/dollar spend using
-`.claude/metrics/token_report.py`, which reads Claude Code's own transcripts
--- no new instrumentation, no guessing. Produce one concise narrative
-summary back to the caller: total spend, the breakdown that actually answers
-their question, and any caveat that changes how the numbers should be read.
-Do not dump the raw table unless asked for detail.
+You answer questions about pipeline token/dollar spend. Two tools, same
+underlying accounting (`usage_db.py` imports `token_report.py`'s own pricing
+and transcript parsing -- no new math, no guessing):
+
+- **`.claude/metrics/usage_db.py`** (preferred) -- a unified SQLite store
+  covering local/po-live sessions, dispatched dev/fix/review containers, and
+  po-act.sh cycle manifests **in one queryable table**, keyed for idempotent
+  incremental re-ingest (unchanged transcripts are skipped by mtime/size, so
+  a repeat `ingest` after the first is near-instant). Use this for anything
+  involving `--group-by`, a specific session drill-down, or a specific
+  story's cost -- it answers what used to require running `token_report.py`
+  twice (once for the session scan, once for `--story-report`) and manually
+  reconciling the two.
+- **`.claude/metrics/token_report.py`** -- the underlying per-call accounting
+  engine. Still the right tool for `--composition` (cache vs. generation
+  breakdown) and `--cycle-manifest` correlation, which `usage_db.py` doesn't
+  wrap.
+
+Produce one concise narrative summary back to the caller: total spend, the
+breakdown that actually answers their question, and any caveat that changes
+how the numbers should be read. Do not dump the raw table unless asked for
+detail.
 
 This skill is about **usage telemetry** (where did tokens/dollars actually
 go). It is unrelated to `.claude/bench/` (quality-per-dollar benchmarking) --
@@ -58,7 +74,7 @@ already handles arbitrary precision.
 | "which role / review lens / tech-lead / fix round costs what" | `--group-by role` |
 | "main loop vs subagents vs workflow agents" | `--group-by agent` |
 | "where does the money actually go" (cache vs generation) | `--composition` |
-| a specific story/PR number, or "cost per story/PR" | `--story-report` (see caveat below) |
+| a specific story/PR number, or "cost per story/PR" | `usage_db.py report --story <N>` (see caveat below) |
 | ambiguous / caller just says "usage" or "spend" | run composition + `--group-by segment` together and present both |
 
 All non-story-report commands take the same `--since` from Step 1. Add
@@ -66,15 +82,30 @@ All non-story-report commands take the same `--since` from Step 1. Add
 
 ## Step 3: Run it
 
+First, refresh the SQLite store (fast after the first run -- unchanged
+transcripts are skipped):
+
 ```bash
-.claude/metrics/token_report.py --since <N> --composition
-.claude/metrics/token_report.py --since <N> --group-by <key> --top 20
+.claude/metrics/usage_db.py ingest
 ```
 
-For a story/PR question:
+Then query it:
 
 ```bash
-.claude/metrics/token_report.py --story-report --since <N>
+.claude/metrics/usage_db.py report --group-by <key> --since <N> --top 20
+.claude/metrics/usage_db.py report --story <issue-num>       # dev/fix/review split for one story
+.claude/metrics/usage_db.py report --session <session-id>    # drill into one session's calls + its container + its cycle
+```
+
+`<key>` includes everything `token_report.py --group-by` supports (model,
+segment, session, day, skill, agent, project, workflow, role) plus two new
+ones this store adds: `container` (per dispatched dev/fix/review container)
+and `source` (`local` vs `container`).
+
+For cache-composition breakdown (still `token_report.py` only):
+
+```bash
+.claude/metrics/token_report.py --since <N> --composition
 ```
 
 ## Step 4: Report back -- narrative, not a data dump
@@ -91,12 +122,14 @@ be read, not just decorate them:
 - **A model row marked `UNPRICED`** (`*`) in the output means it has no entry
   in `pricing.json`; its tokens are real but its dollar figure is not
   guessed. Say so rather than silently omitting or estimating it.
-- **`--story-report` rows can be `partial`** -- transcript missing, story
-  number unresolved, or (the common case for anything dispatched before dev-agent
-  session persistence landed, or before the `cfg-agent` image was rebuilt
-  after it) no dev-mode launch was found, so the largest cost component is
-  silently absent, not genuinely zero. Never report a partial row's total as
-  complete.
+- **A story's containers can be missing a dev launch, or have no transcript
+  at all** -- transcript missing, story number unresolved, or (the common
+  case for anything dispatched before dev-agent session persistence landed,
+  or before the `cfg-agent` image was rebuilt after it) no dev-mode launch
+  was found, so the largest cost component is silently absent, not genuinely
+  zero. `usage_db.py report --story <N>` flags `[PARTIAL: no transcript]` on
+  any such row inline; `token_report.py --story-report` marks the whole row
+  `partial`. Never report either as a complete total without checking this.
 - **Dispatched dev/fix-agent containers only produce telemetry if the
   `cfg-agent:latest` image was rebuilt after dev-agent session persistence
   (story #3051) landed.** If a window's dispatched-agent numbers look

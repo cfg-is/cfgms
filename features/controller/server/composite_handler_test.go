@@ -108,6 +108,23 @@ func (s *emptyLogStream) RecvMsg(interface{}) error                         { re
 // Compile-time check.
 var _ grpc.ClientStreamingServer[transportpb.LogEntry, transportpb.LogStreamResponse] = (*emptyLogStream)(nil)
 
+// emptyTerminalStream implements grpc.BidiStreamingServer[TerminalData, TerminalData].
+// Context() returns a background context (no mTLS peer) so the terminal handler's
+// mTLS extraction fails fast, proving delegation without needing a live stream.
+type emptyTerminalStream struct{}
+
+func (s *emptyTerminalStream) Recv() (*transportpb.TerminalData, error) { return nil, io.EOF }
+func (s *emptyTerminalStream) Send(*transportpb.TerminalData) error     { return nil }
+func (s *emptyTerminalStream) SetHeader(metadata.MD) error              { return nil }
+func (s *emptyTerminalStream) SendHeader(metadata.MD) error             { return nil }
+func (s *emptyTerminalStream) SetTrailer(metadata.MD)                   {}
+func (s *emptyTerminalStream) Context() context.Context                 { return context.Background() }
+func (s *emptyTerminalStream) SendMsg(interface{}) error                { return nil }
+func (s *emptyTerminalStream) RecvMsg(interface{}) error                { return nil }
+
+// Compile-time check.
+var _ grpc.BidiStreamingServer[transportpb.TerminalData, transportpb.TerminalData] = (*emptyTerminalStream)(nil)
+
 // ---------------------------------------------------------------------------
 // Additive-extension helpers (TestComposite_AdditiveExtension)
 // ---------------------------------------------------------------------------
@@ -224,6 +241,32 @@ func TestComposite_LogStream_NilHandler(t *testing.T) {
 	require.Error(t, err, "LogStream with nil logStreamHandler should return unimplemented error")
 	assert.Contains(t, err.Error(), "not implemented",
 		"LogStream with nil handler must return Unimplemented")
+}
+
+func TestComposite_Terminal_NilHandler(t *testing.T) {
+	cp := newRecordingHandler()
+	composite := newCompositeTransportServer(cp, nil)
+
+	err := composite.Terminal(&emptyTerminalStream{})
+	require.Error(t, err, "Terminal with nil terminalHandler should return unimplemented error")
+	assert.Contains(t, err.Error(), "not implemented",
+		"Terminal with nil handler must fall through to the Unimplemented base")
+}
+
+func TestComposite_Terminal_WithHandler(t *testing.T) {
+	cp := newRecordingHandler()
+	logger := logging.NewNoopLogger()
+	terminalHandler := controllerTransport.NewTerminalHandler(logger, nil, nil, nil, nil, nil)
+	composite := newCompositeTransportServer(cp, logger)
+	composite.SetTerminalHandler(terminalHandler)
+
+	// Empty stream with background context (no mTLS peer) → Unauthenticated from
+	// the handler's mTLS extraction. This proves terminalHandler.HandleGRPC is
+	// invoked, not the Unimplemented fallback.
+	err := composite.Terminal(&emptyTerminalStream{})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "not implemented",
+		"Terminal must route through terminalHandler, not the Unimplemented fallback")
 }
 
 // TestComposite_AdditiveExtension proves that adding a new data-plane handler

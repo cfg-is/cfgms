@@ -319,7 +319,7 @@ separate call needed.
   - `merge-queue` — queue state as JSON
   - `block <ISSUE> <reason>` — set project status Blocked, post escalation comment
   - `release-story <ITEM_ID>` — release a §7 self-dispatch story lease after the PR is up
-  - `cycle-start [cron|cycle]` / `cycle-end` — bracket a cycle's per-step manifest (Issue #3053); see §4.0/§4.1 Step 11 below. Every other subcommand above auto-records a step into it — with the work/no-op/error outcome it actually produced, classified from its own status markers — while a cycle is open. Nested `Agent`/`Skill` spawns (Tech Lead, BA, pin-refresh-runner, pipeline-sweep-runner, reviewers) are read out of this session's transcript by `cycle-end` and land in the manifest's `agents[]` with their roles and measured cost. **Nothing else to call, and nothing to narrate:** never report step outcomes, spawned agents or token counts into the manifest by hand — self-reported numbers were measured 31.5x low, which is why the record is taken from transcripts instead.
+  - `cycle-start [cron|cycle|pipeline]` / `cycle-end` — bracket a cycle's per-step manifest (Issue #3053); see §4.0/§4.1 Step 11 below. Every other subcommand above auto-records a step into it — with the work/no-op/error outcome it actually produced, classified from its own status markers — while a cycle is open. Nested `Agent`/`Skill` spawns (Tech Lead, BA, pin-refresh-runner, pipeline-sweep-runner, reviewers) are read out of this session's transcript by `cycle-end` and land in the manifest's `agents[]` with their roles and measured cost. **Nothing else to call, and nothing to narrate:** never report step outcomes, spawned agents or token counts into the manifest by hand — self-reported numbers were measured 31.5x low, which is why the record is taken from transcripts instead.
   - `cycle-report [N]` — average cost per cycle step (with its work/no-op split) and per nested agent role, across the last N completed cycles
 - `./scripts/pipeline-helper.sh lease-{acquire,release,status,list,gc}` — distributed-lease primitive (multi-host coordination, §4.-1). `lease-acquire <key> [ttl]` prints `ACQUIRED`/`RECLAIMED` (rc0), `HELD` (rc1), or `ACQUIRE_ERROR` (rc2). Used directly only for the inline-op leases below; container-op leases are managed by the dispatch helpers.
 - `./.claude/scripts/po-cycle-preflight.py` — the underlying preflight (called by `po-act.sh preflight`). Accepts `--stdout` for raw JSON or `--path` for the cache path.
@@ -330,7 +330,9 @@ separate call needed.
 Open this cycle's step manifest first (Issue #3053) — every `po-act.sh`
 subcommand from here through Step 11's `cycle-end` auto-records itself into
 it, so cost becomes attributable per step instead of only to the cycle as a
-whole. Pass `cron` for `/po cron`, `cycle` for `/po cycle`:
+whole. Pass `cron` for `/po cron`, `cycle` for `/po cycle`, `pipeline` for
+`/pipeline` (the dedicated cron-cycle entry point, same cycle as `/po cron`
+with its own segment for cost reporting):
 
 ```bash
 ./.claude/scripts/po-act.sh cycle-start cron
@@ -596,20 +598,20 @@ agent, fresh budget. No retry counter is incremented at the cron level.
 **Find PRs that need review.** A PR is review-eligible when:
 - branch is `feature/story-*`
 - state is OPEN
-- has no comment from `cfg-agent` with "acceptance review" in the body
-- no review container (`cfg-agent-review-pr-<N>`) is currently running (the dispatch script checks this)
+- has no *trusted* review comment — the machine sentinel `<!-- cfgms-acceptance-review -->` or a `## Acceptance Review` heading, posted by a push+/maintain/admin author (`is_trusted_review_comment` in `po-cycle-preflight.py`; a naive substring match on "acceptance review" is NOT sufficient — it false-positives on unrelated cfg-agent comments like the draft-skip notice, whose body is "Acceptance Reviewer — skipping draft PR.")
+- no review container (`cfg-agent-review-pr-<N>`) with state `running`/`restarting`/`created` (an `exited` one is stale, not in-flight — see the `already_in_flight` vs `container_exists` distinction in `dispatch.md` §4e)
 - story does NOT have project status `Fix` (waiting on dev fix; review re-runs after fix lands)
 
 Sorted by creation timestamp ascending (oldest first) — FIFO order minimizes
 rebase churn.
 
-```bash
-gh pr list --repo cfg-is/cfgms --search "head:feature/story-" --state open \
-  --json number,headRefName,createdAt,comments \
-  --jq '[.[] | select(([.comments[] | select(.author.login == "cfg-agent") | select(.body | test("acceptance review"; "i"))] | length == 0))] | sort_by(.createdAt)'
-```
-
-Cross-check the story's project status: skip any story with status `Fix`. Use `preflight` data (`review_recommendations`) to filter — the preflight already tracks Fix-status stories and excludes them from `spawn_acceptance_reviewer` actions.
+**Don't hand-roll this query.** All of the above is already computed by
+`po-cycle-preflight.py` and surfaced as `review_recommendations` entries with
+`action: "spawn_acceptance_reviewer"`, sorted FIFO. Read that output
+(`po-act.sh state '.review_recommendations'`) rather than reconstructing the
+eligibility check with a fresh `gh pr list --jq` — the preflight is the
+authoritative implementation and the one that's kept in sync with the dispatch
+script; a hand-written filter drifts.
 
 **Dispatch reviews for ALL eligible PRs each cycle, in parallel.** Iterate the
 `spawn_acceptance_reviewer` PRs in FIFO order (oldest `createdAt` first) and
@@ -633,7 +635,7 @@ a nice-to-have, not load-bearing.
 
 Each call returns one of:
 - `REVIEW_DISPATCHED:<PR>:<STORY>:<container_id>` — running headless. Move on; the comment will appear on the PR when done.
-- `REVIEW_REFUSED:<PR>:<reason>` — see Section 4e of `.claude/commands/dispatch.md` for reasons. Common cases: `pr_state_<X>` (PR closed), `no_story_link` (manually associate), `container_exists` (skip — another review is running).
+- `REVIEW_REFUSED:<PR>:<reason>: <hint>` — the trailing hint is self-explanatory (generated by `_review_refusal_hint()` in `agent-dispatch.sh`); act on it directly. See Section 4e of `.claude/commands/dispatch.md` for the output-format contract if the hint is empty/unfamiliar.
 
 After dispatch, **do NOT wait**. Later cron cycles will see the
 `acceptance-reviewer` comment on each PR (if review completed) and move on to

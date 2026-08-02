@@ -40,10 +40,32 @@ func newInMemoryTokenStore() *inMemoryTokenStore {
 	return &inMemoryTokenStore{tokens: make(map[string]*business.RegistrationTokenData)}
 }
 
+// snapshot returns a caller-owned copy of a stored token. The durable stores
+// build a fresh struct from a database row on every read, so a caller may hold
+// and inspect the result without synchronising against the store. Handing out
+// the map's own pointer instead would let a reader observe IsValid() while a
+// concurrent ConsumeToken flips Revoked on the same struct — a race in the
+// double, not in the code under test.
+func snapshot(token *business.RegistrationTokenData) *business.RegistrationTokenData {
+	if token == nil {
+		return nil
+	}
+	clone := *token
+	if token.ExpiresAt != nil {
+		expiresAt := *token.ExpiresAt
+		clone.ExpiresAt = &expiresAt
+	}
+	if token.RevokedAt != nil {
+		revokedAt := *token.RevokedAt
+		clone.RevokedAt = &revokedAt
+	}
+	return &clone
+}
+
 func (s *inMemoryTokenStore) SaveToken(_ context.Context, token *business.RegistrationTokenData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tokens[token.Token] = token
+	s.tokens[token.Token] = snapshot(token)
 	return nil
 }
 
@@ -54,13 +76,13 @@ func (s *inMemoryTokenStore) GetToken(_ context.Context, tokenStr string) (*busi
 	if !ok {
 		return nil, fmt.Errorf("token not found: %q", tokenStr)
 	}
-	return token, nil
+	return snapshot(token), nil
 }
 
 func (s *inMemoryTokenStore) UpdateToken(_ context.Context, token *business.RegistrationTokenData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tokens[token.Token] = token
+	s.tokens[token.Token] = snapshot(token)
 	return nil
 }
 
@@ -79,7 +101,7 @@ func (s *inMemoryTokenStore) ListTokens(_ context.Context, filter *business.Regi
 		if filter != nil && filter.TenantID != "" && t.TenantID != filter.TenantID {
 			continue
 		}
-		result = append(result, t)
+		result = append(result, snapshot(t))
 	}
 	return result, nil
 }
@@ -101,7 +123,7 @@ func (s *inMemoryTokenStore) RotateToken(_ context.Context, tenantID, group stri
 		CreatedAt: time.Now(),
 	}
 	s.tokens[newTok.Token] = newTok
-	return newTok, nil
+	return snapshot(newTok), nil
 }
 
 func (s *inMemoryTokenStore) GetTokenByID(_ context.Context, id string) (*business.RegistrationTokenData, error) {
@@ -109,7 +131,7 @@ func (s *inMemoryTokenStore) GetTokenByID(_ context.Context, id string) (*busine
 	defer s.mu.RUnlock()
 	for _, t := range s.tokens {
 		if t.ID == id {
-			return t, nil
+			return snapshot(t), nil
 		}
 	}
 	return nil, fmt.Errorf("registration token not found")

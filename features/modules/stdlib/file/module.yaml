@@ -30,6 +30,9 @@ owns:
       - hostname  # device identity — required in every full-os-device DNA snapshot
       - os        # device identity — required in every full-os-device DNA snapshot
 
+# observe_when: omitted — file domain is content-bearing and unbounded; declared
+# resources live in config + drift only, never enumerated into DNA (ADR-024 §3).
+
 security:
   requires_root: false
   capabilities: []

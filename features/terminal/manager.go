@@ -20,6 +20,11 @@ type DefaultSessionManager struct {
 	recorder  Recorder
 	cleanupCh chan string
 	stopCh    chan struct{}
+	// stopped records that Stop has already run. Stop closes stopCh, so a second
+	// call would panic on close of a closed channel; shutdown paths legitimately
+	// converge (explicit shutdown plus a deferred safety net), so the second call
+	// must be a no-op rather than a crash.
+	stopped bool
 	// afterCollectHook, if non-nil, is called after the timed-out ID slice is
 	// collected and m.mu is released, but before the termination loop begins.
 	// Used in tests to inject deterministic race conditions.
@@ -40,6 +45,13 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 		return nil, fmt.Errorf("max sessions must be positive")
 	}
 
+	// Recording writes cleartext session content to disk, so the destination must
+	// be an explicit, deployment-owned directory. Reject the misconfiguration at
+	// construction instead of silently falling back to a shared location.
+	if config.RecordSessions && config.RecordingStoragePath == "" {
+		return nil, fmt.Errorf("recording_storage_path is required when record_sessions is enabled")
+	}
+
 	manager := &DefaultSessionManager{
 		config:    config,
 		logger:    logger,
@@ -48,18 +60,19 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 		stopCh:    make(chan struct{}),
 	}
 
-	// Initialize recorder if recording is enabled
+	// Initialize recorder if recording is enabled. RecordSessions is a security
+	// control (session I/O is the audit trail for privileged interactive shells),
+	// so a recorder that fails to initialize — including the symlink/permission
+	// hijack cases ensureSecureRecordingDir rejects — must fail construction
+	// rather than silently fall back to running unrecorded.
 	if config.RecordSessions {
 		recorderConfig := DefaultRecorderConfig()
-		if config.RecordingStoragePath != "" {
-			recorderConfig.StoragePath = config.RecordingStoragePath
-		}
+		recorderConfig.StoragePath = config.RecordingStoragePath
 		recorder, err := NewSessionRecorder(recorderConfig, logger)
 		if err != nil {
-			logger.Warn("Failed to initialize session recorder, continuing without recording", "error", err)
-		} else {
-			manager.recorder = recorder
+			return nil, fmt.Errorf("failed to initialize session recorder: %w", err)
 		}
+		manager.recorder = recorder
 	}
 
 	// Start background cleanup routine
@@ -93,15 +106,17 @@ func (m *DefaultSessionManager) CreateSession(ctx context.Context, req *SessionR
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Set recorder if available
+	// Set recorder if available. When RecordSessions is enabled, a session must
+	// not be created — let alone served — without a working recording: that
+	// would leave a privileged interactive shell with no captured keystroke/output
+	// audit trail, silently defeating the reason recording is enabled.
 	if m.recorder != nil {
 		session.SetRecorder(m.recorder)
 
-		// Start recording session
 		metadata := session.GetMetadata()
 		if recorder, ok := m.recorder.(*DefaultSessionRecorder); ok {
 			if err := recorder.StartRecording(session.ID, metadata); err != nil {
-				m.logger.Warn("Failed to start session recording", "session_id", logging.RedactedID(session.ID), "error", err)
+				return nil, fmt.Errorf("failed to start session recording: %w", err)
 			}
 		}
 	}
@@ -111,8 +126,8 @@ func (m *DefaultSessionManager) CreateSession(ctx context.Context, req *SessionR
 
 	m.logger.Info("Session created",
 		"session_id", logging.RedactedID(session.ID),
-		"steward_id", session.StewardID,
-		"user_id", session.UserID,
+		"steward_id", logging.SanitizeLogValue(session.StewardID),
+		"user_id", logging.SanitizeLogValue(session.UserID),
 		"active_sessions", len(m.sessions))
 
 	return session, nil
@@ -141,18 +156,12 @@ func (m *DefaultSessionManager) TerminateSession(ctx context.Context, sessionID 
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Close the session
+	// Close the session. Session.Close finalizes this session's recording (and only
+	// this session's) via Recorder.EndRecording, so no manager-level end/close of the
+	// shared recorder happens here — that would take down the recordings of every
+	// other live session.
 	if err := session.Close(ctx); err != nil {
 		m.logger.Warn("Error closing session", "session_id", logging.RedactedID(sessionID), "error", err)
-	}
-
-	// End recording if recorder is available
-	if m.recorder != nil {
-		if recorder, ok := m.recorder.(*DefaultSessionRecorder); ok {
-			if err := recorder.EndRecording(sessionID); err != nil {
-				m.logger.Warn("Failed to end session recording", "session_id", logging.RedactedID(sessionID), "error", err)
-			}
-		}
 	}
 
 	// Remove from active sessions
@@ -262,10 +271,16 @@ func (m *DefaultSessionManager) RequestCleanup(sessionID string) {
 	}
 }
 
-// Stop stops the session manager and cleans up resources
+// Stop stops the session manager and cleans up resources. It is idempotent:
+// repeated calls return nil without re-closing stopCh or re-closing sessions.
 func (m *DefaultSessionManager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.stopped {
+		return nil
+	}
+	m.stopped = true
 
 	// Signal cleanup routine to stop
 	close(m.stopCh)
