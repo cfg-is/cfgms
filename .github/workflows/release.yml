@@ -23,7 +23,7 @@ jobs:
       epoch: ${{ steps.release.outputs.epoch }}
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@9c091bb5c9d13c1f7bdc0fd0e0c6873a92cc28de # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -80,16 +80,19 @@ jobs:
       contents: read
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@9c091bb5c9d13c1f7bdc0fd0e0c6873a92cc28de # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up pinned Go toolchain
-        uses: actions/setup-go@b7ad1e5852cbd3f7e9a4f47e0c8853af6c9e1683 # v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          # Release artifacts must not be built from a cache any other workflow
+          # can write. A poisoned module cache would be baked into signed,
+          # attested binaries.
+          cache: false
 
       - name: Build twice and compare
         env:
@@ -112,7 +115,7 @@ jobs:
             --output dist
 
       - name: Upload reproducible archives
-        uses: actions/upload-artifact@043fb46cd6927812f2d5e40c3a11e0e2f3fdd5bf # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-archives
           path: dist/cfgms-*.tar.gz
@@ -128,16 +131,19 @@ jobs:
       contents: read
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@9c091bb5c9d13c1f7bdc0fd0e0c6873a92cc28de # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up pinned Go toolchain
-        uses: actions/setup-go@b7ad1e5852cbd3f7e9a4f47e0c8853af6c9e1683 # v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          # Release artifacts must not be built from a cache any other workflow
+          # can write. A poisoned module cache would be baked into signed,
+          # attested binaries.
+          cache: false
 
       - name: Import signing certificate and build MSI
         shell: pwsh
@@ -171,7 +177,7 @@ jobs:
           }
 
       - name: Upload signed MSI
-        uses: actions/upload-artifact@043fb46cd6927812f2d5e40c3a11e0e2f3fdd5bf # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows-msi
           path: bin/cfgms-steward-windows-amd64.msi
@@ -187,16 +193,19 @@ jobs:
       contents: read
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@9c091bb5c9d13c1f7bdc0fd0e0c6873a92cc28de # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up pinned Go toolchain
-        uses: actions/setup-go@b7ad1e5852cbd3f7e9a4f47e0c8853af6c9e1683 # v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          # Release artifacts must not be built from a cache any other workflow
+          # can write. A poisoned module cache would be baked into signed,
+          # attested binaries.
+          cache: false
 
       - name: Import signing identities, build, and notarize
         env:
@@ -246,7 +255,7 @@ jobs:
           bash build/darwin/build-pkg.sh --arch arm64 --version "$RELEASE_VERSION" --publisher-key "$PUBLISHER_KEY"
 
       - name: Upload signed packages
-        uses: actions/upload-artifact@043fb46cd6927812f2d5e40c3a11e0e2f3fdd5bf # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-macos-pkgs
           path: bin/cfgms-steward-darwin-*.pkg
@@ -265,7 +274,7 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@9c091bb5c9d13c1f7bdc0fd0e0c6873a92cc28de # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
