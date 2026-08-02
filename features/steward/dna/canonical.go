@@ -175,6 +175,9 @@ func decodeCanonValue(b []byte, depth int) (interface{}, int, error) {
 		if len(b) < 9 {
 			return nil, 0, fmt.Errorf("decodeCanonValue: int64 truncated")
 		}
+		// #nosec G115 -- the inverse of the encoder's uint64(v) at appendCanonInt:
+		// it reads back the same two's-complement bit pattern that was written, so
+		// all 64 bits are preserved. This is a reinterpretation, not a narrowing.
 		return int64(binary.BigEndian.Uint64(b[1:9])), 9, nil
 
 	case canonTagUint:
