@@ -162,6 +162,57 @@ Resolution is controller-mediated: the steward reports baseline DNA, the control
 
 **Evaluating a module for `observe_when`:** existing modules are being tagged as part of the ADR-024 epic; new modules must make a considered declaration (or deliberate omission).
 
+#### Deliberate-omission convention
+
+`module.yaml` has no schema field for "I considered `observe_when` and said no." When a module author deliberately omits `observe_when`, they must record that decision as a YAML comment using the following exact format (checked by `make check-stdlib-completeness` check-6):
+
+```yaml
+# observe_when: omitted — <reason>
+```
+
+The `<reason>` should explain which ADR-024 §3 criterion applies:
+
+- **Content-bearing / unbounded-domain modules** (`file`, future registry-value): omit permanently, e.g.
+  ```yaml
+  # observe_when: omitted — file domain is content-bearing and unbounded; declared
+  # resources live in config + drift only, never enumerated into DNA (ADR-024 §3).
+  ```
+- **Execution primitives** (`script`): omit permanently, e.g.
+  ```yaml
+  # observe_when: omitted — script is an execution primitive with no observation
+  # domain; it executes signed files on demand and is never auto-pulled for DNA
+  # observation (ADR-024 §3).
+  ```
+- **Inventory-worthy modules awaiting tagging**: omit temporarily, e.g.
+  ```yaml
+  # observe_when: omitted — pending module-tagging story (bounded inventory-worthy
+  # domain; observe_when predicate will be added by the ADR-024 epic).
+  ```
+
+Place the comment in `module.yaml` after the `owns:` block (or after `behavioral_envelope:` if present). The gate checks for the prefix `# observe_when: omitted` — the exact reason text is free-form.
+
+**Build enforcement:** `make check-stdlib-completeness` (check-6) fails if any stdlib module's `module.yaml` has neither an `observe_when:` key nor the omission-marker comment. This ensures every module has made a deliberate decision rather than silently skipping the consideration.
+
+#### Read-only conformance for observe-eligible modules
+
+A module that carries `observe_when` must verify its observe path is provably read-only (ADR-024 §4). Use the conformance helper alongside `AssertDeterministicGet` and `AssertNoEphemeralFields`:
+
+```go
+import "github.com/cfgis/cfgms/features/modules/conformance"
+
+// AssertObserveReadOnly performs two checks:
+//   Layer 1: BehavioralEnvelope.WritesPaths must be empty.
+//   Layer 2: no banned mutating PowerShell verb prefix (New-*, Set-*, Remove-*, Add-*)
+//            appears in the caller-supplied command list.
+//
+// The two-layer design is intentional — the envelope check alone is not sufficient
+// because a module could declare an empty writes_paths while its Get still calls a
+// mutating command. The command-verb check closes that gap.
+conformance.AssertObserveReadOnly(t, module.BehavioralEnvelope, executedCommands)
+```
+
+Pass the list of PowerShell script blocks or command strings executed during the observe path as `executedCommands`. This mirrors the `assertNoWriteCmdlets` pattern used in `features/modules/hyperv/observe_test.go`.
+
 ### `Get` canonical fragment contract (ADR-016 clause 4)
 
 Every module's `Get` implementation must return a **canonical,
@@ -230,10 +281,11 @@ In addition to the payload boundary, `make check-stdlib-completeness` (also wire
 | **check-3** | `cmd/main.go` exists — the bundle entry point that builds the module as a standalone binary |
 | **check-4** | `module.yaml` declares at least one `owns:` entry (ADR-016 clause 5) |
 | **check-5** | No unresolved-work stubs: no file whose basename starts with `stub_`, no `panic("TODO")`, and no `ErrNotImplemented` in non-test Go source files |
+| **check-6** | `module.yaml` carries either an `observe_when:` predicate or the deliberate-omission comment `# observe_when: omitted — <reason>` (ADR-024 §3) |
 
 **check-5 distinction:** `ErrUnsupportedPlatform` in build-tag platform-fallback files (e.g. `executor_stub.go` with `//go:build !linux`) is intentional cross-platform boundary behaviour and is **not** flagged. Only `ErrNotImplemented` — the "we haven't built this yet" marker — causes the gate to fail. Use module-specific errors (e.g. `ErrSymlinkNotSupported`) for documented feature gaps that are out-of-scope for the current version, and `ErrUnsupportedPlatform` for genuine platform boundaries.
 
-**Adding a new stdlib module:** satisfy all five payload sources *and* all four completeness checks before the PR will merge.
+**Adding a new stdlib module:** satisfy all five payload sources *and* all five completeness checks before the PR will merge (checks 2–6).
 
 ### Current stdlib members
 

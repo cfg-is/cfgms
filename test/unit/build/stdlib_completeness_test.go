@@ -100,6 +100,8 @@ func buildCompletenessFixture(t *testing.T, opts completenessFixtureOpts) string
 }
 
 // validManifest returns a complete, valid module.yaml content for the named module.
+// It carries a check-6 (ADR-024 §3) deliberate-omission marker so fixtures
+// exercising other checks aren't incidentally failed by check-6.
 func validManifest(name string) string {
 	return fmt.Sprintf(`name: %s
 version: 0.1.0
@@ -112,6 +114,7 @@ interfaces:
   - Test
 owns:
   - kind: %s
+# observe_when: omitted — test fixture, not subject to ADR-024 tagging
 `, name, name)
 }
 
@@ -322,4 +325,98 @@ func (e *stubExecutor) setState(_ string, _ bool) error {
 	})
 	code, out := runCompletenessScript(t, root)
 	assert.Equal(t, 0, code, "ErrUnsupportedPlatform in build-tag stub should NOT cause failure\nOutput:\n%s", out)
+}
+
+// TestCompletenessCheck6_ObserveWhenPresent verifies that a module.yaml
+// carrying an observe_when: key satisfies check #6 (ADR-024 §3).
+func TestCompletenessCheck6_ObserveWhenPresent(t *testing.T) {
+	manifest := `name: observe-when-present
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+interfaces:
+  - Get
+  - Set
+  - Test
+owns:
+  - kind: observe-when-present
+observe_when:
+  - fact: os
+    equals: linux
+`
+	root := buildCompletenessFixture(t, completenessFixtureOpts{
+		modules: []completenessModuleSpec{
+			{
+				name:            "observe-when-present",
+				manifestContent: manifest,
+				hasCmdMain:      true,
+				goFiles:         map[string]string{"module.go": cleanGoFileContent},
+			},
+		},
+	})
+	code, out := runCompletenessScript(t, root)
+	assert.Equal(t, 0, code, "observe_when: present should satisfy check-6\nOutput:\n%s", out)
+}
+
+// TestCompletenessCheck6_OmissionMarker verifies that a module.yaml carrying
+// the deliberate-omission marker comment satisfies check #6 (ADR-024 §3)
+// without declaring observe_when itself.
+func TestCompletenessCheck6_OmissionMarker(t *testing.T) {
+	manifest := `name: observe-when-omitted
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+interfaces:
+  - Get
+  - Set
+  - Test
+owns:
+  - kind: observe-when-omitted
+# observe_when: omitted — unbounded domain; content-bearing module (ADR-024 §3)
+`
+	root := buildCompletenessFixture(t, completenessFixtureOpts{
+		modules: []completenessModuleSpec{
+			{
+				name:            "observe-when-omitted",
+				manifestContent: manifest,
+				hasCmdMain:      true,
+				goFiles:         map[string]string{"module.go": cleanGoFileContent},
+			},
+		},
+	})
+	code, out := runCompletenessScript(t, root)
+	assert.Equal(t, 0, code, "omission marker should satisfy check-6\nOutput:\n%s", out)
+}
+
+// TestCompletenessCheck6_NeitherFails verifies that a module.yaml with
+// neither observe_when: nor the omission marker fails check #6 (ADR-024 §3).
+func TestCompletenessCheck6_NeitherFails(t *testing.T) {
+	manifest := `name: observe-when-neither
+version: 0.1.0
+publisher: cfgms
+executors:
+  - steward
+interfaces:
+  - Get
+  - Set
+  - Test
+owns:
+  - kind: observe-when-neither
+`
+	root := buildCompletenessFixture(t, completenessFixtureOpts{
+		modules: []completenessModuleSpec{
+			{
+				name:            "observe-when-neither",
+				manifestContent: manifest,
+				hasCmdMain:      true,
+				goFiles:         map[string]string{"module.go": cleanGoFileContent},
+			},
+		},
+	})
+	code, out := runCompletenessScript(t, root)
+	assert.NotEqual(t, 0, code, "missing observe_when and omission marker should cause failure\nOutput:\n%s", out)
+	assert.Contains(t, out, "check-6", "output should mention check-6")
+	assert.Contains(t, out, "observe-when-neither", "output should mention the failing module")
 }

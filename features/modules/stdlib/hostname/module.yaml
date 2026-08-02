@@ -28,6 +28,9 @@ interfaces:
 owns:
   - kind: hostname  # authority over hostname:* objects this module manages
 
+# observe_when: omitted — pending module-tagging story (bounded inventory-worthy
+# domain; observe_when predicate will be added by the ADR-024 epic).
+
 security:
   requires_root: true  # writing /etc/hostname and syscall.Sethostname require root on Linux; scutil requires admin on macOS; wmic/netdom require admin on Windows
   capabilities: []

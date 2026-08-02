@@ -28,6 +28,10 @@ owns:
       - hostname  # device identity — required in every full-os-device DNA snapshot
       - os        # device identity — required in every full-os-device DNA snapshot
 
+# observe_when: omitted — script is an execution primitive with no observation
+# domain; it executes signed files on demand and is never auto-pulled for DNA
+# observation (ADR-024 §3).
+
 security:
   requires_root: false
   capabilities: []
