@@ -151,15 +151,6 @@ jobs:
       with:
         go-version: ${{ env.GO_VERSION }}
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-nancy-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-nancy-
-      continue-on-error: true
-
     - name: Install Nancy
       run: make install-nancy
     
@@ -205,15 +196,6 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-gosec-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-gosec-
-      continue-on-error: true
 
     - name: Install gosec
       run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
@@ -276,15 +258,6 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-staticcheck-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-staticcheck-
-      continue-on-error: true
 
     - name: Install staticcheck
       run: GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.1
