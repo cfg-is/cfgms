@@ -32,26 +32,36 @@ original v0.9.7 Tier-1 bringup referenced elsewhere in epic #3090's planning
 re-enrolled). Anything in this epic that assumed continuity with the
 original controller's history/state should be re-verified.
 
-Two genuine defects were found and worked around during the rebuild (not yet
-filed as separate issues):
-- `tier1-bootstrap.sh`'s config template is missing `transport.external_address`
-  (controller now refuses to start without it) and its `certificate.ca_path`
-  is silently ignored in favor of a relative default — `--init` must be run
-  with CWD `/var/lib/cfgms` (matching the systemd unit's `WorkingDirectory`)
-  or the CA never lands where the server expects to load it from.
-- The `hyperv.vm` module's `Set-VMFirmware -EnableSecureBoot On -SecureBootTemplate
-  MicrosoftUEFICertificateAuthority` call reproducibly failed
-  (`'MicrosoftUEFICertificateAuthority' matches none of the secure boot
-  templates`) when run as part of the module's actual create sequence, even
-  though the identical call succeeds in isolation. Both `cfgms-ctrl-01` and
-  `cfgms-lab-datasvc` were provisioned manually instead (raw cloud image →
-  fixed VHD → dynamic VHDX via `C:\temp\raw2vhd`, CIDATA seed built with the
-  same mechanics as the module, `-EnableSecureBoot Off`) rather than via
+Seven genuine defects were found during the rebuild and filed as follow-up
+stories under this epic (none fixed here — #3124 is infra-provisioning only):
+- #3168 — `hyperv.vm` cloud-init VM occasionally boots without seeing the
+  CIDATA seed disk on first boot (self-heals on a power-cycle, but not
+  automatically on the module's own timeline).
+- #3169 — the `hyperv.vm` module's `Set-VMFirmware -EnableSecureBoot On
+  -SecureBootTemplate MicrosoftUEFICertificateAuthority` call reproducibly
+  fails (`'MicrosoftUEFICertificateAuthority' matches none of the secure
+  boot templates`) when run as part of the module's actual create sequence,
+  even though the identical call succeeds in isolation. Both `cfgms-ctrl-01`
+  and `cfgms-lab-datasvc` were provisioned manually instead (raw cloud image
+  → fixed VHD → dynamic VHDX via `C:\temp\raw2vhd`, CIDATA seed built with
+  the same mechanics as the module, `-EnableSecureBoot Off`) rather than via
   `cfg config upload` — see `C:\temp\ctrl-vm-create.ps1` /
   `C:\temp\datasvc-vm-create.ps1` on `CFG-70-02` for the exact recipe.
-- `cfg registration approve` / `approve-all` return success but the
+- #3170 — `tier1-bootstrap.sh`'s config template is missing
+  `transport.external_address` (controller now refuses to start without it).
+- #3171 — `certificate.ca_path`/`cert_path` is silently ignored in favor of a
+  relative default — `--init` must be run with CWD `/var/lib/cfgms` (matching
+  the systemd unit's `WorkingDirectory`) or the CA never lands where the
+  server expects to load it from.
+- #3172 — the generated admin bundle embeds a hardcoded `controller_url` port
+  (`:8080`) instead of the configured `listen_addr` port.
+- #3173 — `cfg registration approve` / `approve-all` return success but the
   `registration pending` list still shows the entries afterward — cosmetic
   (the underlying steward really does flip to `active`), but worth fixing.
+- #3174 — `cfg`'s `--tls-insecure` / `CFGMS_TLS_INSECURE` has no effect for
+  admin-bundle (mTLS) authenticated commands (`steward`, `tenant`), only
+  worked around here via an SSH tunnel to `localhost` (in the cert's SAN)
+  instead of connecting by LAN IP.
 
 ### Shared data-services VM (`cfgms-lab-datasvc`) — story #3124
 
