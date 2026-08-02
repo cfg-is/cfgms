@@ -79,6 +79,33 @@ const maxCanonDecodeDepth = 32
 // before any allocation is made from it.
 const minCanonMapEntrySize = 5
 
+// canonSpan converts a wire-declared length into an int offset, but only after
+// proving it addresses bytes that are actually present.
+//
+// Every length and count in the canonical encoding arrives as an attacker-chosen
+// uint32, so each one needs the same two-sided argument before it can be used as
+// an index. Routing them all through one function means that argument is made
+// once, in a place that can be audited, instead of being restated at each site.
+//
+// The comparison runs in uint64 deliberately: on a 32-bit GOARCH a direct
+// int(uint32) can go negative, which would make a "remaining < declared" guard
+// trivially false and defeat the check. remaining is a slice length and so is
+// never negative, making the widening lossless; declared is then bounded by
+// remaining, so narrowing it to int is lossless too.
+//
+// #nosec G115 -- both conversions are bounded by the guards in this function:
+// remaining is a non-negative slice length, and declared is rejected unless it
+// is <= remaining, so neither widening nor narrowing can lose information.
+func canonSpan(declared uint32, remaining int) (int, bool) {
+	if remaining < 0 {
+		return 0, false
+	}
+	if uint64(declared) > uint64(remaining) {
+		return 0, false
+	}
+	return int(declared), true
+}
+
 // decodeCanonMap decodes [uint32 count][entries...] from b at the given nesting depth.
 // Returns the map, bytes consumed, and any error.
 //
@@ -92,24 +119,29 @@ func decodeCanonMap(b []byte, depth int) (map[string]interface{}, int, error) {
 	if len(b) < 4 {
 		return nil, 0, fmt.Errorf("decodeCanonMap: need 4 bytes for count, have %d", len(b))
 	}
-	count := uint64(binary.BigEndian.Uint32(b[:4]))
+	declaredCount := binary.BigEndian.Uint32(b[:4])
 	pos := 4
-	if maxEntries := uint64(len(b)-pos) / minCanonMapEntrySize; count > maxEntries {
+	// Each entry needs at least minCanonMapEntrySize bytes, so a count larger than
+	// the remaining buffer can hold is structurally impossible. canonSpan bounds the
+	// count by the remaining bytes; the divisor tightens that to what can actually fit.
+	count, ok := canonSpan(declaredCount, len(b)-pos)
+	if !ok || count > (len(b)-pos)/minCanonMapEntrySize {
 		return nil, 0, fmt.Errorf("decodeCanonMap: declared %d entries exceeds %d possible in %d remaining bytes",
-			count, maxEntries, len(b)-pos)
+			declaredCount, (len(b)-pos)/minCanonMapEntrySize, len(b)-pos)
 	}
 	m := make(map[string]interface{})
-	for i := uint64(0); i < count; i++ {
+	for i := 0; i < count; i++ {
 		if pos+4 > len(b) {
 			return nil, 0, fmt.Errorf("decodeCanonMap: key length truncated at entry %d", i)
 		}
-		klen := uint64(binary.BigEndian.Uint32(b[pos : pos+4]))
+		declaredKeyLen := binary.BigEndian.Uint32(b[pos : pos+4])
 		pos += 4
-		if klen > uint64(len(b)-pos) {
+		klen, ok := canonSpan(declaredKeyLen, len(b)-pos)
+		if !ok {
 			return nil, 0, fmt.Errorf("decodeCanonMap: key bytes truncated at entry %d", i)
 		}
-		key := string(b[pos : pos+int(klen)])
-		pos += int(klen)
+		key := string(b[pos : pos+klen])
+		pos += klen
 		v, n, err := decodeCanonValue(b[pos:], depth)
 		if err != nil {
 			return nil, 0, fmt.Errorf("decodeCanonMap: entry %q: %w", key, err)
@@ -155,29 +187,26 @@ func decodeCanonValue(b []byte, depth int) (interface{}, int, error) {
 		if len(b) < 5 {
 			return nil, 0, fmt.Errorf("decodeCanonValue: float length truncated")
 		}
-		// Compared in uint64 (not int) so the guard holds on 32-bit GOARCH, where
-		// int(uint32) can go negative and make "len(b) < 5+slen" trivially false.
-		slen := uint64(binary.BigEndian.Uint32(b[1:5]))
-		if slen > uint64(len(b)-5) {
+		slen, ok := canonSpan(binary.BigEndian.Uint32(b[1:5]), len(b)-5)
+		if !ok {
 			return nil, 0, fmt.Errorf("decodeCanonValue: float string truncated")
 		}
-		s := string(b[5 : 5+int(slen)])
+		s := string(b[5 : 5+slen])
 		v, err := strconv.ParseFloat(s, 64)
 		if err != nil {
 			return nil, 0, fmt.Errorf("decodeCanonValue: parse float %q: %w", s, err)
 		}
-		return v, 5 + int(slen), nil
+		return v, 5 + slen, nil
 
 	case canonTagString, canonTagOther:
 		if len(b) < 5 {
 			return nil, 0, fmt.Errorf("decodeCanonValue: string/other length truncated")
 		}
-		// uint64 comparison for the same 32-bit-safety reason as canonTagFloat.
-		slen := uint64(binary.BigEndian.Uint32(b[1:5]))
-		if slen > uint64(len(b)-5) {
+		slen, ok := canonSpan(binary.BigEndian.Uint32(b[1:5]), len(b)-5)
+		if !ok {
 			return nil, 0, fmt.Errorf("decodeCanonValue: string/other bytes truncated")
 		}
-		return string(b[5 : 5+int(slen)]), 5 + int(slen), nil
+		return string(b[5 : 5+slen]), 5 + slen, nil
 
 	case canonTagMap:
 		m, n, err := decodeCanonMap(b[1:], depth+1)
@@ -190,20 +219,21 @@ func decodeCanonValue(b []byte, depth int) (interface{}, int, error) {
 		if len(b) < 5 {
 			return nil, 0, fmt.Errorf("decodeCanonValue: slice count truncated")
 		}
-		count := uint64(binary.BigEndian.Uint32(b[1:5]))
+		declaredCount := binary.BigEndian.Uint32(b[1:5])
 		pos := 5
 		// Every element consumes at least one type-tag byte, so a count larger than
 		// the remaining buffer is structurally impossible. Rejecting it here (rather
 		// than discovering the truncation mid-loop) keeps a hostile header from
 		// driving an allocation before a single element has been read.
-		if count > uint64(len(b)-pos) {
+		count, ok := canonSpan(declaredCount, len(b)-pos)
+		if !ok {
 			return nil, 0, fmt.Errorf("decodeCanonValue: declared %d slice elements exceeds %d remaining bytes",
-				count, len(b)-pos)
+				declaredCount, len(b)-pos)
 		}
 		// Grown incrementally rather than pre-sized from the declared count, so the
 		// allocation tracks elements actually decoded instead of the declared header.
 		elems := make([]interface{}, 0)
-		for i := uint64(0); i < count; i++ {
+		for i := 0; i < count; i++ {
 			v, n, err := decodeCanonValue(b[pos:], depth+1)
 			if err != nil {
 				return nil, 0, fmt.Errorf("decodeCanonValue: slice element %d: %w", i, err)
