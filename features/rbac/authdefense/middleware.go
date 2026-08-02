@@ -5,7 +5,6 @@ package authdefense
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -30,12 +29,16 @@ func (sc *statusCapture) WriteHeader(code int) {
 	sc.ResponseWriter.WriteHeader(code)
 }
 
-func (sc *statusCapture) Write(data []byte) (int, error) {
-	if !sc.wroteHeader {
-		sc.WriteHeader(http.StatusOK)
-	}
-	return sc.ResponseWriter.Write(data)
-}
+// Write is deliberately NOT overridden. This middleware wraps every route, so a
+// pass-through Write would funnel every handler's response body through one
+// method — losing, for static analysis, the Content-Type each handler set on
+// the writer it was given, and reporting each body as a possible XSS sink. It
+// is also unnecessary: a handler that never calls WriteHeader has returned 200
+// by definition, which is the code this wrapper starts with. The embedded
+// ResponseWriter's Write is promoted unchanged.
+//
+// ReadFrom is omitted for the same reason; without a Write override, io.Copy
+// reaches the underlying writer's own optimized path.
 
 // Unwrap allows net/http.ResponseController to discover optional interfaces on
 // the underlying writer.
@@ -54,9 +57,6 @@ func (sc *statusCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 // Flush preserves streaming response support.
 func (sc *statusCapture) Flush() {
-	if !sc.wroteHeader {
-		sc.WriteHeader(http.StatusOK)
-	}
 	if flusher, ok := sc.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
@@ -68,18 +68,6 @@ func (sc *statusCapture) Push(target string, opts *http.PushOptions) error {
 		return pusher.Push(target, opts)
 	}
 	return http.ErrNotSupported
-}
-
-// ReadFrom keeps io.Copy on the underlying optimized path while recording the
-// implicit success status.
-func (sc *statusCapture) ReadFrom(src io.Reader) (int64, error) {
-	if !sc.wroteHeader {
-		sc.WriteHeader(http.StatusOK)
-	}
-	if readerFrom, ok := sc.ResponseWriter.(io.ReaderFrom); ok {
-		return readerFrom.ReadFrom(src)
-	}
-	return io.Copy(sc.ResponseWriter, src)
 }
 
 // Middleware returns an HTTP middleware that enforces the three-tier defense.

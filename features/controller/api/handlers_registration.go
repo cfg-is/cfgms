@@ -725,13 +725,20 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		switch decision {
 		case DecisionReject:
+			// The reason originates in an approval workflow, which reaches
+			// modules and external APIs, so it is untrusted text of the
+			// controller's own making. It belongs in the durable audit record —
+			// access-controlled and attributable — not in the application log,
+			// which is the broader-exposure surface. The log records only that a
+			// bounded reason exists, so an operator knows where to look.
 			s.logger.Warn("Registration rejected by approval workflow",
 				"tenant_id", token.TenantID,
-				"reason", logging.SanitizeLogValue(reason))
+				"has_reason", reason != "")
 			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
 				business.AuditEventSecurityEvent, "registration_rejected",
-				business.AuditResultDenied, business.AuditSeverityCritical, nil)
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{"rejection_reason": reason})
 			http.Error(w, "Registration rejected", http.StatusForbidden)
 			return
 		case DecisionQuarantine:

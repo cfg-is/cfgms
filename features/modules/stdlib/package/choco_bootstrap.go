@@ -160,9 +160,17 @@ func extractZipWithLimit(data []byte, destDir string, maxBytes int64) error {
 		return fmt.Errorf("resolve extraction directory: %w", err)
 	}
 	var extracted int64
+	destPrefix := cleanDest + string(os.PathSeparator)
 	for _, f := range r.File {
 		path, err := archiveEntryPath(cleanDest, f.Name)
 		if err != nil {
+			return fmt.Errorf("invalid nupkg entry path %q", f.Name)
+		}
+		// archiveEntryPath already rejects traversal via filepath.Rel. This
+		// containment check restates the guarantee at the point of use, so the
+		// property holds locally even if the helper is later changed, and so
+		// static analysis can see the barrier without modelling the helper.
+		if !strings.HasPrefix(path, destPrefix) {
 			return fmt.Errorf("invalid nupkg entry path %q", f.Name)
 		}
 		if f.FileInfo().IsDir() {

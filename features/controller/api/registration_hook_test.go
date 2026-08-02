@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -630,4 +632,39 @@ func TestManualReviewApprovalHook_ExpireTimedOut(t *testing.T) {
 	got, err := pendingStore.GetPendingByID(ctx, "pending-expired-test")
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusExpired, got.Status)
+}
+
+func TestBoundRejectionReason(t *testing.T) {
+	t.Run("passes a normal operator-readable reason through", func(t *testing.T) {
+		assert.Equal(t, "device not on the trusted subnet",
+			boundRejectionReason("device not on the trusted subnet"))
+	})
+
+	t.Run("strips control characters that would forge log or record structure", func(t *testing.T) {
+		got := boundRejectionReason("denied\n2026-01-01 ERROR forged entry\x00")
+		assert.Equal(t, "denied2026-01-01 ERROR forged entry", got)
+		assert.NotContains(t, got, "\n")
+		assert.NotContains(t, got, "\x00")
+	})
+
+	t.Run("folds tabs to spaces and trims surrounding whitespace", func(t *testing.T) {
+		assert.Equal(t, "denied by policy", boundRejectionReason("  denied\tby policy  "))
+	})
+
+	t.Run("caps an unbounded reason", func(t *testing.T) {
+		got := boundRejectionReason(strings.Repeat("A", 5000))
+		assert.LessOrEqual(t, len(got), maxRejectionReasonLength+len("…"))
+		assert.True(t, strings.HasSuffix(got, "…"), "truncation must be visible: %q", got)
+	})
+
+	t.Run("truncates on a rune boundary", func(t *testing.T) {
+		// Multi-byte runes straddling the cut must not leave invalid UTF-8.
+		got := boundRejectionReason(strings.Repeat("é", 5000))
+		assert.True(t, utf8.ValidString(got), "truncated reason must remain valid UTF-8")
+		assert.True(t, strings.HasSuffix(got, "…"))
+	})
+
+	t.Run("empty stays empty", func(t *testing.T) {
+		assert.Equal(t, "", boundRejectionReason(""))
+	})
 }
