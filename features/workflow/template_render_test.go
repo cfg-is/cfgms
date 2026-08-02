@@ -39,6 +39,7 @@ func TestHTTPStep_TemplateRendering(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "template-render-test",
@@ -133,6 +134,7 @@ func TestHTTPStep_JSONResponseBinding(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "json-response-test",
@@ -195,6 +197,7 @@ func TestHTTPStep_JSONResponse_DownstreamTemplate(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "downstream-template-test",
@@ -709,6 +712,7 @@ func TestWebhookStep_TemplateRendering(t *testing.T) {
 	moduleFactory := createTestFactory()
 	logger := logging.NewLogger("info")
 	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 
 	workflow := Workflow{
 		Name: "webhook-template-render-test",

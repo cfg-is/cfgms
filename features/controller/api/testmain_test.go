@@ -2,39 +2,26 @@
 // Copyright 2026 Jordan Ritz
 //
 // Issue #2993: argon2id removed — passkey-only login. TestMain no longer needs
-// to override cost parameters. The file is retained as the package-level test entry
-// point in case future TestMain logic is needed.
+// to override cost parameters; it now provisions only the durable secret-store
+// contract the API server requires at construction.
 package api
 
 import (
-	"crypto/rand"
-	"encoding/base64"
+	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
+
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
 
 func TestMain(m *testing.M) {
-	base, err := os.MkdirTemp("", "cfgms-api-test-secrets-")
+	cleanup, err := pkgtestutil.ProvisionSecretsEnv("cfgms-api-test-secrets-")
 	if err != nil {
-		panic(err)
-	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		panic(err)
-	}
-	keyPath := filepath.Join(base, "controller-secrets.key")
-	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
-		panic(err)
-	}
-	if err := os.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath); err != nil {
-		panic(err)
-	}
-	if err := os.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(base, "data")); err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "provision api test secrets: %v\n", err)
+		os.Exit(1)
 	}
 
 	code := m.Run()
-	_ = os.RemoveAll(base)
+	cleanup()
 	os.Exit(code)
 }
