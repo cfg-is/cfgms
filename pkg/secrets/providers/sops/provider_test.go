@@ -16,7 +16,6 @@ import (
 
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
 func TestSOPSProvider_ClusterCapable_False(t *testing.T) {

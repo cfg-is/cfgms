@@ -1178,6 +1178,56 @@ func TestWebSessionCookie_ValidCookie_BuildsPrincipal(t *testing.T) {
 	assert.Equal(t, "web-session:alice", capturedPrincipal.Name)
 }
 
+// TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker pins the fail-closed
+// half of hasPermission's implicit-admin encoding.
+//
+// hasPermission grants every permission to a principal with Assurance >= AssuranceBasic
+// AND a nil Permissions slice — nil is the marker for administrator mTLS and CLI-session
+// principals. Web-session principals also carry AssuranceBasic, so the ONLY thing keeping
+// them subject to their configured RBAC grants is that authenticationMiddleware builds
+// them with a non-nil slice.
+//
+// That distinction is invisible in Go: len(), range and append treat a nil and an empty
+// slice identically, and `append(nil)` with zero elements yields nil. Initialising with
+// `var permissions []string` instead of `[]string{}` — an idiomatic-looking, apparently
+// equivalent edit — would silently promote every web account to full administrator.
+// This test fails on exactly that edit.
+//
+// The account lookup deliberately misses here (no web account backs "alice"), which is the
+// worst case: an unresolvable account must yield no permissions, never unbounded ones.
+func TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal, "Principal must be set in context")
+	require.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance,
+		"precondition: a web principal carries the assurance level that arms the implicit-admin branch")
+
+	require.NotNil(t, capturedPrincipal.Permissions,
+		"web-session principals MUST carry a non-nil Permissions slice; nil is the implicit-admin marker")
+
+	// The security property the non-nil slice exists to produce.
+	assert.False(t, srv.hasPermission(capturedPrincipal, "rbac:create-role"),
+		"a web principal with no resolvable account must not be granted permissions it was never assigned")
+	assert.False(t, srv.hasPermission(capturedPrincipal, "steward:write-config"),
+		"a web principal with no resolvable account must not be granted permissions it was never assigned")
+	assert.False(t, capturedPrincipal.GlobalScope,
+		"GlobalScope must reflect the account's explicit root grant, not be assumed for web sessions")
+}
+
 // TestWebSessionCookie_RenewalCookieFlags verifies that the refreshed Set-Cookie header
 // carries exactly HttpOnly; Secure; SameSite=Strict; Path=/ (ADR-018 §1).
 func TestWebSessionCookie_RenewalCookieFlags(t *testing.T) {
