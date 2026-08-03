@@ -3,6 +3,15 @@ name: Security Scanning Workflow
 on:
   pull_request:
     branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # Security scans still run if ANY code changes are present
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   merge_group:
   push:
     branches:
@@ -58,13 +67,32 @@ jobs:
     - name: Enforce HTTP route security classifications
       run: go test ./features/controller/api -run '^TestEveryHTTPRouteHasSecurityClassification$'
 
-  # Required on PR, merge queue, main, and manual release validation. A skipped
-  # scan is treated as a failed gate by security-validation below.
+  # PR-time stub for the `trivy-scan` required context (#2595).
+  # QUEUE-REAL: the real Trivy scan runs in the merge queue (merge_group) and on
+  # push to main — see the trivy-scan job below. This posts the required check
+  # green on code PRs; docs-only PRs are covered by documentation.yml's stub.
+  # Same check-name as the real job; mutually exclusive by event.
+  trivy-scan-pr-stub:
+    name: trivy-scan
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: PR-time stub (real scan runs in the merge queue)
+        run: |
+          echo "trivy-scan: real image/dependency scan runs in the merge queue (merge_group) per #2595."
+          echo "The authoritative scan runs against the merge commit, not this PR head."
+
+  # QUEUE-REAL (#2595): the authoritative Trivy scan runs against the merge
+  # commit, not the PR head — a zero-trust posture the PR-time stub above cannot
+  # provide. security-validation requires this to pass on the events where it
+  # runs, and tolerates its deliberate absence on pull_request.
   trivy-scan:
     permissions:
       contents: read
       security-events: write
     runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     timeout-minutes: 10
     outputs:
       status: ${{ steps.scan.outputs.status }}
@@ -132,10 +160,15 @@ jobs:
         echo "❌ Trivy scan found UNKNOWN/MEDIUM/HIGH/CRITICAL findings — see scan output above"
         exit 1
 
+  # PR-REAL (#2595): advisory static analysis — fast, cheap, and deterministic on
+  # the diff. Developer and agent feedback matters more here than re-validating an
+  # unchanged dependency graph against the merge commit, so this deliberately does
+  # not run in the merge queue.
   nancy-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 5
     outputs:
       status: ${{ steps.scan.outputs.status }}
@@ -178,10 +211,12 @@ jobs:
         echo "status=passed" >> "$GITHUB_OUTPUT"
         echo "issues-found=false" >> "$GITHUB_OUTPUT"
 
+  # PR-REAL (#2595): advisory — see nancy-scan comment above.
   gosec-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 10
     outputs:
       status: ${{ steps.scan.outputs.status }}
@@ -240,10 +275,12 @@ jobs:
         path: sarif-results/
         retention-days: 30
 
+  # PR-REAL (#2595): advisory — see nancy-scan comment above.
   staticcheck-scan:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 10
     outputs:
       status: ${{ steps.scan.outputs.status }}
@@ -314,6 +351,7 @@ jobs:
         NANCY_RESULT: ${{ needs.nancy-scan.result }}
         GOSEC_RESULT: ${{ needs.gosec-scan.result }}
         STATICCHECK_RESULT: ${{ needs.staticcheck-scan.result }}
+        EVENT_NAME: ${{ github.event_name }}
         IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
       run: |
         echo "📊 Parallel Security Scan Summary"
@@ -338,15 +376,54 @@ jobs:
           echo "ℹ️  Nancy skipped: fork PRs have no GUIDE_TOKEN; the merge queue scans this change."
         fi
 
-        # Cancellation, initialization failure, and skipped scans are failures,
-        # not implicit approvals.
-        if [ "$SOURCE_RESULT" != "success" ] || \
-           [ "$TRIVY_RESULT" != "success" ] || \
-           [ "$NANCY_RESULT" != "success" ] || \
-           [ "$GOSEC_RESULT" != "success" ] || \
-           [ "$STATICCHECK_RESULT" != "success" ]; then
+        # The #2595 split means a job's absence is only acceptable on the side of
+        # the split it does not run on. Cancellation, initialization failure, and
+        # an unexpected skip are failures, never implicit approvals.
+        #
+        #   PR-REAL   nancy / gosec / staticcheck — required on pull_request
+        #   QUEUE-REAL trivy — required on merge_group, main, and release tags
+        #
+        # workflow_dispatch runs both sides, so every job is required there.
+        gate_failed=0
+
+        # required: the job runs on this event and must have passed.
+        required() {
+          if [ "$2" != "success" ]; then
+            echo "❌ $1 must pass on this event but reported: $2"
+            gate_failed=1
+          fi
+        }
+
+        # off_split: the job deliberately does not run on this event. A skip is
+        # expected; success is fine too (workflow_dispatch). Anything else — a
+        # failure or a cancellation — still fails the gate.
+        off_split() {
+          case "$2" in
+            skipped|success) : ;;
+            *)
+              echo "❌ $1 is not expected to run on this event but reported: $2"
+              gate_failed=1
+              ;;
+          esac
+        }
+
+        required "source-security-contract" "$SOURCE_RESULT"
+
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          required "nancy-scan" "$NANCY_RESULT"
+          required "gosec-scan" "$GOSEC_RESULT"
+          required "staticcheck-scan" "$STATICCHECK_RESULT"
+          off_split "trivy-scan" "$TRIVY_RESULT"
+        else
+          required "trivy-scan" "$TRIVY_RESULT"
+          off_split "nancy-scan" "$NANCY_RESULT"
+          off_split "gosec-scan" "$GOSEC_RESULT"
+          off_split "staticcheck-scan" "$STATICCHECK_RESULT"
+        fi
+
+        if [ "$gate_failed" -ne 0 ]; then
           echo "issues-found=true" >> "$GITHUB_OUTPUT"
-          echo "❌ One or more required security scans failed, skipped, or were cancelled"
+          echo "❌ One or more security scans failed, were cancelled, or were absent where required"
           exit 1
         fi
 
