@@ -126,9 +126,16 @@ list them. Treat a finding there as real work, not as optional.
 
 **A stub must be mutually exclusive with the job it stands in for.** Two check
 runs sharing one context name is a false-green risk: a passing stub alongside a
-failing real job. The stub's trigger must be the exact complement of the real
-one — see `codeql-stub.yml`, whose `paths-ignore` is the precise inverse of
-`codeql-analysis.yml`'s `paths`, so exactly one of the two ever runs.
+failing real job. Stubs are paired with their real job by inverting the trigger —
+`codeql-stub.yml`'s `paths-ignore` is the inverse of `codeql-analysis.yml`'s
+`paths`, and the PR-time stubs are gated on `github.event_name`.
+
+Event-gated pairs are genuinely exclusive. **Path-gated pairs are not, for a PR
+that touches both sides**: `paths` fires when *any* changed file matches, and
+`paths-ignore` fires when *any* changed file does not, so a PR touching both a
+`.go` file and a `.md` file triggers the real job and its stub. Whether GitHub
+then resolves the shared context to the failing run or the passing one is not
+established — do not rely on a path-gated stub to be exclusive until it is.
 
 Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 
