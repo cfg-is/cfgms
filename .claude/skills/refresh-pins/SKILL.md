@@ -4,7 +4,8 @@ description: Research all pinned dependencies and the Go toolchain version again
   their upstream latest releases, apply a 3-day cooldown plus CVE-driven override
   policy, and create stories for pins that should be bumped. Use after the weekly
   `dependency-pins` GitHub issue lands, when Trivy or the docker-security gate
-  flags a CVE in a currently-pinned version, or when the founder asks about pin
+  flags a CVE in a currently-pinned version, when the weekly dependency-cve-scan
+  reports a CVE against a `go.mod` module, or when the founder asks about pin
   freshness. Loads the full decision rationale and cooldown policy from
   references/ lazily — do not pre-load them. Outputs a single Markdown summary
   and one GitHub story per pin that should be bumped.
@@ -24,6 +25,9 @@ You research the state of every pinned dependency in the repo, apply the cooldow
 - empty — sweep every pin
 - `<pin-name>` — focused single-pin run (e.g. `go-toolchain`, `trivy`, `gosec`)
 - `--urgent <pin-name>` — CVE-driven; skip the cooldown gate, log the override
+- `--urgent <go-module-path>` — a Go **module** dependency rather than a pinned
+  tool (e.g. `go.opentelemetry.io/otel`). See "Dependency CVEs" below; these are
+  not in the pin inventory and must not be treated as a missing pin.
 
 ## Phase 1: Discover
 
@@ -35,7 +39,36 @@ Run the discovery script to build the pin inventory:
 
 Output is JSON conforming to `references/inventory-schema.md` (load that file lazily if you need to interpret a field). Each pin entry has: `name`, `kind` (`lockstep` | `tool`), `current` version, `release_source` (URL or `gh:<org>/<repo>`), and `locations[]` of every file:line where the pin appears.
 
-If `$ARGUMENTS` names a specific pin, filter the inventory to that pin only. Halt with a clear error if the named pin isn't in the inventory.
+If `$ARGUMENTS` names a specific pin, filter the inventory to that pin only. Halt with a clear error if the named pin isn't in the inventory — **unless** it looks like a Go module path (contains `/` and a dot in its first segment, e.g. `go.opentelemetry.io/otel`), in which case follow "Dependency CVEs" below instead.
+
+### Dependency CVEs (go.mod modules, not pinned tools)
+
+The weekly `dependency-pins` issue carries two distinct kinds of finding. The
+`Outdated Pinned Tool Versions` section is what `discover-pins.py` covers. A
+`Dependency CVEs` section is **not** — it comes from the `dependency-cve-scan`
+job running Nancy against the whole `go.mod` graph, and those modules are
+deliberately absent from the pin inventory (the script reads go.mod only for the
+`toolchain` directive).
+
+These matter because they are the one class no PR or merge-queue scan can find:
+the advisory is published against a dependency already merged, so nothing in the
+diff moves and no code-triggered scan re-examines it.
+
+For each affected module:
+
+1. Find the first patched version — the Nancy output links the Sonatype Guide
+   advisory, and `gh api graphql` GHSA (ecosystem `GO`, package = module path)
+   gives `firstPatchedVersion.identifier`.
+2. Check whether the module is a direct or indirect requirement
+   (`go list -m -f '{{if .Indirect}}indirect{{else}}direct{{end}}' <module>`).
+   An indirect dependency usually moves by bumping its parent instead.
+3. **Skip the cooldown gate.** A CVE against a merged dependency is already
+   shipping; the 3-day soak protects against regressions in fresh releases, not
+   against a known-vulnerable status quo. Log the override in Phase 5 exactly as
+   for a tool pin.
+4. Create the story against `go.mod`/`go.sum` rather than the pin locations, and
+   have it state the CVE ID, the current and target versions, and that
+   `make security-deps` (with `GUIDE_TOKEN` exported) is the verification step.
 
 ## Phase 2: Research
 
@@ -181,5 +214,7 @@ Single Markdown summary, sections in this order (omit empty sections):
 - **One story per logical pin**, not per file. `go-toolchain` is one story that touches all 13 file:line locations in lockstep.
 - **No code edits**: this skill creates stories, it does not edit go.mod / workflows / Dockerfiles directly. Dispatched dev agents apply the bumps under the regular pipeline.
 - **CI-blocking pins skip cooldown**: a vulnerability that's actively failing required CI is its own justification — don't wait the 3 days.
+- **Dependency CVEs skip cooldown too**: a `Dependency CVEs` finding is published against code already merged, so the vulnerable version is the status quo, not the risk being soaked against. Bump to the first patched version and log the override.
+- **Never report a scan that could not run as clean**: if `make security-deps` reports a missing `GUIDE_TOKEN`, or the weekly `dependency-cve-scan` job failed before scanning, say so explicitly. Nancy returns 401 without a Sonatype Guide token, and an unauthenticated run produces no evidence rather than a clean result.
 - **Audit every override**: every BUMP NOW that overrides cooldown gets a line in the audit log. No exceptions.
 - **Idempotent**: re-running the skill produces the same stories (or comments on existing ones if they already exist). No duplicates.
