@@ -97,14 +97,38 @@ Format: `<scope>: <what changed> (Issue #XXX)`. See [commit standards](docs/deve
 
 ## Required CI Checks
 
-All must pass before merge to `develop`:
+All must pass before merge to `develop`. Verify this list against the ruleset
+rather than trusting it — `gh api repos/cfg-is/cfgms/rulesets/11647684 --jq
+'.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'`.
 
-| Check | What it validates |
-|-------|-------------------|
-| `unit-tests` | Core functionality (~3-5 min) |
-| `integration-tests` | Comprehensive + production-critical (~5-10 min) |
-| `Build Gate` | Cross-platform compilation + Docker integration (~10-15 min) |
-| `security-deployment-gate` | Security vulnerability blocking (~6-10 min) |
+Most of these run for real on only **one** side of the PR / merge-queue split and
+post a stub context on the other, so the same change is not scanned twice. A
+green check on a PR therefore does not always mean that scan ran — read the
+"Real run" column.
+
+| Check | Real run | What it validates |
+|-------|----------|-------------------|
+| `unit-tests` | PR | Core functionality (~3-5 min) |
+| `integration-tests` | merge queue | Comprehensive + production-critical (~5-10 min) |
+| `Build Gate` | merge queue | Cross-platform compilation + Docker integration (~10-15 min) |
+| `Controller Integration Tests (Linux)` | merge queue | Controller integration suite |
+| `security-deployment-gate` | merge queue | Critical vulnerability blocking (~6-10 min) |
+| `trivy-scan` | merge queue | Filesystem vulnerabilities, secrets, misconfiguration |
+| `CodeQL` | PR + merge queue | Semantic analysis; reports alerts on changed lines only |
+| `zizmor` | PR + merge queue | Workflow security — action pins, cache poisoning, injection |
+| `frontend-checks` | PR + merge queue | `web/` typecheck, lint, and tests |
+| `CLA signature check` | PR + merge queue | Contributor licence agreement |
+
+**Advisory, not required:** `nancy-scan`, `gosec-scan` and `staticcheck-scan`
+(PR side only), plus `security-validation`, which aggregates them. Their jobs
+fail on findings, but a red one does **not** block a merge — the ruleset does not
+list them. Treat a finding there as real work, not as optional.
+
+**A stub must be mutually exclusive with the job it stands in for.** Two check
+runs sharing one context name is a false-green risk: a passing stub alongside a
+failing real job. The stub's trigger must be the exact complement of the real
+one — see `codeql-stub.yml`, whose `paths-ignore` is the precise inverse of
+`codeql-analysis.yml`'s `paths`, so exactly one of the two ever runs.
 
 Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 
