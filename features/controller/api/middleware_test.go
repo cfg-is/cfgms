@@ -1228,6 +1228,116 @@ func TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker(t *testing.T)
 		"GlobalScope must reflect the account's explicit root grant, not be assumed for web sessions")
 }
 
+// TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp asserts the
+// platform-administrator half of the web-account model.
+//
+// A root-scope web account is an administrator: it holds every permission, so a
+// permission introduced after the account was created is usable immediately rather
+// than silently 403-ing until someone re-enumerates all 87 IDs.
+//
+// Breadth is not proof. This test pins both halves together, because the breadth grant
+// is only defensible while the assurance gate still bites: the same principal that
+// sails through a non-gated permission must be challenged for an AssuranceStrong one.
+func TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	// Deliberately no Permissions: breadth must come from the root-scope grant.
+	srv.cacheWebAccount(&webAccount{
+		ID:        "admin-principal-id",
+		Username:  "root-admin",
+		TenantID:  "",
+		RootScope: true,
+	})
+	cookie := issueWebSession(t, mgr, "admin-principal-id", "")
+
+	var capturedPrincipal *Principal
+	capture := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	capture.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	assert.Nil(t, capturedPrincipal.Permissions,
+		"a resolved root-scope account carries the nil implicit-admin marker")
+	assert.True(t, capturedPrincipal.GlobalScope,
+		"root scope grants cross-tenant visibility")
+	assert.True(t, srv.hasPermission(capturedPrincipal, "workflow:execute"),
+		"an administrator holds permissions that were never enumerated on the account")
+
+	// Breadth: a permission absent from permissionAssurance is reachable directly.
+	okHandler := srv.authenticationMiddleware(
+		srv.requirePermission("steward", "list")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })))
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	okHandler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"administrator must reach a non-assurance-gated permission without a challenge")
+
+	// Proof: certificate:provision is AssuranceStrong; this session is AssuranceBasic.
+	require.Equal(t, session.AssuranceStrong, permissionAssurance["certificate:provision"].Min,
+		"precondition: certificate:provision is the AssuranceStrong permission under test")
+	stepUpHandler := srv.authenticationMiddleware(
+		srv.requirePermission("certificate", "provision")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/certificates/provision", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	stepUpHandler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"implicit admin must still be challenged for an AssuranceStrong permission, not admitted")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp",
+		"the challenge must be a step-up invitation, not a flat denial")
+	assert.Contains(t, rec.Body.String(), "step_up_required")
+}
+
+// TestWebSessionCookie_TenantScopedAccountIsEnumerated asserts the least-privilege half:
+// a non-root web account is held to exactly the grants configured on it. This is the
+// persona the Principal doc comment anticipates (Assurance=AssuranceBasic,
+// GlobalScope=false) and the one whose permissions must never be widened by assurance.
+func TestWebSessionCookie_TenantScopedAccountIsEnumerated(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	srv.cacheWebAccount(&webAccount{
+		ID:          "operator-principal-id",
+		Username:    "tenant-operator",
+		TenantID:    "tenant-a",
+		RootScope:   false,
+		Permissions: []string{"steward:list"},
+	})
+	cookie := issueWebSession(t, mgr, "operator-principal-id", "tenant-a")
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	require.NotNil(t, capturedPrincipal.Permissions,
+		"a tenant-scoped account must never carry the implicit-admin marker")
+	assert.False(t, capturedPrincipal.GlobalScope,
+		"a tenant-scoped account is confined to its tenant subtree")
+	assert.True(t, srv.hasPermission(capturedPrincipal, "steward:list"),
+		"configured grants are honoured")
+	assert.False(t, srv.hasPermission(capturedPrincipal, "steward:write-config"),
+		"human assurance must not widen a tenant-scoped account beyond its grants")
+	assert.False(t, srv.hasPermission(capturedPrincipal, "rbac:create-role"),
+		"human assurance must not widen a tenant-scoped account beyond its grants")
+}
+
 // TestWebSessionCookie_RenewalCookieFlags verifies that the refreshed Set-Cookie header
 // carries exactly HttpOnly; Secure; SameSite=Strict; Path=/ (ADR-018 §1).
 func TestWebSessionCookie_RenewalCookieFlags(t *testing.T) {

@@ -416,11 +416,34 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
 				authCount := -1
 				globalScope := false
+				// Non-nil is the fail-closed default: an account that cannot be resolved
+				// gets an empty grant set, never an unbounded one. nil is the
+				// implicit-admin marker consumed by hasPermission, and is assigned
+				// below only for an account that resolved AND carries an explicit
+				// root-scope grant.
 				permissions := []string{}
 				if acct, err := s.getWebAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
 					authCount = len(acct.Credentials)
 					globalScope = acct.RootScope
-					permissions = append(permissions, acct.Permissions...)
+					if acct.RootScope {
+						// Root-scope web accounts are platform administrators: they hold
+						// every permission, exactly as the mTLS-admin and CLI-session
+						// principals do. This is not an authorization hole — permission
+						// breadth and proof strength are separate layers, and this one
+						// only decides breadth. requirePermission still applies
+						// permissionAssurance immediately afterwards, so the 32
+						// AssuranceStrong permissions still force a WebAuthn step-up from
+						// this AssuranceBasic session, and the 6 RequireUserPresence ones
+						// still demand a fresh single-use presence token. Enumerating all
+						// 87 IDs per account instead would add no assurance gate that is
+						// not already applied, and would silently strip an administrator
+						// of any permission introduced after their account was created.
+						permissions = nil
+					} else {
+						// Tenant-scoped web accounts are least-privilege operators: their
+						// configured RBAC grants are enforced verbatim (Issue #2919).
+						permissions = append(permissions, acct.Permissions...)
+					}
 				}
 				webPrincipal := &Principal{
 					ID:                 webSess.PrincipalID,
@@ -1026,11 +1049,25 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 	return "LOW" // Regular authorized operations
 }
 
-// hasPermission checks whether principal has permissionID. Administrator mTLS and
-// CLI-session principals use nil Permissions as an explicit implicit-admin marker.
-// Web-account principals always carry a non-nil permission slice, including when
-// the account was granted no permissions, so their configured RBAC grants are
-// enforced instead of being replaced by an assurance-based admin bypass.
+// hasPermission checks whether principal has permissionID.
+//
+// A nil Permissions slice is the explicit implicit-admin marker, carried by the three
+// platform-administrator principals: mTLS admin certs, CLI Bearer sessions, and
+// root-scope web accounts. Every other principal carries a non-nil slice — including
+// an empty one — and is held to it verbatim: tenant-scoped web accounts, API keys,
+// relay principals, and any web account that failed to resolve.
+//
+// This decides permission BREADTH only, never proof strength. requirePermission
+// consults permissionAssurance immediately after this returns, so an implicit admin
+// is still forced through a WebAuthn step-up for AssuranceStrong permissions and a
+// fresh single-use presence token for RequireUserPresence ones. Widening breadth here
+// cannot widen the assurance gate.
+//
+// nil and empty slices are near-indistinguishable in Go — len, range and append treat
+// them alike, and append(nil) with zero elements yields nil — so the middleware
+// assigns nil deliberately and never by omission. See
+// TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker.
+//
 // C1: "*" is treated as a literal permission name — it will not match any real permissionID.
 func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 	if principal == nil {
