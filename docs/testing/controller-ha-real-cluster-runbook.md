@@ -84,7 +84,7 @@ cluster controller nodes:
 | Database | `cfgms` |
 | Role | `cfgms` (dedicated, non-superuser, `LOGIN` only) |
 | Listen | all interfaces; `pg_hba.conf` restricts inbound to `192.168.234.0/24` via `scram-sha-256` |
-| Connection string shape | `postgres://cfgms:<password>@192.168.234.105:5432/cfgms?sslmode=require` |
+| Connection string shape | `postgres://cfgms:<password>@192.168.234.105:5432/cfgms?sslmode=disable` (the bootstrap script does not enable TLS on the PostgreSQL server — `sslmode=require` will fail until a follow-up adds server-side TLS) |
 
 **MinIO (S3-compatible blob storage):**
 
