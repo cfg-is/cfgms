@@ -289,6 +289,8 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 			"error_details", err.Error())
 		return err
 	}
+	// #nosec G115 -- FileConfig.Validate bounds permissions to the portable
+	// 0000..0777 mode range before converting to os.FileMode.
 	if err := security.SecureWriteFileWithPerms(fileConfig.AllowedBasePath, resourceID, []byte(fileConfig.Content), os.FileMode(fileConfig.Permissions)); err != nil {
 		return err
 	}
@@ -360,6 +362,8 @@ func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath str
 			"error_details", err.Error())
 		return err
 	}
+	// #nosec G115 -- FileConfig.Validate bounds permissions to the portable
+	// 0000..0777 mode range before converting to os.FileMode.
 	fileMode := os.FileMode(fileConfig.Permissions)
 
 	info, err := os.Stat(cleanPath)

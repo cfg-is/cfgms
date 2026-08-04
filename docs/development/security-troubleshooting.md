@@ -88,9 +88,22 @@ trivy fs ./features --timeout 5m
 make install-nancy
 
 # Solution 2: Manual installation
-curl -sSfL https://github.com/sonatypecommunity/nancy/releases/download/v1.0.51/nancy-v1.0.51-linux-amd64 \
+curl -sSfL https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64 \
   -o /usr/local/bin/nancy && chmod +x /usr/local/bin/nancy
 ```
+
+#### Authentication Problems
+
+**Error**: `guide API request failed: 401 Unauthorized`
+
+```bash
+# Nancy v2 requires a Sonatype Guide bearer token.
+export GUIDE_TOKEN="<token from https://guide.sonatype.com>"
+make security-deps
+```
+
+The hosted `nancy-scan` job reads the same value from the repository's
+`GUIDE_TOKEN` Actions secret and fails closed if it is missing.
 
 #### Go Module Issues
 
@@ -421,7 +434,7 @@ staticcheck -version # Should be 2023.1+
 
 # Update to compatible versions
 go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-go install honnef.co/go/tools/cmd/staticcheck@2026.1
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.1
 ```
 
 ## Escalation Procedures
@@ -542,7 +555,7 @@ rm -rf ~/.cache/staticcheck
 # Reinstall tools
 make install-nancy
 go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-go install honnef.co/go/tools/cmd/staticcheck@2026.1
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.1
 
 # Test installations
 trivy --version && nancy --version && gosec -version && staticcheck -version

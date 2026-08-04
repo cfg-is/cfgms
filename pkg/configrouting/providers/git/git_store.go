@@ -216,8 +216,14 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		}
 	}
 
+	configRoot, err := os.OpenRoot(searchDir)
+	if err != nil {
+		return nil, fmt.Errorf("open config search root: %w", err)
+	}
+	defer func() { _ = configRoot.Close() }()
+
 	var entries []*cfgconfig.ConfigEntry
-	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, walkErr error) error {
+	err = filepath.Walk(searchDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil || info.IsDir() {
 			return walkErr
 		}
@@ -225,7 +231,11 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 			return nil
 		}
 
-		data, readErr := os.ReadFile(path) // #nosec G304 — Walk restricts to searchDir subtree
+		relativePath, relErr := filepath.Rel(searchDir, path)
+		if relErr != nil {
+			return nil
+		}
+		data, readErr := configRoot.ReadFile(relativePath)
 		if readErr != nil {
 			return nil // skip unreadable files
 		}

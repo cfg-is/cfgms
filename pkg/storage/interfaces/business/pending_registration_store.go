@@ -37,8 +37,9 @@ type PendingRegistrationEntry struct {
 	// TenantID is the tenant the registering steward belongs to.
 	TenantID string
 
-	// TokenStr is the full registration token presented at registration time.
-	// Stored so GetPendingByToken can locate the entry without the pending_id.
+	// TokenStr is a deterministic, non-reversible registration-token lookup key.
+	// Stores must hash a raw token before persistence; legacy plaintext rows may be
+	// read only for migration compatibility.
 	TokenStr string
 
 	// SourceIP is the remote address of the registering steward.
@@ -69,7 +70,7 @@ type PendingRegistrationStore interface {
 	// Returns ErrPendingRegistrationNotFound if no record exists.
 	GetPendingByID(ctx context.Context, pendingID string) (*PendingRegistrationEntry, error)
 
-	// GetPendingByToken retrieves the entry whose TokenStr matches the given token.
+	// GetPendingByToken hashes the supplied raw token and retrieves the matching entry.
 	// Returns ErrPendingRegistrationNotFound if no matching record exists.
 	GetPendingByToken(ctx context.Context, tokenStr string) (*PendingRegistrationEntry, error)
 

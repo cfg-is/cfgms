@@ -406,11 +406,11 @@ func TestAuditLogger_LogExecution_ContextExtraction(t *testing.T) {
 
 	t.Run("plain string keys do not populate record fields", func(t *testing.T) {
 		logger := NewAuditLogger(10)
-		//nolint:staticcheck // SA1029: intentionally using plain strings to verify typed keys are required
+		//lint:ignore SA1029 intentionally use a plain string to verify typed keys are required
 		ctx := context.WithValue(context.Background(), "correlation_id", "plain-corr")
-		//nolint:staticcheck // SA1029: intentionally using plain strings to verify typed keys are required
+		//lint:ignore SA1029 intentionally use a plain string to verify typed keys are required
 		ctx = context.WithValue(ctx, "user_id", "plain-user")
-		//nolint:staticcheck // SA1029: intentionally using plain strings to verify typed keys are required
+		//lint:ignore SA1029 intentionally use a plain string to verify typed keys are required
 		ctx = context.WithValue(ctx, "tenant_id", "plain-tenant")
 
 		record := &AuditRecord{

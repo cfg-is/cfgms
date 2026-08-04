@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -74,7 +73,7 @@ func hashPresenceToken(token string) string {
 // principals confined to their own tenant subtree. Today every human-authenticated principal
 // has GlobalScope=true and every machine-authenticated principal has GlobalScope=false —
 // these happen to correlate, but they model different questions. A future tenant-scoped web
-// account type (Assurance=AssuranceBasic, GlobalScope=false) would be confined by GlobalScope
+// account type (Assurance=AssuranceBasic, GlobalScope=false) is confined by GlobalScope
 // regardless of its assurance level; a strongly-authenticated but tenant-scoped service account
 // (Assurance=AssuranceStrong, GlobalScope=false) would pass AssuranceStrong-gated routes but
 // still be confined to its tenant. The two signals MUST NOT be collapsed back into one.
@@ -139,6 +138,9 @@ func (rw *responseWriter) WriteHeader(code int) {
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Add("Vary", "Origin")
+		}
 
 		// Check if origin is in allowed list
 		allowed := false
@@ -169,6 +171,23 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeadersMiddleware applies browser and intermediary hardening to every
+// public response, including early authentication, rate-limit, and error paths.
+func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers := w.Header()
+		headers.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		headers.Set("X-Content-Type-Options", "nosniff")
+		headers.Set("X-Frame-Options", "DENY")
+		headers.Set("Referrer-Policy", "no-referrer")
+		headers.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			headers.Set("Cache-Control", "no-store")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -266,39 +285,6 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			_ = injected // already in context
 			next.ServeHTTP(w, r)
 			return
-		}
-
-		// Test endpoints require explicit opt-in via CFGMS_ENABLE_TEST_ENDPOINTS=true.
-		// Without this env var, test endpoints require authentication like everything else.
-		if os.Getenv("CFGMS_ENABLE_TEST_ENDPOINTS") == "true" {
-			if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/config") {
-				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/quic/connect") {
-				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Issue #2098: test-mode status update and audit count endpoints (no auth in test mode).
-			if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/v1/test/stewards/") && strings.HasSuffix(r.URL.Path, "/status") {
-				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			if r.Method == "GET" && r.URL.Path == "/api/v1/test/audit/count" {
-				s.logger.Warn("Test endpoint accessed with authentication bypass",
-					"path", logging.SanitizeLogValue(r.URL.Path), "method", r.Method, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
-				next.ServeHTTP(w, r)
-				return
-			}
 		}
 
 		// H2: mTLS-presented identity always wins.
@@ -429,15 +415,43 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// Assurance and LastProvenAt are read from session state so that IP-change downgrades
 				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
 				authCount := -1
-				if acct, err := s.getWebAccount(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
+				globalScope := false
+				// Non-nil is the fail-closed default: an account that cannot be resolved
+				// gets an empty grant set, never an unbounded one. nil is the
+				// implicit-admin marker consumed by hasPermission, and is assigned
+				// below only for an account that resolved AND carries an explicit
+				// root-scope grant.
+				permissions := []string{}
+				if acct, err := s.getWebAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
 					authCount = len(acct.Credentials)
+					globalScope = acct.RootScope
+					if acct.RootScope {
+						// Root-scope web accounts are platform administrators: they hold
+						// every permission, exactly as the mTLS-admin and CLI-session
+						// principals do. This is not an authorization hole — permission
+						// breadth and proof strength are separate layers, and this one
+						// only decides breadth. requirePermission still applies
+						// permissionAssurance immediately afterwards, so the 32
+						// AssuranceStrong permissions still force a WebAuthn step-up from
+						// this AssuranceBasic session, and the 6 RequireUserPresence ones
+						// still demand a fresh single-use presence token. Enumerating all
+						// 87 IDs per account instead would add no assurance gate that is
+						// not already applied, and would silently strip an administrator
+						// of any permission introduced after their account was created.
+						permissions = nil
+					} else {
+						// Tenant-scoped web accounts are least-privilege operators: their
+						// configured RBAC grants are enforced verbatim (Issue #2919).
+						permissions = append(permissions, acct.Permissions...)
+					}
 				}
 				webPrincipal := &Principal{
 					ID:                 webSess.PrincipalID,
 					Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
 					Assurance:          webSess.Assurance,
 					LastProvenAt:       webSess.LastProvenAt,
-					GlobalScope:        true,
+					GlobalScope:        globalScope,
+					Permissions:        permissions,
 					TenantID:           webSess.TenantID,
 					AuthenticatorCount: authCount,
 				}
@@ -606,13 +620,14 @@ type AuthorizationDecision struct {
 }
 
 // requirePermission creates middleware that enforces specific permission requirements.
-// Human-authenticated principals (Assurance >= AssuranceBasic) short-circuit to ALLOW for any permission.
+// Human administrator principals carry nil Permissions and are implicitly
+// authorized; web accounts carry an explicit (possibly empty) permission slice.
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip permission check if RBAC service is not available.
-			// Relay principals are always enforced inline — scope isolation is their
-			// entire security guarantee and must hold even without the RBAC audit path.
+			// Fail closed when the authorization service was not wired. Relay
+			// principals are the sole exception: their grant-derived permission
+			// set is independently verified inline.
 			if s.rbacService == nil {
 				if _, isRelay := r.Context().Value(relayPrincipalKey).(*Principal); isRelay {
 					p, _ := r.Context().Value(principalContextKey).(*Principal)
@@ -624,8 +639,9 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					next.ServeHTTP(w, r)
 					return
 				}
-				s.logger.Warn("RBAC service not available, skipping permission check")
-				next.ServeHTTP(w, r)
+				s.logger.Error("RBAC service not available; denying request")
+				s.writeErrorResponse(w, http.StatusServiceUnavailable,
+					"Authorization service unavailable", "AUTHORIZATION_UNAVAILABLE")
 				return
 			}
 
@@ -792,9 +808,30 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			s.mu.RLock()
 			engine := s.isolationEngine
 			s.mu.RUnlock()
-			if engine != nil && !principal.GlobalScope && principal.TenantID != "" {
+			if !principal.GlobalScope && principal.TenantID != "" {
 				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
-				if targetTenant != "" && targetTenant != principal.TenantID {
+				if targetTenant != "" && targetTenant != principal.TenantID &&
+					!strings.HasPrefix(targetTenant, principal.TenantID+"/") {
+					isoDecision := &AuthorizationDecision{
+						Granted:      false,
+						PermissionID: permissionID,
+						Resource:     resource,
+						Action:       action,
+						Decision:     "DENY",
+						Reason:       "Target tenant is outside principal tenant subtree",
+						CheckedAt:    time.Now(),
+						SubjectID:    userID,
+						TenantID:     tenantID,
+					}
+					s.auditAuthorizationDecision(r, isoDecision)
+					if resourceType == "tenant" && action == "read" {
+						s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+						return
+					}
+					s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+					return
+				}
+				if engine != nil && targetTenant != "" && targetTenant != principal.TenantID {
 					isoResp, isoErr := engine.ValidateTenantAccess(r.Context(), &tenantsecurity.TenantAccessRequest{
 						SubjectID:       principal.ID,
 						SubjectTenantID: principal.TenantID,
@@ -1013,15 +1050,30 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 }
 
 // hasPermission checks whether principal has permissionID.
-// Human-authenticated principals (Assurance >= AssuranceBasic) short-circuit to true
-// regardless of permissionID — they carry an empty Permissions list and rely on this
-// bypass for every requirePermission check.
+//
+// A nil Permissions slice is the explicit implicit-admin marker, carried by the three
+// platform-administrator principals: mTLS admin certs, CLI Bearer sessions, and
+// root-scope web accounts. Every other principal carries a non-nil slice — including
+// an empty one — and is held to it verbatim: tenant-scoped web accounts, API keys,
+// relay principals, and any web account that failed to resolve.
+//
+// This decides permission BREADTH only, never proof strength. requirePermission
+// consults permissionAssurance immediately after this returns, so an implicit admin
+// is still forced through a WebAuthn step-up for AssuranceStrong permissions and a
+// fresh single-use presence token for RequireUserPresence ones. Widening breadth here
+// cannot widen the assurance gate.
+//
+// nil and empty slices are near-indistinguishable in Go — len, range and append treat
+// them alike, and append(nil) with zero elements yields nil — so the middleware
+// assigns nil deliberately and never by omission. See
+// TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker.
+//
 // C1: "*" is treated as a literal permission name — it will not match any real permissionID.
 func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 	if principal == nil {
 		return false
 	}
-	if principal.Assurance >= session.AssuranceBasic {
+	if principal.Assurance >= session.AssuranceBasic && principal.Permissions == nil {
 		return true
 	}
 	for _, p := range principal.Permissions {

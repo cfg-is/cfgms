@@ -217,6 +217,39 @@ func doLogout(t *testing.T, srv *Server, sessionTok, csrfTok string) *httptest.R
 
 // --- tests ---
 
+func TestWebSessionEnforcesAccountPermissionsAndTenantScope(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	acct, err := srv.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	acct.Permissions = []string{"steward:list"}
+	srv.cacheWebAccount(acct)
+
+	loginRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, loginRec.Code, "login failed: %s", loginRec.Body.String())
+	sessionToken := extractCookie(loginRec, cookieWebSession)
+	require.NotEmpty(t, sessionToken)
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	allowedReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	allowedRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(allowedRec, allowedReq)
+	assert.Equal(t, http.StatusOK, allowedRec.Code,
+		"account's explicit steward:list grant should be honored: %s", allowedRec.Body.String())
+
+	deniedReq := httptest.NewRequest(http.MethodGet, "/api/v1/rbac/permissions", nil)
+	deniedReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	deniedRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(deniedRec, deniedReq)
+	assert.Equal(t, http.StatusForbidden, deniedRec.Code,
+		"strong human assurance must not grant permissions absent from the web account: %s", deniedRec.Body.String())
+
+	var response ErrorResponse
+	require.NoError(t, json.NewDecoder(deniedRec.Body).Decode(&response))
+	require.NotNil(t, response.Error)
+	assert.Equal(t, "INSUFFICIENT_PERMISSIONS", response.Error.Code)
+}
+
 // TestPasskeyLogin_SuccessSetsBothCookies verifies that a valid passkey assertion sets
 // cfgms_session (HttpOnly) and cfgms_csrf (non-HttpOnly), the body contains no token
 // (security A5.5), the ceremony and pre-CSRF cookies are cleared, and the session

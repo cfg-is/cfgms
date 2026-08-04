@@ -16,8 +16,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sync"
 	"time"
@@ -98,6 +100,11 @@ type DefaultSessionRecorder struct {
 // existing resilience stance where recording errors never fail terminal I/O).
 const recordQueueDepth = 4096
 
+// recordingSessionIDPattern permits only the opaque identifier alphabet emitted
+// by the terminal session manager. Recording IDs become filenames, so path
+// separators and dot components must never reach filesystem operations.
+var recordingSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
 // recordChunk is one queued recording frame awaiting durable write. The data is
 // an owned copy, so the caller may reuse its buffer immediately after enqueue.
 type recordChunk struct {
@@ -152,8 +159,14 @@ const recordingDirMode = 0o700
 // pre-create <session>.rec (or its .meta) as a symlink could otherwise have the
 // controller truncate an arbitrary file it can write. O_EXCL also guarantees a
 // completed recording is never silently overwritten by a session ID collision.
-func createRecordingFile(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, recordingFileMode)
+// The file is created through an *os.Root rather than by absolute path, so a
+// name derived from a session ID cannot resolve outside the storage directory
+// even if the ID pattern is later loosened. O_EXCL and the root confinement
+// cover different attacks and are both required: the root stops traversal out
+// of the directory, O_EXCL stops clobbering or following anything already
+// sitting at that name inside it.
+func createRecordingFile(root *os.Root, name string) (*os.File, error) {
+	return root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, recordingFileMode)
 }
 
 // ensureSecureRecordingDir creates the recording storage directory and asserts it
@@ -196,6 +209,8 @@ func ensureSecureRecordingDir(path string) error {
 func computeEventChecksum(key []byte, sequence int64, previous []byte, content []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	seqBytes := make([]byte, 8)
+	// #nosec G115 -- sequence is a monotonic, 1-based counter; the conversion
+	// preserves its non-negative value for the checksum wire encoding.
 	binary.BigEndian.PutUint64(seqBytes, uint64(sequence))
 	mac.Write(seqBytes)
 	mac.Write(previous)
@@ -215,6 +230,12 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...R
 	if config.MaxRecordingMB <= 0 {
 		config.MaxRecordingMB = 100
 	}
+	if int64(config.MaxRecordingMB) > math.MaxUint32/(1024*1024) {
+		return nil, fmt.Errorf("max recording size exceeds uint32 frame format")
+	}
+	// ensureSecureRecordingDir supersedes a plain MkdirAll: it also rejects a
+	// symlinked storage path and re-asserts owner-only permissions, which a
+	// pre-created directory would otherwise keep.
 	if err := ensureSecureRecordingDir(config.StoragePath); err != nil {
 		return nil, err
 	}
@@ -254,6 +275,10 @@ func NewSessionRecorder(config *RecorderConfig, logger logging.Logger, opts ...R
 
 // StartRecording starts recording a new session.
 func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *SessionMetadata) error {
+	if !recordingSessionIDPattern.MatchString(sessionID) {
+		return fmt.Errorf("invalid recording session ID")
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -264,7 +289,13 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 	filename := fmt.Sprintf("%s.rec", sessionID)
 	filePath := filepath.Join(r.storagePath, filename)
 
-	file, err := createRecordingFile(filePath)
+	recordingRoot, err := os.OpenRoot(r.storagePath)
+	if err != nil {
+		return fmt.Errorf("failed to open recording root: %w", err)
+	}
+	defer func() { _ = recordingRoot.Close() }()
+
+	file, err := createRecordingFile(recordingRoot, filename)
 	if err != nil {
 		return fmt.Errorf("failed to create recording file: %w", err)
 	}
@@ -279,7 +310,7 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 		events:           make([]RecordEvent, 0),
 		metadata:         metadata,
 		startTime:        time.Now(),
-		maxSize:          int64(r.config.MaxRecordingMB * 1024 * 1024),
+		maxSize:          int64(r.config.MaxRecordingMB) * 1024 * 1024,
 		queue:            make(chan recordChunk, recordQueueDepth),
 		stop:             make(chan struct{}),
 		drained:          make(chan struct{}),
@@ -662,12 +693,16 @@ func (w *recordingWriter) writeData(data []byte, direction DataDirection) error 
 	if err != nil {
 		return fmt.Errorf("failed to compress event: %w", err)
 	}
+	if len(content) > math.MaxUint32 {
+		return fmt.Errorf("recording frame exceeds uint32 length prefix")
+	}
 
 	// Sequence is 1-based; advance before computing HMAC.
 	w.sequence++
 	checksum := computeEventChecksum(w.hmacKey, w.sequence, w.previousChecksum, content)
 
 	var lenBuf [4]byte
+	// #nosec G115 -- content length is explicitly bounded by MaxUint32 above.
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(content)))
 
 	if _, err := w.file.Write(lenBuf[:]); err != nil {
@@ -718,8 +753,19 @@ func (w *recordingWriter) finalize() error {
 
 	closeErr := w.file.Close()
 
-	metadataPath := w.file.Name() + ".meta"
-	metaFile, createErr := createRecordingFile(metadataPath)
+	// finalize runs long after StartRecording returned, so it opens its own root
+	// over the storage directory rather than reusing that call's. The sidecar
+	// gets the same confinement and O_EXCL treatment as the recording itself.
+	metadataRoot, rootErr := os.OpenRoot(filepath.Dir(w.file.Name()))
+	if rootErr != nil {
+		if closeErr != nil {
+			return closeErr
+		}
+		return fmt.Errorf("failed to open recording root: %w", rootErr)
+	}
+	defer func() { _ = metadataRoot.Close() }()
+
+	metaFile, createErr := createRecordingFile(metadataRoot, filepath.Base(w.file.Name())+".meta")
 	if createErr != nil {
 		if closeErr != nil {
 			return closeErr

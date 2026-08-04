@@ -53,6 +53,8 @@ func (s *Server) handleGetWebCSRF(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate CSRF token", "CSRF_GEN_ERROR")
 		return
 	}
+	// #nosec G124 -- the pre-session CSRF cookie is deliberately readable by
+	// browser code for double-submit; Secure and SameSite=Strict are required.
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieCSRFPre,
 		Value:    tok,
@@ -132,6 +134,8 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 // cfgms_session is HttpOnly (mirrors login-time design); cfgms_csrf is not (JS reads it).
 func clearWebSessionCookies(w http.ResponseWriter) {
 	for _, name := range []string{cookieWebSession, cookieCSRFSession} {
+		// #nosec G124 -- cfgms_csrf is intentionally readable for double-submit;
+		// cfgms_session remains HttpOnly and both deletion cookies are Secure/Strict.
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
 			Value:    "",

@@ -280,3 +280,29 @@ jobs:
           echo "   Matches the check context name emitted by security-scan.yml's"
           echo "   real trivy-scan job, so the develop ruleset's required check"
           echo "   is satisfied uniformly for both code PRs and docs-only PRs."
+
+  # Docs-only stub for the `security-validation` aggregate context.
+  # security-scan.yml is paths-ignored for pure documentation changes, so its
+  # security-validation job never posts there. Without this stub the context
+  # would be permanently absent on a docs-only PR, which blocks the merge
+  # outright once security-validation is a required check.
+  #
+  # Same shape as the trivy-scan stub above: pull_request only, never
+  # merge_group — in the queue the real job in security-scan.yml is the sole
+  # poster. On a PR touching .github/workflows/*.yml both this workflow and
+  # security-scan.yml run, so both post this context; that overlap is inherent
+  # to the existing stub design and is shared by trivy-scan, unit-tests and
+  # Build Gate.
+  security-validation:
+    name: security-validation
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only security validation aggregate
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   security-scan.yml is paths-ignored for documentation changes,"
+          echo "   so there are no scan results to aggregate."
+          echo "   Posting the security-validation context so the required check"
+          echo "   is satisfied uniformly for both code PRs and docs-only PRs."

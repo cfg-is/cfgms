@@ -123,6 +123,81 @@ func TestValidateRequestBody_JSONStillSizeCapped(t *testing.T) {
 	assert.True(t, foundSize, "expected max_size rule violation; got %+v", result.Errors)
 }
 
+func TestRequestBodyLimitMiddleware_RejectsOversizedContentLengthBeforeHandler(t *testing.T) {
+	s := &Server{}
+	called := false
+	handler := s.requestBodyLimitMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = maxStructuredRequestBodyBytes + 1
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.False(t, called, "oversized body must be rejected before reaching a public handler")
+}
+
+func TestRequestBodyLimitMiddleware_RejectsOversizedChunkedBody(t *testing.T) {
+	s := &Server{}
+	called := false
+	handler := s.requestBodyLimitMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+
+	body := io.MultiReader(
+		io.LimitReader(&zeroReader{}, maxStructuredRequestBodyBytes),
+		strings.NewReader("x"),
+	)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.False(t, called, "chunked transfer encoding must not bypass the body limit")
+}
+
+func TestRequestBodyLimitMiddleware_BoundsBinaryStreams(t *testing.T) {
+	s := &Server{}
+	handler := s.requestBodyLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.ReadAll(r.Body)
+		var tooLarge *http.MaxBytesError
+		if !assert.ErrorAs(t, err, &tooLarge) {
+			return
+		}
+		assert.Equal(t, maxBinaryRequestBodyBytes, tooLarge.Limit)
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+	}))
+
+	body := io.MultiReader(
+		io.LimitReader(&zeroReader{}, maxBinaryRequestBodyBytes),
+		strings.NewReader("x"),
+	)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+}
+
+type zeroReader struct{}
+
+func (*zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
 // TestValidateURLParameters_TenantPathWithSlash verifies that a route variable named
 // "tenant_path" with a hierarchical value (e.g., "fleet-root/fleet-child-a") passes
 // validation. Regression test for the tenant_path_id charset introduced in Issue #2098

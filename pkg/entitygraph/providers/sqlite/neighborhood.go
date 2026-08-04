@@ -165,6 +165,8 @@ func (p *SQLiteEntityGraphProvider) queryNeighborhoodEdges(
 		args = append(args, tenantFilter, tenantFilter+"/%")
 	}
 
+	// #nosec G202 -- conds contains only fixed predicates and generated "?"
+	// placeholders; every edge type and tenant value is passed through args.
 	q := `SELECT ep.from_subject, ep.to_subject, ep.edge_type, ep.source
 		  FROM eg_edge_projection ep
 		  LEFT JOIN eg_entity_index fi ON fi.subject = ep.from_subject

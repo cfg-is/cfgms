@@ -116,6 +116,10 @@ func TestControllerLifecycle(t *testing.T) {
 	if cfg.Transport != nil {
 		cfg.Transport.ListenAddr = "127.0.0.1:0"
 	}
+	// DefaultConfig leaves metrics_listen_addr empty so startup fails closed
+	// rather than binding a metrics listener nobody chose. Deployments set it
+	// explicitly; so must a test that starts the controller.
+	cfg.MetricsListenAddr = pkgtestutil.ReservePrivateListenerAddress(t)
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
@@ -256,6 +260,7 @@ func TestControllerSingleHTTPServer(t *testing.T) {
 
 	// Use an ephemeral HTTP port to avoid conflicts with parallel tests.
 	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+	cfg.MetricsListenAddr = pkgtestutil.ReservePrivateListenerAddress(t)
 
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)

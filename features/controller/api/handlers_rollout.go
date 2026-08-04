@@ -153,6 +153,8 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 	haltCh := make(chan struct{})
 	rolloutHaltChans.Store(rolloutID, haltCh)
 
+	// #nosec G118 -- rollout is persisted and intentionally survives the
+	// initiating request; haltCh and per-command deadlines bound its lifecycle.
 	go s.runRollout(context.Background(), record, rings.Rings, haltCh)
 
 	s.logger.Info("Rollout started",

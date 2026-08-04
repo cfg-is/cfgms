@@ -4,8 +4,8 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -161,10 +161,42 @@ type BlobStorageConfig struct {
 	Root string `yaml:"root"`
 }
 
+const (
+	SecurityProfileDevelopment = "development"
+	SecurityProfileTest        = "test"
+	SecurityProfilePublicBeta  = "public-beta"
+)
+
+// ExecutionSecurityConfig controls security requirements for controller-issued
+// execution commands.
+type ExecutionSecurityConfig struct {
+	// RequireSignedAdhoc requires both the operator's inline-content signature
+	// and the controller's signed command envelope for every ad-hoc execution.
+	RequireSignedAdhoc bool `yaml:"require_signed_adhoc"`
+}
+
 // Config holds the controller configuration
 type Config struct {
+	// SecurityProfile selects deployment security invariants. Public-beta is a
+	// fail-closed production profile; development and test are explicit,
+	// non-public profiles.
+	SecurityProfile string `yaml:"security_profile"`
+
+	// Execution contains controller-issued execution security policy.
+	Execution ExecutionSecurityConfig `yaml:"execution"`
+
 	// Controller listen address
 	ListenAddr string `yaml:"listen_addr"`
+
+	// MetricsListenAddr is the dedicated HTTPS listener for product metrics.
+	// It is intentionally required rather than defaulted: operators must choose
+	// an explicit loopback or private IP address and a fixed port.
+	MetricsListenAddr string `yaml:"metrics_listen_addr"`
+
+	// InternalListenAddr is the private HTTPS listener used only for
+	// controller-to-controller Raft traffic in cluster mode. It must bind a
+	// loopback or private IP address and must never be Internet-published.
+	InternalListenAddr string `yaml:"internal_listen_addr,omitempty"`
 
 	// External URL for controller API callbacks (used by scripts and external integrations)
 	ExternalURL string `yaml:"external_url"`
@@ -252,9 +284,10 @@ type RegistrationConfig struct {
 	Workflow string `yaml:"workflow"`
 
 	// TrustedProxies is a list of CIDR ranges identifying reverse proxies that are
-	// trusted to set the X-Forwarded-For header. When empty (the default),
-	// X-Forwarded-For is never trusted and the TCP peer address is always used
-	// for the IP-trust decision. Parse once at startup, not per-request (Issue #1695).
+	// trusted to append the upstream address to X-Forwarded-For. The controller
+	// walks the chain right-to-left and uses the first untrusted hop. When empty
+	// (the default), X-Forwarded-For is never trusted and the TCP peer address is
+	// always used for source controls. Parse once at startup, not per request.
 	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 
 	// ApprovalMode selects the registration approval hook implementation.
@@ -597,11 +630,13 @@ func (t *TransportConfig) Validate() error {
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	cfg := &Config{
-		ListenAddr:  "127.0.0.1:8080",
-		ExternalURL: "https://localhost:8080", // Default external URL
-		CertPath:    "certs/",
-		DataDir:     "data/",
-		LogLevel:    "info",
+		SecurityProfile:   SecurityProfileDevelopment,
+		ListenAddr:        "127.0.0.1:8080",
+		MetricsListenAddr: "",                       // Required explicitly; startup fails closed when absent.
+		ExternalURL:       "https://localhost:8080", // Default external URL
+		CertPath:          "certs/",
+		DataDir:           "data/",
+		LogLevel:          "info",
 		Certificate: &CertificateConfig{
 			EnableCertManagement:   true,
 			CAPath:                 "certs/ca",
@@ -651,7 +686,6 @@ func DefaultConfig() *Config {
 			IdleTimeout:     Duration(5 * time.Minute),
 		},
 	}
-	cfg.BlobStorage.Root = filepath.Join(cfg.DataDir, "installers")
 	return cfg
 }
 
@@ -674,6 +708,8 @@ func findConfigFile(explicitPath string) (string, error) {
 
 	// Priority 2: Environment variable
 	if envPath := os.Getenv("CFGMS_CONTROLLER_CONFIG"); envPath != "" {
+		// #nosec G703 -- this process-start configuration path is controlled by
+		// the controller administrator/service definition, not a remote request.
 		if _, err := os.Stat(envPath); err == nil {
 			return envPath, nil
 		}
@@ -723,6 +759,8 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 	// Load from config file if found
 	if foundPath != "" {
+		// #nosec G304 -- foundPath is selected by findConfigFile from the
+		// operator's explicit configuration path or fixed CFGMS search paths.
 		data, err := os.ReadFile(foundPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read config file %s: %w", foundPath, err)
@@ -748,8 +786,29 @@ func LoadWithPath(configPath string) (*Config, error) {
 	}
 
 	// Override with environment variables if set
+	if securityProfile := strings.TrimSpace(os.Getenv("CFGMS_SECURITY_PROFILE")); securityProfile != "" {
+		// An environment variable may tighten a development/test configuration
+		// to public-beta, but it may never downgrade a reviewed public-beta file.
+		if cfg.SecurityProfile == SecurityProfilePublicBeta && securityProfile != SecurityProfilePublicBeta {
+			return nil, fmt.Errorf("CFGMS_SECURITY_PROFILE cannot downgrade configured public-beta security profile to %q", securityProfile)
+		}
+		cfg.SecurityProfile = securityProfile
+	}
+
+	if requireSignedAdhoc := strings.TrimSpace(os.Getenv("CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC")); requireSignedAdhoc != "" {
+		val, parseErr := strconv.ParseBool(requireSignedAdhoc)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC value %q: %w", requireSignedAdhoc, parseErr)
+		}
+		cfg.Execution.RequireSignedAdhoc = val
+	}
+
 	if addr := os.Getenv("CFGMS_LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
+	}
+
+	if metricsListenAddr := os.Getenv("CFGMS_METRICS_LISTEN_ADDR"); metricsListenAddr != "" {
+		cfg.MetricsListenAddr = metricsListenAddr
 	}
 
 	if externalURL := os.Getenv("CFGMS_EXTERNAL_URL"); externalURL != "" {
@@ -1030,7 +1089,63 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Certificate.ClusterCA.VaultKeyPath = vaultKeyPath
 	}
 
+	if err := cfg.ValidateExecutionSecurity(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// ValidateExecutionSecurity enforces the public-beta connected-execution
+// contract after all file and environment paths have been resolved.
+func (c *Config) ValidateExecutionSecurity() error {
+	switch c.SecurityProfile {
+	case "", SecurityProfileDevelopment, SecurityProfileTest:
+		return nil
+	case SecurityProfilePublicBeta:
+		if !c.Execution.RequireSignedAdhoc {
+			return fmt.Errorf("public-beta security profile requires execution.require_signed_adhoc: true")
+		}
+		if c.Transport == nil {
+			return fmt.Errorf("public-beta security profile requires connected transport configuration")
+		}
+		if c.Certificate == nil || !c.Certificate.EnableCertManagement {
+			return fmt.Errorf("public-beta security profile requires certificate management and signing roots")
+		}
+		if !c.Transport.UseCertManager {
+			return fmt.Errorf("public-beta security profile requires transport.use_cert_manager: true")
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid security_profile %q: must be development, test, or public-beta", c.SecurityProfile)
+	}
+}
+
+// ValidatePrivateListenerAddress requires a fixed numeric loopback or private
+// address. Hostnames are rejected so DNS changes cannot turn a listener that
+// passed startup validation into an Internet-facing listener later.
+func ValidatePrivateListenerAddress(address string) error {
+	if address == "" {
+		return fmt.Errorf("address is required")
+	}
+
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("must be a host:port address: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("host must be an explicit loopback or private IP address")
+	}
+	if !ip.IsLoopback() && !ip.IsPrivate() {
+		return fmt.Errorf("host %q is not a loopback or private IP address", host)
+	}
+
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("a fixed numeric port from 1 to 65535 is required")
+	}
+	return nil
 }
 
 // Load loads the configuration using default search paths.

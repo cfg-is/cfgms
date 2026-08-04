@@ -76,22 +76,25 @@ func platformLogDir() string {
 	return dest
 }
 
-// setServiceEnvironment writes a service's REG_MULTI_SZ Environment value —
-// the native SCM mechanism for per-service environment variables (Windows has
-// no systemd-style inline Environment= line; the SCM reads this value at
-// service start). In-process registry access, never a reg.exe/sc.exe
-// shell-out. root and keyPath are parameters so the round-trip unit test can
-// target a scratch HKCU key (writing the real HKLM service key requires
-// Administrator, which unit tests do not have). The access mask must include
-// SET_VALUE — the read-only QUERY_VALUE mask used by read paths yields
-// access-denied on SetStringsValue.
+// setServiceEnvironment writes the log directory and fail-closed connected
+// security profile to the service's REG_MULTI_SZ Environment value — the native
+// SCM mechanism for per-service environment variables (Windows has no
+// systemd-style inline Environment= line; the SCM reads this value at service
+// start). In-process registry access, never a reg.exe/sc.exe shell-out. root and
+// keyPath are parameters so the round-trip unit test can target a scratch HKCU
+// key (writing the real HKLM service key requires Administrator, which unit
+// tests do not have). The access mask must include SET_VALUE — the read-only
+// QUERY_VALUE mask used by read paths yields access-denied on SetStringsValue.
 func setServiceEnvironment(root registry.Key, keyPath, logDir string) error {
 	key, err := registry.OpenKey(root, keyPath, registry.SET_VALUE)
 	if err != nil {
 		return fmt.Errorf("open service key %s: %w", keyPath, err)
 	}
 	defer key.Close()
-	if err := key.SetStringsValue("Environment", []string{"CFGMS_LOG_DIR=" + logDir}); err != nil {
+	if err := key.SetStringsValue("Environment", []string{
+		"CFGMS_LOG_DIR=" + logDir,
+		"CFGMS_SECURITY_PROFILE=public-beta",
+	}); err != nil {
 		return fmt.Errorf("set Environment value on %s: %w", keyPath, err)
 	}
 	return nil

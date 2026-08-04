@@ -537,7 +537,7 @@ func TestSaveToken_HealsEmptyStoredID(t *testing.T) {
 
 	byID, err := store.GetTokenByID(ctx, resaved.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "empty-id-token", byID.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey("empty-id-token"), byID.Token)
 }
 
 // TestBackfillRegistrationTokenID_FreshDB verifies a fresh database carries the id column

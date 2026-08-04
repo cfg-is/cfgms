@@ -266,6 +266,8 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *busin
 	orderClause := buildOrderByClause(filter)
 	limitClause := buildLimitOffsetClause(filter)
 
+	// #nosec G202 -- all three helpers return allowlisted SQL fragments and
+	// place every caller-controlled filter value in the args slice.
 	query := baseQuery + " " + whereClause + " " + orderClause + limitClause
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

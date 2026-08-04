@@ -17,9 +17,12 @@ import (
 
 	"github.com/gorilla/mux"
 
+	configsignature "github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	_ "modernc.org/sqlite"
@@ -238,6 +241,59 @@ func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected as unauthenticated; body: %s", rec.Body.String())
 	assert.Equal(t, http.StatusOK, rec.Code, "admin exec should reach run synthesis; body: %s", rec.Body.String())
+}
+
+func TestPublicBetaRunCommandRequiresAndPreservesOperatorSignature(t *testing.T) {
+	const content = "hostname"
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, queue := setupRunServer(t, stewards)
+	server.cfg.SecurityProfile = config.SecurityProfilePublicBeta
+	server.cfg.Execution.RequireSignedAdhoc = true
+	server.certManager = newTLSTestCertManager(t)
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true}
+
+	unsigned := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+		"target":  "id:steward-1",
+		"content": base64.StdEncoding.EncodeToString([]byte(content)),
+		"shell":   "pwsh",
+	})
+	require.Equal(t, http.StatusBadRequest, unsigned.Code, "body: %s", unsigned.Body.String())
+	assert.Contains(t, unsigned.Body.String(), "INVALID_SIGNATURE")
+	assert.Empty(t, queue.PeekForDevice("steward-1"), "unsigned command must not reach the execution queue")
+
+	operator, err := server.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "public-beta-operator",
+		ValidityDays:     1,
+		KeySize:          2048,
+		ClientID:         "public-beta-operator",
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	signer, err := configsignature.NewSigner(&configsignature.SignerConfig{
+		PrivateKeyPEM:  operator.PrivateKeyPEM,
+		CertificatePEM: operator.CertificatePEM,
+	})
+	require.NoError(t, err)
+	signedContent, err := signer.Sign([]byte(content))
+	require.NoError(t, err)
+
+	signed := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+		"target":  "id:steward-1",
+		"content": base64.StdEncoding.EncodeToString([]byte(content)),
+		"shell":   "pwsh",
+		"signature": map[string]interface{}{
+			"algorithm":  string(signedContent.Algorithm),
+			"value":      signedContent.Signature,
+			"public_key": string(operator.CertificatePEM),
+		},
+	})
+	require.Equal(t, http.StatusOK, signed.Code, "body: %s", signed.Body.String())
+
+	queued := queue.PeekForDevice("steward-1")
+	require.Len(t, queued, 1)
+	assert.Equal(t, string(signedContent.Algorithm), queued[0].Metadata["signature_algorithm"])
+	assert.Equal(t, signedContent.Signature, queued[0].Metadata["signature_value"])
+	assert.Equal(t, string(operator.CertificatePEM), queued[0].Metadata["signature_public_key"])
 }
 
 // TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized is the same guard for run-script.

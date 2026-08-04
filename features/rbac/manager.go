@@ -15,10 +15,10 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// Issue #764: audit queue write errors (queue full / manager stopped) are now
+// Issue #764: audit write errors (caller cancellation / manager stopped) are
 // logged via slog.Warn at each call site instead of being discarded with
-// `_ = m.auditManager.RecordEvent(...)`. Audit recording remains best-effort —
-// failures never interrupt the caller.
+// `_ = m.auditManager.RecordEvent(...)`. The bounded audit queue applies
+// caller-context backpressure rather than shedding authorization evidence.
 
 // Manager provides a complete RBAC implementation with advanced features
 type Manager struct {

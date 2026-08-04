@@ -72,7 +72,8 @@ func (s *CredentialStore) Store(_ context.Context, name string, bundleBytes []by
 		return fmt.Errorf("credential store: encrypt %q: %w", name, err)
 	}
 	path := filepath.Join(s.dir, name+".enc")
-	// #nosec G306 - 0600: owner read/write only; encrypted credential material
+	// #nosec G306 G703 -- ValidateCredentialName rejects separators/traversal,
+	// s.dir is the fixed private credential root, and 0600 protects ciphertext.
 	if err := os.WriteFile(path, ciphertext, 0600); err != nil {
 		return fmt.Errorf("credential store: write %q: %w", name, err)
 	}

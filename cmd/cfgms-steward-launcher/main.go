@@ -13,9 +13,10 @@
 //	cfgms-steward-launcher rollback         Restore the previous-recorded version as current.
 //	cfgms-steward-launcher status           Print the current and previous version names.
 //
-// The launcher does NOT verify bundle signatures in this Phase-1 cut;
-// signature verification is a follow-up under epic #1917. Operators are
-// expected to stage from trusted sources for now.
+// The connected-steward upgrade path verifies the publisher signature before
+// invoking swap. The privileged launcher independently rejects semantic-version
+// downgrades unless an operator explicitly supplies --allow-downgrade; manual
+// callers remain responsible for authenticating the staged binary.
 package main
 
 import (
@@ -128,6 +129,7 @@ func runSuperviseWithCtx(ctx context.Context, args []string) int {
 func runSwap(args []string) int {
 	fs := flag.NewFlagSet("swap", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "Install root holding current.txt + versions/")
+	allowDowngrade := fs.Bool("allow-downgrade", false, "Permit an explicit rollback to an older semantic version")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "launcher swap: %v\n", err)
 		return 2
@@ -141,7 +143,9 @@ func runSwap(args []string) int {
 	version := fs.Arg(0)
 	sourceExe := fs.Arg(1)
 
-	dst, err := layout.StageBinary(version, sourceExe)
+	dst, err := layout.StageBinaryWithOptions(version, sourceExe, StageOptions{
+		AllowDowngrade: *allowDowngrade,
+	})
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "launcher swap: %v\n", err)
 		return 1

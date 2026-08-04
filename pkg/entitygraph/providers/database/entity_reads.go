@@ -222,6 +222,8 @@ func (p *DatabaseEntityGraphProvider) QueryEntities(ctx context.Context, filter 
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")
 	}
+	// #nosec G202 -- the appended SQL is a fixed clause containing only
+	// monotonically generated placeholder numbers; page values remain bound args.
 	query += fmt.Sprintf(" ORDER BY subject LIMIT $%d OFFSET $%d", n, n+1)
 	args = append(args, pageSize+1, offset)
 
@@ -312,6 +314,8 @@ func (p *DatabaseEntityGraphProvider) ResolveIdentity(ctx context.Context, claim
 		return nil, nil
 	}
 
+	// #nosec G202 -- conds contains a fixed MAC predicate with generated $N
+	// placeholders; all normalized MAC values are separately bound in args.
 	query := "SELECT DISTINCT subject FROM eg_entity_index WHERE " + strings.Join(conds, " OR ")
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {

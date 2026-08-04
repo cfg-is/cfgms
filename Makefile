@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -34,7 +34,8 @@ GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 #   make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com VERSION=v1.0.0
 #   make build-steward STEWARD_PUBLISHER_KEY=<base64-ed25519-pub>
 STEWARD_CONTROLLER_URL ?= https://localhost:9080
-STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=)"
+STEWARD_SECURITY_PROFILE?=public-beta
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=)"
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
@@ -309,6 +310,25 @@ build-pkg-darwin:
 	bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)" $$KEY_ARG; \
 	bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)" $$KEY_ARG
 	@echo "✅ Packages built: bin/cfgms-steward-darwin-amd64.pkg  bin/cfgms-steward-darwin-arm64.pkg"
+
+# Build deterministic release archives. Official invocations must supply the
+# annotated-tag version, exact commit timestamp, and non-placeholder publisher
+# public key; the script independently rebuilds and compares every file.
+release-artifacts:
+	@if [ -z "$(VERSION)" ] || [ -z "$(COMMIT)" ] || [ -z "$(SOURCE_DATE_EPOCH)" ] || [ -z "$(PUBLISHER_KEY)" ]; then \
+		echo "Usage: make release-artifacts VERSION=vX.Y.Z COMMIT=<full-sha> SOURCE_DATE_EPOCH=<epoch> PUBLISHER_KEY=<base64-public-key> [OUTPUT_DIR=dist]"; \
+		exit 1; \
+	fi
+	@bash scripts/release/build-reproducible.sh \
+		--version "$(VERSION)" \
+		--commit "$(COMMIT)" \
+		--source-date-epoch "$(SOURCE_DATE_EPOCH)" \
+		--publisher-key "$(PUBLISHER_KEY)" \
+		--output "$(or $(OUTPUT_DIR),dist)"
+
+test-release-artifacts:
+	@bash scripts/release/build-reproducible_test.sh
+	@bash scripts/verify-release-artifact_test.sh
 
 # Run Linux install.sh tests (Story #1708)
 test-install-sh:
@@ -905,7 +925,13 @@ test-load-testing:
 	@echo "====================="
 	@echo "📊 Testing system under high concurrency"
 	@echo ""
-	@go test -race -timeout=30m -run "Load" ./test/e2e/... ./test/integration/transport/... ./test/performance/... || exit 1
+	@set -eu; \
+		load_key=$$(mktemp); \
+		trap 'rm -f "$$load_key"' EXIT; \
+		chmod 0600 "$$load_key"; \
+		head -c 32 /dev/urandom > "$$load_key"; \
+		CFGMS_SECRETS_KEY_FILE="$$load_key" go test -race -timeout=30m -run "Load" \
+			./features/controller/api ./test/e2e/... ./test/integration/transport/...
 	@echo ""
 	@echo "✅ Load testing complete"
 
@@ -933,7 +959,10 @@ test-performance-benchmarks:
 
 
 # Security Scanning Tools (v0.3.1)
-.PHONY: security-trivy security-deps security-gosec security-staticcheck security-scan security-check security-scan-nonblocking security-remediation-report install-nancy
+.PHONY: check-binary-artifacts security-trivy security-deps security-gosec security-staticcheck security-scan security-check security-scan-nonblocking security-remediation-report install-nancy
+
+check-binary-artifacts:
+	@bash scripts/check-binary-artifacts.sh
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
@@ -986,10 +1015,10 @@ security-trivy:
 	@if ! command -v trivy >/dev/null 2>&1; then \
 		echo "❌ Error: trivy is not installed"; \
 		echo ""; \
-		echo "Install trivy v0.71.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
+		echo "Install trivy v0.72.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
 		echo "and NEVER use @latest:"; \
-		echo "  ./.github/scripts/install-trivy.sh v0.71.0 \\"; \
-		echo "    30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814"; \
+		echo "  ./.github/scripts/install-trivy.sh v0.72.0 \\"; \
+		echo "    bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"; \
 		echo ""; \
 		echo "Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
 		echo "Rollback procedure: docs/runbooks/trivy-rollback.md"; \
@@ -1000,11 +1029,10 @@ security-trivy:
 		rc=$$?; \
 		if [ $$rc -eq 2 ]; then \
 			echo ""; \
-			echo "⚠️  Trivy DB download failed — infrastructure issue, not a security finding."; \
-			echo "   Scan skipped; ensure mirror.gcr.io is in the DNS allowlist and re-run."; \
-		else \
-			exit $$rc; \
+			echo "❌ Trivy scan incomplete — database initialization failed."; \
+			echo "   This blocking target cannot pass until the scan completes cleanly."; \
 		fi; \
+		exit $$rc; \
 	}
 
 # Nancy Go dependency vulnerability scanning
@@ -1042,17 +1070,34 @@ security-deps:
 		echo "🔗 All releases: https://github.com/sonatype-nexus-community/nancy/releases"; \
 		exit 1; \
 	fi
-	@echo "Scanning Go dependencies for known vulnerabilities..."
-	@if go list -json -deps ./... | nancy sleuth --skip-update-check 2>/dev/null; then \
+	@# Nancy v2 cannot query Sonatype Guide anonymously — a missing token yields
+	@# 401 Unauthorized, not a clean scan. CI must fail closed on that; a developer
+	@# workstation without a token skips loudly rather than blocking local work.
+	@# Set CFGMS_REQUIRE_GUIDE_TOKEN=1 to force fail-closed outside CI.
+	@# One shell block: `exit 0` in a separate recipe line would end only that
+	@# line's shell and make would run the scan anyway.
+	@if [ -z "$${GUIDE_TOKEN:-}" ]; then \
+		if [ -n "$${CI:-}" ] || [ "$${CFGMS_REQUIRE_GUIDE_TOKEN:-}" = "1" ]; then \
+			echo "❌ Error: GUIDE_TOKEN is required by Nancy v2 for Sonatype Guide"; \
+			echo "   Obtain a token from https://guide.sonatype.com and export GUIDE_TOKEN."; \
+			exit 1; \
+		fi; \
+		echo "⏭️  SKIPPED: no GUIDE_TOKEN — dependency vulnerabilities were NOT checked"; \
+		echo "   Nancy v2 requires a Sonatype Guide bearer token; it cannot scan anonymously."; \
+		echo "   Get a free token at https://guide.sonatype.com, then: export GUIDE_TOKEN=<token>"; \
+		echo "   CI runs this scan with the repository GUIDE_TOKEN secret and fails closed."; \
+		exit 0; \
+	fi; \
+	echo "Scanning Go dependencies for known vulnerabilities..."; \
+	if go list -json -deps ./... | nancy sleuth --skip-update-check; then \
 		echo "✅ Nancy dependency scan completed - no critical vulnerabilities found"; \
 	else \
 		echo ""; \
-		echo "⚠️  Nancy found vulnerable dependencies. Consider updating:"; \
+		echo "❌ Nancy dependency scan failed or found vulnerable dependencies:"; \
 		echo "   - Review the vulnerabilities listed above"; \
 		echo "   - Update dependencies with: go get -u <package>@<safe-version>"; \
 		echo "   - Re-run: make security-deps"; \
-		echo ""; \
-		echo "ℹ️  Non-blocking for development workflow - fix when convenient"; \
+		exit 1; \
 	fi
 
 # gosec Go security pattern analysis
@@ -1070,35 +1115,9 @@ security-gosec:
 	fi
 	@echo "Analyzing Go code for security patterns..."
 	@echo "Using .gosec.json configuration (single source of truth)..."
-	@echo "Running per-directory to avoid cross-package type resolution bottleneck..."
-	@rm -f /tmp/gosec-results-combined.json
-	@all_issues="[]"; \
-	for dir in pkg features cmd api test internal; do \
-		if [ -d "$$dir" ]; then \
-			gosec -conf .gosec.json -exclude=G103,G115,G404 -fmt json -quiet ./$$dir/... > /tmp/gosec-results-$$dir.json 2>/dev/null || true; \
-			if [ -s /tmp/gosec-results-$$dir.json ]; then \
-				dir_issues=$$(jq -r '.Issues // []' /tmp/gosec-results-$$dir.json 2>/dev/null); \
-				if [ "$$dir_issues" != "null" ] && [ "$$dir_issues" != "[]" ]; then \
-					all_issues=$$(echo "$$all_issues" "$$dir_issues" | jq -s '.[0] + .[1]'); \
-				fi; \
-			fi; \
-			rm -f /tmp/gosec-results-$$dir.json; \
-		fi; \
-	done; \
-	issues_count=$$(echo "$$all_issues" | jq 'length' 2>/dev/null || echo "0"); \
-	if [ "$$issues_count" -gt 0 ]; then \
-		echo "⚠️  gosec found $$issues_count security issues:"; \
-		echo ""; \
-		echo "$$all_issues" | jq -r '.[] | "  • \(.rule_id) (\(.severity)): \(.details) at \(.file):\(.line)"' 2>/dev/null || echo "  Issues found but could not parse details"; \
-		echo ""; \
-		echo "💡 Review and fix security patterns above"; \
-		echo "   Use #nosec comment to suppress false positives"; \
-		echo "   Configure .gosec.json to customize rules and exclusions"; \
-		echo ""; \
-		echo "ℹ️  Non-blocking for development workflow - fix when convenient"; \
-	else \
-		echo "✅ gosec analysis completed - no security patterns found"; \
-	fi
+	@echo "Public-beta policy: every medium-or-higher candidate is blocking."
+	@gosec -conf .gosec.json -severity medium -confidence medium ./...
+	@echo "✅ gosec analysis completed - no blocking security patterns found"
 
 # staticcheck advanced Go static analysis with curated rules and performance optimization
 security-staticcheck:
@@ -1108,7 +1127,7 @@ security-staticcheck:
 		echo "❌ Error: staticcheck is not installed"; \
 		echo ""; \
 		echo "Install staticcheck using Go:"; \
-		echo "  go install honnef.co/go/tools/cmd/staticcheck@2026.1"; \
+		echo "  GOTOOLCHAIN=\$$(go env GOVERSION) go install honnef.co/go/tools/cmd/staticcheck@2026.1"; \
 		echo ""; \
 		echo "For more info: https://staticcheck.io/"; \
 		exit 1; \
@@ -1121,47 +1140,10 @@ security-staticcheck:
 	fi
 	@echo "🚀 Performance: caching enabled, concurrent analysis, memory-optimized"
 	@echo "Analyzing Go code for critical static analysis issues..."
-	@# Use configuration file if available, with performance optimizations
-	@staticcheck_cmd="staticcheck -f json"; \
-	if [ -f staticcheck.conf ]; then \
-		staticcheck_cmd="$$staticcheck_cmd -config staticcheck.conf"; \
-	fi; \
-	if $$staticcheck_cmd ./... > /tmp/staticcheck-results.json 2>/dev/null; then \
-		echo "✅ staticcheck analysis completed - no issues found"; \
-	else \
-		issues_count=$$(wc -l < /tmp/staticcheck-results.json 2>/dev/null || echo "0"); \
-		if [ "$$issues_count" -gt 0 ]; then \
-			echo "⚠️  staticcheck found $$issues_count static analysis issues:"; \
-			echo ""; \
-			echo "📊 Issue Summary by Category:"; \
-			jq -r 'group_by(.code | split("")[0]) | .[] | "\(.length) issues: \(.[0].code | split("")[0]) (\(if .[0].code | startswith("SA") then "Static Analysis - HIGH" elif .[0].code | startswith("ST") then "Standard Library - MEDIUM" elif .[0].code | startswith("U") then "Unused Code - LOW" else "Other" end))"' /tmp/staticcheck-results.json 2>/dev/null || \
-			echo "  Could not categorize issues"; \
-			echo ""; \
-			echo "🔍 Top Issues (showing up to 15):"; \
-			head -15 /tmp/staticcheck-results.json | jq -r '. | "  • \(.code): \(.message) at \(.location.file):\(.location.line)"' 2>/dev/null || \
-			head -15 /tmp/staticcheck-results.json | sed 's/^/  • /' 2>/dev/null || \
-			echo "  Issues found but could not parse details"; \
-			if [ "$$issues_count" -gt 15 ]; then \
-				echo "  ... and $$((issues_count - 15)) more issues (see full results in JSON)"; \
-			fi; \
-			echo ""; \
-			echo "💡 Fix Priority Guide:"; \
-			echo "   • SA* (Static Analysis): HIGH - potential bugs and correctness issues"; \
-			echo "   • ST* (Standard Library): MEDIUM - API usage and best practices"; \
-			echo "   • U* (Unused Code): LOW - cleanup when convenient"; \
-			echo ""; \
-			echo "🔧 Configuration:"; \
-			echo "   • Customize rules in staticcheck.conf"; \
-			echo "   • Use //lint:ignore <rule> <reason> to suppress false positives"; \
-			echo "   • Focus on SA* issues first for maximum impact"; \
-			echo ""; \
-			echo "ℹ️  Non-blocking for development workflow - fix based on priority"; \
-		else \
-			echo "✅ staticcheck analysis completed - no issues found"; \
-		fi; \
-	fi
-	@echo "📁 Full results saved to: /tmp/staticcheck-results.json"
-	@echo "🎯 Focused on important issues - style warnings excluded for development velocity"
+	@# Staticcheck discovers staticcheck.conf by walking up from each package.
+	@# Current releases no longer accept the removed -config flag.
+	@staticcheck ./...
+	@echo "✅ staticcheck analysis completed - no issues found"
 
 # Security testing only
 test-security: security-scan
@@ -1182,18 +1164,25 @@ test-docker: test-integration-status
 	@echo "Use 'make test-with-real-storage' to run tests against Docker backends"
 
 # Unified security scanning (runs all security tools) - BLOCKING mode
-security-scan: security-trivy security-deps security-gosec security-staticcheck
+security-scan: check-binary-artifacts security-trivy security-deps security-gosec security-staticcheck
 	@echo ""
 	@echo "🛡️  SECURITY SCAN COMPLETE"
 	@echo "=========================="
 	@echo "📊 Security Scan Results:"
 	@echo "   • Trivy filesystem scan: ✅ PASSED"
-	@echo "   • Nancy dependency scan: ✅ PASSED"
+	@if [ -z "$${GUIDE_TOKEN:-}" ]; then \
+		echo "   • Nancy dependency scan: ⏭️  SKIPPED (no GUIDE_TOKEN)"; \
+	else \
+		echo "   • Nancy dependency scan: ✅ PASSED"; \
+	fi
 	@echo "   • gosec Go security analysis: ✅ PASSED"
 	@echo "   • staticcheck advanced analysis: ✅ PASSED"
 	@echo ""
-	@echo "🎯 ALL SECURITY TOOLS PASSED - DEPLOYMENT APPROVED"
-	@echo "   Mode: BLOCKING (critical issues block deployment)"
+	@echo "✅ ALL LOCAL SECURITY GATES PASSED"
+	@echo "   Mode: BLOCKING (findings and incomplete scans fail this target)"
+	@if [ -z "$${GUIDE_TOKEN:-}" ]; then \
+		echo "   ⚠️  Dependency scanning was skipped — this run is not complete evidence."; \
+	fi
 	@echo ""
 	@echo "📋 Claude Code Integration:"
 	@echo "   • All security scans passed - no automated remediation needed"
@@ -2062,7 +2051,11 @@ test-e2e-fleet: build-cli
 	@echo "Starting fleet docker-compose profile and running test/e2e/fleet/..."
 	@echo ""
 	@set -e; \
-	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; for c in fleet-controller fleet-steward-1 fleet-steward-2; do echo ""; echo "----- $$c : /tmp/cfgms file logs -----"; docker cp "$$c:/tmp/cfgms/." - 2>/dev/null | tar -xOf - 2>/dev/null || echo "(no file logs)"; done; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
+	fleet_key=$$(mktemp); \
+	chmod 0600 "$$fleet_key"; \
+	head -c 32 /dev/urandom > "$$fleet_key"; \
+	export CFGMS_SECRETS_KEY_FILE="$$fleet_key"; \
+	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; for c in fleet-controller fleet-steward-1 fleet-steward-2; do echo ""; echo "----- $$c : /tmp/cfgms file logs -----"; docker cp "$$c:/tmp/cfgms/." - 2>/dev/null | tar -xOf - 2>/dev/null || echo "(no file logs)"; done; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v; rm -f "$$fleet_key"' EXIT; \
 	docker compose --profile fleet -f docker-compose.test.yml up -d --build --wait; \
 	echo ""; \
 	echo "Running fleet E2E tests..."; \
@@ -2175,8 +2168,17 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
 	@echo "Step 2: Initializing controller to generate CA and certificates..."
-	@./bin/controller --init > /tmp/controller-init.log 2>&1 || \
-		{ echo "❌ Controller init failed:"; cat /tmp/controller-init.log; exit 1; }
+# The controller refuses to initialize its secret store without an external key —
+# plaintext secret storage is prohibited. This target only needs the CA and
+# certificates it writes, so give it an ephemeral key that lives for the length of
+# the init and is removed straight after.
+	@set -eu; \
+		init_key=$$(mktemp); \
+		trap 'rm -f "$$init_key"' EXIT; \
+		chmod 0600 "$$init_key"; \
+		head -c 32 /dev/urandom > "$$init_key"; \
+		CFGMS_SECRETS_KEY_FILE="$$init_key" ./bin/controller --init > /tmp/controller-init.log 2>&1 || \
+			{ echo "❌ Controller init failed:"; cat /tmp/controller-init.log; exit 1; }
 	@rm -f controller.cfg
 	@if [ ! -f "test/integration/transport/certs/ca/ca.crt" ]; then \
 		echo "❌ CA certificate not generated. Init log:"; \

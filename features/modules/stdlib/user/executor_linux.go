@@ -94,14 +94,18 @@ func (e *linuxExecutor) setState(username string, desired userState) error {
 			args = append(args, "-c", desired.FullName)
 		}
 		args = append(args, username)
-		if out, err := exec.Command("useradd", args...).CombinedOutput(); err != nil { // #nosec G204 - username validated by caller
+		// #nosec G204 -- executable is fixed, no shell is used, and username,
+		// full name, and groups are validated before reaching this executor.
+		if out, err := exec.Command("useradd", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("useradd %s: %w (output: %s)", username, err, strings.TrimSpace(string(out)))
 		}
 		current.Exists = true
 		current.FullName = desired.FullName
 		current.Locked = false
 	} else if desired.FullName != current.FullName {
-		if out, err := exec.Command("usermod", "-c", desired.FullName, username).CombinedOutput(); err != nil { // #nosec G204 - username validated by caller
+		// #nosec G204 -- executable is fixed, no shell is used, and username
+		// and GECOS input are validated before reaching this executor.
+		if out, err := exec.Command("usermod", "-c", desired.FullName, username).CombinedOutput(); err != nil {
 			return fmt.Errorf("usermod -c %s: %w (output: %s)", username, err, strings.TrimSpace(string(out)))
 		}
 	}
@@ -111,7 +115,9 @@ func (e *linuxExecutor) setState(username string, desired userState) error {
 	currentGroups := sortedCopy(current.Groups)
 	if !slicesEqual(desiredGroups, currentGroups) {
 		groupArg := strings.Join(desiredGroups, ",")
-		if out, err := exec.Command("usermod", "-G", groupArg, username).CombinedOutput(); err != nil { // #nosec G204 - username validated by caller
+		// #nosec G204 -- executable is fixed, no shell is used, and every
+		// username/group token is option-injection-safe by module validation.
+		if out, err := exec.Command("usermod", "-G", groupArg, username).CombinedOutput(); err != nil {
 			return fmt.Errorf("usermod -G %s %s: %w (output: %s)", groupArg, username, err, strings.TrimSpace(string(out)))
 		}
 	}

@@ -82,6 +82,8 @@ func (jam *JITAccessManager) Start(ctx context.Context, cleanupInterval time.Dur
 	}
 
 	ticker := time.NewTicker(cleanupInterval)
+	// #nosec G118 -- this manager-owned cleanup loop intentionally outlives the
+	// Start caller and is terminated by the paired stopCh/Stop lifecycle.
 	go func() {
 		defer close(doneCh)
 		defer ticker.Stop()

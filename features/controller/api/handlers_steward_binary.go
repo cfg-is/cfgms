@@ -71,6 +71,10 @@ func stewardBinaryBlobKey(tenantID, version, platform, arch string) blob.BlobKey
 	}
 }
 
+func stewardBinaryDownloadCacheKey(tenantID, version, platform, arch string) string {
+	return "steward/" + tenantID + "/" + version + "/" + platform + "/" + arch
+}
+
 // handlePublishStewardBinary handles POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}.
 // Verifies the Ed25519 publisher signature against CFGMSPublisherIdentity before storing the blob.
 // Returns 400 if signature is absent or invalid, 409 if the binary already exists (use ?force=true to overwrite).
@@ -117,6 +121,11 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	sigBase64 := r.URL.Query().Get("signature")
 	if sigBase64 == "" {
 		// Also check multipart form field (used when binary is uploaded as multipart).
+		// Keep a handler-local bound in addition to the global request-body middleware:
+		// ParseMultipartForm may otherwise allocate before the later binary read.
+		r.Body = http.MaxBytesReader(w, r.Body, maxBinaryRequestBodyBytes)
+		// #nosec G120 -- both the global middleware and the immediately preceding
+		// MaxBytesReader cap the request at 64 MiB; in-memory form parts cap at 32 MiB.
 		if parseErr := r.ParseMultipartForm(32 << 20); parseErr == nil {
 			sigBase64 = r.FormValue("signature")
 		}
@@ -226,6 +235,7 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store binary", "STORE_ERROR")
 		return
 	}
+	s.publicDownloadCache.invalidate(stewardBinaryDownloadCacheKey(tenantID, version, platform, arch))
 
 	// Retrieve stored metadata — provider populates Checksum and Size during PutBlob.
 	rc, storedMeta, err := s.blobStore.GetBlob(r.Context(), key)
@@ -369,49 +379,78 @@ func (s *Server) handleGetStewardBinaryPublic(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	asset, err := s.publicDownloadCache.getOrBuild(
+		r.Context(),
+		stewardBinaryDownloadCacheKey(tenantID, version, platform, arch),
+		func() (*publicDownloadAsset, error) {
+			return s.buildPublicStewardBinary(r, tenantID, version, platform, arch)
+		},
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, blob.ErrBlobNotFound):
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward binary not found", "BINARY_NOT_FOUND")
+		case errors.Is(err, errPublicDownloadTooLarge):
+			s.writeErrorResponse(w, http.StatusRequestEntityTooLarge, "Steward binary too large", "BINARY_TOO_LARGE")
+		default:
+			s.logger.Error("Failed to get steward binary (public)",
+				"error", err,
+				"version", logging.SanitizeLogValue(version),
+				"platform", logging.SanitizeLogValue(platform),
+				"arch", logging.SanitizeLogValue(arch))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get binary", "GET_ERROR")
+		}
+		return
+	}
+	servePublicDownload(w, r, "cfgms-steward-"+platform+"-"+arch, asset)
+}
+
+func (s *Server) buildPublicStewardBinary(
+	r *http.Request,
+	tenantID, version, platform, arch string,
+) (*publicDownloadAsset, error) {
 	key := stewardBinaryBlobKey(tenantID, version, platform, arch)
 	rc, meta, err := s.blobStore.GetBlob(r.Context(), key)
 	if err != nil {
-		if errors.Is(err, blob.ErrBlobNotFound) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward binary not found", "BINARY_NOT_FOUND")
-			return
-		}
-		s.logger.Error("Failed to get steward binary (public)",
-			"error", err,
-			"version", logging.SanitizeLogValue(version),
-			"platform", logging.SanitizeLogValue(platform),
-			"arch", logging.SanitizeLogValue(arch))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get binary", "GET_ERROR")
-		return
+		return nil, err
 	}
 	defer func() {
 		if cerr := rc.Close(); cerr != nil {
 			s.logger.Warn("failed to close steward binary reader (public)", "error", cerr)
 		}
 	}()
+	if meta.Size > maxBinaryRequestBodyBytes {
+		return nil, errPublicDownloadTooLarge
+	}
+	body, err := io.ReadAll(io.LimitReader(rc, maxBinaryRequestBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBinaryRequestBodyBytes {
+		return nil, errPublicDownloadTooLarge
+	}
 
 	contentType := meta.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	w.Header().Set("Content-Type", contentType)
+	asset := newPublicDownloadAsset(
+		body,
+		contentType,
+		"",
+		"public, max-age=300, must-revalidate",
+	)
+	asset.headers = make(map[string]string, 3)
 	if meta.Checksum != "" {
-		w.Header().Set("X-CFGMS-SHA256", meta.Checksum)
+		asset.headers["X-CFGMS-SHA256"] = meta.Checksum
 	}
-	// Serve the publisher signature so a self-fetching steward can verify the
-	// publisher identity independently of the controller-attested SHA-256 (#2836).
-	// Read the two keys individually by name — never range over meta.Labels: the
-	// same map also holds published_by (operator identity), publisher_tenant, and
-	// signature_digest, and this endpoint is unauthenticated, so a blanket
-	// label→header copy would leak operator/tenant identity to anonymous callers.
+	// Read these labels individually. The same map contains operator and internal
+	// tenant identifiers that must never cross this anonymous trust boundary.
 	if sig := meta.Labels["signature"]; sig != "" {
-		w.Header().Set("X-CFGMS-Signature", sig)
+		asset.headers["X-CFGMS-Signature"] = sig
 	}
 	if pub := meta.Labels["publisher"]; pub != "" {
-		w.Header().Set("X-CFGMS-Publisher", pub)
+		asset.headers["X-CFGMS-Publisher"] = pub
 	}
-	w.WriteHeader(http.StatusOK)
-	if _, copyErr := io.Copy(w, rc); copyErr != nil {
-		s.logger.Warn("Failed to stream steward binary to client (public)", "error", copyErr)
-	}
+	return asset, nil
 }

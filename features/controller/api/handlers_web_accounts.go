@@ -149,34 +149,40 @@ func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccoun
 	return s.loadWebAccountFromStore(ctx, username)
 }
 
-// getWebAccountByID returns the account with the given ID, searching the cache
-// first then falling back to the secret store. Used in the discoverable passkey
-// login flow where the authenticator returns a userHandle (the account UUID).
-func (s *Server) getWebAccountByID(ctx context.Context, id string) (*webAccount, error) {
+// getWebAccountByID resolves the durable principal ID stored in a web session
+// back to its account. Session principal IDs are deliberately stable across
+// account updates, so authentication middleware must not treat the ID
+// as a username when loading permissions and tenant scope.
+func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*webAccount, error) {
 	s.mu.RLock()
 	for _, acct := range s.webAccounts {
-		if acct.ID == id {
+		if acct != nil && acct.ID == principalID {
 			s.mu.RUnlock()
 			return acct, nil
 		}
 	}
 	s.mu.RUnlock()
+
 	if s.secretStore == nil {
 		return nil, nil
 	}
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
 		Metadata: map[string]string{
 			secretsif.MetadataKeySecretType: webAccountSecretType,
-			"id":                            id,
+			"id":                            principalID,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list web accounts by id: %w", err)
+		return nil, fmt.Errorf("failed to list web accounts by principal ID: %w", err)
 	}
 	if len(metas) == 0 {
 		return nil, nil
 	}
-	return s.loadWebAccountFromStore(ctx, metas[0].Metadata["username"])
+	username := metas[0].Metadata["username"]
+	if username == "" {
+		return nil, fmt.Errorf("web account for principal ID is missing username metadata")
+	}
+	return s.loadWebAccountFromStore(ctx, username)
 }
 
 // loadWebAccountFromStore reloads an account record from the central secret store

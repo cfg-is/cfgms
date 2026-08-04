@@ -28,6 +28,12 @@ const chocoExePath = `C:\ProgramData\chocolatey\choco.exe`
 // isn't explicitly configured.
 const chocoDefaultBootstrapFile = "chocolatey.nupkg"
 
+// maxChocoBootstrapBytes bounds both acquisition and the cumulative
+// uncompressed archive content. The Chocolatey bootstrap package is normally
+// only a few megabytes; 512 MiB leaves ample headroom while preventing an
+// attacker-controlled org feed from exhausting steward memory or disk.
+const maxChocoBootstrapBytes int64 = 512 << 20
+
 // commandRunner abstracts external process execution so chocolatey
 // bootstrap/source-configuration logic is unit-testable without spawning real
 // processes. extraEnv, when non-empty, is appended to the current environment
@@ -37,6 +43,8 @@ type commandRunner func(ctx context.Context, name string, args []string, extraEn
 
 // execCommandRunner is the production commandRunner, backed by os/exec.
 func execCommandRunner(ctx context.Context, name string, args []string, extraEnv []string) ([]byte, error) {
+	// #nosec G204 -- this private runner receives only module-selected
+	// Chocolatey/PowerShell executables and argv arrays; it never invokes a shell.
 	cmd := exec.CommandContext(ctx, name, args...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
@@ -95,11 +103,36 @@ func fetchBytes(ctx context.Context, src string) ([]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("failed to download bootstrap package from %s: HTTP %d", src, resp.StatusCode)
 		}
-		return io.ReadAll(resp.Body)
+		if resp.ContentLength > maxChocoBootstrapBytes {
+			return nil, fmt.Errorf("bootstrap package from %s exceeds %d-byte limit", src, maxChocoBootstrapBytes)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxChocoBootstrapBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read bootstrap package from %s: %w", src, err)
+		}
+		if int64(len(data)) > maxChocoBootstrapBytes {
+			return nil, fmt.Errorf("bootstrap package from %s exceeds %d-byte limit", src, maxChocoBootstrapBytes)
+		}
+		return data, nil
 	}
-	data, err := os.ReadFile(src)
+	// #nosec G304 -- a local bootstrap package is an explicit administrator
+	// configuration input; it is only read, size-bounded, and archive-validated.
+	f, err := os.Open(src)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bootstrap package from %s: %w", src, err)
+	}
+	defer func() { _ = f.Close() }()
+	if info, statErr := f.Stat(); statErr != nil {
+		return nil, fmt.Errorf("failed to stat bootstrap package from %s: %w", src, statErr)
+	} else if info.Size() > maxChocoBootstrapBytes {
+		return nil, fmt.Errorf("bootstrap package from %s exceeds %d-byte limit", src, maxChocoBootstrapBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxChocoBootstrapBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bootstrap package from %s: %w", src, err)
+	}
+	if int64(len(data)) > maxChocoBootstrapBytes {
+		return nil, fmt.Errorf("bootstrap package from %s exceeds %d-byte limit", src, maxChocoBootstrapBytes)
 	}
 	return data, nil
 }
@@ -110,53 +143,105 @@ func fetchBytes(ctx context.Context, src string) ([]byte, error) {
 // RemoteSigned execution policy runs chocolateyInstall.ps1 without needing
 // -ExecutionPolicy Bypass (banned — see CLAUDE.md).
 func extractZip(data []byte, destDir string) error {
+	return extractZipWithLimit(data, destDir, maxChocoBootstrapBytes)
+}
+
+func extractZipWithLimit(data []byte, destDir string, maxBytes int64) error {
+	if maxBytes < 0 || int64(len(data)) > maxBytes {
+		return fmt.Errorf("nupkg archive exceeds %d-byte limit", maxBytes)
+	}
 	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return fmt.Errorf("invalid nupkg archive: %w", err)
 	}
 
-	cleanDest := filepath.Clean(destDir)
+	cleanDest, err := filepath.Abs(destDir)
+	if err != nil {
+		return fmt.Errorf("resolve extraction directory: %w", err)
+	}
+	var extracted int64
+	destPrefix := cleanDest + string(os.PathSeparator)
 	for _, f := range r.File {
-		path := filepath.Join(destDir, f.Name)
-		// Zip-slip guard: reject any entry that would escape destDir.
-		if path != cleanDest && !strings.HasPrefix(path, cleanDest+string(os.PathSeparator)) {
+		path, err := archiveEntryPath(cleanDest, f.Name)
+		if err != nil {
+			return fmt.Errorf("invalid nupkg entry path %q", f.Name)
+		}
+		// archiveEntryPath already rejects traversal via filepath.Rel. This
+		// containment check restates the guarantee at the point of use, so the
+		// property holds locally even if the helper is later changed, and so
+		// static analysis can see the barrier without modelling the helper.
+		if !strings.HasPrefix(path, destPrefix) {
 			return fmt.Errorf("invalid nupkg entry path %q", f.Name)
 		}
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(path, 0o755); err != nil {
+			if err := os.MkdirAll(path, 0o700); err != nil {
 				return fmt.Errorf("failed to create directory %s: %w", path, err)
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		// #nosec G115 -- maxBytes is checked non-negative on entry and extracted
+		// never exceeds it, so the remaining-byte conversion is lossless.
+		if f.UncompressedSize64 > uint64(maxBytes-extracted) {
+			return fmt.Errorf("nupkg content exceeds %d-byte extraction limit", maxBytes)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", filepath.Dir(path), err)
 		}
-		if err := extractZipFile(f, path); err != nil {
+		written, err := extractZipFile(f, path, maxBytes-extracted)
+		if err != nil {
 			return fmt.Errorf("failed to extract %s: %w", f.Name, err)
 		}
+		extracted += written
 	}
 	return nil
 }
 
-func extractZipFile(f *zip.File, destPath string) error {
+// archiveEntryPath treats both slash styles as archive separators before
+// applying filepath semantics. That closes zip-slip on Unix for archives
+// crafted with Windows backslashes and vice versa.
+func archiveEntryPath(destDir, name string) (string, error) {
+	normalized := strings.ReplaceAll(name, `\`, "/")
+	if normalized == "" || strings.HasPrefix(normalized, "/") {
+		return "", fmt.Errorf("empty or absolute archive path")
+	}
+	cleanName := filepath.FromSlash(normalized)
+	if filepath.IsAbs(cleanName) || filepath.VolumeName(cleanName) != "" {
+		return "", fmt.Errorf("absolute archive path")
+	}
+	path := filepath.Clean(filepath.Join(destDir, cleanName))
+	rel, err := filepath.Rel(destDir, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("archive path escapes destination")
+	}
+	return path, nil
+}
+
+func extractZipFile(f *zip.File, destPath string, maxBytes int64) (int64, error) {
 	rc, err := f.Open()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = rc.Close() }()
 
-	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	// #nosec G304 -- destPath is produced only by archiveEntryPath, which
+	// resolves it beneath the private extraction root and rejects traversal.
+	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	if _, err := io.Copy(out, rc); err != nil {
+	written, err := io.Copy(out, io.LimitReader(rc, maxBytes+1))
+	if err != nil {
 		_ = out.Close()
-		return err
+		return 0, err
+	}
+	if written > maxBytes {
+		_ = out.Close()
+		return 0, fmt.Errorf("entry exceeds remaining %d-byte extraction limit", maxBytes)
 	}
 	// Return the Close error so a failed flush of the extracted file surfaces
 	// rather than being silently dropped by a deferred close.
-	return out.Close()
+	return written, out.Close()
 }
 
 // runner returns the commandRunner this module uses: the injected test seam

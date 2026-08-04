@@ -38,6 +38,8 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 
 	// Step 1: Complete cleanup - remove all containers, networks, volumes, and images
 	fmt.Println("Step 1/5: Cleaning up existing Docker resources...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local HA test harness.
 	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -62,6 +64,8 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 
 	// Step 3: Build images from scratch with no cache
 	fmt.Println("Step 3/5: Building fresh Docker images (no cache)...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local HA test harness.
 	buildCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test", // Use generated test credentials
@@ -77,6 +81,8 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 
 	// Step 4: Start the cluster with freshly built images and test credentials
 	fmt.Println("Step 4/5: Starting HA cluster with credentials...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local HA test harness.
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test", // Use generated test credentials
@@ -96,6 +102,8 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 
 // StopCluster stops the HA cluster and cleans up resources
 func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local HA test harness.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -114,6 +122,8 @@ func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
 
 // GetContainerLogs retrieves logs from a specific container
 func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service string) (string, error) {
+	// #nosec G204 -- integration-only Docker Compose logs invocation; service
+	// names are local harness inputs and no shell interprets them.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -130,6 +140,8 @@ func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service stri
 
 // GetStewardLogs retrieves logs from a steward container with filtering
 func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName string, lines int) (string, error) {
+	// #nosec G204 -- integration-only Docker Compose logs invocation; steward
+	// name/count are local harness inputs and no shell interprets them.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -208,6 +220,8 @@ func (h *DockerComposeHelper) WaitForStewardConnections(ctx context.Context, tim
 
 // StopService stops a specific service in the cluster
 func (h *DockerComposeHelper) StopService(ctx context.Context, service string) error {
+	// #nosec G204 -- integration-only Docker Compose invocation; service is a
+	// harness-selected Compose service and no shell interprets it.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -224,6 +238,8 @@ func (h *DockerComposeHelper) StopService(ctx context.Context, service string) e
 
 // RestartService restarts a specific service in the cluster
 func (h *DockerComposeHelper) RestartService(ctx context.Context, service string) error {
+	// #nosec G204 -- integration-only Docker Compose invocation; service is a
+	// harness-selected Compose service and no shell interprets it.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -240,6 +256,8 @@ func (h *DockerComposeHelper) RestartService(ctx context.Context, service string
 
 // ScaleService scales a service to the specified number of replicas
 func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, replicas int) error {
+	// #nosec G204 -- integration-only Docker Compose invocation; scale inputs
+	// are local test values passed without a shell.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",
@@ -256,6 +274,8 @@ func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, 
 
 // GetServiceStatus checks if all specified services are running
 func (h *DockerComposeHelper) GetServiceStatus(ctx context.Context, services ...string) (map[string]bool, error) {
+	// #nosec G204 -- integration-only Docker Compose status invocation with a
+	// fixed argument vector; requested services are filtered in Go afterward.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"--env-file", "../../../.env.test",

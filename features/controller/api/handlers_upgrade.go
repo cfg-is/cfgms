@@ -316,6 +316,8 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			"bundle_signature": base64.StdEncoding.EncodeToString(bundleSig),
 		}
 		createdSnapshot := created
+		// #nosec G118 -- persisted upgrade commands intentionally outlive the
+		// HTTP request; each publisher call has a fixed two-minute deadline.
 		go func() {
 			for _, entry := range createdSnapshot {
 				upgradeID := entry.upgradeID
@@ -612,6 +614,8 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 			"bundle_signature": base64.StdEncoding.EncodeToString(bundleSig),
 		}
 		stewardID := original.StewardID
+		// #nosec G118 -- persisted rollback dispatch intentionally outlives the
+		// HTTP request; the publisher call has a fixed two-minute deadline.
 		go func() {
 			onComplete := func(event *cpTypes.Event) {
 				switch event.Type {

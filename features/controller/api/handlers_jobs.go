@@ -153,6 +153,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// Start the executor asynchronously — the HTTP response returns immediately.
 	if s.batchJobExecutor != nil {
 		executor := s.batchJobExecutor
+		// #nosec G118 -- the persisted batch job intentionally outlives the HTTP
+		// request and the executor applies its own batch/concurrency lifecycle.
 		go func() {
 			if execErr := executor.Execute(context.Background(), job); execErr != nil {
 				// execErr may embed job.Selector (user-tainted) via executor error messages.

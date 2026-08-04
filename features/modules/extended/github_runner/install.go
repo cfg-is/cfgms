@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -178,6 +179,11 @@ func unpackTarGz(data []byte, dest string) error {
 				return err
 			}
 		case tar.TypeReg:
+			if hdr.Mode < 0 || hdr.Mode > math.MaxUint32 {
+				return fmt.Errorf("archive entry %q has invalid mode", hdr.Name)
+			}
+			// #nosec G115 -- tar mode is explicitly bounded to FileMode's
+			// uint32 representation above and writeFileFromReader masks it.
 			if err := writeFileFromReader(target, tr, os.FileMode(hdr.Mode)); err != nil {
 				return err
 			}

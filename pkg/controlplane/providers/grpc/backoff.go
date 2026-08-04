@@ -73,6 +73,8 @@ func (b *backoff) next() time.Duration {
 
 	// Apply jitter: ±jitter fraction
 	jitterRange := base * b.jitter
+	// #nosec G404 -- math/rand only jitters retry timing; it does not generate
+	// tokens or influence authentication, authorization, or cryptography.
 	jittered := base + (rand.Float64()*2-1)*jitterRange
 
 	// Clamp to [initial, max]

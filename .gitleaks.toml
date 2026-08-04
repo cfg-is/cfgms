@@ -73,6 +73,13 @@ paths = [
 
     # Feature test files (contain deliberate test-fixture credentials for scrubber/validator tests)
     '''features/.*_test\.go$''',
+    # Token-validation/service-argument unit tests use nonfunctional tok_* literals.
+    '''cmd/steward/service/token_test\.go$''',
+    '''cmd/steward/service/manager_windows_test\.go$''',
+
+    # Locally generated, gitignored test-service credentials. This file is also
+    # excluded from every Docker build context and is never a release input.
+    '''docker-compose\.test\.override\.yml$''',
 
     # Environment and configuration examples
     '''\.env\..*\.example$''',

@@ -222,6 +222,7 @@ func TestSynthesizeCommandRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 		"#!/bin/bash\necho hello",
 		scriptmodule.ShellBash,
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -400,6 +401,7 @@ func TestSynthesizeCommandRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {
 		fleet.Filter{},
 		"echo test",
 		scriptmodule.ShellBash,
+		nil,
 		nil,
 	)
 	require.NoError(t, err)

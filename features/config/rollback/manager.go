@@ -223,6 +223,8 @@ func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request Ro
 	}
 
 	// Execute rollback asynchronously
+	// #nosec G118 -- rollback is a persisted durable operation that must survive
+	// the initiating request; executeRollbackAsync enforces step timeouts/status.
 	go m.executeRollbackAsync(context.Background(), operation, preview)
 
 	return operation, nil

@@ -279,6 +279,9 @@ func computePollInterval(base, jitter time.Duration) time.Duration {
 	if jitter <= 0 {
 		return base
 	}
+	// #nosec G115,G404 -- jitter is a positive int64 duration, so the uint64
+	// conversion is lossless; math/rand is intentionally used for non-security
+	// poll scheduling and never influences authentication or authorization.
 	return base + time.Duration(rand.N(uint64(jitter)))
 }
 

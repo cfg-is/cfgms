@@ -5,7 +5,10 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -42,7 +45,41 @@ const (
 	// registrationRejectionReasonVar is an optional workflow output variable for a human-readable
 	// rejection reason. Only meaningful when the decision is "reject".
 	registrationRejectionReasonVar = "registration_rejection_reason"
+
+	// maxRejectionReasonLength bounds the workflow-supplied reason. The value is
+	// produced by workflow steps that call out to modules and external APIs, so
+	// it must be treated as untrusted text rather than an operator-authored
+	// message before it crosses the registration boundary.
+	maxRejectionReasonLength = 200
 )
+
+// boundRejectionReason constrains workflow-supplied rejection text to a short,
+// printable, single-line value. A workflow can otherwise route arbitrary module
+// and API error output — of unbounded length, and carrying whatever internal
+// detail those errors happen to contain — into the controller's registration
+// records.
+func boundRejectionReason(reason string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
+		if !unicode.IsPrint(r) {
+			return -1
+		}
+		return r
+	}, reason)
+	cleaned = strings.TrimSpace(cleaned)
+
+	if len(cleaned) > maxRejectionReasonLength {
+		// Cut on a rune boundary so the result stays valid UTF-8.
+		truncated := cleaned[:maxRejectionReasonLength]
+		for len(truncated) > 0 && !utf8.ValidString(truncated) {
+			truncated = truncated[:len(truncated)-1]
+		}
+		cleaned = truncated + "…"
+	}
+	return cleaned
+}
 
 // RegistrationInput contains the data available to a registration approval hook.
 type RegistrationInput struct {
@@ -56,8 +93,8 @@ type RegistrationInput struct {
 // RegistrationApprovalHook evaluates whether a registration request should be approved.
 //
 // The hook is called after token validation and before certificate issuance.
-// Returning an error is non-fatal: the registration handler logs the error and
-// falls back to approve so that transient hook failures do not block registrations.
+// Returning an error causes the registration handler to quarantine the request.
+// Admission-service failures must never grant unrestricted fleet access.
 type RegistrationApprovalHook interface {
 	Evaluate(ctx context.Context, input RegistrationInput) (decision ApprovalDecision, reason string, err error)
 }
@@ -205,7 +242,7 @@ func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationI
 	var reason string
 	if reasonVal, ok := exec.GetVariable(registrationRejectionReasonVar); ok {
 		if r, ok := reasonVal.(string); ok {
-			reason = r
+			reason = boundRejectionReason(r)
 		}
 	}
 

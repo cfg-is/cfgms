@@ -4,6 +4,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -55,6 +56,54 @@ func TestDatabaseRegistrationStore_RotateToken_Basic(t *testing.T) {
 	got, err := store.GetToken(ctx, newTok.Token)
 	require.NoError(t, err)
 	assert.True(t, got.IsValid())
+}
+
+func TestDatabaseRegistrationStore_RESTClaimIsAtomicAndRetryable(t *testing.T) {
+	store := newTestRegistrationStore(t)
+	ctx := context.Background()
+	expires := time.Now().Add(time.Hour)
+	require.NoError(t, store.SaveToken(ctx, &business.RegistrationTokenData{
+		Token: "db-rest-claim-canary", TenantID: "tenant-claim",
+		ControllerURL: "grpc://controller:7443", ExpiresAt: &expires,
+	}))
+
+	const contenders = 16
+	var successes atomic.Int32
+	var winner atomic.Int32
+	winner.Store(-1)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			created, err := store.ClaimToken(ctx, "db-rest-claim-canary", fmt.Sprintf("device-%d", i))
+			if err == nil && created {
+				successes.Add(1)
+				winner.Store(int32(i))
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	require.Equal(t, int32(1), successes.Load())
+
+	winnerID := fmt.Sprintf("device-%d", winner.Load())
+	created, err := store.ClaimToken(ctx, "db-rest-claim-canary", winnerID)
+	require.NoError(t, err)
+	assert.False(t, created)
+
+	_, err = store.ClaimToken(ctx, "db-rest-claim-canary", "different-device")
+	require.ErrorIs(t, err, business.ErrRegistrationTokenAlreadyClaimed)
+
+	require.NoError(t, store.ReleaseTokenClaim(ctx, "db-rest-claim-canary", winnerID))
+	created, err = store.ClaimToken(ctx, "db-rest-claim-canary", "retry-after-pre-issuance-failure")
+	require.NoError(t, err)
+	assert.True(t, created)
+
+	require.NoError(t, store.ConsumeToken(ctx, "db-rest-claim-canary"),
+		"REST claim must leave the bearer valid for final gRPC consumption")
 }
 
 func TestDatabaseRegistrationStore_RotateToken_NoActiveTokens(t *testing.T) {
@@ -153,7 +202,7 @@ func TestDatabaseRegistrationStore_SaveAndGetByID(t *testing.T) {
 	// The id must round-trip through the id-addressed lookup used by the web UI.
 	byID, err := store.GetTokenByID(ctx, token.ID)
 	require.NoError(t, err)
-	assert.Equal(t, token.Token, byID.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey(token.Token), byID.Token)
 	assert.Equal(t, token.ID, byID.ID)
 	assert.Equal(t, "tenant-byid", byID.TenantID)
 	assert.Equal(t, "prod", byID.Group)
@@ -213,7 +262,7 @@ func TestDatabaseRegistrationStore_SaveToken_AssignsIDWhenMissing(t *testing.T) 
 
 	byID, err := store.GetTokenByID(ctx, assignedID)
 	require.NoError(t, err)
-	assert.Equal(t, "db-no-id", byID.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey("db-no-id"), byID.Token)
 
 	// Upserting the same token must not reassign the id.
 	resaved := &business.RegistrationTokenData{
@@ -262,7 +311,7 @@ func TestDatabaseRegistrationStore_SaveToken_HealsEmptyStoredID(t *testing.T) {
 
 	byID, err := store.GetTokenByID(ctx, resaved.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "db-empty-id", byID.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey("db-empty-id"), byID.Token)
 }
 
 func TestDatabaseRegistrationStore_RotateToken_AssignsID(t *testing.T) {
@@ -285,7 +334,7 @@ func TestDatabaseRegistrationStore_RotateToken_AssignsID(t *testing.T) {
 
 	got, err := store.GetTokenByID(ctx, rotated.ID)
 	require.NoError(t, err)
-	assert.Equal(t, rotated.Token, got.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey(rotated.Token), got.Token)
 	assert.True(t, got.IsValid())
 
 	old, err := store.GetTokenByID(ctx, seed.ID)

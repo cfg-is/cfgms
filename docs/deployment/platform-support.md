@@ -121,7 +121,9 @@ The project includes automated builds and testing for all supported platforms:
 
 ### Building from Source
 
-CFGMS does not yet publish pre-built release binaries. Build from source:
+No pre-built artifact should be treated as available or trusted until the new
+protected signed-release workflow has completed successfully for a frozen tag.
+Until then, build from source:
 
 ```bash
 # Clone and build
@@ -130,6 +132,10 @@ cd cfgms
 make build
 # Creates: bin/controller, bin/cfgms-steward, bin/cfg
 ```
+
+For future tagged artifacts, follow
+[Release Artifact Verification](release-artifact-verification.md) before
+installation.
 
 ### Cross-Platform Steward Builds
 

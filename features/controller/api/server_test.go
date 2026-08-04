@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -74,7 +75,7 @@ func (p *testControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneSta
 func setupTestServer(t *testing.T) *Server {
 	// Isolate secrets storage per test. initializeSecretStore() defaults to a
 	// shared os.TempDir() path, which causes file-lock contention on Windows CI.
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	// Create test configuration
 	cfg := config.DefaultConfig()
@@ -160,7 +161,7 @@ func setupTestServer(t *testing.T) *Server {
 //	   does as long as s.rbacService != nil — no permissions need to be loaded.
 func setupRouteTestServer(t *testing.T) *Server {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -970,7 +971,7 @@ func (l *capturingWarnLogger) warnMessages() []string {
 // Use this when you need to capture log output for assertions.
 func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	// Isolate secrets storage per test (same reason as setupTestServer).
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -1021,8 +1022,9 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	return server
 }
 
-// TestTestEndpointAuthGate tests the CFGMS_ENABLE_TEST_ENDPOINTS env var gating
-// in authenticationMiddleware (middleware.go:114-134).
+// TestTestEndpointAuthGate verifies that runtime environment variables cannot
+// re-enable an authentication bypass in a production build. Test-only routes
+// are compile-time isolated behind the cfgms_test_endpoints build tag.
 func TestTestEndpointAuthGate(t *testing.T) {
 	t.Run("default behavior enforces auth when env var is unset", func(t *testing.T) {
 		server := setupTestServer(t)
@@ -1071,7 +1073,7 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		assert.False(t, handlerCalled, "Handler should not be called without authentication")
 	})
 
-	t.Run("bypass works when CFGMS_ENABLE_TEST_ENDPOINTS is true", func(t *testing.T) {
+	t.Run("environment variable cannot enable bypass", func(t *testing.T) {
 		server := setupTestServer(t)
 
 		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
@@ -1083,13 +1085,13 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		})
 		wrappedHandler := server.authenticationMiddleware(testHandler)
 
-		// PUT /api/v1/test/stewards/{id}/config — should bypass auth
+		// Test-looking paths still traverse ordinary authentication middleware.
 		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/config", nil)
 		rec := httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth when env var is set")
-		assert.True(t, handlerCalled, "Handler should be called (auth bypassed)")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
 
 		// POST /api/v1/test/stewards/{id}/quic/connect — should bypass auth
 		handlerCalled = false
@@ -1097,8 +1099,8 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		rec = httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for QUIC test endpoint")
-		assert.True(t, handlerCalled, "Handler should be called for QUIC test endpoint (auth bypassed)")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
 
 		// PUT /api/v1/test/stewards/{id}/status — Issue #2098: should bypass auth
 		handlerCalled = false
@@ -1106,8 +1108,8 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		rec = httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for status test endpoint")
-		assert.True(t, handlerCalled, "Handler should be called for status test endpoint (auth bypassed)")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
 
 		// GET /api/v1/test/audit/count — Issue #2098: should bypass auth
 		handlerCalled = false
@@ -1115,44 +1117,8 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		rec = httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for audit count test endpoint")
-		assert.True(t, handlerCalled, "Handler should be called for audit count test endpoint (auth bypassed)")
-	})
-
-	t.Run("warn log emitted on bypass", func(t *testing.T) {
-		capLogger := &capturingWarnLogger{}
-		server := setupTestServerWithLogger(t, capLogger)
-
-		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
-
-		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		wrappedHandler := server.authenticationMiddleware(testHandler)
-
-		// Clear any startup log messages before testing
-		capLogger.reset()
-
-		// Trigger bypass for config endpoint
-		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/steward-abc/config", nil)
-		rec := httptest.NewRecorder()
-		wrappedHandler.ServeHTTP(rec, req)
-
-		assert.Equal(t, http.StatusOK, rec.Code)
-		warnMsgs := capLogger.warnMessages()
-		require.NotEmpty(t, warnMsgs, "Should emit warn log on auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
-
-		// Trigger bypass for QUIC endpoint
-		capLogger.reset()
-		req = httptest.NewRequest("POST", "/api/v1/test/stewards/steward-abc/quic/connect", nil)
-		rec = httptest.NewRecorder()
-		wrappedHandler.ServeHTTP(rec, req)
-
-		assert.Equal(t, http.StatusOK, rec.Code)
-		warnMsgs = capLogger.warnMessages()
-		require.NotEmpty(t, warnMsgs, "Should emit warn log on QUIC auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
 	})
 
 	t.Run("non-test endpoints still require auth when env var is set", func(t *testing.T) {
@@ -1281,10 +1247,13 @@ func TestTenantContextPropagation(t *testing.T) {
 // (Issue #778): after removing the duplicate api.New() from controller.go, server.Server
 // is the sole owner of the api.Server instance and its Start/Stop lifecycle.
 func TestAPIServerStartStop(t *testing.T) {
-	// Use an ephemeral HTTP port so the test never conflicts with other tests or processes.
+	// Use an ephemeral HTTPS port so the test never conflicts with other tests or processes.
 	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
 
 	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = reservePrivateMetricsAddress(t)
+	server.cfg.Certificate.EnableCertManagement = true
+	server.certManager = newTLSTestCertManager(t)
 
 	err := server.Start()
 	require.NoError(t, err, "api.Server.Start() must return no error")
@@ -1293,6 +1262,64 @@ func TestAPIServerStartStop(t *testing.T) {
 	// cleanly even if ListenAndServe hasn't bound yet — no sleep required.
 	err = server.Stop()
 	assert.NoError(t, err, "api.Server.Stop() must return no error")
+}
+
+func reservePrivateMetricsAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	return address
+}
+
+func TestAPIServerStart_FailsClosedWithoutPrivateMetricsListener(t *testing.T) {
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = ""
+
+	err := server.Start()
+
+	require.ErrorContains(t, err, "invalid private metrics listener")
+	assert.Nil(t, server.httpServer, "public API must not bind when private metrics configuration is missing")
+	assert.Nil(t, server.metricsHTTPServer, "metrics server must not bind with missing configuration")
+}
+
+func TestAPIServerStart_RejectsUnsafePrivateMetricsListener(t *testing.T) {
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = "0.0.0.0:9090"
+
+	err := server.Start()
+
+	require.ErrorContains(t, err, "invalid private metrics listener")
+	assert.Nil(t, server.httpServer, "public API must not bind when metrics configuration is unsafe")
+	assert.Nil(t, server.metricsHTTPServer, "metrics server must not bind to an unsafe address")
+}
+
+// TestAPIServerStart_FailsClosedWithoutTLS guards against the former plaintext
+// fallback: a missing certificate manager and absent legacy files must prevent
+// startup instead of calling ListenAndServe.
+func TestAPIServerStart_FailsClosedWithoutTLS(t *testing.T) {
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = "127.0.0.1:9090"
+	server.cfg.CertPath = t.TempDir()
+
+	err := server.Start()
+	require.ErrorContains(t, err, "refusing to start public API without valid TLS")
+	assert.Nil(t, server.httpServer, "no HTTP server may be published after TLS preflight fails")
+}
+
+func TestAPIServerStart_RejectsCertificateHostnameMismatch(t *testing.T) {
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = "127.0.0.1:9090"
+	server.cfg.Certificate.EnableCertManagement = true
+	server.cfg.ExternalURL = "https://wrong-host.example:8080"
+	server.certManager = newTLSTestCertManager(t)
+
+	err := server.Start()
+	require.ErrorContains(t, err, "does not match external_url hostname")
+	assert.Nil(t, server.httpServer, "identity mismatch must fail before listener publication")
 }
 
 // TestServerClose_Idempotent verifies the Close contract: calling Close more than once
@@ -1451,7 +1478,7 @@ func TestServer_MonitoringStubRoutesDeregistered(t *testing.T) {
 // so tests can interact with them directly.
 func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *service.ConfigurationServiceV2, *service.ControllerService) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false

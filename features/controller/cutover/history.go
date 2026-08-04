@@ -97,7 +97,7 @@ func (h *History) Append(ev UpgradeEvent) (retErr error) {
 	if ev.Timestamp.IsZero() {
 		ev.Timestamp = time.Now().UTC()
 	}
-	if err := os.MkdirAll(filepath.Dir(h.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(h.path), 0o700); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(h.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //#nosec G304 -- caller owns path

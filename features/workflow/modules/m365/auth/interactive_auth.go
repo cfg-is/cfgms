@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"os"
@@ -121,6 +122,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 			err := fmt.Errorf("OAuth error: %s - %s", errCode, errDesc)
 			resultChan <- authResult{err: err}
 
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -132,7 +134,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 	<p>Description: %s</p>
 	<p>You can close this window.</p>
 </body>
-</html>`, errCode, errDesc)
+</html>`, html.EscapeString(errCode), html.EscapeString(errDesc))
 			return
 		}
 
@@ -184,6 +186,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 		if err != nil {
 			resultChan <- authResult{err: err}
 
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = fmt.Fprintf(w, `
 <!DOCTYPE html>
@@ -194,7 +197,7 @@ func (ia *InteractiveAuthenticator) setupCallbackHandler(state, codeVerifier, te
 	<p>Failed to exchange authorization code for token: %s</p>
 	<p>You can close this window.</p>
 </body>
-</html>`, err.Error())
+</html>`, html.EscapeString(err.Error()))
 			return
 		}
 

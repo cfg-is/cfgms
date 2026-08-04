@@ -311,6 +311,8 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 	// Execute workflow asynchronously
 	execution.Status = TriggerExecutionStatusRunning
 
+	// #nosec G118 -- the accepted webhook returns an execution handle while the
+	// workflow continues; the configured trigger timeout bounds it when present.
 	go func() {
 		execCtx := context.WithValue(context.Background(), TenantIDContextKey, tenantID)
 		if trigger.Timeout > 0 {

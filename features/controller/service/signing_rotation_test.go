@@ -23,6 +23,7 @@ import (
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,6 +136,8 @@ func tlsForTest(t *testing.T, stewardID string) (serverTLS, clientTLS *tls.Confi
 
 	clientTLS, err = cert.CreateClientTLSConfig(clientCert.CertificatePEM, clientCert.PrivateKeyPEM, caPEM, "localhost", tls.VersionTLS13)
 	require.NoError(t, err)
+	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
+	clientTLS.NextProtos = []string{quictransport.ALPNProtocol}
 	return serverTLS, clientTLS
 }
 

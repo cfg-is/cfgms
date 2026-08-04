@@ -30,7 +30,7 @@ import (
 // so deployment handler tests can exercise the full handler path.
 func setupDeploymentServer(t *testing.T) (*Server, business.PushStore) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false

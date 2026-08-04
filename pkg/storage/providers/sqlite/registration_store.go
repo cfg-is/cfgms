@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -74,7 +75,7 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 			revoked = excluded.revoked,
 			revoked_at = excluded.revoked_at
 		RETURNING id`,
-		token.Token,
+		business.RegistrationTokenLookupKey(token.Token),
 		nullableStr(token.ID),
 		token.TenantID,
 		token.ControllerURL,
@@ -93,11 +94,23 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 
 // GetToken retrieves a registration token by its token string.
 func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
+	lookupKey := business.RegistrationTokenLookupKey(tokenStr)
 	row := s.db.QueryRowContext(ctx, `
 		SELECT token, id, tenant_id, controller_url, group_name, created_at,
 		       expires_at, revoked, revoked_at
-		FROM registration_tokens WHERE token = ?`, tokenStr)
-	return scanToken(row)
+		FROM registration_tokens WHERE token = ?`, lookupKey)
+	token, err := scanToken(row)
+	if err != nil && lookupKey != tokenStr {
+		// Read legacy plaintext rows so they can be rotated without downtime.
+		token, err = scanToken(s.db.QueryRowContext(ctx, `
+			SELECT token, id, tenant_id, controller_url, group_name, created_at,
+			       expires_at, revoked, revoked_at
+			FROM registration_tokens WHERE token = ?`, tokenStr))
+	}
+	if err == nil {
+		token.Token = tokenStr
+	}
+	return token, err
 }
 
 // GetTokenByID retrieves a registration token by its stable UUID (Issue #2970).
@@ -122,13 +135,14 @@ func (s *SQLiteRegistrationTokenStore) UpdateToken(ctx context.Context, token *b
 		UPDATE registration_tokens
 		SET tenant_id = ?, controller_url = ?, group_name = ?,
 		    expires_at = ?, revoked = ?, revoked_at = ?
-		WHERE token = ?`,
+		WHERE token IN (?, ?)`,
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
 		nullTime(token.ExpiresAt),
 		boolToInt(token.Revoked),
 		nullTime(token.RevokedAt),
+		business.RegistrationTokenLookupKey(token.Token),
 		token.Token,
 	)
 	if err != nil {
@@ -143,13 +157,112 @@ func (s *SQLiteRegistrationTokenStore) UpdateToken(ctx context.Context, token *b
 
 // DeleteToken removes a registration token.
 func (s *SQLiteRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM registration_tokens WHERE token = ?`, tokenStr)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM registration_tokens WHERE token IN (?, ?)`,
+		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	if err != nil {
 		return fmt.Errorf("failed to delete registration token: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("registration token not found")
+	}
+	return nil
+}
+
+// ConsumeToken atomically marks one valid token spent. Concurrent callers race
+// on the conditional UPDATE; exactly one can affect a row.
+func (s *SQLiteRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenStr string) error {
+	now := nowUTC()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE registration_tokens
+		SET revoked = 1, revoked_at = ?
+		WHERE token IN (?, ?)
+		  AND revoked = 0
+		  AND (expires_at IS NULL OR expires_at > ?)`,
+		formatTime(now),
+		business.RegistrationTokenLookupKey(tokenStr),
+		tokenStr,
+		formatTime(now),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to consume registration token: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to confirm registration token consumption: %w", err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("registration token is invalid, expired, or already used")
+	}
+	return nil
+}
+
+// ClaimToken atomically reserves one valid token at the REST admission boundary.
+// The claim is intentionally separate from revoked/consumed state because the
+// steward must present the same bearer during the subsequent gRPC registration.
+func (s *SQLiteRegistrationTokenStore) ClaimToken(ctx context.Context, tokenStr, claimID string) (bool, error) {
+	if tokenStr == "" {
+		return false, fmt.Errorf("token string cannot be empty")
+	}
+	if claimID == "" {
+		return false, fmt.Errorf("registration claim ID cannot be empty")
+	}
+
+	now := nowUTC()
+	lookupKey := business.RegistrationTokenLookupKey(tokenStr)
+	res, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO registration_token_claims (token, claim_id, claimed_at)
+		SELECT ?, ?, ?
+		WHERE EXISTS (
+			SELECT 1 FROM registration_tokens
+			WHERE token IN (?, ?)
+			  AND revoked = 0
+			  AND (expires_at IS NULL OR expires_at > ?)
+		)`,
+		lookupKey,
+		claimID,
+		formatTime(now),
+		lookupKey,
+		tokenStr,
+		formatTime(now),
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim registration token: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to confirm registration token claim: %w", err)
+	}
+	if affected == 1 {
+		return true, nil
+	}
+
+	var existingClaimID string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT claim_id FROM registration_token_claims WHERE token = ?`,
+		lookupKey,
+	).Scan(&existingClaimID)
+	if err == sql.ErrNoRows {
+		return false, fmt.Errorf("registration token is invalid, expired, or revoked")
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect registration token claim: %w", err)
+	}
+	if existingClaimID == claimID {
+		return false, nil
+	}
+	return false, business.ErrRegistrationTokenAlreadyClaimed
+}
+
+// ReleaseTokenClaim removes only the exact claim made by this REST attempt.
+func (s *SQLiteRegistrationTokenStore) ReleaseTokenClaim(ctx context.Context, tokenStr, claimID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM registration_token_claims WHERE token = ? AND claim_id = ?`,
+		business.RegistrationTokenLookupKey(tokenStr),
+		claimID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to release registration token claim: %w", err)
 	}
 	return nil
 }
@@ -235,6 +348,8 @@ func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID
 
 	now := nowUTC()
 	nowStr := formatTime(now)
+	expiresAt := now.Add(15 * time.Minute)
+	newLookupKey := business.RegistrationTokenLookupKey(newTokenStr)
 
 	newID, err := generateTokenID()
 	if err != nil {
@@ -244,9 +359,9 @@ func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID
 	// Insert the new token.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO registration_tokens
-			(token, id, tenant_id, controller_url, group_name, created_at, revoked)
-		VALUES (?, ?, ?, ?, ?, ?, 0)`,
-		newTokenStr, newID, tenantID, controllerURL, group, nowStr,
+			(token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+		newLookupKey, newID, tenantID, controllerURL, group, nowStr, formatTime(expiresAt),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert new token: %w", err)
@@ -257,7 +372,7 @@ func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID
 		UPDATE registration_tokens
 		SET revoked = 1, revoked_at = ?
 		WHERE tenant_id = ? AND group_name = ? AND revoked = 0 AND token != ?`,
-		nowStr, tenantID, group, newTokenStr,
+		nowStr, tenantID, group, newLookupKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to revoke old tokens: %w", err)
@@ -275,6 +390,7 @@ func (s *SQLiteRegistrationTokenStore) RotateToken(ctx context.Context, tenantID
 		ControllerURL: controllerURL,
 		Group:         group,
 		CreatedAt:     now,
+		ExpiresAt:     &expiresAt,
 	}, nil
 }
 
@@ -362,3 +478,5 @@ func generateTokenID() (string, error) {
 
 // ensure SQLiteRegistrationTokenStore satisfies the interface at compile time
 var _ business.RegistrationTokenStore = (*SQLiteRegistrationTokenStore)(nil)
+var _ business.RegistrationTokenConsumer = (*SQLiteRegistrationTokenStore)(nil)
+var _ business.RegistrationTokenClaimer = (*SQLiteRegistrationTokenStore)(nil)

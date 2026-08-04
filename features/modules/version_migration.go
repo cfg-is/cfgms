@@ -638,6 +638,8 @@ func (m *DefaultVersionMigrator) ExecuteMigration(ctx context.Context, path *Mig
 	}
 
 	// Create migration execution context
+	// #nosec G118 -- cancellation ownership is transferred into execution and
+	// released by executeMigrationSteps on every terminal path.
 	migrationCtx, cancelFunc := context.WithCancel(ctx)
 	execution := &MigrationExecution{
 		Path:           path,
@@ -669,6 +671,8 @@ func (m *DefaultVersionMigrator) ExecuteMigration(ctx context.Context, path *Mig
 
 // executeMigrationSteps executes the migration steps
 func (m *DefaultVersionMigrator) executeMigrationSteps(execution *MigrationExecution) {
+	defer execution.CancelFunc()
+
 	// Set status to running under lock protection
 	m.mu.Lock()
 	execution.Status = MigrationStatusRunning

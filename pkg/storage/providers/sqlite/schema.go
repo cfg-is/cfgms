@@ -399,9 +399,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_rbac_role_assignments_role_id    ON rbac_role_assignments(role_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_rbac_role_assignments_tenant_id  ON rbac_role_assignments(tenant_id)`,
 
-		// Registration tokens — perennial model (Issue #1690)
-		// Migration note: single_use, used_at, and used_by columns were removed in Issue #1690.
-		// Pre-existing deployments must DROP these columns before upgrading.
+		// Registration tokens. New tokens are short-lived and their bearer values
+		// are persisted only as deterministic SHA-256 lookup keys. Legacy rows
+		// without expiry remain readable so operators can rotate them.
 		`CREATE TABLE IF NOT EXISTS registration_tokens (
 			token          TEXT PRIMARY KEY,
 			id             TEXT,
@@ -416,6 +416,15 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_tenant_id  ON registration_tokens(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_group_name ON registration_tokens(group_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_id         ON registration_tokens(id)`,
+
+		// REST registration claims are separate from final token consumption:
+		// a claim gates certificate/pending-record creation, while the token
+		// remains valid until the mTLS-authenticated gRPC registration.
+		`CREATE TABLE IF NOT EXISTS registration_token_claims (
+				token      TEXT PRIMARY KEY,
+				claim_id   TEXT NOT NULL,
+				claimed_at TEXT NOT NULL
+			)`,
 
 		// Stewards — durable fleet registry (ADR-003 §2, Issue #663)
 		// Records are never deleted; deregistered stewards are retained for audit.

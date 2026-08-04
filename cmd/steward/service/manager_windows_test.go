@@ -128,7 +128,10 @@ func TestSetServiceEnvironmentRoundTrip(t *testing.T) {
 	vals, valType, err := rk.GetStringsValue("Environment")
 	require.NoError(t, err)
 	assert.Equal(t, uint32(registry.MULTI_SZ), valType, "Environment must be REG_MULTI_SZ — the only type the SCM accepts")
-	assert.Equal(t, []string{"CFGMS_LOG_DIR=" + logDir}, vals)
+	assert.Equal(t, []string{
+		"CFGMS_LOG_DIR=" + logDir,
+		"CFGMS_SECURITY_PROFILE=public-beta",
+	}, vals)
 }
 
 // TestWindowsLauncherPathParity is the REQUIRED path-parity TEST for #2379:

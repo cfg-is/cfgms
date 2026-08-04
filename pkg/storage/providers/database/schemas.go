@@ -589,6 +589,8 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 // (perennial token model with immediate-invalidation rotation). The id column (stable,
 // non-secret UUID used by the web UI to address a token) was added in Issue #2970 —
 // BackfillRegistrationTokenIDs handles pre-existing deployments.
+// Bearer values are persisted as deterministic SHA-256 lookup keys by the store.
+// Legacy rows without expiry remain readable so operators can rotate them.
 func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_registration_tokens (
@@ -612,6 +614,17 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 	// assign a UUID to every pre-existing row so the web UI can address them.
 	if err := s.BackfillRegistrationTokenIDs(ctx, db); err != nil {
 		return err
+	}
+
+	createClaimsTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_registration_token_claims (
+			token      VARCHAR(255) PRIMARY KEY,
+			claim_id   VARCHAR(255) NOT NULL,
+			claimed_at TIMESTAMP WITH TIME ZONE NOT NULL
+		);
+	`
+	if _, err := db.ExecContext(ctx, createClaimsTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_registration_token_claims table: %w", err)
 	}
 
 	// Create indexes for performance and tenant isolation
@@ -1179,6 +1192,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS admin_consent_requests;",
 		"DROP TABLE IF EXISTS client_tenants;",
 		"DROP TABLE IF EXISTS cfgms_registration_tokens;",
+		"DROP TABLE IF EXISTS cfgms_registration_token_claims;",
 		"DROP TABLE IF EXISTS cfgms_ip_trust_ranges;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",

@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -286,7 +285,10 @@ func (c *TransportClient) finalizeStewardBinaryUpgrade(ctx context.Context, tmpP
 	}
 
 	// Step 12: Invoke launcher swap.
-	if err := c.execLauncherSwap(ctx, lPath, params.Version, tmpPath); err != nil {
+	c.mu.RLock()
+	allowDowngrade := c.upgradeAllowDowngrade
+	c.mu.RUnlock()
+	if err := c.execLauncherSwap(ctx, lPath, params.Version, tmpPath, allowDowngrade); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("push_steward_binary: launcher swap failed: %w", err)
 	}
@@ -749,7 +751,7 @@ func (c *TransportClient) isVersionRevoked(v string) bool {
 // execLauncherSwap invokes the launcher swap subcommand.
 // Uses c.launcherSwapFunc when set (injectable for tests); otherwise uses
 // exec.CommandContext with a 60-second timeout.
-func (c *TransportClient) execLauncherSwap(ctx context.Context, lPath, ver, binaryPath string) error {
+func (c *TransportClient) execLauncherSwap(ctx context.Context, lPath, ver, binaryPath string, allowDowngrade bool) error {
 	c.mu.RLock()
 	swapFn := c.launcherSwapFunc
 	c.mu.RUnlock()
@@ -762,7 +764,12 @@ func (c *TransportClient) execLauncherSwap(ctx context.Context, lPath, ver, bina
 	defer cancel()
 	// launcherPath is a compile-time constant; ver and binaryPath are verified
 	// above (host-pinned URL, SHA-256 + signature checked). G204 is intentional.
-	cmd := exec.CommandContext(swapCtx, lPath, "swap", ver, binaryPath) //#nosec G204
+	args := []string{"swap"}
+	if allowDowngrade {
+		args = append(args, "--allow-downgrade")
+	}
+	args = append(args, ver, binaryPath)
+	cmd := exec.CommandContext(swapCtx, lPath, args...) //#nosec G204
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -773,42 +780,8 @@ func (c *TransportClient) execLauncherSwap(ctx context.Context, lPath, ver, bina
 }
 
 // isNewerVersion reports whether candidate is strictly newer than running.
-// Both strings should be semver-like ("v1.2.3" or "1.2.3"). Non-parseable
-// versions fall back to lexicographic comparison.
+// Invalid versions fail closed instead of falling back to lexical ordering.
 func isNewerVersion(candidate, running string) bool {
-	cv := parseSemver(candidate)
-	rv := parseSemver(running)
-	if cv != nil && rv != nil {
-		if cv[0] != rv[0] {
-			return cv[0] > rv[0]
-		}
-		if cv[1] != rv[1] {
-			return cv[1] > rv[1]
-		}
-		return cv[2] > rv[2]
-	}
-	// Fallback: lexicographic.
-	return candidate > running
-}
-
-// parseSemver parses "v?MAJOR.MINOR.PATCH" into [3]int. Returns nil on error.
-func parseSemver(v string) []int {
-	v = strings.TrimPrefix(v, "v")
-	// Strip pre-release / build metadata (e.g. "-beta.1", "+build.1").
-	if i := strings.IndexAny(v, "-+"); i >= 0 {
-		v = v[:i]
-	}
-	parts := strings.SplitN(v, ".", 3)
-	if len(parts) != 3 {
-		return nil
-	}
-	nums := make([]int, 3)
-	for i, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			return nil
-		}
-		nums[i] = n
-	}
-	return nums
+	cmp, err := version.CompareSemantic(candidate, running)
+	return err == nil && cmp > 0
 }

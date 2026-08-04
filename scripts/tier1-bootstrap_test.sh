@@ -166,6 +166,15 @@ else
     elif ! grep -q "ctrl.test.lab" "$CFG_FILE"; then
         fail "test2: controller.cfg does not contain hostname"
         PASS_THIS=false
+    elif ! grep -Fxq 'security_profile: "public-beta"' "$CFG_FILE"; then
+        fail "test2: controller.cfg does not select public-beta security"
+        PASS_THIS=false
+    elif ! grep -Fxq '  require_signed_adhoc: true' "$CFG_FILE"; then
+        fail "test2: controller.cfg does not require signed ad-hoc execution"
+        PASS_THIS=false
+    elif ! grep -Fxq 'metrics_listen_addr: "127.0.0.1:9090"' "$CFG_FILE"; then
+        fail "test2: controller.cfg does not bind metrics to the private loopback listener"
+        PASS_THIS=false
     fi
 
     # Init marker created
@@ -182,11 +191,40 @@ else
         PASS_THIS=false
     fi
 
+    # External secret-encryption key created with no group/other access.
+    SECRETS_KEY="${T2_PREFIX}/etc/cfgms/secrets.key"
+    if [[ ! -f "$SECRETS_KEY" ]]; then
+        fail "test2: external secret-encryption key not created"
+        PASS_THIS=false
+    elif [[ "$(stat -c '%a' "$SECRETS_KEY")" != "600" ]]; then
+        fail "test2: external secret-encryption key mode is not 0600"
+        PASS_THIS=false
+    fi
+
     # Systemd unit written
     SERVICE="${T2_PREFIX}/etc/systemd/system/cfgms-controller.service"
     if [[ ! -f "$SERVICE" ]]; then
         fail "test2: systemd unit not written"
         PASS_THIS=false
+    elif grep -q '^User=root$' "$SERVICE"; then
+        fail "test2: systemd unit must not run the controller as root"
+        PASS_THIS=false
+    else
+        for directive in \
+            'User=cfgms' \
+            'Group=cfgms' \
+            'Environment=CFGMS_SECURITY_PROFILE=public-beta' \
+            'Environment=CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC=true' \
+            'NoNewPrivileges=true' \
+            'ProtectSystem=strict' \
+            'PrivateTmp=true' \
+            'CapabilityBoundingSet=' \
+            'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6'; do
+            if ! grep -Fxq "$directive" "$SERVICE"; then
+                fail "test2: systemd unit missing hardening directive: $directive"
+                PASS_THIS=false
+            fi
+        done
     fi
 
     # Required directories created

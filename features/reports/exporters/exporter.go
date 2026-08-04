@@ -441,8 +441,12 @@ func buildSheetXML(rows [][]string) string {
 // xlsxColLetter converts a 1-based column index to an Excel column letter (A–Z, AA–AZ, …).
 func xlsxColLetter(col int) string {
 	if col <= 26 {
+		// #nosec G115 -- buildExcelRows emits two columns and tests call this
+		// helper only with positive spreadsheet-column indices.
 		return string(rune('A' + col - 1))
 	}
+	// #nosec G115 -- this branch is the bounded two-letter spreadsheet-column
+	// encoding; both modulo-derived values remain in the ASCII A-Z range.
 	return string(rune('A'+(col-1)/26-1)) + string(rune('A'+(col-1)%26))
 }
 

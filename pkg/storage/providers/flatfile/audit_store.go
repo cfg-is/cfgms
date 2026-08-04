@@ -114,7 +114,7 @@ func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 	}
 
 	// #nosec G304 — path validated by safeJoin inside dailyFilePath
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open audit file: %w", err)
 	}
@@ -533,6 +533,12 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*business.Audit
 
 	var oldest, newest *time.Time
 
+	auditRoot, err := os.OpenRoot(s.root)
+	if err != nil {
+		return nil, fmt.Errorf("open audit root: %w", err)
+	}
+	defer func() { _ = auditRoot.Close() }()
+
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil || d.IsDir() {
 			return nil
@@ -541,8 +547,11 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*business.Audit
 			return nil
 		}
 
-		// #nosec G304 — path from WalkDir rooted at s.root
-		f, err := os.Open(path)
+		relativePath, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return nil
+		}
+		f, err := auditRoot.Open(relativePath)
 		if err != nil {
 			return nil
 		}
@@ -667,6 +676,12 @@ func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate
 func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	var count int64
 
+	auditRoot, err := os.OpenRoot(s.root)
+	if err != nil {
+		return 0, fmt.Errorf("open audit root: %w", err)
+	}
+	defer func() { _ = auditRoot.Close() }()
+
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil || d.IsDir() {
 			return nil
@@ -680,9 +695,13 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 			return nil
 		}
 
-		// Count entries before deleting. readFile retries Windows
-		// sharing violations from concurrent writers (Issue #1919).
-		raw, err := readFile(path)
+		relativePath, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return nil
+		}
+		// Files selected for purge predate the current audit file, so no writer
+		// should hold them; Root keeps both the count and removal beneath s.root.
+		raw, err := auditRoot.ReadFile(relativePath)
 		if err == nil {
 			for _, line := range strings.Split(string(raw), "\n") {
 				if strings.TrimSpace(line) != "" {
@@ -690,7 +709,7 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 				}
 			}
 		}
-		_ = os.Remove(path)
+		_ = auditRoot.Remove(relativePath)
 		return nil
 	})
 	if walkErr != nil {

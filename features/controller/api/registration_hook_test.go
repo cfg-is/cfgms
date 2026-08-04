@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -501,12 +503,13 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
 }
 
-// TestHandleRegister_HookError_FailsOpen verifies that when the approval hook returns an
-// error, handleRegister falls back to approve (fail-open) and continues with normal
-// registration processing (not 403 Forbidden).
-func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
+// TestHandleRegister_HookError_Quarantines verifies that admission-service
+// failures cannot grant a certificate or unrestricted fleet access.
+func TestHandleRegister_HookError_Quarantines(t *testing.T) {
 	server, tokenStore := setupTestServerWithTokenStore(t)
 	server.SetApprovalHook(&errorHook{})
+	server.SetPendingStore(pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore())
+	server.cfg.Transport.ExternalAddress = "controller.example.com"
 
 	// Create a valid token in the store.
 	token := &registration.Token{
@@ -529,12 +532,12 @@ func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
 
 	server.router.ServeHTTP(rec, req)
 
-	// The hook error causes fail-open: the request should not be rejected (403).
-	// Without a cert manager, the handler returns 500 at certificate generation.
-	// Either way it must NOT be 403 Forbidden (which would mean the hook error was
-	// incorrectly treated as a rejection).
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"hook error must fail open — not treated as a rejection")
+	assert.Equal(t, http.StatusAccepted, rec.Code,
+		"hook error must quarantine without issuing a certificate")
+	var response RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	assert.Equal(t, business.PendingRegistrationStatusPending, response.Status)
+	assert.NotEmpty(t, response.PendingID)
 }
 
 // --- ManualReviewApprovalHook ---
@@ -629,4 +632,39 @@ func TestManualReviewApprovalHook_ExpireTimedOut(t *testing.T) {
 	got, err := pendingStore.GetPendingByID(ctx, "pending-expired-test")
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusExpired, got.Status)
+}
+
+func TestBoundRejectionReason(t *testing.T) {
+	t.Run("passes a normal operator-readable reason through", func(t *testing.T) {
+		assert.Equal(t, "device not on the trusted subnet",
+			boundRejectionReason("device not on the trusted subnet"))
+	})
+
+	t.Run("strips control characters that would forge log or record structure", func(t *testing.T) {
+		got := boundRejectionReason("denied\n2026-01-01 ERROR forged entry\x00")
+		assert.Equal(t, "denied2026-01-01 ERROR forged entry", got)
+		assert.NotContains(t, got, "\n")
+		assert.NotContains(t, got, "\x00")
+	})
+
+	t.Run("folds tabs to spaces and trims surrounding whitespace", func(t *testing.T) {
+		assert.Equal(t, "denied by policy", boundRejectionReason("  denied\tby policy  "))
+	})
+
+	t.Run("caps an unbounded reason", func(t *testing.T) {
+		got := boundRejectionReason(strings.Repeat("A", 5000))
+		assert.LessOrEqual(t, len(got), maxRejectionReasonLength+len("…"))
+		assert.True(t, strings.HasSuffix(got, "…"), "truncation must be visible: %q", got)
+	})
+
+	t.Run("truncates on a rune boundary", func(t *testing.T) {
+		// Multi-byte runes straddling the cut must not leave invalid UTF-8.
+		got := boundRejectionReason(strings.Repeat("é", 5000))
+		assert.True(t, utf8.ValidString(got), "truncated reason must remain valid UTF-8")
+		assert.True(t, strings.HasSuffix(got, "…"))
+	})
+
+	t.Run("empty stays empty", func(t *testing.T) {
+		assert.Equal(t, "", boundRejectionReason(""))
+	})
 }

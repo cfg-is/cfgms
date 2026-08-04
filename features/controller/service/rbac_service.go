@@ -468,7 +468,8 @@ func (s *RBACService) convertToProtoHierarchy(hierarchy *rbac.RoleHierarchy) *co
 	}
 
 	protoHierarchy := &controller.RoleHierarchy{
-		Role:  hierarchy.Role,
+		Role: hierarchy.Role,
+		// #nosec G115 -- the immediately preceding check bounds Depth to int32.
 		Depth: int32(hierarchy.Depth), // Safe: bounds validated above
 	}
 

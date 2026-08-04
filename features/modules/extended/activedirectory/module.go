@@ -1089,6 +1089,9 @@ func (m *activeDirectoryModule) verifySystemAccess(ctx context.Context) error {
 func (m *activeDirectoryModule) executePowerShellWithSystemContext(ctx context.Context, script string) (string, error) {
 	// Create PowerShell command that runs with current system context
 	// The steward should already be running as SYSTEM, so this inherits those permissions
+	// #nosec G204 -- callers use module-owned templates; the only interpolated
+	// values are validateObjectID's strict [A-Za-z0-9._@-] token or a decimal
+	// PageSize integer, so PowerShell metacharacters cannot reach -Command.
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 
 	// Execute command

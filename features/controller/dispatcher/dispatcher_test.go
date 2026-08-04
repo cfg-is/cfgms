@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	configsignature "github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/run"
 	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -40,6 +41,20 @@ type testControlPlane struct {
 	eventHandler cpinterfaces.EventHandler
 	sendErr      error // if set, SendCommand returns this error
 }
+
+type testCommandSigner struct{}
+
+func (testCommandSigner) Sign([]byte) (*configsignature.ConfigSignature, error) {
+	return &configsignature.ConfigSignature{
+		Algorithm:      configsignature.AlgorithmRSASHA256,
+		Signature:      "controller-envelope-signature",
+		KeyFingerprint: "controller-key",
+	}, nil
+}
+func (testCommandSigner) Algorithm() configsignature.Algorithm {
+	return configsignature.AlgorithmRSASHA256
+}
+func (testCommandSigner) KeyFingerprint() string { return "controller-key" }
 
 func (p *testControlPlane) Name() string      { return "test" }
 func (p *testControlPlane) IsConnected() bool { return true }
@@ -315,6 +330,51 @@ func queuedExec(executionID, scriptRef string) *script.QueuedExecution {
 		Shell:       script.ShellBash,
 		Timeout:     5 * time.Minute,
 	}
+}
+
+func TestDispatcherPublicBetaContractRejectsMissingSigner(t *testing.T) {
+	queue := newTestQueue(t, nil)
+	dispatcher, err := New(&Config{
+		Queue:              queue,
+		ControlPlane:       &testControlPlane{},
+		RequireSignedAdhoc: true,
+		Logger:             logging.NewNoopLogger(),
+	})
+	require.Nil(t, dispatcher)
+	require.ErrorContains(t, err, "requires a command signer")
+}
+
+func TestDispatcherPublicBetaContractPreservesBothSignatureLayers(t *testing.T) {
+	queue := newTestQueue(t, nil)
+	controlPlane := &testControlPlane{}
+	dispatcher, err := New(&Config{
+		Queue:              queue,
+		ControlPlane:       controlPlane,
+		Signer:             testCommandSigner{},
+		RequireSignedAdhoc: true,
+		Logger:             logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	execution := &script.QueuedExecution{
+		ExecutionID: "exec-public-beta",
+		Shell:       script.ShellBash,
+		Metadata: map[string]interface{}{
+			"signature_algorithm":  "rsa-sha256",
+			"signature_value":      "operator-content-signature",
+			"signature_public_key": "operator-certificate",
+		},
+	}
+	prepared := &script.PreparedExecution{ScriptContent: "hostname"}
+	require.NoError(t, dispatcher.sendCommand(context.Background(), "steward-1", execution, prepared))
+
+	require.Len(t, controlPlane.sent, 1)
+	sent := controlPlane.sent[0]
+	require.NotNil(t, sent.Signature, "controller command envelope must be signed")
+	assert.Equal(t, "controller-envelope-signature", sent.Signature.Signature)
+	assert.Equal(t, "rsa-sha256", sent.Command.Params["signature_algorithm"])
+	assert.Equal(t, "operator-content-signature", sent.Command.Params["signature_value"])
+	assert.Equal(t, "operator-certificate", sent.Command.Params["signature_public_key"])
 }
 
 // ----------------------------------------------------------------------------

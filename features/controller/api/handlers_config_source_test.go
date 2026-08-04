@@ -88,7 +88,7 @@ func TestConnectionTest_RateLimitReturns429(t *testing.T) {
 
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
 
 	// Exhaust the per-tenant rate limit.
@@ -118,7 +118,7 @@ func TestConnectionTest_ActorFromContextOnly(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
 
 	// Attempt to inject a fake actor via the request body (must be ignored).
 	body := `{"actor": "injected-actor", "user": "attacker"}`
@@ -144,7 +144,7 @@ func TestConnectionTest_Returns200WhenReachable(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
 
 	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
@@ -167,7 +167,7 @@ func TestConnectionTest_Returns200WhenUnreachable(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysFailValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
 
 	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))

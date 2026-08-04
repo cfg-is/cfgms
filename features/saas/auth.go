@@ -246,6 +246,8 @@ func (ua *UniversalAuthenticator) authenticateBasicAuth(ctx context.Context, pro
 	}
 
 	// Store username and password as JSON
+	// #nosec G117 -- this JSON becomes the opaque value of CredentialStore.StoreToken,
+	// whose production implementation persists it through the encrypted SecretStore.
 	data, err := json.Marshal(struct {
 		Username string `json:"username"`
 		Password string `json:"password"`

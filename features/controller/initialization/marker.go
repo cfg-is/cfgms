@@ -48,6 +48,8 @@ func IsInitialized(caPath string) bool {
 // ReadInitMarker reads and parses the initialization marker from the CA directory.
 func ReadInitMarker(caPath string) (*InitMarker, error) {
 	markerPath := filepath.Join(caPath, markerFileName)
+	// #nosec G304 -- caPath is the controller's configured CA directory and
+	// markerFileName is a fixed internal filename beneath it.
 	data, err := os.ReadFile(markerPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read init marker: %w", err)
@@ -112,10 +114,14 @@ func CreateLegacyMarker(caPath string) error {
 // Checks both direct placement (caPath/ca.crt) and subdirectory layout (caPath/ca/ca.crt).
 func readCAFingerprint(caPath string) (string, error) {
 	caCertPath := filepath.Join(caPath, "ca.crt")
+	// #nosec G304 -- caPath is the configured CA root and ca.crt is a fixed
+	// public certificate filename beneath it.
 	certPEM, err := os.ReadFile(caCertPath)
 	if err != nil {
 		// Try subdirectory layout used by cert.NewManager
 		caCertPath = filepath.Join(caPath, "ca", "ca.crt")
+		// #nosec G304 -- fallback is another fixed CA certificate path beneath
+		// the same configured controller CA root.
 		certPEM, err = os.ReadFile(caCertPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to read CA certificate: %w", err)

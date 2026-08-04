@@ -18,6 +18,59 @@ import (
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
+const (
+	maxStructuredRequestBodyBytes int64 = 10 * 1024 * 1024
+	maxBinaryRequestBodyBytes     int64 = 64 * 1024 * 1024
+)
+
+// requestBodyLimitMiddleware enforces body limits on every router surface,
+// including unauthenticated base-router endpoints that do not pass through
+// validationMiddleware. Structured bodies are buffered only up to the limit so
+// chunked requests cannot bypass Content-Length checks. Binary artifacts remain
+// streaming, but are bounded by MaxBytesReader.
+func (s *Server) requestBodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		limit := maxStructuredRequestBodyBytes
+		isBinary := strings.HasPrefix(r.Header.Get("Content-Type"), "application/octet-stream")
+		if isBinary {
+			limit = maxBinaryRequestBodyBytes
+		}
+
+		if r.ContentLength > limit {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		if isBinary {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if closeErr := r.Body.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > limit {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ValidationMiddleware provides comprehensive input validation for API requests
 func (s *Server) validationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -233,8 +286,9 @@ func (s *Server) validateRequestBody(validator *security.EnhancedValidator, resu
 		return nil
 	}
 
-	// Read the body
-	body, err := io.ReadAll(r.Body)
+	// Read at most one byte beyond the limit. This protects direct users of
+	// validationMiddleware as well as the normal global middleware chain.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxStructuredRequestBodyBytes+1))
 	if err != nil {
 		return fmt.Errorf("failed to read request body: %w", err)
 	}
@@ -243,7 +297,7 @@ func (s *Server) validateRequestBody(validator *security.EnhancedValidator, resu
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	// Check body size
-	if len(body) > 10*1024*1024 { // 10MB max
+	if int64(len(body)) > maxStructuredRequestBodyBytes {
 		result.AddError("body", "", "max_size", "request body too large (max 10MB)")
 		return nil
 	}

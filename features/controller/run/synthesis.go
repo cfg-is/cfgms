@@ -14,6 +14,14 @@ import (
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 )
 
+// CommandSignature is the operator signature over inline ad-hoc content. It is
+// carried unchanged from the authenticated HTTP request to steward verification.
+type CommandSignature struct {
+	Algorithm string
+	Value     string
+	PublicKey string
+}
+
 // SynthesizeScriptRun resolves matching devices from the fleet and creates a
 // RunRecord plus one JobRecord per device, each backed by a QueuedExecution.
 // It returns the new run ID so callers can redirect to GET /runs/{run_id}.
@@ -143,6 +151,7 @@ func SynthesizeCommandRun(
 	inlineContent string,
 	shell scriptmodule.ShellType,
 	params map[string]string,
+	commandSignature *CommandSignature,
 ) (string, error) {
 	filter.TenantID = tenantID
 
@@ -192,15 +201,22 @@ func SynthesizeCommandRun(
 			return "", fmt.Errorf("synthesize command run: resolve params for device %s: %w", device.ID, err)
 		}
 
+		metadata := map[string]interface{}{
+			"workflow_run_id":       runID,
+			"job_id":                jobID,
+			"inline_script_content": inlineContent,
+		}
+		if commandSignature != nil {
+			metadata["signature_algorithm"] = commandSignature.Algorithm
+			metadata["signature_value"] = commandSignature.Value
+			metadata["signature_public_key"] = commandSignature.PublicKey
+		}
+
 		qe := &scriptmodule.QueuedExecution{
 			ExecutionID: executionID,
 			Shell:       shell,
 			Parameters:  resolved,
-			Metadata: map[string]interface{}{
-				"workflow_run_id":       runID,
-				"job_id":                jobID,
-				"inline_script_content": inlineContent,
-			},
+			Metadata:    metadata,
 		}
 		if err := executionQueue.QueueExecution(device.ID, qe); err != nil {
 			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {

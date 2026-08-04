@@ -616,6 +616,55 @@ func TestHandleDownloadInstallPackage_WithoutCA(t *testing.T) {
 	assert.Contains(t, files, "installer/README.txt")
 }
 
+func TestHandleDownloadInstallPackage_CacheValidatorsAndRanges(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	require.NoError(t, store.PutBlob(
+		context.Background(),
+		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		bytes.NewReader([]byte("range-test-installer-binary")),
+		blob.BlobMeta{ContentType: "application/octet-stream"},
+	))
+
+	request := func(rangeHeader, etag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		rec := httptest.NewRecorder()
+		server.handleDownloadInstallPackage(rec, req)
+		return rec
+	}
+
+	full := request("", "")
+	require.Equal(t, http.StatusOK, full.Code)
+	require.Greater(t, full.Body.Len(), 10)
+	assert.Equal(t, "bytes", full.Header().Get("Accept-Ranges"))
+	assert.Equal(t, "public, max-age=300, must-revalidate", full.Header().Get("Cache-Control"))
+	etag := full.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	partial := request("bytes=0-9", "")
+	require.Equal(t, http.StatusPartialContent, partial.Code)
+	assert.Equal(t, full.Body.Bytes()[:10], partial.Body.Bytes())
+
+	notModified := request("", etag)
+	assert.Equal(t, http.StatusNotModified, notModified.Code)
+	assert.Zero(t, notModified.Body.Len())
+
+	multiple := request("bytes=0-1,8-9", "")
+	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, multiple.Code)
+
+	server.publicDownloadCache.invalidate(installerDownloadCacheKey("linux", "amd64"))
+	rebuilt := request("", "")
+	require.Equal(t, http.StatusOK, rebuilt.Code)
+	assert.Equal(t, full.Body.Bytes(), rebuilt.Body.Bytes(), "generated package must be deterministic")
+	assert.Equal(t, etag, rebuilt.Header().Get("ETag"))
+}
+
 // TestHandleDownloadInstallPackage_NotFound verifies that a missing artifact returns
 // 404 with the writeErrorResponse JSON shape (not a raw http.Error string).
 func TestHandleDownloadInstallPackage_NotFound(t *testing.T) {

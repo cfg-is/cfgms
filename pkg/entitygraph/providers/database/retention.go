@@ -271,6 +271,8 @@ func (p *DatabaseEntityGraphProvider) dbPruneHistory(ctx context.Context, now ti
 				args = append(args, seq)
 				placeholders[i] = fmt.Sprintf("$%d", i+3)
 			}
+			// #nosec G202 -- placeholders are generated only from integer
+			// positions; subject, cutoff, and pinned IDs remain bound arguments.
 			query := `DELETE FROM eg_observation_log WHERE subject = $1 AND observed_at < $2` +
 				` AND id NOT IN (` + strings.Join(placeholders, ",") + `)`
 			if _, err := p.db.ExecContext(ctx, query, args...); err != nil {

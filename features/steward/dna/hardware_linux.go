@@ -121,6 +121,8 @@ func (l *LinuxHardwareCollector) CollectMotherboard(ctx context.Context, attribu
 
 	for _, kv := range dmidecodeKeys {
 		cmdCtx, cancel := context.WithTimeout(ctx, linuxCmdTimeout)
+		// #nosec G204 -- dmidecode is a fixed diagnostic executable and kv.flag
+		// comes only from the closed local hardware-field table; no shell runs.
 		if output, err := exec.CommandContext(cmdCtx, "dmidecode", "-s", kv.flag).Output(); err == nil {
 			attributes[kv.attr] = strings.TrimSpace(string(output))
 		}

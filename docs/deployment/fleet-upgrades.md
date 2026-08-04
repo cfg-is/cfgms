@@ -128,6 +128,14 @@ steward-3901879957445270929           committed
 
 Exit code is 1 if any steward reaches `failed` or `rolled_back` state.
 
+Both the steward and the privileged launcher enforce the downgrade boundary.
+The steward accepts only valid semantic versions and passes an override to the
+launcher only when `allow_downgrade` is explicitly authorized. The launcher
+independently rejects an older semantic version (including a
+release-to-prerelease rollback) and rejects opaque candidates after
+semantic-version migration. A direct privileged downgrade requires the
+launcher's explicit `--allow-downgrade` flag.
+
 ## Step 5a: Check upgrade status
 
 Use `cfg steward upgrade status` to check per-steward upgrade progress:

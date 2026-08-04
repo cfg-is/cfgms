@@ -39,14 +39,14 @@ func (s *testSecretStore) StoreSecret(_ context.Context, req *secretsInterfaces.
 	if s.storeErr != nil {
 		return s.storeErr
 	}
-	s.secrets[req.Key] = req.Value
+	s.secrets[req.TenantID+"/"+req.Key] = req.Value
 	return nil
 }
 
 func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsInterfaces.Secret, error) {
 	v, ok := s.secrets[key]
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, secretsInterfaces.ErrSecretNotFound
 	}
 	return &secretsInterfaces.Secret{Key: key, Value: v}, nil
 }
@@ -101,14 +101,14 @@ func newTestManager(t *testing.T, source string) *audit.Manager {
 }
 
 // slowAuditStore wraps a real business.AuditStore and injects a configurable
-// per-write delay so we can prove that Flush actually waits for the drain
+// per-entry delay so we can prove that Flush actually waits for the drain
 // goroutine to finish writing pending entries rather than returning
 // prematurely. No mocks — every method delegates to the real backing store.
 type slowAuditStore struct {
 	inner business.AuditStore
 	delay time.Duration
-	// writes counts successful calls to StoreAuditEntry so tests can assert the
-	// drain completed N writes before Flush returned.
+	// writes counts successfully persisted entries so tests can assert the
+	// drain completed N entries before Flush returned.
 	writes atomic.Int64
 }
 
@@ -130,7 +130,14 @@ func (s *slowAuditStore) ListAuditEntries(ctx context.Context, filter *business.
 	return s.inner.ListAuditEntries(ctx, filter)
 }
 func (s *slowAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
-	return s.inner.StoreAuditBatch(ctx, entries)
+	if s.delay > 0 {
+		time.Sleep(s.delay * time.Duration(len(entries)))
+	}
+	err := s.inner.StoreAuditBatch(ctx, entries)
+	if err == nil {
+		s.writes.Add(int64(len(entries)))
+	}
+	return err
 }
 func (s *slowAuditStore) GetAuditsByUser(ctx context.Context, userID string, tr *business.TimeRange) ([]*business.AuditEntry, error) {
 	return s.inner.GetAuditsByUser(ctx, userID, tr)
@@ -1264,6 +1271,7 @@ func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
 	const perWriter = 50
 
 	var wg sync.WaitGroup
+	recordErrs := make(chan error, writers*perWriter)
 	wg.Add(writers)
 	for w := 0; w < writers; w++ {
 		go func(writerID int) {
@@ -1276,10 +1284,9 @@ func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
 					User("concurrent-user", business.AuditUserTypeHuman).
 					Resource("res", fmt.Sprintf("w%d-%d", writerID, i), "").
 					Severity(business.AuditSeverityLow)
-				// Errors are acceptable here only when the queue is full — the
-				// test does not assert every write succeeds, only that the
-				// combination of RecordEvent + Flush does not deadlock or race.
-				_ = manager.RecordEvent(ctx, event)
+				if err := manager.RecordEvent(ctx, event); err != nil {
+					recordErrs <- err
+				}
 			}
 		}(w)
 	}
@@ -1297,6 +1304,10 @@ func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
 	}()
 
 	wg.Wait()
+	close(recordErrs)
+	for err := range recordErrs {
+		require.NoError(t, err, "background-context audit writes must not be shed under load")
+	}
 	<-flushDone
 
 	// Final flush drains everything and must succeed.
@@ -1438,9 +1449,9 @@ func TestWithSecretsStore_GeneratesAndPersistsKey(t *testing.T) {
 	assert.Empty(t, breaks, "chain must be intact when using a generated and persisted HMAC key")
 }
 
-// TestWithSecretsStore_StoreFailureFallsBack verifies that when StoreSecret
-// fails, the Manager still starts and uses a generated in-process key.
-func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
+// TestWithSecretsStore_StoreFailureFailsClosed verifies that an unavailable
+// durable key backend prevents the Manager from starting with an ephemeral key.
+func TestWithSecretsStore_StoreFailureFailsClosed(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
@@ -1449,32 +1460,9 @@ func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
 	ss := newTestSecretStore()
 	ss.storeErr = errors.New("backend unavailable")
 
-	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
-	require.NoError(t, err, "Manager must start even when StoreSecret fails")
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = m.Stop(ctx)
-	})
-
-	// Record an entry and confirm the chain is verifiable — proving the fallback key is functional.
-	ctx := context.Background()
-	event := audit.NewEventBuilder().
-		Tenant("hmac-fallback-tenant").
-		Type(business.AuditEventConfiguration).
-		Action("fallback_action").
-		User("user1", business.AuditUserTypeHuman).
-		Resource("resource", "res-1", "").
-		Severity(business.AuditSeverityMedium)
-	require.NoError(t, m.RecordEvent(ctx, event))
-	flushOrFail(t, m)
-
-	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-fallback-tenant"})
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-
-	breaks := m.VerifyChain(entries)
-	assert.Empty(t, breaks, "chain must be intact even with an in-process fallback HMAC key")
+	_, err = audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "persist audit HMAC key")
 }
 
 // TestConvenienceBuilderSeverity verifies that the predefined convenience constructors

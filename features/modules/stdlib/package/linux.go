@@ -36,6 +36,8 @@ func newAptManager() PackageManager {
 }
 
 func (m *aptManager) Install(ctx context.Context, name, version string) error {
+	// #nosec G204 -- package name/version are validated before dispatch, "--"
+	// terminates options, and apt-get receives argv directly without a shell.
 	cmd := exec.CommandContext(ctx, "apt-get", "install", "-y", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "="+version)
@@ -48,6 +50,7 @@ func (m *aptManager) Install(ctx context.Context, name, version string) error {
 }
 
 func (m *aptManager) Remove(ctx context.Context, name string) error {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed apt-get.
 	cmd := exec.CommandContext(ctx, "apt-get", "remove", "-y", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -57,6 +60,7 @@ func (m *aptManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *aptManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed dpkg-query.
 	cmd := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${Version}", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -107,6 +111,8 @@ func newDnfManager() PackageManager {
 }
 
 func (m *dnfManager) Install(ctx context.Context, name, version string) error {
+	// #nosec G204 -- validated package coordinates follow "--" and are passed
+	// directly to the fixed dnf executable without shell interpretation.
 	cmd := exec.CommandContext(ctx, "dnf", "install", "-y", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "-"+version)
@@ -119,6 +125,7 @@ func (m *dnfManager) Install(ctx context.Context, name, version string) error {
 }
 
 func (m *dnfManager) Remove(ctx context.Context, name string) error {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed dnf.
 	cmd := exec.CommandContext(ctx, "dnf", "remove", "-y", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -128,6 +135,7 @@ func (m *dnfManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *dnfManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed rpm.
 	cmd := exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -178,6 +186,8 @@ func newYumManager() PackageManager {
 }
 
 func (m *yumManager) Install(ctx context.Context, name, version string) error {
+	// #nosec G204 -- validated package coordinates follow "--" and are passed
+	// directly to the fixed yum executable without shell interpretation.
 	cmd := exec.CommandContext(ctx, "yum", "install", "-y", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "-"+version)
@@ -190,6 +200,7 @@ func (m *yumManager) Install(ctx context.Context, name, version string) error {
 }
 
 func (m *yumManager) Remove(ctx context.Context, name string) error {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed yum.
 	cmd := exec.CommandContext(ctx, "yum", "remove", "-y", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -199,6 +210,7 @@ func (m *yumManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *yumManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed rpm.
 	cmd := exec.CommandContext(ctx, "rpm", "-q", "--qf", "%{VERSION}", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -249,6 +261,8 @@ func newPacmanManager() PackageManager {
 }
 
 func (m *pacmanManager) Install(ctx context.Context, name, version string) error {
+	// #nosec G204 -- validated package coordinates follow "--" and are passed
+	// directly to the fixed pacman executable without shell interpretation.
 	cmd := exec.CommandContext(ctx, "pacman", "-S", "--noconfirm", "--", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, "="+version)
@@ -261,6 +275,7 @@ func (m *pacmanManager) Install(ctx context.Context, name, version string) error
 }
 
 func (m *pacmanManager) Remove(ctx context.Context, name string) error {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed pacman.
 	cmd := exec.CommandContext(ctx, "pacman", "-R", "--noconfirm", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -270,6 +285,7 @@ func (m *pacmanManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *pacmanManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
+	// #nosec G204 -- validated name follows "--" as one argv to fixed pacman.
 	cmd := exec.CommandContext(ctx, "pacman", "-Q", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

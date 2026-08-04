@@ -105,8 +105,12 @@ func TestSetupCommandHandler_EnforcesRequireSignedAdhoc(t *testing.T) {
 	}
 
 	t.Run("require_signed_adhoc true rejects unsigned ad-hoc command", func(t *testing.T) {
+		caPEM, err := newTestCA(t).GetCACertificate()
+		require.NoError(t, err)
 		c, err := NewTransportClient(&TransportConfig{
 			ControllerURL: "localhost:4433",
+			CACertPEM:     string(caPEM),
+			PublicBeta:    true,
 			ScriptSigning: stewardconfig.ScriptSigningConfig{
 				Policy:             stewardconfig.ScriptSigningPolicyRequired,
 				RequireSignedAdhoc: true,
@@ -144,26 +148,50 @@ func TestSetupCommandHandler_EnforcesRequireSignedAdhoc(t *testing.T) {
 			"unsigned ad-hoc command must pass signature preflight when require_signed_adhoc is false")
 	})
 
-	t.Run("invalid controller CA PEM degrades gracefully and still enforces", func(t *testing.T) {
-		// An unparseable CACertPEM leaves controllerCARoots nil — setupCommandHandler
-		// must not fail, and require_signed_adhoc enforcement must still be active.
+	t.Run("public-beta rejects require_signed_adhoc false", func(t *testing.T) {
+		caPEM, err := newTestCA(t).GetCACertificate()
+		require.NoError(t, err)
+		c, err := NewTransportClient(&TransportConfig{
+			ControllerURL: "localhost:4433",
+			CACertPEM:     string(caPEM),
+			PublicBeta:    true,
+			ScriptSigning: stewardconfig.ScriptSigningConfig{
+				Policy:             stewardconfig.ScriptSigningPolicyOptional,
+				RequireSignedAdhoc: false,
+			},
+			Logger: newTestLogger(t),
+		})
+		require.ErrorContains(t, err, "require_signed_adhoc")
+		require.Nil(t, c)
+	})
+
+	t.Run("invalid controller CA PEM fails closed", func(t *testing.T) {
 		c, err := NewTransportClient(&TransportConfig{
 			ControllerURL: "localhost:4433",
 			CACertPEM:     "-----BEGIN CERTIFICATE-----\nnot-valid-base64\n-----END CERTIFICATE-----",
+			PublicBeta:    true,
 			ScriptSigning: stewardconfig.ScriptSigningConfig{
 				Policy:             stewardconfig.ScriptSigningPolicyRequired,
 				RequireSignedAdhoc: true,
 			},
 			Logger: newTestLogger(t),
 		})
-		require.NoError(t, err)
+		require.Error(t, err, "public-beta startup must fail before connecting without controller CA roots")
+		require.ErrorContains(t, err, "valid controller signing roots")
+		require.Nil(t, c)
+	})
 
-		handler, err := c.setupCommandHandler(context.Background(), stewardID)
-		require.NoError(t, err, "setupCommandHandler must tolerate an unparseable controller CA PEM")
-		t.Cleanup(handler.Wait)
-
-		err = handler.HandleCommand(context.Background(), unsignedExecuteScript("sig-wired-badca"))
-		require.ErrorIs(t, err, commands.ErrUnauthenticatedCommand,
-			"require_signed_adhoc enforcement must remain active even when CA roots cannot be built")
+	t.Run("missing controller CA PEM fails closed", func(t *testing.T) {
+		c, err := NewTransportClient(&TransportConfig{
+			ControllerURL: "localhost:4433",
+			PublicBeta:    true,
+			ScriptSigning: stewardconfig.ScriptSigningConfig{
+				Policy:             stewardconfig.ScriptSigningPolicyRequired,
+				RequireSignedAdhoc: true,
+			},
+			Logger: newTestLogger(t),
+		})
+		require.ErrorContains(t, err, "valid controller signing roots")
+		require.Nil(t, c)
 	})
 }

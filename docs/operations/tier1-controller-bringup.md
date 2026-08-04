@@ -181,12 +181,25 @@ automatically.
 
 ## 6. Manual Upgrade
 
-To upgrade the controller binary without reprovisioning:
+Verify the candidate's release signature, provenance, and checksum before it
+reaches the controller. Read the release notes for state-format compatibility;
+if the new release performs an irreversible state migration, a binary-only
+rollback is not safe and the cold backup from §8 is required.
+
+Stage the candidate without overwriting either the running binary or the
+previous rollback copy:
 
 ```bash
+sudo install -o root -g root -m 0755 \
+  /path/to/new/cfgms-controller \
+  /usr/local/bin/cfgms-controller.candidate
+
 sudo systemctl stop cfgms-controller
-sudo cp /path/to/new/cfgms-controller /usr/local/bin/cfgms-controller
-sudo chmod +x /usr/local/bin/cfgms-controller
+sudo cp --preserve=mode,ownership,timestamps \
+  /usr/local/bin/cfgms-controller \
+  /usr/local/bin/cfgms-controller.previous
+sudo mv /usr/local/bin/cfgms-controller.candidate \
+  /usr/local/bin/cfgms-controller
 sudo systemctl start cfgms-controller
 ```
 
@@ -196,6 +209,26 @@ Run the smoke test after upgrade to confirm the new version operates correctly:
 source scripts/cfgms-bundle-load
 bash scripts/tier1-smoke-test.sh
 ```
+
+If startup or the smoke test fails, capture the journal and roll back immediately:
+
+```bash
+sudo journalctl -u cfgms-controller --no-pager -n 200
+sudo systemctl stop cfgms-controller
+sudo cp --preserve=mode,ownership,timestamps \
+  /usr/local/bin/cfgms-controller.previous \
+  /usr/local/bin/cfgms-controller.rollback
+sudo mv /usr/local/bin/cfgms-controller.rollback \
+  /usr/local/bin/cfgms-controller
+sudo systemctl start cfgms-controller
+
+source scripts/cfgms-bundle-load
+bash scripts/tier1-smoke-test.sh
+```
+
+Retain `cfgms-controller.previous` until the upgraded controller has completed
+the environment's soak period. For an incompatible state migration, restore the
+pre-upgrade archive as described in §8 before starting the previous binary.
 
 Do not re-run `tier1-bootstrap.sh` for upgrades — the `--init` step is idempotent
 but binary placement goes through the download path. Use `--binary-path` if you
@@ -226,10 +259,88 @@ before `--init`.
 
 ## 8. Recovery
 
-Tier 1 has no automated backup. The controller's state lives in `/var/lib/cfgms/`.
-If the VM is lost or unrecoverable, all state is discarded.
+Tier 1 has no online backup command. A complete recoverable copy consists of:
 
-**To rebuild from scratch:**
+- `/var/lib/cfgms/` — SQLite, flat-file data, CA, server certificate, and audit data
+- `/etc/cfgms/controller.cfg` — deployment configuration
+- `/etc/cfgms/secrets.key` — the external encryption key
+
+The key must be backed up at the same consistency point but escrowed separately
+from the state archive under equivalent or stronger access control. Loss of it
+makes encrypted data unrecoverable; disclosure compromises every secret
+protected by it.
+
+### Cold backup
+
+Stop the controller so SQLite and flat-file state are captured at one consistency
+point. Create the archive on an encrypted filesystem, copy the archive and checksum
+to encrypted off-host storage, and then remove the staging copy.
+
+```bash
+sudo systemctl stop cfgms-controller
+
+sudo sh -eu <<'EOF'
+umask 077
+install -d -m 0700 /backup/cfgms
+backup_base="/backup/cfgms/controller-$(date -u +%Y%m%dT%H%M%SZ)"
+state_file="${backup_base}.state.tar.gz"
+key_file="${backup_base}.secrets.key"
+tar --create --gzip --acls --xattrs --numeric-owner \
+  --file "${state_file}.tmp" \
+  --directory / \
+  var/lib/cfgms \
+  etc/cfgms/controller.cfg
+install -m 0600 /etc/cfgms/secrets.key "${key_file}.tmp"
+mv "${state_file}.tmp" "${state_file}"
+mv "${key_file}.tmp" "${key_file}"
+sha256sum "${state_file}" "${key_file}" > "${backup_base}.sha256"
+printf 'Created coordinated backup set %s\n' "${backup_base}"
+EOF
+
+sudo systemctl start cfgms-controller
+source scripts/cfgms-bundle-load
+bash scripts/tier1-smoke-test.sh
+```
+
+Test restoration on an isolated host at the same release before relying on a
+backup. Never extract an untrusted archive.
+
+### Cold restore
+
+Provision the `cfgms` service account and systemd unit first, but leave the
+controller stopped. Verify the checksum and inspect the member list before
+extracting:
+
+```bash
+sudo systemctl stop cfgms-controller
+cd /backup/cfgms
+sha256sum --check controller-YYYYMMDDTHHMMSSZ.sha256
+tar --list --gzip --file controller-YYYYMMDDTHHMMSSZ.state.tar.gz
+
+sudo tar --extract --gzip --acls --xattrs --numeric-owner \
+  --file controller-YYYYMMDDTHHMMSSZ.state.tar.gz \
+  --directory /
+sudo install -o cfgms -g cfgms -m 0600 \
+  controller-YYYYMMDDTHHMMSSZ.secrets.key \
+  /etc/cfgms/secrets.key
+sudo chown -R cfgms:cfgms /var/lib/cfgms
+sudo chown cfgms:cfgms /etc/cfgms/controller.cfg
+sudo chmod 0750 /var/lib/cfgms /etc/cfgms
+sudo chmod 0640 /etc/cfgms/controller.cfg
+sudo chmod 0600 /etc/cfgms/secrets.key
+
+sudo systemctl start cfgms-controller
+source scripts/cfgms-bundle-load
+bash scripts/tier1-smoke-test.sh
+```
+
+After restore, verify audit-chain integrity, tenant inventory, steward
+reconnections, certificate validity, and a signed configuration operation in
+addition to the smoke test.
+
+### Rebuild without a backup
+
+If no usable backup exists:
 
 1. Provision a new Debian 12 VM (§2)
 2. Copy `tier1-bootstrap.sh` and `tier1-smoke-test.sh` to the new VM
@@ -237,9 +348,6 @@ If the VM is lost or unrecoverable, all state is discarded.
 4. Distribute the new admin bundle (§5)
 5. Re-register stewards — existing steward registrations are not portable across
    controller reinitializations (new CA means all mTLS credentials are invalid)
-
-For disaster recovery planning, consider scheduling periodic exports of tenant
-configuration data using `cfg` before they are needed.
 
 ---
 

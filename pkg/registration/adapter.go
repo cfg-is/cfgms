@@ -4,6 +4,7 @@ package registration
 
 import (
 	"context"
+	"fmt"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -86,6 +87,24 @@ func (a *StorageAdapter) RotateToken(ctx context.Context, tenantID, group string
 		return nil, err
 	}
 	return dataToToken(data), nil
+}
+
+// ClaimToken atomically reserves a valid token at the REST admission boundary.
+func (a *StorageAdapter) ClaimToken(ctx context.Context, tokenStr, claimID string) (bool, error) {
+	claimer, ok := a.store.(business.RegistrationTokenClaimer)
+	if !ok {
+		return false, fmt.Errorf("registration token store does not support atomic REST claims")
+	}
+	return claimer.ClaimToken(ctx, tokenStr, claimID)
+}
+
+// ReleaseTokenClaim removes an exact REST claim after a pre-issuance failure.
+func (a *StorageAdapter) ReleaseTokenClaim(ctx context.Context, tokenStr, claimID string) error {
+	claimer, ok := a.store.(business.RegistrationTokenClaimer)
+	if !ok {
+		return fmt.Errorf("registration token store does not support atomic REST claims")
+	}
+	return claimer.ReleaseTokenClaim(ctx, tokenStr, claimID)
 }
 
 // tokenToData converts a Token to RegistrationTokenData

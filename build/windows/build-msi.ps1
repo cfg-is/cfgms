@@ -7,7 +7,7 @@
 #   - Go toolchain (for building the binary when -BinaryPath is not supplied)
 #   - .NET SDK (WiX is installed automatically via dotnet tool if absent)
 #
-# Code signing (optional):
+# Code signing (required when CFGMS_RELEASE_BUILD=1):
 #   Provide -SigningCertThumbprint to sign with signtool.exe from the Windows SDK.
 #   Without it the MSI is produced unsigned and a warning is printed.
 #   Windows SmartScreen may flag unsigned installers; sign production builds.
@@ -76,11 +76,42 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = $PSScriptRoot
 $RepoRoot  = Resolve-Path (Join-Path $ScriptDir ".." "..")
+$ReleaseBuild = $env:CFGMS_RELEASE_BUILD -eq "1"
 
-# Normalize version: strip leading 'v' for the MSI ProductVersion field.
-# MSI requires N.N.N or N.N.N.N; fall back to 0.0.0 for non-conforming strings.
-$MsiVersion = $Version -replace '^v', ''
-if ($MsiVersion -notmatch '^\d+\.\d+\.\d+') {
+if ($ReleaseBuild) {
+    if ($Version -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$') {
+        Write-Error "CFGMS_RELEASE_BUILD requires a canonical v-prefixed semantic version."
+    }
+    if ($Version.Contains("-")) {
+        $PreRelease = $Version.Split("-", 2)[1]
+        foreach ($Identifier in $PreRelease.Split(".")) {
+            if ($Identifier -match '^0\d+$') {
+                Write-Error "CFGMS_RELEASE_BUILD rejects numeric prerelease identifiers with leading zeroes."
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($PublisherKey)) {
+        Write-Error "CFGMS_RELEASE_BUILD requires a non-placeholder publisher public key."
+    }
+    try {
+        $PublisherKeyBytes = [Convert]::FromBase64String($PublisherKey)
+    } catch {
+        Write-Error "CFGMS_RELEASE_BUILD publisher public key is not valid base64."
+    }
+    if ($PublisherKeyBytes.Length -ne 32 -or
+        ($PublisherKeyBytes | Where-Object { $_ -ne 0 }).Count -eq 0) {
+        Write-Error "CFGMS_RELEASE_BUILD requires a non-zero 32-byte Ed25519 publisher public key."
+    }
+    if ([string]::IsNullOrWhiteSpace($SigningCertThumbprint)) {
+        Write-Error "CFGMS_RELEASE_BUILD requires -SigningCertThumbprint."
+    }
+}
+
+# Normalize version: strip the release-tag prefix and prerelease suffix for the
+# numeric MSI ProductVersion field. Authenticode/Sigstore still bind the full
+# tag to the release artifact.
+$MsiVersion = (($Version -replace '^v', '') -split '-', 2)[0]
+if ($MsiVersion -notmatch '^\d+\.\d+\.\d+$') {
     $MsiVersion = "0.0.0"
 }
 
@@ -111,9 +142,9 @@ if ($BinaryPath -eq "") {
 
     $VersionFlag = "-X github.com/cfgis/cfgms/pkg/version.Version=$Version"
     $LdFlags = if ($ControllerURL -ne "") {
-        "-s -w -X main.ControllerURL=$ControllerURL $VersionFlag"
+        "-s -w -X main.ControllerURL=$ControllerURL -X main.SecurityProfile=public-beta $VersionFlag"
     } else {
-        "-s -w $VersionFlag"
+        "-s -w -X main.SecurityProfile=public-beta $VersionFlag"
     }
     if ($PublisherKey -ne "") {
         $LdFlags += " -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$PublisherKey"
@@ -152,7 +183,18 @@ if ($BinaryPath -eq "") {
 Write-Host ""
 Write-Host "Building stdlib module binaries for windows/$Arch..." -ForegroundColor Yellow
 
-$StdlibModules = @("file", "service", "package", "script", "firewall", "patch")
+$StdlibModules = @(
+    "cert_trust",
+    "file",
+    "firewall",
+    "hostname",
+    "package",
+    "patch",
+    "script",
+    "service",
+    "time",
+    "user"
+)
 $ModulesDir = Join-Path $RepoRoot "bin" "modules-windows-$Arch"
 
 if (-not (Test-Path $ModulesDir)) {
@@ -172,7 +214,7 @@ try {
             "-trimpath",
             "-ldflags", "-s -w",
             "-o", $moduleBinPath,
-            "./features/modules/$module/cmd"
+            "./features/modules/stdlib/$module/cmd"
         )
         & go @moduleArgs
         if ($LASTEXITCODE -ne 0) {
@@ -223,6 +265,50 @@ try {
 }
 
 Write-Host "  Launcher: $LauncherPath" -ForegroundColor Green
+
+# ── Step 1d: Authenticode-sign executable payloads ───────────────────────────
+
+$SignTool = $null
+if ($SigningCertThumbprint -ne "") {
+    $SignTool = Get-ChildItem `
+        -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
+        -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match "x64" } |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+
+    if ($null -eq $SignTool) {
+        Write-Error ("signtool.exe not found under C:\Program Files (x86)\Windows Kits\10\bin. " +
+                     "Install the Windows SDK: https://developer.microsoft.com/windows/downloads/windows-sdk/")
+    }
+
+    function Sign-AndVerify([string]$Path, [string]$Description) {
+        & $SignTool sign `
+            /sha1 $SigningCertThumbprint `
+            /fd sha256 `
+            /tr http://timestamp.digicert.com `
+            /td sha256 `
+            /d $Description `
+            $Path
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool.exe signing failed for $Path (exit $LASTEXITCODE)"
+        }
+        & $SignTool verify /pa /all $Path
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool.exe verification failed for $Path (exit $LASTEXITCODE)"
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Signing executable payloads..." -ForegroundColor Yellow
+    Sign-AndVerify $BinaryPath "CFGMS Steward"
+    Sign-AndVerify $LauncherPath "CFGMS Steward Launcher"
+    foreach ($module in $StdlibModules) {
+        Sign-AndVerify (Join-Path $ModulesDir "cfgms-module-$module.exe") "CFGMS Module $module"
+    }
+} elseif ($ReleaseBuild) {
+    Write-Error "Release executable payloads cannot be unsigned."
+}
 
 # ── Step 2: Ensure WiX 4 toolset is installed ────────────────────────────────
 
@@ -287,34 +373,10 @@ if ($SigningCertThumbprint -ne "") {
     Write-Host ""
     Write-Host "Signing MSI..." -ForegroundColor Yellow
 
-    # Locate signtool.exe from the Windows SDK (prefer the newest x64 copy).
-    $SignTool = Get-ChildItem `
-        -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
-        -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match "x64" } |
-        Sort-Object FullName -Descending |
-        Select-Object -First 1 -ExpandProperty FullName
-
-    if ($null -eq $SignTool) {
-        Write-Error ("signtool.exe not found under C:\Program Files (x86)\Windows Kits\10\bin. " +
-                     "Install the Windows SDK: https://developer.microsoft.com/windows/downloads/windows-sdk/")
-    }
-
     Write-Host "  signtool: $SignTool"
+    Sign-AndVerify $OutputMsi "CFGMS Steward Installer"
 
-    & $SignTool sign `
-        /sha1 $SigningCertThumbprint `
-        /fd sha256 `
-        /tr http://timestamp.digicert.com `
-        /td sha256 `
-        /d "CFGMS Steward" `
-        $OutputMsi
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "signtool.exe signing failed (exit $LASTEXITCODE)"
-    }
-
-    Write-Host "  MSI signed." -ForegroundColor Green
+    Write-Host "  MSI signed and verified." -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Warning "No -SigningCertThumbprint provided — MSI is unsigned."

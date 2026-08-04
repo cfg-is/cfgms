@@ -112,7 +112,9 @@ func (e *linuxExecutor) readTimezone() (string, error) {
 // writeTimezone writes the IANA timezone name to timezoneFile, creating the
 // file and any parent directories that do not exist.
 func (e *linuxExecutor) writeTimezone(timezone string) error {
-	if err := os.MkdirAll(filepath.Dir(e.timezoneFile), 0o755); err != nil { // #nosec G301 - /etc is world-traversable by convention
+	// #nosec G301 -- this creates the conventional /etc parent, which must be
+	// world-traversable; the managed timezone file itself is not secret.
+	if err := os.MkdirAll(filepath.Dir(e.timezoneFile), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(e.timezoneFile, []byte(timezone+"\n"), 0o644) // #nosec G306 - /etc/timezone is world-readable by convention
@@ -181,7 +183,9 @@ func (e *linuxExecutor) readTimesyncd() (servers []string, enabled bool, err err
 // writeTimesyncd writes the NTP server list and sync-enabled state to the
 // timesyncd config file. Parent directories are created if needed.
 func (e *linuxExecutor) writeTimesyncd(servers []string, enabled bool) error {
-	if err := os.MkdirAll(filepath.Dir(e.timesyncdConfig), 0o755); err != nil { // #nosec G301 - /etc/systemd is world-traversable by convention
+	// #nosec G301 -- /etc/systemd is conventionally world-traversable; this
+	// module writes public service configuration, not credential material.
+	if err := os.MkdirAll(filepath.Dir(e.timesyncdConfig), 0o755); err != nil {
 		return err
 	}
 
