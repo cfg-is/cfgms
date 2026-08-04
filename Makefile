@@ -2168,8 +2168,17 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
 	@echo "Step 2: Initializing controller to generate CA and certificates..."
-	@./bin/controller --init > /tmp/controller-init.log 2>&1 || \
-		{ echo "❌ Controller init failed:"; cat /tmp/controller-init.log; exit 1; }
+# The controller refuses to initialize its secret store without an external key —
+# plaintext secret storage is prohibited. This target only needs the CA and
+# certificates it writes, so give it an ephemeral key that lives for the length of
+# the init and is removed straight after.
+	@set -eu; \
+		init_key=$$(mktemp); \
+		trap 'rm -f "$$init_key"' EXIT; \
+		chmod 0600 "$$init_key"; \
+		head -c 32 /dev/urandom > "$$init_key"; \
+		CFGMS_SECRETS_KEY_FILE="$$init_key" ./bin/controller --init > /tmp/controller-init.log 2>&1 || \
+			{ echo "❌ Controller init failed:"; cat /tmp/controller-init.log; exit 1; }
 	@rm -f controller.cfg
 	@if [ ! -f "test/integration/transport/certs/ca/ca.crt" ]; then \
 		echo "❌ CA certificate not generated. Init log:"; \

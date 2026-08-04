@@ -5,6 +5,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -157,7 +158,23 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 		Transport: &config.TransportConfig{
 			ListenAddr:     "127.0.0.1:0",
 			UseCertManager: true,
+			// The gRPC control-plane provider rejects max_connections < 1, and
+			// TransportConfig.Validate() requires the same, so a config built
+			// directly here must set it rather than inherit the zero value.
+			// 10 matches the other in-tree test configs; production defaults to 50000.
+			MaxConnections: 10,
 		},
+		// The private metrics listener fails closed on an empty address and
+		// deliberately rejects port 0, so ":0"-style ephemeral binding is not an
+		// option here. Reserve a concrete free port instead: loopback host and a
+		// fixed numeric port are exactly what ValidatePrivateListenerAddress wants.
+		MetricsListenAddr: freeLoopbackAddr(t),
+		// The public API refuses to start unless external_url is set and its
+		// hostname is present in the server certificate — the check that stops a
+		// controller serving on an identity it cannot prove. "localhost" is one of
+		// the Server.DNSNames configured above, so this is the same verification a
+		// real deployment performs rather than a relaxation of it.
+		ExternalURL: "https://localhost",
 	}
 
 	// Create controller data directory
@@ -423,4 +440,44 @@ func (e *TestEnv) GetCertificateInfo(certType cert.CertificateType) ([]*cert.Cer
 		}
 	}
 	return filtered, nil
+}
+
+// freeLoopbackAddr reserves an available loopback host:port for a listener that
+// cannot use ephemeral ":0" binding.
+//
+// config.ValidatePrivateListenerAddress requires a loopback-or-private host and a
+// fixed numeric port from 1 to 65535 — port 0 is rejected on purpose, so a private
+// listener can never land on an unpredictable port.
+//
+// The port MUST come from outside the OS ephemeral range. Reserving one by binding
+// ":0" and closing it looks correct but is actively wrong here: it hands back a port
+// from the ephemeral range, and the controller binds its public listener with ":0"
+// BEFORE the metrics listener. The kernel then re-issues the just-released port to
+// the public listener, and the metrics bind fails with "address already in use" —
+// a collision between two listeners of the same process. Ports below the ephemeral
+// floor are never auto-assigned, so that cannot happen.
+//
+// The PID offset spreads concurrent test binaries so they do not all probe the same
+// first candidate.
+func freeLoopbackAddr(t *testing.T) string {
+	t.Helper()
+
+	const (
+		low  = 20000 // comfortably below the lowest common ephemeral floor (32768)
+		high = 32000
+	)
+	base := low + (os.Getpid()*7)%(high-low)
+
+	for i := 0; i < 500; i++ {
+		port := low + ((base - low + i) % (high - low))
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue // in use by another process or test binary; try the next
+		}
+		require.NoError(t, l.Close())
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	}
+
+	t.Fatalf("no free loopback port in %d-%d for the private metrics listener", low, high)
+	return ""
 }

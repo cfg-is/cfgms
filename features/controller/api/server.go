@@ -160,6 +160,15 @@ type Server struct {
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	terminalHandler                http.Handler                          // Issue #2761: terminal WebSocket relay handler
+
+	// Listeners retained so Close can shut them regardless of whether their serve
+	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
+	// it already tracks, and tracking begins inside Serve. A Start followed
+	// promptly by a Close would otherwise leak a bound socket — fatal for the
+	// metrics listener, which binds a fixed port and cannot silently rebind.
+	publicTLSListener   net.Listener
+	metricsTLSListener  net.Listener
+	internalTLSListener net.Listener
 }
 
 // SetDraining implements cluster.DrainHealthRegistrar. When draining is true,
@@ -711,6 +720,8 @@ func (s *Server) Start() error {
 	publicTLSListener := tls.NewListener(publicListener, tlsConfig)
 	metricsServer := s.metricsHTTPServer
 	metricsTLSListener := tls.NewListener(metricsListener, metricsTLSConfig)
+	s.publicTLSListener = publicTLSListener
+	s.metricsTLSListener = metricsTLSListener
 	go func() {
 		s.logger.Info("Starting HTTPS REST API server", "address", publicServer.Addr)
 		if serveErr := publicServer.Serve(publicTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
@@ -726,6 +737,7 @@ func (s *Server) Start() error {
 	if s.internalHTTPServer != nil {
 		internalServer := s.internalHTTPServer
 		internalTLSListener := tls.NewListener(internalListener, internalTLSConfig)
+		s.internalTLSListener = internalTLSListener
 		go func() {
 			s.logger.Info("Starting private mTLS Raft server", "address", internalServer.Addr)
 			if serveErr := internalServer.Serve(internalTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
@@ -887,7 +899,39 @@ func (s *Server) Close(ctx context.Context) error {
 				firstErr = err
 			}
 		}
+
 	})
+
+	// Deliberately OUTSIDE closeOnce. The once above guards one-shot teardown of
+	// caches, stores and goroutines, but listeners are re-created by every Start.
+	// A Server that is stopped and started again therefore holds fresh listeners
+	// that a once-guarded Close could never reach, leaking the socket for the life
+	// of the process.
+	//
+	// Shutdown normally closes these already; it only closes listeners its server
+	// is tracking, and tracking starts inside Serve, which runs in a goroutine
+	// spawned just after bind. A Start followed promptly by a Close can outrun it.
+	//
+	// The public and Raft listeners take an OS-assigned port, so a leak there is
+	// invisible and the next Start just binds elsewhere. The metrics listener binds
+	// a FIXED port — ValidatePrivateListenerAddress rejects port 0 — so the same
+	// leak makes the next Start fail with "address already in use".
+	//
+	// Closing an already-closed listener is a harmless no-op error.
+	//
+	// Guarded by s.mu because Start writes these fields under the same lock. The
+	// once-body above releases s.mu via defer before returning, and on a second
+	// Close it never runs at all, so acquiring here cannot deadlock.
+	s.mu.Lock()
+	listeners := []net.Listener{s.publicTLSListener, s.metricsTLSListener, s.internalTLSListener}
+	s.publicTLSListener, s.metricsTLSListener, s.internalTLSListener = nil, nil, nil
+	s.mu.Unlock()
+	for _, l := range listeners {
+		if l != nil {
+			_ = l.Close()
+		}
+	}
+
 	return firstErr
 }
 

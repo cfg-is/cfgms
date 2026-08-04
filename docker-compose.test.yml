@@ -477,12 +477,25 @@ services:
       CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      # Required explicitly: the controller fails closed when the private metrics
+      # listener has no address, and rejects port 0. Loopback keeps it unreachable
+      # from outside the container.
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
     # Run as root to avoid permission issues, create log dir first
     user: root
+    # cmd/controller/Dockerfile declares ENTRYPOINT ["/app/controller"], so a bare
+    # command would be appended as controller arguments ("unknown command \"sh\"").
+    # Clearing the entrypoint restores shell-form startup — same treatment as
+    # fleet-controller below.
+    entrypoint: []
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
       - controller_standalone_certs:/app/certs  # Use volume for writable certs
       - controller_standalone_data:/app/data
+      # The controller refuses to start without an external secrets key; the host
+      # path is generated per test session by scripts/generate-test-credentials.sh.
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -717,6 +730,10 @@ services:
       # Active only when CFGMS_SEED_TEST_API_KEYS=1.
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
       CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      # Required explicitly: the controller fails closed when the private metrics
+      # listener has no address, and rejects port 0. Loopback keeps it unreachable
+      # from outside the container.
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
     user: root
     entrypoint: []
     command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]

@@ -2166,6 +2166,26 @@ func (s *Server) Stop() error {
 		s.logger.Info("git-sync syncer stopped")
 	}
 
+	// Close the REST API server — releases the public HTTPS listener and the
+	// private metrics listener it owns.
+	//
+	// The metrics listener binds a FIXED port: ValidatePrivateListenerAddress
+	// rejects port 0 so a private listener can never land somewhere unpredictable.
+	// Leaking it therefore breaks the next Start with "address already in use",
+	// where the public listener hid the same leak by taking an OS-assigned port
+	// and silently rebinding elsewhere.
+	//
+	// Runs after the managers that serve requests have stopped and before the
+	// storage manager closes: api.Server.Close also releases the secret store and
+	// nonce cache, which the audit drain above still needs.
+	if s.httpServer != nil {
+		apiCtx, apiCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.httpServer.Close(apiCtx); err != nil {
+			s.logger.Warn("Failed to close REST API server", "error", err)
+		}
+		apiCancel()
+	}
+
 	// Close main storage manager — releases flatfile + SQLite store handles so
 	// temp-directory cleanup succeeds on Windows. Must run after managers that
 	// use the stores have stopped.
