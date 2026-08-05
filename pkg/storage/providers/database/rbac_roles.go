@@ -57,7 +57,7 @@ func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) er
 		permissionIDsJSON,
 		role.IsSystemRole,
 		role.TenantId,
-		role.ParentRoleId,
+		nullStringOrEmpty(role.ParentRoleId), // empty means "no parent"; the column has a self-referential FK, so "" must become NULL, not a literal empty-string match
 		int32(role.InheritanceType),
 	)
 

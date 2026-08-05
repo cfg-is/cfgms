@@ -114,9 +114,203 @@ a non-admin shell cannot create the VM or reach the Hyper-V APIs.
 
 ## 2. Storage migration (story #3127)
 
-*To be filled in when #3127 lands — migrates the live Tier-1 controller from
-its current flatfile/SQLite backend onto the `cfgms-lab-datasvc` PostgreSQL +
-MinIO backend via `cfg storage migrate`.*
+Migrates the live Tier-1 controller (`cfgms-ctrl-01`) from its `oss`
+(flatfile+SQLite) backend onto the `cfgms-lab-datasvc` PostgreSQL backend
+(story #3124) via `cfg migrate --provider storage --from oss --to database`
+— **not** `cfg storage migrate`, which hard-rejects `--to postgres` (see the
+epic Goal). Executed 2026-08-05.
+
+### Bugs found and fixed while proving this path live
+
+This was the first time the `database`/cluster storage path (used by both
+`cfg migrate --provider storage` and real `ha.mode: cluster` controller
+startup) had ever been exercised against a real Postgres instance — none of
+its integration tests are wired into any Makefile target or CI job. Four
+genuine bugs surfaced and were fixed directly (not routed around), per the
+epic's guidance:
+
+1. **`CreateClusterStorageManager` never threaded `session_hmac_key`**
+   (`pkg/storage/interfaces/provider.go`) — the session store's HMAC key was
+   silently dropped from the config map it built, so session-store creation
+   always failed. This affects every real (non-test) caller: the migrator,
+   and `server.go`/`initialization.go` cluster-mode controller startup.
+   Fixed by adding a `sessionHMACKey` parameter, a
+   `storage.cluster.session_hmac_key` / `CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY`
+   config path, and threading it through all four real call sites.
+2. **Tenant and RBAC role import had no parent-first ordering**
+   (`pkg/migrate/storage/migrate.go`) — `ListTenants`/`ListRoles` make no
+   ordering guarantee, so importing a child before its parent violated the
+   `cfgms_tenants_parent_id_fkey` / `rbac_roles_parent_role_id_fkey` foreign
+   keys. Fixed with a generic `sortParentFirst` topological sort applied to
+   both.
+3. **`DatabaseTenantStore.CreateTenant` never translated a Postgres unique
+   violation into `business.ErrTenantAlreadyExists`**
+   (`pkg/storage/providers/database/tenant_store.go`) — so the migrator's
+   already-idempotent retry logic (`errors.Is(err, ErrTenantAlreadyExists)`
+   → `UpdateTenant`) never triggered, and a second migration run against a
+   partially-populated target failed outright. Fixed to detect Postgres
+   error code `23505` the same way the sqlite provider already does.
+4. **`DatabaseRBACStore.StoreRole` inserted an empty `parent_role_id` as a
+   literal empty string instead of `NULL`**
+   (`pkg/storage/providers/database/rbac_roles.go`) — `parent_role_id` has a
+   self-referential foreign key, so *every* role without a parent (i.e. every
+   top-level role) violated it. Fixed with the same `nullStringOrEmpty`
+   helper the tenant store already uses.
+5. **`DatabaseAuditStore.scanAuditEntry` failed to scan a `NULL` `ip_address`**
+   (`pkg/storage/providers/database/audit_store.go`) — `net.IP` has no
+   `sql.Scanner`, so `database/sql`'s built-in NULL handling doesn't cover
+   it; any audit entry without a client IP (internal/system-generated
+   entries) broke `GetAuditEntry`/`ListAuditEntries` outright. This silently
+   defeated the migrator's idempotent existence-check-before-insert, causing
+   a duplicate-key error on any retry. Fixed by scanning into
+   `sql.NullString` instead.
+
+All five are covered by `go build`/`go vet`/`go test -short` (already in
+`make test`) plus a live re-run of the affected integration suites
+(`go test -tags integration ./pkg/storage/interfaces/... ./pkg/migrate/storage/... ./pkg/storage/providers/database/...`)
+against a local `docker compose --profile database` Postgres — run per
+package, not concurrently, since the shared, non-isolated `cfgms_test`
+database races on schema setup across packages when run together (a
+pre-existing test-infra gap, not caused by or fixed in this story).
+
+### Pre-migration state
+
+- Storage: `flatfile_root: /var/lib/cfgms/storage`, `sqlite_path:
+  /var/lib/cfgms/cfgms.db` (the `oss` composite backend).
+- Blobs: `/var/lib/cfgms/data/installers` contained **0 files** — there was
+  no existing installer-blob data to migrate. `cfg migrate --provider blob`
+  was not run; the `blobs:` config was left untouched.
+
+### `--dry-run` record counts
+
+Captured immediately after stopping the controller (2026-08-05T02:52:27Z),
+against the live data:
+
+```
+Dry-run: planning migration oss → database (provider: storage)
+Migration plan (no writes performed):
+  rbac_role:                     12 records
+  refresh_policy:                 3 records
+  rbac_permission:               32 records
+  registration_token:             2 records
+  tenant:                         3 records
+  audit:                         25 records
+  Total:                         77 records
+```
+
+(An identical dry-run taken ~15 minutes earlier while the controller was
+still live reported `audit: 24` / `Total: 76` — the `systemctl stop` itself
+wrote one audit entry, accounting for the difference. No other drift between
+the two runs.)
+
+### Live migration
+
+`cfg migrate --provider storage --from oss --to database` (no `--dry-run`)
+completed with counts matching the dry-run exactly:
+
+```
+Migration complete:
+  tenant:                         3 records
+  rbac_permission:               32 records
+  rbac_role:                     12 records
+  refresh_policy:                 3 records
+  audit:                         25 records
+  registration_token:             2 records
+  Total:                         77 records
+```
+
+### Controller cutover
+
+`storage:` in `/etc/cfgms/controller.cfg` changed from the `oss` block to:
+
+```yaml
+storage:
+  provider: database
+  config:
+    host: "192.168.234.105"
+    port: 5432
+    database: "cfgms"
+    username: "cfgms"
+    password: "${CFGMS_STORAGE_DB_PASSWORD}"
+    sslmode: "disable"
+    session_hmac_key: "${CFGMS_SESSION_HMAC_KEY}"
+```
+
+`ha.mode` was **not** set — per this story's Out of Scope, the Tier-1
+controller stays single-node; this is the plain single-provider `database`
+path (`storage.provider: database`), not `storage.cluster.*`/cluster mode
+(that's story #3130).
+
+The two secrets are never written to `controller.cfg` or any committed
+file — the config's generic `${VAR}` expansion (already supported by the
+config loader) resolves them from `/etc/cfgms/storage-secrets.env`
+(root-owned, mode 600), loaded into the `cfgms-controller` systemd unit via
+`EnvironmentFile=`. Both values were pulled from the operator's OS keychain
+(Windows Credential Manager on `CFG-70-02`, `cfgms-lab-datasvc-postgres`) at
+cutover time; the session HMAC key was generated once (`openssl rand -hex
+32`) and persisted the same way — it must stay stable for the life of the
+deployment since it backs bearer-token hashing.
+
+Post-cutover verification (steward round-trip, since no fleet is yet
+enrolled to this HA-validation controller instance): a throwaway steward was
+installed (`cfg token create` → `cfgms-steward install --regtoken ...
+--controller-ca ... --fingerprint ...`), quarantined, approved
+(`cfg registration approve`), reached `active` status with a live
+heartbeat, received a `cfg config upload`'d test config (`file` module, a
+scratch path under `/tmp`), and converged it correctly — proving the full
+register → heartbeat → config-push → converge path against the new backend.
+The steward was then decommissioned and its token revoked, leaving the
+fleet table clean.
+
+**Known pre-existing issue hit during verification, not fixed here:** the
+generated admin bundle's embedded `controller_url` uses the hardcoded port
+`:8080` instead of the configured `9080` (`#3172`, already filed) — worked
+around with `CFGMS_API_URL=https://localhost:9080` for every `cfg` CLI
+invocation against this controller.
+
+### Downtime
+
+| Leg | Stopped | Started | Downtime |
+|-----|---------|---------|----------|
+| Initial cutover (oss → database) | 2026-08-05T02:52:27Z | 2026-08-05T03:17:05Z | ~25 min — includes live debugging and rebuild/redeploy of the five bugs above; not representative of a routine cutover |
+| Rollback drill (database → oss) | 2026-08-05T03:40:07Z | 2026-08-05T03:40:08Z | ~1s — a config/unit-file swap only, no data migration |
+| Re-cutover (oss → database, final) | 2026-08-05T03:40:58Z | 2026-08-05T03:41:43Z | ~45s — representative of a routine cutover once the storage backend already holds migrated data |
+
+### Rollback drill (tested, not just documented)
+
+Executed once against the archive to prove the procedure actually works:
+
+1. `systemctl stop cfgms-controller`.
+2. Restored `/etc/cfgms/controller.cfg` and the systemd unit from the
+   pre-migration backups taken before the cutover
+   (`controller.cfg.pre-3127.bak`, `cfgms-controller.service.pre-3127.bak`,
+   both left in place on `cfgms-ctrl-01` alongside the live config).
+3. `systemctl daemon-reload && systemctl start cfgms-controller`.
+4. Confirmed `GET /api/v1/health` returned `"status":"healthy"` and the
+   startup log showed `backend=flatfile` — the controller was serving the
+   original, untouched flatfile+SQLite data.
+5. Re-applied the database cutover (step above) to leave the controller
+   running on Postgres for the health-soak period below.
+
+The pre-migration flatfile+SQLite data was never deleted or moved — it
+remains at its original paths (`/var/lib/cfgms/storage`,
+`/var/lib/cfgms/cfgms.db`) — and is additionally archived (copied, not
+moved) to `/var/lib/cfgms/archive-pre-3127-migration/` on `cfgms-ctrl-01`.
+Per the epic, this archive and the rollback path are **not** retired by this
+story; only an explicit founder sign-off retires them.
+
+### Health soak
+
+The controller was left running on the Postgres backend after the rollback
+drill (from 2026-08-05T03:41:43Z). Observed clean for 17+ minutes at story
+close: `GET /api/v1/health` returns `"status":"healthy"` throughout, `systemctl
+status` shows continuous `active (running)` with no restarts, and
+`journalctl` shows zero `error`/`panic`/`fatal` lines since the re-cutover
+(the only log noise is the pre-existing periodic TLS handshake errors from
+stray clients on the LAN, unrelated to this story). The controller is left
+running and observed on an ongoing basis past story close — the archived
+pre-migration data and the tested rollback procedure both remain in place
+and untouched; retiring them is a separate, explicit founder decision.
 
 ## 3. Cluster join (story #3130)
 

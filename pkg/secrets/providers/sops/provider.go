@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Package sops implements SOPS-based secrets provider for CFGMS
-// M-AUTH-1: Secure secret storage using Mozilla SOPS with git backend
+// M-AUTH-1: Secure secret storage using Mozilla SOPS
 package sops
 
 import (
@@ -11,7 +11,7 @@ import (
 )
 
 // SOPSProvider implements the SecretProvider interface using SOPS encryption
-// This provider uses git ConfigStore as the backend, which automatically handles SOPS encryption
+// This provider uses a backend-agnostic ConfigStore, which automatically handles SOPS encryption
 type SOPSProvider struct{}
 
 // Name returns the provider name

@@ -99,8 +99,10 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		// the same fleet state immediately after --init. S3 blob store is configured
 		// separately at startup; only the DSN is needed here.
 		pgDSN := ""
+		sessionHMACKey := ""
 		if cfg.Storage.Cluster != nil {
 			pgDSN = cfg.Storage.Cluster.PostgresDSN
+			sessionHMACKey = cfg.Storage.Cluster.SessionHMACKey
 		}
 		var s3Config map[string]interface{}
 		if cfg.Storage.Cluster != nil {
@@ -108,7 +110,7 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		}
 		logger.Info("Cluster mode: initializing Postgres business store backend...",
 			"ha_mode", cfg.HA.Mode)
-		storageManager, err = interfaces.CreateClusterStorageManager(pgDSN, s3Config)
+		storageManager, err = interfaces.CreateClusterStorageManager(pgDSN, sessionHMACKey, s3Config)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize cluster storage: %w", err)
 		}

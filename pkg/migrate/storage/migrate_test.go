@@ -50,7 +50,11 @@ func newDatabaseManager(t *testing.T) *interfaces.StorageManager {
 		t.Skip("skipping database test in short mode")
 	}
 	dsn := buildTestDSN()
-	mgr, err := interfaces.CreateClusterStorageManager(dsn, nil)
+	hmacKey := os.Getenv("CFGMS_TEST_SESSION_HMAC_KEY")
+	if hmacKey == "" {
+		hmacKey = "test-hmac-key-for-storage-migrate-tests-only"
+	}
+	mgr, err := interfaces.CreateClusterStorageManager(dsn, hmacKey, nil)
 	if err != nil {
 		t.Skipf("postgres test database not available: %v", err)
 	}

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/lib/pq" // PostgreSQL driver
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -135,6 +135,9 @@ func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business
 	)
 
 	if err != nil {
+		if pgErr, ok := err.(*pq.Error); ok && pgErr.Code == "23505" {
+			return fmt.Errorf("create tenant %s: %w", tenant.ID, business.ErrTenantAlreadyExists)
+		}
 		return fmt.Errorf("failed to create tenant: %w", err)
 	}
 

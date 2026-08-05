@@ -449,6 +449,12 @@ type ClusterStorageConfig struct {
 	// Override via CFGMS_STORAGE_CLUSTER_POSTGRES_DSN environment variable.
 	PostgresDSN string `yaml:"postgres_dsn"`
 
+	// SessionHMACKey backs the Postgres-backed session store's bearer-token hashing
+	// (DatabaseSessionStore fails closed when empty). All controller nodes in the cluster
+	// must use the same key so a token issued on one node validates on any peer node.
+	// Override via CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY environment variable.
+	SessionHMACKey string `yaml:"session_hmac_key"`
+
 	// S3 holds S3-compatible blob store configuration keys used for installer artifact storage.
 	// Required keys: "bucket". Optional: "region", "endpoint_url", "access_key_id", "secret_access_key".
 	// When empty, the S3 bucket name is read from CFGMS_S3_INSTALLER_BUCKET at startup.
@@ -1012,6 +1018,14 @@ func LoadWithPath(configPath string) (*Config, error) {
 			cfg.Storage.Cluster = &ClusterStorageConfig{}
 		}
 		cfg.Storage.Cluster.PostgresDSN = pgDSN
+	}
+
+	// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY overrides storage.cluster.session_hmac_key.
+	if hmacKey := os.Getenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY"); hmacKey != "" {
+		if cfg.Storage.Cluster == nil {
+			cfg.Storage.Cluster = &ClusterStorageConfig{}
+		}
+		cfg.Storage.Cluster.SessionHMACKey = hmacKey
 	}
 
 	// Cluster CA vault configuration environment variables (Issue #2018).
