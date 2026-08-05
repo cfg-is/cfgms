@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -761,16 +760,18 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 			created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
 			if claimErr != nil {
-				if errors.Is(claimErr, business.ErrRegistrationTokenAlreadyClaimed) {
-					http.Error(w, "Registration token has already been claimed", http.StatusConflict)
-					return
-				}
 				s.logger.Error("Failed to atomically claim registration token", "error", claimErr)
 				http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
 				return
 			}
+
+			// The pending ID is derived from the token and the device identity
+			// rather than from the clock, so a retrying device can be handed back
+			// its own entry. A perennial token quarantines many devices at once,
+			// so a by-token lookup here could return a different device's entry.
+			pendingID := pendingRegistrationID(req.Token, claimID)
 			if !created {
-				existing, existingErr := s.pendingStore.GetPendingByToken(r.Context(), req.Token)
+				existing, existingErr := s.pendingStore.GetPendingByID(r.Context(), pendingID)
 				if existingErr == nil && existing != nil &&
 					(existing.Status == business.PendingRegistrationStatusPending ||
 						existing.Status == business.PendingRegistrationStatusApproved) {
@@ -781,7 +782,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
 			pendingEntry := &business.PendingRegistrationEntry{
 				PendingID:    pendingID,
 				StewardID:    stewardID,
@@ -881,15 +881,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			"steward_id", stewardID)
 	}
 
-	// This is the REST issuance boundary. Exactly one caller can create the
-	// durable claim, even across controller processes. Same-device retries are
-	// recognized by the store but cannot issue a second private key/certificate.
+	// This is the REST issuance boundary. For a given device identity exactly one
+	// caller can create the durable claim, even across controller processes, so a
+	// concurrent retry cannot obtain a second private key/certificate. The token
+	// itself stays valid for the rest of the fleet (Issue #1690).
 	created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
 	if claimErr != nil {
-		if errors.Is(claimErr, business.ErrRegistrationTokenAlreadyClaimed) {
-			http.Error(w, "Registration token has already been claimed", http.StatusConflict)
-			return
-		}
 		s.logger.Error("Failed to atomically claim registration token", "error", claimErr)
 		http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
 		return
@@ -993,6 +990,18 @@ func registrationClaimID(deviceID string, identityKey []byte) string {
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write(identityKey)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// pendingRegistrationID derives a quarantine entry's identifier from the token
+// and the claiming device, so the same device retrying the same token addresses
+// the same entry and a second device on that token gets its own. Neither the
+// bearer token nor the device identity is recoverable from the result.
+func pendingRegistrationID(tokenStr, claimID string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(business.RegistrationTokenLookupKey(tokenStr)))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(claimID))
+	return "pending-" + hex.EncodeToString(h.Sum(nil))
 }
 
 func (s *Server) writePendingRegistrationResponse(w http.ResponseWriter, entry *business.PendingRegistrationEntry, group string) {

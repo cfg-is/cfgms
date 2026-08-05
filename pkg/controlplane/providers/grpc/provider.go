@@ -285,8 +285,8 @@ func (p *Provider) initializeServer(config map[string]interface{}) error {
 		if p.registrationTokenStore == nil {
 			return fmt.Errorf("server mode requires a registration token store")
 		}
-		if _, ok := p.registrationTokenStore.(business.RegistrationTokenConsumer); !ok {
-			return fmt.Errorf("server mode requires atomic registration token consumption")
+		if _, ok := p.registrationTokenStore.(business.RegistrationTokenClaimer); !ok {
+			return fmt.Errorf("server mode requires atomic registration token claiming")
 		}
 	}
 
@@ -1119,13 +1119,14 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 			return nil, status.Error(codes.PermissionDenied, "registration rejected: creds.tenant_id does not match registration token")
 		}
 
-		if consumer, ok := ts.(business.RegistrationTokenConsumer); ok {
-			if consumeErr := consumer.ConsumeToken(ctx, tokenStr); consumeErr != nil {
-				return nil, status.Error(codes.PermissionDenied, "registration rejected: token already used or expired")
-			}
-		} else if s.provider.requireSecurityStores {
-			return nil, status.Error(codes.Unavailable, "registration token service lacks atomic consumption")
-		}
+		// The token is not spent here. Registration tokens are perennial
+		// (Issue #1690) — one enrolment token is what an RMM or GPO deployment
+		// bakes into a script for a whole fleet, so revoking it on first use
+		// would lock out every remaining endpoint. At this point the caller has
+		// already presented an mTLS client certificate that only the REST
+		// issuance boundary can mint, and that boundary holds the per-device
+		// single-issuance guard (RegistrationTokenClaimer). The token's role
+		// here is tenant binding, which the checks above enforce.
 	}
 
 	s.provider.logger.Info("steward registered", "steward_id", logging.SanitizeLogValue(stewardID), "version", logging.SanitizeLogValue(req.GetVersion()))

@@ -361,6 +361,28 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
 	}
 
+	// From here on New holds open SQLite/Postgres handles. Every remaining failure
+	// returns without a Server, so nothing would ever call Stop to release them —
+	// the handles would leak for the process's life. On Windows that also pins the
+	// database files, so a caller cannot delete the data directory of a controller
+	// that refused to start. Each store below registers itself here as soon as it
+	// is opened, mirroring what Stop releases.
+	constructed := false
+	var openedStores []func() error
+	defer func() {
+		if constructed {
+			return
+		}
+		// Reverse order, so a store closes before anything it was layered onto.
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				logger.Warn("Failed to release storage after controller initialization failed",
+					"error", closeErr)
+			}
+		}
+	}()
+	openedStores = append(openedStores, storageManager.Close)
+
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
 	clientTenantStore := storageManager.GetClientTenantStore()
@@ -433,6 +455,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if dnaErr != nil {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
 	}
+	if dnaStorageManager != nil {
+		openedStores = append(openedStores, dnaStorageManager.Close)
+	}
 
 	// Create the controller service. With durable DNA storage its in-memory
 	// steward registry is warm-loaded from a previous run on startup, so a
@@ -457,6 +482,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// configured (tags API degrades gracefully; SetTagStore is a no-op on nil).
 	tagStoreInstance := initializeTagStore(context.Background(), cfg, logger)
 	if tagStoreInstance != nil {
+		openedStores = append(openedStores, tagStoreInstance.Close)
 		controllerService.SetTagStore(tagStoreInstance)
 	}
 
@@ -1448,6 +1474,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
+	// The Server now owns the storage manager and releases it in Stop.
+	constructed = true
 	return srv, nil
 }
 

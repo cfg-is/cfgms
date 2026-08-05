@@ -321,37 +321,9 @@ func (s *DatabaseRegistrationTokenStore) DeleteToken(ctx context.Context, tokenS
 	return nil
 }
 
-// ConsumeToken atomically marks one valid token spent.
-func (s *DatabaseRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenStr string) error {
-	now := time.Now().UTC()
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE cfgms_registration_tokens
-		SET revoked = true, revoked_at = $1
-		WHERE (token = $2 OR token = $3)
-		  AND revoked = false
-		  AND (expires_at IS NULL OR expires_at > $1)`,
-		now,
-		business.RegistrationTokenLookupKey(tokenStr),
-		tokenStr,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to consume registration token: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to confirm registration token consumption: %w", err)
-	}
-	if affected != 1 {
-		return fmt.Errorf("registration token is invalid, expired, or already used")
-	}
-	return nil
-}
-
-var _ business.RegistrationTokenConsumer = (*DatabaseRegistrationTokenStore)(nil)
-
-// ClaimToken atomically reserves one valid token at the REST admission boundary.
-// It does not revoke the token; final consumption remains the responsibility of
-// the mTLS-authenticated gRPC registration.
+// ClaimToken atomically reserves a valid token for one device identity at the
+// REST admission boundary. It does not revoke the token: registration tokens are
+// perennial (Issue #1690) and one fleet token enrols many endpoints.
 func (s *DatabaseRegistrationTokenStore) ClaimToken(ctx context.Context, tokenStr, claimID string) (bool, error) {
 	if tokenStr == "" {
 		return false, fmt.Errorf("token string cannot be empty")
@@ -373,9 +345,9 @@ func (s *DatabaseRegistrationTokenStore) ClaimToken(ctx context.Context, tokenSt
 		}
 	}()
 
-	// Serialize with final ConsumeToken's UPDATE of the same token row. This
-	// prevents a claim from observing a stale valid snapshot while another
-	// controller process is consuming the token.
+	// Serialize with any concurrent UPDATE of the same token row, so a claim
+	// cannot observe a stale valid snapshot while another controller process is
+	// revoking or rotating the token.
 	var storedToken string
 	err = tx.QueryRowContext(ctx, `
 		SELECT token FROM cfgms_registration_tokens
@@ -397,7 +369,7 @@ func (s *DatabaseRegistrationTokenStore) ClaimToken(ctx context.Context, tokenSt
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO cfgms_registration_token_claims (token, claim_id, claimed_at)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (token) DO NOTHING`,
+		ON CONFLICT (token, claim_id) DO NOTHING`,
 		lookupKey, claimID, now)
 	if err != nil {
 		return false, fmt.Errorf("failed to claim registration token: %w", err)
@@ -406,33 +378,14 @@ func (s *DatabaseRegistrationTokenStore) ClaimToken(ctx context.Context, tokenSt
 	if err != nil {
 		return false, fmt.Errorf("failed to confirm registration token claim: %w", err)
 	}
-	if affected == 1 {
-		if err := tx.Commit(); err != nil {
-			return false, fmt.Errorf("failed to commit registration token claim: %w", err)
-		}
-		committed = true
-		return true, nil
-	}
-
-	var existingClaimID string
-	err = tx.QueryRowContext(ctx,
-		`SELECT claim_id FROM cfgms_registration_token_claims WHERE token = $1`,
-		lookupKey,
-	).Scan(&existingClaimID)
-	if err == sql.ErrNoRows {
-		return false, fmt.Errorf("registration token is invalid, expired, or revoked")
-	}
-	if err != nil {
-		return false, fmt.Errorf("failed to inspect registration token claim: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("failed to commit registration token claim inspection: %w", err)
+		return false, fmt.Errorf("failed to commit registration token claim: %w", err)
 	}
 	committed = true
-	if existingClaimID == claimID {
-		return false, nil
-	}
-	return false, business.ErrRegistrationTokenAlreadyClaimed
+
+	// The token row was locked and valid above, so the only reason the insert
+	// found a conflict is that this same device already holds the claim.
+	return affected == 1, nil
 }
 
 // ReleaseTokenClaim removes only the exact claim made by this REST attempt.

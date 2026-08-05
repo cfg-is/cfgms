@@ -916,6 +916,13 @@ test-fast:
 #	not a deadlock. Do not tighten this to track how long the suite currently takes.
 	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=10m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
 	@echo ""
+#	Build-tagged code is invisible to every target above, so nothing catches a
+#	break in it until an e2e image build fails hours later. The test-endpoint
+#	routes are only compiled by docker-compose.test.yml, which is exactly the
+#	configuration the integration and fleet suites depend on.
+	@echo "🏷️  Vetting build-tagged sources (cfgms_test_endpoints)..."
+	@go vet -tags cfgms_test_endpoints ./features/controller/api/... || exit 1
+	@echo ""
 	@echo "✅ Fast comprehensive tests complete"
 
 # Load testing for production readiness (Story #294 Phase 4)

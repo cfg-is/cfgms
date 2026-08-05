@@ -19,11 +19,19 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 # Copy source code
 COPY . .
 
+# Optional build tags. Empty by default so a production image can never contain
+# tag-gated code: the integration-test administration endpoints live behind
+# `cfgms_test_endpoints` and are not compiled into the binary unless a test
+# compose service asks for them (they also require CFGMS_ENABLE_TEST_ENDPOINTS at
+# runtime). Only docker-compose.test.yml sets this.
+ARG GO_BUILD_TAGS=""
+
 # Build controller (GOCACHE + module cache mounts warm across builds; CGO_ENABLED=0
 # already yields a static binary, so -a/-installsuffix are unneeded and only force
 # cold recompiles)
 RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false \
+    -tags "${GO_BUILD_TAGS}" \
     -ldflags="-s -w" -o controller ./cmd/controller
 
 # Final stage

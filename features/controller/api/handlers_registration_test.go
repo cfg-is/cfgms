@@ -270,7 +270,10 @@ func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) 
 		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
 	}))
 
+	// One device racing itself. Only one of these may receive a private key —
+	// that is the double-issuance the REST claim exists to prevent.
 	const contenders = 16
+	const deviceID = "00000000000000000000000000000000000000000000000000000000000000ab"
 	start := make(chan struct{})
 	recorders := make([]*httptest.ResponseRecorder, contenders)
 	var wg sync.WaitGroup
@@ -281,7 +284,7 @@ func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) 
 			<-start
 			recorders[i] = postRegisterWithBody(server, RegistrationRequest{
 				Token:          tokenStr,
-				DeviceID:       fmt.Sprintf("%064x", i+1),
+				DeviceID:       deviceID,
 				IdentityKeyPub: testValidIdentityKeyPub,
 			})
 		}(i)
@@ -308,6 +311,41 @@ func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) 
 	}
 	assert.Equal(t, 1, successes)
 	assert.Equal(t, contenders-1, conflicts)
+}
+
+// The claim is scoped to the device, not the token: a perennial fleet token
+// (Issue #1690) must keep enrolling endpoints after the first one registers.
+func TestHandleRegister_PerennialTokenEnrollsManyDevices(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	const tokenStr = "cfgms_reg_fleet_enrolment"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	stewardIDs := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       fmt.Sprintf("%064x", i+1),
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		require.Equal(t, http.StatusOK, rec.Code,
+			"device %d must enrol on the perennial token: %s", i, rec.Body.String())
+
+		var resp RegistrationResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.NotEmpty(t, resp.ClientCert, "device %d must receive its own certificate", i)
+		assert.False(t, stewardIDs[resp.StewardID], "steward IDs must be unique")
+		stewardIDs[resp.StewardID] = true
+	}
+
+	tok, err := tokenStore.GetToken(context.Background(), tokenStr)
+	require.NoError(t, err)
+	assert.True(t, tok.IsValid(), "enrolment must not spend the fleet token")
 }
 
 // kvCapturingLogger captures both Warn message and key-value pairs for security assertions.
@@ -691,7 +729,11 @@ func TestHandleRegister_ConcurrentClaimsCreateAtMostOnePendingRegistration(t *te
 		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
 	}))
 
+	// One device racing itself must produce exactly one quarantine entry, and the
+	// retries that lose the race must be handed back that same entry rather than
+	// a second one.
 	const contenders = 16
+	const deviceID = "00000000000000000000000000000000000000000000000000000000000000cd"
 	start := make(chan struct{})
 	recorders := make([]*httptest.ResponseRecorder, contenders)
 	var wg sync.WaitGroup
@@ -702,7 +744,7 @@ func TestHandleRegister_ConcurrentClaimsCreateAtMostOnePendingRegistration(t *te
 			<-start
 			recorders[i] = postRegisterWithBody(server, RegistrationRequest{
 				Token:          tokenStr,
-				DeviceID:       fmt.Sprintf("%064x", i+1),
+				DeviceID:       deviceID,
 				IdentityKeyPub: testValidIdentityKeyPub,
 			})
 		}(i)
@@ -710,25 +752,72 @@ func TestHandleRegister_ConcurrentClaimsCreateAtMostOnePendingRegistration(t *te
 	close(start)
 	wg.Wait()
 
-	accepted := 0
-	conflicts := 0
+	pendingIDs := make(map[string]bool)
 	for _, rec := range recorders {
 		switch rec.Code {
 		case http.StatusAccepted:
-			accepted++
 			assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE")
+			var resp RegistrationPendingResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			pendingIDs[resp.PendingID] = true
 		case http.StatusConflict:
-			conflicts++
+			// A retry that raced the entry's creation.
 		default:
 			t.Errorf("unexpected registration status %d: %s", rec.Code, rec.Body.String())
 		}
 	}
-	assert.Equal(t, 1, accepted)
-	assert.Equal(t, contenders-1, conflicts)
+	assert.Len(t, pendingIDs, 1, "the device must only ever be told about one pending entry")
 
 	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
 	require.NoError(t, err)
 	assert.Len(t, entries, 1)
+}
+
+// Quarantined devices sharing a perennial token must each get their own pending
+// entry — never a handle to another device's registration.
+func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	const tokenStr = "cfgms_reg_quarantine_fleet"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	pendingIDs := make(map[string]string)
+	for i := 0; i < 3; i++ {
+		deviceID := fmt.Sprintf("%064x", i+1)
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       deviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code,
+			"device %d must be quarantined, not refused: %s", i, rec.Body.String())
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotEmpty(t, resp.PendingID)
+		pendingIDs[deviceID] = resp.PendingID
+	}
+	assert.Len(t, pendingIDs, 3, "each device must receive a distinct pending_id")
+
+	// A device retrying gets its own entry back, not one of its peers'.
+	for deviceID, want := range pendingIDs {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       deviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "retry body: %s", rec.Body.String())
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, want, resp.PendingID, "device %s must recover its own pending entry", deviceID)
+	}
+
+	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Len(t, entries, 3)
 }
 
 func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {

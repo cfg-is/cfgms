@@ -70,8 +70,14 @@ type PendingRegistrationStore interface {
 	// Returns ErrPendingRegistrationNotFound if no record exists.
 	GetPendingByID(ctx context.Context, pendingID string) (*PendingRegistrationEntry, error)
 
-	// GetPendingByToken hashes the supplied raw token and retrieves the matching entry.
-	// Returns ErrPendingRegistrationNotFound if no matching record exists.
+	// GetPendingByToken hashes the supplied raw token and retrieves *an* entry that
+	// matches. Returns ErrPendingRegistrationNotFound if no matching record exists.
+	//
+	// Registration tokens are perennial (Issue #1690), so one token routinely has
+	// several devices quarantined against it and this lookup cannot say which
+	// entry it returned. Never use it to answer a specific device — doing so hands
+	// that device another device's pending_id. Address a known device's entry by
+	// PendingID via GetPendingByID instead.
 	GetPendingByToken(ctx context.Context, tokenStr string) (*PendingRegistrationEntry, error)
 
 	// UpdateStatus updates the status of the entry identified by pendingID.

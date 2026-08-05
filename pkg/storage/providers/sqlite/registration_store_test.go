@@ -224,31 +224,28 @@ func TestRegistrationStore_GetNotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestRegistrationStore_ConsumeIsAtomicAndSingleUse(t *testing.T) {
+// A perennial token (Issue #1690) enrols a whole fleet, so claiming it for one
+// device must not lock every other device out.
+func TestRegistrationStore_ClaimDoesNotSpendThePerennialToken(t *testing.T) {
 	store := newRegistrationStore(t)
-	consumer, ok := store.(business.RegistrationTokenConsumer)
+	claimer, ok := store.(business.RegistrationTokenClaimer)
 	require.True(t, ok)
 	ctx := context.Background()
 	expires := time.Now().Add(time.Hour)
 	require.NoError(t, store.SaveToken(ctx, &business.RegistrationTokenData{
-		Token: "single-use-canary", TenantID: "tenant-1",
+		Token: "fleet-enrolment-canary", TenantID: "tenant-1",
 		ControllerURL: "https://controller.example.com", ExpiresAt: &expires,
 	}))
 
-	const contenders = 16
-	var successes atomic.Int32
-	var wg sync.WaitGroup
-	for i := 0; i < contenders; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if consumer.ConsumeToken(ctx, "single-use-canary") == nil {
-				successes.Add(1)
-			}
-		}()
+	for i := 0; i < 5; i++ {
+		created, err := claimer.ClaimToken(ctx, "fleet-enrolment-canary", fmt.Sprintf("device-%d", i))
+		require.NoError(t, err, "device %d must be able to enrol on the fleet token", i)
+		assert.True(t, created, "device %d must win its own claim", i)
 	}
-	wg.Wait()
-	assert.Equal(t, int32(1), successes.Load())
+
+	got, err := store.GetToken(ctx, "fleet-enrolment-canary")
+	require.NoError(t, err)
+	assert.True(t, got.IsValid(), "enrolment must not revoke the fleet token")
 }
 
 func TestRegistrationStore_RESTClaimIsAtomicAndRetryable(t *testing.T) {
@@ -262,45 +259,64 @@ func TestRegistrationStore_RESTClaimIsAtomicAndRetryable(t *testing.T) {
 		ControllerURL: "https://controller.example.com", ExpiresAt: &expires,
 	}))
 
+	// One device, many concurrent attempts: exactly one may create the claim, so
+	// only one private key can ever be issued to it.
 	const contenders = 16
+	const deviceID = "device-under-contention"
 	var successes atomic.Int32
-	var winner atomic.Int32
-	winner.Store(-1)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < contenders; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			<-start
-			created, err := claimer.ClaimToken(ctx, "rest-claim-canary", fmt.Sprintf("device-%d", i))
+			created, err := claimer.ClaimToken(ctx, "rest-claim-canary", deviceID)
 			if err == nil && created {
 				successes.Add(1)
-				winner.Store(int32(i))
 			}
-		}(i)
+		}()
 	}
 	close(start)
 	wg.Wait()
 	require.Equal(t, int32(1), successes.Load())
 
-	winnerID := fmt.Sprintf("device-%d", winner.Load())
-	created, err := claimer.ClaimToken(ctx, "rest-claim-canary", winnerID)
+	created, err := claimer.ClaimToken(ctx, "rest-claim-canary", deviceID)
 	require.NoError(t, err, "same-device retry must be recognized")
 	assert.False(t, created, "retry must not create another claim")
 
-	_, err = claimer.ClaimToken(ctx, "rest-claim-canary", "different-device")
-	require.ErrorIs(t, err, business.ErrRegistrationTokenAlreadyClaimed)
+	// A different device is unaffected by the first device's claim.
+	created, err = claimer.ClaimToken(ctx, "rest-claim-canary", "second-device")
+	require.NoError(t, err)
+	assert.True(t, created, "a second device must enrol on the same perennial token")
 
-	require.NoError(t, claimer.ReleaseTokenClaim(ctx, "rest-claim-canary", winnerID))
-	created, err = claimer.ClaimToken(ctx, "rest-claim-canary", "retry-after-pre-issuance-failure")
+	require.NoError(t, claimer.ReleaseTokenClaim(ctx, "rest-claim-canary", deviceID))
+	created, err = claimer.ClaimToken(ctx, "rest-claim-canary", deviceID)
 	require.NoError(t, err)
 	assert.True(t, created, "released pre-issuance claim must be retryable")
 
-	consumer, ok := store.(business.RegistrationTokenConsumer)
+	// Releasing one device's claim must not disturb another's.
+	created, err = claimer.ClaimToken(ctx, "rest-claim-canary", "second-device")
+	require.NoError(t, err)
+	assert.False(t, created, "the second device's claim must survive an unrelated release")
+}
+
+// A revoked token must be refused even for a device that never claimed it.
+func TestRegistrationStore_ClaimRejectsRevokedToken(t *testing.T) {
+	store := newRegistrationStore(t)
+	claimer, ok := store.(business.RegistrationTokenClaimer)
 	require.True(t, ok)
-	require.NoError(t, consumer.ConsumeToken(ctx, "rest-claim-canary"),
-		"REST claim must leave the bearer valid for final gRPC consumption")
+	ctx := context.Background()
+	tok := &business.RegistrationTokenData{
+		Token: "revoked-claim-canary", TenantID: "tenant-1",
+		ControllerURL: "https://controller.example.com",
+	}
+	require.NoError(t, store.SaveToken(ctx, tok))
+	tok.Revoke()
+	require.NoError(t, store.UpdateToken(ctx, tok))
+
+	_, err := claimer.ClaimToken(ctx, "revoked-claim-canary", "some-device")
+	require.Error(t, err, "a revoked token must not admit a new device")
 }
 
 func TestRegistrationStore_Update(t *testing.T) {

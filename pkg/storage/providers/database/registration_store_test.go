@@ -4,7 +4,6 @@ package database
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,43 +66,46 @@ func TestDatabaseRegistrationStore_RESTClaimIsAtomicAndRetryable(t *testing.T) {
 		ControllerURL: "grpc://controller:7443", ExpiresAt: &expires,
 	}))
 
+	// One device, many concurrent attempts: exactly one may create the claim, so
+	// only one private key can ever be issued to it.
 	const contenders = 16
+	const deviceID = "device-under-contention"
 	var successes atomic.Int32
-	var winner atomic.Int32
-	winner.Store(-1)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < contenders; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			<-start
-			created, err := store.ClaimToken(ctx, "db-rest-claim-canary", fmt.Sprintf("device-%d", i))
+			created, err := store.ClaimToken(ctx, "db-rest-claim-canary", deviceID)
 			if err == nil && created {
 				successes.Add(1)
-				winner.Store(int32(i))
 			}
-		}(i)
+		}()
 	}
 	close(start)
 	wg.Wait()
 	require.Equal(t, int32(1), successes.Load())
 
-	winnerID := fmt.Sprintf("device-%d", winner.Load())
-	created, err := store.ClaimToken(ctx, "db-rest-claim-canary", winnerID)
+	created, err := store.ClaimToken(ctx, "db-rest-claim-canary", deviceID)
 	require.NoError(t, err)
-	assert.False(t, created)
+	assert.False(t, created, "same-device retry must not create another claim")
 
-	_, err = store.ClaimToken(ctx, "db-rest-claim-canary", "different-device")
-	require.ErrorIs(t, err, business.ErrRegistrationTokenAlreadyClaimed)
-
-	require.NoError(t, store.ReleaseTokenClaim(ctx, "db-rest-claim-canary", winnerID))
-	created, err = store.ClaimToken(ctx, "db-rest-claim-canary", "retry-after-pre-issuance-failure")
+	// The token is perennial (Issue #1690): one device's claim must not lock the
+	// rest of the fleet out of the same enrolment token.
+	created, err = store.ClaimToken(ctx, "db-rest-claim-canary", "second-device")
 	require.NoError(t, err)
-	assert.True(t, created)
+	assert.True(t, created, "a second device must enrol on the same perennial token")
 
-	require.NoError(t, store.ConsumeToken(ctx, "db-rest-claim-canary"),
-		"REST claim must leave the bearer valid for final gRPC consumption")
+	require.NoError(t, store.ReleaseTokenClaim(ctx, "db-rest-claim-canary", deviceID))
+	created, err = store.ClaimToken(ctx, "db-rest-claim-canary", deviceID)
+	require.NoError(t, err)
+	assert.True(t, created, "released pre-issuance claim must be retryable")
+
+	got, err := store.GetToken(ctx, "db-rest-claim-canary")
+	require.NoError(t, err)
+	assert.True(t, got.IsValid(), "enrolment must not revoke the fleet token")
 }
 
 func TestDatabaseRegistrationStore_RotateToken_NoActiveTokens(t *testing.T) {

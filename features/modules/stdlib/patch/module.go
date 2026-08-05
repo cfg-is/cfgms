@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -371,21 +370,14 @@ func (m *PatchModule) executeScript(ctx context.Context, script string) error {
 	logger := m.GetEffectiveLogger(logging.NewNoopLogger())
 	logger.Debug("executing script", "script", logging.SanitizeLogValue(scriptPath))
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		if err := validateWindowsScriptPath(scriptPath); err != nil {
 			return err
 		}
-		// #nosec G204 -- cmd.exe is required for .cmd/.bat patch scripts; the
-		// absolute, cleaned path is metacharacter-rejected above and quoted as
-		// the sole /c command, so configured script data cannot add commands.
-		cmd = exec.CommandContext(ctx, "cmd", "/d", "/s", "/c", `"`+scriptPath+`"`)
-	} else {
-		// #nosec G204 -- executing an administrator-configured absolute patch
-		// script is this module's explicit capability; no shell is involved.
-		cmd = exec.CommandContext(ctx, scriptPath)
 	}
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd := newScriptCommand(ctx, scriptPath)
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
