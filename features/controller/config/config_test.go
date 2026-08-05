@@ -492,12 +492,14 @@ func TestHAModeEnvVar(t *testing.T) {
 	assert.True(t, cfg.HA.IsClusterMode())
 }
 
-// TestClusterStorageConfig_YAML verifies that storage.cluster.postgres_dsn is parsed (Issue #2119).
+// TestClusterStorageConfig_YAML verifies that storage.cluster.postgres_dsn and
+// storage.cluster.session_hmac_key are parsed (Issues #2119, #3127).
 func TestClusterStorageConfig_YAML(t *testing.T) {
 	yamlInput := `
 storage:
   cluster:
     postgres_dsn: "host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require"
+    session_hmac_key: "yaml-session-hmac-key"
     s3:
       bucket: "cfgms-installers"
       region: "us-east-1"
@@ -509,6 +511,8 @@ storage:
 	assert.Equal(t,
 		"host=pg.example.com port=5432 dbname=cfgms user=cfgms password=secret sslmode=require",
 		cfg.Storage.Cluster.PostgresDSN)
+	assert.Equal(t, "yaml-session-hmac-key", cfg.Storage.Cluster.SessionHMACKey,
+		"storage.cluster.session_hmac_key must be parsed from YAML")
 	require.NotNil(t, cfg.Storage.Cluster.S3)
 	assert.Equal(t, "cfgms-installers", cfg.Storage.Cluster.S3["bucket"])
 	assert.Equal(t, "us-east-1", cfg.Storage.Cluster.S3["region"])
@@ -528,6 +532,62 @@ func TestClusterStorageDSNEnvVar(t *testing.T) {
 	assert.Equal(t,
 		"host=override.pg port=5432 dbname=cfgms user=cfgms password=test sslmode=disable",
 		cfg.Storage.Cluster.PostgresDSN)
+}
+
+// TestClusterStorageSessionHMACKeyEnvVar verifies that
+// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY materialises storage.cluster and populates
+// storage.cluster.session_hmac_key when no config file supplies it (Issue #3127).
+func TestClusterStorageSessionHMACKeyEnvVar(t *testing.T) {
+	t.Setenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY", "env-session-hmac-key")
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "") // clear so only the HMAC key is set by env
+	t.Setenv("CFGMS_HA_MODE", "")                      // clear so HA mode is not set by env
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Storage.Cluster,
+		"CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY must materialise storage.cluster")
+	assert.Equal(t, "env-session-hmac-key", cfg.Storage.Cluster.SessionHMACKey)
+}
+
+// TestClusterStorageSessionHMACKeyEnvVarOverridesYAML verifies that
+// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY takes precedence over a session_hmac_key
+// supplied by the config file, and that an unset env var leaves the YAML value intact
+// (Issue #3127). The key backs bearer-token hashing, so operators must be able to keep
+// it out of the on-disk config.
+func TestClusterStorageSessionHMACKeyEnvVarOverridesYAML(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+
+	content := `
+storage:
+  cluster:
+    postgres_dsn: "host=pg.example.com port=5432 dbname=cfgms user=cfgms sslmode=require"
+    session_hmac_key: "from-yaml"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "") // clear so the YAML DSN is not overridden
+	t.Setenv("CFGMS_HA_MODE", "")                      // clear so HA mode is not set by env
+
+	// Env var unset: the YAML value survives.
+	t.Setenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY", "")
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Storage.Cluster)
+	assert.Equal(t, "from-yaml", cfg.Storage.Cluster.SessionHMACKey,
+		"an empty env var must not clobber the config-file session_hmac_key")
+
+	// Env var set: it wins over the YAML value.
+	t.Setenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY", "from-env")
+	cfg, err = LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Storage.Cluster)
+	assert.Equal(t, "from-env", cfg.Storage.Cluster.SessionHMACKey,
+		"CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY must override storage.cluster.session_hmac_key")
+	assert.Equal(t, "host=pg.example.com port=5432 dbname=cfgms user=cfgms sslmode=require",
+		cfg.Storage.Cluster.PostgresDSN,
+		"overriding the HMAC key must not disturb the sibling postgres_dsn")
 }
 
 // --- Deployment Ring Config tests (Issue #2271) ---

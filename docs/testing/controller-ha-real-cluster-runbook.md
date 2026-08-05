@@ -203,6 +203,28 @@ still live reported `audit: 24` / `Total: 76` — the `systemctl stop` itself
 wrote one audit entry, accounting for the difference. No other drift between
 the two runs.)
 
+**`trigger` and `push` records were skipped — known, accepted OSS-only gap.**
+Neither kind appears in the report above, and neither appears in the live
+migration output below. Two things combine here:
+
+- This controller genuinely held **0 `trigger` and 0 `push` records**. The
+  migrator exports both kinds unconditionally from the `oss` source (which
+  *does* implement `TriggerStore` and `PushStore`), and the report prints a
+  line only for kinds with at least one record, so a `0`-count kind produces
+  no line at all rather than an explicit `0`.
+- Even had the counts been nonzero, those records would have been **silently
+  dropped on import**: per the per-store-kind coverage table in
+  [storage-architecture.md](../architecture/storage-architecture.md#stores-covered-by-the-storage-migrator),
+  `trigger` and `push` are OSS-only — the PostgreSQL backend exposes no
+  `TriggerStore`/`PushStore`, so the importer skips those records without
+  error and the end-of-run integrity check compares only kinds that *both*
+  backends support.
+
+An operator migrating a controller that *does* hold trigger or push data
+should expect exactly that silent skip and plan to re-create those records on
+the Postgres side — it is a known gap in the database backend, not a
+migration bug.
+
 ### Live migration
 
 `cfg migrate --provider storage --from oss --to database` (no `--dry-run`)
