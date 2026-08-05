@@ -234,6 +234,15 @@ jobs:
       if: always()
       run: |
         echo "🧹 Stopping controller..."
+        # Compose interpolates every service in the file even for `down`, and two
+        # of them require CFGMS_SECRETS_KEY_FILE. Without it this aborted before
+        # stopping anything — masked by the `|| true`.
+        if [ -f .env.test ]; then
+          set -a
+          source .env.test
+          set +a
+        fi
+        export CFGMS_SECRETS_KEY_FILE="${CFGMS_SECRETS_KEY_FILE:-/dev/null}"
         docker compose -f docker-compose.test.yml --profile ha down || true
 
     - name: Cleanup Docker Services

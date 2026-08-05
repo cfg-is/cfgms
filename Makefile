@@ -1623,9 +1623,17 @@ test-integration-setup:
 	@echo ""
 
 # Clean up Docker test environment and generated credentials
+#
+# Compose interpolates the whole file even for `down`, and two services declare
+# ${CFGMS_SECRETS_KEY_FILE:?...}, so tearing down without that variable aborts
+# before removing anything. .env.test carries the ephemeral key when setup ran;
+# when it did not, any value satisfies interpolation because `down` mounts
+# nothing. The :? guard still fails closed on `up`, which is where it matters.
 test-integration-cleanup:
 	@echo "🧹 Cleaning up CFGMS Docker test environment..."
 	@echo "================================================"
+	@if [ -f .env.test ]; then set -a; . ./.env.test; set +a; fi; \
+	export CFGMS_SECRETS_KEY_FILE="$${CFGMS_SECRETS_KEY_FILE:-/dev/null}"; \
 	docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml down -v --remove-orphans 2>/dev/null || \
 	docker compose -f docker-compose.test.yml down -v --remove-orphans
 	@echo "🔐 Removing generated credentials..."
