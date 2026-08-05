@@ -34,6 +34,7 @@ import (
 type inMemoryTokenStore struct {
 	mu     sync.RWMutex
 	tokens map[string]*business.RegistrationTokenData
+	claims map[string]map[string]struct{} // token string → set of device claim IDs
 }
 
 func newInMemoryTokenStore() *inMemoryTokenStore {
@@ -140,22 +141,43 @@ func (s *inMemoryTokenStore) GetTokenByID(_ context.Context, id string) (*busine
 func (s *inMemoryTokenStore) Initialize(_ context.Context) error { return nil }
 func (s *inMemoryTokenStore) Close() error                       { return nil }
 
-func (s *inMemoryTokenStore) ConsumeToken(_ context.Context, tokenStr string) error {
+// ClaimToken reserves the token for one device identity. Like the durable
+// stores it leaves the token itself valid — registration tokens are perennial
+// (Issue #1690) and one enrolment token serves a whole fleet.
+func (s *inMemoryTokenStore) ClaimToken(_ context.Context, tokenStr, claimID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	token, ok := s.tokens[tokenStr]
 	if !ok || !token.IsValid() {
-		return fmt.Errorf("token is invalid, expired, or already used")
+		return false, fmt.Errorf("registration token is invalid, expired, or revoked")
 	}
-	now := time.Now()
-	token.Revoked = true
-	token.RevokedAt = &now
+	if s.claims == nil {
+		s.claims = make(map[string]map[string]struct{})
+	}
+	claimed := s.claims[tokenStr]
+	if claimed == nil {
+		claimed = make(map[string]struct{})
+		s.claims[tokenStr] = claimed
+	}
+	if _, exists := claimed[claimID]; exists {
+		return false, nil
+	}
+	claimed[claimID] = struct{}{}
+	return true, nil
+}
+
+func (s *inMemoryTokenStore) ReleaseTokenClaim(_ context.Context, tokenStr, claimID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if claimed, ok := s.claims[tokenStr]; ok {
+		delete(claimed, claimID)
+	}
 	return nil
 }
 
 // compile-time assertion
 var _ business.RegistrationTokenStore = (*inMemoryTokenStore)(nil)
-var _ business.RegistrationTokenConsumer = (*inMemoryTokenStore)(nil)
+var _ business.RegistrationTokenClaimer = (*inMemoryTokenStore)(nil)
 
 func verifiedPeerContext(commonName string) context.Context {
 	leaf := &x509.Certificate{Subject: pkix.Name{CommonName: commonName}}
@@ -169,10 +191,13 @@ func verifiedPeerContext(commonName string) context.Context {
 	})
 }
 
-func TestRegister_ConsumesTokenAtomically(t *testing.T) {
+// gRPC registration binds the caller to the token's tenant; it must not spend
+// the token. Registration tokens are perennial (Issue #1690), so revoking one on
+// first use would lock every remaining endpoint out of the fleet.
+func TestRegister_DoesNotSpendThePerennialToken(t *testing.T) {
 	store := newInMemoryTokenStore()
 	require.NoError(t, store.SaveToken(context.Background(), &business.RegistrationTokenData{
-		Token: "one-use-token", TenantID: "tenant-a",
+		Token: "fleet-token", TenantID: "tenant-a",
 	}))
 	provider := New(ModeServer)
 	provider.registrationTokenStore = store
@@ -181,7 +206,7 @@ func TestRegister_ConsumesTokenAtomically(t *testing.T) {
 	request := &controllerpb.RegisterRequest{
 		Version: "1.0.0",
 		Credentials: &commonpb.Credentials{
-			ClientId: "one-use-token",
+			ClientId: "fleet-token",
 			TenantId: "tenant-a",
 		},
 	}
@@ -191,15 +216,68 @@ func TestRegister_ConsumesTokenAtomically(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < contenders; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			if _, err := server.Register(verifiedPeerContext("steward-atomic"), request); err == nil {
+			ctx := verifiedPeerContext(fmt.Sprintf("steward-%d", i))
+			if _, err := server.Register(ctx, request); err == nil {
 				successes.Add(1)
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
-	assert.Equal(t, int32(1), successes.Load())
+	assert.Equal(t, int32(contenders), successes.Load(),
+		"every steward presenting the fleet token must register")
+
+	tok, err := store.GetToken(context.Background(), "fleet-token")
+	require.NoError(t, err)
+	assert.True(t, tok.IsValid(), "registration must leave the fleet token valid")
+}
+
+// Revocation is how a token is spent, and it must be enforced at the gRPC
+// boundary as well as the REST one.
+func TestRegister_RejectsRevokedToken(t *testing.T) {
+	store := newInMemoryTokenStore()
+	revokedAt := time.Now()
+	require.NoError(t, store.SaveToken(context.Background(), &business.RegistrationTokenData{
+		Token: "revoked-token", TenantID: "tenant-a",
+		Revoked: true, RevokedAt: &revokedAt,
+	}))
+	provider := New(ModeServer)
+	provider.registrationTokenStore = store
+	provider.requireSecurityStores = true
+	server := &transportServer{provider: provider}
+
+	_, err := server.Register(verifiedPeerContext("steward-revoked"), &controllerpb.RegisterRequest{
+		Version: "1.0.0",
+		Credentials: &commonpb.Credentials{
+			ClientId: "revoked-token",
+			TenantId: "tenant-a",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid or expired registration token")
+}
+
+// The token, not the client-supplied field, is the source of truth for tenancy.
+func TestRegister_RejectsTenantMismatch(t *testing.T) {
+	store := newInMemoryTokenStore()
+	require.NoError(t, store.SaveToken(context.Background(), &business.RegistrationTokenData{
+		Token: "tenant-bound-token", TenantID: "tenant-a",
+	}))
+	provider := New(ModeServer)
+	provider.registrationTokenStore = store
+	provider.requireSecurityStores = true
+	server := &transportServer{provider: provider}
+
+	_, err := server.Register(verifiedPeerContext("steward-mismatch"), &controllerpb.RegisterRequest{
+		Version: "1.0.0",
+		Credentials: &commonpb.Credentials{
+			ClientId: "tenant-bound-token",
+			TenantId: "tenant-b",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match registration token")
 }
 
 // dialAndRegister dials the server over QUIC+mTLS and invokes the Register RPC.

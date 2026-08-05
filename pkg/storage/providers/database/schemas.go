@@ -616,11 +616,21 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 		return err
 	}
 
+	// A claim gates certificate issuance for one device identity. Registration
+	// tokens are perennial (Issue #1690), so the key is (token, claim_id): many
+	// devices enrol on one fleet token, but a given device can be issued a key
+	// only once per token. A table left over from the original single-column key
+	// is dropped — claims are short-lived in-flight guards, and keeping them
+	// would preserve exactly the rows that block re-enrolment.
+	if err := dropSingleColumnRegistrationClaimKey(ctx, db); err != nil {
+		return err
+	}
 	createClaimsTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_registration_token_claims (
-			token      VARCHAR(255) PRIMARY KEY,
+			token      VARCHAR(255) NOT NULL,
 			claim_id   VARCHAR(255) NOT NULL,
-			claimed_at TIMESTAMP WITH TIME ZONE NOT NULL
+			claimed_at TIMESTAMP WITH TIME ZONE NOT NULL,
+			PRIMARY KEY (token, claim_id)
 		);
 	`
 	if _, err := db.ExecContext(ctx, createClaimsTableQuery); err != nil {
@@ -646,6 +656,39 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 		}
 	}
 
+	return nil
+}
+
+// dropSingleColumnRegistrationClaimKey removes a cfgms_registration_token_claims
+// table that still carries the original single-column `token` primary key. That
+// key admitted one device per token for the token's whole lifetime, which
+// silently reverted the perennial token model (Issue #1690) — a fleet token
+// could enrol exactly one endpoint. CREATE TABLE IF NOT EXISTS alone would leave
+// the old key in place, so the stale table is dropped and recreated with
+// PRIMARY KEY (token, claim_id).
+//
+// Dropping the rows is safe: a claim is a short-lived in-flight admission guard,
+// so any registration still mid-flight simply retries.
+func dropSingleColumnRegistrationClaimKey(ctx context.Context, db *sql.DB) error {
+	var keyColumns int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_name = kcu.constraint_name
+		 AND tc.table_schema = kcu.table_schema
+		WHERE tc.table_name = 'cfgms_registration_token_claims'
+		  AND tc.constraint_type = 'PRIMARY KEY'`).Scan(&keyColumns)
+	if err != nil {
+		return fmt.Errorf("failed to inspect cfgms_registration_token_claims primary key: %w", err)
+	}
+	// 0 = table absent (nothing to migrate); 2 = already the corrected key.
+	if keyColumns != 1 {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE cfgms_registration_token_claims`); err != nil {
+		return fmt.Errorf("failed to drop legacy cfgms_registration_token_claims table: %w", err)
+	}
 	return nil
 }
 

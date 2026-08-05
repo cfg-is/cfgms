@@ -37,6 +37,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
+	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 
 	// Import storage providers for testing
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
@@ -338,11 +339,29 @@ func (f *E2ETestFramework) initializeController() error {
 	// Story #1919 made getHTTPListenAddr() honor cfg.ListenAddr, exposing
 	// the harness bug: with ListenAddr set to ControllerPort=8080, registration
 	// to HTTPPort=9080 was hitting nothing. Bind HTTP on HTTPPort to match.
+	//
+	// The dedicated metrics listener is fail-closed: DefaultConfig leaves it empty
+	// so a deployment has to choose an address, and Server.Start refuses to bind
+	// anything — including the public API this harness registers stewards
+	// against — until one is set. Reserve a concrete loopback port, which is what
+	// a deployment configures.
+	//
+	// external_url is likewise required: the public API refuses to serve TLS
+	// until it can confirm the server certificate actually covers the hostname
+	// clients are told to use. The harness issues its server certificate for
+	// "localhost" below, and registers stewards against that name.
+	metricsAddr, err := pkgtestutil.ReserveLoopbackAddress()
+	if err != nil {
+		return fmt.Errorf("failed to reserve metrics listener address: %w", err)
+	}
+
 	config := &controllerConfig.Config{
-		ListenAddr: fmt.Sprintf("localhost:%d", f.config.HTTPPort),
-		CertPath:   filepath.Join(f.tempDir, "certs"), // Legacy cert path
-		DataDir:    filepath.Join(f.tempDir, "controller-data"),
-		LogLevel:   "info",
+		ListenAddr:        fmt.Sprintf("localhost:%d", f.config.HTTPPort),
+		ExternalURL:       fmt.Sprintf("https://localhost:%d", f.config.HTTPPort),
+		MetricsListenAddr: metricsAddr,
+		CertPath:          filepath.Join(f.tempDir, "certs"), // Legacy cert path
+		DataDir:           filepath.Join(f.tempDir, "controller-data"),
+		LogLevel:          "info",
 		Storage: &controllerConfig.StorageConfig{
 			Provider:     "flatfile",
 			FlatfileRoot: filepath.Join(f.tempDir, "storage-flatfile"),
@@ -389,15 +408,26 @@ func (f *E2ETestFramework) initializeController() error {
 		return fmt.Errorf("failed to create controller: %w", err)
 	}
 
-	// Start controller in background
+	// Start controller in background. Start's error was previously only logged,
+	// which made every fail-closed startup check surface as an unrelated symptom
+	// much later — a refused listener shows up as "connection refused" in whatever
+	// test registers first, and on Windows as a temp-dir cleanup failure, because
+	// Stop short-circuits on a controller that never started and so never releases
+	// its SQLite handles. Capture it and report it as itself.
+	startErr := make(chan error, 1)
 	go func() {
-		if err := ctrl.Start(f.ctx); err != nil {
-			f.logger.Error("Controller start failed", "error", err)
-		}
+		startErr <- ctrl.Start(f.ctx)
 	}()
 
-	// Wait for controller to start (give it some time)
-	time.Sleep(f.config.ComponentStartup)
+	select {
+	case err := <-startErr:
+		if err != nil {
+			return fmt.Errorf("controller failed to start: %w", err)
+		}
+	case <-time.After(f.config.ComponentStartup):
+		// Start blocks while the controller serves; reaching the budget without an
+		// error is the normal path.
+	}
 
 	f.controller = ctrl
 	f.addCleanup(func() error {
@@ -723,11 +753,13 @@ func (f *E2ETestFramework) createTLSConfigFromPEM(caCertPEM, clientCertPEM, clie
 		return nil, fmt.Errorf("failed to load client certificate: %w", err)
 	}
 
-	// Create TLS config with ALPN protocol for gRPC-over-QUIC
+	// Create TLS config with ALPN protocol for gRPC-over-QUIC.
+	// QUIC is TLS 1.3-only and the dialer now rejects anything lower outright, so
+	// TLS 1.2 here is not a weaker-but-working setting — it fails the handshake.
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
-		MinVersion:   tls.VersionTLS12,
+		MinVersion:   tls.VersionTLS13,
 		ServerName:   "localhost",                          // Connect via localhost in tests
 		NextProtos:   []string{quictransport.ALPNProtocol}, // Required for QUIC transport
 	}

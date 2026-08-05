@@ -80,13 +80,24 @@ func writeSecretsKeyFile(base string) (string, error) {
 func ReservePrivateListenerAddress(t *testing.T) string {
 	t.Helper()
 
+	address, err := ReserveLoopbackAddress()
+	if err != nil {
+		t.Fatalf("ReservePrivateListenerAddress: %v", err)
+	}
+	return address
+}
+
+// ReserveLoopbackAddress is ReservePrivateListenerAddress for harness code that
+// builds a controller outside a *testing.T — the e2e framework constructs its
+// controller config in a plain function.
+func ReserveLoopbackAddress() (string, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("ReservePrivateListenerAddress: reserve loopback port: %v", err)
+		return "", fmt.Errorf("reserve loopback port: %w", err)
 	}
 	address := listener.Addr().String()
 	if err := listener.Close(); err != nil {
-		t.Fatalf("ReservePrivateListenerAddress: release loopback port: %v", err)
+		return "", fmt.Errorf("release loopback port: %w", err)
 	}
-	return address
+	return address, nil
 }

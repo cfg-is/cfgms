@@ -916,6 +916,13 @@ test-fast:
 #	not a deadlock. Do not tighten this to track how long the suite currently takes.
 	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=10m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
 	@echo ""
+#	Build-tagged code is invisible to every target above, so nothing catches a
+#	break in it until an e2e image build fails hours later. The test-endpoint
+#	routes are only compiled by docker-compose.test.yml, which is exactly the
+#	configuration the integration and fleet suites depend on.
+	@echo "🏷️  Vetting build-tagged sources (cfgms_test_endpoints)..."
+	@go vet -tags cfgms_test_endpoints ./features/controller/api/... || exit 1
+	@echo ""
 	@echo "✅ Fast comprehensive tests complete"
 
 # Load testing for production readiness (Story #294 Phase 4)
@@ -1616,9 +1623,17 @@ test-integration-setup:
 	@echo ""
 
 # Clean up Docker test environment and generated credentials
+#
+# Compose interpolates the whole file even for `down`, and two services declare
+# ${CFGMS_SECRETS_KEY_FILE:?...}, so tearing down without that variable aborts
+# before removing anything. .env.test carries the ephemeral key when setup ran;
+# when it did not, any value satisfies interpolation because `down` mounts
+# nothing. The :? guard still fails closed on `up`, which is where it matters.
 test-integration-cleanup:
 	@echo "🧹 Cleaning up CFGMS Docker test environment..."
 	@echo "================================================"
+	@if [ -f .env.test ]; then set -a; . ./.env.test; set +a; fi; \
+	export CFGMS_SECRETS_KEY_FILE="$${CFGMS_SECRETS_KEY_FILE:-/dev/null}"; \
 	docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml down -v --remove-orphans 2>/dev/null || \
 	docker compose -f docker-compose.test.yml down -v --remove-orphans
 	@echo "🔐 Removing generated credentials..."

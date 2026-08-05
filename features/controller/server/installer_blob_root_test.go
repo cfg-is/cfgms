@@ -13,14 +13,19 @@ import (
 func TestResolveInstallerBlobRootUsesLoadedDeploymentPaths(t *testing.T) {
 	t.Parallel()
 
+	// A deployment's data directory, spelled the way the host spells paths:
+	// resolveInstallerBlobRoot joins with filepath, so the expectation has to be
+	// built the same way rather than hard-coded to one platform's separator.
+	dataDir := filepath.Join(string(filepath.Separator), "var", "lib", "cfgms")
+
 	cfg := config.DefaultConfig()
-	cfg.DataDir = "/var/lib/cfgms"
-	cfg.Storage.FlatfileRoot = "/var/lib/cfgms/storage"
-	cfg.Storage.SQLitePath = "/var/lib/cfgms/cfgms.db"
+	cfg.DataDir = dataDir
+	cfg.Storage.FlatfileRoot = filepath.Join(dataDir, "storage")
+	cfg.Storage.SQLitePath = filepath.Join(dataDir, "cfgms.db")
 
 	assert.Empty(t, cfg.BlobStorage.Root,
 		"default must not freeze a relative root before YAML overrides are loaded")
-	assert.Equal(t, "/var/lib/cfgms/installers", resolveInstallerBlobRoot(cfg))
+	assert.Equal(t, filepath.Join(dataDir, "installers"), resolveInstallerBlobRoot(cfg))
 }
 
 func TestResolveInstallerBlobRootPrecedence(t *testing.T) {

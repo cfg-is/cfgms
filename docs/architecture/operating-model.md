@@ -182,7 +182,7 @@ The steward binary is built with the controller's URL compiled in (`-ldflags="-X
 **Steward identity is established at registration.**
 Two credential flavors:
 
-- **Short-lived / single-use registration tokens** — manual onboarding, small fleets, time-bounded provisioning. Generated on the controller, handed to the steward as a string. Consumed at registration; expiry enforces time bounds.
+- **Perennial registration tokens** — manual onboarding, small fleets, time-bounded provisioning. Generated on the controller, handed to the steward as a string. Never consumed at registration: one token enrolls many devices and is spent only by rotation or revocation, with expiry enforcing time bounds. The controller records a per-device claim at the issuance boundary, so a device cannot be issued two certificates on one token.
 - **Long-lived tenant/group registration codes** — RMM/GPO mass deployment. Same string-on-the-wire pattern, baked into deployment scripts and reused by many devices. Encodes tenant/group target.
 
 Both flow through the controller's registration approval workflow (`RegistrationApprovalHook`). The controller ships two built-in workflows selectable via `registration.workflow` in `controller.cfg`:

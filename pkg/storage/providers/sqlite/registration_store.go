@@ -169,37 +169,9 @@ func (s *SQLiteRegistrationTokenStore) DeleteToken(ctx context.Context, tokenStr
 	return nil
 }
 
-// ConsumeToken atomically marks one valid token spent. Concurrent callers race
-// on the conditional UPDATE; exactly one can affect a row.
-func (s *SQLiteRegistrationTokenStore) ConsumeToken(ctx context.Context, tokenStr string) error {
-	now := nowUTC()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE registration_tokens
-		SET revoked = 1, revoked_at = ?
-		WHERE token IN (?, ?)
-		  AND revoked = 0
-		  AND (expires_at IS NULL OR expires_at > ?)`,
-		formatTime(now),
-		business.RegistrationTokenLookupKey(tokenStr),
-		tokenStr,
-		formatTime(now),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to consume registration token: %w", err)
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to confirm registration token consumption: %w", err)
-	}
-	if affected != 1 {
-		return fmt.Errorf("registration token is invalid, expired, or already used")
-	}
-	return nil
-}
-
-// ClaimToken atomically reserves one valid token at the REST admission boundary.
-// The claim is intentionally separate from revoked/consumed state because the
-// steward must present the same bearer during the subsequent gRPC registration.
+// ClaimToken atomically reserves a valid token for one device identity at the
+// REST admission boundary. It does not revoke the token: registration tokens are
+// perennial (Issue #1690) and one fleet token enrols many endpoints.
 func (s *SQLiteRegistrationTokenStore) ClaimToken(ctx context.Context, tokenStr, claimID string) (bool, error) {
 	if tokenStr == "" {
 		return false, fmt.Errorf("token string cannot be empty")
@@ -237,21 +209,21 @@ func (s *SQLiteRegistrationTokenStore) ClaimToken(ctx context.Context, tokenStr,
 		return true, nil
 	}
 
-	var existingClaimID string
+	// No row was inserted: either this device already holds a claim (a retry) or
+	// the token itself is not usable. Distinguishing the two keeps a retry
+	// idempotent without reporting a revoked token as a successful claim.
+	var claimed int
 	err = s.db.QueryRowContext(ctx,
-		`SELECT claim_id FROM registration_token_claims WHERE token = ?`,
-		lookupKey,
-	).Scan(&existingClaimID)
-	if err == sql.ErrNoRows {
-		return false, fmt.Errorf("registration token is invalid, expired, or revoked")
-	}
+		`SELECT COUNT(1) FROM registration_token_claims WHERE token = ? AND claim_id = ?`,
+		lookupKey, claimID,
+	).Scan(&claimed)
 	if err != nil {
 		return false, fmt.Errorf("failed to inspect registration token claim: %w", err)
 	}
-	if existingClaimID == claimID {
+	if claimed == 1 {
 		return false, nil
 	}
-	return false, business.ErrRegistrationTokenAlreadyClaimed
+	return false, fmt.Errorf("registration token is invalid, expired, or revoked")
 }
 
 // ReleaseTokenClaim removes only the exact claim made by this REST attempt.
@@ -478,5 +450,4 @@ func generateTokenID() (string, error) {
 
 // ensure SQLiteRegistrationTokenStore satisfies the interface at compile time
 var _ business.RegistrationTokenStore = (*SQLiteRegistrationTokenStore)(nil)
-var _ business.RegistrationTokenConsumer = (*SQLiteRegistrationTokenStore)(nil)
 var _ business.RegistrationTokenClaimer = (*SQLiteRegistrationTokenStore)(nil)

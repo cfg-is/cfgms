@@ -154,10 +154,10 @@ func TestRequiredSecurityStoresFailInitializationClosed(t *testing.T) {
 		require.ErrorContains(t, err, "approval checker")
 	})
 
-	t.Run("token store without atomic consumer", func(t *testing.T) {
+	t.Run("token store without atomic claimer", func(t *testing.T) {
 		provider := New(ModeServer, WithApprovalChecker(approveAll{}))
 		err := provider.Initialize(context.Background(), baseConfig(&nonConsumingRegistrationStore{}))
-		require.ErrorContains(t, err, "atomic registration token consumption")
+		require.ErrorContains(t, err, "atomic registration token claiming")
 	})
 
 	t.Run("complete security services", func(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"time"
 )
@@ -66,26 +65,22 @@ type RegistrationTokenStore interface {
 	Close() error
 }
 
-// RegistrationTokenConsumer is implemented by durable stores that can
-// atomically spend a registration token. Public admission requires this
-// capability so concurrent claims cannot both succeed.
-type RegistrationTokenConsumer interface {
-	ConsumeToken(ctx context.Context, tokenStr string) error
-}
-
-// ErrRegistrationTokenAlreadyClaimed is returned when a registration token has
-// already crossed the REST admission boundary for a different device identity.
-var ErrRegistrationTokenAlreadyClaimed = errors.New("registration token already claimed")
-
 // RegistrationTokenClaimer is implemented by durable stores that can reserve a
-// valid registration token at the REST certificate-issuance boundary without
-// consuming it. The token remains valid for the subsequent mTLS-authenticated
-// gRPC registration, where RegistrationTokenConsumer performs final consumption.
+// registration token for one device identity at the REST certificate-issuance
+// boundary.
+//
+// Registration tokens are perennial (Issue #1690): they survive multiple
+// registrations and are spent only by rotation or revocation, because one
+// enrollment token is what an RMM or GPO deployment bakes into a script for a
+// whole fleet. A claim therefore scopes to the *device*, not to the token — it
+// exists so that two concurrent requests carrying the same token and the same
+// device identity cannot both be issued a private key, including across
+// controller processes. Distinct devices claim the same token independently.
 type RegistrationTokenClaimer interface {
-	// ClaimToken atomically creates a durable claim for tokenStr. It returns true
-	// only to the caller that created the claim. A retry with the same claimID
-	// returns (false, nil); a different claimant receives
-	// ErrRegistrationTokenAlreadyClaimed.
+	// ClaimToken atomically creates a durable claim on tokenStr for claimID. It
+	// returns true only to the caller that created that claim; a retry with the
+	// same claimID returns (false, nil). An invalid, expired, or revoked token is
+	// an error.
 	ClaimToken(ctx context.Context, tokenStr, claimID string) (bool, error)
 
 	// ReleaseTokenClaim removes an exact claim after a failure that occurred
