@@ -170,6 +170,8 @@ func (p *DatabaseEntityGraphProvider) queryNeighborhoodEdges(
 		conds = append(conds, "(ti.owning_tenant = "+tf2+" OR ti.owning_tenant LIKE "+tfLike2+")")
 	}
 
+	// #nosec G202 -- conds contains only fixed predicates and generated $N
+	// placeholders; every edge type and tenant value is bound through args.
 	q := `SELECT ep.from_subject, ep.to_subject, ep.edge_type, ep.source
 		  FROM eg_edge_projection ep
 		  LEFT JOIN eg_entity_index fi ON fi.subject = ep.from_subject

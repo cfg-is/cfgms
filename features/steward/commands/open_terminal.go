@@ -74,6 +74,8 @@ func (h *Handler) handleOpenTerminal(ctx context.Context, cmd *cpTypes.Command, 
 	// Run the bridge in a background goroutine; the command itself returns
 	// immediately (EventCommandCompleted) while the PTY session runs as long as
 	// the stream stays open. The bridge is responsible for its own teardown.
+	// #nosec G118 -- the authenticated terminal stream intentionally outlives
+	// command receipt and dialer.Dial owns teardown when the stream closes.
 	go func() {
 		if err := dialer.Dial(context.Background(), sessionID, shellStr, cols, rows); err != nil {
 			h.logger.Error("open_terminal: bridge exited with error",

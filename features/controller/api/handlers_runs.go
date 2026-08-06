@@ -5,9 +5,11 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,10 +18,12 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -96,6 +100,62 @@ type postRunCommandRequest struct {
 	Shell     string                `json:"shell"`     // shell to use (e.g. "bash")
 	Params    map[string]string     `json:"params"`    // script parameters
 	Signature *execCommandSignature `json:"signature"` // optional mTLS signing envelope
+}
+
+func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, sig *execCommandSignature) error {
+	if s.cfg == nil || s.cfg.SecurityProfile != config.SecurityProfilePublicBeta {
+		return nil
+	}
+	if sig == nil || sig.Algorithm == "" || sig.Value == "" || sig.PublicKey == "" {
+		return fmt.Errorf("public-beta ad-hoc execution requires an operator signature")
+	}
+	if s.certManager == nil {
+		return fmt.Errorf("public-beta ad-hoc execution requires loaded controller signing roots")
+	}
+
+	scriptSig := &scriptmodule.ScriptSignature{
+		Algorithm: sig.Algorithm,
+		Signature: sig.Value,
+		PublicKey: sig.PublicKey,
+	}
+	if err := scriptmodule.VerifyScriptSignature(
+		content,
+		scriptSig,
+		scriptmodule.ShellType(shell),
+		scriptmodule.ModuleSigningConfig{TrustMode: scriptmodule.TrustModeAnyValid},
+	); err != nil {
+		return fmt.Errorf("invalid operator signature: %w", err)
+	}
+
+	caPEM, err := s.certManager.GetCACertificate()
+	if err != nil {
+		return fmt.Errorf("controller signing roots unavailable: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return fmt.Errorf("controller signing roots are invalid")
+	}
+	block, _ := pem.Decode([]byte(sig.PublicKey))
+	if block == nil {
+		return fmt.Errorf("operator signing certificate is not valid PEM")
+	}
+	operatorCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("operator signing certificate is invalid: %w", err)
+	}
+	if _, err := operatorCert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return fmt.Errorf("operator signing certificate is not trusted by the controller CA: %w", err)
+	}
+	if !cert.HasAdminMarker(operatorCert) {
+		return fmt.Errorf("operator signing certificate is not an administrator certificate")
+	}
+	if s.certManager.IsRevoked(operatorCert.SerialNumber.String()) {
+		return fmt.Errorf("operator signing certificate is revoked")
+	}
+	return nil
 }
 
 // authRunAccess authenticates a request to the ad-hoc run API and returns the
@@ -263,6 +323,10 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "content must be base64-encoded", "INVALID_CONTENT")
 		return
 	}
+	if err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Signature); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+		return
+	}
 
 	// Banned-pattern enforcement — controller-side (defense-in-depth; steward also checks).
 	if patternName, found := containsBannedPattern(string(inlineContent)); found {
@@ -304,6 +368,15 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var commandSignature *controllerrun.CommandSignature
+	if req.Signature != nil {
+		commandSignature = &controllerrun.CommandSignature{
+			Algorithm: req.Signature.Algorithm,
+			Value:     req.Signature.Value,
+			PublicKey: req.Signature.PublicKey,
+		}
+	}
+
 	runID, err := controllerrun.SynthesizeCommandRun(
 		r.Context(),
 		s.runManager,
@@ -315,6 +388,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		string(inlineContent),
 		scriptmodule.ShellType(req.Shell),
 		req.Params,
+		commandSignature,
 	)
 	if err != nil {
 		s.logger.Error("Failed to synthesize command run",

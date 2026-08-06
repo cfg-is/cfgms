@@ -133,7 +133,7 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *b
 			revoked = EXCLUDED.revoked,
 			revoked_at = EXCLUDED.revoked_at
 		RETURNING id`,
-		token.Token,
+		business.RegistrationTokenLookupKey(token.Token),
 		token.ID,
 		token.TenantID,
 		token.ControllerURL,
@@ -163,10 +163,11 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 	var expiresAt, revokedAt sql.NullTime
 	var group, id sql.NullString
 
+	lookupKey := business.RegistrationTokenLookupKey(tokenStr)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
 		FROM cfgms_registration_tokens
-		WHERE token = $1`, tokenStr).Scan(
+		WHERE token = $1`, lookupKey).Scan(
 		&token.Token,
 		&id,
 		&token.TenantID,
@@ -179,9 +180,21 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("token not found")
+			// Read legacy plaintext rows so they can be rotated without downtime.
+			err = s.db.QueryRowContext(ctx, `
+				SELECT token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+				FROM cfgms_registration_tokens
+				WHERE token = $1`, tokenStr).Scan(
+				&token.Token, &id, &token.TenantID, &token.ControllerURL, &group,
+				&token.CreatedAt, &expiresAt, &token.Revoked, &revokedAt,
+			)
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("token not found")
+			}
 		}
-		return nil, fmt.Errorf("failed to get token: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get token: %w", err)
+		}
 	}
 
 	token.ID = id.String
@@ -192,6 +205,7 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 	if revokedAt.Valid {
 		token.RevokedAt = &revokedAt.Time
 	}
+	token.Token = tokenStr
 
 	return &token, nil
 }
@@ -257,14 +271,15 @@ func (s *DatabaseRegistrationTokenStore) UpdateToken(ctx context.Context, token 
 		UPDATE cfgms_registration_tokens
 		SET tenant_id = $2, controller_url = $3, group_name = $4,
 		    expires_at = $5, revoked = $6, revoked_at = $7
-		WHERE token = $1`,
-		token.Token,
+		WHERE token = $1 OR token = $8`,
+		business.RegistrationTokenLookupKey(token.Token),
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
 		nullTimeOrNil(token.ExpiresAt),
 		token.Revoked,
 		nullTimeOrNil(token.RevokedAt),
+		token.Token,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update token: %w", err)
@@ -289,7 +304,9 @@ func (s *DatabaseRegistrationTokenStore) DeleteToken(ctx context.Context, tokenS
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	result, err := s.db.ExecContext(ctx, `DELETE FROM cfgms_registration_tokens WHERE token = $1`, tokenStr)
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM cfgms_registration_tokens WHERE token = $1 OR token = $2`,
+		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	if err != nil {
 		return fmt.Errorf("failed to delete token: %w", err)
 	}
@@ -303,6 +320,88 @@ func (s *DatabaseRegistrationTokenStore) DeleteToken(ctx context.Context, tokenS
 	}
 	return nil
 }
+
+// ClaimToken atomically reserves a valid token for one device identity at the
+// REST admission boundary. It does not revoke the token: registration tokens are
+// perennial (Issue #1690) and one fleet token enrols many endpoints.
+func (s *DatabaseRegistrationTokenStore) ClaimToken(ctx context.Context, tokenStr, claimID string) (bool, error) {
+	if tokenStr == "" {
+		return false, fmt.Errorf("token string cannot be empty")
+	}
+	if claimID == "" {
+		return false, fmt.Errorf("registration claim ID cannot be empty")
+	}
+
+	now := time.Now().UTC()
+	lookupKey := business.RegistrationTokenLookupKey(tokenStr)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to begin registration token claim: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Serialize with any concurrent UPDATE of the same token row, so a claim
+	// cannot observe a stale valid snapshot while another controller process is
+	// revoking or rotating the token.
+	var storedToken string
+	err = tx.QueryRowContext(ctx, `
+		SELECT token FROM cfgms_registration_tokens
+		WHERE (token = $1 OR token = $2)
+		  AND revoked = false
+		  AND (expires_at IS NULL OR expires_at > $3)
+		FOR UPDATE`,
+		lookupKey,
+		tokenStr,
+		now,
+	).Scan(&storedToken)
+	if err == sql.ErrNoRows {
+		return false, fmt.Errorf("registration token is invalid, expired, or revoked")
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to lock registration token for claim: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO cfgms_registration_token_claims (token, claim_id, claimed_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (token, claim_id) DO NOTHING`,
+		lookupKey, claimID, now)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim registration token: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to confirm registration token claim: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("failed to commit registration token claim: %w", err)
+	}
+	committed = true
+
+	// The token row was locked and valid above, so the only reason the insert
+	// found a conflict is that this same device already holds the claim.
+	return affected == 1, nil
+}
+
+// ReleaseTokenClaim removes only the exact claim made by this REST attempt.
+func (s *DatabaseRegistrationTokenStore) ReleaseTokenClaim(ctx context.Context, tokenStr, claimID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM cfgms_registration_token_claims WHERE token = $1 AND claim_id = $2`,
+		business.RegistrationTokenLookupKey(tokenStr),
+		claimID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to release registration token claim: %w", err)
+	}
+	return nil
+}
+
+var _ business.RegistrationTokenClaimer = (*DatabaseRegistrationTokenStore)(nil)
 
 // ListTokens implements RegistrationTokenStore.ListTokens
 func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
@@ -328,6 +427,8 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 			argCount++
 		}
 		if filter.Revoked != nil {
+			// #nosec G202 -- only the generated placeholder index is formatted;
+			// the boolean filter value remains a bound argument.
 			query += fmt.Sprintf(" AND revoked = $%d", argCount)
 			args = append(args, *filter.Revoked)
 			argCount++
@@ -420,6 +521,8 @@ func (s *DatabaseRegistrationTokenStore) RotateToken(ctx context.Context, tenant
 	}
 
 	now := time.Now().UTC()
+	expiresAt := now.Add(15 * time.Minute)
+	newLookupKey := business.RegistrationTokenLookupKey(newTokenStr)
 
 	newID, err := generateTokenID()
 	if err != nil {
@@ -429,9 +532,9 @@ func (s *DatabaseRegistrationTokenStore) RotateToken(ctx context.Context, tenant
 	// Insert the new token.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cfgms_registration_tokens
-			(token, id, tenant_id, controller_url, group_name, created_at, revoked)
-		VALUES ($1, $2, $3, $4, $5, $6, false)`,
-		newTokenStr, newID, tenantID, controllerURL, group, now,
+			(token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
+		newLookupKey, newID, tenantID, controllerURL, group, now, expiresAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert new token: %w", err)
@@ -442,7 +545,7 @@ func (s *DatabaseRegistrationTokenStore) RotateToken(ctx context.Context, tenant
 		UPDATE cfgms_registration_tokens
 		SET revoked = true, revoked_at = $1
 		WHERE tenant_id = $2 AND group_name = $3 AND revoked = false AND token != $4`,
-		now, tenantID, group, newTokenStr,
+		now, tenantID, group, newLookupKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to revoke old tokens: %w", err)
@@ -460,6 +563,7 @@ func (s *DatabaseRegistrationTokenStore) RotateToken(ctx context.Context, tenant
 		ControllerURL: controllerURL,
 		Group:         group,
 		CreatedAt:     now,
+		ExpiresAt:     &expiresAt,
 	}, nil
 }
 

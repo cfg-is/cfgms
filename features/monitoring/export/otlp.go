@@ -409,8 +409,8 @@ func (oe *OTLPExporter) convertTracesToOTLP(traces []TraceSpan) *tracecollectorp
 			SpanId:            decodeHexID(t.SpanID, 8),
 			ParentSpanId:      decodeHexID(t.ParentSpanID, 8),
 			Name:              t.OperationName,
-			StartTimeUnixNano: uint64(t.StartTime.UnixNano()),
-			EndTimeUnixNano:   uint64(t.EndTime.UnixNano()),
+			StartTimeUnixNano: unixNano(t.StartTime),
+			EndTimeUnixNano:   unixNano(t.EndTime),
 			Status:            &tracepb.Status{Code: traceStatusCode(t.Status)},
 			Attributes:        attrsFromMap(t.Tags),
 		}
@@ -432,7 +432,7 @@ func (oe *OTLPExporter) convertTracesToOTLP(traces []TraceSpan) *tracecollectorp
 // convertMetricsToOTLP converts all CFGMS metric maps to an ExportMetricsServiceRequest.
 // Each key-value pair becomes a Gauge metric with a single timestamped data point.
 func (oe *OTLPExporter) convertMetricsToOTLP(data ExportData) *metricscollectorpb.ExportMetricsServiceRequest {
-	now := uint64(time.Now().UnixNano())
+	now := unixNano(time.Now())
 	metrics := make([]*metricspb.Metric, 0)
 
 	addMetrics := func(prefix string, m map[string]interface{}) {
@@ -480,7 +480,7 @@ func (oe *OTLPExporter) convertLogsToOTLP(logs []LogEntry) *logscollectorpb.Expo
 	records := make([]*logspb.LogRecord, 0, len(logs))
 	for _, log := range logs {
 		records = append(records, &logspb.LogRecord{
-			TimeUnixNano:   uint64(log.Timestamp.UnixNano()),
+			TimeUnixNano:   unixNano(log.Timestamp),
 			SeverityNumber: logSeverityNumber(log.Level),
 			SeverityText:   log.Level,
 			Body:           &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: log.Message}},
@@ -499,6 +499,17 @@ func (oe *OTLPExporter) convertLogsToOTLP(logs []LogEntry) *logscollectorpb.Expo
 			},
 		},
 	}
+}
+
+// unixNano maps pre-epoch timestamps to zero, which is OTLP's "unset" value,
+// and safely represents every positive time.Time UnixNano value as uint64.
+func unixNano(t time.Time) uint64 {
+	nanos := t.UnixNano()
+	if nanos <= 0 {
+		return 0
+	}
+	// #nosec G115 -- nanos is explicitly proven positive above.
+	return uint64(nanos)
 }
 
 // cfgmsResource returns the standard CFGMS resource descriptor for OTLP payloads.

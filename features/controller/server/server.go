@@ -5,7 +5,9 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"os"
@@ -222,6 +224,28 @@ func resolveDNADataRoot(cfg *config.Config) string {
 	return root
 }
 
+// resolveInstallerBlobRoot returns the configured installer artifact root, or
+// derives it from the resolved deployment storage paths. BlobStorage.Root must
+// remain empty in DefaultConfig so a YAML data_dir/storage override cannot
+// inherit the stale relative "data/installers" default from before unmarshal.
+func resolveInstallerBlobRoot(cfg *config.Config) string {
+	if cfg.BlobStorage.Root != "" {
+		return cfg.BlobStorage.Root
+	}
+	if cfg.Storage != nil {
+		if cfg.Storage.FlatfileRoot != "" {
+			return filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
+		}
+		if cfg.Storage.SQLitePath != "" {
+			return filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
+		}
+	}
+	if cfg.DataDir != "" {
+		return filepath.Join(cfg.DataDir, "installers")
+	}
+	return ""
+}
+
 // makeHeartbeatStatusChangeCallback builds the OnStatusChange closure wired into
 // the heartbeat.Service. When a steward's liveness state changes, the callback
 // persists the new status to the durable StewardStore so that cfg steward list
@@ -264,6 +288,9 @@ func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger loggi
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if cfg == nil {
 		return nil, ErrNilConfig
+	}
+	if err := cfg.ValidateExecutionSecurity(); err != nil {
+		return nil, fmt.Errorf("execution security validation failed: %w", err)
 	}
 
 	// Validate transport config early: refuse to start if 0.0.0.0 bind has no external address.
@@ -336,6 +363,28 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
 	}
 
+	// From here on New holds open SQLite/Postgres handles. Every remaining failure
+	// returns without a Server, so nothing would ever call Stop to release them —
+	// the handles would leak for the process's life. On Windows that also pins the
+	// database files, so a caller cannot delete the data directory of a controller
+	// that refused to start. Each store below registers itself here as soon as it
+	// is opened, mirroring what Stop releases.
+	constructed := false
+	var openedStores []func() error
+	defer func() {
+		if constructed {
+			return
+		}
+		// Reverse order, so a store closes before anything it was layered onto.
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				logger.Warn("Failed to release storage after controller initialization failed",
+					"error", closeErr)
+			}
+		}
+	}()
+	openedStores = append(openedStores, storageManager.Close)
+
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
 	clientTenantStore := storageManager.GetClientTenantStore()
@@ -351,9 +400,21 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize unified audit system with pluggable storage only
 	logger.Info("Creating audit manager...")
-	auditManager, auditErr := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	auditSecrets, auditSecretsErr := api.NewSecretStore(cfg)
+	if auditSecretsErr != nil {
+		return nil, fmt.Errorf("failed to initialize durable audit signing key store: %w", auditSecretsErr)
+	}
+	auditManager, auditErr := audit.NewManager(
+		storageManager.GetAuditStore(),
+		"controller",
+		audit.WithSecretsStore(auditSecrets),
+	)
+	closeAuditSecretsErr := auditSecrets.Close()
 	if auditErr != nil {
 		return nil, fmt.Errorf("failed to initialize audit manager: %w", auditErr)
+	}
+	if closeAuditSecretsErr != nil {
+		return nil, fmt.Errorf("failed to close audit signing key store after initialization: %w", closeAuditSecretsErr)
 	}
 	logger.Info("Audit manager created")
 
@@ -396,6 +457,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if dnaErr != nil {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
 	}
+	if dnaStorageManager != nil {
+		openedStores = append(openedStores, dnaStorageManager.Close)
+	}
 
 	// Create the controller service. With durable DNA storage its in-memory
 	// steward registry is warm-loaded from a previous run on startup, so a
@@ -420,6 +484,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// configured (tags API degrades gracefully; SetTagStore is a no-op on nil).
 	tagStoreInstance := initializeTagStore(context.Background(), cfg, logger)
 	if tagStoreInstance != nil {
+		openedStores = append(openedStores, tagStoreInstance.Close)
 		controllerService.SetTagStore(tagStoreInstance)
 	}
 
@@ -452,6 +517,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		certManager, err = loadExistingCertificateManager(cfg, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
+		}
+		if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+			if err := validatePublicBetaControllerRoots(certManager, time.Now()); err != nil {
+				return nil, fmt.Errorf("public-beta signing roots are invalid: %w", err)
+			}
 		}
 
 		// Reject legacy unified-mode config and block on legacy cert types in store
@@ -524,8 +594,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize registration token store for HTTP-based registration (Story #263)
 	var regStore pkgRegistration.Store
+	regTokenStore := storageManager.GetRegistrationTokenStore()
 	{
-		regTokenStore := storageManager.GetRegistrationTokenStore()
+		if regTokenStore == nil {
+			return nil, fmt.Errorf("registration token store is required")
+		}
 		if err := regTokenStore.Initialize(context.Background()); err != nil {
 			return nil, fmt.Errorf("failed to initialize registration token store: %w", err)
 		}
@@ -653,6 +726,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// we can inject it as the on-connect hook. The publisher is wired after
 		// commandPublisher is constructed below (breaks the init cycle).
 		connRegistry = registry.NewRegistry()
+		stewardStore := storageManager.GetStewardStore()
+		if stewardStore == nil {
+			return nil, fmt.Errorf("steward approval store is required when transport is enabled")
+		}
+		approvalChecker := grpcCP.NewStewardStoreApprovalChecker(stewardStore)
 		// Issue #2008: compose the admin-registry upsert hook alongside the
 		// signing-rotation hook so every authenticated (re)connect repopulates
 		// ControllerService.s.stewards (which backs cfg steward list/status/exec).
@@ -668,17 +746,28 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if certManager != nil {
 			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
 			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook, completionReconciler)
-			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(composite))
+			controlPlane = grpcCP.New(
+				grpcCP.ModeServer,
+				grpcCP.WithOnConnectHook(composite),
+				grpcCP.WithApprovalChecker(approvalChecker),
+			)
 		} else {
 			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler)
-			controlPlane = grpcCP.New(grpcCP.ModeServer, grpcCP.WithOnConnectHook(composite))
+			controlPlane = grpcCP.New(
+				grpcCP.ModeServer,
+				grpcCP.WithOnConnectHook(composite),
+				grpcCP.WithApprovalChecker(approvalChecker),
+			)
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
-			"mode":       "server",
-			"addr":       cfg.Transport.ListenAddr,
-			"tls_config": grpcTLSConfig,
-			"registry":   connRegistry,
-			"logger":     logger,
+			"mode":                     "server",
+			"addr":                     cfg.Transport.ListenAddr,
+			"tls_config":               grpcTLSConfig,
+			"registry":                 connRegistry,
+			"logger":                   logger,
+			"max_connections":          cfg.Transport.MaxConnections,
+			"registration_token_store": regTokenStore,
+			"require_security_stores":  true,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
@@ -701,6 +790,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// generates the signing cert once and reuses it on every later boot.
 		if certManager != nil {
 			if ensureErr := certManager.EnsureSigningCertificate(nil); ensureErr != nil {
+				if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+					return nil, fmt.Errorf("public-beta signing certificate initialization failed: %w", ensureErr)
+				}
 				logger.Warn("Failed to ensure config signing certificate", "error", ensureErr)
 			}
 			signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
@@ -723,7 +815,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 							"cert_type", cert.CertificateTypeConfigSigning.String())
 					}
 				}
+			} else if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+				return nil, fmt.Errorf("public-beta signing certificate is unavailable: %w", scErr)
 			}
+		}
+		if cfg.SecurityProfile == config.SecurityProfilePublicBeta && hoistedSigner == nil {
+			return nil, fmt.Errorf("public-beta startup requires a valid loaded command-signing certificate and private key")
 		}
 
 		// Issue #1844: Command publisher and dispatcher use a DynamicSigner that
@@ -779,10 +876,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		)
 		var dispatcherErr error
 		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
-			Queue:        executionQueue,
-			ControlPlane: controlPlane,
-			Signer:       commandSigner,
-			Logger:       logger,
+			Queue:              executionQueue,
+			ControlPlane:       controlPlane,
+			Signer:             commandSigner,
+			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
+			Logger:             logger,
 		})
 		if dispatcherErr != nil {
 			return nil, fmt.Errorf("failed to initialize job dispatcher: %w", dispatcherErr)
@@ -1051,20 +1149,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Cluster mode: S3 installer blob store initialized", "bucket", bucket)
 	} else {
-		// Default BlobStorage.Root when not explicitly configured (e.g. in tests or
-		// minimal configs that rely on the storage path for co-location).
-		blobRoot := cfg.BlobStorage.Root
-		if blobRoot == "" {
-			if cfg.Storage.FlatfileRoot != "" {
-				blobRoot = filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
-			} else if cfg.Storage.SQLitePath != "" {
-				blobRoot = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
-			} else if cfg.DataDir != "" {
-				// Mirrors LoadWithPath: BlobStorage.Root defaults to <DataDir>/installers
-				// when neither FlatfileRoot nor SQLitePath is present (e.g. database provider).
-				blobRoot = filepath.Join(cfg.DataDir, "installers")
-			}
-		}
+		// Derive the default only after the full configuration is loaded so YAML
+		// overrides cannot retain a stale relative path from DefaultConfig.
+		blobRoot := resolveInstallerBlobRoot(cfg)
 		installerBlobStore, blobErr = blob.CreateBlobStoreFromConfig("filesystem",
 			map[string]interface{}{"root": blobRoot})
 		if blobErr != nil {
@@ -1389,6 +1476,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
+	// The Server now owns the storage manager and releases it in Stop.
+	constructed = true
 	return srv, nil
 }
 
@@ -1668,7 +1757,12 @@ func (s *Server) Start() error {
 		s.grpcServer = grpc.NewServer(
 			append([]grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}, dataplaneGRPC.ServerOptions()...)...,
 		)
-		ql, err := quictransport.Listen(s.cfg.Transport.ListenAddr, grpcTLSConfig, nil)
+		ql, err := quictransport.ListenWithLimits(
+			s.cfg.Transport.ListenAddr,
+			grpcTLSConfig,
+			nil,
+			quictransport.LimitsForMaxConnections(s.cfg.Transport.MaxConnections),
+		)
 		if err != nil {
 			return fmt.Errorf("failed to start shared QUIC listener: %w", err)
 		}
@@ -1679,11 +1773,14 @@ func (s *Server) Start() error {
 		// passed back in — keep the same instance the API server holds so
 		// connection_state stays accurate across the Start() re-init (Issue #1572).
 		if err := s.controlPlane.Initialize(context.Background(), map[string]interface{}{
-			"mode":        "server",
-			"addr":        s.cfg.Transport.ListenAddr,
-			"tls_config":  grpcTLSConfig,
-			"grpc_server": s.grpcServer,
-			"registry":    s.connRegistry,
+			"mode":                     "server",
+			"addr":                     s.cfg.Transport.ListenAddr,
+			"tls_config":               grpcTLSConfig,
+			"grpc_server":              s.grpcServer,
+			"registry":                 s.connRegistry,
+			"max_connections":          s.cfg.Transport.MaxConnections,
+			"registration_token_store": s.storageManager.GetRegistrationTokenStore(),
+			"require_security_stores":  true,
 		}); err != nil {
 			return fmt.Errorf("failed to re-initialize CP provider with shared server: %w", err)
 		}
@@ -1872,12 +1969,12 @@ func (s *Server) Start() error {
 
 	// Start HTTP API server
 	if s.httpServer != nil {
-		logger := s.logger // Capture logger for goroutine
-		go func() {
-			if err := s.httpServer.Start(); err != nil {
-				logger.Error("HTTP API server failed", "error", err)
-			}
-		}()
+		// api.Server.Start performs synchronous TLS preflight before launching
+		// its serving goroutine. Propagate any failure so controller startup
+		// cannot report success while the public API is absent or downgraded.
+		if err := s.httpServer.Start(); err != nil {
+			return fmt.Errorf("failed to start HTTPS API server: %w", err)
+		}
 		s.logger.Info("HTTP API server started")
 	}
 
@@ -2099,6 +2196,26 @@ func (s *Server) Stop() error {
 		s.logger.Info("git-sync syncer stopped")
 	}
 
+	// Close the REST API server — releases the public HTTPS listener and the
+	// private metrics listener it owns.
+	//
+	// The metrics listener binds a FIXED port: ValidatePrivateListenerAddress
+	// rejects port 0 so a private listener can never land somewhere unpredictable.
+	// Leaking it therefore breaks the next Start with "address already in use",
+	// where the public listener hid the same leak by taking an OS-assigned port
+	// and silently rebinding elsewhere.
+	//
+	// Runs after the managers that serve requests have stopped and before the
+	// storage manager closes: api.Server.Close also releases the secret store and
+	// nonce cache, which the audit drain above still needs.
+	if s.httpServer != nil {
+		apiCtx, apiCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.httpServer.Close(apiCtx); err != nil {
+			s.logger.Warn("Failed to close REST API server", "error", err)
+		}
+		apiCancel()
+	}
+
 	// Close main storage manager — releases flatfile + SQLite store handles so
 	// temp-directory cleanup succeeds on Windows. Must run after managers that
 	// use the stores have stopped.
@@ -2282,6 +2399,43 @@ func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (
 	logger.Info("Loaded existing Certificate Authority", "ca_path", cfg.Certificate.CAPath)
 
 	return manager, nil
+}
+
+func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) error {
+	caPEM, err := manager.GetCACertificate()
+	if err != nil {
+		return fmt.Errorf("load controller CA: %w", err)
+	}
+	remaining := caPEM
+	validRoots := 0
+	for {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			break
+		}
+		remaining = rest
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("controller CA contains unexpected PEM block %q", block.Type)
+		}
+		root, parseErr := x509.ParseCertificate(block.Bytes)
+		if parseErr != nil {
+			return fmt.Errorf("parse controller CA certificate: %w", parseErr)
+		}
+		if !root.IsCA || !root.BasicConstraintsValid || root.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return fmt.Errorf("controller root %q is not a certificate authority", root.Subject.CommonName)
+		}
+		if now.Before(root.NotBefore) || now.After(root.NotAfter) {
+			return fmt.Errorf("controller root %q is not currently valid", root.Subject.CommonName)
+		}
+		validRoots++
+	}
+	if strings.TrimSpace(string(remaining)) != "" {
+		return fmt.Errorf("controller CA contains malformed trailing data")
+	}
+	if validRoots == 0 {
+		return fmt.Errorf("controller CA contains no valid certificate roots")
+	}
+	return nil
 }
 
 // initializeHAManager initializes the HA manager, transferring the deployment

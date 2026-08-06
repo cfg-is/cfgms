@@ -192,18 +192,21 @@ journalctl -u cfgms-steward --since "10 minutes ago"
 
 **When to use**: Scheduled maintenance, performance issues
 
+There is no `cfg backup` command. Before maintenance, take the complete cold
+controller-state backup documented in
+[`tier1-controller-bringup.md`](tier1-controller-bringup.md#cold-backup).
+Backing up only SQLite is not sufficient: flat-file data, certificates, the
+configuration, and the external secrets key are also required for recovery.
+
 ```bash
-# Backup database
-/opt/cfgms/bin/cfg backup --output /backup/cfgms-$(date +%Y%m%d).sql
-
 # Check database size
-du -sh /var/lib/cfgms/database/
+du -sh /var/lib/cfgms/cfgms.db /var/lib/cfgms/storage
 
-# Optimize database (if using SQLite)
-sqlite3 /var/lib/cfgms/database/cfgms.db "VACUUM; ANALYZE;"
+# With cfgms-controller stopped, optimize SQLite
+sqlite3 /var/lib/cfgms/cfgms.db "VACUUM; ANALYZE;"
 
 # Check for corruption
-sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
+sqlite3 /var/lib/cfgms/cfgms.db "PRAGMA integrity_check;"
 ```
 
 ## Incident Response Procedures
@@ -239,7 +242,7 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    openssl x509 -in /etc/cfgms/certs/server.crt -checkend 86400
    
    # Check database connectivity
-   sqlite3 /var/lib/cfgms/database/cfgms.db ".tables"
+   sqlite3 /var/lib/cfgms/cfgms.db ".tables"
    ```
 
 3. **Recovery Actions** (10-15 minutes)
@@ -248,8 +251,8 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
    # Restart controller service
    systemctl restart cfgms-controller
    
-   # If database issues, restore from backup
-   /opt/cfgms/bin/cfg restore --input /backup/cfgms-latest.sql
+   # If state is corrupt, keep the controller stopped and follow the
+   # complete cold-restore procedure in tier1-controller-bringup.md.
    
    # Verify recovery
    curl https://localhost:8080/health
@@ -343,75 +346,17 @@ sqlite3 /var/lib/cfgms/database/cfgms.db "PRAGMA integrity_check;"
 
 ### Data Backup Procedures
 
-#### Daily Backup
+CFGMS does not currently expose online `cfg backup` or `cfg restore` commands.
+Use the supported systemd cold-backup and cold-restore procedures in
+[`tier1-controller-bringup.md`](tier1-controller-bringup.md#recovery).
+They capture `/var/lib/cfgms`, `/etc/cfgms/controller.cfg`, and the external
+`/etc/cfgms/secrets.key` at one stopped-service consistency point.
 
-```bash
-#!/bin/bash
-# /opt/cfgms/scripts/daily-backup.sh
-
-BACKUP_DIR="/backup/cfgms/$(date +%Y%m%d)"
-mkdir -p $BACKUP_DIR
-
-# Backup database
-/opt/cfgms/bin/cfg backup --output $BACKUP_DIR/database.sql
-
-# Backup certificates
-cp -r /etc/cfgms/certs $BACKUP_DIR/
-
-# Backup configuration
-cp -r /etc/cfgms/config $BACKUP_DIR/
-
-# Backup logs (last 7 days)
-find /var/log/cfgms -name "*.log" -mtime -7 -exec cp {} $BACKUP_DIR/ \;
-
-# Compress backup
-tar -czf $BACKUP_DIR.tar.gz -C /backup/cfgms $(basename $BACKUP_DIR)
-rm -rf $BACKUP_DIR
-
-# Upload to remote storage (implement according to your setup)
-# aws s3 cp $BACKUP_DIR.tar.gz s3://cfgms-backups/
-```
-
-#### Disaster Recovery Restore
-
-```bash
-#!/bin/bash
-# /opt/cfgms/scripts/disaster-restore.sh
-
-RESTORE_DATE=$1
-if [ -z "$RESTORE_DATE" ]; then
-    echo "Usage: $0 YYYYMMDD"
-    exit 1
-fi
-
-BACKUP_FILE="/backup/cfgms/$RESTORE_DATE.tar.gz"
-
-# Stop services
-systemctl stop cfgms-controller
-systemctl stop cfgms-steward
-
-# Extract backup
-tar -xzf $BACKUP_FILE -C /tmp/
-
-# Restore database
-/opt/cfgms/bin/cfg restore --input /tmp/$RESTORE_DATE/database.sql
-
-# Restore certificates
-cp -r /tmp/$RESTORE_DATE/certs/* /etc/cfgms/certs/
-
-# Restore configuration
-cp -r /tmp/$RESTORE_DATE/config/* /etc/cfgms/config/
-
-# Start services
-systemctl start cfgms-controller
-systemctl start cfgms-steward
-
-# Verify recovery
-sleep 30
-curl https://localhost:8080/health
-
-echo "Disaster recovery completed for backup date: $RESTORE_DATE"
-```
+Backups must be encrypted and access-controlled off-host. Restore-test them on
+an isolated host at the same release, including audit-chain verification,
+certificate validation, steward reconnection, and a signed configuration
+operation. A checksum proves transfer integrity; it does not make an untrusted
+archive safe to extract.
 
 ### Network Partition Recovery
 
@@ -563,7 +508,7 @@ find /backup/cfgms -name "*.tar.gz" -mtime +30 -delete
 # /opt/cfgms/scripts/monthly-maintenance.sh
 
 # Full system backup
-/opt/cfgms/scripts/daily-backup.sh
+# Follow the stopped-service cold-backup procedure linked above.
 
 # Security audit
 /opt/cfgms/bin/cfg security audit --full
@@ -582,38 +527,19 @@ find /backup/cfgms -name "*.tar.gz" -mtime +30 -delete
 
 #### Minor Version Upgrade (e.g., v0.3.0 to v0.3.1)
 
-```bash
-# 1. Backup current system
-/opt/cfgms/scripts/daily-backup.sh
-
-# 2. Download new version
-wget https://releases.example.com/cfgms/v0.3.1/cfgms-v0.3.1-linux-amd64.tar.gz
-
-# 3. Stop services
-systemctl stop cfgms-controller
-systemctl stop cfgms-steward
-
-# 4. Install new binaries
-tar -xzf cfgms-v0.3.1-linux-amd64.tar.gz -C /opt/cfgms/
-
-# 5. Run database migrations
-/opt/cfgms/bin/cfg migrate --from v0.3.0 --to v0.3.1
-
-# 6. Start services
-systemctl start cfgms-controller
-systemctl start cfgms-steward
-
-# 7. Verify upgrade
-/opt/cfgms/bin/cfg version
-curl https://localhost:8080/health
-```
+The generic `cfg migrate` command migrates storage/secrets/blob providers; it
+does not migrate a database between release versions and does not accept the
+version-only invocation previously shown here. Use the staged systemd upgrade
+and explicit rollback procedure in
+[`tier1-controller-bringup.md`](tier1-controller-bringup.md#manual-upgrade).
+Take and restore-test a cold backup first, preserve the previous binary, and
+confirm state-format compatibility in the exact release notes.
 
 #### Major Version Upgrade (e.g., v0.3.x to v0.4.0)
 
-```bash
-# Follow detailed upgrade guide for breaking changes
-# See: docs/upgrade/v0.3-to-v0.4.md
-```
+Do not infer a major-version migration procedure. Use only the signed release's
+version-specific migration and rollback instructions after validating them in
+an isolated copy of production state.
 
 ## Emergency Contacts
 

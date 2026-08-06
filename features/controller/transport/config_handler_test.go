@@ -84,7 +84,9 @@ func peerContextWithCA(t *testing.T, ca *cfgcert.CA, cn string) context.Context 
 	p := &peer.Peer{
 		AuthInfo: credentials.TLSInfo{
 			State: tls.ConnectionState{
-				PeerCertificates: []*x509.Certificate{x509Cert},
+				PeerCertificates:  []*x509.Certificate{x509Cert},
+				VerifiedChains:    [][]*x509.Certificate{{x509Cert}},
+				HandshakeComplete: true,
 			},
 		},
 	}
@@ -165,7 +167,7 @@ func TestHandleGRPC_MissingPeerCert(t *testing.T) {
 func TestHandleGRPC_StewardIDMismatch(t *testing.T) {
 	ca := newTestCA(t)
 	svc := createTestService(t)
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil)
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca))
 
 	// Peer authenticates as "steward-alice".
 	ctx := peerContextWithCA(t, ca, "steward-alice")
@@ -195,7 +197,7 @@ func TestHandleGRPC_MatchingStewardIDProceedsNormally(t *testing.T) {
 
 	ca := newTestCA(t)
 	svc := createTestService(t)
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil)
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca))
 
 	// Store a real configuration so GetConfiguration returns OK.
 	err := svc.SetConfiguration(context.Background(), "default", stewardID, minimalStewardConfig(stewardID))
@@ -293,9 +295,9 @@ func TestHandleGRPC_PopulatesSignatureWhenSignerSet(t *testing.T) {
 	assert.NotEmpty(t, sig.Signature, "signature bytes must be non-empty")
 }
 
-// TestHandleGRPC_NoSignatureWhenSignerNil verifies that HandleGRPC leaves
-// ConfigTransfer.Signature empty when no signer is configured.
-func TestHandleGRPC_NoSignatureWhenSignerNil(t *testing.T) {
+// TestHandleGRPC_RejectsWhenSignerNil verifies configuration cannot be
+// dispatched unsigned when the signing service is unavailable.
+func TestHandleGRPC_RejectsWhenSignerNil(t *testing.T) {
 	const stewardID = "steward-unsigned"
 
 	ca := newTestCA(t)
@@ -310,11 +312,9 @@ func TestHandleGRPC_NoSignatureWhenSignerNil(t *testing.T) {
 	stream := &testConfigStream{}
 
 	err = h.HandleGRPC(ctx, req, stream)
-	require.NoError(t, err)
-
-	transfer := assembleConfigTransfer(t, stream)
-	assert.Empty(t, transfer.Signature,
-		"ConfigTransfer.Signature must be empty when no signer is configured")
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	assert.Empty(t, stream.chunks)
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +358,7 @@ func TestHandleGRPC_TenantIsolation_ReceivesRegisteredTenantConfig(t *testing.T)
 	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "tenant-a", "localhost:4433", "connected"))
 
 	svc := createTestServiceWithControllerSvc(t, nil) // nil: service does not see controllerSvc
-	h := NewConfigHandler(svc, logging.NewNoopLogger(), nil).
+	h := NewConfigHandler(svc, logging.NewNoopLogger(), newTestSignerFromCA(t, ca)).
 		WithControllerService(controllerSvc)
 
 	// Store config under tenant-a only; no config under default.

@@ -422,10 +422,37 @@ func TestHandlePushStewardBinary_TempFilePermissions(t *testing.T) {
 
 	// Confirm the swap function received the binary path (integration check).
 	// We simulate the handler's launcher call here.
-	err = c.execLauncherSwap(context.Background(), "/fake/launcher", "v2.0.0", tmpPath)
+	err = c.execLauncherSwap(context.Background(), "/fake/launcher", "v2.0.0", tmpPath, false)
 	require.NoError(t, err)
 	assert.Equal(t, tmpPath, capturedBinPath,
 		"launcher swap must receive the downloaded binary path")
+}
+
+func TestExecLauncherSwapPropagatesDowngradeAuthorization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell argument-capture fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "args")
+	launcher := filepath.Join(dir, "launcher")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", capture)
+	require.NoError(t, os.WriteFile(launcher, []byte(script), 0o755))
+
+	c := &TransportClient{}
+	binaryPath := filepath.Join(dir, "candidate")
+	require.NoError(t, c.execLauncherSwap(
+		context.Background(), launcher, "v1.2.3", binaryPath, true,
+	))
+	got, err := os.ReadFile(capture)
+	require.NoError(t, err)
+	assert.Equal(t, "swap\n--allow-downgrade\nv1.2.3\n"+binaryPath+"\n", string(got))
+
+	require.NoError(t, c.execLauncherSwap(
+		context.Background(), launcher, "v2.0.0", binaryPath, false,
+	))
+	got, err = os.ReadFile(capture)
+	require.NoError(t, err)
+	assert.Equal(t, "swap\nv2.0.0\n"+binaryPath+"\n", string(got))
 }
 
 // TestHandlePushStewardBinary_RejectsNonHTTPS verifies that a download_url

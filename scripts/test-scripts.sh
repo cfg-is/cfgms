@@ -750,10 +750,10 @@ MOCKEOF
         log_fail "security-trivy.sh: Missing DB-download-failed message (output: $output)"
     fi
 
-    if echo "$output" | grep -q "CRITICAL/HIGH/MEDIUM vulnerabilities found"; then
-        log_fail "security-trivy.sh: Must NOT print false vulnerability-found message on init error"
+    if echo "$output" | grep -q "Blocking vulnerabilities, secrets, or misconfigurations found"; then
+        log_fail "security-trivy.sh: Must NOT print false security-findings message on init error"
     else
-        log_pass "security-trivy.sh: Does NOT emit false '❌ CRITICAL/HIGH/MEDIUM vulnerabilities found' on init error"
+        log_pass "security-trivy.sh: Does NOT emit a false security-findings message on init error"
     fi
 
     rm -rf "$tmp_dir"
@@ -792,7 +792,7 @@ MOCKEOF
         log_fail "security-trivy.sh: Expected exit 1 on findings, got $exit_code"
     fi
 
-    if echo "$output" | grep -q "CRITICAL/HIGH/MEDIUM vulnerabilities found"; then
+    if echo "$output" | grep -q "Blocking vulnerabilities, secrets, or misconfigurations found"; then
         log_pass "security-trivy.sh: Prints deployment-blocked message for real findings"
     else
         log_fail "security-trivy.sh: Missing deployment-blocked message for real findings (output: $output)"
@@ -1213,6 +1213,11 @@ test_project_queue_invalid_args() {
 test_project_queue_integration() {
     log_test "Testing project-queue.sh: integration against live cfgms-pipeline project..."
 
+    if [[ "${CFGMS_RUN_LIVE_PROJECT_TESTS:-}" != "1" ]]; then
+        log_skip "project-queue.sh integration: set CFGMS_RUN_LIVE_PROJECT_TESTS=1 to allow live project mutations"
+        return
+    fi
+
     local script
     script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"
 
@@ -1526,6 +1531,11 @@ print(d.get('deleted_item_id', ''))
 
 test_project_queue_set_pr() {
     log_test "Testing project-queue.sh: set-pr integration against live cfgms-pipeline project..."
+
+    if [[ "${CFGMS_RUN_LIVE_PROJECT_TESTS:-}" != "1" ]]; then
+        log_skip "project-queue.sh set-pr integration: set CFGMS_RUN_LIVE_PROJECT_TESTS=1 to allow live project mutations"
+        return
+    fi
 
     local script
     script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-queue.sh"

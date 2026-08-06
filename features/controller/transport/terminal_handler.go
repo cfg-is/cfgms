@@ -491,7 +491,10 @@ func (h *TerminalHandler) runWSRelay(ctx context.Context, conn *websocket.Conn, 
 						return
 					}
 					select {
-					case relay.inputCh <- inputMsg{resize: true, rows: int32(req.Rows), cols: int32(req.Cols)}: // safe: bounded above
+					// #nosec G115 -- both dimensions are rejected unless > 0 and clamped
+					// to maxTerminalDim (65535) immediately above, so each is within
+					// int32 range at this point.
+					case relay.inputCh <- inputMsg{resize: true, rows: int32(req.Rows), cols: int32(req.Cols)}:
 					case <-relay.done:
 						return
 					}

@@ -27,7 +27,7 @@ func TestTenantIDMissing(t *testing.T) {
 
 func TestContextKeyCollision(t *testing.T) {
 	// A plain string key must not collide with the struct-typed TenantID key.
-	//nolint:staticcheck // SA1029: intentionally using a plain string to verify typed key does not collide
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
 	ctx := context.WithValue(context.Background(), "tenant_id", "plain-string-value")
 	got, ok := ctx.Value(ctxkeys.TenantID).(string)
 	assert.False(t, ok, "struct-typed key must not match plain string key")
@@ -50,7 +50,7 @@ func TestCorrelationIDKeyMissing(t *testing.T) {
 
 func TestCorrelationIDKeyCollision(t *testing.T) {
 	// A plain string key must not collide with the struct-typed CorrelationIDKey.
-	//nolint:staticcheck // SA1029: intentionally using a plain string to verify typed key does not collide
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
 	ctx := context.WithValue(context.Background(), "correlation_id", "plain-string-value")
 	got, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string)
 	assert.False(t, ok, "struct-typed key must not match plain string key")
@@ -73,7 +73,7 @@ func TestUserIDKeyMissing(t *testing.T) {
 
 func TestUserIDKeyCollision(t *testing.T) {
 	// A plain string key must not collide with the struct-typed UserIDKey.
-	//nolint:staticcheck // SA1029: intentionally using a plain string to verify typed key does not collide
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
 	ctx := context.WithValue(context.Background(), "user_id", "plain-string-value")
 	got, ok := ctx.Value(ctxkeys.UserIDKey).(string)
 	assert.False(t, ok, "struct-typed key must not match plain string key")
@@ -97,7 +97,7 @@ func TestAuthClaimsKeyMissing(t *testing.T) {
 
 func TestAuthClaimsKeyCollision(t *testing.T) {
 	// A plain string key must not collide with the struct-typed AuthClaimsKey.
-	//nolint:staticcheck // SA1029: intentionally using a plain string to verify typed key does not collide
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
 	ctx := context.WithValue(context.Background(), "auth_claims", map[string]interface{}{"sub": "bad"})
 	got, ok := ctx.Value(ctxkeys.AuthClaimsKey).(map[string]interface{})
 	assert.False(t, ok, "struct-typed key must not match plain string key")

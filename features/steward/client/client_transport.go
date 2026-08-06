@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,6 +209,7 @@ type TransportClient struct {
 	// handler by setupCommandHandler so CommandExecuteScript signature enforcement
 	// is active in controller-connected deployments, not just standalone mode.
 	scriptSigning stewardconfig.ScriptSigningConfig
+	publicBeta    bool
 
 	// Last configuration received from the controller (for scheduled re-convergence)
 	lastConfigYAML    []byte
@@ -495,6 +498,11 @@ type TransportConfig struct {
 	// means signing enforcement is inactive (policy: none).
 	ScriptSigning stewardconfig.ScriptSigningConfig
 
+	// PublicBeta enables the fail-closed connected-execution contract. It
+	// requires signed ad-hoc commands and a valid, loaded controller CA root.
+	// Development and tests must opt out explicitly by leaving this false.
+	PublicBeta bool
+
 	// CertManager provides on-demand client certificate loading for TLS handshakes
 	// (Issue #920). When non-nil, GetClientCertificate is used per handshake so
 	// certificate rotations are picked up automatically. When nil the client falls
@@ -546,6 +554,47 @@ type TransportConfig struct {
 	Logger logging.Logger
 }
 
+func validControllerCARoots(caPEM string, now time.Time) (*x509.CertPool, error) {
+	if caPEM == "" {
+		return nil, fmt.Errorf("controller CA PEM is empty")
+	}
+	remaining := []byte(caPEM)
+	validRoots := 0
+	for {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			break
+		}
+		remaining = rest
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("controller CA PEM contains unexpected block %q", block.Type)
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse controller CA certificate: %w", err)
+		}
+		if !certificate.IsCA || !certificate.BasicConstraintsValid ||
+			certificate.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return nil, fmt.Errorf("controller signing root %q is not a certificate authority", certificate.Subject.CommonName)
+		}
+		if now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
+			return nil, fmt.Errorf("controller signing root %q is not currently valid", certificate.Subject.CommonName)
+		}
+		validRoots++
+	}
+	if strings.TrimSpace(string(remaining)) != "" {
+		return nil, fmt.Errorf("controller CA PEM contains malformed trailing data")
+	}
+	if validRoots == 0 {
+		return nil, fmt.Errorf("controller CA PEM contains no valid certificate roots")
+	}
+	pool, err := cert.CertPoolFromPEM([]byte(caPEM))
+	if err != nil {
+		return nil, err
+	}
+	return pool, nil
+}
+
 // NewTransportClient creates a new steward transport client.
 func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	if cfg.ControllerURL == "" {
@@ -553,6 +602,14 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	}
 	if cfg.Logger == nil {
 		return nil, fmt.Errorf("logger is required")
+	}
+	if cfg.PublicBeta {
+		if !cfg.ScriptSigning.RequireSignedAdhoc {
+			return nil, fmt.Errorf("public-beta connected execution requires require_signed_adhoc: true")
+		}
+		if _, err := validControllerCARoots(cfg.CACertPEM, time.Now()); err != nil {
+			return nil, fmt.Errorf("public-beta connected execution requires valid controller signing roots: %w", err)
+		}
 	}
 
 	heartbeatInterval := cfg.HeartbeatInterval
@@ -609,6 +666,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		commandReplayWindow:        cfg.SignedCommandReplayWindow,
 		commandMaxParamsBytes:      cfg.SignedCommandMaxParamsBytes,
 		scriptSigning:              cfg.ScriptSigning,
+		publicBeta:                 cfg.PublicBeta,
 		identityPersistFunc:        cfg.IdentityPersistFunc,
 		secretStore:                cfg.SecretStore,
 		certStoreDir:               cfg.CertStoreDir,
@@ -841,6 +899,8 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	// invocation. An additional outer cap would silently truncate long-running but
 	// legitimate Set calls (e.g. large installer downloads) to 30s even when the
 	// module's declared budget is 120s (Issue #2480).
+	// #nosec G118 -- on-connect sync intentionally survives Connect's caller;
+	// every module operation is bounded by its declared ModuleCallTimeoutSec.
 	go func() {
 		if err := c.syncConfigNow(context.Background(), "on-connect", nil); err != nil {
 			c.logger.Info("On-connect config sync skipped", "error", err)
@@ -848,6 +908,8 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	}()
 
 	// Start heartbeat
+	// #nosec G118 -- heartbeat is client-owned, each send has a five-second
+	// timeout, and Disconnect closes heartbeatStop to end the goroutine.
 	go c.startHeartbeat()
 
 	c.logger.Info("Connected to controller successfully via gRPC transport")
@@ -882,27 +944,31 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	signingConfig := stewardconfig.BuildModuleSigningConfig(scriptSigning)
 
 	// controllerCARoots verifies operator-signed inline command certs chain to the
-	// controller CA — the same CA bundle used for mTLS. Left nil when no CA PEM is
-	// available, which the handler treats as "skip operator-cert CA verification".
-	// Pool construction goes through pkg/cert (the central certificate provider)
-	// rather than building an x509 pool locally.
-	var controllerCARoots *x509.CertPool
-	if caCertPEM != "" {
-		pool, poolErr := cert.NewCertPoolFromPEM([]byte(caCertPEM))
-		if poolErr != nil {
-			c.logger.Warn("Failed to parse controller CA PEM for operator certificate verification",
-				"error", poolErr)
-		} else {
-			controllerCARoots = pool
+	// controller CA — the same CA bundle used for mTLS. Left nil when no usable CA
+	// PEM is available, which the handler treats as "skip operator-cert CA
+	// verification". validControllerCARoots checks each root is a currently-valid
+	// CA before building the pool, and builds it through pkg/cert (the central
+	// certificate provider) rather than assembling an x509 pool locally.
+	controllerCARoots, rootsErr := validControllerCARoots(caCertPEM, time.Now())
+	if rootsErr != nil {
+		if c.publicBeta {
+			return nil, fmt.Errorf("public-beta connected execution requires valid controller signing roots: %w", rootsErr)
 		}
+		// Outside public beta an unusable bundle disables operator-cert chaining
+		// rather than failing the connection. Say so, so a misconfigured CA is
+		// diagnosable instead of silently reducing verification.
+		c.logger.Warn("Controller CA PEM unusable for operator certificate verification",
+			"error", rootsErr)
 	}
 
-	// Surface the weaker security posture when require_signed_adhoc is enabled but
-	// no CA roots could be built: inline operator-cert CA-chain verification is then
-	// skipped (cryptographic signature verification still runs).
+	// A required-signature policy without roots would accept an otherwise valid
+	// signature from an arbitrary certificate. Refuse to construct the connected
+	// command handler rather than silently dropping operator-certificate chaining.
 	if controllerCARoots == nil && scriptSigning.RequireSignedAdhoc {
-		c.logger.Warn("require_signed_adhoc is enabled but no controller CA roots are available; " +
-			"operator certificate CA-chain verification of inline signed commands will be skipped")
+		return nil, fmt.Errorf("require_signed_adhoc requires a valid controller CA certificate")
+	}
+	if c.publicBeta && !scriptSigning.RequireSignedAdhoc {
+		return nil, fmt.Errorf("public-beta connected execution requires require_signed_adhoc: true")
 	}
 
 	// Build the EventEmitter for script output streaming (Issue #2143). Reuse the
@@ -1222,34 +1288,28 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	// Verify configuration signature — verifier obtained on demand (Issue #920).
 	verifier := c.buildVerifierOnDemand()
 
-	var unsignedProtoConfig *controller.StewardConfig
-	if verifier != nil {
-		if signedProtoConfig.Signature == nil {
-			c.logger.Error("Configuration is not signed",
-				"command_id", commandID,
-				"version", version)
-			return fmt.Errorf("configuration signature verification failed: missing signature")
-		}
-
-		verified, err := signature.VerifyProtoConfig(verifier, &signedProtoConfig)
-		if err != nil {
-			c.logger.Error("Configuration signature verification failed",
-				"command_id", commandID,
-				"version", version,
-				"error", err)
-			return fmt.Errorf("configuration signature verification failed: %w", err)
-		}
-
-		c.logger.Info("Configuration signature verified",
+	if verifier == nil {
+		return fmt.Errorf("configuration signature verification failed: verifier unavailable")
+	}
+	if signedProtoConfig.Signature == nil {
+		c.logger.Error("Configuration is not signed",
 			"command_id", commandID,
 			"version", version)
-
-		unsignedProtoConfig = verified
-	} else {
-		c.logger.Warn("Configuration verifier not available, skipping signature verification",
-			"command_id", commandID)
-		unsignedProtoConfig = signedProtoConfig.Config
+		return fmt.Errorf("configuration signature verification failed: missing signature")
 	}
+
+	unsignedProtoConfig, err := signature.VerifyProtoConfig(verifier, &signedProtoConfig)
+	if err != nil {
+		c.logger.Error("Configuration signature verification failed",
+			"command_id", commandID,
+			"version", version,
+			"error", err)
+		return fmt.Errorf("configuration signature verification failed: %w", err)
+	}
+
+	c.logger.Info("Configuration signature verified",
+		"command_id", commandID,
+		"version", version)
 
 	// Convert protobuf to Go struct.
 	goConfig, err := stewardconfig.FromProto(unsignedProtoConfig)
@@ -1410,22 +1470,22 @@ func (c *TransportClient) GetConfiguration(ctx context.Context, modules []string
 		return nil, "", fmt.Errorf("failed to receive configuration: %w", err)
 	}
 
-	// Verify the transport-level signature when both a verifier and signature are present.
-	// Skip silently when either is absent for backward compatibility with unsigned controllers.
-	if len(transfer.Signature) > 0 {
-		verifier := c.buildVerifierOnDemand()
-		if verifier != nil {
-			var sig signature.ConfigSignature
-			if err := json.Unmarshal(transfer.Signature, &sig); err != nil {
-				return nil, "", status.Error(codes.DataLoss, "config signature verification failed")
-			}
-			if err := verifier.Verify(transfer.Data, &sig); err != nil {
-				c.logger.Error("Config transfer signature verification failed",
-					"version", transfer.Version,
-					"error", err)
-				return nil, "", status.Error(codes.DataLoss, "config signature verification failed")
-			}
-		}
+	if len(transfer.Signature) == 0 {
+		return nil, "", status.Error(codes.DataLoss, "config signature missing")
+	}
+	verifier := c.buildVerifierOnDemand()
+	if verifier == nil {
+		return nil, "", status.Error(codes.FailedPrecondition, "config signature verifier unavailable")
+	}
+	var sig signature.ConfigSignature
+	if err := json.Unmarshal(transfer.Signature, &sig); err != nil {
+		return nil, "", status.Error(codes.DataLoss, "config signature verification failed")
+	}
+	if err := verifier.Verify(transfer.Data, &sig); err != nil {
+		c.logger.Error("Config transfer signature verification failed",
+			"version", transfer.Version,
+			"error", err)
+		return nil, "", status.Error(codes.DataLoss, "config signature verification failed")
 	}
 
 	c.logger.Info("Configuration received",
@@ -1819,7 +1879,7 @@ func (c *TransportClient) triggerVersionConvergence(ctx context.Context, desired
 		"desired_version", logging.SanitizeLogValue(desiredVersion),
 		"running_version", runningVersion)
 
-	if err := c.execLauncherSwap(ctx, lPath, desiredVersion, stagedPath); err != nil {
+	if err := c.execLauncherSwap(ctx, lPath, desiredVersion, stagedPath, allowDowngrade); err != nil {
 		c.logger.Warn("Version convergence: launcher swap failed",
 			"desired_version", logging.SanitizeLogValue(desiredVersion),
 			"error", err)
@@ -2324,17 +2384,20 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 			return nil, nil
 		}
 
-		// #nosec G304 - Certificate paths are controlled via configuration
+		// #nosec G304 G703 -- certificate paths come only from the steward's
+		// administrator-controlled process environment, never protocol input.
 		clientCertPEM, err = os.ReadFile(certFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read client certificate: %w", err)
 		}
-		// #nosec G304 - Certificate paths are controlled via configuration
+		// #nosec G304 G703 -- the private-key path is administrator-controlled
+		// startup configuration and is not influenced by a controller request.
 		clientKeyPEM, err = os.ReadFile(keyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read client key: %w", err)
 		}
-		// #nosec G304 - Certificate paths are controlled via configuration
+		// #nosec G304 G703 -- the CA path is administrator-controlled startup
+		// configuration and is not influenced by a controller request.
 		caCertPEM, err = os.ReadFile(caFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA certificate: %w", err)

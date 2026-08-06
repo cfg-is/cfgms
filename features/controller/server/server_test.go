@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -675,6 +676,106 @@ func TestServer_New_Fails_BindAll_NoExternalAddress(t *testing.T) {
 	assert.Contains(t, err.Error(), "transport.listen_addr binds 0.0.0.0 but no external address is configured")
 	assert.Contains(t, err.Error(), "transport.external_address")
 	assert.Contains(t, err.Error(), "CFGMS_EXTERNAL_HOSTNAME")
+}
+
+func TestServerNewPublicBetaRejectsUnsignedAdhocConfiguration(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SecurityProfile = config.SecurityProfilePublicBeta
+	cfg.Execution.RequireSignedAdhoc = false
+
+	server, err := New(cfg, logging.NewNoopLogger())
+
+	require.Nil(t, server)
+	require.ErrorContains(t, err, "require_signed_adhoc")
+}
+
+func TestServerNewPublicBetaRejectsMissingSigningRoots(t *testing.T) {
+	root := t.TempDir()
+	keyPath := filepath.Join(root, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(root, "secrets"))
+
+	cfg := config.DefaultConfig()
+	cfg.SecurityProfile = config.SecurityProfilePublicBeta
+	cfg.Execution.RequireSignedAdhoc = true
+	cfg.DataDir = filepath.Join(root, "data")
+	cfg.Storage.Provider = "flatfile"
+	cfg.Storage.FlatfileRoot = filepath.Join(root, "flatfile")
+	cfg.Storage.SQLitePath = filepath.Join(root, "cfgms.db")
+	cfg.Certificate.CAPath = filepath.Join(root, "missing-ca")
+	cfg.Transport.ExternalAddress = "controller.test"
+
+	server, err := New(cfg, logging.NewNoopLogger())
+
+	require.Nil(t, server)
+	require.ErrorIs(t, err, ErrNotInitialized)
+}
+
+func TestServerNewPublicBetaRejectsInvalidSigningRoots(t *testing.T) {
+	root := t.TempDir()
+	keyPath := filepath.Join(root, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(root, "secrets"))
+
+	certRoot := filepath.Join(root, "certs")
+	caRoot := filepath.Join(certRoot, "ca")
+	require.NoError(t, os.MkdirAll(caRoot, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(caRoot, "ca.crt"), []byte("invalid CA certificate"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(caRoot, "ca.key"), []byte("invalid CA key"), 0600))
+	require.NoError(t, initialization.CreateLegacyMarker(certRoot))
+
+	cfg := config.DefaultConfig()
+	cfg.SecurityProfile = config.SecurityProfilePublicBeta
+	cfg.Execution.RequireSignedAdhoc = true
+	cfg.DataDir = filepath.Join(root, "data")
+	cfg.Storage = createTestStorageConfig(root, "public-beta-invalid-roots")
+	cfg.CertPath = certRoot
+	cfg.Certificate.CAPath = certRoot
+	cfg.Transport.ExternalAddress = "controller.test"
+
+	server, err := New(cfg, logging.NewNoopLogger())
+
+	require.Nil(t, server)
+	require.ErrorContains(t, err, "failed to load certificate manager")
+	require.ErrorContains(t, err, "failed to decode CA certificate PEM")
+}
+
+func TestServerNewPublicBetaRejectsExpiredSigningRoots(t *testing.T) {
+	root := t.TempDir()
+	keyPath := filepath.Join(root, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(root, "secrets"))
+
+	certRoot := filepath.Join(root, "certs")
+	_, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: certRoot,
+		CAConfig: &cert.CAConfig{
+			Organization: "Expired Public Beta Root",
+			Country:      "US",
+			ValidityDays: -1,
+			StoragePath:  certRoot,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, initialization.CreateLegacyMarker(certRoot))
+
+	cfg := config.DefaultConfig()
+	cfg.SecurityProfile = config.SecurityProfilePublicBeta
+	cfg.Execution.RequireSignedAdhoc = true
+	cfg.DataDir = filepath.Join(root, "data")
+	cfg.Storage = createTestStorageConfig(root, "public-beta-expired-roots")
+	cfg.CertPath = certRoot
+	cfg.Certificate.CAPath = certRoot
+	cfg.Transport.ExternalAddress = "controller.test"
+
+	server, err := New(cfg, logging.NewNoopLogger())
+
+	require.Nil(t, server)
+	require.ErrorContains(t, err, "public-beta signing roots are invalid")
+	require.ErrorContains(t, err, "not currently valid")
 }
 
 // TestServer_New_Succeeds_BindAll_WithExternalAddressConfig verifies that server.New()

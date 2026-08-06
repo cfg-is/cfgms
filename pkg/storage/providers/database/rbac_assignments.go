@@ -136,6 +136,8 @@ func (s *DatabaseRBACStore) ListRoleAssignments(ctx context.Context, subjectID, 
 
 	if tenantID != "" {
 		argCount++
+		// #nosec G202 -- only a generated placeholder number enters the query;
+		// tenantID is appended separately as a database argument.
 		query += fmt.Sprintf(" AND tenant_id = $%d", argCount)
 		args = append(args, tenantID)
 	}

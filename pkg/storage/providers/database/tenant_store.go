@@ -294,6 +294,8 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 			argCount++
 		}
 		if filter.Name != "" {
+			// #nosec G202 -- only the generated placeholder index is formatted;
+			// the wildcarded name remains a bound database argument.
 			query += fmt.Sprintf(" AND name ILIKE $%d", argCount)
 			args = append(args, "%"+filter.Name+"%")
 			// argCount not incremented as it's the last filter condition

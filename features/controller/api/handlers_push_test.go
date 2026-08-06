@@ -80,7 +80,7 @@ func newPushRequest(t *testing.T, payload interface{}) *http.Request {
 // can call Flush and then query the audit store for emitted events.
 func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -507,7 +507,7 @@ func TestHandleConfigPush_ConfigStoreWriterFailureDoesNotBlock(t *testing.T) {
 // begins. No commandPublisher is wired so the goroutine never runs and the record
 // stays in_progress — confirming durable capture regardless of delivery state.
 func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -646,7 +646,7 @@ func (s *syncedPushStore) waitForStatusUpdate(t *testing.T) {
 // the terminal push status use waitForStatusUpdate to synchronize with the goroutine.
 func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlaneProvider) (*Server, *syncedPushStore) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false

@@ -154,6 +154,8 @@ func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter in
 	}
 
 	// Fetch one extra row to detect whether a further page exists.
+	// #nosec G202 -- where contains only fixed predicates and "?" placeholders;
+	// all caller-controlled values, including paging, are bound in args.
 	query := "SELECT subject, entity_kind, owning_tenant FROM eg_entity_index" + where + " ORDER BY subject LIMIT ? OFFSET ?"
 	args = append(args, pageSize+1, offset)
 
@@ -239,6 +241,8 @@ func (p *SQLiteEntityGraphProvider) ResolveIdentity(ctx context.Context, claims 
 		return nil, nil
 	}
 
+	// #nosec G202 -- conds contains a fixed MAC predicate with "?"
+	// placeholders; all normalized MAC values are passed separately in args.
 	query := "SELECT DISTINCT subject FROM eg_entity_index WHERE " + strings.Join(conds, " OR ")
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {

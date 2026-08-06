@@ -381,6 +381,8 @@ func (s *SQLiteRBACStore) ListRoleAssignments(ctx context.Context, subjectID, ro
 
 	query := `SELECT id, subject_id, role_id, tenant_id, conditions, expires_at, assigned_at, assigned_by FROM rbac_role_assignments`
 	if len(conditions) > 0 {
+		// #nosec G202 -- conditions contains only the three fixed column=?
+		// literals above; all subject/role/tenant values remain bound args.
 		query += ` WHERE ` + strings.Join(conditions, ` AND `)
 	}
 	query += ` ORDER BY assigned_at DESC`

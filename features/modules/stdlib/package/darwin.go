@@ -17,6 +17,8 @@ func newHomebrewManager() PackageManager {
 }
 
 func (m *homebrewManager) Install(ctx context.Context, name, version string) error {
+	// #nosec G204 -- Configure validates package names/versions, rejects leading
+	// dashes, fixes the brew executable, and passes values as argv without a shell.
 	cmd := exec.CommandContext(ctx, "brew", "install", name)
 	if version != "latest" {
 		cmd.Args = append(cmd.Args, version)
@@ -29,6 +31,8 @@ func (m *homebrewManager) Install(ctx context.Context, name, version string) err
 }
 
 func (m *homebrewManager) Remove(ctx context.Context, name string) error {
+	// #nosec G204 -- name passed validatePackageName (including leading-dash
+	// rejection) and is a single argv to the fixed brew executable.
 	cmd := exec.CommandContext(ctx, "brew", "uninstall", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -38,6 +42,8 @@ func (m *homebrewManager) Remove(ctx context.Context, name string) error {
 }
 
 func (m *homebrewManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
+	// #nosec G204 -- the fixed brew command receives a validated package name as
+	// one argv; no shell parsing occurs.
 	cmd := exec.CommandContext(ctx, "brew", "list", "--versions", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -77,6 +83,8 @@ func (m *homebrewManager) ListInstalled(ctx context.Context) (map[string]string,
 }
 
 func (m *homebrewManager) GetVersion(ctx context.Context, name string) (string, error) {
+	// #nosec G204 -- the fixed brew command receives a validated package name as
+	// one argv; no shell parsing occurs.
 	cmd := exec.CommandContext(ctx, "brew", "list", "--versions", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -97,6 +105,8 @@ func (m *homebrewManager) GetVersion(ctx context.Context, name string) (string, 
 }
 
 func (m *homebrewManager) IsInstalled(ctx context.Context, name string) (bool, error) {
+	// #nosec G204 -- name is validated before manager dispatch and is passed as
+	// one argv to the fixed brew executable.
 	cmd := exec.CommandContext(ctx, "brew", "list", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -110,6 +120,8 @@ func (m *homebrewManager) IsInstalled(ctx context.Context, name string) (bool, e
 }
 
 func (m *homebrewManager) Update(ctx context.Context, name string) error {
+	// #nosec G204 -- name is validated before manager dispatch and is passed as
+	// one argv to the fixed brew executable.
 	cmd := exec.CommandContext(ctx, "brew", "upgrade", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

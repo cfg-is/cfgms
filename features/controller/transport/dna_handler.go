@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"sync"
 	"unicode/utf8"
@@ -754,10 +755,14 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 		}
 	}
 
+	if len(attrs) > math.MaxInt32 {
+		return nil, fmt.Errorf("DNA attribute count exceeds int32 limit")
+	}
+	// #nosec G115 -- attribute count is explicitly bounded by MaxInt32 above.
 	return &common.DNA{
 		Id:             stewardID,
 		Attributes:     attrs,
-		AttributeCount: int32(len(attrs)), //nolint:gosec // attribute counts are far below int32 max
+		AttributeCount: int32(len(attrs)),
 		Fragments:      frags,
 	}, nil
 }

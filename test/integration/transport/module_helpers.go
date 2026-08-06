@@ -79,6 +79,8 @@ func GetCACertFromContainer(containerName string) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// #nosec G204 -- integration-only Docker call; validateContainerName rejects
+	// option/shell syntax and the certificate path plus executable are fixed.
 	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "cat", "/app/certs/ca/ca.crt")
 	output, err := cmd.Output()
 	if err != nil {
@@ -127,6 +129,8 @@ func (h *ModuleTestHelper) GetStewardIDFromContainer(t *testing.T, containerName
 
 	maxAttempts := 30
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// #nosec G204 -- integration-only Docker call; the shell program is a
+		// fixed literal and validated containerName is a separate Docker argv.
 		cmd := exec.Command("docker", "exec", containerName, "sh", "-c",
 			"ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null | grep -o '\"steward_id\":\"[^\"]*\"' | tail -1 | cut -d'\"' -f4")
 
@@ -171,6 +175,8 @@ func (h *ModuleTestHelper) CheckFileInContainer(t *testing.T, containerName, fil
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// #nosec G204 -- integration-only Docker call; validated container and
+	// harness-owned filePath are separate argv with no host shell.
 	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "test", "-f", filePath)
 	if err := cmd.Run(); err != nil {
 		return info, nil
@@ -178,6 +184,7 @@ func (h *ModuleTestHelper) CheckFileInContainer(t *testing.T, containerName, fil
 
 	info.Exists = true
 
+	// #nosec G204 -- integration-only Docker call with harness-owned path argv.
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "cat", filePath)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -187,6 +194,7 @@ func (h *ModuleTestHelper) CheckFileInContainer(t *testing.T, containerName, fil
 		info.Content = stdout.String()
 	}
 
+	// #nosec G204 -- integration-only Docker call with harness-owned path argv.
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "stat", "-c", "%a %U %G", filePath)
 	stdout.Reset()
 	cmd.Stdout = &stdout
@@ -226,6 +234,8 @@ func (h *ModuleTestHelper) CheckDirectoryInContainer(t *testing.T, containerName
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// #nosec G204 -- integration-only Docker call; validated container and
+	// harness-owned directory path are separate argv with no host shell.
 	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "test", "-d", dirPath)
 	if err := cmd.Run(); err != nil {
 		return info, nil
@@ -233,6 +243,7 @@ func (h *ModuleTestHelper) CheckDirectoryInContainer(t *testing.T, containerName
 
 	info.Exists = true
 
+	// #nosec G204 -- integration-only Docker call with harness-owned path argv.
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "stat", "-c", "%a %U %G", dirPath)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -262,6 +273,8 @@ func (h *ModuleTestHelper) ExecuteCommandInContainer(t *testing.T, containerName
 	defer cancel()
 
 	args := append([]string{"exec", containerName}, command...)
+	// #nosec G204 -- integration-only Docker exec; executable is fixed and
+	// container/command inputs are created by this local transport test harness.
 	cmd := exec.CommandContext(ctx, "docker", args...)
 
 	var stdout, stderr bytes.Buffer
@@ -288,6 +301,8 @@ func (h *ModuleTestHelper) CleanupTestFiles(t *testing.T, containerName string, 
 
 	for _, path := range paths {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// #nosec G204 -- integration-only cleanup inside a harness-created
+		// container; Docker and rm arguments are discrete and no shell is used.
 		cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "rm", "-rf", path)
 		_ = cmd.Run()
 		cancel()
@@ -396,12 +411,16 @@ func (h *ModuleTestHelper) CreateFileInContainer(t *testing.T, containerName, fi
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// #nosec G204 -- integration-only Docker call; validated container and
+	// harness-owned path are argv, while content is supplied on stdin.
 	cmd := exec.CommandContext(ctx, "docker", "exec", "-i", containerName, "tee", filePath)
 	cmd.Stdin = strings.NewReader(content)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to write file content: %w", err)
 	}
 
+	// #nosec G204 -- integration-only chmod in a harness-created container;
+	// Docker/command are fixed and the test owns permissions and file path.
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "chmod", fmt.Sprintf("%o", permissions), filePath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to set permissions: %w", err)
@@ -421,11 +440,15 @@ func (h *ModuleTestHelper) CreateDirectoryInContainer(t *testing.T, containerNam
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// #nosec G204 -- integration-only Docker call; validated container and
+	// harness-owned directory path are separate argv without a host shell.
 	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, "mkdir", "-p", dirPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
+	// #nosec G204 -- integration-only chmod in a harness-created container;
+	// Docker/command are fixed and the test owns permissions and directory path.
 	cmd = exec.CommandContext(ctx, "docker", "exec", containerName, "chmod", fmt.Sprintf("%o", permissions), dirPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to set directory permissions: %w", err)
@@ -445,6 +468,8 @@ func (h *ModuleTestHelper) ExecuteScriptInContainer(t *testing.T, containerName,
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// #nosec G204 -- integration-only execution inside a harness-owned container;
+	// validated container and test-created script path are separate Docker argv.
 	cmd := exec.CommandContext(ctx, "docker", "exec", containerName, scriptPath)
 
 	var stdout, stderr bytes.Buffer

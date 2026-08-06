@@ -184,6 +184,9 @@ func TestGenerateLaunchdPlistSetsLogDir(t *testing.T) {
 	assert.Contains(t, plist, "<key>CFGMS_LOG_DIR</key>")
 	assert.Contains(t, plist, "<string>/usr/local/var/log/cfgms</string>",
 		"launchd plist must set the platform-conventional log directory")
+	assert.Contains(t, plist, "<key>CFGMS_SECURITY_PROFILE</key>")
+	assert.Contains(t, plist, "<string>public-beta</string>",
+		"installer-managed connected stewards must select the fail-closed public-beta profile")
 }
 
 // TestDarwinLauncherPathParity is the REQUIRED TEST for path parity: darwinLauncherPath

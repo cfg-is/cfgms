@@ -204,6 +204,8 @@ func (c *ModuleCache) Get(addr bundle.ContentAddress) (*bundle.Bundle, error) {
 		return nil, ErrBundleNotFound
 	}
 
+	// #nosec G304 -- bundleDir validates the content address and all following
+	// reads use fixed filenames beneath the private cache directory.
 	manifestBytes, err := os.ReadFile(filepath.Join(dir, "manifest.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("read manifest: %w", err)
@@ -213,6 +215,8 @@ func (c *ModuleCache) Get(addr bundle.ContentAddress) (*bundle.Bundle, error) {
 		return nil, fmt.Errorf("unmarshal manifest: %w", err)
 	}
 
+	// #nosec G304 -- dir is validated by bundleDir and signatures.yaml is a
+	// fixed cache metadata filename.
 	sigBytes, err := os.ReadFile(filepath.Join(dir, "signatures.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("read signatures: %w", err)
@@ -222,6 +226,8 @@ func (c *ModuleCache) Get(addr bundle.ContentAddress) (*bundle.Bundle, error) {
 		return nil, fmt.Errorf("unmarshal signatures: %w", err)
 	}
 
+	// #nosec G304 -- dir is validated by bundleDir and binaries.yaml is a fixed
+	// cache metadata filename.
 	binBytes, err := os.ReadFile(filepath.Join(dir, "binaries.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("read binaries index: %w", err)
@@ -272,6 +278,8 @@ func (c *ModuleCache) GetApprovalStatus(addr bundle.ContentAddress) (ApprovalSta
 		return "", err
 	}
 
+	// #nosec G304 -- bundleDir validates the content address and approval.yaml
+	// is a fixed filename beneath the private cache directory.
 	recBytes, err := os.ReadFile(filepath.Join(dir, "approval.yaml"))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", ErrBundleNotFound
@@ -342,6 +350,8 @@ func (c *ModuleCache) List() ([]CacheEntry, error) {
 					}
 					// Recover the original content hash (pre-sanitization).
 					originalHash := hash.Name()
+					// #nosec G304 -- hashDir is assembled exclusively from nested
+					// ReadDir entries beneath c.rootDir; filename is fixed.
 					if hashBytes, readErr := os.ReadFile(filepath.Join(hashDir, "content_hash.txt")); readErr == nil {
 						originalHash = strings.TrimSpace(string(hashBytes))
 					}
@@ -352,6 +362,8 @@ func (c *ModuleCache) List() ([]CacheEntry, error) {
 						ContentHash: originalHash,
 					}
 					status := ApprovalStatusPending
+					// #nosec G304 -- hashDir is assembled exclusively from nested
+					// ReadDir entries beneath c.rootDir; filename is fixed.
 					if recBytes, readErr := os.ReadFile(filepath.Join(hashDir, "approval.yaml")); readErr == nil {
 						var rec approvalRecord
 						if yaml.Unmarshal(recBytes, &rec) == nil {

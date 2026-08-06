@@ -179,6 +179,8 @@ func getRoleClient() (*APIClient, error) {
 func runRoleCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
+	// #nosec G304 -- roleConfigFile is an explicit local CLI flag; reading the
+	// operator-selected role fragment is the create command's purpose.
 	fragmentBytes, err := os.ReadFile(roleConfigFile)
 	if err != nil {
 		return fmt.Errorf("failed to read config file %q: %w", roleConfigFile, err)

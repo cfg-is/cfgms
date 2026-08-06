@@ -815,7 +815,7 @@ registration:
 
 If `registration.workflow` is omitted, the controller defaults to `ip-trust`. The `CFGMS_REGISTRATION_WORKFLOW` environment variable overrides the config-file value (used by test environments to opt into `auto-approve`).
 
-**X-Forwarded-For spoofing protection:** The controller derives the steward's source IP for the IP-trust decision from the TCP peer address (`r.RemoteAddr`). It honors an `X-Forwarded-For` header **only** when the TCP peer falls within a `trusted_proxies` CIDR range. With `trusted_proxies` empty (the default), `X-Forwarded-For` is always ignored, so an attacker on an untrusted network position cannot bypass IP-trust by injecting a forged header. When the controller runs behind a load balancer, set `trusted_proxies` to the load balancer's address range so the real client IP is used.
+**X-Forwarded-For spoofing protection:** The controller derives the steward's source IP for the IP-trust decision and anonymous-download budgets from the TCP peer address (`r.RemoteAddr`). It honors `X-Forwarded-For` **only** when the TCP peer falls within a `trusted_proxies` CIDR range, then walks all header fields and comma-separated hops from right to left to select the first untrusted address. A malformed chain falls back to the TCP peer. With `trusted_proxies` empty (the default), `X-Forwarded-For` is always ignored. Configure every trusted hop and require the edge to append its observed upstream address or replace client-supplied headers; forwarding an unmodified client header defeats any origin-address scheme.
 
 **Managing pending registrations with `cfg registration`:**
 
@@ -1071,7 +1071,14 @@ Stewards connect to any cluster node. If their node goes down, they reconnect to
 
 #### Raft Peer Authentication
 
-The `POST /raft/message` endpoint uses **mTLS peer certificate CN verification** as its sole authentication mechanism. The TLS listener in `ClusterMode` is configured with `ClientAuth = tls.VerifyClientCertIfGiven` (set in `setupManagedTLS`), so HA peers that present a client certificate have it chain-verified and recorded in `r.TLS.PeerCertificates` for application-layer inspection. Clients without a certificate still complete the TLS handshake and fall through to API-key auth on other endpoints; `HandleMessage` explicitly rejects them with HTTP 403.
+The `POST /raft/message` endpoint exists only on the private address configured
+by top-level `internal_listen_addr`; it is not registered on the public product
+router. Cluster startup fails when this address is absent, is a wildcard/public
+address, or has no fixed port. The private listener requires a client
+certificate signed by the configured controller/HA peer CA
+(`ClientAuth = tls.RequireAndVerifyClientCert`) before the request reaches the
+application-layer peer identity check. Do not publish this listener through an
+Internet-facing load balancer or container port mapping.
 
 `HandleMessage` extracts `r.TLS.PeerCertificates[0].Subject.CommonName` and rejects (HTTP 403) any request where:
 

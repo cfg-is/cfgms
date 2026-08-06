@@ -198,9 +198,13 @@ curl -H "X-API-Key: your-key" \
 
 ### System Metrics
 
+Metrics are served only by the explicitly private HTTPS listener. The same path
+on the public product listener returns `404`.
+
 ```bash
 curl -H "X-API-Key: your-key" \
-  http://localhost:9080/api/v1/monitoring/metrics
+  --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  https://localhost:9090/api/v1/monitoring/metrics
 ```
 
 ### Recent Logs
@@ -228,10 +232,14 @@ Configure Prometheus to scrape CFGMS metrics:
 scrape_configs:
   - job_name: 'cfgms-controller'
     static_configs:
-      - targets: ['cfgms-controller:9080']
+      - targets: ['cfgms-controller:9090']
     metrics_path: '/api/v1/monitoring/metrics'
     scrape_interval: 30s
 ```
+
+The target must resolve to the configured numeric loopback/private listener.
+Configure the existing `monitoring:read-metrics` API-key header and CA
+verification in the scraper; do not proxy this listener onto a public network.
 
 ### Grafana Dashboard
 
@@ -320,7 +328,8 @@ collector:
 
 ```bash
 # Check memory metrics
-curl -H "X-API-Key: key" http://localhost:9080/api/v1/monitoring/metrics
+curl --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: key" https://localhost:9090/api/v1/monitoring/metrics
 
 # Look for memory leaks in logs
 curl -H "X-API-Key: key" \

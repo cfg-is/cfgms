@@ -178,6 +178,8 @@ func TestGenerateSystemdUnitSetsLogDir(t *testing.T) {
 	unit := generateSystemdUnit("tok_test", "")
 	assert.Contains(t, unit, "Environment=CFGMS_LOG_DIR=/var/log/cfgms",
 		"systemd unit must set the platform-conventional log directory")
+	assert.Contains(t, unit, "Environment=CFGMS_SECURITY_PROFILE=public-beta",
+		"installer-managed connected stewards must select the fail-closed public-beta profile")
 }
 
 // TestLinuxInstallCreatesLogDir is the required acceptance test for Issue #2483:

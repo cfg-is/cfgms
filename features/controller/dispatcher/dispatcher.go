@@ -62,9 +62,10 @@ type lockMetaEntry struct {
 //  2. TTL sweep in pollLoop (no completion event within lockTTL)
 //  3. ReleaseDeviceForCancelledExecution (explicit cancellation via CancelRun)
 type Dispatcher struct {
-	queue        *script.ExecutionQueue
-	controlPlane controlplaneInterfaces.ControlPlaneProvider
-	signer       signature.Signer // optional; when nil commands are sent unsigned
+	queue              *script.ExecutionQueue
+	controlPlane       controlplaneInterfaces.ControlPlaneProvider
+	signer             signature.Signer // optional; when nil commands are sent unsigned
+	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
 	deviceLocks  sync.Map
@@ -132,6 +133,9 @@ type Config struct {
 	// Should be set to the same signer used by the command publisher so all
 	// controller-issued commands carry consistent signatures.
 	Signer signature.Signer
+	// RequireSignedAdhoc makes a signer mandatory and prevents unsigned
+	// execute_script delivery. Public-beta deployments must set this true.
+	RequireSignedAdhoc bool
 	// PollInterval is how often the background loop polls all devices.
 	// Defaults to 30 s when zero.
 	PollInterval time.Duration
@@ -154,6 +158,9 @@ func New(cfg *Config) (*Dispatcher, error) {
 	if cfg.Logger == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
+	if cfg.RequireSignedAdhoc && cfg.Signer == nil {
+		return nil, fmt.Errorf("signed ad-hoc execution requires a command signer")
+	}
 
 	interval := cfg.PollInterval
 	if interval == 0 {
@@ -171,6 +178,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		queue:               cfg.Queue,
 		controlPlane:        cfg.ControlPlane,
 		signer:              cfg.Signer,
+		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
 		pollInterval:        interval,
 		logger:              cfg.Logger,
 		lockMetaMap:         make(map[string]lockMetaEntry),
@@ -510,6 +518,18 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		"script_content": encodedContent,
 		"shell":          string(exec.Shell),
 	}
+	for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key"} {
+		if value, ok := exec.Metadata[key].(string); ok && value != "" {
+			params[key] = value
+		}
+	}
+	if d.requireSignedAdhoc && exec.ScriptRef == "" {
+		for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key"} {
+			if _, ok := params[key]; !ok {
+				return fmt.Errorf("signed ad-hoc execution missing %s", key)
+			}
+		}
+	}
 
 	if exec.ExecutionContext != "" {
 		params["execution_context"] = string(exec.ExecutionContext)
@@ -564,6 +584,11 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 			return fmt.Errorf("sign command: %w", err)
 		}
 		signed.Signature = sig
+	}
+	if d.requireSignedAdhoc && (signed.Signature == nil ||
+		signed.Signature.Signature == "" ||
+		!signed.Signature.Algorithm.IsValid()) {
+		return fmt.Errorf("signed ad-hoc execution refused unsigned command")
 	}
 
 	if err := d.controlPlane.SendCommand(ctx, signed); err != nil {

@@ -131,6 +131,8 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Fire sync in the background so the webhook returns quickly.
 		bindingCopy := b
 		h.wg.Add(1)
+		// #nosec G118 -- authenticated sync is handler-owned after acceptance;
+		// Shutdown waits on h.wg and TriggerSync applies provider operation bounds.
 		go func() {
 			defer h.wg.Done()
 			if syncErr := h.syncer.TriggerSync(context.Background(), bindingCopy); syncErr != nil {

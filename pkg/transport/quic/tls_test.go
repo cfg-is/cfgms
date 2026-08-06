@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"testing"
 	"time"
@@ -87,7 +88,9 @@ func TestPeerStewardID_ValidCert(t *testing.T) {
 	x509Cert := parsePEMCert(t, cert.CertificatePEM)
 
 	state := tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{x509Cert},
+		PeerCertificates:  []*x509.Certificate{x509Cert},
+		VerifiedChains:    [][]*x509.Certificate{{x509Cert}},
+		HandshakeComplete: true,
 	}
 
 	id, err := PeerStewardID(state)
@@ -99,7 +102,9 @@ func TestPeerStewardID_ValidCert(t *testing.T) {
 // returns an error.
 func TestPeerStewardID_NoPeerCerts(t *testing.T) {
 	state := tls.ConnectionState{
-		PeerCertificates: nil,
+		HandshakeComplete: true,
+		VerifiedChains:    [][]*x509.Certificate{{}},
+		PeerCertificates:  nil,
 	}
 
 	id, err := PeerStewardID(state)
@@ -124,12 +129,56 @@ func TestPeerStewardID_EmptyCN(t *testing.T) {
 	x509Cert.Subject.CommonName = ""
 
 	state := tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{x509Cert},
+		PeerCertificates:  []*x509.Certificate{x509Cert},
+		VerifiedChains:    [][]*x509.Certificate{{x509Cert}},
+		HandshakeComplete: true,
 	}
 
 	id, err := PeerStewardID(state)
 	assert.Error(t, err)
 	assert.Empty(t, id)
+}
+
+func TestPeerStewardID_RejectsUnverifiedPeer(t *testing.T) {
+	state := tls.ConnectionState{
+		HandshakeComplete: true,
+		PeerCertificates: []*x509.Certificate{{
+			Subject: pkix.Name{CommonName: "unverified-steward"},
+		}},
+	}
+
+	id, err := PeerStewardID(state)
+	require.ErrorContains(t, err, "not verified")
+	assert.Empty(t, id)
+}
+
+func TestQUIC_TLSConfigValidation(t *testing.T) {
+	validServer := &tls.Config{ //nolint:gosec // synthetic validation-only config
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{ALPNProtocol},
+		Certificates: []tls.Certificate{{Certificate: [][]byte{{1}}}},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    x509.NewCertPool(),
+	}
+	validClient := &tls.Config{ //nolint:gosec // synthetic validation-only config
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{ALPNProtocol},
+		Certificates: []tls.Certificate{{Certificate: [][]byte{{1}}}},
+	}
+
+	require.NoError(t, validateServerTLSConfig(validServer))
+	require.NoError(t, validateClientTLSConfig(validClient))
+
+	serverNoMTLS := validServer.Clone()
+	serverNoMTLS.ClientAuth = tls.NoClientCert
+	require.ErrorContains(t, validateServerTLSConfig(serverNoMTLS), "require and verify client certificates")
+
+	clientInsecure := validClient.Clone()
+	clientInsecure.InsecureSkipVerify = true
+	require.ErrorContains(t, validateClientTLSConfig(clientInsecure), "cannot be disabled")
+
+	require.Error(t, validateServerTLSConfig(nil))
+	require.Error(t, validateClientTLSConfig(nil))
 }
 
 // ---------------------------------------------------------------------------

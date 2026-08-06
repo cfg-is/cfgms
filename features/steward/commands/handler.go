@@ -393,6 +393,8 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 
 	// Execute command in background; wg.Done is called inside executeCommand.
 	h.wg.Add(1)
+	// #nosec G118 -- accepted commands intentionally outlive receipt handling;
+	// executeCommand applies a command timeout and Handler.Stop waits on h.wg.
 	go h.executeCommand(cmd)
 
 	return nil

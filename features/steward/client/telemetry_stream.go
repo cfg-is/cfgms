@@ -292,9 +292,13 @@ func clampTelemetryInterval(ms int32) time.Duration {
 // range (Linux max is 2^22, Windows HANDLE-carried PIDs are similar); the
 // explicit bounds check satisfies the narrowing-conversion invariant.
 func safePID(pid int) int32 {
+	if pid < 0 {
+		return 0
+	}
 	if pid > math.MaxInt32 {
 		return math.MaxInt32
 	}
+	// #nosec G115 -- pid is explicitly bounded to [0, MaxInt32] above.
 	return int32(pid)
 }
 

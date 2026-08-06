@@ -169,6 +169,8 @@ func (l Layout) loadState() (pointerState, error) {
 // observe either the pre-write state or the post-write state — never
 // a partially-updated one.
 func (l Layout) saveState(ps pointerState) error {
+	// #nosec G301 -- the launcher root holds public executable versions and
+	// pointer metadata that the steward service must traverse/read.
 	if err := os.MkdirAll(l.Root, 0o755); err != nil {
 		return err
 	}

@@ -75,7 +75,9 @@ func (b *secretServiceBackend) available() bool {
 
 func (b *secretServiceBackend) set(key string, value []byte) error {
 	// secret-tool store reads the secret from stdin; attributes come from argv.
-	cmd := exec.Command(b.bin, "store", "--label=CFGMS session token", //nolint:gosec // fixed binary + discrete args, no shell
+	// #nosec G204 -- b.bin is resolved by LookPath for secret-tool, command
+	// structure is fixed, the key is a discrete attribute value, and no shell runs.
+	cmd := exec.Command(b.bin, "store", "--label=CFGMS session token",
 		"service", serviceName, "account", key)
 	cmd.Stdin = bytes.NewReader(value)
 	var stderr bytes.Buffer
@@ -87,7 +89,9 @@ func (b *secretServiceBackend) set(key string, value []byte) error {
 }
 
 func (b *secretServiceBackend) get(key string) ([]byte, error) {
-	cmd := exec.Command(b.bin, "lookup", "service", serviceName, "account", key) //nolint:gosec // fixed binary + discrete args, no shell
+	// #nosec G204 -- b.bin is resolved by LookPath for secret-tool, command
+	// structure is fixed, the key is a discrete attribute value, and no shell runs.
+	cmd := exec.Command(b.bin, "lookup", "service", serviceName, "account", key)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -102,7 +106,9 @@ func (b *secretServiceBackend) get(key string) ([]byte, error) {
 }
 
 func (b *secretServiceBackend) del(key string) error {
-	cmd := exec.Command(b.bin, "clear", "service", serviceName, "account", key) //nolint:gosec // fixed binary + discrete args, no shell
+	// #nosec G204 -- b.bin is resolved by LookPath for secret-tool, command
+	// structure is fixed, the key is a discrete attribute value, and no shell runs.
+	cmd := exec.Command(b.bin, "clear", "service", serviceName, "account", key)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

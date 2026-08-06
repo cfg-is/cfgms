@@ -216,6 +216,73 @@ func TestGetStewardBinaryPublic_ServesSignatureHeaders(t *testing.T) {
 	assert.Equal(t, content, getRec.Body.Bytes(), "public GET must return the exact bytes")
 }
 
+func TestGetStewardBinaryPublic_CacheValidatorsRangesAndPublishInvalidation(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	content := []byte("0123456789-steward-binary")
+	signature := fix.signContent(content, "v1.0.0", "linux", "amd64")
+	pubRec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", signature, content)
+	require.Equal(t, http.StatusOK, pubRec.Code)
+
+	request := func(rangeHeader, etag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/api/v1/public/steward-binaries/v1.0.0/linux/amd64?tenant=test-tenant",
+			nil,
+		)
+		req = mux.SetURLVars(req, map[string]string{
+			"version": "v1.0.0", "platform": "linux", "arch": "amd64",
+		})
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		rec := httptest.NewRecorder()
+		server.handleGetStewardBinaryPublic(rec, req)
+		return rec
+	}
+
+	full := request("", "")
+	require.Equal(t, http.StatusOK, full.Code)
+	assert.Equal(t, content, full.Body.Bytes())
+	etag := full.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+	assert.Equal(t, "bytes", full.Header().Get("Accept-Ranges"))
+
+	partial := request("bytes=3-7", "")
+	require.Equal(t, http.StatusPartialContent, partial.Code)
+	assert.Equal(t, content[3:8], partial.Body.Bytes())
+	assert.Equal(t, signature, partial.Header().Get("X-CFGMS-Signature"))
+
+	notModified := request("", etag)
+	assert.Equal(t, http.StatusNotModified, notModified.Code)
+	assert.Zero(t, notModified.Body.Len())
+
+	replacement := []byte("replacement-steward-binary")
+	replacementSignature := fix.signContent(replacement, "v1.0.0", "linux", "amd64")
+	q := url.Values{}
+	q.Set("signature", replacementSignature)
+	q.Set("force", "true")
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/installer/steward-binaries/v1.0.0/linux/amd64?"+q.Encode(),
+		bytes.NewReader(replacement),
+	)
+	req = withScopedPrincipal(req, "test-tenant")
+	req = mux.SetURLVars(req, map[string]string{
+		"version": "v1.0.0", "platform": "linux", "arch": "amd64",
+	})
+	replaceRec := httptest.NewRecorder()
+	server.handlePublishStewardBinary(replaceRec, req)
+	require.Equal(t, http.StatusOK, replaceRec.Code)
+
+	updated := request("", "")
+	require.Equal(t, http.StatusOK, updated.Code)
+	assert.Equal(t, replacement, updated.Body.Bytes())
+	assert.NotEqual(t, etag, updated.Header().Get("ETag"))
+}
+
 // TestGetStewardBinaryPublic_DoesNotLeakSensitiveLabels guards the security invariant that
 // header emission reads the two signature keys individually and never ranges over the
 // blob's Labels map. The same map on this UNAUTHENTICATED endpoint also holds the operator

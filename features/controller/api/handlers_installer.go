@@ -98,6 +98,9 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
 		return
 	}
+	if tenantID == downloadTenantID {
+		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
+	}
 
 	// Retrieve stored metadata (size + checksum computed by provider during PutBlob).
 	rc, storedMeta, err := s.blobStore.GetBlob(r.Context(), key)
@@ -266,6 +269,9 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete artifact", "DELETE_ERROR")
 		return
 	}
+	if tenantID == downloadTenantID {
+		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -286,6 +292,10 @@ func parseInstallerName(name string) (platform, arch string, ok bool) {
 // downloadTenantID is the fixed tenant used to look up installer artifacts for public download.
 // Installer artifacts intended for public distribution must be uploaded by the root tenant.
 const downloadTenantID = "root"
+
+func installerDownloadCacheKey(platform, arch string) string {
+	return "installer/" + platform + "/" + arch
+}
 
 // caIsPrivate reports whether the controller is using a private (self-signed) CA.
 // When the cert manager is unavailable or the CA cannot be verified, it logs a warning
@@ -343,109 +353,120 @@ func (s *Server) handleDownloadInstallPackage(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	archiveName := fmt.Sprintf("cfgms-steward-%s-%s.tar.gz", platform, arch)
+	asset, err := s.publicDownloadCache.getOrBuild(
+		r.Context(),
+		installerDownloadCacheKey(platform, arch),
+		func() (*publicDownloadAsset, error) {
+			return s.buildInstallPackage(r, platform, arch, archiveName)
+		},
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, blob.ErrBlobNotFound):
+			s.writeErrorResponse(w, http.StatusNotFound, "Installer artifact not found", "ARTIFACT_NOT_FOUND")
+		case errors.Is(err, errPublicDownloadTooLarge):
+			s.writeErrorResponse(w, http.StatusRequestEntityTooLarge, "Installer artifact too large", "ARTIFACT_TOO_LARGE")
+		default:
+			s.logger.Error("Failed to build installer artifact for public download",
+				"error", err,
+				"platform", logging.SanitizeLogValue(platform),
+				"arch", logging.SanitizeLogValue(arch))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "BUILD_ERROR")
+		}
+		return
+	}
+	servePublicDownload(w, r, archiveName, asset)
+}
+
+func (s *Server) buildInstallPackage(
+	r *http.Request,
+	platform, arch, archiveName string,
+) (*publicDownloadAsset, error) {
 	key := blob.BlobKey{
 		TenantID:  downloadTenantID,
 		Namespace: "installers",
 		Name:      platform + "-" + arch,
 	}
-
-	rc, _, err := s.blobStore.GetBlob(r.Context(), key)
+	rc, meta, err := s.blobStore.GetBlob(r.Context(), key)
 	if err != nil {
-		if errors.Is(err, blob.ErrBlobNotFound) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Installer artifact not found", "ARTIFACT_NOT_FOUND")
-			return
-		}
-		s.logger.Error("Failed to get installer artifact for download",
-			"error", err,
-			"platform", logging.SanitizeLogValue(platform),
-			"arch", logging.SanitizeLogValue(arch))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read artifact", "GET_ERROR")
-		return
+		return nil, err
 	}
 	defer func() {
 		if cerr := rc.Close(); cerr != nil {
 			s.logger.Warn("failed to close installer artifact reader", "error", cerr)
 		}
 	}()
-
-	artifactBytes, err := io.ReadAll(rc)
+	if meta.Size > maxBinaryRequestBodyBytes {
+		return nil, errPublicDownloadTooLarge
+	}
+	artifactBytes, err := io.ReadAll(io.LimitReader(rc, maxBinaryRequestBodyBytes+1))
 	if err != nil {
-		s.logger.Error("Failed to read installer artifact content", "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read artifact content", "READ_ERROR")
-		return
+		return nil, fmt.Errorf("read installer artifact: %w", err)
+	}
+	if int64(len(artifactBytes)) > maxBinaryRequestBodyBytes {
+		return nil, errPublicDownloadTooLarge
 	}
 
-	// Conditionally bundle the CA cert and fingerprint for private-CA deployments.
 	var caCertPEM []byte
 	var caFingerprint string
 	if s.caIsPrivate() {
 		caCertPEM, err = s.certManager.GetCACertificate()
 		if err != nil {
-			s.logger.Error("Failed to get CA certificate for install package", "error", err)
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get CA certificate", "CA_ERROR")
-			return
+			return nil, fmt.Errorf("read private CA: %w", err)
 		}
 		if s.cfg.Certificate == nil || s.cfg.Certificate.CAPath == "" {
-			s.logger.Error("CA path not configured; cannot read CA fingerprint")
-			s.writeErrorResponse(w, http.StatusInternalServerError, "CA path not configured", "CA_PATH_ERROR")
-			return
+			return nil, errors.New("private CA path is not configured")
 		}
 		marker, markerErr := initialization.ReadInitMarker(s.cfg.Certificate.CAPath)
 		if markerErr != nil {
-			s.logger.Error("Failed to read init marker for CA fingerprint", "error", markerErr)
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read CA fingerprint", "FINGERPRINT_ERROR")
-			return
+			return nil, fmt.Errorf("read CA fingerprint: %w", markerErr)
 		}
 		caFingerprint = marker.CAFingerprint
 	}
 
-	// Assemble the tar.gz archive entirely in memory before writing response headers.
 	var buf bytes.Buffer
 	gzWriter := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gzWriter)
-
 	artifactPath := "installer/" + platform + "-" + arch + "/" + installerFilename(platform, arch)
-	if err := addTarFile(tw, artifactPath, artifactBytes); err != nil {
-		s.logger.Error("Failed to write artifact to tar archive", "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "TAR_ERROR")
-		return
-	}
-
+	files := []struct {
+		path string
+		data []byte
+	}{{artifactPath, artifactBytes}}
 	if caCertPEM != nil {
-		if err := addTarFile(tw, "installer/ca.crt", caCertPEM); err != nil {
-			s.logger.Error("Failed to write CA cert to tar archive", "error", err)
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "TAR_ERROR")
-			return
-		}
-		if err := addTarFile(tw, "installer/ca.fingerprint", []byte(caFingerprint)); err != nil {
-			s.logger.Error("Failed to write CA fingerprint to tar archive", "error", err)
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "TAR_ERROR")
-			return
+		files = append(files,
+			struct {
+				path string
+				data []byte
+			}{"installer/ca.crt", caCertPEM},
+			struct {
+				path string
+				data []byte
+			}{"installer/ca.fingerprint", []byte(caFingerprint)},
+		)
+	}
+	files = append(files, struct {
+		path string
+		data []byte
+	}{"installer/README.txt", []byte(readmeText(platform, arch))})
+	for _, file := range files {
+		if err := addTarFile(tw, file.path, file.data); err != nil {
+			return nil, fmt.Errorf("write %s to installer archive: %w", file.path, err)
 		}
 	}
-
-	if err := addTarFile(tw, "installer/README.txt", []byte(readmeText(platform, arch))); err != nil {
-		s.logger.Error("Failed to write README to tar archive", "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "TAR_ERROR")
-		return
-	}
-
 	if err := tw.Close(); err != nil {
-		s.logger.Error("Failed to close tar writer", "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "TAR_ERROR")
-		return
+		return nil, fmt.Errorf("close installer tar: %w", err)
 	}
 	if err := gzWriter.Close(); err != nil {
-		s.logger.Error("Failed to close gzip writer", "error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "TAR_ERROR")
-		return
+		return nil, fmt.Errorf("close installer gzip: %w", err)
 	}
 
-	archiveName := fmt.Sprintf("cfgms-steward-%s-%s.tar.gz", platform, arch)
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(buf.Bytes())
+	return newPublicDownloadAsset(
+		buf.Bytes(),
+		"application/gzip",
+		fmt.Sprintf(`attachment; filename="%s"`, archiveName),
+		"public, max-age=300, must-revalidate",
+	), nil
 }
 
 // installerFilename returns the filename for the installer binary within the package archive.
@@ -471,10 +492,12 @@ func readmeText(platform, arch string) string {
 // addTarFile writes a single file entry to a tar archive.
 func addTarFile(tw *tar.Writer, path string, content []byte) error {
 	if err := tw.WriteHeader(&tar.Header{
-		Name:    path,
-		Mode:    0644,
-		Size:    int64(len(content)),
-		ModTime: time.Now().UTC(),
+		Name: path,
+		Mode: 0644,
+		Size: int64(len(content)),
+		// Generated packages must be byte-stable so validators, range retries,
+		// and the response cache all refer to one representation.
+		ModTime: time.Unix(0, 0).UTC(),
 	}); err != nil {
 		return err
 	}

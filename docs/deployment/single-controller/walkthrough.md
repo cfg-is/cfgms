@@ -19,6 +19,7 @@ Deploy one CFGMS controller and set up the controller-steward to keep the node i
 │  │  Controller                           │  │
 │  │                                       │  │
 │  │  REST API (HTTPS)       :9080/TCP     │  │
+│  │  Metrics (HTTPS) :9090/TCP (loopback) │  │
 │  │  gRPC-over-QUIC (mTLS) :4433/UDP     │  │
 │  │  Auto-generated CA + certificates     │  │
 │  │  Flatfile+SQLite config storage       │  │
@@ -41,7 +42,8 @@ Deploy one CFGMS controller and set up the controller-steward to keep the node i
 - **Go toolchain**: see `go.mod` for the required version (on the build machine,
   can be the controller VM)
 - **Git**: installed on the controller VM
-- **Network**: Ports 9080/TCP and 4433/UDP available on the controller
+- **Network**: Ports 9080/TCP and 4433/UDP available on the controller. Port
+  9090/TCP is reserved for host-local metrics and must not be opened publicly.
 
 ## Step 1: Build Binaries
 
@@ -75,7 +77,16 @@ sudo chmod +x /usr/local/bin/cfgms-controller
 ### Create directories
 
 ```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin cfgms 2>/dev/null || \
+  test "$(id -u cfgms)" -ge 0
 sudo mkdir -p /etc/cfgms /var/lib/cfgms/storage /var/lib/cfgms/certs/ca /var/log/cfgms
+sudo chown cfgms:cfgms /etc/cfgms
+sudo chown -R cfgms:cfgms /var/lib/cfgms /var/log/cfgms
+sudo chmod 0750 /etc/cfgms /var/lib/cfgms /var/log/cfgms
+
+# Generate the external secret-encryption key. Keep it separate from controller
+# data and backups; never put the key bytes in an environment variable.
+sudo -u cfgms sh -c 'umask 077; openssl rand -out /etc/cfgms/secrets.key 32'
 ```
 
 ### Copy and configure controller.cfg
@@ -84,6 +95,8 @@ Copy [controller.cfg](../controller.cfg) to `/etc/cfgms/controller.cfg`:
 
 ```bash
 sudo cp docs/deployment/controller.cfg /etc/cfgms/controller.cfg
+sudo chown root:cfgms /etc/cfgms/controller.cfg
+sudo chmod 0640 /etc/cfgms/controller.cfg
 ```
 
 Open `/etc/cfgms/controller.cfg` in your editor and verify the following variables:
@@ -95,8 +108,12 @@ Open `/etc/cfgms/controller.cfg` in your editor and verify the following variabl
 | `ip_addresses` | `certificate.server` | All IPs the controller is reachable at (include `127.0.0.1`) |
 | `organization` | `certificate.server` | Your organization name |
 | `listen_addr` | `transport` | Transport bind address and port (default `0.0.0.0:4433`) |
+| `metrics_listen_addr` | top level | Keep `127.0.0.1:9090`; startup rejects missing or non-private values |
 
 The REST API listens on port 9080 by default. To change it, set `CFGMS_HTTP_LISTEN_ADDR` in the systemd unit's `Environment=` directive.
+The metrics API is not registered on that product listener. Query
+`https://localhost:9090/api/v1/monitoring/metrics` locally with a key carrying
+`monitoring:read-metrics`.
 
 ### Install the systemd service
 
@@ -112,7 +129,8 @@ sudo systemctl daemon-reload
 This is a one-time operation that creates the CA, server certificates, storage backend, and admin credential bundle:
 
 ```bash
-sudo cfgms-controller --init --config /etc/cfgms/controller.cfg
+sudo -u cfgms env CFGMS_SECRETS_KEY_FILE=/etc/cfgms/secrets.key \
+  cfgms-controller --init --config /etc/cfgms/controller.cfg
 ```
 
 You should see:
@@ -129,6 +147,13 @@ The controller is now ready to start with: cfgms-controller --config <path>
 Save the CA fingerprint — stewards verify it during registration. Detailed initialization
 logs (CA creation, storage setup, RBAC, bundle issuance) are written to
 `/var/log/cfgms/cfgms.log`.
+
+Back up `/etc/cfgms/secrets.key` separately from `/var/lib/cfgms`, using
+encryption and access controls at least as strong as the admin credential
+bundle. Losing this key makes stored secrets unrecoverable; exposing it
+compromises every secret encrypted with it. The systemd unit copies it into the
+service credential directory at runtime and makes the source path inaccessible
+inside the service sandbox.
 
 ### Admin credential bundle
 
@@ -172,8 +197,21 @@ sudo systemctl start cfgms-controller
 # Service is running
 sudo systemctl status cfgms-controller
 
-# REST API responds
-curl -k https://localhost:9080/api/v1/health
+# REST API responds with CA and hostname verification
+curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  https://localhost:9080/api/v1/health
+
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: ${CFGMS_MONITORING_API_KEY}" \
+  https://localhost:9080/api/v1/monitoring/metrics)" = 404
+
+curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: ${CFGMS_MONITORING_API_KEY}" \
+  https://localhost:9090/api/v1/monitoring/metrics
+
+# Review the effective sandbox (resolve any warning before Internet exposure)
+sudo systemd-analyze security cfgms-controller.service
 
 # Logs show clean startup
 sudo journalctl -u cfgms-controller --no-pager -n 20
@@ -262,8 +300,9 @@ sudo ufw status | grep -E "9080|4433"
 # Controller is still running after steward convergence
 sudo systemctl status cfgms-controller
 
-# Health check still responds
-curl -k https://localhost:9080/api/v1/health
+# Health check still responds with certificate verification
+curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  https://localhost:9080/api/v1/health
 ```
 
 ## Step 4: Validate End-to-End
@@ -271,7 +310,8 @@ curl -k https://localhost:9080/api/v1/health
 Run through this checklist to confirm the deployment is working:
 
 - [ ] **Controller service**: `sudo systemctl status cfgms-controller` shows `active (running)`
-- [ ] **REST API**: `curl -k https://localhost:9080/api/v1/health` returns a healthy response
+- [ ] **REST API**: `curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt https://localhost:9080/api/v1/health` returns a healthy response
+- [ ] **Service sandbox**: `sudo systemd-analyze security cfgms-controller.service` shows the shipped restrictions are active
 - [ ] **Transport**: logs show `Transport server listening on :4433`
 - [ ] **Certificates**: `sudo journalctl -u cfgms-controller | grep "Certificate manager initialized"`
 - [ ] **Firewall**: ports 9080/TCP and 4433/UDP are open
@@ -290,7 +330,7 @@ sudo journalctl -u cfgms-controller -n 50
 |---------|-------|-----|
 | `bind: address already in use` | Another process on port 9080 or 4433 | `ss -tlnp \| grep 9080` to find it |
 | `permission denied` | Data directories not writable | `ls -la /var/lib/cfgms /var/log/cfgms` |
-| Certificate errors | CA not initialized or corrupt | `sudo rm -rf /var/lib/cfgms/certs && sudo cfgms-controller --init --config /etc/cfgms/controller.cfg` |
+| Certificate errors | Certificate hostname/SAN or CA trust mismatch | Correct `certificate.server` SANs and the client `--cacert` path; do not bypass verification |
 
 ### Controller-steward reports errors
 

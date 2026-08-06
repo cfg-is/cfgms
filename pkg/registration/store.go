@@ -33,13 +33,22 @@ type Store interface {
 	// controller_url is inherited from an existing active token.
 	// Returns an error if no active tokens exist for the given tenant+group.
 	RotateToken(ctx context.Context, tenantID, group string) (*Token, error)
+
+	// ClaimToken atomically reserves a token at the REST admission boundary.
+	// created is true only for the caller that won the claim. A retry from the
+	// same device identity returns created=false without an error.
+	ClaimToken(ctx context.Context, tokenStr, claimID string) (created bool, err error)
+
+	// ReleaseTokenClaim removes an exact claim after a pre-issuance failure.
+	ReleaseTokenClaim(ctx context.Context, tokenStr, claimID string) error
 }
 
 // memoryStore is an in-memory implementation of Store (for use within this package only).
 type memoryStore struct {
 	mu     sync.RWMutex
-	tokens map[string]*Token // keyed by token string
-	byID   map[string]string // id → token string
+	tokens map[string]*Token              // keyed by token string
+	byID   map[string]string              // id → token string
+	claims map[string]map[string]struct{} // token string → set of device claim IDs
 }
 
 // newMemoryStore creates a new in-memory token store.
@@ -47,6 +56,7 @@ func newMemoryStore() *memoryStore {
 	return &memoryStore{
 		tokens: make(map[string]*Token),
 		byID:   make(map[string]string),
+		claims: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -141,6 +151,44 @@ func (s *memoryStore) DeleteToken(ctx context.Context, tokenStr string) error {
 		delete(s.byID, token.ID)
 	}
 	delete(s.tokens, tokenStr)
+	delete(s.claims, tokenStr)
+	return nil
+}
+
+// ClaimToken atomically reserves a valid token for one device identity. The
+// token itself is perennial (Issue #1690) — distinct devices claim it
+// independently; only a repeat claim by the same device returns false.
+func (s *memoryStore) ClaimToken(_ context.Context, tokenStr, claimID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	token, ok := s.tokens[tokenStr]
+	if !ok || !token.IsValid() {
+		return false, fmt.Errorf("registration token is invalid, expired, or revoked")
+	}
+	claimed := s.claims[tokenStr]
+	if claimed == nil {
+		claimed = make(map[string]struct{})
+		s.claims[tokenStr] = claimed
+	}
+	if _, exists := claimed[claimID]; exists {
+		return false, nil
+	}
+	claimed[claimID] = struct{}{}
+	return true, nil
+}
+
+// ReleaseTokenClaim removes only the matching device's claim.
+func (s *memoryStore) ReleaseTokenClaim(_ context.Context, tokenStr, claimID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if claimed, ok := s.claims[tokenStr]; ok {
+		delete(claimed, claimID)
+		if len(claimed) == 0 {
+			delete(s.claims, tokenStr)
+		}
+	}
 	return nil
 }
 
@@ -178,6 +226,7 @@ func (s *memoryStore) RotateToken(ctx context.Context, tenantID, group string) (
 	}
 
 	now := time.Now()
+	expiresAt := now.Add(DefaultTokenTTL)
 
 	// Revoke all prior tokens atomically under the same lock.
 	for _, tok := range tokensToRevoke {
@@ -194,6 +243,7 @@ func (s *memoryStore) RotateToken(ctx context.Context, tenantID, group string) (
 		ControllerURL: controllerURL,
 		Group:         group,
 		CreatedAt:     now,
+		ExpiresAt:     &expiresAt,
 	}
 	s.tokens[tokenStr] = newToken
 	s.byID[tokenID] = tokenStr

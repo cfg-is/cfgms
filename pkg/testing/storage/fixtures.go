@@ -181,7 +181,7 @@ func (f *StorageTestFixture) setupDatabaseConfig(t *testing.T) {
 // setupFlatfileConfig creates a flatfile provider configuration backed by a temp dir.
 func (f *StorageTestFixture) setupFlatfileConfig(t *testing.T) {
 	flatfileDir := filepath.Join(f.TempDir, "flatfile-storage")
-	err := os.MkdirAll(flatfileDir, 0755)
+	err := os.MkdirAll(flatfileDir, 0700)
 	require.NoError(t, err, "Failed to create flatfile storage directory")
 
 	f.Configs["flatfile"] = &StorageTestConfig{
@@ -197,7 +197,7 @@ func (f *StorageTestFixture) setupFlatfileConfig(t *testing.T) {
 // Uses a real file path (not :memory:) to avoid parallel-test issues.
 func (f *StorageTestFixture) setupSQLiteConfig(t *testing.T) {
 	sqliteDir := filepath.Join(f.TempDir, "sqlite-storage")
-	err := os.MkdirAll(sqliteDir, 0755)
+	err := os.MkdirAll(sqliteDir, 0700)
 	require.NoError(t, err, "Failed to create sqlite storage directory")
 
 	f.Configs["sqlite"] = &StorageTestConfig{

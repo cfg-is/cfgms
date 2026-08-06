@@ -13,6 +13,10 @@ import (
 const (
 	// TokenLength is the length of the random part (before encoding)
 	TokenLength = 16 // 16 bytes = 128 bits of entropy
+
+	// DefaultTokenTTL bounds the exposure window when an operator does not
+	// request a specific registration-token lifetime.
+	DefaultTokenTTL = 15 * time.Minute
 )
 
 // GenerateToken generates a new random registration token.
@@ -48,7 +52,8 @@ func GenerateTokenID() (string, error) {
 // ParseExpiration parses expiration duration string (e.g., "24h", "7d", "30d")
 func ParseExpiration(expiresIn string) (*time.Time, error) {
 	if expiresIn == "" {
-		return nil, nil // No expiration
+		expiresAt := time.Now().Add(DefaultTokenTTL)
+		return &expiresAt, nil
 	}
 
 	// Parse duration with day support

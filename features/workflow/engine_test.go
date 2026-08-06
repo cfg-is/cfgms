@@ -22,6 +22,15 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// allowLoopbackHTTP re-points an engine at an HTTP client that may reach the
+// loopback httptest server a test just started. The engine's default client
+// blocks private and loopback destinations to stop workflow definitions from
+// reaching controller-internal services (SSRF), so any test serving its own
+// endpoint has to opt out explicitly. Production engines never do.
+func allowLoopbackHTTP(engine *Engine) {
+	engine.httpClient = NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
+}
+
 func createTestFactory() *factory.ModuleFactory {
 	registry := make(discovery.ModuleRegistry)
 
@@ -562,6 +571,7 @@ func TestRetryMaxAttempts(t *testing.T) {
 	factory := createTestFactory()
 	logger := logging.NewNoopLogger()
 	engine := NewEngine(factory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
 	// Use zero delays so the test runs instantly.
 	engine.errorHandler = &DefaultErrorHandler{
 		MaxRetries:        maxAttempts,

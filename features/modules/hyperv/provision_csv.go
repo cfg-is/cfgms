@@ -79,6 +79,8 @@ func (s *csvProvisionStore) GetProvision(_ context.Context, vmName string) (*Pro
 	if err != nil {
 		return nil, err
 	}
+	// #nosec G304 -- recordPath rejects separators/traversal in vmName and
+	// resolves the fixed .json filename beneath the configured CSV store.
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrProvisionNotFound
@@ -170,6 +172,8 @@ func (s *csvProvisionStore) ListProvisions(_ context.Context) ([]*ProvisionRecor
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
+		// #nosec G304 -- e.Name comes from ReadDir of the provision store and
+		// only non-directory .json entries are read.
 		data, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
 		if rerr != nil {
 			return nil, fmt.Errorf("hyperv: read provision record %q: %w", e.Name(), rerr)

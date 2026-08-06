@@ -251,7 +251,7 @@ func newRefreshTestServer(
 	policyStore business.RefreshPolicyStore,
 ) (*Server, *audit.Manager) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -743,7 +743,7 @@ func newRefreshAdminTestServer(
 	policyStore business.RefreshPolicyStore,
 ) (*Server, *audit.Manager) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false

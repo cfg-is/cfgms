@@ -253,6 +253,8 @@ func generateLaunchdPlist(token, controllerURL string) string {
   <dict>
     <key>CFGMS_LOG_DIR</key>
     <string>/usr/local/var/log/cfgms</string>
+    <key>CFGMS_SECURITY_PROFILE</key>
+    <string>public-beta</string>
   </dict>
   <key>StandardOutPath</key>
   <string>/var/log/cfgms-steward.log</string>

@@ -2,8 +2,9 @@
 # Runs trivy filesystem scan and distinguishes init-errors from real findings.
 #
 # Exit codes:
-#   0 — clean (no blocking vulnerabilities)
-#   1 — CRITICAL/HIGH/MEDIUM vulnerabilities found (deployment blocked)
+#   0 — clean (no blocking security findings)
+#   1 — UNKNOWN/MEDIUM/HIGH/CRITICAL vulnerability, secret, or
+#       misconfiguration findings (deployment blocked)
 #   2 — trivy failed to initialize (DB/network error) — re-run required
 #
 # The split between exit 1 and exit 2 prevents init-errors (e.g. mirror.gcr.io
@@ -24,15 +25,15 @@ _is_init_error() {
     echo "$1" | grep -qiE "$INIT_ERROR_PATTERN"
 }
 
-# --- Blocking vulnerability scan ---
-echo "🔍 Vulnerability Scan (Blocking Issues):"
+# --- Blocking vulnerability, secret, and misconfiguration scan ---
+echo "🔍 Comprehensive Security Scan (Blocking Issues):"
 
 vuln_output=""
 vuln_exit=0
 vuln_output=$("$TRIVY_CMD" fs "$SCAN_TARGET" \
-    --scanners vuln \
+    --scanners vuln,secret,misconfig \
     --format table \
-    --severity CRITICAL,HIGH,MEDIUM \
+    --severity UNKNOWN,CRITICAL,HIGH,MEDIUM \
     --skip-dirs .cache \
     --exit-code 1 2>&1) || vuln_exit=$?
 
@@ -48,21 +49,11 @@ if [[ $vuln_exit -ne 0 ]]; then
         exit 2
     fi
     echo ""
-    echo "❌ CRITICAL/HIGH/MEDIUM vulnerabilities found - deployment blocked!"
-    echo "   Please update dependencies to fix these security issues."
-    echo "   This matches CI/CD severity requirements."
+    echo "❌ Blocking vulnerabilities, secrets, or misconfigurations found."
+    echo "   Public-beta policy blocks UNKNOWN/MEDIUM/HIGH/CRITICAL findings."
     exit 1
 fi
 
-# --- Non-blocking complete scan (vuln + secret + misconfig) ---
-echo "🔍 Complete Security Scan (All Issues):"
-"$TRIVY_CMD" fs "$SCAN_TARGET" \
-    --scanners vuln,secret,misconfig \
-    --format table \
-    --skip-dirs .cache \
-    --exit-code 0 2>&1 || true
-
 echo ""
 echo "✅ Trivy scan completed"
-echo "   Note: Development certificates detected in features/controller/certs/ are expected"
-echo "   Critical/High/Medium vulnerabilities will block deployment (matches CI/CD)"
+echo "   No UNKNOWN/MEDIUM/HIGH/CRITICAL vulnerability, secret, or misconfiguration findings"

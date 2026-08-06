@@ -20,7 +20,7 @@ type TestReporter struct {
 // NewTestReporter creates a new test reporter
 func NewTestReporter(framework *E2ETestFramework) *TestReporter {
 	reportDir := filepath.Join(framework.tempDir, "reports")
-	if err := os.MkdirAll(reportDir, 0755); err != nil {
+	if err := os.MkdirAll(reportDir, 0700); err != nil {
 		// Log error but continue - reports are optional
 		_ = err // Explicitly ignore directory creation errors for optional reports
 	}
@@ -495,17 +495,17 @@ func (r *TestReporter) saveJSONReport(report *TestSummaryReport, path string) er
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 func (r *TestReporter) saveTextReport(report *TestSummaryReport, path string) error {
 	content := r.formatTextReport(report)
-	return os.WriteFile(path, []byte(content), 0644)
+	return os.WriteFile(path, []byte(content), 0600)
 }
 
 func (r *TestReporter) saveCISummary(report *TestSummaryReport, path string) error {
 	content := r.formatCISummary(report)
-	return os.WriteFile(path, []byte(content), 0644)
+	return os.WriteFile(path, []byte(content), 0600)
 }
 
 func (r *TestReporter) formatTextReport(report *TestSummaryReport) string {

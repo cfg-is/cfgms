@@ -367,6 +367,8 @@ func (s *Syncer) importConfigs(ctx context.Context, b ScopeBinding, repoDir, sha
 			continue // skip non-config files
 		}
 
+		// #nosec G304 -- name comes from ReadDir of the freshly synchronized
+		// repository root and only recognized config-file suffixes reach here.
 		data, readErr := os.ReadFile(filepath.Join(repoDir, name))
 		if readErr != nil {
 			return fmt.Errorf("gitsync: failed to read config file %s: %w", name, readErr)

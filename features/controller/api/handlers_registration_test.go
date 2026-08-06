@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -70,7 +71,7 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 	t.Helper()
 
 	// Isolate secrets storage per test to prevent shared-path contention on Windows CI.
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -124,6 +125,7 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 		nil, // No blob store for basic tests
 	)
 	require.NoError(t, err)
+	server.SetPendingStore(storageManager.GetPendingRegistrationStore())
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -231,32 +233,119 @@ func TestHandleRegister_ExpiredToken_Returns401(t *testing.T) {
 		"token_prefix in audit detail must be redacted by the audit manager")
 }
 
-func TestHandleRegister_PerennialToken_AllowsMultipleRegistrations(t *testing.T) {
+func TestHandleRegister_RetryDoesNotIssueSecondCertificate(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
-	// Explicitly use always-approve hook: this test verifies perennial token behaviour
-	// on the approve path, not registration approval policy.
 	server.SetApprovalHook(&AlwaysApproveHook{})
 
 	tok := &registration.Token{
-		Token:         "cfgms_reg_perennial_valid",
+		Token:         "cfgms_reg_retry_once",
 		TenantID:      "test-tenant",
 		ControllerURL: "grpc://controller:7443",
 	}
 	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
 
-	rec1 := postRegister(server, "cfgms_reg_perennial_valid")
-	assert.Equal(t, http.StatusOK, rec1.Code)
+	rec1 := postRegister(server, tok.Token)
+	require.Equal(t, http.StatusOK, rec1.Code)
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.ClientCert)
 
-	rec2 := postRegister(server, "cfgms_reg_perennial_valid")
-	assert.Equal(t, http.StatusOK, rec2.Code)
+	// A transport retry of the same request is safe: it cannot generate a second
+	// private key/certificate after the durable REST claim has committed.
+	rec2 := postRegister(server, tok.Token)
+	assert.Equal(t, http.StatusConflict, rec2.Code)
+	assert.NotContains(t, rec2.Body.String(), "BEGIN CERTIFICATE")
+}
 
-	// Both registrations should have distinct steward IDs
-	var resp1, resp2 RegistrationResponse
-	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
-	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
-	assert.NotEqual(t, resp1.StewardID, resp2.StewardID)
+func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	const tokenStr = "cfgms_reg_parallel_certificate"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	// One device racing itself. Only one of these may receive a private key —
+	// that is the double-issuance the REST claim exists to prevent.
+	const contenders = 16
+	const deviceID = "00000000000000000000000000000000000000000000000000000000000000ab"
+	start := make(chan struct{})
+	recorders := make([]*httptest.ResponseRecorder, contenders)
+	var wg sync.WaitGroup
+	wg.Add(contenders)
+	for i := 0; i < contenders; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			recorders[i] = postRegisterWithBody(server, RegistrationRequest{
+				Token:          tokenStr,
+				DeviceID:       deviceID,
+				IdentityKeyPub: testValidIdentityKeyPub,
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	conflicts := 0
+	for _, rec := range recorders {
+		switch rec.Code {
+		case http.StatusOK:
+			successes++
+			var resp RegistrationResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.NotEmpty(t, resp.ClientCert)
+			assert.NotEmpty(t, resp.ClientKey)
+		case http.StatusConflict:
+			conflicts++
+			assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE")
+		default:
+			t.Errorf("unexpected registration status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, contenders-1, conflicts)
+}
+
+// The claim is scoped to the device, not the token: a perennial fleet token
+// (Issue #1690) must keep enrolling endpoints after the first one registers.
+func TestHandleRegister_PerennialTokenEnrollsManyDevices(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	const tokenStr = "cfgms_reg_fleet_enrolment"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	stewardIDs := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       fmt.Sprintf("%064x", i+1),
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		require.Equal(t, http.StatusOK, rec.Code,
+			"device %d must enrol on the perennial token: %s", i, rec.Body.String())
+
+		var resp RegistrationResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.NotEmpty(t, resp.ClientCert, "device %d must receive its own certificate", i)
+		assert.False(t, stewardIDs[resp.StewardID], "steward IDs must be unique")
+		stewardIDs[resp.StewardID] = true
+	}
+
+	tok, err := tokenStore.GetToken(context.Background(), tokenStr)
+	require.NoError(t, err)
+	assert.True(t, tok.IsValid(), "enrolment must not spend the fleet token")
 }
 
 // kvCapturingLogger captures both Warn message and key-value pairs for security assertions.
@@ -602,6 +691,17 @@ func TestHandleRegister_QuarantineReturns202NoCert(t *testing.T) {
 	assert.Equal(t, "test-tenant", pending.TenantID)
 	assert.Equal(t, "pending", pending.Status)
 
+	// Same-device retry is idempotent: return the same durable pending record
+	// rather than creating a second pending registration.
+	retry := postRegister(server, "cfgms_reg_quarantine_test")
+	require.Equal(t, http.StatusAccepted, retry.Code)
+	var retryPending RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(retry.Body.Bytes(), &retryPending))
+	assert.Equal(t, pending.PendingID, retryPending.PendingID)
+	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+
 	// Verify no cert fields in the raw JSON — the struct definition must not carry them.
 	var raw map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
@@ -611,12 +711,113 @@ func TestHandleRegister_QuarantineReturns202NoCert(t *testing.T) {
 
 	// Verify the quarantine audit event was emitted.
 	require.NoError(t, auditMgr.Flush(context.Background()))
-	entries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	auditEntries, err := auditMgr.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, "registration_quarantined", entries[0].Action)
-	assert.Equal(t, string(business.AuditResultSuccess), string(entries[0].Result))
-	assert.Equal(t, string(business.AuditEventAuthentication), string(entries[0].EventType))
+	require.Len(t, auditEntries, 1)
+	assert.Equal(t, "registration_quarantined", auditEntries[0].Action)
+	assert.Equal(t, string(business.AuditResultSuccess), string(auditEntries[0].Result))
+	assert.Equal(t, string(business.AuditEventAuthentication), string(auditEntries[0].EventType))
+}
+
+func TestHandleRegister_ConcurrentClaimsCreateAtMostOnePendingRegistration(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	const tokenStr = "cfgms_reg_parallel_pending"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	// One device racing itself must produce exactly one quarantine entry, and the
+	// retries that lose the race must be handed back that same entry rather than
+	// a second one.
+	const contenders = 16
+	const deviceID = "00000000000000000000000000000000000000000000000000000000000000cd"
+	start := make(chan struct{})
+	recorders := make([]*httptest.ResponseRecorder, contenders)
+	var wg sync.WaitGroup
+	wg.Add(contenders)
+	for i := 0; i < contenders; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			recorders[i] = postRegisterWithBody(server, RegistrationRequest{
+				Token:          tokenStr,
+				DeviceID:       deviceID,
+				IdentityKeyPub: testValidIdentityKeyPub,
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	pendingIDs := make(map[string]bool)
+	for _, rec := range recorders {
+		switch rec.Code {
+		case http.StatusAccepted:
+			assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE")
+			var resp RegistrationPendingResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			pendingIDs[resp.PendingID] = true
+		case http.StatusConflict:
+			// A retry that raced the entry's creation.
+		default:
+			t.Errorf("unexpected registration status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	assert.Len(t, pendingIDs, 1, "the device must only ever be told about one pending entry")
+
+	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+}
+
+// Quarantined devices sharing a perennial token must each get their own pending
+// entry — never a handle to another device's registration.
+func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	const tokenStr = "cfgms_reg_quarantine_fleet"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token: tokenStr, TenantID: "test-tenant", ControllerURL: "grpc://controller:7443",
+	}))
+
+	pendingIDs := make(map[string]string)
+	for i := 0; i < 3; i++ {
+		deviceID := fmt.Sprintf("%064x", i+1)
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       deviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code,
+			"device %d must be quarantined, not refused: %s", i, rec.Body.String())
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotEmpty(t, resp.PendingID)
+		pendingIDs[deviceID] = resp.PendingID
+	}
+	assert.Len(t, pendingIDs, 3, "each device must receive a distinct pending_id")
+
+	// A device retrying gets its own entry back, not one of its peers'.
+	for deviceID, want := range pendingIDs {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          tokenStr,
+			DeviceID:       deviceID,
+			IdentityKeyPub: testValidIdentityKeyPub,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "retry body: %s", rec.Body.String())
+		var resp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, want, resp.PendingID, "device %s must recover its own pending entry", deviceID)
+	}
+
+	entries, err := server.pendingStore.ListPending(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Len(t, entries, 3)
 }
 
 func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {
@@ -781,6 +982,26 @@ func TestExtractSourceIP_XFFIgnoredWhenPeerNotProxy(t *testing.T) {
 	got = extractSourceIP(reqFromProxy, proxies)
 	assert.Equal(t, spoofedXFF, got,
 		"peer in trustedProxies: XFF must be honored")
+
+	// Standard proxies append the observed upstream address. Walk from the
+	// trusted edge toward the client so an attacker-controlled leftmost value
+	// cannot replace the address actually observed by the proxy.
+	reqFromProxy.Header.Set("X-Forwarded-For", "198.51.100.99, 203.0.113.5")
+	got = extractSourceIP(reqFromProxy, proxies)
+	assert.Equal(t, peerAddr, got,
+		"trusted proxy chain: first untrusted hop from the right is the client")
+
+	reqFromProxy.Header.Del("X-Forwarded-For")
+	reqFromProxy.Header.Add("X-Forwarded-For", "198.51.100.99")
+	reqFromProxy.Header.Add("X-Forwarded-For", "203.0.113.5")
+	got = extractSourceIP(reqFromProxy, proxies)
+	assert.Equal(t, peerAddr, got,
+		"multiple X-Forwarded-For fields must form one right-to-left chain")
+
+	reqFromProxy.Header.Set("X-Forwarded-For", "198.51.100.99, not-an-ip")
+	got = extractSourceIP(reqFromProxy, proxies)
+	assert.Equal(t, "192.168.1.10", got,
+		"malformed trusted-proxy chain must fall back to the TCP peer")
 
 	// When the peer IS in trustedProxies but XFF is absent, use peer address.
 	reqFromProxyNoXFF := httptest.NewRequest(http.MethodPost, "/api/v1/register", nil)
@@ -1094,7 +1315,7 @@ func TestHandleApproveByCIDR_InvalidCIDR(t *testing.T) {
 func TestHandleApproveByCIDR_NoPendingStore(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
-	// Do NOT set pendingStore.
+	server.SetPendingStore(nil)
 
 	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
 		strings.NewReader(`{"cidr":"10.0.0.0/8"}`))
@@ -1203,6 +1424,7 @@ func TestHandleApproveByCIDRPreview_MissingCIDR(t *testing.T) {
 func TestHandleApproveByCIDRPreview_NoPendingStore(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetPendingStore(nil)
 
 	req := makeAdminRequest(t, "GET", "/api/v1/registration/approve-by-cidr/preview?cidr=10.0.0.0/8", nil)
 	rec := httptest.NewRecorder()
@@ -1215,6 +1437,7 @@ func TestHandleApproveByCIDRPreview_NoPendingStore(t *testing.T) {
 func TestHandleApproveAll_NoPendingStore(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	server, _ := newHandleRegisterServer(t, tokenStore, nil)
+	server.SetPendingStore(nil)
 	// Do NOT set pendingStore.
 
 	req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-all", nil)
@@ -1346,6 +1569,13 @@ func TestHandleRegister_ApprovePath_TransportAddressError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code,
 		"approve path must return HTTP 500 when transport address is misconfigured")
 	assert.Contains(t, rec.Body.String(), "transport address not configured")
+
+	// The failure occurred before the atomic issuance boundary, so correcting
+	// the prerequisite and retrying the same request must still succeed.
+	server.cfg.Transport.ExternalAddress = "localhost"
+	retry := postRegister(server, "cfgms_reg_approve_transport_err")
+	assert.Equal(t, http.StatusOK, retry.Code)
+	assert.Contains(t, retry.Body.String(), "BEGIN CERTIFICATE")
 }
 
 // newHandleRegisterServerWithStewardStore creates a server wired with a real
@@ -1616,14 +1846,21 @@ func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
 		Group:         "hv-vms",
 	}
 	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+	trustedTok := &registration.Token{
+		Token:         "cfgms_reg_hv_iptest_trusted",
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+		Group:         "hv-vms",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), trustedTok))
 
 	// sendFrom posts a registration request with the given source IP and returns
 	// the raw response body bytes alongside the recorder so both decoded fields
 	// and raw content (e.g. cert PEM checks) can be verified.
-	sendFrom := func(t *testing.T, sourceIP string) (*httptest.ResponseRecorder, []byte) {
+	sendFrom := func(t *testing.T, sourceIP, tokenStr string) (*httptest.ResponseRecorder, []byte) {
 		t.Helper()
 		body, err := json.Marshal(RegistrationRequest{
-			Token:          tok.Token,
+			Token:          tokenStr,
 			DeviceID:       testValidDeviceID,
 			IdentityKeyPub: testValidIdentityKeyPub,
 		})
@@ -1639,7 +1876,7 @@ func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
 	t.Run("untrusted_network_requires_manual_approval", func(t *testing.T) {
 		// HV host IP is NOT in the trust store → evaluator returns DecisionQuarantine
 		// → handler returns HTTP 202 Accepted with a pending_id for operator review.
-		rec, rawBody := sendFrom(t, hvUntrustedIP)
+		rec, rawBody := sendFrom(t, hvUntrustedIP, tok.Token)
 		require.Equal(t, http.StatusAccepted, rec.Code,
 			"provisioned VM registering from an untrusted network must be quarantined (202 Accepted)")
 
@@ -1675,7 +1912,7 @@ func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
 	t.Run("trusted_network_auto_admits", func(t *testing.T) {
 		// HV host IP IS in the trust store → evaluator returns DecisionApprove
 		// → handler returns HTTP 200 with a full mTLS cert bundle.
-		rec, rawBody := sendFrom(t, hvTrustedIP)
+		rec, rawBody := sendFrom(t, hvTrustedIP, trustedTok.Token)
 		require.Equal(t, http.StatusOK, rec.Code,
 			"provisioned VM registering from the HV host's trusted network must be auto-admitted (200 OK)")
 

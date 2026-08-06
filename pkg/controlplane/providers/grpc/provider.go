@@ -93,6 +93,7 @@ type Provider struct {
 	tlsConfig       *tls.Config
 	keepalivePeriod time.Duration // 0 = use QUIC default (25s)
 	idleTimeout     time.Duration // 0 = use QUIC default (90s)
+	maxConnections  int
 	stewardID       string
 	tenantID        string
 	logger          logging.Logger
@@ -119,6 +120,7 @@ type Provider struct {
 	// the registration token (creds.ClientId) maps to a tenant matching creds.TenantId.
 	// Injected via Initialize config key "registration_token_store".
 	registrationTokenStore business.RegistrationTokenStore
+	requireSecurityStores  bool
 
 	// Subscription handlers (server mode)
 	eventHandlers     []eventSubscription
@@ -160,6 +162,7 @@ func New(mode Mode, opts ...option) *Provider {
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
 		logger:            logging.NewNoopLogger(),
+		maxConnections:    50000,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -227,6 +230,12 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 	if it, ok := config["idle_timeout"].(time.Duration); ok {
 		p.idleTimeout = it
 	}
+	if max, ok := config["max_connections"].(int); ok {
+		if max < 1 {
+			return fmt.Errorf("max_connections must be at least 1")
+		}
+		p.maxConnections = max
+	}
 	if cb, ok := config["on_state_change"].(func(ConnectionState)); ok {
 		p.onStateChange = cb
 	}
@@ -267,6 +276,18 @@ func (p *Provider) initializeServer(config map[string]interface{}) error {
 
 	if ts, ok := config["registration_token_store"].(business.RegistrationTokenStore); ok {
 		p.registrationTokenStore = ts
+	}
+	if required, _ := config["require_security_stores"].(bool); required {
+		p.requireSecurityStores = true
+		if p.approvalChecker == nil {
+			return fmt.Errorf("server mode requires an approval checker")
+		}
+		if p.registrationTokenStore == nil {
+			return fmt.Errorf("server mode requires a registration token store")
+		}
+		if _, ok := p.registrationTokenStore.(business.RegistrationTokenClaimer); !ok {
+			return fmt.Errorf("server mode requires atomic registration token claiming")
+		}
 	}
 
 	return nil
@@ -333,7 +354,12 @@ func (p *Provider) startServer() error {
 	p.serverImpl = &transportServer{provider: p}
 
 	if p.ownGRPCServer {
-		ql, err := quictransport.Listen(p.addr, p.tlsConfig, p.quicConfig())
+		ql, err := quictransport.ListenWithLimits(
+			p.addr,
+			p.tlsConfig,
+			p.quicConfig(),
+			quictransport.LimitsForMaxConnections(p.maxConnections),
+		)
 		if err != nil {
 			return fmt.Errorf("failed to start QUIC listener: %w", err)
 		}
@@ -595,6 +621,8 @@ func (p *Provider) closeClientConn() {
 
 // setState updates the connection state and fires the on_state_change callback.
 func (p *Provider) setState(state ConnectionState) {
+	// #nosec G115 -- ConnectionState is a closed enum whose constants are all
+	// within int32; callers cannot construct an out-of-range enum value here.
 	old := ConnectionState(p.connState.Swap(int32(state)))
 	if old == state {
 		return
@@ -1090,6 +1118,15 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 				"claimed_tenant", logging.SanitizeLogValue(claimedTenantID))
 			return nil, status.Error(codes.PermissionDenied, "registration rejected: creds.tenant_id does not match registration token")
 		}
+
+		// The token is not spent here. Registration tokens are perennial
+		// (Issue #1690) — one enrolment token is what an RMM or GPO deployment
+		// bakes into a script for a whole fleet, so revoking it on first use
+		// would lock out every remaining endpoint. At this point the caller has
+		// already presented an mTLS client certificate that only the REST
+		// issuance boundary can mint, and that boundary holds the per-device
+		// single-issuance guard (RegistrationTokenClaimer). The token's role
+		// here is tenant binding, which the checks above enforce.
 	}
 
 	s.provider.logger.Info("steward registered", "steward_id", logging.SanitizeLogValue(stewardID), "version", logging.SanitizeLogValue(req.GetVersion()))
@@ -1123,15 +1160,16 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	}
 
 	// Approval gate hook (Issue #1719): checked before admitting the stream.
-	// Fail-open on checker error to match the HTTP registration hook policy and
-	// avoid taking endpoints offline during transient controller-side failures.
-	// The #1690–#1698 epic wires in the real implementation via WithApprovalChecker.
+	// Store and service failures deny admission; an unavailable authorization
+	// dependency must not turn into fleet-wide implicit approval.
 	if s.provider.approvalChecker != nil {
 		admitted, checkErr := s.provider.approvalChecker.IsApproved(stream.Context(), stewardID)
 		if checkErr != nil {
-			s.provider.logger.Error("steward approval check error, admitting (fail-open)",
+			s.provider.logger.Error("steward approval check error, rejecting (fail-closed)",
 				"steward_id", logging.SanitizeLogValue(stewardID), "error", checkErr)
-		} else if !admitted {
+			return status.Error(codes.Unavailable, "steward approval service unavailable")
+		}
+		if !admitted {
 			s.provider.logger.Warn("steward ControlChannel rejected by approval checker",
 				"steward_id", logging.SanitizeLogValue(stewardID))
 			return status.Error(codes.PermissionDenied, "steward reconnect not approved")

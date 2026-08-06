@@ -622,6 +622,21 @@ func TestExecuteScript_RejectsEmptyPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "empty")
 }
 
+func TestValidateWindowsScriptPath_RejectsCmdMetacharacters(t *testing.T) {
+	for _, path := range []string{
+		`C:\patches\update&whoami.cmd`,
+		`C:\patches\update|more.cmd`,
+		`C:\patches\update>.cmd`,
+		`C:\patches\update%.cmd`,
+		"C:\\patches\\update\nwhoami.cmd",
+	} {
+		t.Run(path, func(t *testing.T) {
+			require.Error(t, validateWindowsScriptPath(path))
+		})
+	}
+	require.NoError(t, validateWindowsScriptPath(`C:\Program Files\CFGMS Patches\update.cmd`))
+}
+
 func TestExecuteScript_FailedScript(t *testing.T) {
 	dir := t.TempDir()
 	var scriptPath string

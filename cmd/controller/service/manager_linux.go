@@ -42,6 +42,9 @@ func (m *linuxManager) Install(configPath string) error {
 	if !m.IsElevated() {
 		return fmt.Errorf("install requires root privileges: re-run with sudo")
 	}
+	if err := ensureLinuxServiceAccount(); err != nil {
+		return err
+	}
 
 	// Stop existing service if running (idempotent: ignore failure if not running).
 	_ = exec.Command("systemctl", "stop", linuxServiceName).Run()
@@ -71,6 +74,26 @@ func (m *linuxManager) Install(configPath string) error {
 	fmt.Printf("  Config:  %s\n", configPath)
 	fmt.Printf("  Status:  cfgms-controller status\n")
 	fmt.Printf("  Remove:  cfgms-controller uninstall\n")
+	return nil
+}
+
+// ensureLinuxServiceAccount creates the locked, non-interactive identity used by
+// the shipped unit. It intentionally does not grant supplementary groups.
+func ensureLinuxServiceAccount() error {
+	if err := exec.Command("id", "-u", "cfgms").Run(); err == nil {
+		return nil
+	}
+
+	out, err := exec.Command(
+		"useradd",
+		"--system",
+		"--no-create-home",
+		"--shell", "/usr/sbin/nologin",
+		"cfgms",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to create cfgms service account: %w\n%s", err, out)
+	}
 	return nil
 }
 
@@ -171,8 +194,53 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=%s --config "%s"
-Restart=always
+LoadCredential=cfgms-secrets-key:/etc/cfgms/secrets.key
+Environment=CFGMS_SECRETS_KEY_FILE=%%d/cfgms-secrets-key
+Restart=on-failure
 RestartSec=10
+User=cfgms
+Group=cfgms
+WorkingDirectory=/var/lib/cfgms
+UMask=0077
+ConfigurationDirectory=cfgms
+ConfigurationDirectoryMode=0750
+StateDirectory=cfgms
+StateDirectoryMode=0750
+LogsDirectory=cfgms
+LogsDirectoryMode=0750
+RuntimeDirectory=cfgms
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/etc/cfgms/secrets.key
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/var/lib/cfgms /var/log/cfgms
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+KeyringMode=private
+PrivateMounts=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+TasksMax=512
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cfgms-controller

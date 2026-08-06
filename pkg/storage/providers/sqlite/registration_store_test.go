@@ -4,6 +4,7 @@ package sqlite_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,12 @@ func TestRegistrationStore_SaveAndGet(t *testing.T) {
 	assert.Equal(t, token.Group, got.Group)
 	assert.False(t, got.Revoked)
 	assert.Nil(t, got.ExpiresAt)
+
+	listed, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "tenant-1"})
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.NotEqual(t, token.Token, listed[0].Token, "durable token lookup key must not be plaintext")
+	assert.Equal(t, "tok-ab", business.RegistrationTokenDisplayPrefix(listed[0].Token))
 }
 
 func TestRegistrationStore_GetTokenByID(t *testing.T) {
@@ -64,7 +71,7 @@ func TestRegistrationStore_GetTokenByID(t *testing.T) {
 
 	got, err := store.GetTokenByID(ctx, token.ID)
 	require.NoError(t, err)
-	assert.Equal(t, token.Token, got.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey(token.Token), got.Token)
 	assert.Equal(t, token.ID, got.ID)
 	assert.Equal(t, token.TenantID, got.TenantID)
 	assert.Equal(t, token.Group, got.Group)
@@ -115,7 +122,7 @@ func TestRegistrationStore_SaveToken_AssignsIDWhenMissing(t *testing.T) {
 
 	byID, err := store.GetTokenByID(ctx, assignedID)
 	require.NoError(t, err)
-	assert.Equal(t, "tok-no-id", byID.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey("tok-no-id"), byID.Token)
 
 	// Re-saving the same token (upsert) must not reassign the id.
 	resaved := &business.RegistrationTokenData{
@@ -201,7 +208,7 @@ func TestRegistrationStore_RotateToken_AssignsID(t *testing.T) {
 
 	got, err := store.GetTokenByID(ctx, rotated.ID)
 	require.NoError(t, err)
-	assert.Equal(t, rotated.Token, got.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey(rotated.Token), got.Token)
 	assert.True(t, got.IsValid())
 
 	// The rotated-away token stays addressable by its own id.
@@ -215,6 +222,101 @@ func TestRegistrationStore_GetNotFound(t *testing.T) {
 	ctx := context.Background()
 	_, err := store.GetToken(ctx, "nonexistent")
 	assert.Error(t, err)
+}
+
+// A perennial token (Issue #1690) enrols a whole fleet, so claiming it for one
+// device must not lock every other device out.
+func TestRegistrationStore_ClaimDoesNotSpendThePerennialToken(t *testing.T) {
+	store := newRegistrationStore(t)
+	claimer, ok := store.(business.RegistrationTokenClaimer)
+	require.True(t, ok)
+	ctx := context.Background()
+	expires := time.Now().Add(time.Hour)
+	require.NoError(t, store.SaveToken(ctx, &business.RegistrationTokenData{
+		Token: "fleet-enrolment-canary", TenantID: "tenant-1",
+		ControllerURL: "https://controller.example.com", ExpiresAt: &expires,
+	}))
+
+	for i := 0; i < 5; i++ {
+		created, err := claimer.ClaimToken(ctx, "fleet-enrolment-canary", fmt.Sprintf("device-%d", i))
+		require.NoError(t, err, "device %d must be able to enrol on the fleet token", i)
+		assert.True(t, created, "device %d must win its own claim", i)
+	}
+
+	got, err := store.GetToken(ctx, "fleet-enrolment-canary")
+	require.NoError(t, err)
+	assert.True(t, got.IsValid(), "enrolment must not revoke the fleet token")
+}
+
+func TestRegistrationStore_RESTClaimIsAtomicAndRetryable(t *testing.T) {
+	store := newRegistrationStore(t)
+	claimer, ok := store.(business.RegistrationTokenClaimer)
+	require.True(t, ok)
+	ctx := context.Background()
+	expires := time.Now().Add(time.Hour)
+	require.NoError(t, store.SaveToken(ctx, &business.RegistrationTokenData{
+		Token: "rest-claim-canary", TenantID: "tenant-1",
+		ControllerURL: "https://controller.example.com", ExpiresAt: &expires,
+	}))
+
+	// One device, many concurrent attempts: exactly one may create the claim, so
+	// only one private key can ever be issued to it.
+	const contenders = 16
+	const deviceID = "device-under-contention"
+	var successes atomic.Int32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			created, err := claimer.ClaimToken(ctx, "rest-claim-canary", deviceID)
+			if err == nil && created {
+				successes.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	require.Equal(t, int32(1), successes.Load())
+
+	created, err := claimer.ClaimToken(ctx, "rest-claim-canary", deviceID)
+	require.NoError(t, err, "same-device retry must be recognized")
+	assert.False(t, created, "retry must not create another claim")
+
+	// A different device is unaffected by the first device's claim.
+	created, err = claimer.ClaimToken(ctx, "rest-claim-canary", "second-device")
+	require.NoError(t, err)
+	assert.True(t, created, "a second device must enrol on the same perennial token")
+
+	require.NoError(t, claimer.ReleaseTokenClaim(ctx, "rest-claim-canary", deviceID))
+	created, err = claimer.ClaimToken(ctx, "rest-claim-canary", deviceID)
+	require.NoError(t, err)
+	assert.True(t, created, "released pre-issuance claim must be retryable")
+
+	// Releasing one device's claim must not disturb another's.
+	created, err = claimer.ClaimToken(ctx, "rest-claim-canary", "second-device")
+	require.NoError(t, err)
+	assert.False(t, created, "the second device's claim must survive an unrelated release")
+}
+
+// A revoked token must be refused even for a device that never claimed it.
+func TestRegistrationStore_ClaimRejectsRevokedToken(t *testing.T) {
+	store := newRegistrationStore(t)
+	claimer, ok := store.(business.RegistrationTokenClaimer)
+	require.True(t, ok)
+	ctx := context.Background()
+	tok := &business.RegistrationTokenData{
+		Token: "revoked-claim-canary", TenantID: "tenant-1",
+		ControllerURL: "https://controller.example.com",
+	}
+	require.NoError(t, store.SaveToken(ctx, tok))
+	tok.Revoke()
+	require.NoError(t, store.UpdateToken(ctx, tok))
+
+	_, err := claimer.ClaimToken(ctx, "revoked-claim-canary", "some-device")
+	require.Error(t, err, "a revoked token must not admit a new device")
 }
 
 func TestRegistrationStore_Update(t *testing.T) {

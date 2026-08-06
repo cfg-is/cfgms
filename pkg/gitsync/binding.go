@@ -139,7 +139,7 @@ func (bs *BindingStore) save() error {
 		return fmt.Errorf("gitsync: failed to marshal bindings: %w", err)
 	}
 	tmp := bs.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0640); err != nil {
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("gitsync: failed to write bindings temp file: %w", err)
 	}
 	if err := os.Rename(tmp, bs.path); err != nil {

@@ -5,8 +5,42 @@ package business
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
 	"time"
 )
+
+const registrationTokenHashPrefix = "sha256:"
+
+// RegistrationTokenLookupKey returns a deterministic, non-reversible storage
+// key. The short prefix is retained only for operator identification.
+func RegistrationTokenLookupKey(token string) string {
+	if strings.HasPrefix(token, registrationTokenHashPrefix) {
+		return token
+	}
+	prefix := token
+	if len(prefix) > 6 {
+		prefix = prefix[:6]
+	}
+	sum := sha256.Sum256([]byte(token))
+	return registrationTokenHashPrefix + prefix + ":" + hex.EncodeToString(sum[:])
+}
+
+// RegistrationTokenDisplayPrefix extracts the non-secret operator prefix from
+// either a raw token during its mint window or a stored lookup key.
+func RegistrationTokenDisplayPrefix(token string) string {
+	if strings.HasPrefix(token, registrationTokenHashPrefix) {
+		parts := strings.SplitN(token, ":", 3)
+		if len(parts) == 3 {
+			return parts[1]
+		}
+	}
+	if len(token) > 6 {
+		return token[:6]
+	}
+	return token
+}
 
 // RegistrationTokenStore defines storage interface for CFGMS registration token persistence
 // All registration token modules use this interface - storage provider is chosen by controller
@@ -29,6 +63,29 @@ type RegistrationTokenStore interface {
 	// Initialize and cleanup
 	Initialize(ctx context.Context) error
 	Close() error
+}
+
+// RegistrationTokenClaimer is implemented by durable stores that can reserve a
+// registration token for one device identity at the REST certificate-issuance
+// boundary.
+//
+// Registration tokens are perennial (Issue #1690): they survive multiple
+// registrations and are spent only by rotation or revocation, because one
+// enrollment token is what an RMM or GPO deployment bakes into a script for a
+// whole fleet. A claim therefore scopes to the *device*, not to the token — it
+// exists so that two concurrent requests carrying the same token and the same
+// device identity cannot both be issued a private key, including across
+// controller processes. Distinct devices claim the same token independently.
+type RegistrationTokenClaimer interface {
+	// ClaimToken atomically creates a durable claim on tokenStr for claimID. It
+	// returns true only to the caller that created that claim; a retry with the
+	// same claimID returns (false, nil). An invalid, expired, or revoked token is
+	// an error.
+	ClaimToken(ctx context.Context, tokenStr, claimID string) (bool, error)
+
+	// ReleaseTokenClaim removes an exact claim after a failure that occurred
+	// before a certificate or pending-registration record was produced.
+	ReleaseTokenClaim(ctx context.Context, tokenStr, claimID string) error
 }
 
 // RegistrationTokenData represents a registration token in the storage layer

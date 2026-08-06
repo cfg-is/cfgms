@@ -46,6 +46,24 @@ type auditCapturingLogger struct {
 	entries []auditLogEntry
 }
 
+func TestSecurityHeadersMiddlewareCoversAPIErrorResponses(t *testing.T) {
+	srv := setupTestServer(t)
+	handler := srv.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "denied", http.StatusUnauthorized)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, "max-age=31536000; includeSubDomains", rec.Header().Get("Strict-Transport-Security"))
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"))
+	assert.Equal(t, "no-referrer", rec.Header().Get("Referrer-Policy"))
+	assert.Equal(t, "camera=(), microphone=(), geolocation=()", rec.Header().Get("Permissions-Policy"))
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
 type auditLogEntry struct {
 	level string
 	msg   string
@@ -594,8 +612,8 @@ func TestMTLSAuth_NoCert_FallsBackToAPIKey(t *testing.T) {
 	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance)
 }
 
-// TestHasPermission_AdminPrincipal verifies that hasPermission returns true for any
-// permissionID when the principal has Assurance >= AssuranceBasic.
+// TestHasPermission_AdminPrincipal verifies that an administrator principal with
+// the explicit nil-permissions marker is authorized for every permission.
 func TestHasPermission_AdminPrincipal(t *testing.T) {
 	server := setupTestServer(t)
 	admin := &Principal{Assurance: session.AssuranceBasic}
@@ -603,6 +621,20 @@ func TestHasPermission_AdminPrincipal(t *testing.T) {
 	assert.True(t, server.hasPermission(admin, "steward:read"))
 	assert.True(t, server.hasPermission(admin, "rbac:delete-role"))
 	assert.True(t, server.hasPermission(admin, "some-future:permission"))
+}
+
+// TestHasPermission_WebAccountPermissions verifies that human assurance does not
+// erase the explicit, least-privilege grants configured on a web account.
+func TestHasPermission_WebAccountPermissions(t *testing.T) {
+	server := setupTestServer(t)
+	web := &Principal{
+		Assurance:   session.AssuranceBasic,
+		Permissions: []string{"steward:list"},
+	}
+
+	assert.True(t, server.hasPermission(web, "steward:list"))
+	assert.False(t, server.hasPermission(web, "steward:write-config"))
+	assert.False(t, server.hasPermission(web, "rbac:create-role"))
 }
 
 // TestHasPermission_WildcardStringRejected verifies that an API-key principal with
@@ -668,7 +700,7 @@ func TestMTLSAuth_AuditFields_APIKeyAuth(t *testing.T) {
 // so that extractAdminPrincipal can check the revocation list.
 func setupTestServerWithCertMgr(t *testing.T, certManager *cert.Manager) *Server {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -836,7 +868,7 @@ func TestAuthMiddleware_SetsUserIDKey_CertAuth(t *testing.T) {
 // TenantIsolationEngine. Uses real CFGMS components — no mocks.
 func setupTestServerWithIsolationEngine(t *testing.T) *Server {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -916,6 +948,35 @@ func requestWithTargetTenant(method, path, targetTenant, apiKey string) *http.Re
 	req := httptest.NewRequest(method, path, nil)
 	req.Header.Set("X-API-Key", apiKey)
 	return req.WithContext(context.WithValue(req.Context(), targetTenantContextKey, targetTenant))
+}
+
+func TestTenantIsolation_SubtreeBoundaryEnforcedWithoutIsolationEngine(t *testing.T) {
+	server := setupTestServer(t) // isolation engine is deliberately not wired
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:list"}, "msp-a/client-1", 5*time.Minute)
+	handler := server.authenticationMiddleware(
+		server.requirePermission("steward", "list")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})))
+
+	for _, tc := range []struct {
+		name         string
+		targetTenant string
+		wantStatus   int
+	}{
+		{name: "same tenant", targetTenant: "msp-a/client-1", wantStatus: http.StatusOK},
+		{name: "child tenant", targetTenant: "msp-a/client-1/group-a", wantStatus: http.StatusOK},
+		{name: "sibling tenant", targetTenant: "msp-a/client-2", wantStatus: http.StatusForbidden},
+		{name: "parent tenant", targetTenant: "msp-a", wantStatus: http.StatusForbidden},
+		{name: "prefix collision", targetTenant: "msp-a/client-10", wantStatus: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := requestWithTargetTenant(http.MethodGet, "/api/v1/stewards", tc.targetTenant, apiKey)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, tc.wantStatus, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
 }
 
 // TestTenantIsolation_AgentDevKey verifies that requirePermission enforces tenant
@@ -1115,6 +1176,166 @@ func TestWebSessionCookie_ValidCookie_BuildsPrincipal(t *testing.T) {
 	assert.Equal(t, "tenant-a", capturedPrincipal.TenantID)
 	assert.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance, "web session principal must have AssuranceBasic")
 	assert.Equal(t, "web-session:alice", capturedPrincipal.Name)
+}
+
+// TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker pins the fail-closed
+// half of hasPermission's implicit-admin encoding.
+//
+// hasPermission grants every permission to a principal with Assurance >= AssuranceBasic
+// AND a nil Permissions slice — nil is the marker for administrator mTLS and CLI-session
+// principals. Web-session principals also carry AssuranceBasic, so the ONLY thing keeping
+// them subject to their configured RBAC grants is that authenticationMiddleware builds
+// them with a non-nil slice.
+//
+// That distinction is invisible in Go: len(), range and append treat a nil and an empty
+// slice identically, and `append(nil)` with zero elements yields nil. Initialising with
+// `var permissions []string` instead of `[]string{}` — an idiomatic-looking, apparently
+// equivalent edit — would silently promote every web account to full administrator.
+// This test fails on exactly that edit.
+//
+// The account lookup deliberately misses here (no web account backs "alice"), which is the
+// worst case: an unresolvable account must yield no permissions, never unbounded ones.
+func TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal, "Principal must be set in context")
+	require.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance,
+		"precondition: a web principal carries the assurance level that arms the implicit-admin branch")
+
+	require.NotNil(t, capturedPrincipal.Permissions,
+		"web-session principals MUST carry a non-nil Permissions slice; nil is the implicit-admin marker")
+
+	// The security property the non-nil slice exists to produce.
+	assert.False(t, srv.hasPermission(capturedPrincipal, "rbac:create-role"),
+		"a web principal with no resolvable account must not be granted permissions it was never assigned")
+	assert.False(t, srv.hasPermission(capturedPrincipal, "steward:write-config"),
+		"a web principal with no resolvable account must not be granted permissions it was never assigned")
+	assert.False(t, capturedPrincipal.GlobalScope,
+		"GlobalScope must reflect the account's explicit root grant, not be assumed for web sessions")
+}
+
+// TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp asserts the
+// platform-administrator half of the web-account model.
+//
+// A root-scope web account is an administrator: it holds every permission, so a
+// permission introduced after the account was created is usable immediately rather
+// than silently 403-ing until someone re-enumerates all 87 IDs.
+//
+// Breadth is not proof. This test pins both halves together, because the breadth grant
+// is only defensible while the assurance gate still bites: the same principal that
+// sails through a non-gated permission must be challenged for an AssuranceStrong one.
+func TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	// Deliberately no Permissions: breadth must come from the root-scope grant.
+	srv.cacheWebAccount(&webAccount{
+		ID:        "admin-principal-id",
+		Username:  "root-admin",
+		TenantID:  "",
+		RootScope: true,
+	})
+	cookie := issueWebSession(t, mgr, "admin-principal-id", "")
+
+	var capturedPrincipal *Principal
+	capture := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	capture.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	assert.Nil(t, capturedPrincipal.Permissions,
+		"a resolved root-scope account carries the nil implicit-admin marker")
+	assert.True(t, capturedPrincipal.GlobalScope,
+		"root scope grants cross-tenant visibility")
+	assert.True(t, srv.hasPermission(capturedPrincipal, "workflow:execute"),
+		"an administrator holds permissions that were never enumerated on the account")
+
+	// Breadth: a permission absent from permissionAssurance is reachable directly.
+	okHandler := srv.authenticationMiddleware(
+		srv.requirePermission("steward", "list")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })))
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	okHandler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"administrator must reach a non-assurance-gated permission without a challenge")
+
+	// Proof: certificate:provision is AssuranceStrong; this session is AssuranceBasic.
+	require.Equal(t, session.AssuranceStrong, permissionAssurance["certificate:provision"].Min,
+		"precondition: certificate:provision is the AssuranceStrong permission under test")
+	stepUpHandler := srv.authenticationMiddleware(
+		srv.requirePermission("certificate", "provision")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/certificates/provision", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	stepUpHandler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"implicit admin must still be challenged for an AssuranceStrong permission, not admitted")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp",
+		"the challenge must be a step-up invitation, not a flat denial")
+	assert.Contains(t, rec.Body.String(), "step_up_required")
+}
+
+// TestWebSessionCookie_TenantScopedAccountIsEnumerated asserts the least-privilege half:
+// a non-root web account is held to exactly the grants configured on it. This is the
+// persona the Principal doc comment anticipates (Assurance=AssuranceBasic,
+// GlobalScope=false) and the one whose permissions must never be widened by assurance.
+func TestWebSessionCookie_TenantScopedAccountIsEnumerated(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	srv.cacheWebAccount(&webAccount{
+		ID:          "operator-principal-id",
+		Username:    "tenant-operator",
+		TenantID:    "tenant-a",
+		RootScope:   false,
+		Permissions: []string{"steward:list"},
+	})
+	cookie := issueWebSession(t, mgr, "operator-principal-id", "tenant-a")
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	require.NotNil(t, capturedPrincipal.Permissions,
+		"a tenant-scoped account must never carry the implicit-admin marker")
+	assert.False(t, capturedPrincipal.GlobalScope,
+		"a tenant-scoped account is confined to its tenant subtree")
+	assert.True(t, srv.hasPermission(capturedPrincipal, "steward:list"),
+		"configured grants are honoured")
+	assert.False(t, srv.hasPermission(capturedPrincipal, "steward:write-config"),
+		"human assurance must not widen a tenant-scoped account beyond its grants")
+	assert.False(t, srv.hasPermission(capturedPrincipal, "rbac:create-role"),
+		"human assurance must not widen a tenant-scoped account beyond its grants")
 }
 
 // TestWebSessionCookie_RenewalCookieFlags verifies that the refreshed Set-Cookie header

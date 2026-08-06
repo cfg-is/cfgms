@@ -38,7 +38,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -71,7 +74,19 @@ type HTTPClientConfig struct {
 
 	// MaxIdleConnsPerHost for HTTP transport
 	MaxIdleConnsPerHost int
+
+	// MaxRequestBodyBytes limits the serialized request body (default: 10 MiB).
+	MaxRequestBodyBytes int64
+
+	// MaxResponseBodyBytes limits response buffering (default: 10 MiB).
+	MaxResponseBodyBytes int64
+
+	// AllowPrivateNetworks disables SSRF network filtering. It is intended only
+	// for isolated tests; production workflow clients must leave it false.
+	AllowPrivateNetworks bool
 }
+
+const defaultHTTPBodyLimit int64 = 10 << 20
 
 // HTTPResponse represents the response from an HTTP request
 type HTTPResponse struct {
@@ -103,17 +118,42 @@ func NewHTTPClient(config HTTPClientConfig) *HTTPClient {
 	if config.MaxIdleConnsPerHost == 0 {
 		config.MaxIdleConnsPerHost = 10
 	}
+	if config.MaxRequestBodyBytes <= 0 {
+		config.MaxRequestBodyBytes = defaultHTTPBodyLimit
+	}
+	if config.MaxResponseBodyBytes <= 0 {
+		config.MaxResponseBodyBytes = defaultHTTPBodyLimit
+	}
 
 	// Create HTTP client with custom transport
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		MaxIdleConns:        config.MaxIdleConns,
 		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
 		IdleConnTimeout:     90 * time.Second,
+		Proxy:               nil,
+	}
+	if config.AllowPrivateNetworks {
+		transport.DialContext = dialer.DialContext
+	} else {
+		transport.DialContext = secureDialContext(dialer)
 	}
 
 	httpClient := &http.Client{
 		Timeout:   config.Timeout,
 		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("stopped after 5 redirects")
+			}
+			if err := validateWorkflowURL(req.URL, config.AllowPrivateNetworks); err != nil {
+				return err
+			}
+			if len(via) > 0 && !sameOrigin(via[0].URL, req.URL) {
+				return fmt.Errorf("cross-origin redirects are not permitted")
+			}
+			return nil
+		},
 	}
 
 	// Create rate limiter if configured
@@ -214,9 +254,12 @@ func (c *HTTPClient) executeSingleRequest(ctx context.Context, httpConfig *HTTPC
 	}()
 
 	// Read response body
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, c.config.MaxResponseBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if int64(len(body)) > c.config.MaxResponseBodyBytes {
+		return nil, fmt.Errorf("response body exceeds %d byte limit", c.config.MaxResponseBodyBytes)
 	}
 
 	response := &HTTPResponse{
@@ -242,6 +285,9 @@ func (c *HTTPClient) createHTTPRequest(ctx context.Context, httpConfig *HTTPConf
 		bodyBytes, err := c.prepareRequestBody(httpConfig.Body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to prepare request body: %w", err)
+		}
+		if int64(len(bodyBytes)) > c.config.MaxRequestBodyBytes {
+			return nil, fmt.Errorf("request body exceeds %d byte limit", c.config.MaxRequestBodyBytes)
 		}
 		bodyReader = bytes.NewReader(bodyBytes)
 	}
@@ -369,6 +415,13 @@ func (c *HTTPClient) validateHTTPConfig(httpConfig *HTTPConfig) error {
 	if httpConfig.Method == "" {
 		return fmt.Errorf("HTTP method is required")
 	}
+	parsedURL, err := url.Parse(httpConfig.URL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if err := validateWorkflowURL(parsedURL, c.config.AllowPrivateNetworks); err != nil {
+		return err
+	}
 
 	// Validate method
 	method := strings.ToUpper(httpConfig.Method)
@@ -381,6 +434,98 @@ func (c *HTTPClient) validateHTTPConfig(httpConfig *HTTPConfig) error {
 	}
 
 	return nil
+}
+
+func validateWorkflowURL(target *url.URL, allowPrivate bool) error {
+	if target == nil {
+		return fmt.Errorf("URL is required")
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return fmt.Errorf("URL scheme must be http or https")
+	}
+	if target.Hostname() == "" {
+		return fmt.Errorf("URL hostname is required")
+	}
+	if target.User != nil {
+		return fmt.Errorf("URL user information is not permitted")
+	}
+	if allowPrivate {
+		return nil
+	}
+	host := strings.TrimSuffix(strings.ToLower(target.Hostname()), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return fmt.Errorf("private network destinations are not permitted")
+	}
+	if addr, err := netip.ParseAddr(host); err == nil && isForbiddenWorkflowIP(addr) {
+		return fmt.Errorf("private network destinations are not permitted")
+	}
+	return nil
+}
+
+func secureDialContext(dialer *net.Dialer) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("invalid destination address: %w", err)
+		}
+		addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workflow destination: %w", err)
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("workflow destination resolved to no addresses")
+		}
+		for _, addr := range addrs {
+			if isForbiddenWorkflowIP(addr) {
+				return nil, fmt.Errorf("private network destinations are not permitted")
+			}
+		}
+		var lastErr error
+		for _, addr := range addrs {
+			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(addr.Unmap().String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		return nil, fmt.Errorf("dial workflow destination: %w", lastErr)
+	}
+}
+
+func isForbiddenWorkflowIP(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if !addr.IsValid() || !addr.IsGlobalUnicast() ||
+		addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	// Carrier-grade NAT and IPv4 benchmarking ranges are not globally routed
+	// services and are commonly present inside infrastructure networks.
+	for _, prefix := range []netip.Prefix{
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+	} {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(strings.TrimSuffix(a.Hostname(), "."), strings.TrimSuffix(b.Hostname(), ".")) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if u.Scheme == "https" {
+		return "443"
+	}
+	return "80"
 }
 
 // validateResponseStatus validates the HTTP response status code

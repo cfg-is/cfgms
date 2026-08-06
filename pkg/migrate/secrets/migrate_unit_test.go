@@ -4,7 +4,11 @@ package secrets_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -150,11 +154,18 @@ func TestSecretsMigrator_SOPStoSOPS_Idempotent(t *testing.T) {
 // No external services are required.
 func newSOPSStore(t *testing.T) secretsinterfaces.SecretStore {
 	t.Helper()
-	dir := t.TempDir()
+	base := t.TempDir()
+	dir := filepath.Join(base, "data")
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	keyPath := filepath.Join(base, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600))
 	store, err := secretsinterfaces.CreateSecretStoreFromConfig("sops", map[string]interface{}{
 		"storage_provider": "flatfile",
 		"storage_config":   map[string]interface{}{"root": dir},
 		"cache_enabled":    false,
+		"key_file":         keyPath,
 	})
 	require.NoError(t, err, "create SOPS test store")
 	t.Cleanup(func() { _ = store.Close() })

@@ -16,6 +16,8 @@ package secrets_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,11 +67,18 @@ func TestSecretsMigrate_FileToOpenBaoIncludingCA(t *testing.T) {
 	ctx := context.Background()
 
 	// Source: SOPS store backed by flatfile in a temp dir (no SOPS encryption needed for tests).
-	srcDir := t.TempDir()
+	srcBase := t.TempDir()
+	srcDir := filepath.Join(srcBase, "data")
+	srcKey := make([]byte, 32)
+	_, err := rand.Read(srcKey)
+	require.NoError(t, err)
+	srcKeyPath := filepath.Join(srcBase, "secrets.key")
+	require.NoError(t, os.WriteFile(srcKeyPath, []byte(base64.StdEncoding.EncodeToString(srcKey)), 0o600))
 	srcStore, err := secretsinterfaces.CreateSecretStoreFromConfig("sops", map[string]interface{}{
 		"storage_provider": "flatfile",
 		"storage_config":   map[string]interface{}{"root": srcDir},
 		"cache_enabled":    false,
+		"key_file":         srcKeyPath,
 	})
 	require.NoError(t, err, "failed to create source SOPS store")
 

@@ -406,6 +406,8 @@ func signScript(filePath, keyPath, algorithm string) error {
 	}
 
 	sigPath := filePath + ".sig"
+	// #nosec G703 -- this local signing command writes beside the exact artifact
+	// path selected by its operator; no remote principal controls filePath.
 	if err := os.WriteFile(sigPath, sigBytes, 0600); err != nil {
 		return fmt.Errorf("write signature file %q: %w", sigPath, err)
 	}

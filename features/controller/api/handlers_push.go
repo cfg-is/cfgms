@@ -204,6 +204,8 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// response is written. 202 is returned to the caller immediately.
 	if s.commandPublisher != nil {
 		cfgSnapshot := cfg
+		// #nosec G118 -- this authenticated, target-bounded fan-out intentionally
+		// survives the HTTP response and persists completion in pushStore.
 		go func() {
 			result := push.Fanout(context.Background(), &cfgSnapshot, targeted, s.commandPublisher, s.logger)
 			s.logger.Info("Config push fan-out complete",

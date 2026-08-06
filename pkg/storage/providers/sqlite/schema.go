@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 const currentSchemaVersion = 2
@@ -224,6 +225,40 @@ func assignMissingRegistrationTokenIDs(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// migrateRegistrationTokenClaimKey rebuilds a registration_token_claims table
+// that still carries the original `token TEXT PRIMARY KEY`. That key admitted
+// one device per token for the lifetime of the token, which silently reverted
+// the perennial token model (Issue #1690) — a fleet token could enrol exactly
+// one endpoint. The corrected key is (token, claim_id).
+//
+// Claims are short-lived in-flight admission guards, so the rows are dropped
+// rather than copied: any registration still mid-flight retries, and keeping
+// them would preserve the very rows that block re-enrolment.
+func migrateRegistrationTokenClaimKey(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "registration_token_claims")
+	if err != nil {
+		return fmt.Errorf("sqlite: registration_token_claims probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+
+	var ddl string
+	if err := db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'registration_token_claims'`,
+	).Scan(&ddl); err != nil {
+		return fmt.Errorf("sqlite: registration_token_claims DDL probe failed: %w", err)
+	}
+	if strings.Contains(ddl, "PRIMARY KEY (token, claim_id)") {
+		return nil
+	}
+
+	if _, err := db.ExecContext(ctx, `DROP TABLE registration_token_claims`); err != nil {
+		return fmt.Errorf("sqlite: registration_token_claims migration failed: %w", err)
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 // All DDL statements are executed inside a single transaction to reduce WAL
@@ -237,6 +272,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillSessionTokenRecords(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateRegistrationTokenClaimKey(ctx, db); err != nil {
 		return err
 	}
 	if err := backfillRegistrationTokenID(ctx, db); err != nil {
@@ -399,9 +437,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_rbac_role_assignments_role_id    ON rbac_role_assignments(role_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_rbac_role_assignments_tenant_id  ON rbac_role_assignments(tenant_id)`,
 
-		// Registration tokens — perennial model (Issue #1690)
-		// Migration note: single_use, used_at, and used_by columns were removed in Issue #1690.
-		// Pre-existing deployments must DROP these columns before upgrading.
+		// Registration tokens. New tokens are short-lived and their bearer values
+		// are persisted only as deterministic SHA-256 lookup keys. Legacy rows
+		// without expiry remain readable so operators can rotate them.
 		`CREATE TABLE IF NOT EXISTS registration_tokens (
 			token          TEXT PRIMARY KEY,
 			id             TEXT,
@@ -416,6 +454,17 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_tenant_id  ON registration_tokens(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_group_name ON registration_tokens(group_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_registration_tokens_id         ON registration_tokens(id)`,
+
+		// A REST registration claim gates certificate/pending-record creation for
+		// one device identity. Registration tokens are perennial (Issue #1690), so
+		// the key is (token, claim_id) — many devices enroll on one fleet token,
+		// but a given device can be issued a key only once per token.
+		`CREATE TABLE IF NOT EXISTS registration_token_claims (
+				token      TEXT NOT NULL,
+				claim_id   TEXT NOT NULL,
+				claimed_at TEXT NOT NULL,
+				PRIMARY KEY (token, claim_id)
+			)`,
 
 		// Stewards — durable fleet registry (ADR-003 §2, Issue #663)
 		// Records are never deleted; deregistered stewards are retained for audit.

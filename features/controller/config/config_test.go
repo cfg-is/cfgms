@@ -25,6 +25,66 @@ func TestDefaultConfig_TransportPopulated(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, cfg.Transport.IdleTimeout.AsDuration())
 }
 
+func TestDefaultConfig_RequiresExplicitPrivateMetricsListener(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.Empty(t, cfg.MetricsListenAddr,
+		"metrics listener must not be silently defaulted by production configuration")
+}
+
+func TestValidatePrivateListenerAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, address := range []string{
+		"127.0.0.1:9090",
+		"10.20.30.40:9090",
+		"172.30.0.10:9090",
+		"192.168.1.5:9090",
+		"[::1]:9090",
+		"[fd00::1]:9090",
+	} {
+		if err := ValidatePrivateListenerAddress(address); err != nil {
+			t.Errorf("private address %q rejected: %v", address, err)
+		}
+	}
+
+	for _, address := range []string{
+		"",
+		"0.0.0.0:9090",
+		"[::]:9090",
+		"8.8.8.8:9090",
+		"metrics.example.com:9090",
+		"127.0.0.1:0",
+		"127.0.0.1:http",
+		"127.0.0.1:65536",
+	} {
+		if err := ValidatePrivateListenerAddress(address); err == nil {
+			t.Errorf("unsafe address %q accepted", address)
+		}
+	}
+}
+
+func TestLoadWithPath_PrivateMetricsListener(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte("metrics_listen_addr: \"127.0.0.1:9090\"\n"), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:9090", cfg.MetricsListenAddr)
+	require.NoError(t, ValidatePrivateListenerAddress(cfg.MetricsListenAddr))
+}
+
+func TestLoadWithPath_PrivateMetricsListenerEnvOverride(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte("metrics_listen_addr: \"127.0.0.1:9090\"\n"), 0600))
+	t.Setenv("CFGMS_METRICS_LISTEN_ADDR", "10.20.30.40:9191")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "10.20.30.40:9191", cfg.MetricsListenAddr)
+}
+
 // TestTransportConfig_Validate_Valid verifies that a valid TransportConfig passes validation.
 func TestTransportConfig_Validate_Valid(t *testing.T) {
 	tc := &TransportConfig{

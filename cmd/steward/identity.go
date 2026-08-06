@@ -53,6 +53,8 @@ func savePendingState(dir string, state PendingState) error {
 // Returns (nil, err) on read/parse failure.
 func loadPendingState(dir string) (*PendingState, error) {
 	path := filepath.Join(dir, pendingStateFileName)
+	// #nosec G304 -- dir is the steward's private identity directory and the
+	// pending-state filename is a fixed internal constant.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -154,6 +156,8 @@ func saveIdentity(dir string, id StewardIdentity) error {
 // the legacy field.
 func loadIdentity(dir string) (*StewardIdentity, error) {
 	path := filepath.Join(dir, identityFileName)
+	// #nosec G304 -- dir is the steward's private identity directory and the
+	// identity filename is a fixed internal constant.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

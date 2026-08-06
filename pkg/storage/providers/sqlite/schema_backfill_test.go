@@ -537,7 +537,7 @@ func TestSaveToken_HealsEmptyStoredID(t *testing.T) {
 
 	byID, err := store.GetTokenByID(ctx, resaved.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "empty-id-token", byID.Token)
+	assert.Equal(t, business.RegistrationTokenLookupKey("empty-id-token"), byID.Token)
 }
 
 // TestBackfillRegistrationTokenID_FreshDB verifies a fresh database carries the id column
@@ -589,4 +589,49 @@ func TestBackfillRegistrationTokenID_UpdateFailure(t *testing.T) {
 	err = backfillRegistrationTokenID(ctx, roDB)
 	require.Error(t, err, "UPDATE on read-only DB must return an error")
 	assert.Contains(t, err.Error(), "back-fill update failed", "error must identify the update stage")
+}
+
+// legacySingleDeviceClaimSchema is the registration_token_claims DDL as first
+// shipped: one claim row per token, for the token's whole lifetime.
+const legacySingleDeviceClaimSchema = `CREATE TABLE IF NOT EXISTS registration_token_claims (
+	token      TEXT PRIMARY KEY,
+	claim_id   TEXT NOT NULL,
+	claimed_at TEXT NOT NULL
+)`
+
+// A database created before the fix carries a primary key that admits one device
+// per token forever, so an existing controller would keep refusing to enrol the
+// rest of its fleet even after upgrading. CREATE TABLE IF NOT EXISTS cannot
+// change a key, so the migration has to rebuild the table.
+func TestMigrate_LegacySingleDeviceRegistrationClaimKey(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacySingleDeviceClaimSchema)
+	require.NoError(t, err, "seed legacy claims schema")
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO registration_token_claims (token, claim_id, claimed_at) VALUES ('tok', 'device-a', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err, "seed a claim held under the legacy key")
+
+	require.NoError(t, initializeSchema(ctx, db), "initializeSchema must migrate the claims table")
+
+	// A second device on the same token is the case the legacy key rejected.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO registration_token_claims (token, claim_id, claimed_at) VALUES ('tok', 'device-a', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err, "first device claims the token")
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO registration_token_claims (token, claim_id, claimed_at) VALUES ('tok', 'device-b', '2026-01-01T00:00:01Z')`)
+	require.NoError(t, err, "a second device must be able to claim the same perennial token")
+
+	// The same device twice must still collide, so it cannot be issued two keys.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO registration_token_claims (token, claim_id, claimed_at) VALUES ('tok', 'device-b', '2026-01-01T00:00:02Z')`)
+	require.Error(t, err, "a device must not hold two claims on one token")
+
+	// Re-running must not drop the migrated table or its rows.
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+	var claims int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM registration_token_claims WHERE token = 'tok'`).Scan(&claims))
+	assert.Equal(t, 2, claims, "migrated claims must survive a later startup")
 }

@@ -43,8 +43,7 @@ type rotateTokenRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
-// createTokenRequestWithSingleUseCheck wraps TokenCreateRequest to detect the removed
-// single_use field and return 400 if a caller still sends it.
+// createTokenRequestWithSingleUseCheck detects the legacy single_use field.
 type createTokenRequestWithSingleUseCheck struct {
 	registration.TokenCreateRequest
 	SingleUse *bool `json:"single_use,omitempty"`
@@ -66,7 +65,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	}
 
 	if req.SingleUse != nil {
-		http.Error(w, "single_use is no longer supported; tokens are perennial by default", http.StatusBadRequest)
+		http.Error(w, "single_use is not supported by this token format; newly issued tokens are short-lived by default", http.StatusBadRequest)
 		return
 	}
 
@@ -436,7 +435,7 @@ func tokenToResponse(token *registration.Token) TokenResponse {
 	resp := TokenResponse{
 		TokenID:       token.ID,
 		Token:         token.Token,
-		TokenPrefix:   token.Token[:min(len(token.Token), 6)],
+		TokenPrefix:   business.RegistrationTokenDisplayPrefix(token.Token),
 		TenantID:      token.TenantID,
 		ControllerURL: token.ControllerURL,
 		Group:         token.Group,

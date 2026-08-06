@@ -434,6 +434,11 @@ services:
     build:
       context: .
       dockerfile: cmd/controller/Dockerfile
+      args:
+        # Compiles in the /api/v1/test/* administration endpoints the integration
+        # suite drives. CFGMS_ENABLE_TEST_ENDPOINTS below is the second, runtime
+        # gate; without both the routes are absent and every call 404s.
+        GO_BUILD_TAGS: cfgms_test_endpoints
     ports:
       - "4436:4433/udp"   # gRPC-over-QUIC transport (CP+DP on single port, Story #515)
       - "8080:9080"    # HTTP API (unique host port to avoid conflict with controller-east)
@@ -477,12 +482,25 @@ services:
       CFGMS_ENABLE_TEST_ENDPOINTS: "true"
       CFGMS_CERT_PATH: "/app/certs"
       CFGMS_DATA_DIR: "/app/data"
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      # Required explicitly: the controller fails closed when the private metrics
+      # listener has no address, and rejects port 0. Loopback keeps it unreachable
+      # from outside the container.
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
     # Run as root to avoid permission issues, create log dir first
     user: root
+    # cmd/controller/Dockerfile declares ENTRYPOINT ["/app/controller"], so a bare
+    # command would be appended as controller arguments ("unknown command \"sh\"").
+    # Clearing the entrypoint restores shell-form startup — same treatment as
+    # fleet-controller below.
+    entrypoint: []
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
       - controller_standalone_certs:/app/certs  # Use volume for writable certs
       - controller_standalone_data:/app/data
+      # The controller refuses to start without an external secrets key; the host
+      # path is generated per test session by scripts/generate-test-credentials.sh.
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
     depends_on:
       timescaledb-test:
         condition: service_healthy
@@ -673,6 +691,11 @@ services:
     build:
       context: .
       dockerfile: cmd/controller/Dockerfile
+      args:
+        # Compiles in the /api/v1/test/* administration endpoints the fleet suite
+        # drives. CFGMS_ENABLE_TEST_ENDPOINTS below is the second, runtime gate;
+        # without both the routes are absent and every call 404s.
+        GO_BUILD_TAGS: cfgms_test_endpoints
       x-bake:
         cache-from:
           - type=gha,scope=cfgms-fleet-controller
@@ -716,11 +739,19 @@ services:
       # Allows E2E upgrade tests to sign binaries with the known zero-seed private key.
       # Active only when CFGMS_SEED_TEST_API_KEYS=1.
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      # Required explicitly: the controller fails closed when the private metrics
+      # listener has no address, and rejects port 0. Loopback keeps it unreachable
+      # from outside the container.
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
     user: root
+    entrypoint: []
     command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]
     volumes:
       - fleet_controller_certs:/app/certs
+      - fleet_controller_data:/app/data
       - ./test/e2e/fleet/configs/controller.cfg:/app/controller.cfg:ro
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
     healthcheck:
       test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
       interval: 10s
@@ -927,6 +958,10 @@ volumes:
     # CA must persist across container restarts (no tmpfs)
     # Stewards hold client certs issued by this CA — cert validity requires persistence
     # Mounted by the controller only — never by stewards (holds ca.key).
+  fleet_controller_data:
+    driver: local
+    # SQLite, flat-file state, and the admin bundle must survive controller
+    # restart/recreation alongside the persistent CA.
   fleet_steward1_data:
     driver: local
     driver_opts:

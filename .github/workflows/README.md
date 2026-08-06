@@ -4,21 +4,35 @@ This directory contains automated CI/CD workflows for CFGMS. All workflows are a
 
 ## Required Status Checks (develop ruleset)
 
-These are the exact context names configured as required checks in the develop branch ruleset. All must pass (or be satisfied by a stub) before a PR can merge:
+These are the exact context names configured as required checks in the develop
+branch ruleset. All ten must pass (or be satisfied by a stub) before a PR can
+merge. Verify this list against the ruleset rather than trusting it:
+
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647684 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
 
 | Context name | Source workflow |
 |---|---|
 | `unit-tests` | `test-suite.yml` (PR/merge_group) or `documentation.yml` stub |
 | `integration-tests` | `test-suite.yml` (PR/merge_group) or `documentation.yml` stub |
-| `Build Gate` | `production-gates.yml` or `documentation.yml` stub |
+| `Build Gate` | `cross-platform-build.yml` or `documentation.yml` stub |
 | `security-deployment-gate` | `production-gates.yml` or `documentation.yml` stub |
-| `Controller Integration Tests (Linux)` | `cross-platform-build.yml` or `documentation.yml` stub |
-| `zizmor` | `zizmor.yml` |
-| `CLA signature check` | `cla-check.yml` |
+| `Controller Integration Tests (Linux)` | `production-gates.yml` or `documentation.yml` stub |
+| `zizmor` | `zizmor.yml` — no stub |
+| `CLA signature check` | `cla-check.yml` — no stub |
+| `frontend-checks` | `frontend-ci.yml` — no stub |
 | `trivy-scan` | `security-scan.yml` or `documentation.yml` stub |
 | `CodeQL` | `codeql-analysis.yml` or `codeql-stub.yml` |
 
-Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to `docs/**`, `*.md`, `.claude/**`) so they clear all nine required contexts without running the full code-validation suite.
+Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to
+`docs/**`, `*.md`, `.claude/**`) for the seven contexts that have one. The other
+three — `zizmor`, `CLA signature check` and `frontend-checks` — carry no path
+filter and no stub: their real job runs on every `pull_request` and every
+`merge_group`. `frontend-ci.yml` deliberately has no workflow-level paths filter
+and detects `web/**` changes inside the job instead, because a required check
+that never creates a check run blocks the merge queue indefinitely.
 
 ---
 

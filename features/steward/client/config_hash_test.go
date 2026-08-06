@@ -14,9 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
-	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -36,14 +33,15 @@ import (
 // a real in-process test implementation of the interface, not a mocking-framework stub.
 type testConfigSession struct {
 	testDataPlaneSession
-	data    []byte
-	version string
+	data      []byte
+	version   string
+	signature []byte
 }
 
 var _ dataplaneInterfaces.DataPlaneSession = (*testConfigSession)(nil)
 
 func (s *testConfigSession) ReceiveConfig(_ context.Context) (*dpTypes.ConfigTransfer, error) {
-	return &dpTypes.ConfigTransfer{Data: s.data, Version: s.version}, nil
+	return &dpTypes.ConfigTransfer{Data: s.data, Version: s.version, Signature: s.signature}, nil
 }
 
 // eventCapture is a real in-process implementation of ControlPlaneProvider
@@ -134,43 +132,44 @@ func newMinimalClientWithCP(t *testing.T, sess dataplaneInterfaces.DataPlaneSess
 // published to the controller contains a "config_hash" field equal to
 // fmt.Sprintf("%x", sha256.Sum256(rawConfigBytes)) (Issue #1316).
 func TestCommandSyncConfig_DNAUpdateCarriesConfigHash(t *testing.T) {
-	// Build minimal valid protobuf SignedConfig so proto.Unmarshal and
-	// stewardconfig.FromProto both succeed without a signature verifier.
-	protoConfig := &controllerpb.SignedConfig{
-		Config: &controllerpb.StewardConfig{
-			Steward: &controllerpb.StewardSettings{
-				Id: "test-steward-for-hash",
-			},
-		},
-	}
-	configData, err := proto.Marshal(protoConfig)
-	require.NoError(t, err, "proto.Marshal must succeed for minimal SignedConfig")
+	const stewardID = "test-steward-for-hash"
+	_, signer, certPEM := newSigningCA(t)
+	configData := buildMinimalSignedConfigBytes(t, signer, stewardID)
+	transfer := buildSignedConfigTransfer(t, signer, configData, "v-hash-test-1")
 
 	expectedHash := fmt.Sprintf("%x", sha256.Sum256(configData))
 
 	sess := &testConfigSession{
 		testDataPlaneSession: *newTestSession(),
-		data:                 configData,
-		version:              "v-hash-test-1",
+		data:                 transfer.Data,
+		version:              transfer.Version,
+		signature:            transfer.Signature,
 	}
 
 	exec, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: newTestLogger(t)})
 	require.NoError(t, err)
 
 	capture := newEventCapture()
-	c := newMinimalClientWithCP(t, sess, exec, capture, "steward-hash-test", "tenant-hash-test")
+	c := newMinimalClientWithCP(t, sess, exec, capture, stewardID, "tenant-hash-test")
+	c.signingCertPEMs = []string{certPEM}
 
-	handler, err := c.setupCommandHandler(context.Background(), "steward-hash-test")
+	handler, err := c.setupCommandHandler(context.Background(), stewardID)
 	require.NoError(t, err)
 
-	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+	cmdValue := cpTypes.Command{
 		ID:        "cmd-config-hash-1",
 		Type:      cpTypes.CommandSyncConfig,
-		StewardID: "steward-hash-test",
+		StewardID: stewardID,
 		TenantID:  "tenant-hash-test",
 		Timestamp: time.Now(),
 		Params:    map[string]interface{}{},
-	}}
+	}
+	rawParams := cpTypes.InterfaceParamsToStringMap(cmdValue.Params)
+	commandBytes, err := cpTypes.CommandSigningBytes(&cmdValue, rawParams)
+	require.NoError(t, err)
+	commandSignature, err := signer.Sign(commandBytes)
+	require.NoError(t, err)
+	cmd := &cpTypes.SignedCommand{Command: cmdValue, Signature: commandSignature}
 	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
 
 	// handler.Wait() blocks until the async executeCommand goroutine finishes,

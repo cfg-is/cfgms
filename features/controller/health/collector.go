@@ -310,6 +310,10 @@ func (c *DefaultSystemCollector) CollectMetrics(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get CPU metrics: %w", err)
 	}
+	cpuPercentValue, err := firstCPUPercent(cpuPercent)
+	if err != nil {
+		return err
+	}
 
 	// Memory metrics
 	vmem, err := mem.VirtualMemoryWithContext(ctx)
@@ -332,7 +336,7 @@ func (c *DefaultSystemCollector) CollectMetrics(ctx context.Context) error {
 
 	// Build metrics
 	metrics := &SystemMetrics{
-		CPUPercent:          cpuPercent[0],
+		CPUPercent:          cpuPercentValue,
 		MemoryUsedBytes:     int64(vmem.Used), // #nosec G115 -- Memory size cannot exceed int64 max (8 exabytes)
 		MemoryPercent:       vmem.UsedPercent,
 		HeapBytes:           int64(memStats.HeapAlloc), // #nosec G115 -- Heap size cannot exceed int64 max (8 exabytes)
@@ -347,6 +351,14 @@ func (c *DefaultSystemCollector) CollectMetrics(ctx context.Context) error {
 	c.mu.Unlock()
 
 	return nil
+}
+
+func firstCPUPercent(samples []float64) (float64, error) {
+	if len(samples) == 0 {
+		return 0, fmt.Errorf("failed to get CPU metrics: no CPU samples returned")
+	}
+
+	return samples[0], nil
 }
 
 // GetMetrics returns the current system metrics

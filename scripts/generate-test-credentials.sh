@@ -20,6 +20,17 @@ GITEA_SECRET_KEY=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 GITEA_INTERNAL_TOKEN=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 REDIS_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 
+# Ephemeral external secrets key. The controller refuses to start without one —
+# plaintext secret storage is prohibited — and docker-compose.test.yml mounts this
+# path into the fleet controller. Compose interpolates the whole file even when
+# only a subset of services is started, so this must exist for every target that
+# brings up any test service, not just the fleet stack.
+# A real file on the host, 0600, regenerated per session, never committed.
+SECRETS_KEY_FILE="$(pwd)/.cfgms-test-secrets.key"
+umask 077
+openssl rand 32 > "$SECRETS_KEY_FILE"
+chmod 600 "$SECRETS_KEY_FILE"
+
 # Generate API keys for HA controller nodes
 API_KEY_EAST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 API_KEY_CENTRAL=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
@@ -65,6 +76,9 @@ GITEA_INTERNAL_TOKEN=$GITEA_INTERNAL_TOKEN
 
 # Redis credentials
 REDIS_PASSWORD=$REDIS_PASSWORD
+
+# External secrets key (mounted into the fleet controller by docker-compose.test.yml)
+CFGMS_SECRETS_KEY_FILE=$SECRETS_KEY_FILE
 
 # API keys for HA controller nodes
 API_KEY_EAST=$API_KEY_EAST
@@ -125,10 +139,12 @@ EOF
 if [ -f .gitignore ]; then
     grep -q "^\.env\.test$" .gitignore || echo ".env.test" >> .gitignore
     grep -q "^docker-compose\.test\.override\.yml$" .gitignore || echo "docker-compose.test.override.yml" >> .gitignore
+    grep -q "^\.cfgms-test-secrets\.key$" .gitignore || echo ".cfgms-test-secrets.key" >> .gitignore
 else
     cat > .gitignore <<EOF
 .env.test
 docker-compose.test.override.yml
+.cfgms-test-secrets.key
 EOF
 fi
 
