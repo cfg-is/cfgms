@@ -98,14 +98,78 @@ Format: `<scope>: <what changed> (Issue #XXX)`. See [commit standards](docs/deve
 
 ## Required CI Checks
 
-All must pass before merge to `develop`:
+All must pass before merge to `develop`. Verify this list against the ruleset
+rather than trusting it — `gh api repos/cfg-is/cfgms/rulesets/11647684 --jq
+'.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'`.
 
-| Check | What it validates |
-|-------|-------------------|
-| `unit-tests` | Core functionality (~3-5 min) |
-| `integration-tests` | Comprehensive + production-critical (~5-10 min) |
-| `Build Gate` | Cross-platform compilation + Docker integration (~10-15 min) |
-| `security-deployment-gate` | Security vulnerability blocking (~6-10 min) |
+A green check does not always mean that scan ran. Most of these run for real on
+only **one** side of the PR / merge-queue split and post a stub context on the
+other, so the same change is not scanned twice — read the "Real run" column.
+
+| Check | Real run | What it validates |
+|-------|----------|-------------------|
+| `unit-tests` | PR (queue stubbed) | Core functionality (~3-5 min) |
+| `integration-tests` | merge queue (PR stubbed) | Comprehensive + production-critical (~5-10 min) |
+| `Build Gate` | merge queue (PR stubbed) | Cross-platform compilation + Docker integration (~10-15 min) |
+| `Controller Integration Tests (Linux)` | merge queue (PR stubbed) | Controller integration suite |
+| `security-deployment-gate` | merge queue (PR stubbed) | Critical vulnerability blocking (~6-10 min) |
+| `trivy-scan` | merge queue (PR stubbed) | Filesystem vulnerabilities, secrets, misconfiguration |
+| `CodeQL` | both (stubbed on non-Go PRs) | Semantic analysis; reports alerts on changed lines only |
+| `zizmor` | both (no stub) | Workflow security — action pins, cache poisoning, injection |
+| `frontend-checks` | both (no stub) | `web/` typecheck, lint, and tests |
+| `CLA signature check` | both (no stub) | Contributor licence agreement |
+
+Three shapes sit behind that column:
+
+- **Five run for real in the queue.** Their PR-side stub is a `*-pr-stub` job in
+  the check's own workflow; on a docs-only PR, where that workflow is
+  paths-ignored entirely, `documentation.yml` posts the context instead.
+  `unit-tests` is the inverse — real on the PR, stubbed in the queue by
+  `test-suite.yml`'s `unit-tests-mq-stub`.
+- **`CodeQL` runs for real on both sides,** path-filtered on the PR side to Go
+  sources, the module graph, `.github/codeql/**`, its own workflow file and
+  `web/`. `codeql-stub.yml` covers PRs touching none of those, and deliberately
+  does not trigger on `merge_group`, where the real analysis runs unfiltered.
+- **`zizmor`, `frontend-checks` and `CLA signature check` have no path filter and
+  no stub** — the real job runs on every `pull_request` and every `merge_group`.
+
+**Advisory, not required:** `nancy-scan`, `gosec-scan` and `staticcheck-scan`
+(PR side only), plus `security-validation`, the `security-scan.yml` aggregate
+that evaluates them across the split. Their jobs fail on findings, but a red one
+does **not** block a merge — the ruleset does not list them. Treat a finding
+there as real work, not as optional.
+
+`security-validation`'s merge-queue side is known to work: runs `30906412345`
+and `30906246182`, job `security-validation`, event `merge_group`, branch
+`gh-readonly-queue/develop/pr-3156-…`, conclusion `success`. A docs-only PR is
+not blocked by it either — `security-scan.yml` is paths-ignored for
+documentation changes, so `documentation.yml` posts the `security-validation`
+context for that case.
+
+### Stub exclusivity
+
+**A stub must be mutually exclusive with the job it stands in for.** Two check
+runs sharing one context name is a false-green risk: a passing stub alongside a
+failing real job. Not every pair here meets that bar today.
+
+**Path-gated pairs overlap when a PR touches both sides.** `paths` fires when
+*any* changed file matches and `paths-ignore` fires when *any* changed file does
+not, so a PR touching both a `.go` file and a `.md` file triggers the real job
+and its stub.
+
+**Four `documentation.yml` stubs also fire in the merge queue,** where they guard
+nothing: `unit-tests`, `integration-tests`, `Build Gate` and `Controller
+Integration Tests (Linux)` are gated `pull_request || merge_group`, and
+`documentation.yml` carries no `paths` filter on `merge_group`. Measured on queue
+commit `c9ac1917`: `documentation.yml` posted all four green while the real
+`Build Gate`, `integration-tests` and `Controller Integration Tests (Linux)` ran
+in parallel. (`unit-tests` is harmless — both its queue-side posters are stubs.)
+The `security-deployment-gate`, `trivy-scan` and `security-validation` stubs are
+correctly `pull_request`-only.
+
+Whether GitHub resolves a shared context to the failing run or the passing one is
+not established. Do not rely on a stub being exclusive until it is — and when a
+queue-real check goes green, confirm the *real* job posted it.
 
 Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 

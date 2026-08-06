@@ -37,28 +37,23 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 | Require conversation resolution | ✅ Yes | All PR comments must be resolved |
 | Status checks required | ✅ Yes | All CI checks must pass |
 
-### Required Status Checks (13 total)
+### Required Status Checks (4 total)
 
-**Core Build & Test Checks**:
-- `cross-compile-check` - Cross-platform compilation validation
-- `native-builds` - Native builds (Ubuntu, macOS, Windows)
-- `integration-tests` - Integration test suite
-- `build-gate` - Final build validation
+- `unit-tests` - Core functionality validation
+- `integration-tests` - Fast comprehensive + production-critical tests
+- `Build Gate` - Cross-platform compilation + Docker integration tests
+- `security-deployment-gate` - Security vulnerability blocking
 
-**Security Scans**:
-- `trivy-scan` - Container vulnerability scanning
-- `nancy-scan` - Go dependency scanning
-- `gosec-scan` - Go security analysis
-- `staticcheck-scan` - Static code analysis
-- `security-validation` - Security validation gate
+Read the list from the ruleset rather than trusting this page:
 
-**Code Analysis**:
-- `analyze` - CodeQL security analysis
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647678 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
 
-**Production Gates** (main only):
-- `security-deployment-gate` - Security deployment readiness
-- `production-risk-assessment` - Production risk evaluation
-- `integration-test-gate` - Integration test validation
+**Note**: `main` is reached only by a `develop → main` release PR, so the content
+has already cleared develop's ten checks. These four re-validate the merge
+commit; they are not the whole of what gated the change.
 
 ---
 
@@ -82,15 +77,36 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 | Status checks required | ✅ Yes | CI checks must pass |
 | Merge queue | ✅ Enabled | Serialized merge with post-rebase validation (replaces strict mode) |
 
-### Required Status Checks (5 total)
+### Required Status Checks (10 total)
 
 - `unit-tests` - Core functionality validation
 - `integration-tests` - Fast comprehensive + production-critical tests
 - `Build Gate` - Cross-platform compilation + Docker integration tests
 - `security-deployment-gate` - Security vulnerability blocking
 - `Controller Integration Tests (Linux)` - Controller integration test suite
+- `trivy-scan` - Filesystem vulnerabilities, secrets, misconfiguration
+- `CodeQL` - Semantic code analysis
+- `zizmor` - Workflow security (action pins, cache poisoning, injection)
+- `frontend-checks` - `web/` typecheck, lint and tests
+- `CLA signature check` - Contributor licence agreement
 
-**Rationale**: Direct required checks pattern (Story #322) replaced the previous 10-check approach. These checks cover unit tests, integration tests, cross-platform builds, and security scanning. Production-specific gates (`production-risk-assessment`, `integration-test-gate`) are excluded to allow faster iteration.
+Read the list from the ruleset rather than trusting this page:
+
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647684 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
+
+**Rationale**: Direct required checks pattern (Story #322) replaced the earlier
+approach of gating on aggregate workflow results. The `production-risk-assessment`
+and `integration-test-gate` jobs this list used to name no longer exist — the
+former is commented out in `production-gates.yml`, the latter is absent — so they
+are not "excluded" so much as retired.
+
+**Advisory, not required**: `nancy-scan`, `gosec-scan` and `staticcheck-scan`,
+plus `security-validation`, the `security-scan.yml` aggregate that evaluates them.
+Their jobs fail on findings, but a red one does not block a merge — the ruleset
+does not list them. Treat a finding there as real work, not as optional.
 
 ### Merge Queue
 
@@ -99,7 +115,7 @@ Enabled in Story #801. The merge queue replaces the previous `strict_required_st
 **How it works:**
 1. A PR marked for merge enters a serial queue
 2. GitHub creates a temporary merge-queue branch: current develop tip + the PR's changes
-3. All 5 required checks run against that combined (post-rebase) state
+3. All 10 required checks run against that combined (post-rebase) state
 4. If checks pass, the PR is squash-merged into develop
 5. If checks fail, the PR is ejected from the queue and the author is notified
 
@@ -132,21 +148,23 @@ Enabled in Story #801. The merge queue replaces the previous `strict_required_st
 | Pull request required | ❌ Not required | Release automation pushes directly |
 | Status checks required | ✅ Yes | Full validation before release |
 
-### Required Status Checks (10 total)
+### Required Status Checks (none)
 
-**Core checks + deployment gate**:
-- `cross-compile-check`
-- `native-builds`
-- `integration-tests`
-- `build-gate`
-- `trivy-scan`
-- `nancy-scan`
-- `gosec-scan`
-- `staticcheck-scan`
-- `security-validation`
-- `security-deployment-gate`
+The Release Branch Protection ruleset configures **no** required status checks.
+Deletion and force-push rules apply; CI results do not gate a push to a
+`release/*` branch.
 
-**Note**: Release branches require security deployment gate but exclude `production-risk-assessment` and `integration-test-gate` (already validated in develop). CodeQL analysis (`analyze`) is optional since it was already run on develop.
+```bash
+# Returns nothing — there is no required_status_checks rule on this ruleset.
+gh api repos/cfg-is/cfgms/rulesets/11647689 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
+
+**This is recorded as the measured state, not as an endorsement.** Release
+branches are cut from `develop`, whose ten checks have already run on every
+commit, so content reaching `release/*` has been validated — but nothing
+re-validates the release branch itself. Closing that gap is a ruleset change and
+is tracked separately from this document.
 
 ---
 
@@ -154,21 +172,32 @@ Enabled in Story #801. The merge queue replaces the previous `strict_required_st
 
 ### Status Check Sources
 
-| Check Name | Workflow File | Job Name |
-|------------|---------------|----------|
-| cross-compile-check | cross-platform-build.yml | cross-compile-check |
-| native-builds | cross-platform-build.yml | native-builds |
-| integration-tests | cross-platform-build.yml | integration-tests |
-| build-gate | cross-platform-build.yml | build-gate |
-| trivy-scan | security-scan.yml | trivy-scan |
-| nancy-scan | security-scan.yml | nancy-scan |
-| gosec-scan | security-scan.yml | gosec-scan |
-| staticcheck-scan | security-scan.yml | staticcheck-scan |
-| security-validation | security-scan.yml | security-validation |
-| analyze | codeql-analysis.yml | analyze |
-| security-deployment-gate | production-gates.yml | security-deployment-gate |
-| production-risk-assessment | production-gates.yml | production-risk-assessment |
-| integration-test-gate | production-gates.yml | integration-test-gate |
+The context name is the job's `name:`, not its key — these were measured by
+grepping `name: <context>` across `.github/workflows/`.
+
+**Required on `develop`** (all ten):
+
+| Context name | Real run | Stub |
+|---|---|---|
+| `unit-tests` | `test-suite.yml` | `documentation.yml` |
+| `integration-tests` | `test-suite.yml` | `documentation.yml` |
+| `Build Gate` | `cross-platform-build.yml` | `documentation.yml` |
+| `security-deployment-gate` | `production-gates.yml` | `documentation.yml` |
+| `Controller Integration Tests (Linux)` | `production-gates.yml` | `documentation.yml` |
+| `trivy-scan` | `security-scan.yml` | `documentation.yml` |
+| `CodeQL` | `codeql-analysis.yml` | `codeql-stub.yml` |
+| `zizmor` | `zizmor.yml` | none |
+| `frontend-checks` | `frontend-ci.yml` | none |
+| `CLA signature check` | `cla-check.yml` | none |
+
+**Advisory, not required** — these fail on findings but do not block a merge:
+
+| Context name | Source workflow |
+|---|---|
+| `nancy-scan` | `security-scan.yml` |
+| `gosec-scan` | `security-scan.yml` |
+| `staticcheck-scan` | `security-scan.yml` |
+| `security-validation` | `security-scan.yml` |
 
 ---
 
