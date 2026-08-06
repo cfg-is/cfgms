@@ -8,11 +8,22 @@ This document describes the active GitHub Rulesets configuration for CFGMS. Thes
 
 CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching model:
 
-| Branch | Purpose | Protection Level | Ruleset ID |
-|--------|---------|------------------|------------|
-| `main` | Production-ready releases | **Strict** | 11647678 |
-| `develop` | Integration branch | **Moderate** | 11647684 |
-| `release/*` | Release candidates | **Standard** | 11647689 |
+| Branch | Purpose | Required checks | Ruleset ID |
+|--------|---------|-----------------|------------|
+| `main` | Production-ready releases | 4 | 11647678 |
+| `develop` | Integration branch | **10** | 11647684 |
+| `release/*` | Release candidates | 0 | 11647689 |
+
+The column was previously a "Protection Level" of Strict / Moderate / Standard,
+which ranked the branches in the opposite order to what the rulesets actually
+enforce: `develop` carries the most required checks and `release/*` carries none.
+Counts are stated instead, because they are checkable — see each section below
+for the `gh api` command that re-derives them.
+
+`develop` holding the largest set is deliberate, not an anomaly. It is the branch
+every feature PR merges into, so it is where the gate has to be strongest;
+`main` is reached only by a `develop → main` release PR whose content has already
+cleared those ten.
 
 **Implementation**: All protection is enforced via GitHub Rulesets (modern approach), not legacy branch protection rules.
 
@@ -160,11 +171,19 @@ gh api repos/cfg-is/cfgms/rulesets/11647689 \
   --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
 ```
 
-**This is recorded as the measured state, not as an endorsement.** Release
-branches are cut from `develop`, whose ten checks have already run on every
-commit, so content reaching `release/*` has been validated — but nothing
-re-validates the release branch itself. Closing that gap is a ruleset change and
-is tracked separately from this document.
+**This is a deliberate accepted risk, not an oversight** (decided 2026-08-05,
+recorded in #3199). Release branches are cut from `develop`, whose ten checks
+have already run on every commit, so content reaching `release/*` has been
+validated. The residual gap is only what happens to the branch *after* the cut —
+a cherry-pick, hotfix, force-merge or mistaken push is gated by nothing.
+Exploiting that requires write access, so it is defence-in-depth rather than an
+externally reachable weakness.
+
+Revisit if release-branch hotfixing becomes routine; that is the condition under
+which the residual gap starts to matter. The likely remedy is the four contexts
+that gate `main`, since a release branch is what becomes `main` — but any check
+added here must be verified to actually trigger on `release/*` first, because a
+required context whose workflow never runs blocks the branch permanently.
 
 ---
 
