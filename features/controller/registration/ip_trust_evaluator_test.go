@@ -153,10 +153,17 @@ func TestIPTrustEvaluator_ThresholdNotMet_NoTrust(t *testing.T) {
 	// Start the liveness clock.
 	require.NoError(t, ev.RecordLiveness(ctx, "tenant-1", "steward-1", "10.0.0.1", true))
 
-	// Simulate multiple healthy calls but back-date firstSeen to just under threshold.
+	// Back-date firstSeen to the middle of the window. The margin is deliberately
+	// large: the evaluator measures with time.Since against the wall clock, so a
+	// margin near the boundary asserts a distinction finer than the platform's
+	// timer can resolve. This test previously used threshold-1ms and failed on
+	// Windows, whose timer granularity is ~15.6 ms — the evaluator was correct
+	// (it logged elapsed=5.0004936s against a 5s threshold), the assertion was
+	// not. Testing the exact boundary needs an injectable clock, not a tighter
+	// margin.
 	ev.mu.Lock()
 	key := "tenant-1\x0010.0.0.1"
-	ev.timers[key] = time.Now().Add(-(threshold - time.Millisecond))
+	ev.timers[key] = time.Now().Add(-threshold / 2)
 	ev.mu.Unlock()
 
 	// One more healthy call — elapsed is still < threshold.

@@ -321,28 +321,36 @@ func TestTelemetryStream_NoSnapshotAfterUnsubscribe(t *testing.T) {
 		Collector: col,
 		Logger:    logging.NewNoopLogger(),
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// These waits are hang detectors, not performance budgets, and they have to
+	// clear the operation's own floor: the server sends unsubscribe only after
+	// receiving two snapshots, and the requested 50 ms interval is clamped to
+	// 1000 ms, so unsubscribe cannot arrive sooner than ~2 s by construction —
+	// before QUIC connection setup. The previous 5 s budget was ~2.5x that floor
+	// and failed on a cold Windows runner at 5.41 s. What this test asserts is
+	// behavioural (no snapshots after unsubscribe); it is not a timing assertion,
+	// so the waits are set far above the floor and a genuine hang still fails.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	ts.Start(ctx)
 
 	// Wait for the subscribe request to have been sent.
 	select {
 	case <-subscribed:
-	case <-time.After(3 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("timeout waiting for subscribe signal")
 	}
 
 	// Wait for unsubscribe to be sent.
 	select {
 	case <-unsubscribed:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timeout waiting for unsubscribe signal")
 	}
 	// Block until the server's observation loop returns (its 500 ms window has
 	// elapsed with no further frames), signalled by serverDone — no time.Sleep.
 	select {
 	case <-serverDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("timeout waiting for server observation window to close")
 	}
 	ts.Close()
