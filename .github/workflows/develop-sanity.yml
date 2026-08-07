@@ -5,9 +5,10 @@ on:
     branches:
       - develop
 
-permissions:
-  contents: read
-  issues: write
+# Deny by default at the workflow level; the single job re-grants what it needs.
+# Scorecard's Token-Permissions check scores any top-level write grant as a
+# finding, because it applies to every job the workflow may grow later.
+permissions: {}
 
 env:
   GO_VERSION: '1.26.5'
@@ -15,6 +16,9 @@ env:
 jobs:
   build-sanity:
     name: Post-merge build check
+    permissions:
+      contents: read
+      issues: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

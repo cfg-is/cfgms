@@ -53,9 +53,9 @@ func (e *darwinExecutor) getState(username string) (userState, error) {
 		state.Locked = strings.Contains(string(pwOut), "isDisabled=1")
 	}
 
-	// password_set: conservative false — macOS shadow password inspection
+	// has_credential: conservative false — macOS shadow password inspection
 	// requires root and is out of scope for this version.
-	state.PasswordSet = false
+	state.HasCredential = false
 
 	return state, nil
 }

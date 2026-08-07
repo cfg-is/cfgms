@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -934,37 +933,6 @@ func TestEphemeralAPIKeys(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code, "Key %d should work", i+1)
 		}
 	})
-}
-
-// capturingWarnLogger records Warn-level messages so tests can assert on security-relevant log output.
-type capturingWarnLogger struct {
-	logging.NoopLogger
-	mu      sync.Mutex
-	entries []string
-}
-
-func (l *capturingWarnLogger) Warn(msg string, _ ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.entries = append(l.entries, msg)
-}
-
-func (l *capturingWarnLogger) WarnCtx(_ context.Context, msg string, kvs ...interface{}) {
-	l.Warn(msg, kvs...)
-}
-
-func (l *capturingWarnLogger) reset() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.entries = nil
-}
-
-func (l *capturingWarnLogger) warnMessages() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]string, len(l.entries))
-	copy(out, l.entries)
-	return out
 }
 
 // setupTestServerWithLogger creates a test server using the provided logger.

@@ -6,7 +6,7 @@ description: >
   lock/disable state, and password presence (observed only) via native OS account
   management tools (net.exe on Windows, useradd/usermod/userdel on Linux, dscl on macOS).
   Password setting is intentionally out of scope — the module reports whether an
-  account has a password (password_set, Get-only) but never accepts, stores, or
+  account has a password (has_credential, Get-only) but never accepts, stores, or
   transmits password material.
 
 publisher: cfgms

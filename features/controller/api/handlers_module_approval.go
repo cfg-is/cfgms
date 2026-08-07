@@ -131,14 +131,14 @@ func (s *Server) handleModuleDecisionError(w http.ResponseWriter, err error, act
 	switch {
 	case errors.Is(err, approval.ErrNotQueued):
 		s.logger.Info("Module bundle not in pending state",
-			"action", action, "address", safeAddr, "error", err)
+			"action", action, "address", safeAddr, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusConflict, "Module bundle is not pending review", "NOT_PENDING")
 	case errors.Is(err, cache.ErrBundleNotFound):
 		s.logger.Info("Module bundle not found", "action", action, "address", safeAddr)
 		s.writeErrorResponse(w, http.StatusNotFound, "Module bundle not found", "BUNDLE_NOT_FOUND")
 	default:
 		s.logger.Error("Module bundle decision failed",
-			"action", action, "address", safeAddr, "error", err)
+			"action", action, "address", safeAddr, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record decision", "INTERNAL_ERROR")
 	}
 }

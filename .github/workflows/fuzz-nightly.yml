@@ -14,6 +14,11 @@ env:
   GO_VERSION: '1.26.5'
   FUZZTIME: 60s
 
+# Deny by default at the workflow level; each job re-grants only what it needs.
+# Without this, jobs inherit the repository default token scope (Scorecard
+# TokenPermissions).
+permissions: {}
+
 jobs:
   fuzz:
     name: Fuzz targets

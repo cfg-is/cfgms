@@ -26,7 +26,7 @@ func newTestExecutor(t *testing.T) (*linuxExecutor, string) {
 	t.Helper()
 	dir := t.TempDir()
 	return &linuxExecutor{
-		passwdFile: filepath.Join(dir, "passwd"),
+		userDBPath: filepath.Join(dir, "passwd"),
 		groupFile:  filepath.Join(dir, "group"),
 		shadowFile: filepath.Join(dir, "shadow"),
 	}, dir
@@ -46,7 +46,7 @@ func writeFile(t *testing.T, path, content string) {
 // correct entry for an existing user in a fixture file.
 func TestLinuxExecutor_ParsePasswd_Found(t *testing.T) {
 	exec, dir := newTestExecutor(t)
-	writeFile(t, exec.passwdFile,
+	writeFile(t, exec.userDBPath,
 		"root:x:0:0:root:/root:/bin/bash\n"+
 			"alice:x:1001:1001:Alice Smith:/home/alice:/bin/bash\n"+
 			"bob:x:1002:1002::/home/bob:/bin/sh\n")
@@ -74,7 +74,7 @@ func TestLinuxExecutor_ParsePasswd_Found(t *testing.T) {
 // (zero, false, nil) for a username absent from the fixture.
 func TestLinuxExecutor_ParsePasswd_NotFound(t *testing.T) {
 	e, _ := newTestExecutor(t)
-	writeFile(t, e.passwdFile, "root:x:0:0:root:/root:/bin/bash\n")
+	writeFile(t, e.userDBPath, "root:x:0:0:root:/root:/bin/bash\n")
 
 	entry, found, err := e.parsePasswd("nobody-here")
 	if err != nil {
@@ -167,7 +167,7 @@ func TestLinuxExecutor_ShadowState_NotReadable(t *testing.T) {
 // zero userState (Exists=false) for a user absent from the fixture.
 func TestLinuxExecutor_GetState_UserAbsent(t *testing.T) {
 	e, _ := newTestExecutor(t)
-	writeFile(t, e.passwdFile, "root:x:0:0:root:/root:/bin/bash\n")
+	writeFile(t, e.userDBPath, "root:x:0:0:root:/root:/bin/bash\n")
 	writeFile(t, e.groupFile, "root:x:0:\n")
 
 	state, err := e.getState("nobody-here")
@@ -183,12 +183,12 @@ func TestLinuxExecutor_GetState_UserAbsent(t *testing.T) {
 // assembles a userState from fixture passwd/group files.
 func TestLinuxExecutor_GetState_ExistingUser(t *testing.T) {
 	e, _ := newTestExecutor(t)
-	writeFile(t, e.passwdFile,
+	writeFile(t, e.userDBPath,
 		"alice:x:1001:1001:Alice Smith:/home/alice:/bin/bash\n")
 	writeFile(t, e.groupFile,
 		"alice:x:1001:\n"+
 			"wheel:x:10:alice\n")
-	// No shadow file → locked=false, passwordSet=false
+	// No shadow file → locked=false, hasCredential=false
 
 	state, err := e.getState("alice")
 	if err != nil {
@@ -203,8 +203,8 @@ func TestLinuxExecutor_GetState_ExistingUser(t *testing.T) {
 	if state.Locked {
 		t.Error("expected Locked=false (no shadow file)")
 	}
-	if state.PasswordSet {
-		t.Error("expected PasswordSet=false (no shadow file)")
+	if state.HasCredential {
+		t.Error("expected HasCredential=false (no shadow file)")
 	}
 	// Groups should contain both primary and supplementary.
 	groupMap := make(map[string]bool)
@@ -244,7 +244,7 @@ func TestLinuxExecutor_RoundTrip_CreateModifyDisable(t *testing.T) {
 
 	username := testUsername()
 	e := &linuxExecutor{
-		passwdFile: "/etc/passwd",
+		userDBPath: "/etc/passwd",
 		groupFile:  "/etc/group",
 		shadowFile: "/etc/shadow",
 	}
@@ -356,7 +356,7 @@ func TestLinuxExecutor_RoundTrip_CreateModifyDisable(t *testing.T) {
 // the ADR-016 clause 4 determinism requirement at the executor layer.
 func TestLinuxExecutor_GetState_Idempotent(t *testing.T) {
 	e, _ := newTestExecutor(t)
-	writeFile(t, e.passwdFile,
+	writeFile(t, e.userDBPath,
 		"alice:x:1001:1001:Alice Smith:/home/alice:/bin/bash\n")
 	writeFile(t, e.groupFile,
 		"alice:x:1001:\n"+
@@ -399,7 +399,7 @@ func TestLinuxExecutor_ShadowState_ActivePassword(t *testing.T) {
 // /etc/passwd are skipped gracefully.
 func TestLinuxExecutor_ParsePasswd_MalformedLine(t *testing.T) {
 	e, _ := newTestExecutor(t)
-	writeFile(t, e.passwdFile,
+	writeFile(t, e.userDBPath,
 		"# comment\n"+
 			"malformed-line\n"+
 			"alice:x:1001:1001:Alice:/home/alice:/bin/bash\n")
@@ -417,7 +417,7 @@ func TestLinuxExecutor_ParsePasswd_MalformedLine(t *testing.T) {
 // setState with Exists=false on a non-existent user is a safe no-op.
 func TestLinuxExecutor_SetState_Idempotent_AbsentUser(t *testing.T) {
 	e, _ := newTestExecutor(t)
-	writeFile(t, e.passwdFile, "root:x:0:0:root:/root:/bin/bash\n")
+	writeFile(t, e.userDBPath, "root:x:0:0:root:/root:/bin/bash\n")
 	writeFile(t, e.groupFile, "root:x:0:\n")
 
 	// The executor will call getState (parsing fixtures) and then find no user;

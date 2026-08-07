@@ -297,8 +297,9 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	// M-AUTH-1: Also delete from secret store
 	keyHash := hashAPIKey(keyToDelete)
-	secretKey := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
-	if err := s.secretStore.DeleteSecret(r.Context(), secretKey); err != nil {
+	// SecretStore lookup path, not the credential itself — see middleware.go.
+	credentialRef := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
+	if err := s.secretStore.DeleteSecret(r.Context(), credentialRef); err != nil {
 		s.logger.Warn("Failed to delete API key from secret store (memory cache already cleared)",
 			"error", err, "id", keyID)
 		// Continue anyway - key is removed from memory

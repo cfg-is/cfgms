@@ -47,6 +47,16 @@ extensions:
       # Used in pkg/configrouting/providers/git/git_store.go to clear alerts #745/#746.
       - ["github.com/cfgis/cfgms/pkg/security", "", false, "ValidateAndCleanPath", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
       - ["github.com/cfgis/cfgms/pkg/security", "", false, "ValidateAndCleanPath", "", "", "Argument[1]", "ReturnValue[0]", "value", "manual"]
+      # github_runner.safeJoin is a SECOND, independent safeJoin — the archive
+      # extractor's zip-slip guard, unrelated to the flatfile one above. It
+      # normalises separators, rejects any ".." path segment outright, and then
+      # verifies containment with filepath.Rel before returning the target.
+      # Without this model, every os.MkdirAll / file-write sink consuming its
+      # result fires go/zipslip (alerts #1240, #1241).
+      #   func safeJoin(dest, name string) (string, error)
+      #     Argument[0] = dest, Argument[1] = name (the hostile archive entry)
+      - ["github.com/cfgis/cfgms/features/modules/extended/github_runner", "", false, "safeJoin", "", "", "Argument[0]", "ReturnValue[0]", "value", "manual"]
+      - ["github.com/cfgis/cfgms/features/modules/extended/github_runner", "", false, "safeJoin", "", "", "Argument[1]", "ReturnValue[0]", "value", "manual"]
 
   # Durable upgrade: barrierModel (CodeQL >=2.25.2) marks safeJoin's cleaned
   # return value as a path-injection barrier directly, rather than relying on
@@ -68,3 +78,7 @@ extensions:
       # above. Marks the validated return value as a path-injection barrier so that taint
       # cannot flow out through it even if the summaryModel is bypassed on some flow paths.
       - ["github.com/cfgis/cfgms/pkg/security", "", false, "ValidateAndCleanPath", "", "", "ReturnValue[0]", "path-injection", "manual"]
+      # github_runner.safeJoin — barrier for both sink kinds it feeds. The
+      # zip-slip query shares path-injection's sink set, so the path-injection
+      # kind is what blocks go/zipslip on the extractor's write sinks.
+      - ["github.com/cfgis/cfgms/features/modules/extended/github_runner", "", false, "safeJoin", "", "", "ReturnValue[0]", "path-injection", "manual"]

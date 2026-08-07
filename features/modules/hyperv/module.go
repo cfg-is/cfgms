@@ -32,11 +32,13 @@ type hypervModule struct {
 	modules.DefaultLoggingSupport
 	modules.DefaultSecretStoreSupport
 
-	host          string
-	userSecretKey string
-	passSecretKey string
-	tenantID      string
-	stewardID     string
+	host string
+	// SecretStore lookup keys, not credential values — see winrmClient in
+	// transport.go for why they are named "…Ref".
+	userStoreRef string
+	passStoreRef string
+	tenantID     string
+	stewardID    string
 
 	// Failover-cluster scope (S1/S5). clusterName is the single cluster this
 	// steward is permitted to read; getCluster / clusterOwnershipHelper reject
@@ -435,18 +437,18 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 		if host == "" {
 			return errHostRequired
 		}
-		userSecretKey, _ := configMap["winrm_user_secret"].(string)
-		if userSecretKey == "" {
+		userStoreRef, _ := configMap["winrm_user_secret"].(string)
+		if userStoreRef == "" {
 			return errUserSecretKeyRequired
 		}
-		passSecretKey, _ := configMap["winrm_pass_secret"].(string)
-		if passSecretKey == "" {
+		passStoreRef, _ := configMap["winrm_pass_secret"].(string)
+		if passStoreRef == "" {
 			return errPassSecretKeyRequired
 		}
 		m.host = host
-		m.userSecretKey = userSecretKey
-		m.passSecretKey = passSecretKey
-		m.transport = newWinRMClientWithStore(host, userSecretKey, passSecretKey, store)
+		m.userStoreRef = userStoreRef
+		m.passStoreRef = passStoreRef
+		m.transport = newWinRMClientWithStore(host, userStoreRef, passStoreRef, store)
 		return nil
 	default:
 		return fmt.Errorf("hyperv: unknown transport %q (valid: \"ps-host\", \"winrm\")", transportChoice)

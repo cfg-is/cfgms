@@ -63,7 +63,7 @@ func parseNetUserOutput(output string) userState {
 
 		case strings.HasPrefix(line, "Password required"):
 			rest := strings.TrimSpace(strings.TrimPrefix(line, "Password required"))
-			state.PasswordSet = strings.EqualFold(rest, "Yes")
+			state.HasCredential = strings.EqualFold(rest, "Yes")
 
 		case strings.HasPrefix(line, "Local Group Memberships"):
 			rest := strings.TrimPrefix(line, "Local Group Memberships")
@@ -76,7 +76,7 @@ func parseNetUserOutput(output string) userState {
 }
 
 // setState creates, modifies, or deletes the local user account to match desired.
-// All write operations require Administrator privileges. PasswordSet in desired
+// All write operations require Administrator privileges. HasCredential in desired
 // is always ignored — this module never manages password material.
 func (e *windowsExecutor) setState(username string, desired userState) error {
 	current, err := e.getState(username)

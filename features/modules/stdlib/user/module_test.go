@@ -75,15 +75,15 @@ func TestUserConfig_AsMap(t *testing.T) {
 	}{
 		{
 			name:   "present with groups",
-			config: UserConfig{State: "present", FullName: "Alice Smith", Groups: []string{"wheel", "audio"}, Locked: false, PasswordSet: true},
+			config: UserConfig{State: "present", FullName: "Alice Smith", Groups: []string{"wheel", "audio"}, Locked: false, HasCredential: true},
 			checks: map[string]interface{}{
-				"state": "present", "full_name": "Alice Smith", "locked": false, "password_set": true,
+				"state": "present", "full_name": "Alice Smith", "locked": false, "has_credential": true,
 			},
 		},
 		{
 			name:   "absent",
 			config: UserConfig{State: "absent"},
-			checks: map[string]interface{}{"state": "absent", "locked": false, "password_set": false},
+			checks: map[string]interface{}{"state": "absent", "locked": false, "has_credential": false},
 		},
 		{
 			name:   "locked user",
@@ -106,7 +106,7 @@ func TestUserConfig_AsMap(t *testing.T) {
 				}
 			}
 			// Required keys must always be present.
-			for _, required := range []string{"state", "full_name", "groups", "locked", "password_set"} {
+			for _, required := range []string{"state", "full_name", "groups", "locked", "has_credential"} {
 				if _, ok := m[required]; !ok {
 					t.Errorf("AsMap() missing required key %q", required)
 				}
@@ -141,11 +141,11 @@ func TestUserConfig_AsMap_GroupsAreSorted(t *testing.T) {
 // TestUserConfig_YAMLRoundTrip verifies ToYAML and FromYAML are inverse operations.
 func TestUserConfig_YAMLRoundTrip(t *testing.T) {
 	original := &UserConfig{
-		State:       "present",
-		FullName:    "Test User",
-		Groups:      []string{"users", "wheel"},
-		Locked:      false,
-		PasswordSet: true,
+		State:         "present",
+		FullName:      "Test User",
+		Groups:        []string{"users", "wheel"},
+		Locked:        false,
+		HasCredential: true,
 	}
 	data, err := original.ToYAML()
 	if err != nil {
@@ -167,12 +167,12 @@ func TestUserConfig_YAMLRoundTrip(t *testing.T) {
 	if decoded.Locked != original.Locked {
 		t.Errorf("Locked: got %v, want %v", decoded.Locked, original.Locked)
 	}
-	if decoded.PasswordSet != original.PasswordSet {
-		t.Errorf("PasswordSet: got %v, want %v", decoded.PasswordSet, original.PasswordSet)
+	if decoded.HasCredential != original.HasCredential {
+		t.Errorf("HasCredential: got %v, want %v", decoded.HasCredential, original.HasCredential)
 	}
 }
 
-// TestUserConfig_GetManagedFields verifies password_set is absent from managed fields
+// TestUserConfig_GetManagedFields verifies has_credential is absent from managed fields
 // (it is observed-only and must never be set by this module).
 func TestUserConfig_GetManagedFields(t *testing.T) {
 	c := &UserConfig{State: "present"}
@@ -186,10 +186,10 @@ func TestUserConfig_GetManagedFields(t *testing.T) {
 			t.Errorf("GetManagedFields() missing required field %q", field)
 		}
 	}
-	// password_set must NOT appear in managed fields.
+	// has_credential must NOT appear in managed fields.
 	for _, f := range fields {
-		if f == "password_set" {
-			t.Error("GetManagedFields() must not include password_set (observed-only field)")
+		if f == "has_credential" {
+			t.Error("GetManagedFields() must not include has_credential (observed-only field)")
 		}
 	}
 }
@@ -414,37 +414,37 @@ func TestUserModule_ConformanceNoEphemeralFields(t *testing.T) {
 	conformance.AssertNoEphemeralFields(t, state, conformance.DefaultBannedEphemeralFields)
 }
 
-// TestUserModule_PasswordSet_NotAcceptedBySet verifies that password_set in a
+// TestUserModule_HasCredential_NotAcceptedBySet verifies that has_credential in a
 // config passed to Set() is silently ignored — the module never writes password
 // material.
-func TestUserModule_PasswordSet_NotAcceptedBySet(t *testing.T) {
-	// Build a config that has password_set=true in its AsMap().
+func TestUserModule_HasCredential_NotAcceptedBySet(t *testing.T) {
+	// Build a config that has has_credential=true in its AsMap().
 	cfg := &UserConfig{
-		State:       "absent",
-		PasswordSet: true,
+		State:         "absent",
+		HasCredential: true,
 	}
-	// Verify AsMap contains password_set so this is a real test.
+	// Verify AsMap contains has_credential so this is a real test.
 	m := cfg.AsMap()
-	if m["password_set"] != true {
-		t.Fatal("test precondition: password_set must be true in AsMap()")
+	if m["has_credential"] != true {
+		t.Fatal("test precondition: has_credential must be true in AsMap()")
 	}
 
 	// Set() on a module backed by the real executor (which requires root for
 	// absent→present, but present→absent of a non-existent user is a no-op)
-	// should not error on the password_set field itself.
+	// should not error on the has_credential field itself.
 	mod := New()
 	ctx := context.Background()
 	err := mod.Set(ctx, "cfgms-test-noop-user", cfg)
 	// We don't assert err==nil here because the executor may error if the user
 	// doesn't exist and we're not root. What matters is that the error is NOT
-	// about password_set being supplied.
+	// about has_credential being supplied.
 	if err != nil {
 		// Acceptable errors: permission denied, user not found, platform errors.
-		// Unacceptable: any error mentioning password_set as an invalid field.
+		// Unacceptable: any error mentioning has_credential as an invalid field.
 		errStr := err.Error()
-		for _, bad := range []string{"password_set", "password material", "invalid field password"} {
+		for _, bad := range []string{"has_credential", "password material", "invalid field password"} {
 			if strings.Contains(errStr, bad) {
-				t.Errorf("Set() rejected password_set field with error %q — it must be silently ignored", errStr)
+				t.Errorf("Set() rejected has_credential field with error %q — it must be silently ignored", errStr)
 			}
 		}
 	}

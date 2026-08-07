@@ -2,7 +2,7 @@
 
 ## Overview
 
-The user module manages local OS user accounts and group membership on managed endpoints. It supports account creation, full-name management, group membership, and lock/disable state. Password setting is intentionally out of scope — the module observes whether an account has a password (`password_set`, returned by `Get`) but never accepts, stores, or transmits password material.
+The user module manages local OS user accounts and group membership on managed endpoints. It supports account creation, full-name management, group membership, and lock/disable state. Password setting is intentionally out of scope — the module observes whether an account has a password (`has_credential`, returned by `Get`) but never accepts, stores, or transmits password material.
 
 ## Implementation References
 
@@ -29,17 +29,17 @@ The resource ID is the OS-level username (e.g., `alice`, `svc-backup`).
 | `full_name` | string | No | Display name / GECOS comment |
 | `groups` | list of strings | No | Supplementary groups to assign |
 | `locked` | bool | No | Lock/disable the account (default: `false`) |
-| `password_set` | bool | No | **Observed only** — never accepted by `Set`. Reports whether the OS considers the account to have a password. |
+| `has_credential` | bool | No | **Observed only** — never accepted by `Set`. Reports whether the OS considers the account to have a password. |
 
-### `password_set` (observed only)
+### `has_credential` (observed only)
 
-`password_set` is a read-only observed field returned by `Get`. It reports the OS-level password state:
+`has_credential` is a read-only observed field returned by `Get`. It reports the OS-level password state:
 
 - **Linux**: derived from `/etc/shadow` when readable (requires root); defaults to `false` when shadow is not accessible.
 - **Windows**: `true` when `net user` reports `Password required: Yes`.
 - **macOS**: always `false` in this version (shadow password inspection requires root and is out of scope).
 
-`Set` silently ignores `password_set` if it appears in the config. Password distribution through `cfg` has no secrets-distribution design yet and is explicitly deferred.
+`Set` silently ignores `has_credential` if it appears in the config. Password distribution through `cfg` has no secrets-distribution design yet and is explicitly deferred.
 
 ## Examples
 
@@ -81,12 +81,12 @@ modules:
 
 ## Managed Fields
 
-`GetManagedFields()` returns `["state", "full_name", "groups", "locked"]`. The `password_set` field is excluded because it is observed-only.
+`GetManagedFields()` returns `["state", "full_name", "groups", "locked"]`. The `has_credential` field is excluded because it is observed-only.
 
 ## Security Notes
 
 - All usernames and group names are validated against a strict pattern (`^[a-zA-Z_][a-zA-Z0-9_.-]{0,31}$`) before being passed to OS commands, preventing flag injection and command injection.
-- The module never accepts, logs, stores, or transmits password material. `password_set` is a read-only observation.
+- The module never accepts, logs, stores, or transmits password material. `has_credential` is a read-only observation.
 - On Linux, `userdel -r` removes the user's home directory. Ensure data is backed up before removing accounts.
 - Group removal (removing a user from a group that is no longer in `groups`) is not performed in v1 to avoid disrupting groups managed outside `cfg`.
 

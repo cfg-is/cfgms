@@ -407,10 +407,13 @@ func TestAuditLogger_LogExecution_ContextExtraction(t *testing.T) {
 	t.Run("plain string keys do not populate record fields", func(t *testing.T) {
 		logger := NewAuditLogger(10)
 		//lint:ignore SA1029 intentionally use a plain string to verify typed keys are required
+		//nolint:staticcheck // SA1029: golangci-lint does not honour staticcheck's //lint:ignore directive
 		ctx := context.WithValue(context.Background(), "correlation_id", "plain-corr")
 		//lint:ignore SA1029 intentionally use a plain string to verify typed keys are required
+		//nolint:staticcheck // SA1029: golangci-lint does not honour staticcheck's //lint:ignore directive
 		ctx = context.WithValue(ctx, "user_id", "plain-user")
 		//lint:ignore SA1029 intentionally use a plain string to verify typed keys are required
+		//nolint:staticcheck // SA1029: golangci-lint does not honour staticcheck's //lint:ignore directive
 		ctx = context.WithValue(ctx, "tenant_id", "plain-tenant")
 
 		record := &AuditRecord{

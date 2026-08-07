@@ -8,7 +8,7 @@
 //
 // The module manages account existence, full name, group membership, and lock/disable
 // state. Password setting is intentionally out of scope: the module observes whether
-// an account has a password (password_set, returned by Get) but never accepts,
+// an account has a password (has_credential, returned by Get) but never accepts,
 // stores, or transmits password material.
 //
 // The module follows the Get→Compare→Set→Verify convergence model used by all
@@ -89,7 +89,7 @@ func New() modules.Module {
 // State: "absent" — analogous to how the file module returns State: "absent"
 // for non-existent files.
 //
-// The returned UserConfig.PasswordSet is an observed value only; Set() never
+// The returned UserConfig.HasCredential is an observed value only; Set() never
 // accepts or modifies it.
 func (m *userModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	if resourceID == "" {
@@ -128,11 +128,11 @@ func (m *userModule) Get(ctx context.Context, resourceID string) (modules.Config
 	sort.Strings(groups)
 
 	config := &UserConfig{
-		State:       accountState,
-		FullName:    state.FullName,
-		Groups:      groups,
-		Locked:      state.Locked,
-		PasswordSet: state.PasswordSet,
+		State:         accountState,
+		FullName:      state.FullName,
+		Groups:        groups,
+		Locked:        state.Locked,
+		HasCredential: state.HasCredential,
 	}
 
 	logger.InfoCtx(ctx, "User state retrieved",
@@ -154,7 +154,7 @@ func (m *userModule) Get(ctx context.Context, resourceID string) (modules.Config
 // Set is idempotent: calling it when the account is already in the desired state
 // performs no observable change. The convergence loop relies on this property.
 //
-// password_set in the config is silently ignored — this module never accepts,
+// has_credential in the config is silently ignored — this module never accepts,
 // stores, or transmits password material.
 func (m *userModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	if resourceID == "" {
@@ -180,7 +180,7 @@ func (m *userModule) Set(ctx context.Context, resourceID string, config modules.
 	if !ok {
 		return fmt.Errorf("%w: unsupported config type %T (expected *UserConfig)", modules.ErrInvalidInput, config)
 	}
-	// PasswordSet is not written to desired state — it is an observed-only field.
+	// HasCredential is not written to desired state — it is an observed-only field.
 
 	if err := userCfg.Validate(); err != nil {
 		logger.ErrorCtx(ctx, "User configuration validation failed",
@@ -206,7 +206,7 @@ func (m *userModule) Set(ctx context.Context, resourceID string, config modules.
 		FullName: userCfg.FullName,
 		Groups:   userCfg.Groups,
 		Locked:   userCfg.Locked,
-		// PasswordSet is never set in desired state
+		// HasCredential is never set in desired state
 	}
 
 	if err := m.executor.setState(resourceID, desired); err != nil {
