@@ -438,12 +438,22 @@ func TestHandleListTenants_ClientScopedCallerCannotSeeSibling(t *testing.T) {
 		"sibling tenant list-client-2 must not be visible to list-client-1 scoped caller")
 }
 
-// TestHandleListTenants_RootScopedCallerCannotSeeMSPTenant is a REQUIRED test (Issue #3125
-// AC: "a caller scoped to root without an active grant/break-glass session cannot list or
-// fetch tenants below root/msp-a (ADR-025)"). With flat tenant IDs, a root-scoped caller
-// has its scope set to the tenant ID "root"; MSP-level tenant IDs ("msp-a") do not share
-// that prefix, so isWithinTenantScope correctly denies access.
-func TestHandleListTenants_RootScopedCallerCannotSeeMSPTenant(t *testing.T) {
+// TestHandleListTenants_UnrelatedFlatTenant_NotVisible covers the same fixture shape
+// Issue #3125's original ADR-025 AC used ("root" caller, "msp-a" target) but names what
+// it actually verifies: a caller scoped to one flat, unrelated tenant ID does not see
+// another flat tenant that happens to share no ParentID ancestry with it. This passes
+// under isCallerAuthorizedForTenant's IsTenantAncestor check because "root" is not an
+// ancestor of "msp-a" in the store — the same result plain sibling-exclusion produces,
+// and NOT a stand-in for ADR-025 Decision 1's root<->MSP boundary check.
+//
+// ADR-025 Decision 1 (a root-scoped caller is walled off from an MSP subtree it *is*
+// the ancestor of, absent an active grant/break-glass session) is intentionally not
+// covered by this test: Amendment 1's A1.3 (distinguishing a genuinely root-scoped
+// caller from an unscoped superadmin — both present as callerTenant == "" today) is an
+// open design question the ADR explicitly leaves to a follow-on decision, and the
+// grant/break-glass override has no store-backed state yet. See
+// isCallerAuthorizedForTenant's doc comment and the follow-up tracked in #3228.
+func TestHandleListTenants_UnrelatedFlatTenant_NotVisible(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
@@ -463,7 +473,42 @@ func TestHandleListTenants_RootScopedCallerCannotSeeMSPTenant(t *testing.T) {
 	ids := tenantIDsFromListResponse(t, rec.Body.Bytes())
 	assert.Contains(t, ids, "root", "root-scoped caller must see the root tenant itself")
 	assert.NotContains(t, ids, "msp-a",
-		"root-scoped caller must not see MSP-level tenant msp-a without an active cross-boundary grant (ADR-025)")
+		"a flat tenant ID with no ParentID ancestry relationship to the caller must not be visible")
+}
+
+// TestHandleListTenants_ScopedCaller_SeesOwnDescendant is a regression test for the
+// functional break the acceptance review found in isWithinTenantScope's dead prefix
+// branch: real tenant hierarchy is carried by ParentID, not by tenant-ID string
+// concatenation, so an MSP admin scoped to "msp-a" could not see its own child tenant
+// "client-1" (ParentID: "msp-a") through GET /api/v1/tenants. isCallerAuthorizedForTenant
+// fixes this via IsTenantAncestor, which walks the real ParentID chain.
+func TestHandleListTenants_ScopedCaller_SeesOwnDescendant(t *testing.T) {
+	server := setupTestServer(t)
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "desc-msp-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ID:       "desc-client-1",
+		ParentID: "desc-msp-a",
+	})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "desc-unrelated"})
+	require.NoError(t, err)
+
+	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:list"}, "desc-msp-a", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
+	req.Header.Set("X-API-Key", callerKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	ids := tenantIDsFromListResponse(t, rec.Body.Bytes())
+	assert.Contains(t, ids, "desc-msp-a", "caller must see its own tenant")
+	assert.Contains(t, ids, "desc-client-1",
+		"caller must see its real child tenant via ParentID ancestry, not tenant-ID prefix matching")
+	assert.NotContains(t, ids, "desc-unrelated", "caller must not see an unrelated tenant")
 }
 
 // TestHandleListTenants_MissingPermission verifies that a caller without tenant:list
@@ -633,7 +678,7 @@ func TestHandleUpdateTenant_MissingPermission(t *testing.T) {
 //
 // The handler is called directly rather than through the router because
 // requirePermission's tenant-isolation middleware denies a non-global scoped principal
-// before the handler runs. The handler's own isWithinTenantScope guard is the last line
+// before the handler runs. The handler's own isCallerAuthorizedForTenant guard is the last line
 // of defence for a principal that legitimately clears that middleware — GlobalScope=true
 // carrying a TenantID, the "strongly-authenticated but tenant-scoped" shape the Principal
 // doc comment requires to stay confined. That shape is exercised end-to-end through the
@@ -733,10 +778,10 @@ func TestHandleUpdateTenant_SiblingPrefix_Returns404(t *testing.T) {
 // a scoped caller may update its own tenant. Without this, a guard that refused every
 // scoped caller would still pass the 404 tests above.
 //
-// Only the equality branch of isWithinTenantScope is exercised here: explicit tenant IDs
-// must be Kubernetes DNS labels (validateExplicitTenantID), so a "/"-separated descendant
-// ID cannot be created through the manager yet. The prefix branch is covered by the
-// sibling-prefix test, which fails if that branch is loosened to a bare HasPrefix.
+// Only the self case (resourceTenant == callerTenant, which IsTenantAncestor reports
+// true for since a tenant's own path always includes itself) is exercised here.
+// Genuine descendant access via IsTenantAncestor is covered separately by
+// TestHandleListTenants_ScopedCaller_SeesOwnDescendant.
 func TestHandleUpdateTenant_OwnTenant_Allowed(t *testing.T) {
 	server := setupTestServer(t)
 	ctx := context.Background()
@@ -768,8 +813,8 @@ func TestHandleUpdateTenant_OwnTenant_Allowed(t *testing.T) {
 // AssuranceStrong (ADR-021 Amendment 2). That principal clears every earlier layer —
 // tenant:update is granted, AssuranceStrong satisfies permissionAssurance, and
 // GlobalScope=true means requirePermission's tenant-isolation check does not fire — so
-// handleUpdateTenant's own isWithinTenantScope guard is the only thing standing between
-// it and another MSP client's tenant record.
+// handleUpdateTenant's own isCallerAuthorizedForTenant guard is the only thing standing
+// between it and another MSP client's tenant record.
 func TestHandleUpdateTenant_ScopedStrongSession_CrossTenantReturns404(t *testing.T) {
 	server, sessionMgr, _ := setupTestServerWithSession(t)
 	ctx := context.Background()
@@ -1004,4 +1049,76 @@ func TestHandleUpdateTenant_ParentIDIgnored(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "parent-a", updated.ParentID,
 		"ParentID must remain unchanged after update; the manager silently ignores parent_id in update requests")
+}
+
+// TestHandleUpdateTenant_ForeignCredentialRef_Returns400 covers the write-content
+// half of tenant isolation on PUT /api/v1/tenants/{id}.
+//
+// isCallerAuthorizedForTenant constrains *which* tenant row a scoped principal may
+// mutate; it says nothing about the metadata written into it. config_source_credential
+// is a secret-store key in "<tenant_id>/<secret_key>" form, and the mount-point
+// validator and the configrouting git store fetch it and present the value as HTTP
+// Basic auth to the host in config_source_url — a host the same request body chooses,
+// and one the SSRF guard permits whenever it is a public HTTPS name. So an in-scope
+// PUT naming another tenant's credential is a cross-tenant credential read, and the
+// request must be rejected outright rather than persisted.
+func TestHandleUpdateTenant_ForeignCredentialRef_Returns400(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "victim-msp"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-msp"})
+	require.NoError(t, err)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "client-msp",
+		"metadata": map[string]string{
+			"config_source_type":       "git",
+			"config_source_url":        "https://attacker.example/r.git",
+			"config_source_credential": "victim-msp/git-token",
+		},
+	})
+	rec := putTenantAsScopedCaller(t, server, "client-msp", "client-msp", body)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a tenant-scoped caller must not be able to store another tenant's credential reference")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "VALIDATION_FAILED", errResp.Error.Code)
+
+	stored, err := server.tenantManager.GetTenant(ctx, "client-msp")
+	require.NoError(t, err)
+	assert.Empty(t, stored.Metadata["config_source_credential"],
+		"the rejected credential reference must not be persisted")
+	assert.Empty(t, stored.Metadata["config_source_url"],
+		"no part of the rejected config source may be persisted")
+}
+
+// TestHandleUpdateTenant_OwnCredentialRef_Returns200 is the companion to the test
+// above: the legitimate case — a tenant naming a secret in its own namespace — must
+// still be accepted, so the isolation check cannot be satisfied by rejecting all
+// credential references.
+func TestHandleUpdateTenant_OwnCredentialRef_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "self-msp"})
+	require.NoError(t, err)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "self-msp",
+		"metadata": map[string]string{
+			"config_source_type":       "git",
+			"config_source_url":        "https://git.example.com/configs.git",
+			"config_source_credential": "self-msp/git-token",
+		},
+	})
+	rec := putTenantAsScopedCaller(t, server, "self-msp", "self-msp", body)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	stored, err := server.tenantManager.GetTenant(ctx, "self-msp")
+	require.NoError(t, err)
+	assert.Equal(t, "self-msp/git-token", stored.Metadata["config_source_credential"])
 }

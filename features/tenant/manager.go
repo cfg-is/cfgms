@@ -90,20 +90,27 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Validate git mount point when config_source_type is "git"
-	if req.Metadata[cfgpkg.MetaKeyConfigSourceType] == string(cfgpkg.ConfigSourceTypeGit) {
-		if err := m.validateGitMountPoint(ctx, req.Metadata); err != nil {
-			return nil, err
-		}
-	}
-
-	// Generate tenant ID from name, or use the explicit ID when provided
+	// Generate tenant ID from name, or use the explicit ID when provided.
+	// Resolved before any config source validation because the credential
+	// reference is checked against this ID, and that check must run before
+	// validateGitMountPoint dereferences the reference against the secret store.
 	tenantID := m.generateTenantID(req.Name)
 	if req.ID != "" {
 		if err := validateExplicitTenantID(req.ID); err != nil {
 			return nil, fmt.Errorf("invalid explicit tenant ID: %w", err)
 		}
 		tenantID = req.ID
+	}
+
+	if err := validateCredentialRefOwnership(tenantID, req.Metadata); err != nil {
+		return nil, err
+	}
+
+	// Validate git mount point when config_source_type is "git"
+	if req.Metadata[cfgpkg.MetaKeyConfigSourceType] == string(cfgpkg.ConfigSourceTypeGit) {
+		if err := m.validateGitMountPoint(ctx, req.Metadata); err != nil {
+			return nil, err
+		}
 	}
 
 	// Create tenant object
@@ -167,6 +174,13 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	// Validate the request
 	if err := m.validateTenantRequest(req); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+
+	// A tenant may only point at credentials in its own secret namespace.
+	// Checked before validateGitMountPoint, which dereferences the reference
+	// against the secret store and hands the value to the caller-chosen host.
+	if err := validateCredentialRefOwnership(tenantID, req.Metadata); err != nil {
+		return nil, err
 	}
 
 	// Validate git mount point when config_source_type is "git"
@@ -298,6 +312,52 @@ func (m *Manager) validateTenantRequest(req *TenantRequest) error {
 
 	if len(req.Description) > 255 {
 		return fmt.Errorf("tenant description must be 255 characters or less")
+	}
+
+	return nil
+}
+
+// validateCredentialRefOwnership enforces that a tenant's config_source_credential
+// names a secret inside that tenant's own namespace.
+//
+// The reference is a secret-store key in "<tenant_id>/<secret_key>" form (see
+// pkg/secrets/providers/sops and pkg/secrets/providers/openbao splitKey), and the
+// consuming sinks — pkg/config's MountPointValidator and the configrouting git
+// store — fetch it and send the value as HTTP Basic auth to the host named by
+// config_source_url. Without this constraint a tenant-scoped principal holding
+// tenant:update could write "victim-tenant/git-token" into its own tenant
+// alongside an attacker-controlled HTTPS URL and have the controller deliver
+// another tenant's credential to that host: the scope check on which tenant row
+// is mutated says nothing about the contents written into it, and the SSRF guard
+// in validateSourceURL deliberately permits public HTTPS hosts.
+//
+// Ownership is exact: a parent may not reference a child's secret and vice versa,
+// so a compromised tenant at any depth cannot reach outside its own namespace.
+// The secret key itself must be a single path segment, otherwise a reference such
+// as "self/../victim/git-token" would satisfy the prefix while resolving into
+// another tenant's storage path.
+//
+// The reference is checked on every write that carries it, not only when
+// config_source_type is "git": metadata is persisted wholesale, and a value
+// stored under a non-git type is live the moment the type changes.
+func validateCredentialRefOwnership(tenantID string, metadata map[string]string) error {
+	ref, ok := metadata[cfgpkg.MetaKeyConfigSourceCredential]
+	if !ok || ref == "" {
+		return nil
+	}
+
+	owner, key, found := strings.Cut(ref, "/")
+	if !found || owner == "" || key == "" {
+		return fmt.Errorf("invalid config source metadata: %s must be in \"<tenant_id>/<secret_key>\" form",
+			cfgpkg.MetaKeyConfigSourceCredential)
+	}
+	if owner != tenantID {
+		return fmt.Errorf("invalid config source metadata: %s references tenant %q, but a tenant may only reference secrets in its own namespace (%q)",
+			cfgpkg.MetaKeyConfigSourceCredential, owner, tenantID)
+	}
+	if strings.ContainsAny(key, "/\\") || key == "." || key == ".." {
+		return fmt.Errorf("invalid config source metadata: %s secret key %q must be a single path segment",
+			cfgpkg.MetaKeyConfigSourceCredential, key)
 	}
 
 	return nil

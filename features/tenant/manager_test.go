@@ -924,3 +924,171 @@ func TestManager_RecordConfigSourceEvent_SanitizesTenantIDInLog(t *testing.T) {
 		assert.Equal(t, "clean-tenant-456", tenantID, "clean tenant_id must pass through unchanged")
 	})
 }
+
+// --- config_source_credential tenant-ownership coverage ---
+
+// recordingMountPointValidator records every ConfigSourceInfo it is asked to
+// validate. It stands in for the credential-consuming sink: the real
+// DefaultMountPointValidator resolves CredentialRef against the secret store and
+// sends the value to the host in URL, so "this validator was never called" is the
+// evidence that a rejected reference is never dereferenced.
+type recordingMountPointValidator struct {
+	calls []*cfgpkg.ConfigSourceInfo
+}
+
+func (v *recordingMountPointValidator) ValidateMountPoint(_ context.Context, info *cfgpkg.ConfigSourceInfo, _ secretsiface.SecretStore) error {
+	v.calls = append(v.calls, info)
+	return nil
+}
+
+// TestManager_UpdateTenant_RejectsForeignCredentialRef proves a tenant cannot
+// point its config source at another tenant's secret. The scope check on the API
+// side only constrains which tenant row is mutated; without this check the
+// metadata written into that row can name any tenant's credential, and the
+// mount-point validator would then ship it to the caller-chosen git host.
+func TestManager_UpdateTenant_RejectsForeignCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	victim, err := manager.CreateTenant(ctx, &TenantRequest{ID: "victim-tenant", Name: "victim-tenant"})
+	require.NoError(t, err)
+	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "attacker-tenant", Name: "attacker-tenant"})
+	require.NoError(t, err)
+
+	validator := &recordingMountPointValidator{}
+	manager.WithMountPointValidator(validator, nil)
+
+	_, err = manager.UpdateTenant(ctx, attacker.ID, &TenantRequest{
+		Name: attacker.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://attacker.example/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: victim.ID + "/git-token",
+		},
+	})
+	require.Error(t, err, "a tenant must not be able to reference another tenant's credential")
+	assert.Contains(t, err.Error(), "own namespace")
+	assert.Empty(t, validator.calls, "the foreign credential must be rejected before the mount point is validated")
+
+	// The rejected metadata must not have been persisted.
+	stored, err := manager.GetTenant(ctx, attacker.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.Metadata[cfgpkg.MetaKeyConfigSourceCredential])
+}
+
+// TestManager_UpdateTenant_RejectsForeignCredentialRefUnderNonGitType covers the
+// two-step variant: metadata is replaced wholesale, so a reference parked under a
+// non-git config_source_type would go live the moment the type flips to git.
+func TestManager_UpdateTenant_RejectsForeignCredentialRefUnderNonGitType(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "parking-tenant", Name: "parking-tenant"})
+	require.NoError(t, err)
+
+	_, err = manager.UpdateTenant(ctx, attacker.ID, &TenantRequest{
+		Name: attacker.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "controller",
+			cfgpkg.MetaKeyConfigSourceCredential: "victim-tenant/git-token",
+		},
+	})
+	require.Error(t, err, "a foreign credential reference must be rejected regardless of config_source_type")
+	assert.Contains(t, err.Error(), "own namespace")
+}
+
+// TestManager_UpdateTenant_RejectsTraversingCredentialRef proves the ownership
+// prefix cannot be satisfied while the secret key escapes the tenant's namespace.
+func TestManager_UpdateTenant_RejectsTraversingCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "traversal-tenant", Name: "traversal-tenant"})
+	require.NoError(t, err)
+
+	for _, ref := range []string{
+		"traversal-tenant/../victim-tenant/git-token",
+		"traversal-tenant/..",
+		"traversal-tenant",
+		"/git-token",
+		"traversal-tenant/",
+	} {
+		_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{
+			Name: td.Name,
+			Metadata: map[string]string{
+				cfgpkg.MetaKeyConfigSourceType:       "git",
+				cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
+				cfgpkg.MetaKeyConfigSourceCredential: ref,
+			},
+		})
+		require.Error(t, err, "credential reference %q must be rejected", ref)
+		assert.Contains(t, err.Error(), "invalid config source metadata")
+	}
+}
+
+// TestManager_UpdateTenant_AcceptsOwnCredentialRef verifies the legitimate case
+// still works: a tenant referencing a secret in its own namespace.
+func TestManager_UpdateTenant_AcceptsOwnCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "self-ref-tenant", Name: "self-ref-tenant"})
+	require.NoError(t, err)
+
+	validator := &recordingMountPointValidator{}
+	manager.WithMountPointValidator(validator, nil)
+
+	updated, err := manager.UpdateTenant(ctx, td.ID, &TenantRequest{
+		Name: td.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: td.ID + "/git-token",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "self-ref-tenant/git-token", updated.Metadata[cfgpkg.MetaKeyConfigSourceCredential])
+	require.Len(t, validator.calls, 1, "an in-namespace credential reference must still reach mount point validation")
+	assert.Equal(t, "self-ref-tenant/git-token", validator.calls[0].CredentialRef)
+}
+
+// TestManager_CreateTenant_RejectsForeignCredentialRef covers the create path,
+// which is equally reachable by a tenant-scoped principal provisioning a child.
+func TestManager_CreateTenant_RejectsForeignCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	_, err := manager.CreateTenant(ctx, &TenantRequest{
+		ID:   "child-tenant",
+		Name: "child-tenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://attacker.example/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: "victim-tenant/git-token",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "own namespace")
+
+	_, err = manager.GetTenant(ctx, "child-tenant")
+	require.Error(t, err, "the rejected tenant must not have been created")
+}
+
+// TestManager_CreateTenant_AcceptsOwnCredentialRef verifies a tenant created with
+// an explicit ID may reference a secret in its own namespace.
+func TestManager_CreateTenant_AcceptsOwnCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{
+		ID:   "own-cred-tenant",
+		Name: "own-cred-tenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: "own-cred-tenant/git-token",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "own-cred-tenant/git-token", td.Metadata[cfgpkg.MetaKeyConfigSourceCredential])
+}

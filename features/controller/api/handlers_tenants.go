@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,6 +16,39 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// isCallerAuthorizedForTenant reports whether callerTenant may act on resourceTenant.
+// An empty callerTenant (mTLS admin with no tenant scope) has unrestricted access.
+// Otherwise resourceTenant must be callerTenant itself or a genuine descendant of it
+// per the tenant hierarchy's ParentID chain (business.TenantStore.IsTenantAncestor) —
+// never a string-prefix match against tenant IDs. Real tenant IDs are flat,
+// validated single DNS-label-style tokens (features/tenant/manager.go's
+// k8sNameRegex) and can never contain '/': the prefix-match shape the older
+// isWithinTenantScope helper (middleware.go) uses is dead code against them, per
+// ADR-025 Amendment 1 (A1.1/A1.2).
+//
+// This implements A1.2's corrected ancestry mechanism only. It does not implement
+// ADR-025 Decision 1's root<->MSP boundary: A1.3 (distinguishing a genuinely
+// root-scoped caller from an unscoped superadmin, both of which present as
+// callerTenant == "" today) is an open design question the ADR leaves to a
+// follow-on decision, and the grant/break-glass override (Decision 2) has no
+// store-backed state yet. Tracked as follow-up work in #3228.
+func (s *Server) isCallerAuthorizedForTenant(ctx context.Context, callerTenant, resourceTenant string) bool {
+	if callerTenant == "" {
+		return true
+	}
+	isAncestor, err := s.tenantManager.IsTenantAncestor(ctx, callerTenant, resourceTenant)
+	if err != nil {
+		// Fail closed: a broken ancestry lookup (e.g. a dangling ParentID) must not
+		// silently grant cross-tenant access.
+		s.logger.Error("Tenant ancestry check failed",
+			"caller_tenant", logging.SanitizeLogValue(callerTenant),
+			"resource_tenant", logging.SanitizeLogValue(resourceTenant),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	return isAncestor
+}
 
 // handleCreateTenant implements POST /api/v1/tenants.
 // Creates a tenant with an optional explicit ID. When req.ID is provided
@@ -78,10 +112,11 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 // handleListTenants implements GET /api/v1/tenants.
 // Returns the tenants visible to the caller, filtered to the caller's authorized
 // subtree. An unscoped mTLS admin (callerTenant == "") sees all tenants. A scoped
-// caller sees only tenants whose ID matches their own tenant (equality) or is a
-// slash-prefixed descendant of it (per isWithinTenantScope). ADR-025: a caller
-// scoped to the root tenant ID does not see MSP-level tenants without an active
-// cross-boundary grant, because MSP tenant IDs do not share the root tenant's ID.
+// caller sees only tenants that are callerTenant itself or a genuine descendant of
+// it in the ParentID hierarchy (isCallerAuthorizedForTenant, ADR-025 Amendment 1
+// A1.2). This does not yet enforce ADR-025 Decision 1's root<->MSP boundary — see
+// isCallerAuthorizedForTenant's doc comment; that piece needs founder sign-off on
+// A1.3 and is tracked as follow-up work in #3228, not delivered here.
 func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
@@ -100,7 +135,7 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 
 	result := make([]*business.TenantData, 0, len(all))
 	for _, td := range all {
-		if isWithinTenantScope(callerTenant, td.ID) {
+		if s.isCallerAuthorizedForTenant(r.Context(), callerTenant, td.ID) {
 			result = append(result, td)
 		}
 	}
@@ -182,7 +217,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !isWithinTenantScope(callerTenant, existing.ID) {
+	if !s.isCallerAuthorizedForTenant(r.Context(), callerTenant, existing.ID) {
 		s.logger.Info("Cross-tenant tenant update refused",
 			"resource_tenant", logging.SanitizeLogValue(existing.ID),
 			"caller_tenant", logging.SanitizeLogValue(callerTenant))
