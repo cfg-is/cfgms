@@ -147,9 +147,9 @@ test_magic_signatures_blocked() {
         'macho-32-le|\xce\xfa\xed\xfe\7\0\0\0\3\0\0\0\2\0\0\0|Mach-O binary'
         'macho-64-be|\xfe\xed\xfa\xcf\1\0\0\7\0\0\0\3\0\0\0\2|Mach-O binary'
         'macho-64-le|\xcf\xfa\xed\xfe\7\0\0\1\3\0\0\0\2\0\0\0|Mach-O binary'
-        'macho-fat-be|\xca\xfe\xba\xbe\0\0\0\2\1\0\0\7\0\0\0\3|Mach-O universal binary or Java class file'
-        'macho-fat-le|\xbe\xba\xfe\xca\2\0\0\0\7\0\0\1\3\0\0\0|Mach-O universal binary or Java class file'
-        'pe-windows|MZ\x90\0\3\0\0\0\4\0\0\0\xff\xff\0\0PE\0\0|MS-DOS/PE executable'
+        'macho-fat-be|\xca\xfe\xba\xbe\0\0\0\2\1\0\0\7\0\0\0\3|Mach-O universal binary or Java class data'
+        'macho-fat-le|\xbe\xba\xfe\xca\2\0\0\0\7\0\0\1\3\0\0\0|Mach-O universal binary or Java class data'
+        'pe-windows|MZ\x90\0\3\0\0\0\4\0\0\0\xff\xff\0\0PE\0\0|PE32/MS-DOS executable'
         'wasm-module|\0asm\1\0\0\0\1\7\1\140\0\1\177|WebAssembly binary module'
     )
 
@@ -193,7 +193,7 @@ test_ambiguous_cafebabe_emits_single_finding() {
         _fail "ambiguous cafebabe emitted $line_count finding lines, expected 1"
         echo "$GATE_OUT" | sed 's/^/      /' >&2
     fi
-    assert_contains "Mach-O universal binary or Java class file" \
+    assert_contains "Mach-O universal binary or Java class data" \
         "ambiguous cafebabe names both candidate formats"
 }
 
@@ -211,7 +211,7 @@ test_real_host_binary_blocked() {
     assert_rc 1 "real compiled host binary is blocked"
     assert_contains "tracked compiled artifact: vendor-tool" \
         "real host binary is named in the finding"
-    if [[ "$GATE_OUT" == *"ELF binary"* || "$GATE_OUT" == *"Mach-O binary"* || "$GATE_OUT" == *"MS-DOS/PE executable"* ]]; then
+    if [[ "$GATE_OUT" == *"ELF binary"* || "$GATE_OUT" == *"Mach-O binary"* || "$GATE_OUT" == *"PE32/MS-DOS executable"* ]]; then
         _pass "real host binary is classified as a native executable format"
     else
         _fail "real host binary was not classified as ELF/Mach-O/PE"
@@ -247,7 +247,7 @@ test_two_byte_mz_fails_closed() {
 
     run_gate "$repo"
     assert_rc 1 "two-byte MZ file fails closed"
-    assert_contains "tracked compiled artifact: fixtures/truncated (MS-DOS/PE executable)" \
+    assert_contains "tracked compiled artifact: fixtures/truncated (PE32/MS-DOS executable)" \
         "two-byte MZ reports the PE description"
 }
 
@@ -339,7 +339,7 @@ test_all_offenders_reported() {
     assert_rc 1 "repository with several artifacts is blocked"
     assert_contains "tracked compiled artifact: bin/steward (ELF binary)" \
         "first offender is reported"
-    assert_contains "tracked compiled artifact: bin/cfg.exe (MS-DOS/PE executable)" \
+    assert_contains "tracked compiled artifact: bin/cfg.exe (PE32/MS-DOS executable)" \
         "second offender is reported"
     assert_contains "compiled artifacts must be produced by the release pipeline" \
         "summary remediation message is emitted"
