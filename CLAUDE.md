@@ -336,6 +336,23 @@ Use the right tool per question; never trust one weak query for "what's been don
 
 Call serena's `initial_instructions` at the start of a coding task to load its manual.
 
+**What a wide read actually costs.** Every tool result stays in context and is re-billed
+on every later call in the session, so a read's price is its size × how many calls
+follow it — not a one-off. Two patterns dominate measured spend, and both have a
+cheap alternative:
+
+- **Re-reading slices of one large file.** Reading a file, then re-reading it around
+  a different line, repeatedly, is the single largest context cost measured (one
+  session read `client_transport.go` 63 times). Get the shape once with
+  `get_symbols_overview`, jump to the symbol with `find_symbol`, and when a raw
+  slice is genuinely needed pass `offset`/`limit` instead of pulling the file again.
+- **Bare `git diff` on a wide change.** The whole diff lands in context and stays
+  there. Use `git diff --stat` to see the shape, then `git diff -- <path>` for the
+  file being worked.
+
+The same reasoning covers any large command output: prefer the narrow query, and
+redirect a long run to a file and grep it rather than inlining the whole thing.
+
 ## Desired State Development (DSD)
 
 Stories are outcome-based. Work is complete only when the entire system reflects the desired end state.
