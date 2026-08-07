@@ -299,6 +299,8 @@ test_executable_permissions() {
         "scripts/tier1-smoke-test_test.sh"
         "scripts/tier1-bootstrap.sh"
         "scripts/tier1-bootstrap_test.sh"
+        "scripts/check-binary-artifacts.sh"
+        "scripts/check-binary-artifacts_test.sh"
         "scripts/cfgms-bundle-load"
     )
 
@@ -708,6 +710,49 @@ GOEOF
     fi
 
     rm -rf "$tmp_dir"
+}
+
+# Fixture suite for scripts/check-binary-artifacts.sh — the compiled-artifact
+# merge gate. Delegates to scripts/check-binary-artifacts_test.sh, which builds
+# throwaway git repositories and asserts every magic signature, the extension
+# fallback, and the fail-closed paths.
+test_check_binary_artifacts() {
+    log_test "Testing check-binary-artifacts.sh..."
+
+    local gate_script="scripts/check-binary-artifacts.sh"
+    local test_script="scripts/check-binary-artifacts_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-binary-artifacts.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-binary-artifacts.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-binary-artifacts_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-binary-artifacts_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-binary-artifacts_test.sh: All fixture tests passed"
+    else
+        log_fail "check-binary-artifacts_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
 }
 
 # Tests for scripts/security-trivy.sh — trivy init-error vs real-findings distinction
@@ -3466,6 +3511,8 @@ echo ""
 test_create_clone_duplicate_pr_gate
 echo ""
 test_check_providers
+echo ""
+test_check_binary_artifacts
 echo ""
 test_security_trivy_init_error
 echo ""
