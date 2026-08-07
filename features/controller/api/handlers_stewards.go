@@ -132,7 +132,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		selectorFilter, parsedTenantPath, parseErr := selector.Parse(q)
 		if parseErr != nil {
 			s.logger.Info("Invalid selector expression in steward list",
-				"q", logging.SanitizeLogValue(q), "error", parseErr)
+				"q", logging.SanitizeLogValue(q), "error", logging.SanitizeLogValue(parseErr.Error()))
 			s.writeErrorResponse(w, http.StatusBadRequest, "invalid selector expression", "INVALID_SELECTOR")
 			return
 		}

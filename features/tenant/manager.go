@@ -15,6 +15,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -138,9 +139,9 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 			// loudly for operators to reconcile rather than swallowing it.
 			if delErr := m.store.DeleteTenant(ctx, tenantID); delErr != nil {
 				slog.Error("tenant: failed to roll back tenant after RBAC setup failure; orphaned tenant record left in storage",
-					"tenant_id", tenantID,
-					"rbac_error", err,
-					"rollback_error", delErr,
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"rbac_error", logging.SanitizeLogValue(err.Error()),
+					"rollback_error", logging.SanitizeLogValue(delErr.Error()),
 				)
 			}
 			return nil, fmt.Errorf("failed to create tenant RBAC roles: %w", err)

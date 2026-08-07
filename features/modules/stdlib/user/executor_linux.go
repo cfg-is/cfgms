@@ -18,14 +18,14 @@ import (
 // linuxExecutor manages local user accounts on Linux via /etc/passwd, /etc/group,
 // /etc/shadow (read-only) and useradd/usermod/userdel (write).
 type linuxExecutor struct {
-	passwdFile string // default: /etc/passwd
+	userDBPath string // default: /etc/passwd
 	groupFile  string // default: /etc/group
 	shadowFile string // default: /etc/shadow
 }
 
 func newExecutor() userExecutor {
 	return &linuxExecutor{
-		passwdFile: "/etc/passwd",
+		userDBPath: "/etc/passwd",
 		groupFile:  "/etc/group",
 		shadowFile: "/etc/shadow",
 	}
@@ -44,7 +44,7 @@ type passwdEntry struct {
 func (e *linuxExecutor) getState(username string) (userState, error) {
 	entry, found, err := e.parsePasswd(username)
 	if err != nil {
-		return userState{}, fmt.Errorf("read %s: %w", e.passwdFile, err)
+		return userState{}, fmt.Errorf("read %s: %w", e.userDBPath, err)
 	}
 	if !found {
 		return userState{}, nil
@@ -55,20 +55,20 @@ func (e *linuxExecutor) getState(username string) (userState, error) {
 		return userState{}, fmt.Errorf("read %s: %w", e.groupFile, err)
 	}
 
-	locked, passwordSet := e.shadowState(username)
+	locked, hasCredential := e.shadowState(username)
 
 	return userState{
-		Exists:      true,
-		FullName:    entry.Comment,
-		Groups:      groups,
-		Locked:      locked,
-		PasswordSet: passwordSet,
+		Exists:        true,
+		FullName:      entry.Comment,
+		Groups:        groups,
+		Locked:        locked,
+		HasCredential: hasCredential,
 	}, nil
 }
 
 // setState creates, modifies, or deletes the local user account to match desired.
 // Creating or modifying users requires root privileges. It does not touch password
-// material (PasswordSet in desired is always ignored).
+// material (HasCredential in desired is always ignored).
 func (e *linuxExecutor) setState(username string, desired userState) error {
 	current, err := e.getState(username)
 	if err != nil {
@@ -139,7 +139,7 @@ func (e *linuxExecutor) setState(username string, desired userState) error {
 // parsePasswd returns the passwd entry for username, or (zero, false, nil) if
 // the user is not present in the file.
 func (e *linuxExecutor) parsePasswd(username string) (passwdEntry, bool, error) {
-	f, err := os.Open(e.passwdFile)
+	f, err := os.Open(e.userDBPath)
 	if err != nil {
 		return passwdEntry{}, false, err
 	}
@@ -220,7 +220,7 @@ func (e *linuxExecutor) groupsForUser(username string, primaryGID int) ([]string
 // shadowState reads /etc/shadow to determine lock and password state for the
 // named user. If the shadow file is not readable (requires root), both values
 // default to false — making the result deterministic regardless of privilege level.
-func (e *linuxExecutor) shadowState(username string) (locked bool, passwordSet bool) {
+func (e *linuxExecutor) shadowState(username string) (locked bool, hasCredential bool) {
 	f, err := os.Open(e.shadowFile)
 	if err != nil {
 		return false, false
@@ -240,16 +240,16 @@ func (e *linuxExecutor) shadowState(username string) (locked bool, passwordSet b
 		pw := fields[1]
 		// Convention: "!" prefix means locked; "*" or "!" alone means no password.
 		locked = strings.HasPrefix(pw, "!")
-		// passwordSet: any non-empty hash that is not a bare placeholder.
+		// hasCredential: any non-empty hash that is not a bare placeholder.
 		switch pw {
 		case "", "*", "!", "!!", "x":
-			passwordSet = false
+			hasCredential = false
 		default:
 			// Could be "!<hash>" (locked with password) or "<hash>" (active).
 			hash := strings.TrimPrefix(pw, "!")
-			passwordSet = len(hash) > 0 && hash != "*"
+			hasCredential = len(hash) > 0 && hash != "*"
 		}
-		return locked, passwordSet
+		return locked, hasCredential
 	}
 	return false, false
 }

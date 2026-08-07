@@ -183,6 +183,12 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        # This workflow also runs on pushes to `main` and on `v*` tags, so its
+        # module cache is writable from a release context. zizmor flags that as
+        # cache poisoning: a cache entry populated by one run is restored by a
+        # later publishing run. The scan jobs re-resolve modules in well under a
+        # minute, and the Actions cache is already at its 10 GB ceiling.
+        cache: false
 
     - name: Install Nancy
       run: make install-nancy
@@ -231,6 +237,8 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        # See the cache-poisoning note on the nancy-scan job above.
+        cache: false
 
     - name: Install gosec
       run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
@@ -295,6 +303,8 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        # See the cache-poisoning note on the nancy-scan job above.
+        cache: false
 
     - name: Install staticcheck
       run: GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.1
@@ -334,6 +344,9 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        # See the cache-poisoning note on the nancy-scan job above. This job
+        # only aggregates the other jobs' outputs in shell — it never builds.
+        cache: false
 
     - name: Security Summary
       id: summary

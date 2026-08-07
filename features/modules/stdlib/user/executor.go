@@ -4,11 +4,11 @@ package user
 
 // userState holds the observed current state of a local OS user account.
 type userState struct {
-	Exists      bool
-	FullName    string
-	Groups      []string // sorted supplementary+primary group names, no duplicates
-	Locked      bool
-	PasswordSet bool // observed only; setState must never modify this
+	Exists        bool
+	FullName      string
+	Groups        []string // sorted supplementary+primary group names, no duplicates
+	Locked        bool
+	HasCredential bool // observed only; setState must never modify this
 }
 
 // userExecutor is the platform-specific backend for local user account operations.
@@ -23,7 +23,7 @@ type userExecutor interface {
 
 	// setState applies the desired account state. It is idempotent: calling
 	// setState when the account is already in the desired state is a no-op.
-	// setState never reads or writes password material; PasswordSet in desired
+	// setState never reads or writes password material; HasCredential in desired
 	// is always ignored.
 	setState(username string, desired userState) error
 }

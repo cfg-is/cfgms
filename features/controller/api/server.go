@@ -1451,22 +1451,6 @@ func (s *Server) getHTTPListenAddr() string {
 	return "0.0.0.0:9080"
 }
 
-// shouldUseTLS determines if TLS should be enabled for the HTTP server
-func (s *Server) shouldUseTLS() bool {
-	return s.certManager != nil || s.hasLegacyCertificates()
-}
-
-// hasLegacyCertificates checks if legacy certificate files exist
-func (s *Server) hasLegacyCertificates() bool {
-	certFile := filepath.Join(s.cfg.CertPath, "server.crt")
-	keyFile := filepath.Join(s.cfg.CertPath, "server.key")
-
-	_, certErr := os.Stat(certFile)
-	_, keyErr := os.Stat(keyFile)
-
-	return certErr == nil && keyErr == nil
-}
-
 // setupTLS configures TLS for the HTTP server
 func (s *Server) setupTLS() (*tls.Config, error) {
 	// If certificate management is enabled, use managed certificates

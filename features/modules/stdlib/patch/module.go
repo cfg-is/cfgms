@@ -399,7 +399,7 @@ func (m *PatchModule) executeScript(ctx context.Context, script string) error {
 
 func validateWindowsScriptPath(scriptPath string) error {
 	if strings.ContainsAny(scriptPath, "\"&|<>^()%!\r\n") {
-		return fmt.Errorf("Windows script path contains cmd.exe metacharacters")
+		return fmt.Errorf("script path contains cmd.exe metacharacters")
 	}
 	return nil
 }

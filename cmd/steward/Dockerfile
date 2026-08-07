@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build stage
-FROM golang:1.26.5-alpine3.23 AS builder
+FROM golang:1.26.5-alpine3.23@sha256:622e56dbc11a8cfe87cafa2331e9a201877271cbff918af53d3be315f3da88cc AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/g
     -o steward ./cmd/steward
 
 # Final stage - pinned to Alpine 3.23 (latest stable as of 2025-12)
-FROM alpine:3.23
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
 # Install runtime dependencies and apply security patches
 RUN apk --no-cache upgrade && apk --no-cache add ca-certificates netcat-openbsd

@@ -281,11 +281,11 @@ func TestWinRMClient_UsesInvokeCommandArgumentList(t *testing.T) {
 	store := newInlineStore("user-key", "admin", "pass-key", "hunter2")
 
 	client := &winrmClient{
-		host:          "testhost",
-		userSecretKey: "user-key",
-		passSecretKey: "pass-key",
-		store:         store,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "testhost",
+		userStoreRef: "user-key",
+		passStoreRef: "pass-key",
+		store:        store,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	_, err := client.ExecutePS(context.Background(), "Get-VM -Name $VMName", map[string]string{
@@ -314,11 +314,11 @@ func TestWinRMClient_NoArgsCase(t *testing.T) {
 	store := newInlineStore("u", "admin", "p", "pass")
 
 	client := &winrmClient{
-		host:          "h",
-		userSecretKey: "u",
-		passSecretKey: "p",
-		store:         store,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "h",
+		userStoreRef: "u",
+		passStoreRef: "p",
+		store:        store,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	const cmd = "Get-VM | Select-Object Name"
@@ -341,11 +341,11 @@ func TestWinRMClient_DeterministicArgOrder(t *testing.T) {
 	store := newInlineStore("u", "admin", "p", "pass")
 
 	client := &winrmClient{
-		host:          "h",
-		userSecretKey: "u",
-		passSecretKey: "p",
-		store:         store,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "h",
+		userStoreRef: "u",
+		passStoreRef: "p",
+		store:        store,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	// Multiple params in non-alphabetical key insertion order.
@@ -410,11 +410,11 @@ func TestCredentialLifetime(t *testing.T) {
 
 	recorder := &recordingShell{}
 	client := &winrmClient{
-		host:          "testhost",
-		userSecretKey: "user-key",
-		passSecretKey: "pass-key",
-		store:         counting,
-		newShell:      func(_, _, _ string) (winrmShell, error) { return recorder, nil },
+		host:         "testhost",
+		userStoreRef: "user-key",
+		passStoreRef: "pass-key",
+		store:        counting,
+		newShell:     func(_, _, _ string) (winrmShell, error) { return recorder, nil },
 	}
 
 	ctx := context.Background()
@@ -466,11 +466,11 @@ func TestModule_NoCredentialInLogs_TransportError(t *testing.T) {
 	store := newInlineStore("user-key", "admin", "pass-key", "s3cr3t")
 
 	m := &hypervModule{
-		executor:      &stubHypervExecutor{},
-		host:          "testhost",
-		userSecretKey: "user-key",
-		passSecretKey: "pass-key",
-		detector:      &fakeDetector{result: true},
+		executor:     &stubHypervExecutor{},
+		host:         "testhost",
+		userStoreRef: "user-key",
+		passStoreRef: "pass-key",
+		detector:     &fakeDetector{result: true},
 		transport: &testWinRMTransport{
 			execErr: errors.New("connection refused"),
 		},
@@ -508,8 +508,8 @@ func TestModule_Configure_ExtractsAllKeys_WinRM(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "10.0.0.1", m.host)
-	assert.Equal(t, "svc-user", m.userSecretKey)
-	assert.Equal(t, "svc-pass", m.passSecretKey)
+	assert.Equal(t, "svc-user", m.userStoreRef)
+	assert.Equal(t, "svc-pass", m.passStoreRef)
 	assert.NotNil(t, m.transport, "transport must be wired after Configure")
 }
 

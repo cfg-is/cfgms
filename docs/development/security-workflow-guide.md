@@ -70,11 +70,30 @@ Decision path for a CodeQL alert:
 2. **False positive with a real, value-returning sanitizer** (e.g. `safeJoin`, `ValidateAndCleanPath`) → add/extend a model. Use **both** `barrierModel` (kind = the sink kind, e.g. `path-injection`; CodeQL ≥ 2.25.2) **and** `summaryModel(kind=value)` together — neither is reliable alone across all taint-flow paths (json.Decode field-selection flows bypass barrierModel in some CodeQL versions; summaryModel can miss other paths). Also prefer refactoring the call site to *use the sanitizer's return value* (e.g. `cleanedBase := ValidateAndCleanPath(...)`) rather than discarding it — a code-level taint barrier is more robust than any model. Verify the exact `barrierModel` tuple format against `github/codeql:go/ql/lib/ext/` — the format is finicky and CI is the only reliable verification (CodeQL can't be modeled-and-tested purely locally).
 3. **False positive from a guard-style validator** (returns only `error`, e.g. blobstore `validateKey`/`validateKeyComponent`) or a **heuristic source** (CodeQL flagging a variable *named* `*SecretKey` that holds a SecretStore key *reference*, not a value) → data extensions can't cleanly model these; **dismiss the alert with justification** (or refactor to a value-returning sanitizer that *can* be modeled).
 4. **False positive from struct field-insensitivity** (CodeQL traces taint through a whole struct because one field is a secret — e.g. `APIKey.Key` — even though only non-secret fields are logged) → these **cannot** be fixed by extension-pack models (no field-access barrier primitive exists). Dismiss with justification; confirm via grep that no secret/credential field value is passed to the logger at the flagged site.
+5. **Heuristic source you control the name of** → **rename the identifier**. This is strictly better than dismissal: it clears the alert permanently and stops it re-firing at every new sink the value reaches. See the exact regexes below before choosing a replacement name.
+
+##### The sensitive-name heuristic, exactly
+
+`clear-text-logging` classifies a source by **identifier name alone**, regardless of type — a `bool` named `PasswordSet` is a "secret". The matcher lives in the CodeQL Go pack at `semmle/go/security/SensitiveActions.qll` (module `HeuristicNames`) and consults **no** data extension, so the pack cannot suppress it. There are exactly three source patterns:
+
+| Classification | Regex |
+|---|---|
+| secret | `(?is).*((?<!is)secret\|(?<!un\|is)trusted).*` |
+| account info | `(?is).*(puid\|username\|userid).*` |
+| password | `(?is).*pass(wd\|word\|code\|phrase)(?!.*question).*` and `(?is).*(auth(entication\|ori[sz]ation)?\|api\|secret)key.*` |
+
+A name matching any of them is a source **unless** it also matches the suppressor `(?is).*(test|redact|censor|obfuscate|hash|md5|(?<!un)mask|sha|((?<!un)(en))?(crypt|code)).*`. That suppressor is also what makes a *call* a barrier (`ObfuscatorCall`) — which is why `logging.RedactedID` blocks clear-text-logging flow but `logging.SanitizeLogValue` does not.
+
+Notably **`credential` is not a trigger word** — it appears in no regex in the Go pack. `HasCredential`, `credentialRef`, `userStoreRef` and `passStoreRef` are all clean; `userSecretKey`, `passSecretKey`, `passwdFile`, `PasswordSet` and `secretKey` were not. Test a candidate name against the table above before committing to it, and read the local pack copy (`~/.codeql/packages/codeql/go-all/<version>/semmle/go/security/SensitiveActions.qll`) rather than trusting this table if the two disagree.
 
 #### Model inventory and dismissal log (most recent first)
 
 | Pack version | Alert IDs | Kind | Resolution | Notes |
 |---|---|---|---|---|
+| 0.0.11 | #1240, #1241 | zipslip | Model | `features/modules/extended/github_runner.safeJoin` added as `summaryModel` + `barrierModel(path-injection)`. A second, independent `safeJoin` from the flatfile one already modelled — it rejects any `..` segment and re-verifies containment with `filepath.Rel` before returning the extraction target. |
+| 0.0.11 | #1289, #1284, #1285, #1116–#1121, #1126–#1130, #1138, #1139 | clear-text-logging | Rename | Name-heuristic FPs, fixed at the source by renaming the five identifiers that were classified as secrets by name: `PasswordSet`→`HasCredential` (a bool; also renames the module yaml key `password_set`→`has_credential`), `userSecretKey`/`passSecretKey`→`userStoreRef`/`passStoreRef` (hyperv — SecretStore *lookup keys*, not values), `passwdFile`→`userDBPath` (the path `/etc/passwd`), `secretKey`→`credentialRef` (api — a store lookup path). See "The sensitive-name heuristic, exactly" above for why these names matched and why the replacements do not. |
+| 0.0.11 | #1232 | log-injection | Dismiss | `handlers_ip_trust.go:78` — the flagged argument is `req.PreSeeded`, a `bool`. CodeQL is field-insensitive over the JSON-decoded request struct and does not type-filter the `slog` variadic `...any`, so a boolean is reported as a log-injection sink argument. A bool cannot carry CR/LF; there is nothing to sanitize. |
+| 0.0.11 | #530 | path-injection | Dismiss | `pkg/security/fileaccess.go:189` — the `os.Stat(parent)` existence probe inside `ValidateAndCleanPath`'s deepest-existing-ancestor walk. The sink is *inside the sanitizer itself*, after the pre-resolution containment check at lines 160–164 has already proven the path is inside the base, so the pack's `barrierModel` on the function's return value cannot apply. Read-only probe; no path outside the base is ever touched. |
 | 0.0.10 | #1101 | clear-text-logging | Dismiss | Map field-insensitivity FP: `PasswordSet bool` in `stdlib/user/interface.go ToMap()` taints the generic `configMap` used by the hyperv executor; CodeQL propagates taint to `configMap["vhd_path"]` → `cfg.VHDPath` → `seedVHDPath()` → `mediaPath` in `vm_provision.go:876`. `mediaPath` is a filesystem path, not a credential; `PasswordSet` is a boolean flag. No secret value is logged at that site (grep-confirmed). Cannot be modeled (no map-key/field-access barrier primitive). |
 | 0.0.7 | #745, #746 | path-injection | Code fix + model | `git_store.go`: use `cleanedBase` (return value of `ValidateAndCleanPath`) instead of raw `tenantID` in `filepath.Join`. `ValidateAndCleanPath` added as `summaryModel` + `barrierModel` in `path-injection-sanitizers.model.yml`. |
 | 0.0.7 | #669, #713, #714, #715, #722 | log-injection | Model + dismiss | `SanitizeLogValue` `summaryModel(kind=value)` added as belt-and-suspenders over existing `barrierModel` (json.Decode field-selection flows bypass barrierModel alone). Alerts dismissed as FP: all sites already wrap input in `SanitizeLogValue`; the barrierModel is correct but insufficiently reliable. |
@@ -149,10 +168,10 @@ License, Maintained, Packaging, SAST, Security-Policy.
 | Check | Score | Gap / Rationale | Owning Story or Status |
 |-------|-------|-----------------|------------------------|
 | Binary-Artifacts | 9/10 | Scorecard detected binaries in the repository | Follow-up investigation |
-| Pinned-Dependencies | 7/10 | Dockerfiles use image tags without SHA digest (`FROM golang:1.26.5-bookworm`); GitHub Actions are SHA-pinned but Scorecard scores Docker images too | Dependabot covers Actions pins; Docker image pinning is a separate follow-up story |
+| Pinned-Dependencies | 7/10 | ~~Dockerfiles use image tags without SHA digest~~ **Resolved (Issue #3202)**: all six `FROM` lines across `.devcontainer/Dockerfile`, `cmd/steward/Dockerfile{,.debian}` and `Dockerfile.test-runner` are now digest-pinned. Remaining findings are `goCommand` (`go install …@vX.Y.Z` in `security-scan.yml`), `downloadThenRun` (`curl … \| sh` in the devcontainer) and `npmCommand` — see "Accepted risks" below. | Docker image pinning done + digest-drift tracking added to `dependency-pin-check.yml` |
 | CII-Best-Practices | -1/10¹ | No OpenSSF Best Practices badge obtained; expected 0/10 on GHA run | Future improvement |
 | Vulnerabilities | -1/10¹ | OSV scanner failed due to container network restriction; Trivy + Nancy run as blocking gates in `security-scan.yml`; expected 10/10 on GHA run | Covered by existing blocking gates |
-| Token-Permissions | 0/10 | `develop-sanity.yml` sets `issues: write` at the workflow top level; `cla-check.yml` sets `pull-requests: write` at the top level — Scorecard flags any workflow that doesn't start from `permissions: {}` (default-deny) and grant only per-job. The story notes' expectation of 10/10 here was incorrect: not all workflows use the default-deny pattern. | Follow-up story to migrate both workflows to `permissions: {}` top-level + job-level-only grants |
+| Token-Permissions | 0/10 | **Resolved (Issue #3202)**: `develop-sanity.yml` and `cla-check.yml` moved their write grants from workflow top level to job level; `test-suite.yml`, `fuzz-nightly.yml` and `dependency-pin-check.yml` gained a top-level `permissions: {}`. Every workflow except `frontend-ci.yml` (which grants only `contents: read`) now starts from default-deny. Three jobs still declare write scopes they genuinely need — see "Accepted risks" below. | Migration done; re-score on the next Scorecard run |
 | Signed-Releases | 0/10 | No releases cut yet; no cosign / sigstore provenance attached | Future — when release process is established |
 | Contributors | 0/10 | 0 contributing organizations; Scorecard rewards multi-org contribution | **Accepted gap — solo-dev model (CLAUDE.md)** |
 | Code-Review | 0/10 | 0 approved changesets found; branch protection deliberately omits required reviewers (CLAUDE.md: "squash-only, no-review, solo-friendly") | **Accepted gap — solo-dev model (CLAUDE.md)**. Will improve to 10/10 when team expansion adds required reviews. |
@@ -172,6 +191,26 @@ ceiling is structural — not a gap list to chase.
 
 **Fuzzing:** 10/10 (native Go fuzz targets; Scorecard recognises Go native fuzzing since v5). Score
 may improve further as additional fuzz surfaces land from related stories.
+
+#### Accepted risks (Issue #3202)
+
+These Scorecard alerts stay open deliberately. Each has a reason; none is un-triaged.
+
+| Alert | Reason |
+|---|---|
+| `TokenPermissionsID` — `release.yml:publish` (`contents`/`id-token`/`attestations`/`artifact-metadata: write`) | The job's purpose is to publish a signed release. It cannot do that without write. Scoped to one job in a `release` environment. |
+| `TokenPermissionsID` — `codeql-pack-publish.yml:publish` (`packages: write`) | Publishes the CodeQL extension pack to ghcr.io. Write to packages is the job. |
+| `TokenPermissionsID` — `dast-scan.yml:dast-scan` (`security-events: write`) | Uploads ZAP SARIF to the Security tab. Write to security-events is the job. |
+| `PinnedDependenciesID` — `goCommand` (`go install …@vX.Y.Z` in `security-scan.yml`) | Tool installs are version-pinned, and the module checksum database plus `go.sum` provide the integrity guarantee a hash pin would. `dependency-pin-check.yml` already tracks these versions weekly. |
+| `PinnedDependenciesID` — `downloadThenRun` / `npmCommand` (`.devcontainer/Dockerfile`) | Developer container only — never part of a released artifact or of any steward/controller image. `ARG CLAUDE_CODE_VERSION` is version-pinned and tracked by `dependency-pin-check.yml`. |
+| `CodeReviewID` (0/10), `Contributors` (0/10), `BranchProtectionID` | Structural to the solo operating model documented in `CLAUDE.md` (squash-only, no required reviewers). Not a gap to chase — see "Realistic ceiling" above. |
+| `CIIBestPracticesID` | No OpenSSF Best Practices badge obtained. Applying for one is a founder-owned decision, not a code change. |
+| `VulnerabilitiesID` | OSV scanner network failure in the container run. Trivy and Nancy run as blocking gates and cover the same ground; expected 10/10 on a GHA run. |
+
+**Base-image digests are now tracked.** Digest pinning freezes the image, so a patched re-push of the
+same tag is no longer picked up automatically. `dependency-pin-check.yml` resolves each pinned
+`FROM … @sha256:…` against the tag's current digest on its weekly run and reports drift into the
+`dependency-pins` issue, so a stale base image surfaces the same way a stale tool version does.
 
 ### 8. OWASP ZAP — Dynamic Application Security Testing
 

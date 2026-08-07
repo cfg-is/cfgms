@@ -107,8 +107,8 @@ The command completed successfully.
 	if got.Locked {
 		t.Error("Locked should be false for an active account")
 	}
-	if !got.PasswordSet {
-		t.Error("PasswordSet should be true when 'Password required' is Yes")
+	if !got.HasCredential {
+		t.Error("HasCredential should be true when 'Password required' is Yes")
 	}
 	want := []string{"Administrators", "Users"} // sorted
 	if !reflect.DeepEqual(got.Groups, want) {
@@ -131,8 +131,8 @@ Local Group Memberships      *Users
 	if !got.Locked {
 		t.Error("Locked should be true when 'Account active' is No")
 	}
-	if got.PasswordSet {
-		t.Error("PasswordSet should be false when 'Password required' is No")
+	if got.HasCredential {
+		t.Error("HasCredential should be false when 'Password required' is No")
 	}
 	if got.FullName != "Service Account" {
 		t.Errorf("FullName = %q, want %q", got.FullName, "Service Account")

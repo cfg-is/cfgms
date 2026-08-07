@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgmstesting "github.com/cfgis/cfgms/pkg/testing"
@@ -866,9 +867,13 @@ func TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant(t *testing.T) {
 	require.True(t, ok, "log record must include a string tenant_id")
 	assert.NotEmpty(t, tenantID)
 
-	rbErr, ok := rec.attrs["rollback_error"].(error)
-	require.True(t, ok, "log record must include the rollback error")
-	assert.Equal(t, rollbackErr, rbErr, "rollback_error must be the DeleteTenant failure")
+	// The error is logged as a sanitized string, not a bare error value: the
+	// DeleteTenant failure text can embed operator-supplied tenant input, so it
+	// goes through logging.SanitizeLogValue before reaching slog (CWE-117).
+	rbErr, ok := rec.attrs["rollback_error"].(string)
+	require.True(t, ok, "log record must include the rollback error as a sanitized string")
+	assert.Equal(t, logging.SanitizeLogValue(rollbackErr.Error()), rbErr,
+		"rollback_error must be the sanitized DeleteTenant failure")
 
 	_, ok = rec.attrs["rbac_error"]
 	require.True(t, ok, "log record must include the originating RBAC error")

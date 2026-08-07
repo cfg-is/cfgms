@@ -203,10 +203,13 @@ func (a *Assembler) buildModuleFragment(
 //     across out-of-process module binaries. CodeQL's go/clear-text-logging
 //     unions every Module.Get implementation and treats their returned errors
 //     as potentially carrying a sensitive-named field value — e.g. the linux
-//     user executor formats its /etc/passwd path (field passwdFile) into read
-//     errors, and the hyperv module carries *SecretKey handle references. Those
-//     are naming / field-insensitivity false positives, but the raw error text
-//     is still not the assembler's to surface across that trust boundary. This
+//     user executor formats its /etc/passwd path (field userDBPath) into read
+//     errors, and the hyperv module carries SecretStore handle references
+//     (userStoreRef / passStoreRef). Those fields have since been renamed away
+//     from the sensitive-name heuristic (Issue #3202), but the union at this
+//     boundary is structural: any future module can reintroduce a matching
+//     name. The raw error text is not the assembler's to surface across that
+//     trust boundary regardless of what the current field names are. This
 //     function returns only string constants selected by errors.Is checks, so
 //     no data flows from the error's message text into the log sink.
 func moduleGetErrorCategory(err error) string {

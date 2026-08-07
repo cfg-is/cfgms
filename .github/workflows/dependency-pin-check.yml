@@ -21,6 +21,11 @@ on:
       - '.github/scripts/install-trivy.sh'
       - 'Makefile'
 
+# Deny by default at the workflow level; each job re-grants only what it needs.
+# Without this, jobs inherit the repository default token scope (Scorecard
+# TokenPermissions).
+permissions: {}
+
 jobs:
   # Hard-fail any PR (or schedule run) that reintroduces a compromised Trivy
   # version (v0.69.4 / v0.69.5 / v0.69.6) into the build. CVE-2026-33634.
@@ -272,6 +277,55 @@ jobs:
         else
           echo "  OK: Go toolchain lockstep version=${lockstep_versions}"
         fi
+
+        # Base-image digest drift. Every Dockerfile FROM is pinned by digest
+        # (Scorecard PinnedDependenciesID), which makes builds reproducible but
+        # also means a patched re-push of the same tag is NOT picked up. Nothing
+        # else in the repo notices that, so compare each pinned digest against
+        # the tag's current digest and surface drift in this weekly issue.
+        echo "Checking Docker base-image digest drift..."
+        while IFS= read -r from_line; do
+          [ -n "$from_line" ] || continue
+          ref=${from_line#FROM }
+          ref=${ref%% *}
+          image=${ref%@*}
+          pinned_digest=${ref#*@}
+          repo=${image%:*}
+          tag=${image##*:}
+          # Official Docker Hub images only (no slash). Anything else is not
+          # resolvable with this token flow — report it rather than skip silently.
+          case "$repo" in
+            */*)
+              echo "  SKIP: $image (not a Docker Hub official image)"
+              warnings="${warnings}- **Base image \`${image}\`**: digest drift not checked — only Docker Hub official images are resolvable by this job.\n"
+              continue
+              ;;
+          esac
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/${repo}:pull" \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null || echo "")
+          if [ -z "$token" ]; then
+            echo "  WARN: could not obtain registry token for ${image}"
+            warnings="${warnings}- **Base image \`${image}\`**: could not obtain a Docker Hub registry token to check digest drift.\n"
+            continue
+          fi
+          current_digest=$(curl -fsSI \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+            "https://registry-1.docker.io/v2/library/${repo}/manifests/${tag}" \
+            | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{print $2}' || echo "")
+          if [ -z "$current_digest" ]; then
+            echo "  WARN: could not resolve current digest for ${image}"
+            warnings="${warnings}- **Base image \`${image}\`**: could not resolve the tag's current digest.\n"
+          elif [ "$current_digest" != "$pinned_digest" ]; then
+            echo "  DRIFT: ${image} pinned=${pinned_digest} current=${current_digest}"
+            outdated="${outdated}- **Base image \`${image}\`**: pinned \`${pinned_digest}\`, tag now resolves to \`${current_digest}\`. The tag was re-pushed (usually a patched base). Update the \`FROM\` digest.\n"
+          else
+            echo "  OK: ${image} digest current"
+          fi
+        done < <(grep -hoE '^FROM [^[:space:]]+@sha256:[0-9a-f]{64}' \
+          .devcontainer/Dockerfile cmd/*/Dockerfile cmd/*/Dockerfile.* Dockerfile.test-runner 2>/dev/null | sort -u)
 
         if [ -z "$outdated" ] && [ -z "$warnings" ]; then
           echo ""
