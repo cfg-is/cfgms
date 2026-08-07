@@ -356,4 +356,3 @@ func TestResolveAssurance_UnknownPermission_FoundByOverride(t *testing.T) {
 	require.True(t, found, "tenant-declared perm must be reported as found")
 	assert.Equal(t, session.AssuranceStrong, req.Min)
 }
-

@@ -87,7 +87,7 @@ func (s *Server) handleGetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		s.logger.Error("Failed to get assurance policy",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		http.Error(w, "failed to get assurance policy", http.StatusInternalServerError)
 		return
@@ -99,7 +99,7 @@ func (s *Server) handleGetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.logger.Error("Failed to encode assurance policy response", "error", err)
+		s.logger.Error("Failed to encode assurance policy response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -142,7 +142,7 @@ func (s *Server) handleSetAssurancePolicy(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			s.logger.Warn("handleSetAssurancePolicy: failed to get tenant path",
 				"tenant_id", logging.SanitizeLogValue(tenantID),
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 			http.Error(w, "failed to resolve tenant path", http.StatusInternalServerError)
 			return
@@ -187,7 +187,7 @@ func (s *Server) handleSetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	if err := s.assurancePolicyStore.SetPolicy(r.Context(), policy); err != nil {
 		s.logger.Error("Failed to set assurance policy",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		http.Error(w, "failed to set assurance policy", http.StatusInternalServerError)
 		return
@@ -200,7 +200,7 @@ func (s *Server) handleSetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.logger.Error("Failed to encode assurance policy response", "error", err)
+		s.logger.Error("Failed to encode assurance policy response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -221,7 +221,7 @@ func (s *Server) resolveAssuranceRequirementForPath(ctx context.Context, path []
 			s.logger.Warn("resolveAssuranceRequirementForPath: failed to get assurance policy; using global floor",
 				"tenant_id", logging.SanitizeLogValue(t),
 				"permission_id", permissionID,
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 			return floor, found
 		}
