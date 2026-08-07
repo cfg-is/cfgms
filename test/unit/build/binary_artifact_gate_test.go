@@ -93,7 +93,11 @@ func TestBinaryArtifactGateDetectsCompiledArtifactsByMagic(t *testing.T) {
 		magic    []byte
 		expect   string
 	}{
-		{"elf", "build/steward", []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00}, "ELF executable or shared object"},
+		// Wording tracks scripts/check-binary-artifacts.sh, which says "ELF
+		// binary". This branch originally shipped its own copy of that script
+		// with a different phrase; develop's copy (#3156) is authoritative and
+		// was kept when the branch rebased, so the expectation follows it.
+		{"elf", "build/steward", []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00}, "ELF binary"},
 		{"macho64le", "build/steward-darwin", []byte{0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01}, "Mach-O binary"},
 		{"machoBE", "build/steward-ppc", []byte{0xfe, 0xed, 0xfa, 0xce, 0x00, 0x00, 0x00, 0x12}, "Mach-O binary"},
 		{"machoFat", "build/steward-universal", []byte{0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x02}, "Mach-O universal binary"},
