@@ -60,7 +60,7 @@ func skipIfNoPostgres(t *testing.T) string {
 // TestCreateClusterStorageManager_RequiresDSN verifies the function rejects an empty DSN
 // before touching the database provider.
 func TestCreateClusterStorageManager_RequiresDSN(t *testing.T) {
-	_, err := interfaces.CreateClusterStorageManager("", nil)
+	_, err := interfaces.CreateClusterStorageManager("", "", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "postgres_dsn")
 }
@@ -72,7 +72,7 @@ func TestCreateClusterStorageManager_RequiresDSN(t *testing.T) {
 func TestCreateClusterStorageManager_DatabaseProvider(t *testing.T) {
 	pgDSN := skipIfNoPostgres(t)
 
-	sm, err := interfaces.CreateClusterStorageManager(pgDSN, nil)
+	sm, err := interfaces.CreateClusterStorageManager(pgDSN, testSessionHMACKey(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, sm)
 	defer func() { _ = sm.Close() }()
@@ -98,10 +98,20 @@ func TestCreateClusterStorageManager_WithS3Config(t *testing.T) {
 		"bucket": "cfgms-test-installers",
 		"region": "us-east-1",
 	}
-	sm, err := interfaces.CreateClusterStorageManager(pgDSN, s3Cfg)
+	sm, err := interfaces.CreateClusterStorageManager(pgDSN, testSessionHMACKey(), s3Cfg)
 	require.NoError(t, err)
 	require.NotNil(t, sm)
 	defer func() { _ = sm.Close() }()
 
 	assert.Equal(t, "database", sm.GetProviderName())
+}
+
+// testSessionHMACKey returns the session HMAC key used by cluster storage tests.
+// CFGMS_TEST_SESSION_HMAC_KEY lets CI inject a real key; a fixed test-only key is
+// used for local development, matching the pattern in pkg/testing/storage/fixtures.go.
+func testSessionHMACKey() string {
+	if key := os.Getenv("CFGMS_TEST_SESSION_HMAC_KEY"); key != "" {
+		return key
+	}
+	return "test-hmac-key-for-cluster-manager-tests-only"
 }

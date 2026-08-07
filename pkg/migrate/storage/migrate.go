@@ -14,6 +14,7 @@
 //	CFGMS_STORAGE_FLATFILE_ROOT   – flatfile root directory (oss backend)
 //	CFGMS_STORAGE_SQLITE_PATH     – SQLite file path (oss backend)
 //	CFGMS_STORAGE_CLUSTER_POSTGRES_DSN – Postgres DSN (database backend)
+//	CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY – session-store HMAC key (database backend)
 //
 // For tests, callers should bypass the factory and use NewStorageMigrator directly
 // with pre-built StorageManager instances.
@@ -70,7 +71,11 @@ func openBackend(name string) (*interfaces.StorageManager, error) {
 		if dsn == "" {
 			return nil, fmt.Errorf("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN must be set for database backend")
 		}
-		return interfaces.CreateClusterStorageManager(dsn, nil)
+		hmacKey := os.Getenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY")
+		if hmacKey == "" {
+			return nil, fmt.Errorf("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY must be set for database backend")
+		}
+		return interfaces.CreateClusterStorageManager(dsn, hmacKey, nil)
 	default:
 		return nil, fmt.Errorf("unknown backend %q; supported: oss, database", name)
 	}
@@ -291,6 +296,12 @@ func exportTenants(ctx context.Context, mgr *interfaces.StorageManager) ([]migra
 	if err != nil {
 		return nil, nil, fmt.Errorf("list tenants: %w", err)
 	}
+	tenants, err = sortParentFirst(tenants,
+		func(t *business.TenantData) string { return t.ID },
+		func(t *business.TenantData) string { return t.ParentID })
+	if err != nil {
+		return nil, nil, fmt.Errorf("sort tenants: %w", err)
+	}
 	recs := make([]migrate.Record, 0, len(tenants))
 	ids := make([]string, 0, len(tenants))
 	for _, t := range tenants {
@@ -302,6 +313,43 @@ func exportTenants(ctx context.Context, mgr *interfaces.StorageManager) ([]migra
 		ids = append(ids, t.ID)
 	}
 	return recs, ids, nil
+}
+
+// sortParentFirst orders items so that every item appears after its parent, at
+// arbitrary recursive depth (tenants under storage.cluster's parent_id FK, RBAC
+// roles under parent_role_id). Import targets on the database provider enforce
+// these as foreign keys, so importing a child before its parent fails — the
+// source stores' List* methods make no ordering guarantee (the flatfile
+// provider returns directory-read order).
+func sortParentFirst[T any](items []T, id, parentID func(T) string) ([]T, error) {
+	byID := make(map[string]T, len(items))
+	for _, item := range items {
+		byID[id(item)] = item
+	}
+
+	sorted := make([]T, 0, len(items))
+	placed := make(map[string]bool, len(items))
+	remaining := items
+
+	for len(remaining) > 0 {
+		next := remaining[:0]
+		progressed := false
+		for _, item := range remaining {
+			p := parentID(item)
+			if _, parentKnown := byID[p]; p == "" || placed[p] || !parentKnown {
+				sorted = append(sorted, item)
+				placed[id(item)] = true
+				progressed = true
+				continue
+			}
+			next = append(next, item)
+		}
+		if !progressed {
+			return nil, fmt.Errorf("cycle or unresolved parent chain among %d items", len(next))
+		}
+		remaining = next
+	}
+	return sorted, nil
 }
 
 func exportConfigs(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
@@ -379,6 +427,12 @@ func exportRBAC(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.
 	roles, err := store.ListRoles(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("list RBAC roles: %w", err)
+	}
+	roles, err = sortParentFirst(roles,
+		func(r *common.Role) string { return r.Id },
+		func(r *common.Role) string { return r.ParentRoleId })
+	if err != nil {
+		return nil, fmt.Errorf("sort RBAC roles: %w", err)
 	}
 	for _, r := range roles {
 		data, err := marshal(r)

@@ -318,8 +318,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Cluster mode: all business stores backed by shared Postgres so every node
 		// serving the same fleet uses the same state (Issue #2119).
 		pgDSN := ""
+		sessionHMACKey := ""
 		if cfg.Storage.Cluster != nil {
 			pgDSN = cfg.Storage.Cluster.PostgresDSN
+			sessionHMACKey = cfg.Storage.Cluster.SessionHMACKey
 		}
 		var s3Config map[string]interface{}
 		if cfg.Storage.Cluster != nil {
@@ -328,7 +330,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Cluster mode: initializing Postgres business store backend...",
 			"ha_mode", cfg.HA.Mode)
 		var clusterErr error
-		storageManager, clusterErr = interfaces.CreateClusterStorageManager(pgDSN, s3Config)
+		storageManager, clusterErr = interfaces.CreateClusterStorageManager(pgDSN, sessionHMACKey, s3Config)
 		if clusterErr != nil {
 			return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
 		}

@@ -38,7 +38,7 @@ type SOPSSecretStoreConfig struct {
 // SOPSSecretStore stores encrypted ConfigEntry objects in a configured
 // ConfigStore. The historical provider name is retained for compatibility.
 type SOPSSecretStore struct {
-	configStore  cfgconfig.ConfigStore // Underlying config store (git with SOPS)
+	configStore  cfgconfig.ConfigStore // Underlying config store (backend-agnostic, SOPS-encrypted)
 	cache        *cache.Cache          // Secret cache
 	config       *SOPSSecretStoreConfig
 	providerName string

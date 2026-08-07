@@ -4,6 +4,16 @@ This guide covers the generic `cfg migrate` and `cfg storage migrate` verb shape
 to move data between CFGMS provider backends. Per-provider operator guides are linked
 in the [Provider-Specific Guides](#provider-specific-guides) section below.
 
+**`cfg storage migrate` and `cfg migrate --provider storage` are two different
+tools with different capabilities — they are not interchangeable.**
+`cfg storage migrate` (`cmd/cfg/cmd/storage.go`) is the older, narrower
+command; it hard-rejects `--to database`/`--to postgres` with "postgres
+migration is not supported". `cfg migrate --provider storage ...` (this
+guide's examples below) is the current, supported tool for migrating onto
+Postgres, and the one all examples in this guide use for that case. Confirmed
+live in #3127: an operator following this guide's `cfg storage migrate`
+examples as written against a Postgres target hits that rejection.
+
 ## Offline-Cutover Requirement
 
 **Stop the controller before migrating any provider it is actively using.**
@@ -64,15 +74,37 @@ Use it to confirm record counts before scheduling a maintenance window, and to
 rehearse the migration against a copy of production data.
 
 ```bash
-# Preview what would be migrated
-cfg storage migrate --from oss --to database --dry-run
+# Preview what would be migrated (cfg storage migrate cannot target database — see above)
+cfg migrate --provider storage --from oss --to database --dry-run
 
 # Execute the live migration
-cfg storage migrate --from oss --to database
+cfg migrate --provider storage --from oss --to database
 ```
 
 A `--dry-run` count that differs from the live run count indicates the source
 backend changed between the two invocations — always migrate with the controller stopped.
+
+### Environment variables
+
+`cfg migrate --provider storage` and `cfg migrate --provider blob` read their
+backend configuration from environment variables — there are no `--config`
+or per-backend flags:
+
+| Variable | Provider | Backend | Description |
+|----------|----------|---------|--------------|
+| `CFGMS_STORAGE_FLATFILE_ROOT` | storage | `oss` | Flatfile root directory |
+| `CFGMS_STORAGE_SQLITE_PATH` | storage | `oss` | SQLite database file path |
+| `CFGMS_STORAGE_CLUSTER_POSTGRES_DSN` | storage | `database` | Postgres connection string (`host=... port=... dbname=... user=... password=... sslmode=...`) |
+| `CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY` | storage | `database` | HMAC key backing the session store's bearer-token hashing; required, must be a securely-generated random value |
+| `CFGMS_BLOB_TENANT_IDS` | blob | both | Comma-separated tenant IDs to migrate (required) |
+| `CFGMS_BLOB_FILESYSTEM_ROOT` | blob | `filesystem` | Root directory for the filesystem backend |
+| `CFGMS_BLOB_S3_BUCKET` | blob | `s3` | S3 bucket name (required for `s3`) |
+| `CFGMS_BLOB_S3_REGION` | blob | `s3` | AWS region (optional; default `us-east-1`) |
+| `CFGMS_BLOB_S3_ENDPOINT_URL` | blob | `s3` | S3 endpoint URL for MinIO/local dev (optional) |
+
+Pull `CFGMS_STORAGE_CLUSTER_POSTGRES_DSN`'s password and any S3 access/secret
+keys from the OS keychain at invocation time — never hardcode them in a shell
+history or script.
 
 ### Reporting
 

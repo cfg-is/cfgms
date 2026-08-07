@@ -668,7 +668,10 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	var eventTypeStr, userTypeStr, resultStr, severityStr string
 	var detailsJSON, changesJSON []byte
 	var tags pq.StringArray
-	var ipAddr net.IP
+	// ip_address is a nullable inet column; net.IP has no sql.Scanner, so a NULL
+	// value fails the whole Scan() call (database/sql's built-in NULL handling
+	// does not cover net.IP). Scan into sql.NullString instead.
+	var ipAddr sql.NullString
 	var sessionID, resourceName, errorCode, errorMessage, requestID, userAgent, method, path sql.NullString
 
 	err := scanner.Scan(
@@ -740,8 +743,8 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	}
 
 	// Convert IP address
-	if ipAddr != nil {
-		entry.IPAddress = ipAddr.String()
+	if ipAddr.Valid {
+		entry.IPAddress = ipAddr.String
 	}
 
 	// Deserialize JSON fields

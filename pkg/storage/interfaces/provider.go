@@ -818,6 +818,11 @@ func NewStorageManagerFromStores(
 // CreateClusterStorageManager composes the cluster storage tier from the database provider
 // (Postgres-backed business stores) using pgConnStr as the libpq connection string.
 //
+// sessionHMACKey is required to create the session store: config["session_hmac_key"] backs
+// DatabaseSessionStore's bearer-token hashing (pkg/storage/providers/database/session_store.go),
+// which fails closed rather than falling back to an insecure default when the key is empty.
+// Source it from storage.cluster.session_hmac_key or CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY.
+//
 // s3Config documents the S3-compatible blob store configuration required for cluster
 // installer artifact storage. The blob store itself is NOT created here — callers are
 // responsible for initialising it separately (e.g. via blob.CreateBlobStoreFromConfig("s3", s3Config)).
@@ -827,12 +832,12 @@ func NewStorageManagerFromStores(
 // in the calling binary's main.go or in a providers_test.go file for tests.
 //
 // Used by initialization.go (--init) and server.go (startup) when ha.mode == cluster.
-func CreateClusterStorageManager(pgConnStr string, _ map[string]interface{}) (*StorageManager, error) {
+func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]interface{}) (*StorageManager, error) {
 	if pgConnStr == "" {
 		return nil, fmt.Errorf("cluster storage requires a Postgres connection string (storage.cluster.postgres_dsn or CFGMS_STORAGE_CLUSTER_POSTGRES_DSN)")
 	}
 
-	dbCfg := map[string]interface{}{"dsn": pgConnStr}
+	dbCfg := map[string]interface{}{"dsn": pgConnStr, "session_hmac_key": sessionHMACKey}
 
 	provider, err := GetStorageProvider("database")
 	if err != nil {
