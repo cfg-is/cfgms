@@ -522,9 +522,18 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {server.URL}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "same-origin request must be accepted")
+		// The WebSocket handshake completes before the server goroutine calls
+		// CreateSession, so the accepted Dial races the server-side session's
+		// creation and teardown. Wait for both ends deterministically instead of
+		// letting the subtest return (and eventually the manager Stop / t.TempDir
+		// cleanup run) while the server is still creating or recording the
+		// session — an in-flight StartRecording can create the .rec file after
+		// t.TempDir's RemoveAll has already listed the directory.
+		waitForActiveSessions(t, manager, 1)
 		if err := conn.Close(); err != nil {
 			t.Logf("Failed to close connection: %v", err)
 		}
+		waitForSessionCleanup(t, manager, 0)
 	})
 
 	t.Run("cross_origin_rejected", func(t *testing.T) {
@@ -554,9 +563,13 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {"http://trusted.example.com"}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "allowlist-matched origin must be accepted")
+		// See same_origin_accepted above: wait for the server-side session
+		// lifecycle to fully settle before this subtest returns.
+		waitForActiveSessions(t, manager, 1)
 		if err := conn.Close(); err != nil {
 			t.Logf("Failed to close connection: %v", err)
 		}
+		waitForSessionCleanup(t, manager, 0)
 	})
 
 	t.Run("empty_origin_rejected", func(t *testing.T) {
@@ -588,9 +601,13 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {"http://trusted.example.com:8443"}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "port-qualified allowlist origin must be accepted")
+		// See same_origin_accepted above: wait for the server-side session
+		// lifecycle to fully settle before this subtest returns.
+		waitForActiveSessions(t, manager, 1)
 		if err := conn.Close(); err != nil {
 			t.Logf("Failed to close connection: %v", err)
 		}
+		waitForSessionCleanup(t, manager, 0)
 
 		// Same host without port is rejected — allowlist matching is port-sensitive.
 		headers = http.Header{"Origin": {"http://trusted.example.com"}}
