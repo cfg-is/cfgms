@@ -94,6 +94,13 @@ var permissionAssurance = map[string]Requirement{
 	"module:reject":       {Min: session.AssuranceStrong, RequireUserPresence: true},
 	"publisher-trust:add": {Min: session.AssuranceStrong, RequireUserPresence: true},
 
+	// Per-tenant assurance-policy admin (Issue #2839).
+	// Requires AssuranceStrong so only a strongly-authenticated admin can raise a tenant's
+	// own assurance posture — consistent with refresh:set-policy's existing bar.
+	// assurance-policy:get is intentionally absent (reads stay unrestricted at the assurance
+	// layer, matching refresh:get-policy's absence from this map).
+	"assurance-policy:set": {Min: session.AssuranceStrong}, // PUT /tenants/{tenant_path}/assurance-policy
+
 	// Bulk CIDR registration approval (Issue #2969): RFC1918 ranges collide across tenants,
 	// making this a trust-boundary decision that must not be a convenience gate.
 	// Approve-by-CIDR requires AssuranceStrong + a fresh user-presence proof.
