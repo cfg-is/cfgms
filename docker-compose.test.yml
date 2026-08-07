@@ -537,7 +537,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - steward_standalone_data:/app/data
       - controller_standalone_certs:/app/controller-certs:ro
@@ -577,7 +577,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN --tenant-id tenant1"]
+    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - steward_tenant1_data:/app/data
       - ./test/module-execution:/test-workspace:rw
@@ -604,7 +604,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN --tenant-id tenant2"]
+    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - steward_tenant2_data:/app/data
       - ./test/module-execution:/test-workspace:rw
@@ -631,7 +631,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "./steward --log-level debug --log-provider file --regtoken $$CFGMS_REGISTRATION_TOKEN --tenant-id tenant3"]
+    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - steward_tenant3_data:/app/data
       - ./test/module-execution:/test-workspace:rw
