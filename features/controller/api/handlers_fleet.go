@@ -57,7 +57,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.logger.Info("Invalid selector expression",
-			"selector", logging.SanitizeLogValue(req.Selector), "error", err)
+			"selector", logging.SanitizeLogValue(req.Selector), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SELECTOR")
 		return
 	}
@@ -82,7 +82,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("Fleet query failed", "error", err)
+		s.logger.Error("Fleet query failed", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
 		return
 	}

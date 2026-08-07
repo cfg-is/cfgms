@@ -86,7 +86,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 
 	var req startRolloutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to decode start rollout body", "error", err)
+		s.logger.Warn("Failed to decode start rollout body", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
 		return
 	}
@@ -144,7 +144,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.rolloutStore.CreateRollout(r.Context(), record); err != nil {
 		s.logger.Error("Failed to create rollout record",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"target_version", logging.SanitizeLogValue(req.TargetVersion))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create rollout record", "CREATE_RECORD_ERROR")
 		return
@@ -201,7 +201,7 @@ func (s *Server) handleGetRollout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Error("Failed to retrieve rollout record",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"rollout_id", logging.SanitizeLogValue(rolloutID))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve rollout record", "GET_RECORD_ERROR")
 		return
@@ -282,7 +282,7 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Error("Failed to retrieve rollout record for halt",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"rollout_id", logging.SanitizeLogValue(rolloutID))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve rollout record", "GET_RECORD_ERROR")
 		return
@@ -318,7 +318,7 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 		business.RolloutStatusHalted, record.CurrentRing, record.RingsCompleted,
 		&now, "halted by operator"); updErr != nil {
 		s.logger.Warn("Failed to persist halt for rollout",
-			"rollout_id", logging.SanitizeLogValue(rolloutID), "error", updErr)
+			"rollout_id", logging.SanitizeLogValue(rolloutID), "error", logging.SanitizeLogValue(updErr.Error()))
 	}
 
 	s.logger.Info("Rollout halted by operator",

@@ -239,7 +239,7 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 		if err := h.auditManager.RecordEvent(ctx, event); err != nil {
 			h.logger.Warn("Failed to emit rollback audit event",
 				"rollback_id", logging.SanitizeLogValue(operation.ID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 

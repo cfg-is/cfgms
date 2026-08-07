@@ -124,7 +124,7 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 
 	data, err := json.Marshal(rc)
 	if err != nil {
-		s.logger.Error("Failed to marshal role config", "error", err)
+		s.logger.Error("Failed to marshal role config", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store role config", "INTERNAL_ERROR")
 		return
 	}
@@ -147,7 +147,7 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.roleConfigStore.StoreConfig(r.Context(), entry); err != nil {
-		s.logger.Error("Failed to store role config", "name", logging.SanitizeLogValue(req.Name), "error", err)
+		s.logger.Error("Failed to store role config", "name", logging.SanitizeLogValue(req.Name), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store role config", "INTERNAL_ERROR")
 		return
 	}
@@ -189,14 +189,14 @@ func (s *Server) handleGetRoleConfig(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Role config not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to get role config", "name", logging.SanitizeLogValue(name), "error", err)
+		s.logger.Error("Failed to get role config", "name", logging.SanitizeLogValue(name), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get role config", "INTERNAL_ERROR")
 		return
 	}
 
 	rc, err := unmarshalRoleConfig(entry)
 	if err != nil {
-		s.logger.Error("Failed to decode role config", "name", logging.SanitizeLogValue(name), "error", err)
+		s.logger.Error("Failed to decode role config", "name", logging.SanitizeLogValue(name), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decode role config", "INTERNAL_ERROR")
 		return
 	}
@@ -277,7 +277,7 @@ func (s *Server) handleDeleteRoleConfig(w http.ResponseWriter, r *http.Request) 
 			s.writeErrorResponse(w, http.StatusNotFound, "Role config not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to delete role config", "name", logging.SanitizeLogValue(name), "error", err)
+		s.logger.Error("Failed to delete role config", "name", logging.SanitizeLogValue(name), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete role config", "INTERNAL_ERROR")
 		return
 	}

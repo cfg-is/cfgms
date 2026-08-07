@@ -187,6 +187,96 @@ func TestIsScalarType(t *testing.T) {
 // analyzeSnippet writes src to a temp file and runs the linter against it,
 // returning the findings. This avoids exporting analyzeFile's internals while
 // letting each table-test case use a focused, readable fixture inline.
+// TestAnalyzeFile_FlagsBareErrorFromTaintedCall covers the defect class that kept
+// reaching acceptance review: the obvious taint gets sanitized and the error
+// returned by the same call does not. An error from a decode, lookup, or gRPC
+// call quotes the offending value in its message, so logging it bare is the same
+// injection as logging the value.
+func TestAnalyzeFile_FlagsBareErrorFromTaintedCall(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger; client client }
+type client interface{ GetRole(string) (string, error) }
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	roleID := mux.Vars(r)["id"]
+	_, err := s.client.GetRole(roleID)
+	s.logger.Error("Failed to get role", "role_id", logging.SanitizeLogValue(roleID), "error", err)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding for the bare err, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"err"`) {
+		t.Errorf("expected the finding to name err, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_AcceptsSanitizedError is the negative half: the documented
+// remedy must actually clear the finding, or the rule is unsatisfiable.
+func TestAnalyzeFile_AcceptsSanitizedError(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger; client client }
+type client interface{ GetRole(string) (string, error) }
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	roleID := mux.Vars(r)["id"]
+	_, err := s.client.GetRole(roleID)
+	s.logger.Error("Failed to get role", "error", logging.SanitizeLogValue(err.Error()))
+}
+`
+	if findings := analyzeSnippet(t, src); len(findings) != 0 {
+		t.Fatalf("expected no findings for a sanitized error, got %v", findings)
+	}
+}
+
+// TestAnalyzeFile_SkipsErrorFromTransmitOnlyCall guards the false positive found
+// while building this rule: `w.Write(taintedBytes)` fails because the socket
+// closed, not because of the payload, so its error cannot carry the payload back.
+// Flagging every response-write error would put the lint back in the category
+// developers learn to bypass.
+func TestAnalyzeFile_SkipsErrorFromTransmitOnlyCall(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	body := []byte(mux.Vars(r)["id"])
+	if _, err := w.Write(body); err != nil {
+		s.logger.Error("failed to write response", "error", err)
+	}
+}
+`
+	if findings := analyzeSnippet(t, src); len(findings) != 0 {
+		t.Fatalf("expected no findings for a transmit-only error, got %v", findings)
+	}
+}
+
+// TestAnalyzeFile_SkipsErrorFromUntaintedCall keeps the rule from degenerating
+// into "sanitize every error everywhere": a call that never saw user input
+// produces an error that cannot carry it.
+func TestAnalyzeFile_SkipsErrorFromUntaintedCall(t *testing.T) {
+	src := `package api
+import "net/http"
+type S struct{ logger logger; store store }
+type store interface{ Ping() error }
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Ping(); err != nil {
+		s.logger.Error("store unreachable", "error", err)
+	}
+}
+`
+	if findings := analyzeSnippet(t, src); len(findings) != 0 {
+		t.Fatalf("expected no findings for an untainted error, got %v", findings)
+	}
+}
+
 func analyzeSnippet(t *testing.T, src string) []finding {
 	t.Helper()
 	dir := t.TempDir()

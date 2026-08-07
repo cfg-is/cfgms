@@ -82,7 +82,13 @@ Stewards run on hosts that may be compromised. Admin accounts may be phished or 
 - Input validation and sanitization for all user data
 - SQL injection prevention (parameterized queries only)
 - No information disclosure in error messages
-- Use `logging.SanitizeLogValue()` for HTTP params, URL paths, headers
+- Use `logging.SanitizeLogValue()` for HTTP params, URL paths, headers — **and for
+  error values**: `"error", logging.SanitizeLogValue(err.Error())`, never
+  `"error", err`. An error returned from a gRPC, store, or decode call carries the
+  caller's tainted input back out inside its message text, so a sanitized ID
+  beside a raw `err` in the same log call is still a `go/log-injection` finding.
+  Wrapping an error that happens not to be tainted costs nothing; leaving a
+  tainted one bare costs a review round. `make lint-log-injection` flags it.
 - **CodeQL findings:** genuine bug → fix the code; false positive → extend the in-repo data-extension pack `.github/codeql/extensions/` (republished to ghcr.io by `codeql-pack-publish.yml` — local-path packs are unsupported, and this is **not** the upstream `github/codeql` repo). Heuristic-source FPs that can't be modeled → dismiss with justification. See [security-workflow-guide](docs/development/security-workflow-guide.md#5-codeql---semantic-code-analysis).
 - **Dependency scanning needs a credential.** `make security-deps` runs Nancy against Sonatype Guide, which rejects unauthenticated requests with `401` — an anonymous run produces no evidence, not a clean result. Export a free bearer token from https://guide.sonatype.com as `GUIDE_TOKEN` to scan locally. Without it the target **skips loudly and exits 0** so local work isn't blocked; `make security-scan` then reports the dependency scan as SKIPPED rather than passed. The gate fails closed whenever `CI` is set, or on demand via `CFGMS_REQUIRE_GUIDE_TOKEN=1`. CI supplies the repository `GUIDE_TOKEN` secret. Fork pull requests cannot receive it, so `nancy-scan` skips there and the merge queue — which does have the secret — performs the real scan before anything merges.
 

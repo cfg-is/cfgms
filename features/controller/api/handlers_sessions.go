@@ -55,7 +55,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to issue session",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create session", "SESSION_CREATE_ERROR")
 		return
 	}

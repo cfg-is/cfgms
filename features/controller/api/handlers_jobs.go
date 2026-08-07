@@ -110,7 +110,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("Fleet query failed during job creation", "error", err)
+		s.logger.Error("Fleet query failed during job creation", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
 		return
 	}
@@ -139,7 +139,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.batchJobStore.CreateBatchJob(r.Context(), job); err != nil {
-		s.logger.Error("Failed to persist batch job", "error", err)
+		s.logger.Error("Failed to persist batch job", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create job", "INTERNAL_ERROR")
 		return
 	}

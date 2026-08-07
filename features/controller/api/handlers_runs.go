@@ -275,7 +275,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to synthesize script run",
 			"script_id", logging.SanitizeLogValue(req.ScriptID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create run", "INTERNAL_ERROR")
 		return
@@ -393,7 +393,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to synthesize command run",
 			"shell", logging.SanitizeLogValue(req.Shell),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create run", "INTERNAL_ERROR")
 		return

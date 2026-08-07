@@ -91,7 +91,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	var req dispatchUpgradeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to decode dispatch upgrade body", "error", err)
+		s.logger.Warn("Failed to decode dispatch upgrade body", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
 		return
 	}
@@ -147,7 +147,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Resolve matching stewards.
 	stewards, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("Fleet query failed during upgrade dispatch", "error", err)
+		s.logger.Error("Fleet query failed during upgrade dispatch", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Fleet query failed", "FLEET_QUERY_ERROR")
 		return
 	}
@@ -169,7 +169,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 				"BINARY_NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to retrieve steward binary", "error", err)
+		s.logger.Error("Failed to retrieve steward binary", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve binary", "GET_BINARY_ERROR")
 		return
 	}
@@ -178,7 +178,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	blobContent, err := io.ReadAll(rc)
 	_ = rc.Close()
 	if err != nil {
-		s.logger.Error("Failed to read steward binary for SHA-256 recompute", "error", err)
+		s.logger.Error("Failed to read steward binary for SHA-256 recompute", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read binary", "READ_BINARY_ERROR")
 		return
 	}
@@ -201,7 +201,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	if sigBase64 != "" {
 		bundleSig, err = base64.RawURLEncoding.DecodeString(sigBase64)
 		if err != nil {
-			s.logger.Error("Failed to decode bundle signature from blob label", "error", err)
+			s.logger.Error("Failed to decode bundle signature from blob label", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decode signature", "SIGNATURE_DECODE_ERROR")
 			return
 		}
@@ -413,7 +413,7 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Error("Failed to retrieve upgrade record",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"upgrade_id", logging.SanitizeLogValue(upgradeID))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
@@ -467,7 +467,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to retrieve upgrade record for rollback", "error", err)
+		s.logger.Error("Failed to retrieve upgrade record for rollback", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
 	}
@@ -516,7 +516,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 				"BINARY_NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to retrieve rollback binary", "error", err)
+		s.logger.Error("Failed to retrieve rollback binary", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve binary", "GET_BINARY_ERROR")
 		return
 	}
@@ -524,7 +524,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	blobContent, err := io.ReadAll(rc)
 	_ = rc.Close()
 	if err != nil {
-		s.logger.Error("Failed to read rollback binary for SHA-256 recompute", "error", err)
+		s.logger.Error("Failed to read rollback binary for SHA-256 recompute", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read binary", "READ_BINARY_ERROR")
 		return
 	}
@@ -545,7 +545,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	if sigBase64 != "" {
 		bundleSig, err = base64.RawURLEncoding.DecodeString(sigBase64)
 		if err != nil {
-			s.logger.Error("Failed to decode bundle signature for rollback", "error", err)
+			s.logger.Error("Failed to decode bundle signature for rollback", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decode signature", "SIGNATURE_DECODE_ERROR")
 			return
 		}

@@ -390,7 +390,123 @@ func collectTaintedVars(root ast.Node) map[string]struct{} {
 		return true
 	})
 
+	// Propagate taint through error returns. An error produced by a call that
+	// received tainted input carries that input back out inside its message
+	// text -- a gRPC status, a store lookup, or a decode all quote the offending
+	// value -- so logging that error bare is the same injection as logging the
+	// value. This is the shape that kept reaching acceptance review: the obvious
+	// taint (a path var) gets sanitized and `err` beside it does not.
+	//
+	// Iterated to a fixed point so a chain (tainted arg -> err -> wrapped err)
+	// resolves. Five rounds is far beyond any real handler's depth and bounds a
+	// pathological input.
+	for i := 0; i < 5; i++ {
+		changed := false
+		ast.Inspect(root, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok || len(assign.Rhs) != 1 {
+				return true
+			}
+			call, ok := assign.Rhs[0].(*ast.CallExpr)
+			if !ok || transmitsWithoutEchoing(call) || !anyArgTainted(call.Args, tainted) {
+				return true
+			}
+			for _, lhs := range assign.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || !looksLikeErrorVar(id.Name) {
+					continue
+				}
+				if _, already := tainted[id.Name]; already {
+					continue
+				}
+				tainted[id.Name] = struct{}{}
+				changed = true
+			}
+			return true
+		})
+		if !changed {
+			break
+		}
+	}
+
 	return tainted
+}
+
+// transmitOnlyMethods send bytes somewhere. Their errors describe the transport
+// -- a closed socket, a short write -- and never quote the payload, so a tainted
+// argument does not make the returned error tainted. Distinguishing these from
+// calls that parse or look up the value (a decode error quotes the offending
+// input, a gRPC status quotes the rejected field) is what keeps this rule from
+// flagging every `w.Write` error in the codebase.
+var transmitOnlyMethods = map[string]struct{}{
+	"Write": {}, "WriteString": {}, "WriteHeader": {}, "Writeln": {},
+	"Flush": {}, "Close": {}, "Copy": {}, "CopyN": {},
+	"Fprint": {}, "Fprintf": {}, "Fprintln": {}, "Print": {}, "Printf": {}, "Println": {},
+}
+
+// transmitsWithoutEchoing reports whether a call only ships its arguments
+// onward, so its error cannot carry them back.
+func transmitsWithoutEchoing(call *ast.CallExpr) bool {
+	switch fn := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		_, ok := transmitOnlyMethods[fn.Sel.Name]
+		return ok
+	case *ast.Ident:
+		_, ok := transmitOnlyMethods[fn.Name]
+		return ok
+	}
+	return false
+}
+
+// looksLikeErrorVar reports whether a variable name denotes an error value.
+// Name-based rather than type-based because this linter parses without type
+// information; Go's own naming convention makes it reliable in practice.
+func looksLikeErrorVar(name string) bool {
+	return name == "err" || strings.HasSuffix(name, "Err") || strings.HasSuffix(name, "Error")
+}
+
+// anyArgTainted reports whether any argument carries tainted data, looking
+// through the wrappers a request argument is normally built with: `&pb.Req{...}`,
+// a composite literal's field values, and nested calls like `proto.String(id)`.
+func anyArgTainted(args []ast.Expr, tainted map[string]struct{}) bool {
+	for _, a := range args {
+		if exprCarriesTaint(a, tainted) {
+			return true
+		}
+	}
+	return false
+}
+
+func exprCarriesTaint(e ast.Expr, tainted map[string]struct{}) bool {
+	if e == nil {
+		return false
+	}
+	if isTaintedExpr(e, tainted) {
+		return true
+	}
+	switch v := e.(type) {
+	case *ast.UnaryExpr:
+		return exprCarriesTaint(v.X, tainted)
+	case *ast.ParenExpr:
+		return exprCarriesTaint(v.X, tainted)
+	case *ast.CompositeLit:
+		for _, el := range v.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				if exprCarriesTaint(kv.Value, tainted) {
+					return true
+				}
+				continue
+			}
+			if exprCarriesTaint(el, tainted) {
+				return true
+			}
+		}
+	case *ast.CallExpr:
+		return anyArgTainted(v.Args, tainted)
+	case *ast.BinaryExpr:
+		return exprCarriesTaint(v.X, tainted) || exprCarriesTaint(v.Y, tainted)
+	}
+	return false
 }
 
 // isTaintSourceExpr returns true if the expression is a known HTTP taint source.

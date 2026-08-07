@@ -67,7 +67,7 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to add IP trust range",
 			"tenant_id", logging.SanitizeLogValue(req.TenantID),
 			"cidr", logging.SanitizeLogValue(req.CIDR),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to add IP trust range", http.StatusInternalServerError)
 		return
 	}

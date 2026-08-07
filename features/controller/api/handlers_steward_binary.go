@@ -149,7 +149,7 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	// Buffer the binary body to compute SHA-256 for signature verification.
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.logger.Error("Failed to read request body", "error", err)
+		s.logger.Error("Failed to read request body", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read request body", "READ_ERROR")
 		return
 	}
@@ -241,7 +241,7 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	rc, storedMeta, err := s.blobStore.GetBlob(r.Context(), key)
 	if err != nil {
 		s.logger.Error("Failed to retrieve stored steward binary metadata",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"version", logging.SanitizeLogValue(version),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))

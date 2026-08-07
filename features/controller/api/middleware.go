@@ -493,7 +493,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		if !exists {
 			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKeyStr)
 			if err != nil {
-				s.logger.Debug("Failed to load API key from store", "error", err)
+				s.logger.Debug("Failed to load API key from store", "error", logging.SanitizeLogValue(err.Error()))
 				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
 				return
 			}

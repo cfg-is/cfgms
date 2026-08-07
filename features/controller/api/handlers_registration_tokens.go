@@ -59,7 +59,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Parse request body; detect removed single_use field.
 	var req createTokenRequestWithSingleUseCheck
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to parse token create request", "error", err)
+		s.logger.Warn("Failed to parse token create request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -100,14 +100,14 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Create token using registration package
 	token, err := registration.CreateToken(&req.TokenCreateRequest)
 	if err != nil {
-		s.logger.Error("Failed to create registration token", "error", err)
+		s.logger.Error("Failed to create registration token", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to create token", http.StatusInternalServerError)
 		return
 	}
 
 	// Save token to store
 	if err := s.registrationTokenStore.SaveToken(r.Context(), token); err != nil {
-		s.logger.Error("Failed to save registration token", "error", err)
+		s.logger.Error("Failed to save registration token", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to save token", http.StatusInternalServerError)
 		return
 	}
@@ -123,7 +123,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.logger.Error("Failed to encode token response", "error", err)
+		s.logger.Error("Failed to encode token response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -425,7 +425,7 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.logger.Error("Failed to encode rotate token response", "error", err)
+		s.logger.Error("Failed to encode rotate token response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

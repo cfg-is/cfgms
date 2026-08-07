@@ -85,7 +85,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	h.setExportHeaders(w, req.Format, report.ID)
 	if _, err := w.Write(exportData); err != nil {
-		h.logger.Error("failed to write export data", "error", err)
+		h.logger.Error("failed to write export data", "error", logging.SanitizeLogValue(err.Error()))
 		// Can't return error to client at this point as headers are already sent
 	}
 
