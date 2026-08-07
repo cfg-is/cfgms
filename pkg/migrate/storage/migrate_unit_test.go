@@ -11,6 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/migrate"
 	migratestorage "github.com/cfgis/cfgms/pkg/migrate/storage"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // TestStorageMigratorFactory_Registered verifies that importing pkg/migrate/storage
@@ -101,12 +102,94 @@ func TestStorageMigrator_OSStoOSSRoundTrip(t *testing.T) {
 	require.NoError(t, err, "OSS→OSS migration must succeed")
 
 	// Verify counts for the non-RBAC stores we seeded.
-	wantKinds := []string{"tenant", "config", "audit", "registration_token", "session", "steward", "command", "trigger", "push", "ip_trust", "refresh_policy", "pending_refresh"}
+	wantKinds := []string{"tenant", "config", "audit", "registration_token", "session", "steward", "command", "trigger", "push", "ip_trust", "refresh_policy", "pending_refresh", "pending_registration"}
 	for _, kind := range wantKinds {
 		c, ok := report.Counts[kind]
 		assert.True(t, ok, "expected kind %q in OSS→OSS report", kind)
 		assert.Greater(t, c, 0, "expected at least one %q record in OSS→OSS report", kind)
 	}
+}
+
+// TestStorageMigrator_PendingRegistrationStatusResync verifies that re-running a
+// migration against a destination that has advanced past the source snapshot
+// never regresses a registration out of a terminal state, and never undoes an
+// operator approval. A claimed → approved regression would let a steward that
+// still holds its token claim a second certificate for the same pending_id.
+func TestStorageMigrator_PendingRegistrationStatusResync(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		dest   string
+		want   string
+	}{
+		{"claimed destination is not re-armed by approved source", business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusClaimed, business.PendingRegistrationStatusClaimed},
+		{"claimed destination is not regressed to pending", business.PendingRegistrationStatusPending, business.PendingRegistrationStatusClaimed, business.PendingRegistrationStatusClaimed},
+		{"denied destination is not resurrected", business.PendingRegistrationStatusPending, business.PendingRegistrationStatusDenied, business.PendingRegistrationStatusDenied},
+		{"denied destination is not re-approved", business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusDenied, business.PendingRegistrationStatusDenied},
+		{"expired destination is not revived", business.PendingRegistrationStatusPending, business.PendingRegistrationStatusExpired, business.PendingRegistrationStatusExpired},
+		{"approved destination is not regressed to pending", business.PendingRegistrationStatusPending, business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusApproved},
+		{"pending destination advances to approved", business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusPending, business.PendingRegistrationStatusApproved},
+		{"pending destination advances to denied", business.PendingRegistrationStatusDenied, business.PendingRegistrationStatusPending, business.PendingRegistrationStatusDenied},
+		{"pending destination advances to expired", business.PendingRegistrationStatusExpired, business.PendingRegistrationStatusPending, business.PendingRegistrationStatusExpired},
+		{"approved destination advances to claimed", business.PendingRegistrationStatusClaimed, business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusClaimed},
+		{"matching status is left alone", business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusApproved},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			src := newOSSManager(t)
+			seedPendingRegistration(t, src, "pending-reg-resync", tc.source)
+			dst := newOSSManager(t)
+			seedPendingRegistration(t, dst, "pending-reg-resync", tc.dest)
+
+			_, err := migratestorage.NewStorageMigrator(src, dst).Run(ctx)
+			require.NoError(t, err, "migration must succeed")
+
+			got := pendingRegistrationStatus(t, dst, "pending-reg-resync")
+			assert.Equal(t, tc.want, got.Status, "destination status after resync")
+		})
+	}
+}
+
+// TestStorageMigrator_PendingRegistrationPendingToClaimed verifies that a
+// destination still at "pending" is walked forward to "claimed" (through
+// approved, which the store's claim guard requires) so that an operator cannot
+// later approve a registration the steward has already claimed.
+func TestStorageMigrator_PendingRegistrationPendingToClaimed(t *testing.T) {
+	ctx := context.Background()
+
+	src := newOSSManager(t)
+	seedPendingRegistration(t, src, "pending-reg-claimed", business.PendingRegistrationStatusClaimed)
+	dst := newOSSManager(t)
+	seedPendingRegistration(t, dst, "pending-reg-claimed", business.PendingRegistrationStatusPending)
+
+	_, err := migratestorage.NewStorageMigrator(src, dst).Run(ctx)
+	require.NoError(t, err, "migration must succeed")
+
+	got := pendingRegistrationStatus(t, dst, "pending-reg-claimed")
+	assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status)
+	assert.NotNil(t, got.ClaimedAt, "claimed_at must be persisted with the claimed status")
+}
+
+// TestStorageMigrator_PendingRegistrationUnknownStatus verifies that an
+// unrecognized lifecycle status fails the migration loudly instead of being
+// written blindly into the destination.
+func TestStorageMigrator_PendingRegistrationUnknownStatus(t *testing.T) {
+	ctx := context.Background()
+
+	src := newOSSManager(t)
+	seedPendingRegistration(t, src, "pending-reg-bogus", "not-a-status")
+	dst := newOSSManager(t)
+	seedPendingRegistration(t, dst, "pending-reg-bogus", business.PendingRegistrationStatusPending)
+
+	_, err := migratestorage.NewStorageMigrator(src, dst).Run(ctx)
+	require.Error(t, err, "unrecognized source status must fail the migration")
+	assert.Contains(t, err.Error(), "unrecognized status")
+
+	got := pendingRegistrationStatus(t, dst, "pending-reg-bogus")
+	assert.Equal(t, business.PendingRegistrationStatusPending, got.Status, "destination must be untouched")
 }
 
 // TestStorageMigrator_OSStoOSS_Idempotent verifies that the OSS→OSS migration

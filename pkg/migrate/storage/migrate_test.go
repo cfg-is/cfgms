@@ -164,6 +164,7 @@ func assertMigrationCounts(t *testing.T, counts map[string]int, label string) {
 		"ip_trust",
 		"refresh_policy",
 		"pending_refresh",
+		"pending_registration",
 	}
 	for _, kind := range wantKinds {
 		c, ok := counts[kind]
