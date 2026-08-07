@@ -48,8 +48,13 @@ func NewStorageAdapter(store business.TenantStore) Store {
 
 // Common errors
 var (
-	ErrTenantNotFound    = fmt.Errorf("tenant not found")
-	ErrTenantExists      = fmt.Errorf("tenant already exists")
+	// ErrTenantNotFound aliases the storage-layer sentinel rather than declaring a
+	// second "tenant is missing" error. Manager passes store errors through
+	// untouched, so a caller that matched this value while a provider returned the
+	// storage sentinel would never match — the divergence that let a missing-tenant
+	// lookup be misclassified as a backend fault.
+	ErrTenantNotFound    = business.ErrTenantDoesNotExist
+	ErrTenantExists      = business.ErrTenantAlreadyExists
 	ErrInvalidParent     = fmt.Errorf("invalid parent tenant")
 	ErrCircularReference = fmt.Errorf("circular reference in tenant hierarchy")
 	ErrTenantHasChildren = fmt.Errorf("tenant has child tenants")

@@ -14,6 +14,21 @@ import (
 // with the given ID already exists. Handlers must use errors.Is to detect it.
 var ErrTenantAlreadyExists = errors.New("tenant already exists")
 
+// ErrTenantDoesNotExist is returned by every TenantStore operation that
+// addresses a tenant which has no row: GetTenant, UpdateTenant and
+// DeleteTenant. Providers wrap it with %w so the message may carry the tenant
+// ID and provider-specific phrasing; callers MUST use errors.Is and MUST NOT
+// classify on message text. Matching on a substring silently binds a caller to
+// one provider's phrasing — a handler that classifies "tenant not found" would
+// treat a missing tenant as a backend fault on any provider that phrases the
+// same condition differently, turning the resulting status-code difference into
+// a cross-tenant existence oracle.
+//
+// Named for symmetry with ErrTenantAlreadyExists rather than "NotFound",
+// because ErrTenantNotFound in this package is the unrelated
+// *ClientTenantValidationError for the M365 client-tenant surface.
+var ErrTenantDoesNotExist = errors.New("tenant does not exist")
+
 // TenantStore defines storage interface for CFGMS tenant data persistence
 // All tenant modules use this interface - storage provider is chosen by controller
 type TenantStore interface {

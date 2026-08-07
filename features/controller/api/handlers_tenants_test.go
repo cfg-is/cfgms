@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // tenantIDsFromListResponse extracts the slice of tenant IDs from a list-endpoint response body.
@@ -479,6 +480,68 @@ func TestHandleListTenants_MissingPermission(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
+// TestHandleListTenants_StorageFailure_Returns500 covers handleListTenants' storage-failure
+// branch, the one path the scope-filtering and permission tests above never reach.
+//
+// The failure is produced by the genuine sqlite tenant store rather than a substitute
+// store: the handler passes r.Context() straight through to ListTenants, and the provider
+// issues the query with QueryContext, so a cancelled request context makes the driver fail
+// for real. That is also a fault this endpoint sees in production — a client disconnecting
+// or a request deadline elapsing mid-query.
+//
+// The handler is invoked directly because the failure has to originate inside
+// ListTenants; routing a cancelled-context request would abort in the authentication
+// middleware's own store lookups first and never reach the handler.
+func TestHandleListTenants_StorageFailure_Returns500(t *testing.T) {
+	capLog := &errorCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// A tenant the caller is authorized to see, so an empty result cannot be mistaken
+	// for a correct response: on the success path this ID is returned.
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{
+		ID: "list-failure-visible",
+	})
+	require.NoError(t, err)
+
+	listAsUnscopedAdmin := func(ctx context.Context) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
+		req = req.WithContext(context.WithValue(ctx, ctxkeys.TenantID, ""))
+		rec := httptest.NewRecorder()
+		server.handleListTenants(rec, req)
+		return rec
+	}
+
+	// Precondition: with a healthy store the same call succeeds and returns the tenant.
+	// Without this the 500 below could come from a handler that never works at all.
+	healthy := listAsUnscopedAdmin(context.Background())
+	require.Equal(t, http.StatusOK, healthy.Code, "precondition: the healthy path must return 200")
+	require.Contains(t, tenantIDsFromListResponse(t, healthy.Body.Bytes()), "list-failure-visible")
+
+	failedCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := listAsUnscopedAdmin(failedCtx)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a store failure must be reported as 500, never as an empty success list")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "LIST_FAILED", errResp.Error.Code)
+	assert.Equal(t, "failed to list tenants", errResp.Error.Message,
+		"the client must receive a generic message, not backend driver text")
+	assert.NotContains(t, errResp.Error.Message, "list-failure-visible",
+		"a failed list must not disclose any tenant ID")
+
+	// The detail the client is denied must still reach the operator, sanitized like
+	// every other caller-influenced log value in this file.
+	loggedErr, ok := capLog.kvValue("error").(string)
+	require.True(t, ok, "the store failure must be logged as a sanitized string under 'error'")
+	assert.Contains(t, loggedErr, "context canceled",
+		"the operator must get the underlying store fault")
+	assert.NotContains(t, loggedErr, "\n", "log values must not carry newlines")
+	assert.NotContains(t, loggedErr, "\r", "log values must not carry carriage returns")
+}
+
 // --- handleUpdateTenant tests ---
 
 // TestHandleUpdateTenant_Success verifies that PUT /api/v1/tenants/{id} updates the
@@ -512,6 +575,12 @@ func TestHandleUpdateTenant_Success(t *testing.T) {
 }
 
 // TestHandleUpdateTenant_NotFound verifies that updating a non-existent tenant returns 404.
+//
+// The handler classifies the miss with errors.Is against business.ErrTenantDoesNotExist.
+// No storage provider's message contains the literal "tenant not found" any more, so a
+// regression to substring classification fails this test rather than silently returning
+// 500 for a missing tenant while an out-of-scope tenant still returns 404 — a status
+// split that would disclose the existence of tenants outside the caller's subtree.
 func TestHandleUpdateTenant_NotFound(t *testing.T) {
 	server := setupTestServer(t)
 
@@ -802,6 +871,106 @@ func TestIsTenantInputRejection_OnlyEchoesCallerSuppliedRejections(t *testing.T)
 	}
 
 	assert.False(t, isTenantInputRejection(nil), "a nil error is not a rejection")
+}
+
+// echoingUpdateTenantStore is a real tenant.Store (not a mock): every method except
+// UpdateTenant runs against the wrapped durable store, so GetTenant, the scope check and
+// tenant creation all exercise the genuine sqlite provider. UpdateTenant reproduces the
+// one behaviour that matters here — a storage driver rejecting a write with a message that
+// quotes the value the caller submitted. Postgres does this routinely (unique-constraint
+// and value-length violations both echo the offending column value), which is how untrusted
+// request-body bytes reach the controller's log line.
+type echoingUpdateTenantStore struct {
+	tenant.Store
+}
+
+func (s *echoingUpdateTenantStore) UpdateTenant(_ context.Context, td *business.TenantData) error {
+	return fmt.Errorf("pq: value too long for type character varying (64), Key (description) is %q", td.Description)
+}
+
+// TestHandleUpdateTenant_BackendError_LogValueSanitized pins the go/log-injection fix at
+// handlers_tenants.go: the "error" value logged when UpdateTenant fails must be passed
+// through logging.SanitizeLogValue, exactly like the adjacent "tenant_id" field.
+//
+// The taint path is real: Manager.UpdateTenant wraps the store error as
+// "failed to update tenant: %w", the store's text can quote the caller's Name/Description,
+// and that class is deliberately excluded from isTenantInputRejection so it falls through
+// to the Error log. Without sanitization a request body carrying CR/LF forges whole log
+// lines in the controller log.
+func TestHandleUpdateTenant_BackendError_LogValueSanitized(t *testing.T) {
+	// The payload passes the request-validation middleware's safe_text charset — whose
+	// regexp allows \s, and therefore CR and LF — so this is reachable over the wire by
+	// any caller holding tenant:update, not a hypothetical.
+	const forgedDescription = "evil\r\nERROR Tenant suspended by admin: forged log line"
+
+	t.Run("control characters stripped from logged error", func(t *testing.T) {
+		capLog := &errorCapturingLogger{}
+		server := setupTestServerWithLogger(t, capLog)
+		server.tenantManager = tenant.NewManager(
+			&echoingUpdateTenantStore{Store: tenant.NewStorageAdapter(pkgtesting.SetupTestStorage(t).GetTenantStore())},
+			server.rbacManager,
+		)
+
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "log-injection-target"})
+		require.NoError(t, err)
+
+		// The name must clear Manager.validateTenantRequest so the failure lands on the
+		// store write; the injected control characters ride in on the description instead.
+		body, err := json.Marshal(map[string]string{
+			"name":        "log-injection-target",
+			"description": forgedDescription,
+		})
+		require.NoError(t, err)
+		req := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/log-injection-target", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code,
+			"a store write failure is a backend fault, not a caller-actionable rejection")
+
+		logged := capLog.kvValue("error")
+		require.NotNil(t, logged, "the backend fault must be logged under the 'error' key")
+		loggedStr, ok := logged.(string)
+		require.True(t, ok, "the sanitized error must be logged as a string, not a raw error value")
+		assert.NotContains(t, loggedStr, "\n", "CR/LF from the request body must not reach the log")
+		assert.NotContains(t, loggedStr, "\r", "CR/LF from the request body must not reach the log")
+		assert.Contains(t, loggedStr, "value too long for type",
+			"sanitization must preserve the diagnostic text operators need")
+		assert.NotContains(t, loggedStr, "ERROR Tenant suspended by admin: forged log line\n",
+			"the forged entry must not survive as a standalone log line")
+	})
+
+	t.Run("clean backend error text preserved", func(t *testing.T) {
+		capLog := &errorCapturingLogger{}
+		server := setupTestServerWithLogger(t, capLog)
+		server.tenantManager = tenant.NewManager(
+			&echoingUpdateTenantStore{Store: tenant.NewStorageAdapter(pkgtesting.SetupTestStorage(t).GetTenantStore())},
+			server.rbacManager,
+		)
+
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "log-clean-target"})
+		require.NoError(t, err)
+
+		body, err := json.Marshal(map[string]string{
+			"name":        "log-clean-target",
+			"description": "ordinary description",
+		})
+		require.NoError(t, err)
+		req := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/log-clean-target", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+		loggedStr, ok := capLog.kvValue("error").(string)
+		require.True(t, ok, "the sanitized error must be logged as a string")
+		assert.Contains(t, loggedStr, "failed to update tenant",
+			"a control-character-free backend error must survive sanitization unchanged")
+	})
 }
 
 // TestHandleUpdateTenant_ParentIDIgnored is a REQUIRED test (Issue #3125 AC: "Attempting

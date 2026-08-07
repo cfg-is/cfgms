@@ -53,7 +53,7 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 
 	td, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
-		if strings.Contains(err.Error(), "tenant not found") {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 			return
 		}
@@ -87,6 +87,13 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 
 	all, err := s.tenantManager.ListTenants(r.Context(), &business.TenantFilter{})
 	if err != nil {
+		// The store's text is a backend fault (driver messages naming the schema, the
+		// database host:port, a cancelled request context) and never reaches the client;
+		// it goes to the log instead, sanitized for the same reason the adjacent
+		// caller_tenant field is — see handleUpdateTenant's error branch.
+		s.logger.Error("Tenant list failed",
+			"caller_tenant", logging.SanitizeLogValue(callerTenant),
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to list tenants", "LIST_FAILED")
 		return
 	}
@@ -145,6 +152,13 @@ func isTenantInputRejection(err error) bool {
 // disclosure), 400 for body-decode failures and caller-actionable rejections
 // (isTenantInputRejection), 500 for any other backend failure, 200 with the
 // updated tenant on success.
+//
+// A missing tenant is identified with errors.Is against business.ErrTenantDoesNotExist,
+// never by matching the error message. Message matching only recognises whichever
+// phrasing one storage provider happens to use; on every other provider the missing
+// tenant falls through to 500 while an out-of-scope tenant still returns 404, and that
+// status split is a cross-tenant existence oracle for any tenant-scoped caller holding
+// tenant:update.
 func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	tenantID := vars["id"]
@@ -160,7 +174,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 	// caller's subtree, preventing disclosure of tenants in other scopes.
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
-		if strings.Contains(err.Error(), "tenant not found") {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 			return
 		}
@@ -184,7 +198,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := s.tenantManager.UpdateTenant(r.Context(), tenantID, &req)
 	if err != nil {
-		if strings.Contains(err.Error(), "tenant not found") {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 			return
 		}
@@ -199,9 +213,15 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "VALIDATION_FAILED")
 			return
 		}
+		// err is sanitized for the same reason tenant_id is: the residual (non
+		// input-rejection) classes include tenant.Manager's
+		// fmt.Errorf("failed to update tenant: %w", err), which wraps raw storage-driver
+		// text that can embed the caller's submitted Name/Description/Metadata verbatim.
+		// Logging it unsanitized lets a request body inject CR/LF or ANSI sequences into
+		// the controller log and forge entries.
 		s.logger.Error("Tenant update failed",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to update tenant", "UPDATE_FAILED")
 		return
 	}
@@ -225,7 +245,7 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tenantManager.SuspendTenant(r.Context(), tenantID); err != nil {
-		if strings.Contains(err.Error(), "tenant not found") {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 			return
 		}

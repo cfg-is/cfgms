@@ -13,6 +13,57 @@ import (
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 )
 
+// TenantStoreMissingTenantContract asserts that store signals "this tenant has no
+// row" with the ErrTenantDoesNotExist sentinel from every operation that addresses a
+// tenant by ID. Call it from each TenantStore provider's tests:
+//
+//	func TestMyTenantStore_MissingTenantContract(t *testing.T) {
+//	    business.TenantStoreMissingTenantContract(t, openStore(t))
+//	}
+//
+// Providers are free to phrase the message however they like — callers must use
+// errors.Is, and this contract is what makes that safe. It exists because message
+// phrasing diverged between providers once before: an API handler classifying a
+// missing tenant by substring returned 404 on one provider and 500 on another, while
+// an out-of-scope tenant returned 404 on both, so the status code disclosed the
+// existence of tenants outside the caller's subtree.
+//
+// The store must be initialized and must not contain a tenant named by the probe ID.
+// Lifecycle (Initialize/Close) stays with the caller.
+func TenantStoreMissingTenantContract(t *testing.T, store TenantStore) {
+	t.Helper()
+	ctx := context.Background()
+	const missingID = "contract-probe-tenant-absent"
+
+	t.Run("GetTenant reports the sentinel", func(t *testing.T) {
+		got, err := store.GetTenant(ctx, missingID)
+		require.Error(t, err)
+		assert.Nil(t, got)
+		assert.ErrorIs(t, err, ErrTenantDoesNotExist,
+			"GetTenant on an absent tenant must wrap ErrTenantDoesNotExist so callers need not match message text")
+	})
+
+	t.Run("UpdateTenant reports the sentinel", func(t *testing.T) {
+		err := store.UpdateTenant(ctx, &TenantData{
+			ID:        missingID,
+			Name:      "absent",
+			Status:    TenantStatusActive,
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrTenantDoesNotExist,
+			"UpdateTenant on an absent tenant must wrap ErrTenantDoesNotExist")
+	})
+
+	t.Run("DeleteTenant reports the sentinel", func(t *testing.T) {
+		err := store.DeleteTenant(ctx, missingID)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrTenantDoesNotExist,
+			"DeleteTenant on an absent tenant must wrap ErrTenantDoesNotExist")
+	})
+}
+
 func newContractBatchJob(id, tenantID string) *batchjob.BatchJob {
 	now := time.Now().UTC()
 	return &batchjob.BatchJob{
