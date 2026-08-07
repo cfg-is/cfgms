@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -279,6 +280,106 @@ func TestResolveAssurance_PresenceOverride_ChallengingInOverridingTenant(t *test
 	require.True(t, foundB)
 	assert.False(t, reqB.RequireUserPresence, "sibling without override must not require presence")
 	assert.Equal(t, session.AssuranceStrong, reqB.Min)
+}
+
+// TestRequirePermission_PresenceOverride_HTTPChallengeAndSiblingAdmission is the
+// HTTP-observable half of the same acceptance criterion.
+//
+// The resolver-level test above proves resolveAssuranceRequirement returns the
+// right struct. That alone cannot show requirePermission ACTS on it: a wiring
+// mistake — wrong argument order, tenantID never threaded through, the challenge
+// branch reading the global map instead of the resolved requirement — would leave
+// the resolver test green while the gate admitted everyone. The AC is phrased as
+// an HTTP outcome (401 plus WWW-Authenticate presence="required" in the
+// overriding tenant, admitted in a sibling), so it is asserted as one here.
+//
+// authenticationMiddleware is deliberately not in the chain: it overwrites
+// ctxkeys.TenantID from the principal it builds off the client cert, which would
+// discard the tenant scope this test varies. requirePermission is the unit under
+// test, so the principal and tenant are placed in the request context directly —
+// the same pattern the tenant-scoped handler tests in this package use.
+//
+// [REQUIRED TEST] per acceptance criterion — HTTP-level companion.
+func TestRequirePermission_PresenceOverride_HTTPChallengeAndSiblingAdmission(t *testing.T) {
+	apStore := newTestAssurancePolicyStore()
+	require.NoError(t, apStore.SetPolicy(context.Background(), &business.AssurancePolicy{
+		TenantID: "root/tenant-with-override",
+		Overrides: []business.AssurancePolicyOverride{
+			{PermissionID: "certificate:provision", RequireUserPresence: true},
+		},
+	}))
+
+	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root/tenant-with-override": {"root", "root/tenant-with-override"},
+		"root/sibling-no-override":  {"root", "root/sibling-no-override"},
+	})
+
+	srv := setupTestServer(t)
+	srv.SetAssurancePolicyStore(apStore)
+	srv.SetTenantStore(tsStore)
+
+	// Precondition: the override, not the global map, must be what drives the
+	// challenge. If the global map already required presence the test would pass
+	// for the wrong reason and prove nothing about per-tenant resolution.
+	require.False(t, permissionAssurance["certificate:provision"].RequireUserPresence,
+		"precondition: global map must not require presence for certificate:provision")
+
+	// AssuranceStrong (as an mTLS caller would be) with no fresh presence proof.
+	// Permissions nil is the implicit-admin marker, so authorisation passes and the
+	// only thing that can reject this request is the presence gate.
+	principal := &Principal{
+		ID:           "test-admin",
+		Name:         "test-admin",
+		Assurance:    session.AssuranceStrong,
+		GlobalScope:  true,
+		LastProvenAt: time.Now(),
+	}
+
+	call := func(tenantID string) *httptest.ResponseRecorder {
+		reached := false
+		handler := srv.requirePermission("certificate", "provision")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			}))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/certificates/provision", nil)
+		ctx := context.WithValue(req.Context(), principalContextKey, principal)
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req.WithContext(ctx))
+
+		// Reaching the inner handler and returning 200 must agree; a 200 recorded
+		// without the handler running would mean something else wrote the status.
+		if rec.Code == http.StatusOK {
+			assert.True(t, reached, "200 must mean the wrapped handler actually ran")
+		}
+		return rec
+	}
+
+	t.Run("overriding tenant is challenged", func(t *testing.T) {
+		rec := call("root/tenant-with-override")
+
+		require.Equal(t, http.StatusUnauthorized, rec.Code,
+			"tenant override RequireUserPresence=true must produce a 401 step-up challenge")
+
+		wwwAuth := rec.Header().Get("WWW-Authenticate")
+		assert.Contains(t, wwwAuth, `presence="required"`,
+			`WWW-Authenticate must carry presence="required"`)
+		assert.Contains(t, wwwAuth, "CFGMS-StepUp",
+			"WWW-Authenticate must use the CFGMS-StepUp scheme")
+		assert.Contains(t, rec.Body.String(), "presence_required",
+			"response body must identify presence as the reason")
+	})
+
+	t.Run("sibling tenant without the override is admitted", func(t *testing.T) {
+		rec := call("root/sibling-no-override")
+
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"a sibling tenant without the override must not be challenged")
+		assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
+			"an admitted request must not carry a step-up challenge header")
+	})
 }
 
 // ---- [REQUIRED TEST] per-AC: child inherits parent override and can tighten further ----

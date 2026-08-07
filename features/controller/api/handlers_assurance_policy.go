@@ -220,7 +220,7 @@ func (s *Server) resolveAssuranceRequirementForPath(ctx context.Context, path []
 		if err != nil {
 			s.logger.Warn("resolveAssuranceRequirementForPath: failed to get assurance policy; using global floor",
 				"tenant_id", logging.SanitizeLogValue(t),
-				"permission_id", permissionID,
+				"permission_id", logging.SanitizeLogValue(permissionID),
 				"error", logging.SanitizeLogValue(err.Error()),
 			)
 			return floor, found

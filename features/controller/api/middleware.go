@@ -1182,8 +1182,8 @@ func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, perm
 	if err != nil {
 		s.logger.Warn("resolveAssuranceRequirement: failed to get tenant path; using global floor",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"permission_id", permissionID,
-			"error", err,
+			"permission_id", logging.SanitizeLogValue(permissionID),
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		return floor, found
 	}
@@ -1194,8 +1194,8 @@ func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, perm
 		if err != nil {
 			s.logger.Warn("resolveAssuranceRequirement: failed to get assurance policy; using global floor",
 				"tenant_id", logging.SanitizeLogValue(t),
-				"permission_id", permissionID,
-				"error", err,
+				"permission_id", logging.SanitizeLogValue(permissionID),
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 			return floor, found
 		}
