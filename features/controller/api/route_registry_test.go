@@ -173,6 +173,7 @@ var goldenRouteTable = []string{
 	"GET /api/v1/stewards/{id}/scripts/metrics",
 	"GET /api/v1/stewards/{id}/scripts/status",
 	"GET /api/v1/stewards/{id}/tags",
+	"GET /api/v1/tenants",
 	"GET /api/v1/tenants/{id}",
 	"GET /api/v1/tenants/{tenant_path:.+}/assurance-policy",
 	"GET /api/v1/tenants/{tenant_path:.+}/refresh-policy",
@@ -241,6 +242,7 @@ var goldenRouteTable = []string{
 	"PUT /api/v1/rbac/roles/{id}",
 	"PUT /api/v1/scripts/{id}/privilege",
 	"PUT /api/v1/stewards/{id}/config",
+	"PUT /api/v1/tenants/{id}",
 	"PUT /api/v1/tenants/{tenant_path:.+}/assurance-policy",
 	"PUT /api/v1/tenants/{tenant_path:.+}/refresh-policy",
 }

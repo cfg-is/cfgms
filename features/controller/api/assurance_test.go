@@ -120,6 +120,19 @@ func TestPermissionAssurance_ApproveByCIDRIsGrantable(t *testing.T) {
 	assert.False(t, isKnownPermission("*"), "wildcard must never be a valid permission ID")
 }
 
+// TestPermissionAssurance_TenantUpdateStrong is a REQUIRED test (Issue #3125 AC:
+// "tenant:update is registered in permissionAssurance at Min: session.AssuranceStrong").
+// tenant:update covers config-source-type/git-mount-point transitions — supply-chain-
+// adjacent, blast-radius-relevant changes that sit at the same bar as tenant:create.
+func TestPermissionAssurance_TenantUpdateStrong(t *testing.T) {
+	req, found := permissionAssurance["tenant:update"]
+	require.True(t, found, "tenant:update must be in permissionAssurance")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"tenant:update must require AssuranceStrong (same bar as tenant:create)")
+	assert.False(t, req.RequireUserPresence,
+		"tenant:update must not require user presence (not a catastrophic operation)")
+}
+
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {

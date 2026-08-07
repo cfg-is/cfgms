@@ -79,7 +79,9 @@ var knownPermissions = map[string]bool{
 	// Compliance
 	"compliance:read-summary": true,
 	// Tenant management
+	"tenant:list":   true,
 	"tenant:read":   true,
+	"tenant:update": true,
 	"tenant:manage": true,
 	// Script library administration (Issue #1670)
 	"script:admin": true,

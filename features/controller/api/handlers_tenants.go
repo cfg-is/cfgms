@@ -75,6 +75,143 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, td)
 }
 
+// handleListTenants implements GET /api/v1/tenants.
+// Returns the tenants visible to the caller, filtered to the caller's authorized
+// subtree. An unscoped mTLS admin (callerTenant == "") sees all tenants. A scoped
+// caller sees only tenants whose ID matches their own tenant (equality) or is a
+// slash-prefixed descendant of it (per isWithinTenantScope). ADR-025: a caller
+// scoped to the root tenant ID does not see MSP-level tenants without an active
+// cross-boundary grant, because MSP tenant IDs do not share the root tenant's ID.
+func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	all, err := s.tenantManager.ListTenants(r.Context(), &business.TenantFilter{})
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to list tenants", "LIST_FAILED")
+		return
+	}
+
+	result := make([]*business.TenantData, 0, len(all))
+	for _, td := range all {
+		if isWithinTenantScope(callerTenant, td.ID) {
+			result = append(result, td)
+		}
+	}
+
+	s.logger.Debug("Listed tenants",
+		"caller_tenant", logging.SanitizeLogValue(callerTenant),
+		"count", len(result))
+
+	s.writeSuccessResponse(w, result)
+}
+
+// tenantInputRejectionPrefixes enumerates the error classes tenant.Manager produces
+// from data the caller supplied in the request body. Their text describes the
+// submitted payload, not the controller's backend, so it is safe — and necessary —
+// to return verbatim: the caller cannot correct the request otherwise.
+//
+//   - "validation failed: "             — Manager.validateTenantRequest (name/description rules)
+//   - "invalid config source metadata: " — cfgpkg.ParseConfigSource on caller metadata
+//   - "config source validation failed: " — MountPointValidator rejecting the caller's git source
+//
+// This is an allowlist by construction: an error class added to the manager later,
+// or a rephrased message, is not on the list and therefore fails closed to a
+// generic 500 rather than leaking whatever text it carries.
+var tenantInputRejectionPrefixes = []string{
+	"validation failed: ",
+	"invalid config source metadata: ",
+	"config source validation failed: ",
+}
+
+// isTenantInputRejection reports whether err rejects caller-supplied request data
+// (as opposed to a controller-side storage, serialization or connectivity fault).
+func isTenantInputRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, prefix := range tenantInputRejectionPrefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleUpdateTenant implements PUT /api/v1/tenants/{id}.
+// Decodes the request body into TenantRequest, verifies the tenant exists and is
+// within the caller's authorized subtree, then delegates to tenantManager.UpdateTenant.
+// Returns 404 for a missing or out-of-scope tenant (indistinguishable to prevent
+// disclosure), 400 for body-decode failures and caller-actionable rejections
+// (isTenantInputRejection), 500 for any other backend failure, 200 with the
+// updated tenant on success.
+func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	// Fetch the existing tenant to enforce subtree scope before allowing mutation.
+	// Returns the same 404 whether the tenant does not exist or is outside the
+	// caller's subtree, preventing disclosure of tenants in other scopes.
+	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if strings.Contains(err.Error(), "tenant not found") {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+
+	if !isWithinTenantScope(callerTenant, existing.ID) {
+		s.logger.Info("Cross-tenant tenant update refused",
+			"resource_tenant", logging.SanitizeLogValue(existing.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
+	var req tenant.TenantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return
+	}
+
+	updated, err := s.tenantManager.UpdateTenant(r.Context(), tenantID, &req)
+	if err != nil {
+		if strings.Contains(err.Error(), "tenant not found") {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		// Only the caller-actionable rejection classes carry their detail back over
+		// the wire. Every other failure is a server-side fault whose text is derived
+		// from backend internals (storage driver messages naming the schema, host:port
+		// of the database, metadata marshal errors) — a tenant-scoped principal holding
+		// tenant:update is a downstream MSP-client caller, so echoing that text would
+		// leak controller internals across a tenant boundary. Anything unrecognised
+		// therefore fails closed to a generic 500; the detail goes to the server log.
+		if isTenantInputRejection(err) {
+			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "VALIDATION_FAILED")
+			return
+		}
+		s.logger.Error("Tenant update failed",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to update tenant", "UPDATE_FAILED")
+		return
+	}
+
+	s.logger.Info("Updated tenant",
+		"tenant_id", logging.SanitizeLogValue(tenantID))
+
+	s.writeSuccessResponse(w, updated)
+}
+
 // handleSuspendTenant implements POST /api/v1/tenants/{id}/suspend.
 // Sets the tenant status to TenantStatusSuspended. Used by agent-dispatch cleanup
 // paths to deactivate the agent-test/<N> sub-tenant after the agent exits.

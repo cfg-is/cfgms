@@ -41,6 +41,7 @@ var permissionAssurance = map[string]Requirement{
 	"registration:approve":         {Min: session.AssuranceStrong}, // POST /registration/{id}/approve + approve-all
 	"registration:manage-ip-trust": {Min: session.AssuranceStrong}, // POST + DELETE /registration/ip-trust
 	"tenant:create":                {Min: session.AssuranceStrong}, // POST /tenants
+	"tenant:update":                {Min: session.AssuranceStrong}, // PUT  /tenants/{id}
 	"refresh:approve":              {Min: session.AssuranceStrong}, // POST /stewards/refresh/{pending_id}/approve
 	"refresh:set-policy":           {Min: session.AssuranceStrong}, // PUT /tenants/{tenant_path}/refresh-policy
 	"steward:move":                 {Min: session.AssuranceStrong}, // POST /stewards/{id}/move
