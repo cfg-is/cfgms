@@ -144,7 +144,7 @@ cat > "$HOOKS_DIR/pre-commit" << 'HOOK_EOF'
 #
 
 # Allowed root-level directories
-ALLOWED_DIRS="^(api|cmd|commercial|docs|examples|features|internal|pkg|scripts|templates|test|\.claude|\.devcontainer|\.github)/"
+ALLOWED_DIRS="^(api|cmd|commercial|docs|examples|features|internal|pkg|scripts|templates|test|web|\.claude|\.devcontainer|\.github)/"
 
 # Allowed root-level files (config, docs, build files)
 ALLOWED_FILES="^(\.|CLAUDE|README|CHANGELOG|CONTRIBUTING|CONTRIBUTORS|CODE_OF_CONDUCT|CODEOWNERS|DEVELOPMENT|ARCHITECTURE|LICENSING|QUICK_START|SECURITY|LICENSE|Makefile|Dockerfile|docker-compose|go\.(mod|sum)|buf\.(gen\.)?yaml|staticcheck\.conf|windows-setup\.ps1|\.agent-dispatch\.yaml|codeql-workspace\.yml)"
@@ -189,7 +189,8 @@ if [ $blocked -ne 0 ]; then
     echo -e "$blocked_files"
     echo ""
     echo "Allowed directories: api/ cmd/ commercial/ docs/ examples/ features/"
-    echo "                     internal/ pkg/ scripts/ templates/ test/"
+    echo "                     internal/ pkg/ scripts/ templates/ test/ web/"
+    echo "                     .claude/ .devcontainer/ .github/"
     echo ""
     echo "If these are test artifacts, unstage them:"
     echo "  git reset HEAD <file>"
