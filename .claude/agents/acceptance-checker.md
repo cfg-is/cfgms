@@ -89,6 +89,35 @@ For each reference recorded in Phase 2:
    ```
    If the test exists but fails or wasn't exercised, record FAIL.
 
+6. **Every named site, not just the file.** When the story names several locations
+   in one file (`handlers_runs.go — lines 114, 126: same replacement`), check each
+   one. A file appearing in the diff is not evidence that every site in it was
+   done — this is the single most common way a PR reaches review looking complete:
+   in one measured case the reviewer found one of two named sites changed while
+   every declared file had been touched, so nothing at file granularity could have
+   caught it. Report each unhandled site individually with its line.
+
+7. **Account for every declared file — do not require every one to be touched.**
+   Walk `## Files In Scope` against `git diff --name-only develop...HEAD` and, for
+   each declared file NOT in the diff, decide which it is:
+   - work the story required and the change omits → FAIL, naming the file; or
+   - a file the story listed that genuinely needed no change → note it and move on.
+
+   Both outcomes are legitimate, which is exactly why this is your judgement and
+   not a mechanical gate: a file-level coverage check was measured against four
+   historical fix-round PRs and produced zero true catches and one false positive
+   — it would have failed a correct PR because its story declared a file that
+   rightly went untouched. State which case each one is; never treat "declared but
+   untouched" as automatically either.
+
+8. **Verify the PR's own claims against the code.** Read the PR/commit description
+   and treat every behavioural claim in it as a hypothesis to check, not as
+   evidence. In one measured case a summary stated the audit event recorded a
+   token ID and no call site did — the claim was reviewed as though it were the
+   implementation. Any claim you cannot confirm in the code is a FAIL, quoting the
+   claim and what the code actually does. A PR that admits in its own body that an
+   AC is "approximated" or unmet is a FAIL on that AC, not a judgement call.
+
 ## Phase 4: Verify Deferred annotations are legitimate
 
 If a banned-phrase match is preceded by `// Deferred: tracked in #NNN`, verify the tracking issue is valid:
