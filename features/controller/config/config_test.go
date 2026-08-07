@@ -836,3 +836,32 @@ deployment_rings:
 	assert.Equal(t, "v0.6.0", cfg.DeploymentRings.Rings[0].DesiredVersion)
 	assert.Equal(t, "default", cfg.DeploymentRings.FallbackRing)
 }
+
+// TestLoadWithPath_Tier1BootstrapTemplate_SetsExternalAddress verifies that a config
+// mirroring the tier1-bootstrap.sh generated template populates Transport.ExternalAddress.
+// Regression test for Issue #3170: the bootstrap template omitted external_address from
+// the transport: block, causing controllers to crash on startup.
+func TestLoadWithPath_Tier1BootstrapTemplate_SetsExternalAddress(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	// Minimal fragment matching the fixed tier1-bootstrap.sh template output.
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+external_url: "https://ctrl.tier1.lab:9080"
+listen_addr: "0.0.0.0:9080"
+metrics_listen_addr: "127.0.0.1:9090"
+transport:
+  listen_addr: "0.0.0.0:4433"
+  external_address: "ctrl.tier1.lab"
+  use_cert_manager: true
+  max_connections: 50000
+  keepalive_period: "30s"
+  idle_timeout: "5m"
+`), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Transport, "Transport block must be parsed")
+	assert.NotEmpty(t, cfg.Transport.ExternalAddress,
+		"Transport.ExternalAddress must be populated from the bootstrap template")
+	assert.Equal(t, "ctrl.tier1.lab", cfg.Transport.ExternalAddress)
+	assert.Equal(t, "https://ctrl.tier1.lab:9080", cfg.ExternalURL)
+}

@@ -626,3 +626,61 @@ func TestRun_ClusterMode_UsesDatabaseProvider(t *testing.T) {
 	assert.NotEmpty(t, result.CAFingerprint)
 	assert.False(t, result.InitializedAt.IsZero())
 }
+
+// TestRun_AdminBundleControllerURLMatchesTier1BootstrapTemplate verifies that the
+// admin bundle produced by initialization.Run embeds the controller's real ExternalURL
+// rather than the localhost:8080 default.
+// Regression test for Issue #3170: the bootstrap template omitted the top-level
+// external_url key, so cfg.ExternalURL stayed at its compiled default "https://localhost:8080"
+// and every issued admin bundle pointed at the wrong address.
+func TestRun_AdminBundleControllerURLMatchesTier1BootstrapTemplate(t *testing.T) {
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "ca")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	// Config mirroring the fixed tier1-bootstrap.sh template output for a host
+	// named "ctrl.tier1.lab" with the default REST port 9080.
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://ctrl.tier1.lab:9080",
+		CertPath:        caDir,
+		AdminBundlePath: bundlePath,
+		Transport: &config.TransportConfig{
+			ListenAddr:      "0.0.0.0:4433",
+			ExternalAddress: "ctrl.tier1.lab",
+			UseCertManager:  true,
+			MaxConnections:  50000,
+			KeepalivePeriod: config.Duration(30 * time.Second),
+			IdleTimeout:     config.Duration(5 * time.Minute),
+		},
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement:   true,
+			CAPath:                 caDir,
+			ServerCertValidityDays: 90,
+			RenewalThresholdDays:   7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "ctrl.tier1.lab",
+				DNSNames:     []string{"ctrl.tier1.lab", "localhost"},
+				IPAddresses:  []string{"127.0.0.1"},
+				Organization: "CFGMS Tier 1",
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
+		},
+	}
+
+	_, err := Run(cfg, logger)
+	require.NoError(t, err)
+
+	b, err := bundle.Read(bundlePath)
+	require.NoError(t, err)
+
+	assert.Equal(t, "https://ctrl.tier1.lab:9080", b.ControllerURL,
+		"admin bundle controller_url must embed the configured ExternalURL, not localhost:8080")
+	assert.NotContains(t, b.ControllerURL, "localhost:8080",
+		"admin bundle must not embed the compiled default ExternalURL")
+}
