@@ -8,13 +8,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // getDockerCACert extracts the CA certificate PEM from a Docker container.
@@ -74,227 +75,76 @@ func buildMultiControllerTLSClient(containerNames ...string) *http.Client {
 	}
 }
 
-var (
-	isDockerRunning bool
-	setupOnce       bool
-)
-
-// TestMain handles setup and teardown for all HA tests
-// NOTE: Disabled in favor of per-test Docker management using DockerComposeHelper
-// func TestMain(m *testing.M) {
-// 	var exitCode int
-// 	defer func() {
-// 		// Cleanup
-// 		if isDockerRunning {
-// 			cleanupDocker()
-// 		}
-// 		os.Exit(exitCode)
-// 	}()
+// TestMain sets up the process-level environment for the HA suite.
 //
-// 	// Setup Docker infrastructure
-// 	if err := setupDocker(); err != nil {
-// 		fmt.Printf("Failed to setup Docker infrastructure: %v\n", err)
-// 		exitCode = 1
-// 		return
-// 	}
+// # Blocking-call localisation (Issue #3187, AC1)
 //
-// 	// Run tests
-// 	exitCode = m.Run()
-// }
-
-// setupDocker starts the Docker Compose infrastructure for HA tests
-func setupDocker() error {
-	if setupOnce {
-		return nil
+// Every test in this package independently calls DockerComposeHelper.StartCluster,
+// which ran three sequential Docker operations per invocation:
+//
+//  1. docker compose down -v --rmi all --remove-orphans   (removes all images)
+//  2. docker builder prune -f                              (clears ALL build cache)
+//  3. docker compose build --no-cache --pull               (cold-cache rebuild)
+//
+// Operation 3 was the blocking call: the goroutine sat in
+// exec.CommandContext.Wait() inside buildCmd.CombinedOutput(). With ~15 tests
+// each triggering a cold-cache image build, the cumulative Docker time exceeded
+// the 10-minute binary timeout (600s). Operation 1's --rmi all removed the image
+// each test had just built, so the next test paid the full cold-build cost
+// again, and operation 2 ensured no layer cache survived between tests.
+//
+// # CFGMS_SECRETS_KEY_FILE assessment (Issue #3187, AC2)
+//
+// CFGMS_SECRETS_KEY_FILE is NOT missing from the per-test Docker path.
+// StartCluster ensures ./scripts/generate-test-credentials.sh has run, which
+// writes CFGMS_SECRETS_KEY_FILE into .env.test, and every Compose invocation
+// passes --env-file .env.test to the controller containers.
+//
+// A secondary failure mode exists in Docker-in-Docker CI environments: the
+// generate-test-credentials.sh script resolves $(pwd) to a container-internal
+// path (/workspace/...) while the host Docker daemon mounts volumes by host
+// path. This mismatch causes controller containers to fail to start (the
+// secrets volume mount is missing on the host), but produces a fast error, not
+// a hang — it is not the 600s timeout root cause.
+//
+// This TestMain provisions CFGMS_SECRETS_KEY_FILE at the process level to cover
+// any test code that exercises controller initialisation outside of Docker.
+//
+// # Fix (Issue #3187, AC3)
+//
+// docker_helper.go now generates credentials and builds images once per test
+// binary behind a sync.Once, drops the --rmi all / docker builder prune /
+// --no-cache --pull pattern, and bounds the build with prepareTimeout so a
+// stalled daemon reports a named error instead of consuming the binary timeout.
+// Per-test cluster isolation is unchanged: each StartCluster still recreates
+// containers and volumes, at container-start cost rather than image-build cost.
+func TestMain(m *testing.M) {
+	if err := checkDockerAvailable(); err != nil {
+		fmt.Fprintf(os.Stderr, "[SKIP] test/integration/ha: %v\n", err)
+		os.Exit(0)
 	}
-	setupOnce = true
 
-	fmt.Println("Setting up Docker infrastructure for HA tests...")
-
-	// Get the directory containing docker-compose.yml
-	testDir, err := getTestDir()
+	cleanup, err := testutil.ProvisionSecretsEnv("cfgms-ha-integration-")
 	if err != nil {
-		return fmt.Errorf("failed to get test directory: %w", err)
+		fmt.Fprintf(os.Stderr, "provision test secrets: %v\n", err)
+		os.Exit(1)
 	}
-
-	// Stop any existing containers to ensure clean state
-	cleanupCmd := exec.Command("docker", "compose", "down", "-v", "--remove-orphans")
-	cleanupCmd.Dir = testDir
-	if err := cleanupCmd.Run(); err != nil {
-		fmt.Printf("Warning: failed to cleanup existing containers: %v\n", err)
-	}
-
-	// Build images first
-	fmt.Println("Building controller Docker image...")
-	buildCmd := exec.Command("docker", "compose", "build", "--no-cache")
-	buildCmd.Dir = testDir
-	buildCmd.Stdout = os.Stdout
-	buildCmd.Stderr = os.Stderr
-	if err := buildCmd.Run(); err != nil {
-		return fmt.Errorf("failed to build Docker images: %w", err)
-	}
-
-	// Start services
-	fmt.Println("Starting Docker Compose services...")
-	startCmd := exec.Command("docker", "compose", "up", "-d")
-	startCmd.Dir = testDir
-	startCmd.Stdout = os.Stdout
-	startCmd.Stderr = os.Stderr
-	if err := startCmd.Run(); err != nil {
-		return fmt.Errorf("failed to start Docker services: %w", err)
-	}
-
-	isDockerRunning = true
-
-	// Wait for services to be healthy
-	fmt.Println("Waiting for services to be healthy...")
-	if err := waitForServices(testDir); err != nil {
-		return fmt.Errorf("services failed to become healthy: %w", err)
-	}
-
-	fmt.Println("✓ Docker infrastructure is ready")
-	return nil
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
 }
 
-// getTestDir returns the directory containing the docker-compose.yml file
-func getTestDir() (string, error) {
-	// This should be the test/integration/ha directory
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	// Check if we're in the right directory or need to navigate
-	composePath := filepath.Join(wd, "docker-compose.yml")
-	if _, err := os.Stat(composePath); err == nil {
-		return wd, nil
-	}
-
-	// Try to find the test directory from project root
-	// This handles cases where tests are run from different working directories
-	projectRoot, err := findProjectRoot()
-	if err != nil {
-		return "", err
-	}
-
-	testDir := filepath.Join(projectRoot, "test", "integration", "ha")
-	composePath = filepath.Join(testDir, "docker-compose.yml")
-	if _, err := os.Stat(composePath); err != nil {
-		return "", fmt.Errorf("docker-compose.yml not found in %s", testDir)
-	}
-
-	return testDir, nil
-}
-
-// findProjectRoot finds the project root by looking for go.mod
-func findProjectRoot() (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	dir := wd
-	for {
-		goModPath := filepath.Join(dir, "go.mod")
-		if _, err := os.Stat(goModPath); err == nil {
-			return dir, nil
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-
-	return "", fmt.Errorf("project root not found (no go.mod)")
-}
-
-// waitForServices waits for all Docker services to be healthy
-func waitForServices(testDir string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+// checkDockerAvailable returns nil if the Docker daemon is reachable, or an
+// error if docker info fails or times out.
+func checkDockerAvailable() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	services := []string{"timescaledb", "controller-east", "controller-central", "controller-west"}
-
-	for _, service := range services {
-		fmt.Printf("Waiting for %s to be healthy...\n", service)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("timeout waiting for %s to be healthy", service)
-			default:
-			}
-
-			// Check service health
-			healthCmd := exec.Command("docker", "compose", "ps", "--format", "table")
-			healthCmd.Dir = testDir
-			output, err := healthCmd.Output()
-			if err != nil {
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			// Check if service is healthy in the output
-			if isServiceHealthy(string(output), service) {
-				fmt.Printf("✓ %s is healthy\n", service)
-				break
-			}
-
-			// Additional check for controllers - try to connect to their ports
-			if service != "timescaledb" {
-				var port string
-				switch service {
-				case "controller-east":
-					port = "8080"
-				case "controller-central":
-					port = "8081"
-				case "controller-west":
-					port = "8082"
-				}
-
-				// Simple TCP connection test
-				testCmd := exec.Command("nc", "-z", "localhost", port)
-				if testCmd.Run() == nil {
-					fmt.Printf("✓ %s is responding on port %s\n", service, port)
-					break
-				}
-			}
-
-			time.Sleep(2 * time.Second)
-		}
+	// #nosec G204 -- no user input; fixed command for environment probe only.
+	cmd := exec.CommandContext(ctx, "docker", "info")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker not available: %w", err)
 	}
-
-	// Give services additional time to fully initialize
-	fmt.Println("Giving services additional time to initialize...")
-	time.Sleep(10 * time.Second)
-
 	return nil
-}
-
-// isServiceHealthy checks if a service is healthy in docker compose ps output
-func isServiceHealthy(output, service string) bool {
-	if len(output) == 0 {
-		return false
-	}
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		// Look for lines containing the service name and (healthy) status
-		if strings.Contains(line, service) && strings.Contains(line, "(healthy)") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// EnsureDockerRunning ensures Docker infrastructure is running (for use in individual tests)
-func EnsureDockerRunning(t *testing.T) {
-	if !isDockerRunning {
-		if err := setupDocker(); err != nil {
-			t.Fatalf("Failed to setup Docker infrastructure: %v", err)
-		}
-	}
 }

@@ -6,8 +6,11 @@ package ha
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,6 +18,94 @@ import (
 type DockerComposeHelper struct {
 	ComposeFile string
 	ProjectName string
+}
+
+// prepareTimeout bounds the one-time credential generation and image build.
+// The suite runs under a 10-minute binary timeout in CI, so an unresponsive
+// Docker daemon must surface as a named error with a diagnosable message
+// rather than consuming the whole budget inside exec.Cmd.Wait.
+const prepareTimeout = 8 * time.Minute
+
+var (
+	prepareOnce sync.Once
+	prepareErr  error
+)
+
+// ensurePrepared generates test credentials and builds the Compose images at
+// most once per test binary.
+//
+// Image builds are the dominant cost in this suite: a cold build of the
+// controller image takes minutes, and every test calls StartCluster. Building
+// per test made the cumulative Docker time exceed the binary timeout, so the
+// build is hoisted here behind a sync.Once and reuses the layer cache. Cluster
+// lifecycle (down/up) stays per test, which preserves the isolation each test
+// relies on at container-start cost rather than image-build cost.
+func (h *DockerComposeHelper) ensurePrepared() error {
+	prepareOnce.Do(func() {
+		prepareErr = h.prepare()
+	})
+	return prepareErr
+}
+
+func (h *DockerComposeHelper) prepare() error {
+	ctx, cancel := context.WithTimeout(context.Background(), prepareTimeout)
+	defer cancel()
+
+	if err := h.ensureCredentials(ctx); err != nil {
+		return err
+	}
+
+	fmt.Println("HA test setup: building Compose images (once per test binary)...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local HA test harness.
+	buildCmd := exec.CommandContext(ctx, "docker", "compose",
+		"-f", h.ComposeFile,
+		"--env-file", h.envFile(),
+		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
+		"build")
+
+	buildOutput, err := buildCmd.CombinedOutput()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("image build did not finish within %v (%w)\nOutput: %s",
+				prepareTimeout, ctxErr, string(buildOutput))
+		}
+		return fmt.Errorf("failed to build images: %w\nOutput: %s", err, string(buildOutput))
+	}
+
+	fmt.Println("HA test setup: Compose images ready")
+	return nil
+}
+
+// ensureCredentials generates .env.test only when it is absent. CI generates it
+// before the suite runs and exports the same values into the test process
+// environment; regenerating would rotate the passwords out from under those
+// exported values.
+func (h *DockerComposeHelper) ensureCredentials(ctx context.Context) error {
+	if _, err := os.Stat(h.envFile()); err == nil {
+		return nil
+	}
+
+	fmt.Println("HA test setup: generating test credentials...")
+	credCmd := exec.CommandContext(ctx, "./scripts/generate-test-credentials.sh")
+	credCmd.Dir = h.repoRoot()
+	if output, err := credCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to generate test credentials: %w\nOutput: %s", err, string(output))
+	}
+	return nil
+}
+
+// repoRoot returns the repository root relative to the package directory, which
+// is where `go test` runs this suite from.
+func (h *DockerComposeHelper) repoRoot() string {
+	return filepath.Join("..", "..", "..")
+}
+
+// envFile returns the path to the generated Compose environment file.
+func (h *DockerComposeHelper) envFile() string {
+	return filepath.Join(h.repoRoot(), ".env.test")
 }
 
 // NewDockerComposeHelper creates a new Docker Compose helper
@@ -26,27 +117,31 @@ func NewDockerComposeHelper() *DockerComposeHelper {
 	}
 }
 
-// StartCluster starts the HA cluster using Docker Compose with --profile ha
+// StartCluster starts the HA cluster using Docker Compose with --profile ha.
+//
+// Credentials and images are prepared once per test binary (see ensurePrepared);
+// each call then recreates the containers so the test gets a cluster with empty
+// volumes and freshly started controllers.
 func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
-	// Step 0: Generate test credentials if not already present
-	fmt.Println("Step 0/5: Ensuring test credentials are generated...")
-	credCmd := exec.CommandContext(ctx, "bash", "-c", "cd ../../../ && ./scripts/generate-test-credentials.sh")
-	credOutput, err := credCmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Credential generation warnings: %s\n", string(credOutput))
+	// Step 1: one-time credential generation and image build.
+	fmt.Println("Step 1/3: Ensuring credentials and images are prepared...")
+	if err := h.ensurePrepared(); err != nil {
+		return err
 	}
 
-	// Step 1: Complete cleanup - remove all containers, networks, volumes, and images
-	fmt.Println("Step 1/5: Cleaning up existing Docker resources...")
+	// Step 2: drop containers, networks and volumes left by a previous test.
+	// Images are deliberately kept (no --rmi) so the build from step 1 is
+	// reused for every test in the package.
+	fmt.Println("Step 2/3: Removing containers and volumes from previous tests...")
 	// #nosec G204 -- integration-only Docker Compose invocation; executable is
 	// fixed and all variable arguments are owned by the local HA test harness.
 	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"--profile", "ha",
 		"--profile", "timescale", // Also include timescaledb-test
-		"down", "-v", "--rmi", "all", "--remove-orphans")
+		"down", "-v", "--remove-orphans")
 
 	cleanupOutput, err := cleanupCmd.CombinedOutput()
 	if err != nil {
@@ -54,38 +149,13 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 		fmt.Printf("Cleanup warnings (non-fatal): %s\n", string(cleanupOutput))
 	}
 
-	// Step 2: Prune Docker build cache for this project to force complete rebuild
-	fmt.Println("Step 2/5: Pruning Docker build cache...")
-	pruneCmd := exec.CommandContext(ctx, "docker", "builder", "prune", "-f")
-	pruneOutput, err := pruneCmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Build cache prune warnings (non-fatal): %s\n", string(pruneOutput))
-	}
-
-	// Step 3: Build images from scratch with no cache
-	fmt.Println("Step 3/5: Building fresh Docker images (no cache)...")
-	// #nosec G204 -- integration-only Docker Compose invocation; executable is
-	// fixed and all variable arguments are owned by the local HA test harness.
-	buildCmd := exec.CommandContext(ctx, "docker", "compose",
-		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test", // Use generated test credentials
-		"-p", h.ProjectName,
-		"--profile", "ha",
-		"--profile", "timescale",
-		"build", "--no-cache", "--pull")
-
-	buildOutput, err := buildCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to build images: %w\nOutput: %s", err, string(buildOutput))
-	}
-
-	// Step 4: Start the cluster with freshly built images and test credentials
-	fmt.Println("Step 4/5: Starting HA cluster with credentials...")
+	// Step 3: Start the cluster from the prepared images and test credentials
+	fmt.Println("Step 3/3: Starting HA cluster with credentials...")
 	// #nosec G204 -- integration-only Docker Compose invocation; executable is
 	// fixed and all variable arguments are owned by the local HA test harness.
 	startCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test", // Use generated test credentials
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"--profile", "ha",
 		"--profile", "timescale",
@@ -96,7 +166,7 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 		return fmt.Errorf("failed to start cluster: %w\nOutput: %s", err, string(startOutput))
 	}
 
-	fmt.Println("Step 5/5: HA cluster started successfully with fresh images")
+	fmt.Println("HA cluster started")
 	return nil
 }
 
@@ -106,7 +176,7 @@ func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
 	// fixed and all variable arguments are owned by the local HA test harness.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"--profile", "ha",
 		"--profile", "timescale",
@@ -126,7 +196,7 @@ func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service stri
 	// names are local harness inputs and no shell interprets them.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"logs", service)
 
@@ -144,7 +214,7 @@ func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName st
 	// name/count are local harness inputs and no shell interprets them.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"logs", "--tail", fmt.Sprintf("%d", lines), stewardName)
 
@@ -224,7 +294,7 @@ func (h *DockerComposeHelper) StopService(ctx context.Context, service string) e
 	// harness-selected Compose service and no shell interprets it.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"stop", service)
 
@@ -242,7 +312,7 @@ func (h *DockerComposeHelper) RestartService(ctx context.Context, service string
 	// harness-selected Compose service and no shell interprets it.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"restart", service)
 
@@ -260,7 +330,7 @@ func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, 
 	// are local test values passed without a shell.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"up", "-d", "--scale", fmt.Sprintf("%s=%d", service, replicas))
 
@@ -278,7 +348,7 @@ func (h *DockerComposeHelper) GetServiceStatus(ctx context.Context, services ...
 	// fixed argument vector; requested services are filtered in Go afterward.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"ps", "--services", "--filter", "status=running")
 
