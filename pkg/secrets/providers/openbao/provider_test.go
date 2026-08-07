@@ -179,17 +179,17 @@ func TestParseOpenBaoConfig_EnvFallback(t *testing.T) {
 }
 
 func TestSplitKey_Valid(t *testing.T) {
-	tenantID, secretKey, err := splitKey("tenant1/mykey")
+	tenantID, keyName, err := splitKey("tenant1/mykey")
 	require.NoError(t, err)
 	assert.Equal(t, "tenant1", tenantID)
-	assert.Equal(t, "mykey", secretKey)
+	assert.Equal(t, "mykey", keyName)
 }
 
 func TestSplitKey_WithDeepPath(t *testing.T) {
-	tenantID, secretKey, err := splitKey("tenant1/sub/path/key")
+	tenantID, keyName, err := splitKey("tenant1/sub/path/key")
 	require.NoError(t, err)
 	assert.Equal(t, "tenant1", tenantID)
-	assert.Equal(t, "sub/path/key", secretKey)
+	assert.Equal(t, "sub/path/key", keyName)
 }
 
 func TestSplitKey_Invalid(t *testing.T) {
