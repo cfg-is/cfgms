@@ -120,7 +120,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	// Generate new API key (256-bit cryptographically secure)
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
-		s.logger.Error("Failed to generate API key", "error", err)
+		s.logger.Error("Failed to generate API key", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate API key", "INTERNAL_ERROR")
 		return
 	}
@@ -169,7 +169,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.secretStore.StoreSecret(r.Context(), secretReq); err != nil {
-		s.logger.Error("Failed to persist API key to secret store", "error", err, "id", keyID)
+		s.logger.Error("Failed to persist API key to secret store", "error", logging.SanitizeLogValue(err.Error()), "id", keyID)
 		// Remove from memory cache since we couldn't persist
 		s.mu.Lock()
 		delete(s.apiKeys, keyString)

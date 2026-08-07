@@ -152,7 +152,7 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
@@ -190,7 +190,7 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
@@ -250,7 +250,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 			http.Error(w, "pending registration not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to retrieve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to retrieve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to retrieve pending registration", http.StatusInternalServerError)
 		return
 	}
@@ -300,7 +300,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		resp, err := s.buildClaimResponse(r.Context(), entry, tokenStr)
 		if err != nil {
 			s.logger.Error("Failed to generate cert for claimed registration",
-				"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", logging.SanitizeLogValue(entry.StewardID), "error", err)
+				"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", logging.SanitizeLogValue(entry.StewardID), "error", logging.SanitizeLogValue(err.Error()))
 			// Entry is already "claimed" — steward must re-register if cert was not received.
 			http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
 			return
@@ -309,7 +309,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		// #nosec G117 -- this authenticated, tenant-bound, atomically one-time
 		// claim response is the intended TLS delivery channel for the new key.
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			s.logger.Error("Failed to encode registration status response", "error", err)
+			s.logger.Error("Failed to encode registration status response", "error", logging.SanitizeLogValue(err.Error()))
 		}
 
 	case business.PendingRegistrationStatusClaimed:
@@ -484,7 +484,7 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	callerTenant := s.callerTenantID(r)
 	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
 	if err != nil {
-		s.logger.Error("Failed to list pending registrations for approve-by-cidr", "error", err)
+		s.logger.Error("Failed to list pending registrations for approve-by-cidr", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
 		return
 	}
@@ -500,7 +500,7 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
 			s.logger.Error("Failed to approve pending registration in CIDR bulk",
-				"pending_id", logging.SanitizeLogValue(e.PendingID), "error", err)
+				"pending_id", logging.SanitizeLogValue(e.PendingID), "error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 		approved++
@@ -512,7 +512,7 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 		map[string]interface{}{"cidr": req.CIDR, "approved_count": approved})
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
-		s.logger.Error("Failed to encode approve-by-cidr response", "error", err)
+		s.logger.Error("Failed to encode approve-by-cidr response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -606,7 +606,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
 	var req RegistrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to parse registration request", "error", err)
+		s.logger.Warn("Failed to parse registration request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -629,7 +629,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Retrieve token metadata (tenant, group, controller URL) for building the response
 	token, err := s.registrationTokenStore.GetToken(r.Context(), req.Token)
 	if err != nil {
-		s.logger.Warn("Invalid registration token", "error", err)
+		s.logger.Warn("Invalid registration token", "error", logging.SanitizeLogValue(err.Error()))
 		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 		s.emitRegistrationAudit(r.Context(), req.Token, "unknown", "unknown",
 			business.AuditEventSecurityEvent, "registration_rejected",
@@ -760,7 +760,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 			created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
 			if claimErr != nil {
-				s.logger.Error("Failed to atomically claim registration token", "error", claimErr)
+				s.logger.Error("Failed to atomically claim registration token", "error", logging.SanitizeLogValue(claimErr.Error()))
 				http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
 				return
 			}
@@ -795,10 +795,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
 				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
 					s.logger.Error("Failed to release registration token claim after pending-store failure",
-						"pending_id", pendingID, "error", releaseErr)
+						"pending_id", pendingID, "error", logging.SanitizeLogValue(releaseErr.Error()))
 				}
 				s.logger.Error("Failed to persist pending registration",
-					"pending_id", pendingID, "steward_id", stewardID, "error", err)
+					"pending_id", pendingID, "steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
 				http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
 				return
 			}
@@ -808,7 +808,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				"pending_id", pendingID)
 			if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", initialAttrs); err != nil {
 				s.logger.Error("Failed to register quarantined steward in controller service",
-					"steward_id", stewardID, "error", err)
+					"steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
 			}
 
 			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
@@ -855,7 +855,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Get CA certificate (required for certificate chain validation)
 	caCert, err := s.certManager.GetCACertificate()
 	if err != nil || len(caCert) == 0 {
-		s.logger.Error("Failed to get CA certificate", "error", err, "steward_id", stewardID)
+		s.logger.Error("Failed to get CA certificate", "error", logging.SanitizeLogValue(err.Error()), "steward_id", stewardID)
 		http.Error(w, "CA certificate unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -871,7 +871,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				"cert_serial", s.signerCertSerial)
 		} else {
 			s.logger.Warn("Failed to export signer certificate from cert manager",
-				"error", err, "steward_id", stewardID, "cert_serial", s.signerCertSerial)
+				"error", logging.SanitizeLogValue(err.Error()), "steward_id", stewardID, "cert_serial", s.signerCertSerial)
 		}
 	} else if s.signerCertSerial == "" {
 		s.logger.Warn("Signer certificate serial not available (signer may not be initialized)",
@@ -887,7 +887,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// itself stays valid for the rest of the fleet (Issue #1690).
 	created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
 	if claimErr != nil {
-		s.logger.Error("Failed to atomically claim registration token", "error", claimErr)
+		s.logger.Error("Failed to atomically claim registration token", "error", logging.SanitizeLogValue(claimErr.Error()))
 		http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -905,9 +905,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
 			s.logger.Error("Failed to release registration token claim after certificate failure",
-				"steward_id", stewardID, "error", releaseErr)
+				"steward_id", stewardID, "error", logging.SanitizeLogValue(releaseErr.Error()))
 		}
-		s.logger.Error("Failed to generate client certificate", "error", err, "steward_id", stewardID)
+		s.logger.Error("Failed to generate client certificate", "error", logging.SanitizeLogValue(err.Error()), "steward_id", stewardID)
 		http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
 		return
 	}
@@ -942,7 +942,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, resp.TransportAddress, "registered", initialAttrs); err != nil {
 		s.logger.Error("Failed to register steward in controller service",
-			"steward_id", stewardID, "error", err)
+			"steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Persist device identity to the durable StewardStore so the S3b PoP verification
@@ -963,7 +963,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("Failed to persist device identity to steward store",
 				"steward_id", stewardID,
 				"device_id", logging.SanitizeLogValue(req.DeviceID),
-				"error", storeErr)
+				"error", logging.SanitizeLogValue(storeErr.Error()))
 		}
 	}
 
@@ -978,7 +978,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// #nosec G117 -- successful authenticated registration intentionally returns
 	// the freshly issued client key once over the required TLS endpoint.
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.logger.Error("Failed to encode registration response", "error", err)
+		s.logger.Error("Failed to encode registration response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

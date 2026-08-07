@@ -192,7 +192,7 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 	store := h.workflowStoreForRequest(r)
 	nameForLog := logging.SanitizeLogValue(req.Name)
 	if err := store.StoreWorkflow(r.Context(), vw); err != nil {
-		h.logger.Error("Failed to create workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to create workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to create workflow")
 		return
 	}
@@ -217,7 +217,7 @@ func (h *WorkflowHandler) handleGetWorkflow(w http.ResponseWriter, r *http.Reque
 	store := h.workflowStoreForRequest(r)
 	vw, err := store.GetLatestWorkflow(r.Context(), name)
 	if err != nil {
-		h.logger.Error("Failed to get workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to get workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("workflow %q not found", name))
 		return
 	}
@@ -275,7 +275,7 @@ func (h *WorkflowHandler) handleUpdateWorkflow(w http.ResponseWriter, r *http.Re
 	nameForLog := logging.SanitizeLogValue(name)
 	store := h.workflowStoreForRequest(r)
 	if err := store.StoreWorkflow(r.Context(), vw); err != nil {
-		h.logger.Error("Failed to update workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to update workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to update workflow")
 		return
 	}
@@ -302,7 +302,7 @@ func (h *WorkflowHandler) handleDeleteWorkflow(w http.ResponseWriter, r *http.Re
 	// Retrieve all versions to delete
 	versions, err := store.ListWorkflowVersions(r.Context(), name)
 	if err != nil {
-		h.logger.Error("Failed to list workflow versions for deletion", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to list workflow versions for deletion", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to delete workflow")
 		return
 	}
@@ -314,7 +314,7 @@ func (h *WorkflowHandler) handleDeleteWorkflow(w http.ResponseWriter, r *http.Re
 	for _, vw := range versions {
 		if err := store.DeleteWorkflow(r.Context(), name, vw.SemanticVersion); err != nil {
 			versionForLog := logging.SanitizeLogValue(vw.SemanticVersion.String())
-			h.logger.Error("Failed to delete workflow version", "name", nameForLog, "version", versionForLog, "error", err)
+			h.logger.Error("Failed to delete workflow version", "name", nameForLog, "version", versionForLog, "error", logging.SanitizeLogValue(err.Error()))
 			h.sendError(w, http.StatusInternalServerError, "failed to delete workflow")
 			return
 		}
@@ -360,7 +360,7 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 	nameForLog := logging.SanitizeLogValue(name)
 	execution, err := h.engine.ExecuteWorkflow(r.Context(), vw.Workflow, req.Variables)
 	if err != nil {
-		h.logger.Error("Failed to execute workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to execute workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to start workflow execution")
 		return
 	}

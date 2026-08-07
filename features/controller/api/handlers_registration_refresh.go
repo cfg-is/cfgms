@@ -116,7 +116,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "device not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
+		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -148,7 +148,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 	// Generate 32-byte cryptographically random nonce.
 	nonceBytes := make([]byte, 32)
 	if _, err := rand.Read(nonceBytes); err != nil {
-		s.logger.Error("Failed to generate refresh nonce", "error", err)
+		s.logger.Error("Failed to generate refresh nonce", "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -173,7 +173,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		ServerTS:   serverTS,
 		IssuedAt:   issuedAt,
 	}, nonceTTL); err != nil {
-		s.logger.Error("Failed to store nonce in cache", "error", err)
+		s.logger.Error("Failed to store nonce in cache", "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -192,7 +192,7 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		Nonce:    base64.RawURLEncoding.EncodeToString(nonceBytes),
 		ServerTS: serverTS,
 	}); err != nil {
-		s.logger.Error("Failed to encode challenge response", "error", err)
+		s.logger.Error("Failed to encode challenge response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -225,7 +225,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "device not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", err)
+		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -352,7 +352,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		policy, err := s.refreshPolicyStore.GetPolicy(r.Context(), record.TenantID)
 		if err != nil {
-			s.logger.Error("Failed to get refresh policy", "tenant_id", logging.SanitizeLogValue(record.TenantID), "error", err)
+			s.logger.Error("Failed to get refresh policy", "tenant_id", logging.SanitizeLogValue(record.TenantID), "error", logging.SanitizeLogValue(err.Error()))
 			s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 				business.AuditEventSystemEvent, "refresh_error",
 				business.AuditResultError, business.AuditSeverityMedium,
@@ -658,7 +658,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "pending refresh not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to get pending refresh", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to get pending refresh", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
 		return
 	}
@@ -695,7 +695,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "steward not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to get steward for refresh approval", "device_id", logging.SanitizeLogValue(entry.DeviceID), "error", err)
+		s.logger.Error("Failed to get steward for refresh approval", "device_id", logging.SanitizeLogValue(entry.DeviceID), "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
 			business.AuditEventSystemEvent, "refresh_admin_approve_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -720,7 +720,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 
 	certResp, err := s.buildRefreshClaimResponse(r.Context(), record)
 	if err != nil {
-		s.logger.Error("Failed to build refresh cert for approval", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to build refresh cert for approval", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
 			business.AuditEventSystemEvent, "refresh_admin_approve_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -733,19 +733,19 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	// secure store for one-time authenticated retrieval; it is not logged.
 	bundle, err := json.Marshal(certResp)
 	if err != nil {
-		s.logger.Error("Failed to marshal claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to marshal claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "internal error serializing cert bundle", http.StatusInternalServerError)
 		return
 	}
 
 	if err := s.pendingRefreshStore.StoreClaimBundle(r.Context(), pendingID, bundle); err != nil {
-		s.logger.Error("Failed to store claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to store claim bundle", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to store claim bundle", http.StatusInternalServerError)
 		return
 	}
 
 	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusApproved); err != nil {
-		s.logger.Error("Failed to update refresh status to approved", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to update refresh status to approved", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to update refresh status", http.StatusInternalServerError)
 		return
 	}
@@ -773,7 +773,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		CACert:      certResp.CACert,
 		SigningCert: certResp.SigningCert,
 	}); err != nil {
-		s.logger.Error("Failed to encode approve response", "error", err)
+		s.logger.Error("Failed to encode approve response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -796,7 +796,7 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "pending refresh not found", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("Failed to get pending refresh for rejection", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to get pending refresh for rejection", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
 		return
 	}
@@ -818,7 +818,7 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusRejected); err != nil {
-		s.logger.Error("Failed to update refresh status to rejected", "pending_id", logging.SanitizeLogValue(pendingID), "error", err)
+		s.logger.Error("Failed to update refresh status to rejected", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to update refresh status", http.StatusInternalServerError)
 		return
 	}
@@ -859,7 +859,7 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 
 	policy, err := s.refreshPolicyStore.GetPolicy(r.Context(), tenantID)
 	if err != nil {
-		s.logger.Error("Failed to get refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+		s.logger.Error("Failed to get refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to get refresh policy", http.StatusInternalServerError)
 		return
 	}
@@ -870,7 +870,7 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 		Mode:            policy.Mode,
 		MaxDormancyDays: policy.MaxDormancyDays,
 	}); err != nil {
-		s.logger.Error("Failed to encode refresh policy", "error", err)
+		s.logger.Error("Failed to encode refresh policy", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -913,7 +913,7 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 		MaxDormancyDays: req.MaxDormancyDays,
 	}
 	if err := s.refreshPolicyStore.SetPolicy(r.Context(), policy); err != nil {
-		s.logger.Error("Failed to set refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+		s.logger.Error("Failed to set refresh policy", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to set refresh policy", http.StatusInternalServerError)
 		return
 	}
@@ -925,7 +925,7 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 		Mode:            req.Mode,
 		MaxDormancyDays: req.MaxDormancyDays,
 	}); err != nil {
-		s.logger.Error("Failed to encode refresh policy response", "error", err)
+		s.logger.Error("Failed to encode refresh policy response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

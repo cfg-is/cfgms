@@ -98,7 +98,7 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 		}
 		s.logger.Error("Signing certificate rotation failed",
 			"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Rotation failed", "ROTATION_ERROR")
 		return
 	}
@@ -316,7 +316,7 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		s.logger.Error("Failed to provision certificate",
 			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
 			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
 		return
 	}

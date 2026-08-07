@@ -69,7 +69,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Decode and validate request body.
 	var req configPushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to decode config push body", "error", err)
+		s.logger.Warn("Failed to decode config push body", "error", logging.SanitizeLogValue(err.Error()))
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -124,7 +124,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("Fleet query failed during config push", "error", err, "selector", safeSelector)
+		s.logger.Error("Fleet query failed during config push", "error", logging.SanitizeLogValue(err.Error()), "selector", safeSelector)
 		s.respondError(w, http.StatusInternalServerError, "fleet query failed")
 		return
 	}
@@ -169,7 +169,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		if err := s.egConfigstoreWriter.Ingest(r.Context(), egRev, eids); err != nil {
 			s.logger.Warn("Failed to ingest desired-state observations into entity graph",
 				"push_id", pushID,
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 		}
 	}
@@ -192,7 +192,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 				UpdatedAt: queuedAt,
 			}
 			if err := s.pushStore.CreatePush(r.Context(), record); err != nil {
-				s.logger.Warn("Failed to persist push record", "error", err, "push_id", pushID)
+				s.logger.Warn("Failed to persist push record", "error", logging.SanitizeLogValue(err.Error()), "push_id", pushID)
 			}
 		} else {
 			s.logger.Warn("Failed to marshal push payload for persistence", "error", marshalErr, "push_id", pushID)
@@ -216,7 +216,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("Config push fan-out delivery failed",
 					"push_id", pushID,
 					"steward_id", logging.SanitizeLogValue(stewardID),
-					"error", err)
+					"error", logging.SanitizeLogValue(err.Error()))
 			}
 			if s.pushStore != nil {
 				finalStatus := business.PushStatusCompleted
@@ -264,7 +264,7 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		s.logger.Error("Failed to retrieve push record",
-			"push_id", logging.SanitizeLogValue(id), "error", err)
+			"push_id", logging.SanitizeLogValue(id), "error", logging.SanitizeLogValue(err.Error()))
 		s.respondError(w, http.StatusInternalServerError, "failed to retrieve push record")
 		return
 	}

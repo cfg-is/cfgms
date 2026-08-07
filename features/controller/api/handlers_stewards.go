@@ -157,7 +157,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("Rejected steward list pagination params",
 				"limit", logging.SanitizeLogValue(r.URL.Query().Get("limit")),
 				"offset", logging.SanitizeLogValue(r.URL.Query().Get("offset")),
-				"error", paginErr)
+				"error", logging.SanitizeLogValue(paginErr.Error()))
 			s.writeErrorResponse(w, http.StatusBadRequest, paginErr.Error(), "INVALID_PAGINATION")
 			return
 		}
@@ -221,7 +221,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("Rejected steward list pagination params",
 			"limit", logging.SanitizeLogValue(r.URL.Query().Get("limit")),
 			"offset", logging.SanitizeLogValue(r.URL.Query().Get("offset")),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_PAGINATION")
 		return
 	}
@@ -230,7 +230,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	if !isEmptyFilter(filter) {
 		results, err := s.fleetQuery.Search(r.Context(), filter)
 		if err != nil {
-			s.logger.Error("Fleet query failed", "error", err)
+			s.logger.Error("Fleet query failed", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
 			return
 		}
@@ -804,7 +804,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	validationResp, err := s.configService.ValidateConfig(context.Background(), req)
 	if err != nil {
-		s.logger.Error("Failed to validate configuration", "steward_id", stewardIDForLog, "error", err)
+		s.logger.Error("Failed to validate configuration", "steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to validate configuration", "INTERNAL_ERROR")
 		return
 	}

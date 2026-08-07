@@ -177,7 +177,7 @@ func (s *Server) handlePutScriptPrivilege(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.storePrivilegeMetadata(r.Context(), tenantID, id, meta); err != nil {
-		s.logger.Error("Failed to store privilege metadata", "id", sanitizedID, "error", err)
+		s.logger.Error("Failed to store privilege metadata", "id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store privilege metadata", "INTERNAL_ERROR")
 		return
 	}
