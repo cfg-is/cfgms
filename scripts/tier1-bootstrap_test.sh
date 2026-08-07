@@ -175,6 +175,12 @@ else
     elif ! grep -Fxq 'metrics_listen_addr: "127.0.0.1:9090"' "$CFG_FILE"; then
         fail "test2: controller.cfg does not bind metrics to the private loopback listener"
         PASS_THIS=false
+    elif ! grep -Fxq 'external_url: "https://ctrl.test.lab:9080"' "$CFG_FILE"; then
+        fail "test2: controller.cfg missing top-level external_url with hostname and REST port (Issue #3170)"
+        PASS_THIS=false
+    elif ! grep -Fxq '  external_address: "ctrl.test.lab"' "$CFG_FILE"; then
+        fail "test2: controller.cfg missing transport.external_address (Issue #3170)"
+        PASS_THIS=false
     fi
 
     # Init marker created

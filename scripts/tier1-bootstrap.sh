@@ -281,6 +281,7 @@ execution:
 
 listen_addr: "0.0.0.0:9080"
 metrics_listen_addr: "127.0.0.1:9090"
+external_url: "https://${HOSTNAME_FLAG}:9080"
 data_dir: "/var/lib/cfgms"
 
 certificate:
@@ -313,6 +314,7 @@ logging:
 
 transport:
   listen_addr: "0.0.0.0:4433"
+  external_address: "${HOSTNAME_FLAG}"
   use_cert_manager: true
   max_connections: 50000
   keepalive_period: "30s"
