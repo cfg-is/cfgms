@@ -428,7 +428,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	logger.Info("RBAC initialization completed")
 
 	// Initialize tenant management with durable storage
-	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager)
+	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager).
+		WithAuditManager(auditManager)
 
 	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
 	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode
@@ -2343,6 +2344,13 @@ func (s *Server) GetTenantManager() *tenant.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.tenantManager
+}
+
+// GetAuditManager returns the audit manager instance
+func (s *Server) GetAuditManager() *audit.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.auditManager
 }
 
 // GetRBACManager returns the RBAC manager instance
