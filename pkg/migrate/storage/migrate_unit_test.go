@@ -97,6 +97,14 @@ func TestStorageMigrator_OSStoOSSRoundTrip(t *testing.T) {
 	seedOSSManager(t, src)
 	dst := newOSSManager(t)
 
+	// Capture the source pending-registration entries before migration so the
+	// post-migration comparison below is against actual source state, not
+	// against literals that could drift from seedOSSManager.
+	srcPending, err := src.GetPendingRegistrationStore().GetPendingByID(ctx, "pending-reg-seed-1")
+	require.NoError(t, err, "read back source pending-reg-seed-1")
+	srcClaimed, err := src.GetPendingRegistrationStore().GetPendingByID(ctx, "pending-reg-seed-2")
+	require.NoError(t, err, "read back source pending-reg-seed-2")
+
 	m := migratestorage.NewStorageMigrator(src, dst)
 	report, err := m.Run(ctx)
 	require.NoError(t, err, "OSS→OSS migration must succeed")
@@ -107,6 +115,32 @@ func TestStorageMigrator_OSStoOSSRoundTrip(t *testing.T) {
 		c, ok := report.Counts[kind]
 		assert.True(t, ok, "expected kind %q in OSS→OSS report", kind)
 		assert.Greater(t, c, 0, "expected at least one %q record in OSS→OSS report", kind)
+	}
+
+	// A freshly-migrated (not pre-seeded in dest) pending-registration entry must
+	// carry every field through unchanged — not just a count.
+	dstPending, err := dst.GetPendingRegistrationStore().GetPendingByID(ctx, "pending-reg-seed-1")
+	require.NoError(t, err, "read back destination pending-reg-seed-1")
+	assert.Equal(t, srcPending.StewardID, dstPending.StewardID, "pending-reg-seed-1 StewardID")
+	assert.Equal(t, srcPending.TenantID, dstPending.TenantID, "pending-reg-seed-1 TenantID")
+	assert.Equal(t, srcPending.TokenStr, dstPending.TokenStr, "pending-reg-seed-1 TokenStr")
+	assert.Equal(t, srcPending.SourceIP, dstPending.SourceIP, "pending-reg-seed-1 SourceIP")
+	assert.Equal(t, srcPending.Status, dstPending.Status, "pending-reg-seed-1 Status")
+	assert.True(t, srcPending.RegisteredAt.Equal(dstPending.RegisteredAt), "pending-reg-seed-1 RegisteredAt")
+	assert.True(t, srcPending.ExpiresAt.Equal(dstPending.ExpiresAt), "pending-reg-seed-1 ExpiresAt")
+	assert.Nil(t, dstPending.ClaimedAt, "pending-reg-seed-1 ClaimedAt")
+
+	dstClaimed, err := dst.GetPendingRegistrationStore().GetPendingByID(ctx, "pending-reg-seed-2")
+	require.NoError(t, err, "read back destination pending-reg-seed-2")
+	assert.Equal(t, srcClaimed.StewardID, dstClaimed.StewardID, "pending-reg-seed-2 StewardID")
+	assert.Equal(t, srcClaimed.TenantID, dstClaimed.TenantID, "pending-reg-seed-2 TenantID")
+	assert.Equal(t, srcClaimed.TokenStr, dstClaimed.TokenStr, "pending-reg-seed-2 TokenStr")
+	assert.Equal(t, srcClaimed.SourceIP, dstClaimed.SourceIP, "pending-reg-seed-2 SourceIP")
+	assert.Equal(t, srcClaimed.Status, dstClaimed.Status, "pending-reg-seed-2 Status")
+	assert.True(t, srcClaimed.RegisteredAt.Equal(dstClaimed.RegisteredAt), "pending-reg-seed-2 RegisteredAt")
+	assert.True(t, srcClaimed.ExpiresAt.Equal(dstClaimed.ExpiresAt), "pending-reg-seed-2 ExpiresAt")
+	if assert.NotNil(t, dstClaimed.ClaimedAt, "pending-reg-seed-2 ClaimedAt") {
+		assert.True(t, srcClaimed.ClaimedAt.Equal(*dstClaimed.ClaimedAt), "pending-reg-seed-2 ClaimedAt")
 	}
 }
 
