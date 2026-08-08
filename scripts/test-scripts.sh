@@ -299,6 +299,8 @@ test_executable_permissions() {
         "scripts/tier1-smoke-test_test.sh"
         "scripts/tier1-bootstrap.sh"
         "scripts/tier1-bootstrap_test.sh"
+        "scripts/lab-datasvc-bootstrap.sh"
+        "scripts/lab-datasvc-bootstrap_test.sh"
         "scripts/cfgms-bundle-load"
     )
 
@@ -3394,6 +3396,45 @@ test_resource_sampler_ps1_no_pwsh() {
     fi
 }
 
+test_datasvc_bootstrap() {
+    log_test "Testing lab-datasvc-bootstrap.sh..."
+
+    local bootstrap_script="scripts/lab-datasvc-bootstrap.sh"
+    local test_script="scripts/lab-datasvc-bootstrap_test.sh"
+
+    if [[ ! -f "$bootstrap_script" ]]; then
+        log_fail "lab-datasvc-bootstrap.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$bootstrap_script" ]]; then
+        log_fail "lab-datasvc-bootstrap.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "lab-datasvc-bootstrap_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "lab-datasvc-bootstrap_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "lab-datasvc-bootstrap_test.sh: All tests passed"
+    else
+        log_fail "lab-datasvc-bootstrap_test.sh: Tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 test_tier1_bootstrap() {
     log_test "Testing tier1-bootstrap.sh..."
 
@@ -3522,6 +3563,8 @@ echo ""
 test_tier1_smoke_test
 echo ""
 test_tier1_bootstrap
+echo ""
+test_datasvc_bootstrap
 echo ""
 test_resource_sampler_ps1_no_pwsh
 echo ""
