@@ -23,7 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
-	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	cpmemory "github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -31,44 +31,63 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// testControlPlane is a minimal in-process ControlPlaneProvider for server-wiring tests.
-// sendCommandCh receives a struct{} each time SendCommand is called, allowing tests to
-// observe fanout delivery without requiring a real gRPC connection.
-type testControlPlane struct {
-	sendCommandCh chan struct{}
+// controlPlaneFixture wires a real in-process control plane for server-wiring tests:
+// a cpmemory.Provider in server mode (handed to the command publisher) plus one
+// client-mode provider per steward, connected over a shared bus. Commands travel
+// the same routing path a gRPC steward would take — server-side addressing,
+// per-steward delivery, connection state — so a delivery observed here proves the
+// command actually reached that steward rather than merely being handed to a fake.
+type controlPlaneFixture struct {
+	server *cpmemory.Provider
+
+	// delivered receives the steward ID of every steward that received a command.
+	delivered chan string
 }
 
-var _ cpInterfaces.ControlPlaneProvider = (*testControlPlane)(nil)
+// newControlPlaneFixture starts a server-mode provider and a connected client for
+// each steward ID, each recording received commands on the returned fixture.
+func newControlPlaneFixture(t *testing.T, stewardIDs ...string) *controlPlaneFixture {
+	t.Helper()
+	ctx := context.Background()
 
-func (p *testControlPlane) Name() string                                                 { return "test" }
-func (p *testControlPlane) IsConnected() bool                                            { return true }
-func (p *testControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error { return nil }
-func (p *testControlPlane) Start(_ context.Context) error                                { return nil }
-func (p *testControlPlane) Stop(_ context.Context) error                                 { return nil }
-func (p *testControlPlane) Reconnect(_ context.Context) error                            { return nil }
-func (p *testControlPlane) SendCommand(_ context.Context, _ *cpTypes.SignedCommand) error {
-	select {
-	case p.sendCommandCh <- struct{}{}:
-	default:
+	bus := cpmemory.NewBus()
+	server := cpmemory.New(cpmemory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, server.Stop(stopCtx))
+	})
+
+	fx := &controlPlaneFixture{
+		server:    server,
+		delivered: make(chan string, len(stewardIDs)+1),
 	}
-	return nil
-}
-func (p *testControlPlane) FanOutCommand(_ context.Context, _ *cpTypes.SignedCommand, ids []string) (*cpTypes.FanOutResult, error) {
-	return &cpTypes.FanOutResult{Succeeded: ids, Failed: map[string]error{}}, nil
-}
-func (p *testControlPlane) SubscribeCommands(_ context.Context, _ string, _ cpInterfaces.CommandHandler) error {
-	return nil
-}
-func (p *testControlPlane) PublishEvent(_ context.Context, _ *cpTypes.Event) error { return nil }
-func (p *testControlPlane) SubscribeEvents(_ context.Context, _ *cpTypes.EventFilter, _ cpInterfaces.EventHandler) error {
-	return nil
-}
-func (p *testControlPlane) SendHeartbeat(_ context.Context, _ *cpTypes.Heartbeat) error { return nil }
-func (p *testControlPlane) SubscribeHeartbeats(_ context.Context, _ cpInterfaces.HeartbeatHandler) error {
-	return nil
-}
-func (p *testControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
-	return &cpTypes.ControlPlaneStats{}, nil
+
+	for _, id := range stewardIDs {
+		id := id
+		client := cpmemory.New(cpmemory.ModeClient)
+		require.NoError(t, client.Initialize(ctx, map[string]interface{}{
+			"bus":        bus,
+			"steward_id": id,
+		}))
+		require.NoError(t, client.Start(ctx))
+		require.NoError(t, client.SubscribeCommands(ctx, id, func(_ context.Context, _ *cpTypes.SignedCommand) error {
+			select {
+			case fx.delivered <- id:
+			default:
+			}
+			return nil
+		}))
+		t.Cleanup(func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, client.Stop(stopCtx))
+		})
+	}
+
+	return fx
 }
 
 func setupTestServer(t *testing.T) *Server {
@@ -78,6 +97,7 @@ func setupTestServer(t *testing.T) *Server {
 
 	// Create test configuration
 	cfg := config.DefaultConfig()
+	cfg.ExternalURL = "https://localhost:8080"   // Required; DefaultConfig leaves this empty
 	cfg.Certificate.EnableCertManagement = false // Disable for testing
 
 	// Create test logger
@@ -1442,9 +1462,9 @@ func TestServer_MonitoringStubRoutesDeregistered(t *testing.T) {
 }
 
 // setupServerWithPublisher creates a server with a real commands.Publisher backed by
-// the provided testControlPlane. Returns the server, configService, and controllerService
-// so tests can interact with them directly.
-func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *service.ConfigurationServiceV2, *service.ControllerService) {
+// the fixture's in-process control plane. Returns the server, configService, and
+// controllerService so tests can interact with them directly.
+func setupServerWithPublisher(t *testing.T, fx *controlPlaneFixture) (*Server, *service.ConfigurationServiceV2, *service.ControllerService) {
 	t.Helper()
 	setTestSecretsEnv(t)
 
@@ -1476,7 +1496,7 @@ func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *ser
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
-	publisher, err := commands.New(&commands.Config{ControlPlane: cp, Logger: logger})
+	publisher, err := commands.New(&commands.Config{ControlPlane: fx.server, Logger: logger})
 	require.NoError(t, err)
 
 	server, err := New(
@@ -1517,8 +1537,8 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 	}
 
 	t.Run("fanout dispatched to active steward of matching tenant", func(t *testing.T) {
-		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
-		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+		fx := newControlPlaneFixture(t, "steward-1")
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, fx)
 
 		// Register an active steward in the same tenant used for SetConfiguration.
 		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
@@ -1526,18 +1546,19 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
 		require.NoError(t, err)
 
-		// The goroutine inside the callback calls push.Fanout → TriggerConfigSync → SendCommand.
+		// The goroutine inside the callback calls push.Fanout → TriggerConfigSync → SendCommand,
+		// which the connected steward receives over the in-process control plane.
 		select {
-		case <-cp.sendCommandCh:
-			// success: fanout reached the steward
+		case id := <-fx.delivered:
+			assert.Equal(t, "steward-1", id, "fanout must reach the tenant's steward")
 		case <-time.After(3 * time.Second):
 			t.Fatal("save=deploy fanout did not deliver to active steward within timeout")
 		}
 	})
 
 	t.Run("fanout skipped for steward of different tenant", func(t *testing.T) {
-		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
-		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+		fx := newControlPlaneFixture(t, "steward-b")
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, fx)
 
 		// Register a steward in tenant-b; SetConfiguration is for tenant-a.
 		require.NoError(t, controllerSvc.RegisterSteward("steward-b", "tenant-b", "", "active"))
@@ -1545,18 +1566,19 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
 		require.NoError(t, err)
 
-		// No steward in tenant-a → fanout sends to nobody → SendCommand never called.
+		// No steward in tenant-a → fanout targets nobody → the connected tenant-b
+		// steward must receive nothing.
 		select {
-		case <-cp.sendCommandCh:
-			t.Fatal("cross-tenant fanout must not occur: SendCommand was called for a different tenant's steward")
+		case id := <-fx.delivered:
+			t.Fatalf("cross-tenant fanout must not occur: steward %s received a command", id)
 		case <-time.After(200 * time.Millisecond):
 			// success: no cross-tenant fanout
 		}
 	})
 
 	t.Run("leader check: follower skips fanout", func(t *testing.T) {
-		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
-		server, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+		fx := newControlPlaneFixture(t, "steward-1")
+		server, configSvc, controllerSvc := setupServerWithPublisher(t, fx)
 
 		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
 
@@ -1567,8 +1589,8 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		require.NoError(t, err)
 
 		select {
-		case <-cp.sendCommandCh:
-			t.Fatal("follower node must not perform fanout")
+		case id := <-fx.delivered:
+			t.Fatalf("follower node must not perform fanout: steward %s received a command", id)
 		case <-time.After(200 * time.Millisecond):
 			// success: fanout suppressed on follower
 		}

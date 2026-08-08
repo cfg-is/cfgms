@@ -309,6 +309,63 @@ func TestRegenerate_RequiresConfirmation(t *testing.T) {
 	})
 }
 
+// TestIssueAdminBundle_RejectsUnsetExternalURL verifies that IssueAdminBundle fails
+// with an actionable error when external_url is not configured.
+func TestIssueAdminBundle_RejectsUnsetExternalURL(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	cfg := *setup.cfg
+	cfg.ExternalURL = ""
+
+	outputPath := filepath.Join(t.TempDir(), "should-not-exist.bundle.yaml")
+	err := IssueAdminBundle(&cfg, setup.logger, "alice", outputPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "external_url",
+		"error must name the field that needs to be set")
+	assert.NoFileExists(t, outputPath,
+		"no bundle file must be created when external_url is unset")
+}
+
+// TestIssueAdminBundle_RejectsNonHTTPSExternalURL verifies that a config with a
+// non-https external_url is rejected — an http bundle exposes the controller URL
+// as cleartext.
+func TestIssueAdminBundle_RejectsNonHTTPSExternalURL(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	cfg := *setup.cfg
+	cfg.ExternalURL = "http://controller.example.com:8080"
+
+	outputPath := filepath.Join(t.TempDir(), "should-not-exist.bundle.yaml")
+	err := IssueAdminBundle(&cfg, setup.logger, "alice", outputPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https",
+		"error must require the https scheme")
+	assert.NoFileExists(t, outputPath,
+		"no bundle file must be created when external_url uses http")
+}
+
+// TestIssueAdminBundle_HonoursExplicitLocalhostURL verifies that a config that
+// explicitly sets external_url to https://localhost:8080 is accepted unchanged.
+// A single-host development deployment is a legitimate use case.
+func TestIssueAdminBundle_HonoursExplicitLocalhostURL(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	cfg := *setup.cfg
+	cfg.ExternalURL = "https://localhost:8080"
+
+	outputPath := filepath.Join(t.TempDir(), "dev.bundle.yaml")
+	err := IssueAdminBundle(&cfg, setup.logger, "dev-admin", outputPath)
+	require.NoError(t, err, "explicit https://localhost:8080 must be accepted")
+
+	b, err := bundle.Read(outputPath)
+	require.NoError(t, err)
+	assert.Equal(t, "https://localhost:8080", b.ControllerURL,
+		"bundle ControllerURL must reflect the explicitly configured external_url")
+}
+
 // TestRegenerate_RecoversFromMissingBundle verifies that when the bundle marker is
 // present but the bundle file has been deleted externally, RunRegenerate recreates
 // the bundle and the controller initialization state is still valid.

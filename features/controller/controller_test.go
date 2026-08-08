@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
-	testutil "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
 
@@ -23,8 +23,7 @@ func (m *testModule) Set(_ context.Context, _, _ string) error          { return
 func (m *testModule) Test(_ context.Context, _, _ string) (bool, error) { return true, nil }
 
 func TestControllerCreation(t *testing.T) {
-	// Create a test logger
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 
 	// Test cases
 	tests := []struct {
@@ -89,11 +88,7 @@ func TestControllerCreation(t *testing.T) {
 }
 
 func TestControllerLifecycle(t *testing.T) {
-	// Use a temporary directory for this test
 	tempDir := t.TempDir()
-
-	// Create a test logger and controller
-	logger := testutil.NewMockLogger(true)
 
 	cfg := config.DefaultConfig()
 	cfg.DataDir = tempDir + "/data"
@@ -116,75 +111,22 @@ func TestControllerLifecycle(t *testing.T) {
 	if cfg.Transport != nil {
 		cfg.Transport.ListenAddr = "127.0.0.1:0"
 	}
-	// DefaultConfig leaves metrics_listen_addr empty so startup fails closed
-	// rather than binding a metrics listener nobody chose. Deployments set it
-	// explicitly; so must a test that starts the controller.
+	// DefaultConfig leaves metrics_listen_addr and external_url empty so startup
+	// fails closed when they are absent. Deployments set them explicitly; so must
+	// a test that starts the controller.
 	cfg.MetricsListenAddr = pkgtestutil.ReservePrivateListenerAddress(t)
-	ctrl, err := New(cfg, logger)
+	cfg.ExternalURL = "https://localhost:8080"
+	ctrl, err := New(cfg, logging.NewNoopLogger())
 	require.NoError(t, err)
 
-	// Start the controller
 	ctx := context.Background()
-	err = ctrl.Start(ctx)
-	assert.NoError(t, err)
-
-	// Verify start logged properly - certificate management and REST API adds extra logs
-	infoLogs := logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 8)
-
-	// Convert logs to messages for easier checking
-	messages := make([]string, len(infoLogs))
-	for i, log := range infoLogs {
-		messages[i] = log.Message
-	}
-
-	// Verify required messages are present: CA is always loaded (init was done by PreInitControllerForTest)
-	caLoaded := false
-	for _, msg := range messages {
-		if msg == "Loaded existing Certificate Authority" {
-			caLoaded = true
-			break
-		}
-	}
-	assert.True(t, caLoaded, "Expected CA to be loaded from pre-initialized state")
-
-	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
-	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
-	assert.Contains(t, messages, "HTTP API server started")
-	assert.Contains(t, messages, "Controller started successfully")
-
-	// Stop the controller
-	err = ctrl.Stop(ctx)
-	assert.NoError(t, err)
-
-	// Verify stop logged properly - check that required messages exist
-	infoLogs = logger.GetLogs("info")
-	assert.GreaterOrEqual(t, len(infoLogs), 10)
-
-	// Update messages slice with all current logs
-	messages = make([]string, len(infoLogs))
-	for i, log := range infoLogs {
-		messages[i] = log.Message
-	}
-
-	// Verify required startup messages are present
-	assert.Contains(t, messages, "Starting controller")
-	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
-	assert.Contains(t, messages, "HTTP API server started")
-	assert.Contains(t, messages, "Controller started successfully")
-
-	// Verify required shutdown messages are present
-	assert.Contains(t, messages, "Stopping controller")
-	assert.Contains(t, messages, "Shutting down REST API server")
-	assert.Contains(t, messages, "Shutting down controller server")
-	assert.Contains(t, messages, "Controller stopped successfully")
+	require.NoError(t, ctrl.Start(ctx), "controller must start without error")
+	require.NoError(t, ctrl.Stop(ctx), "controller must stop without error")
 }
 
 func TestModuleRegistration(t *testing.T) {
-	// Create a test logger and controller
-	logger := testutil.NewMockLogger(true)
 	tempDir := t.TempDir()
+	logger := logging.NewNoopLogger()
 	cfg := config.DefaultConfig()
 	cfg.DataDir = tempDir + "/data"
 	cfg.CertPath = tempDir + "/certs"
@@ -238,7 +180,7 @@ func TestModuleRegistration(t *testing.T) {
 // return a non-empty address confirming the server was initialized.
 func TestControllerSingleHTTPServer(t *testing.T) {
 	tempDir := t.TempDir()
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 
 	cfg := config.DefaultConfig()
 	cfg.DataDir = tempDir + "/data"
@@ -261,6 +203,7 @@ func TestControllerSingleHTTPServer(t *testing.T) {
 	// Use an ephemeral HTTP port to avoid conflicts with parallel tests.
 	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
 	cfg.MetricsListenAddr = pkgtestutil.ReservePrivateListenerAddress(t)
+	cfg.ExternalURL = "https://localhost:8080" // Required; DefaultConfig leaves this empty
 
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)

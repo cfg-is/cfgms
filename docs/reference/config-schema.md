@@ -28,7 +28,7 @@ If no file is found, built-in defaults are used and environment variable overrid
 | YAML field | Type | Default | Req | Description | Code ref |
 |---|---|---|---|---|---|
 | `listen_addr` | string | `"127.0.0.1:8080"` | optional | REST API (HTTPS) listen address | config.go:72 |
-| `external_url` | string | `"https://localhost:8080"` | optional | External URL for API callbacks | config.go:75 |
+| `external_url` | string | — | **required** | Externally-reachable HTTPS address used in admin bundles and upgrade URLs (e.g. `https://controller.example.com:8080`); admin bundle issuance fails if unset | config.go:75 |
 | `cert_path` | string | `"certs/"` | optional | Legacy TLS certificate directory (superseded by `certificate` block) | config.go:78 |
 | `data_dir` | string | `"data/"` | optional | Data storage root directory | config.go:81 |
 | `log_level` | string | `"info"` | optional | Log verbosity shorthand; overridden by `logging.level` if both set | config.go:84 |
