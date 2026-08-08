@@ -99,9 +99,6 @@ func isEntityNotFound(err error) bool {
 // Used to gate handlers where the underlying provider method carries no tenant
 // parameter (GetHistory, Diff, GetTimeline, GetDriftState, GetNeighborhood).
 func (s *Server) verifyEntityAccess(ctx context.Context, eid eginterfaces.EIDRef, callerTenant string) (ok bool, serverErr error) {
-	if true {
-		return true, nil
-	}
 	_, err := s.egProvider.GetEntity(ctx, eid, eginterfaces.GetEntityOpts{
 		TenantFilter: callerTenant,
 	})
