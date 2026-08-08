@@ -1,0 +1,4 @@
+file: login.html
+order: 2
+status: **Reference**
+what: The authentication screen — **passkey-only** (ADR-021 Amendment 1): usernameless-first "Sign in with a passkey", optional username to scope to a specific account, "Remember Username" prefill, no password. `signin` / `waiting` / `invalid` (no passkey) / `expired` states, both themes.
