@@ -2004,6 +2004,127 @@ func TestWebSessionCookie_AssurancePropagatedToPrincipal(t *testing.T) {
 	})
 }
 
+// --- cfg-CLI Bearer session GlobalScope tests (Issue #3194) ---
+// These tests verify that the cfg-CLI Bearer session principal's GlobalScope is derived
+// from the session's actual tenant scope rather than hardcoded true.
+
+// TestBearerSession_TenantScoped_GlobalScopeFalse verifies that a cfg-CLI session bound
+// to a non-empty TenantID produces a principal with GlobalScope==false. Before Issue #3194,
+// GlobalScope was hardcoded true on the Bearer session path, making tenant isolation
+// checks dead code for this principal type.
+func TestBearerSession_TenantScoped_GlobalScopeFalse(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	_, token, err := mgr.Issue(context.Background(), "cli-admin", "cfg-cli", "msp-a")
+	require.NoError(t, err)
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	assert.False(t, capturedPrincipal.GlobalScope,
+		"cfg-CLI session bound to TenantID='msp-a' must yield GlobalScope=false (Issue #3194)")
+	assert.Equal(t, "msp-a", capturedPrincipal.TenantID)
+}
+
+// TestBearerSession_Unscoped_GlobalScopeTrue verifies that a cfg-CLI session with no
+// tenant scope (TenantID=="") still receives cross-tenant visibility (GlobalScope==true),
+// so existing platform-admin CLI workflows do not regress after Issue #3194.
+func TestBearerSession_Unscoped_GlobalScopeTrue(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	_, token, err := mgr.Issue(context.Background(), "platform-admin", "cfg-cli", "")
+	require.NoError(t, err)
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	assert.True(t, capturedPrincipal.GlobalScope,
+		"cfg-CLI session with empty TenantID (platform admin) must yield GlobalScope=true (Issue #3194 regression guard)")
+	assert.Empty(t, capturedPrincipal.TenantID)
+}
+
+// TestBearerSession_TenantScoped_CrossTenantAccessDenied verifies end-to-end that the
+// corrected GlobalScope signal causes requirePermission to reject a cross-tenant request
+// from a tenant-scoped cfg-CLI session. Before Issue #3194, GlobalScope was hardcoded
+// true, making the !principal.GlobalScope guard a dead check for this principal type.
+func TestBearerSession_TenantScoped_CrossTenantAccessDenied(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	// setupTestServer wires no isolation engine; the boundary check at middleware.go:818
+	// fires before the engine check, so the simpler server is sufficient.
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	// Issue a tenant-scoped cfg-CLI session for "msp-a".
+	_, token, err := mgr.Issue(context.Background(), "cli-admin", "cfg-cli", "msp-a")
+	require.NoError(t, err)
+
+	handler := srv.authenticationMiddleware(
+		srv.requirePermission("steward", "list")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}),
+		),
+	)
+
+	t.Run("same tenant allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req = req.WithContext(context.WithValue(req.Context(), targetTenantContextKey, "msp-a"))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"tenant-scoped CLI session must access its own tenant")
+	})
+
+	t.Run("cross-tenant denied (GlobalScope now false)", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req = req.WithContext(context.WithValue(req.Context(), targetTenantContextKey, "msp-b"))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"tenant-scoped CLI session must not access a sibling tenant (GlobalScope fix)")
+		assert.Contains(t, rec.Body.String(), "CROSS_TENANT_ACCESS_DENIED",
+			"cross-tenant denial must carry CROSS_TENANT_ACCESS_DENIED error code")
+	})
+}
+
 // TestIsWithinTenantScope verifies the helper introduced by Issue #3147.
 func TestIsWithinTenantScope(t *testing.T) {
 	tests := []struct {

@@ -349,12 +349,18 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// Build a Principal from session state. Assurance is read directly from
 					// the session so that IP-change downgrades (ADR-021 Decision 5) and future
 					// WebAuthn upgrades are reflected on every request rather than fixed at issuance.
+					//
+					// GlobalScope mirrors the session's actual scope (Issue #3194): unscoped sessions
+					// (TenantID=="", matching an unscoped mTLS admin cert) receive cross-tenant
+					// visibility; tenant-scoped sessions are confined to their subtree. Fail-closed:
+					// explicit scope → GlobalScope=false, matching the web-session path's shape.
+					globalScope := sess.TenantID == ""
 					sessionPrincipal := &Principal{
 						ID:           sess.PrincipalID,
 						Name:         "session:" + logging.SanitizeLogValue(sess.PrincipalID),
 						Assurance:    sess.Assurance,
 						LastProvenAt: sess.LastProvenAt,
-						GlobalScope:  true,
+						GlobalScope:  globalScope,
 						// TenantID mirrors the issuing admin cert; "" means no tenant scope
 						// (same semantics as extractAdminPrincipal for mTLS admin certs).
 						TenantID: sess.TenantID,
