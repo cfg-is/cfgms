@@ -4,7 +4,7 @@
 # versions per the GHSA-69fq-xp46-6x23 advisory (CVE-2026-33634).
 #
 # Usage: install-trivy.sh <version> <sha256> [dest_dir]
-#   version    Trivy version tag (e.g. "v0.72.0")
+#   version    Trivy version tag (e.g. "v0.73.0")
 #   sha256     Expected SHA-256 of trivy_<v>_Linux-64bit.tar.gz from the
 #              upstream release's checksums.txt — pinned in caller's env.
 #   dest_dir   Install directory (default: /usr/local/bin)
