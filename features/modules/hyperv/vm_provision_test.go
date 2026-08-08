@@ -452,6 +452,142 @@ func TestProvisionVM_CloudInitGen1SkipsHddFirstBoot(t *testing.T) {
 	require.Len(t, callsContaining(calls, "Add-VMHardDiskDrive"), 1, "Gen1 still attaches the seed")
 }
 
+// cloudInitVMConfigMapWithSecureBoot returns cloudInitVMConfigMap with an
+// explicit source.secure_boot value set (#3169).
+func cloudInitVMConfigMapWithSecureBoot(generation int, secureBoot string) map[string]interface{} {
+	m := cloudInitVMConfigMap(generation)
+	src := m["source"].(map[string]interface{})
+	src["secure_boot"] = secureBoot
+	return m
+}
+
+// firmwareFailingTransport wraps testWinRMTransport and injects a failure
+// specifically on the Set-VMFirmware secure-boot-template call (matched by
+// psCommand identity, not call index — robust against unrelated call-sequence
+// changes), simulating #3169's reproducible "'MicrosoftUEFICertificateAuthority'
+// matches none of the secure boot templates" failure. The disable-secure-boot
+// call (psDisableVMFirmwareSecureBoot) is a different const and is unaffected,
+// so it can still be asserted as the best-effort recovery step.
+type firmwareFailingTransport struct {
+	*testWinRMTransport
+	firmwareErr error
+}
+
+func (t *firmwareFailingTransport) ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error) {
+	out, err := t.testWinRMTransport.ExecutePS(ctx, psCommand, psArgs)
+	if psCommand == psSetVMFirmware {
+		return out, t.firmwareErr
+	}
+	return out, err
+}
+
+// ── REQUIRED TEST: secure_boot modes (#3169) ────────────────────────────────
+
+// TestProvisionVM_SecureBootEnforce_BlocksOnFirmwareFailure asserts the
+// default ("enforce", and no secure_boot field at all) mode is unchanged from
+// pre-#3169 behavior: a Set-VMFirmware failure fails provisioning outright.
+func TestProvisionVM_SecureBootEnforce_BlocksOnFirmwareFailure(t *testing.T) {
+	base := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &firmwareFailingTransport{
+		testWinRMTransport: base,
+		firmwareErr:        fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
+	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
+	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+
+	// No secure_boot field at all — must default to enforce.
+	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
+	err := m.Set(context.Background(), "vm:stw-01", cfg)
+	require.Error(t, err, "enforce (default) must fail provisioning on a Set-VMFirmware error")
+	assert.Contains(t, err.Error(), "set firmware")
+
+	base.mu.Lock()
+	calls := base.calls
+	base.mu.Unlock()
+	assert.Empty(t, callsContaining(calls, "EnableSecureBoot Off"),
+		"enforce must never fall back to disabling secure boot")
+	// Provisioning stopped at the firmware step — the seed/CIDATA build never ran.
+	assert.Empty(t, callsContaining(calls, "New-VHD"),
+		"enforce must block before any further provisioning work")
+}
+
+// TestProvisionVM_SecureBootBestEffort_RecoversFromFirmwareFailure asserts
+// secure_boot: best-effort catches a Set-VMFirmware failure, explicitly turns
+// secure boot off, and lets provisioning proceed to completion instead of
+// blocking convergence forever every cycle (#3169 Branch B).
+func TestProvisionVM_SecureBootBestEffort_RecoversFromFirmwareFailure(t *testing.T) {
+	base := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	transport := &firmwareFailingTransport{
+		testWinRMTransport: base,
+		firmwareErr:        fmt.Errorf("'MicrosoftUEFICertificateAuthority' matches none of the secure boot templates"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
+	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
+	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+
+	cfg := rawConfigState{m: cloudInitVMConfigMapWithSecureBoot(2, "best-effort")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg),
+		"best-effort must converge successfully despite the firmware-template failure")
+
+	base.mu.Lock()
+	calls := base.calls
+	base.mu.Unlock()
+
+	fw := callsContaining(calls, "SecureBootTemplate")
+	require.Len(t, fw, 1, "the template call is still attempted first")
+	disable := callsContaining(calls, "EnableSecureBoot Off")
+	require.Len(t, disable, 1, "secure boot is explicitly turned off after the template call fails")
+	assert.True(t, argsContain(disable[0], "stw-01"), "disable call targets the VM by name via args")
+
+	// Provisioning continued past the firmware step to completion.
+	require.Len(t, callsContaining(calls, "New-VHD"), 1, "CIDATA seed build still runs")
+	require.Len(t, callsContaining(calls, "Cfgms-SetHddFirstBoot"), 1, "OS disk still made first boot device")
+	require.Len(t, callsContaining(calls, "Start-VM"), 1, "VM still powered on")
+}
+
+// TestProvisionVM_SecureBootDisabled_NeverAttemptsTemplate asserts
+// secure_boot: disabled skips the template call entirely and goes straight to
+// disabling secure boot.
+func TestProvisionVM_SecureBootDisabled_NeverAttemptsTemplate(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(t, transport)
+	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
+	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
+	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+
+	cfg := rawConfigState{m: cloudInitVMConfigMapWithSecureBoot(2, "disabled")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "SecureBootTemplate"),
+		"disabled must never attempt the template call")
+	require.Len(t, callsContaining(calls, "EnableSecureBoot Off"), 1,
+		"disabled must explicitly turn secure boot off")
+}
+
+// TestSourceConfig_Validate_SecureBoot asserts secure_boot accepts only its
+// three declared values (plus empty, defaulting to enforce).
+func TestSourceConfig_Validate_SecureBoot(t *testing.T) {
+	base := func(sb string) *SourceConfig {
+		return &SourceConfig{
+			OSFamily:   "linux",
+			Image:      `C:\images\debian.raw`,
+			SecureBoot: sb,
+		}
+	}
+	for _, ok := range []string{"", "enforce", "best-effort", "disabled"} {
+		assert.NoError(t, base(ok).validate(), "secure_boot %q must be valid", ok)
+	}
+	err := base("yolo").validate()
+	assert.ErrorIs(t, err, ErrInvalidSourceSecureBoot)
+}
+
 // TestProvision_CloudInitUserDataRenderedToSeed asserts the cloud-init path
 // writes a REAL rendered cloud-config user-data (not the placeholder) carrying the
 // controller-supplied token + CA fingerprint and the CorrelationID, with list-form

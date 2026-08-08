@@ -91,6 +91,12 @@ const (
 	// template. Gen1 VMs never reach this.
 	psSetVMFirmware = `Set-VMFirmware -VMName $Name -EnableSecureBoot On -SecureBootTemplate $Template`
 
+	// psDisableVMFirmwareSecureBoot wraps Set-VMFirmware -EnableSecureBoot Off.
+	// Used when source.secure_boot is "disabled", or as the fallback after a
+	// "best-effort" template failure, so the VM's firmware is left in a known,
+	// deterministic state rather than partially configured (#3169).
+	psDisableVMFirmwareSecureBoot = `Set-VMFirmware -VMName $Name -EnableSecureBoot Off`
+
 	// psBuildAnswerIso builds a small ISO carrying the rendered answer file
 	// (+ steward binary + CA) for the Windows path: the new Server 2025 Setup
 	// scans DVD roots for autounattend.xml but NOT data disks, so the answer file
@@ -382,15 +388,9 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 
 	// Gen2 secure-boot template by os_family; Gen1 has no UEFI/secure boot.
 	if generation == 2 {
-		template := secureBootTemplate(cfg.Source.OSFamily)
-		if _, psErr := m.transport.ExecutePS(ctx, psSetVMFirmware, map[string]string{
-			"Name":     hostName,
-			"Template": template,
-		}); psErr != nil {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, psErr)
-			return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: set firmware for VM %q: %w", vmName, psErr))
+		if err := m.setSecureBoot(ctx, cfgResourceID, hostName, vmName, cfg, record); err != nil {
+			return err
 		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
 	}
 
 	// cloud-init (Linux VM-from-cloud-image): the boot disk (already prepared
@@ -538,6 +538,62 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	}
 
 	return m.advanceProvision(ctx, cfg, vmName, record, ProvisionStateInstalling)
+}
+
+// setSecureBoot applies the Gen2 secure-boot firmware template per the
+// source's secure_boot mode (#3169). Isolation testing on cfg-lab could not
+// reproduce the module's real create-sequence failure via a direct
+// PowerShell re-run of the same conversion pipeline + attach sequence
+// (findings: docs/troubleshooting/hyperv-secureboot-template-findings.md),
+// so the settle/verify fix (Branch A) has no confirmed cause to target.
+// Secure boot is instead made a declared, degradable step (Branch B):
+//
+//   - "enforce" (default, empty) — unchanged pre-#3169 behavior: a
+//     Set-VMFirmware failure fails provisioning outright.
+//   - "best-effort" — a Set-VMFirmware failure is logged, secure boot is
+//     explicitly turned off (never left ambiguous), and provisioning
+//     continues instead of blocking convergence forever.
+//   - "disabled" — secure boot is turned off immediately; the template call
+//     is never attempted.
+func (m *hypervModule) setSecureBoot(ctx context.Context, cfgResourceID, hostName, vmName string, cfg *VMConfig, record *ProvisionRecord) error {
+	mode := cfg.Source.secureBootMode()
+
+	if mode == "disabled" {
+		if _, psErr := m.transport.ExecutePS(ctx, psDisableVMFirmwareSecureBoot, map[string]string{"Name": hostName}); psErr != nil {
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, psErr)
+			return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: disable secure boot for VM %q: %w", vmName, psErr))
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
+		return nil
+	}
+
+	template := secureBootTemplate(cfg.Source.OSFamily)
+	_, psErr := m.transport.ExecutePS(ctx, psSetVMFirmware, map[string]string{
+		"Name":     hostName,
+		"Template": template,
+	})
+	if psErr == nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
+		return nil
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, psErr)
+
+	if mode == "enforce" {
+		return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: set firmware for VM %q: %w", vmName, psErr))
+	}
+
+	// best-effort: proceed without secure boot instead of blocking
+	// convergence forever every 5-minute cycle.
+	if logger, ok := m.GetLogger(); ok {
+		logger.Warn("hyperv: secure boot template failed, proceeding without secure boot (secure_boot: best-effort)",
+			"vm_name", logging.SanitizeLogValue(vmName), "error", psErr.Error())
+	}
+	if _, offErr := m.transport.ExecutePS(ctx, psDisableVMFirmwareSecureBoot, map[string]string{"Name": hostName}); offErr != nil {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, offErr)
+		return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: disable secure boot after best-effort failure for VM %q: %w", vmName, offErr))
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
+	return nil
 }
 
 // cloudInitMetaData returns the minimal NoCloud meta-data document for a VM.
