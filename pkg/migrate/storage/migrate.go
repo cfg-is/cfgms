@@ -2,7 +2,7 @@
 // Copyright 2026 Jordan Ritz
 // Package storage implements the "storage" migrator for CFGMS controller data.
 //
-// The migrator covers all eleven storage stores through pkg/storage/interfaces
+// The migrator covers all twelve storage stores through pkg/storage/interfaces
 // using upsert semantics so that re-running the migration is idempotent:
 //
 //	cfg migrate --provider storage --from oss --to database
@@ -157,23 +157,24 @@ func (m *StorageMigrator) Run(ctx context.Context) (migrate.MigrationReport, err
 // ─── kind constants ─────────────────────────────────────────────────────────
 
 const (
-	kindConfig            = "config"
-	kindAudit             = "audit"
-	kindRBACPermission    = "rbac_permission"
-	kindRBACRole          = "rbac_role"
-	kindRBACSubject       = "rbac_subject"
-	kindRBACAssignment    = "rbac_role_assignment"
-	kindTenant            = "tenant"
-	kindClientTenant      = "client_tenant"
-	kindRegistrationToken = "registration_token"
-	kindSession           = "session"
-	kindSteward           = "steward"
-	kindCommand           = "command"
-	kindTrigger           = "trigger"
-	kindPush              = "push"
-	kindIPTrust           = "ip_trust"
-	kindRefreshPolicy     = "refresh_policy"
-	kindPendingRefresh    = "pending_refresh"
+	kindConfig              = "config"
+	kindAudit               = "audit"
+	kindRBACPermission      = "rbac_permission"
+	kindRBACRole            = "rbac_role"
+	kindRBACSubject         = "rbac_subject"
+	kindRBACAssignment      = "rbac_role_assignment"
+	kindTenant              = "tenant"
+	kindClientTenant        = "client_tenant"
+	kindRegistrationToken   = "registration_token"
+	kindSession             = "session"
+	kindSteward             = "steward"
+	kindCommand             = "command"
+	kindTrigger             = "trigger"
+	kindPush                = "push"
+	kindIPTrust             = "ip_trust"
+	kindRefreshPolicy       = "refresh_policy"
+	kindPendingRefresh      = "pending_refresh"
+	kindPendingRegistration = "pending_registration"
 )
 
 // ─── export ──────────────────────────────────────────────────────────────────
@@ -270,6 +271,12 @@ func exportAll(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.R
 		return nil, err
 	}
 	out = append(out, prRecs...)
+
+	pendingRegRecs, err := exportPendingRegistrations(ctx, mgr)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, pendingRegRecs...)
 
 	return out, nil
 }
@@ -695,6 +702,33 @@ func exportPendingRefresh(ctx context.Context, mgr *interfaces.StorageManager) (
 	return recs, nil
 }
 
+// exportPendingRegistrations exports all in-flight registration entries across
+// all tenants. ListPending with an empty tenantID returns entries for all tenants.
+func exportPendingRegistrations(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
+	store := mgr.GetPendingRegistrationStore()
+	if store == nil {
+		return nil, nil
+	}
+	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
+		if err := init.Initialize(ctx); err != nil {
+			return nil, fmt.Errorf("initialize pending registration store: %w", err)
+		}
+	}
+	entries, err := store.ListPending(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("list pending registrations: %w", err)
+	}
+	recs := make([]migrate.Record, 0, len(entries))
+	for _, e := range entries {
+		data, err := marshal(e)
+		if err != nil {
+			return nil, err
+		}
+		recs = append(recs, migrate.Record{Kind: kindPendingRegistration, ID: e.PendingID, Data: data})
+	}
+	return recs, nil
+}
+
 // ─── import ──────────────────────────────────────────────────────────────────
 
 // importAll writes all records to mgr using upsert semantics so that calling
@@ -744,6 +778,8 @@ func importRecord(ctx context.Context, mgr *interfaces.StorageManager, rec migra
 		return importRefreshPolicy(ctx, mgr, rec)
 	case kindPendingRefresh:
 		return importPendingRefresh(ctx, mgr, rec)
+	case kindPendingRegistration:
+		return importPendingRegistration(ctx, mgr, rec)
 	default:
 		return fmt.Errorf("unknown record kind %q", rec.Kind)
 	}
@@ -854,7 +890,10 @@ func importRBACAssignment(ctx context.Context, mgr *interfaces.StorageManager, r
 		return fmt.Errorf("unmarshal role assignment: %w", err)
 	}
 	// Check for existence to avoid duplicate-constraint violations.
-	existing, _ := store.ListRoleAssignments(ctx, a.SubjectId, a.RoleId, a.TenantId)
+	existing, err := store.ListRoleAssignments(ctx, a.SubjectId, a.RoleId, a.TenantId)
+	if err != nil {
+		return fmt.Errorf("list role assignments for subject %s role %s: %w", a.SubjectId, a.RoleId, err)
+	}
 	for _, ex := range existing {
 		if ex.Id == a.Id {
 			return nil // already present
@@ -1062,6 +1101,104 @@ func importPendingRefresh(ctx context.Context, mgr *interfaces.StorageManager, r
 	return store.AddPendingRefresh(ctx, &entry)
 }
 
+func importPendingRegistration(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
+	store := mgr.GetPendingRegistrationStore()
+	if store == nil {
+		return nil // backend does not support pending registrations — skip silently
+	}
+	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
+		if err := init.Initialize(ctx); err != nil {
+			return fmt.Errorf("initialize pending registration store: %w", err)
+		}
+	}
+	var entry business.PendingRegistrationEntry
+	if err := json.Unmarshal(rec.Data, &entry); err != nil {
+		return fmt.Errorf("unmarshal pending registration entry: %w", err)
+	}
+	// AddPending has no sentinel error for duplicate PendingID, so we check
+	// existence first to achieve idempotency on re-runs.
+	existing, err := store.GetPendingByID(ctx, entry.PendingID)
+	if errors.Is(err, business.ErrPendingRegistrationNotFound) {
+		return store.AddPending(ctx, &entry)
+	}
+	if err != nil {
+		return fmt.Errorf("get pending registration %s: %w", entry.PendingID, err)
+	}
+	// Already exists — re-sync the status, but only along a legal lifecycle
+	// transition. Both store implementations overwrite the status column
+	// unconditionally for every status except "claimed", so a blind resync
+	// regresses any destination row that has advanced past the source snapshot
+	// (an explicitly supported re-run mode, see the package doc).
+	return resyncPendingRegistrationStatus(ctx, store, entry.PendingID, existing.Status, entry.Status)
+}
+
+// pendingRegistrationTerminalStatuses are the lifecycle states a registration
+// never leaves. Moving a row out of one re-arms behaviour that must happen at
+// most once: "claimed" → "approved" lets a steward still holding its token
+// claim a second certificate for the same pending_id, "denied" → anything
+// resurrects an operator-denied registration, and "expired" → anything revives
+// an entry past its ExpiresAt quarantine deadline.
+var pendingRegistrationTerminalStatuses = map[string]bool{
+	business.PendingRegistrationStatusClaimed: true,
+	business.PendingRegistrationStatusDenied:  true,
+	business.PendingRegistrationStatusExpired: true,
+}
+
+// isKnownPendingRegistrationStatus reports whether s is one of the five defined
+// lifecycle states.
+func isKnownPendingRegistrationStatus(s string) bool {
+	switch s {
+	case business.PendingRegistrationStatusPending,
+		business.PendingRegistrationStatusApproved,
+		business.PendingRegistrationStatusClaimed,
+		business.PendingRegistrationStatusDenied,
+		business.PendingRegistrationStatusExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+// resyncPendingRegistrationStatus moves an existing destination row from
+// current towards want, applying only forward progress through the registration
+// lifecycle (pending → approved → claimed | denied | expired). A destination
+// already in a terminal state, or a source snapshot that would regress the
+// destination back to "pending", is left untouched.
+func resyncPendingRegistrationStatus(ctx context.Context, store business.PendingRegistrationStore, pendingID, current, want string) error {
+	if current == want {
+		return nil
+	}
+	if !isKnownPendingRegistrationStatus(current) {
+		return fmt.Errorf("pending registration %s: destination has unrecognized status %q", pendingID, current)
+	}
+	if !isKnownPendingRegistrationStatus(want) {
+		return fmt.Errorf("pending registration %s: source has unrecognized status %q", pendingID, want)
+	}
+	if pendingRegistrationTerminalStatuses[current] {
+		// Destination has advanced past the source snapshot — keep its state.
+		return nil
+	}
+	if want == business.PendingRegistrationStatusPending {
+		// approved → pending would undo an operator decision.
+		return nil
+	}
+	if current == business.PendingRegistrationStatusPending && want == business.PendingRegistrationStatusClaimed {
+		// UpdateStatus("claimed") guards on AND status = 'approved', so a pending
+		// row must be walked through approved first. Leaving it at "pending"
+		// instead would invite an operator to approve a registration the steward
+		// has already claimed, yielding a second certificate for one pending_id.
+		// claimed_at is set by the store to the resync time; the source timestamp
+		// is not settable through the interface and is only used as a marker.
+		if err := store.UpdateStatus(ctx, pendingID, business.PendingRegistrationStatusApproved); err != nil {
+			return fmt.Errorf("pending registration %s: advance to approved: %w", pendingID, err)
+		}
+	}
+	if err := store.UpdateStatus(ctx, pendingID, want); err != nil {
+		return fmt.Errorf("pending registration %s: set status %q: %w", pendingID, want, err)
+	}
+	return nil
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func countByKind(records []migrate.Record) map[string]int {
@@ -1078,22 +1215,23 @@ func countByKind(records []migrate.Record) map[string]int {
 func supportedKindsByManager(mgr *interfaces.StorageManager) map[string]bool {
 	rbac := mgr.GetRBACStore() != nil
 	return map[string]bool{
-		kindConfig:            mgr.GetConfigStore() != nil,
-		kindAudit:             mgr.GetAuditStore() != nil,
-		kindRBACPermission:    rbac,
-		kindRBACRole:          rbac,
-		kindRBACSubject:       rbac,
-		kindRBACAssignment:    rbac,
-		kindTenant:            mgr.GetTenantStore() != nil,
-		kindClientTenant:      mgr.GetClientTenantStore() != nil,
-		kindRegistrationToken: mgr.GetRegistrationTokenStore() != nil,
-		kindSession:           mgr.GetSessionStore() != nil,
-		kindSteward:           mgr.GetStewardStore() != nil,
-		kindCommand:           mgr.GetCommandStore() != nil,
-		kindTrigger:           mgr.GetTriggerStore() != nil,
-		kindPush:              mgr.GetPushStore() != nil,
-		kindIPTrust:           mgr.GetIPTrustStore() != nil,
-		kindRefreshPolicy:     mgr.GetRefreshPolicyStore() != nil,
-		kindPendingRefresh:    mgr.GetPendingRefreshStore() != nil,
+		kindConfig:              mgr.GetConfigStore() != nil,
+		kindAudit:               mgr.GetAuditStore() != nil,
+		kindRBACPermission:      rbac,
+		kindRBACRole:            rbac,
+		kindRBACSubject:         rbac,
+		kindRBACAssignment:      rbac,
+		kindTenant:              mgr.GetTenantStore() != nil,
+		kindClientTenant:        mgr.GetClientTenantStore() != nil,
+		kindRegistrationToken:   mgr.GetRegistrationTokenStore() != nil,
+		kindSession:             mgr.GetSessionStore() != nil,
+		kindSteward:             mgr.GetStewardStore() != nil,
+		kindCommand:             mgr.GetCommandStore() != nil,
+		kindTrigger:             mgr.GetTriggerStore() != nil,
+		kindPush:                mgr.GetPushStore() != nil,
+		kindIPTrust:             mgr.GetIPTrustStore() != nil,
+		kindRefreshPolicy:       mgr.GetRefreshPolicyStore() != nil,
+		kindPendingRefresh:      mgr.GetPendingRefreshStore() != nil,
+		kindPendingRegistration: mgr.GetPendingRegistrationStore() != nil,
 	}
 }
