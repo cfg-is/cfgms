@@ -160,6 +160,8 @@ type Server struct {
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	terminalHandler                http.Handler                          // Issue #2761: terminal WebSocket relay handler
+	tenantStore                    business.TenantStore                  // Issue #2839: tenant hierarchy for per-tenant assurance resolution
+	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -1197,6 +1199,23 @@ func (s *Server) SetRefreshPolicyStore(store business.RefreshPolicyStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshPolicyStore = store
+}
+
+// SetTenantStore wires the TenantStore for tenant-hierarchy resolution (Issue #2839).
+// TenantStore is a core, always-present store — wired unconditionally at startup.
+func (s *Server) SetTenantStore(store business.TenantStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tenantStore = store
+}
+
+// SetAssurancePolicyStore wires the per-tenant AssurancePolicyStore (Issue #2839).
+// When nil (default), resolveAssuranceRequirement returns the global permissionAssurance
+// floor unchanged — no behavior change for existing tests that build a bare Server.
+func (s *Server) SetAssurancePolicyStore(store business.AssurancePolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.assurancePolicyStore = store
 }
 
 // SetAuditStore wires a direct AuditStore reference for the test-mode count endpoint
