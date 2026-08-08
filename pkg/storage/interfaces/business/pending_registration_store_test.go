@@ -87,6 +87,9 @@ func (s *inMemPendingStore) ListPending(_ context.Context, tenantID string) ([]*
 	defer s.mu.RUnlock()
 	var out []*business.PendingRegistrationEntry
 	for _, e := range s.entries {
+		if e.Status != business.PendingRegistrationStatusPending {
+			continue
+		}
 		if tenantID == "" || e.TenantID == tenantID {
 			cp := *e
 			out = append(out, &cp)
@@ -246,4 +249,58 @@ func TestPendingRegistrationStore_StatusConstants(t *testing.T) {
 func TestErrPendingRegistrationNotFound(t *testing.T) {
 	assert.NotNil(t, business.ErrPendingRegistrationNotFound)
 	assert.Equal(t, "pending registration not found", business.ErrPendingRegistrationNotFound.Error())
+}
+
+// TestPendingRegistrationStore_ListPending_ExcludesResolved verifies that ListPending
+// only returns entries in "pending" status — approved, denied, and expired entries
+// must be excluded.
+func TestPendingRegistrationStore_ListPending_ExcludesResolved(t *testing.T) {
+	store := newInMemPendingStore()
+	ctx := context.Background()
+
+	// pending entry — must appear in results
+	require.NoError(t, store.AddPending(ctx, newTestEntry("p-keep", "tenant-1", "tok-keep")))
+
+	// approved entry — must NOT appear
+	require.NoError(t, store.AddPending(ctx, newTestEntry("p-appr", "tenant-1", "tok-appr")))
+	require.NoError(t, store.UpdateStatus(ctx, "p-appr", business.PendingRegistrationStatusApproved))
+
+	// denied entry — must NOT appear
+	require.NoError(t, store.AddPending(ctx, newTestEntry("p-deny", "tenant-1", "tok-deny")))
+	require.NoError(t, store.UpdateStatus(ctx, "p-deny", business.PendingRegistrationStatusDenied))
+
+	// expired entry — must NOT appear
+	require.NoError(t, store.AddPending(ctx, newTestEntry("p-exp", "tenant-1", "tok-exp")))
+	require.NoError(t, store.UpdateStatus(ctx, "p-exp", business.PendingRegistrationStatusExpired))
+
+	entries, err := store.ListPending(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "p-keep", entries[0].PendingID)
+	assert.Equal(t, business.PendingRegistrationStatusPending, entries[0].Status)
+}
+
+// TestPendingRegistrationStore_ListPending_PendingWithTenantFilter is a regression
+// guard: the tenant-scoping behavior must still work correctly after adding the
+// status filter. A pending entry in the requested tenant is returned; a pending
+// entry in a different tenant and a resolved entry in the same tenant are not.
+func TestPendingRegistrationStore_ListPending_PendingWithTenantFilter(t *testing.T) {
+	store := newInMemPendingStore()
+	ctx := context.Background()
+
+	// pending in tenant-1 — must appear
+	require.NoError(t, store.AddPending(ctx, newTestEntry("p-t1-pend", "tenant-1", "tok-t1-pend")))
+
+	// approved in tenant-1 — must NOT appear (resolved)
+	require.NoError(t, store.AddPending(ctx, newTestEntry("p-t1-appr", "tenant-1", "tok-t1-appr")))
+	require.NoError(t, store.UpdateStatus(ctx, "p-t1-appr", business.PendingRegistrationStatusApproved))
+
+	// pending in tenant-2 — must NOT appear (different tenant)
+	require.NoError(t, store.AddPending(ctx, newTestEntry("p-t2-pend", "tenant-2", "tok-t2-pend")))
+
+	entries, err := store.ListPending(ctx, "tenant-1")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "p-t1-pend", entries[0].PendingID)
+	assert.Equal(t, business.PendingRegistrationStatusPending, entries[0].Status)
 }

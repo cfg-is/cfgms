@@ -146,7 +146,9 @@ func (s *DatabasePendingRegistrationStore) UpdateStatus(ctx context.Context, pen
 	return nil
 }
 
-// ListPending returns all entries for the given tenantID, or all tenants if empty.
+// ListPending returns entries whose status is "pending" for the given tenantID,
+// or all tenants if empty, ordered by registered_at ascending.
+// Approved, denied, claimed, and expired entries are never included.
 func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
 	var (
 		rows *sql.Rows
@@ -155,11 +157,13 @@ func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tena
 	if tenantID == "" {
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-			FROM cfgms_pending_registrations ORDER BY registered_at ASC`)
+			FROM cfgms_pending_registrations WHERE status = $1 ORDER BY registered_at ASC`,
+			business.PendingRegistrationStatusPending)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-			FROM cfgms_pending_registrations WHERE tenant_id = $1 ORDER BY registered_at ASC`, tenantID)
+			FROM cfgms_pending_registrations WHERE tenant_id = $1 AND status = $2 ORDER BY registered_at ASC`,
+			tenantID, business.PendingRegistrationStatusPending)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to list pending registrations: %w", err)

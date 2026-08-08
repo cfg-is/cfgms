@@ -85,8 +85,9 @@ type PendingRegistrationStore interface {
 	// Returns ErrPendingRegistrationNotFound if no record exists for the ID.
 	UpdateStatus(ctx context.Context, pendingID, status string) error
 
-	// ListPending returns all entries for the given tenantID, ordered by registered_at ascending.
-	// An empty tenantID returns entries for all tenants (operator list view).
+	// ListPending returns entries whose status is "pending", ordered by registered_at ascending.
+	// An empty tenantID returns pending entries for all tenants (operator list view).
+	// Approved, denied, claimed, and expired entries are never included.
 	ListPending(ctx context.Context, tenantID string) ([]*PendingRegistrationEntry, error)
 
 	// ExpireStale marks entries whose expires_at is at or before cutoff and whose status

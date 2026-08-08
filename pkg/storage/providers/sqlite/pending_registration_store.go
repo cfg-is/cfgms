@@ -129,8 +129,9 @@ func (s *SQLitePendingRegistrationStore) UpdateStatus(ctx context.Context, pendi
 	return nil
 }
 
-// ListPending returns all entries for the given tenantID ordered by registered_at ascending.
-// An empty tenantID returns entries for all tenants.
+// ListPending returns entries whose status is "pending" for the given tenantID,
+// ordered by registered_at ascending. An empty tenantID returns pending entries for all tenants.
+// Approved, denied, claimed, and expired entries are never included.
 func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
 	var (
 		query string
@@ -139,12 +140,13 @@ func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenant
 	if tenantID == "" {
 		query = `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-			FROM cfgms_pending_registrations ORDER BY registered_at ASC`
+			FROM cfgms_pending_registrations WHERE status = ? ORDER BY registered_at ASC`
+		args = []interface{}{business.PendingRegistrationStatusPending}
 	} else {
 		query = `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-			FROM cfgms_pending_registrations WHERE tenant_id = ? ORDER BY registered_at ASC`
-		args = []interface{}{tenantID}
+			FROM cfgms_pending_registrations WHERE tenant_id = ? AND status = ? ORDER BY registered_at ASC`
+		args = []interface{}{tenantID, business.PendingRegistrationStatusPending}
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

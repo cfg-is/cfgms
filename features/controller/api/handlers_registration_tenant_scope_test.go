@@ -121,7 +121,39 @@ func TestF1_PendingRegistrationTenantScope(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 
+	t.Run("approved entry leaves the pending list", func(t *testing.T) {
+		// pending-a-1 was approved by the preceding sub-test, so it must no longer be
+		// listed for its own tenant (Issue #3173).
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/v1/registration/pending", nil)
+		req = withScopedPrincipal(req, "tenant-a")
+		server.handleListPendingRegistrations(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var entries []PendingRegistration
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+		for _, e := range entries {
+			assert.NotEqual(t, "pending-a-1", e.PendingID,
+				"an approved registration must not remain in the pending list")
+		}
+	})
+
 	t.Run("unscoped admin sees all entries", func(t *testing.T) {
+		// Seed a fresh tenant-a entry: the originally seeded pending-a-1 was approved by
+		// an earlier sub-test and is therefore no longer pending. This sub-test asserts
+		// cross-tenant visibility, so it must supply its own un-resolved tenant-a entry
+		// rather than depend on state mutated upstream.
+		require.NoError(t, pendingStore.AddPending(ctx, &business.PendingRegistrationEntry{
+			PendingID:    "pending-a-2",
+			StewardID:    "steward-a-2",
+			TenantID:     "tenant-a",
+			TokenStr:     "tok-a-2",
+			SourceIP:     "10.0.1.2",
+			RegisteredAt: time.Now().UTC(),
+			ExpiresAt:    time.Now().UTC().Add(24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}))
+
 		req := httptest.NewRequest("GET", "/api/v1/registration/pending", nil)
 		req = withAdminPrincipal(req)
 		rec := httptest.NewRecorder()
@@ -130,7 +162,14 @@ func TestF1_PendingRegistrationTenantScope(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code)
 		var entries []PendingRegistration
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
-		assert.GreaterOrEqual(t, len(entries), 2, "unscoped admin must see all tenants")
+		require.GreaterOrEqual(t, len(entries), 2, "unscoped admin must see all tenants")
+
+		seenTenants := make(map[string]bool, len(entries))
+		for _, e := range entries {
+			seenTenants[e.TenantID] = true
+		}
+		assert.True(t, seenTenants["tenant-a"], "unscoped admin must see tenant-a entries")
+		assert.True(t, seenTenants["tenant-b"], "unscoped admin must see tenant-b entries")
 	})
 }
 
