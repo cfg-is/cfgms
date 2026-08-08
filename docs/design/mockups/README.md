@@ -15,6 +15,7 @@ file wraps its mockup in a small preview harness:
 See [`../web-ui-design-system.md`](../web-ui-design-system.md) for the identity,
 principles, and token rationale these mockups express.
 
+<!-- BEGIN GENERATED TABLE -->
 | File | What it is | Status |
 |------|------------|--------|
 | [`troubleshooting-cockpit.html`](troubleshooting-cockpit.html) | The chosen direction — agentic troubleshooting cockpit: case bar, dense ticket quick-reference, tabbed Investigation/Chat rail, and an evidence→cause→action canvas (drift-diff, blast-radius graph, change timeline, remediation). Brand-aligned, both themes. | **Reference** |
@@ -31,6 +32,7 @@ principles, and token rationale these mockups express.
 | [`certificates.html`](certificates.html) | **Certificate lifecycle** (Epic #2858 · #3135) — list with days-remaining/amber/red expiry warnings, inline provision form, per-row revoke confirm, and a fleet-impact-worded, type-`ROTATE`-to-confirm signing-CA rotation modal. Both themes. | **Reference** |
 | [`tenant-admin.html`](tenant-admin.html) | Tenant admin tree (Epic #2858 · #3131) — built against **ADR-025** (SaaS-operator ↔ MSP access boundary) and **ADR-027** (cascade suspend/restore + Suspend→Hold→Delete). A **Session** switcher demos all three: **MSP admin** — cascade-aware Suspend/Restore with direct-vs-cascade provenance (restoring an ancestor never restores an independently-suspended descendant), a "not fully suspended" delete rejection naming the offending descendant, a hold-eligibility countdown with Cancel, and a distinct dual-control "Approve deletion" action for a second principal; **Root — no grant** — the ADR-025 boundary/empty state; **Root — break-glass active** — the same subtree unlocked under a time-boxed, audited elevation. Both themes. | **Reference** |
 | [`subject-roles.html`](subject-roles.html) | **Subject-role assignment** (Epic #2858 · #3134) — extends `AccountsView`'s account row with an expand panel (the same pattern `RolesView` uses for permissions) to view, assign, and revoke a subject's roles in place. Role picker + Assign, chip `×` + confirm to revoke, and a distinct 403 escalation-prevention message. Both themes. | **Reference** |
+<!-- END GENERATED TABLE -->
 
 > These are design references, not production code. The shipped UI is
 > React + TypeScript + Vite (Epic #2344), built against

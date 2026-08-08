@@ -1,14 +1,15 @@
 #!/bin/bash
-# Structural-integrity check for the mockups index table (Issue #3042 AC4/AC5).
+# Structural-integrity check for the mockups index table (Issues #3042, #3166).
 #
-# docs/design/mockups/README.md carries `merge=union` in .gitattributes so
-# concurrent PRs that each append a distinct row rebase without human
-# intervention. `union` cannot distinguish "two additive rows" from "two
-# edits of the same row" — both look like an add/add hunk to a line-based
-# merge, and union keeps both sides either way. This script is the backstop:
-# it fails loudly (nonzero exit, in CI) the moment a same-row edit slips
-# through as a silent duplicate, instead of a human having to notice it in
-# review.
+# docs/design/mockups/README.md is generated from per-mockup *.yaml sidecar
+# files by scripts/generate-mockups-index.py (Issue #3166). This script is
+# the backstop: it verifies the committed index has exactly one table header
+# and no duplicate rows — the properties that matter regardless of how the
+# file was produced.
+#
+# Generator freshness (committed README matches current *.yaml metadata) is
+# verified separately by scripts/generate-mockups-index.py --check, which is
+# exercised in scripts/test-scripts.sh.
 #
 # Exit code 0 = single header, no duplicate rows. 1 = violation found.
 # Usage: ./scripts/check-mockups-index.sh [path-to-readme]

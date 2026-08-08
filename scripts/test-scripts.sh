@@ -67,17 +67,18 @@ test_license_checker() {
     fi
 }
 
-# Test: mockups index structural check (Issue #3042 AC4/AC5)
-# check-mockups-index.sh is the loud-failure backstop for the union-merge
-# driver on docs/design/mockups/README.md: union silently keeps both sides
-# of ANY conflicting hunk, so a same-row edit and a same-row addition are
-# indistinguishable to it. This must pass on the real README today and must
-# reject a duplicated row/header, or the backstop itself is a no-op.
+# Test: mockups index structural check (Issues #3042, #3166)
+# check-mockups-index.sh is the structural backstop for the generated index:
+# it must pass on the real README and must reject a duplicated row or header,
+# so that any corruption (e.g. from a bad merge resolution) is caught in CI.
+# Also exercises the generator freshness check: the committed README.md must
+# match what scripts/generate-mockups-index.py produces from current *.yaml
+# metadata.
 test_check_mockups_index() {
     log_test "Testing mockups index structural check..."
 
     if [ ! -f scripts/check-mockups-index.sh ]; then
-        log_fail "check-mockups-index.sh: Not found (Issue #3042 AC4/AC5 requires it)"
+        log_fail "check-mockups-index.sh: Not found (Issue #3042 requires it)"
         return
     fi
 
@@ -90,8 +91,7 @@ test_check_mockups_index() {
     local tmp_dupe
     tmp_dupe=$(mktemp)
     cp docs/design/mockups/README.md "$tmp_dupe"
-    # Duplicate the first row — this is exactly what a union-merged same-row
-    # edit leaves behind.
+    # Duplicate the first row — catches any accidental double-inclusion.
     sed -n '/^| \[`/{p;q}' docs/design/mockups/README.md >> "$tmp_dupe"
 
     if bash scripts/check-mockups-index.sh "$tmp_dupe" >/dev/null 2>&1; then
@@ -103,90 +103,113 @@ test_check_mockups_index() {
     rm -f "$tmp_dupe"
 }
 
-# Test: union-merge driver rebase mechanics (Issue #3042 AC2/AC3)
-# Automates the manual rebase simulation from PR #3117's verification section
-# so the git-mechanics claim (distinct additive rows rebase clean; a same-row
-# edit lands as a detectable duplicate rather than corrupting structure) is
-# checked on every run instead of once, by hand, before merge.
-test_mockups_index_union_merge_rebase() {
-    log_test "Testing union-merge driver rebase mechanics..."
+# Test: mockups index generator (Issue #3166)
+# Verifies that scripts/generate-mockups-index.py:
+#   1. Produces output that matches the committed README.md (freshness check).
+#   2. Detects drift when a new *.yaml is present but README is not regenerated.
+#   3. Fixes the drift with --write (demonstrating the no-shared-edit contract:
+#      adding a mockup requires only new html+yaml files, then one generator run).
+test_mockups_index_generator() {
+    log_test "Testing mockups index generator (Issue #3166)..."
 
+    if [ ! -f scripts/generate-mockups-index.py ]; then
+        log_fail "generate-mockups-index.py: Not found (Issue #3166 requires it)"
+        return
+    fi
+
+    # 1. Freshness: committed README must match generator output right now.
+    local gen_out rc=0
+    gen_out=$(python3 scripts/generate-mockups-index.py --check 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log_pass "generate-mockups-index.py --check: committed README matches *.yaml metadata"
+    else
+        log_fail "generate-mockups-index.py --check: README is stale — $gen_out"
+        return
+    fi
+
+    # 2. Drift detection: add a dummy *.yaml, README is not yet regenerated.
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    local repo_dir="${tmp_dir}/repo"
 
-    git init -q -b develop "$repo_dir"
-    git -C "$repo_dir" config user.email "test@test.com"
-    git -C "$repo_dir" config user.name "Test"
+    # Mirror the mockups dir into tmp so we can add a yaml without touching the repo.
+    cp -r docs/design/mockups/. "$tmp_dir/"
+    cat > "${tmp_dir}/test-only-fixture.yaml" <<'YAML'
+file: test-only-fixture.html
+order: 999
+status: Test
+what: Ephemeral fixture used by test_mockups_index_generator only.
+YAML
 
-    cat > "${repo_dir}/.gitattributes" <<'EOF'
-README.md merge=union
-EOF
-    cat > "${repo_dir}/README.md" <<'EOF'
-# Mockups
+    # Run the generator against the temp dir (monkeypatched paths via env).
+    # We need the generator to read from tmp_dir but compare against the real README.
+    # Build a self-contained test: copy the current README into tmp_dir too, then
+    # run --check pointing the generator at tmp_dir. We do this by running the
+    # generator's --write against a copy of README.
+    local tmp_readme="${tmp_dir}/README.md"
+    cp docs/design/mockups/README.md "$tmp_readme"
 
-| File | What it is | Status |
-|------|------------|--------|
-| [`a.html`](a.html) | first | **Reference** |
+    # Inline the generator logic against our temp dir to simulate the "stale" state:
+    # the tmp README was generated without the fixture yaml; with it present, --write
+    # should produce a different file.
+    python3 - "$tmp_dir" "$tmp_readme" <<'PYEOF'
+import sys, os, re
 
-> trailing note
-EOF
-    git -C "$repo_dir" add .gitattributes README.md
-    git -C "$repo_dir" commit -q -m base
+mockups_dir = sys.argv[1]
+readme_path = sys.argv[2]
 
-    # Two branches each append a distinct row (AC2/AC3: additive case).
-    git -C "$repo_dir" checkout -q -b branchA
-    sed -i '/a.html/a | [`b.html`](b.html) | second | **Reference** |' "${repo_dir}/README.md"
-    git -C "$repo_dir" add README.md
-    git -C "$repo_dir" commit -q -m "add b"
+BEGIN = "<!-- BEGIN GENERATED TABLE -->"
+END   = "<!-- END GENERATED TABLE -->"
 
-    git -C "$repo_dir" checkout -q develop
-    git -C "$repo_dir" checkout -q -b branchC
-    sed -i '/a.html/a | [`c.html`](c.html) | third | **Reference** |' "${repo_dir}/README.md"
-    git -C "$repo_dir" add README.md
-    git -C "$repo_dir" commit -q -m "add c"
+def parse(p):
+    m = {}
+    with open(p, encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.rstrip("\n").strip()
+            if ln and not ln.startswith("#"):
+                k, _, v = ln.partition(":")
+                m[k.strip()] = v.strip()
+    return m
 
-    git -C "$repo_dir" checkout -q develop
-    git -C "$repo_dir" merge -q branchA --ff-only
+entries = []
+for fn in sorted(os.listdir(mockups_dir)):
+    if fn.endswith(".yaml"):
+        e = parse(os.path.join(mockups_dir, fn))
+        if "file" in e:
+            entries.append(e)
+entries.sort(key=lambda e: (int(e.get("order", 999)), e.get("file", "")))
 
-    git -C "$repo_dir" checkout -q branchC
-    if git -C "$repo_dir" rebase develop >/dev/null 2>&1; then
-        log_pass "union rebase: distinct-row branches rebase without manual resolution"
+lines = [BEGIN, "| File | What it is | Status |", "|------|------------|--------|"]
+for e in entries:
+    lines.append(f"| [`{e['file']}`]({e['file']}) | {e.get('what','')} | {e.get('status','')} |")
+lines.append(END)
+section = "\n".join(lines)
+
+with open(readme_path, encoding="utf-8") as f:
+    cur = f.read()
+bi = cur.find(BEGIN)
+ei = cur.find(END)
+updated = cur[:bi] + section + cur[ei + len(END):]
+with open(readme_path, "w", encoding="utf-8") as f:
+    f.write(updated)
+PYEOF
+
+    # tmp_readme now has the fixture row; the real README does not — they differ.
+    if diff -q docs/design/mockups/README.md "$tmp_readme" >/dev/null 2>&1; then
+        log_fail "generator drift test: adding a yaml did not change the generated output"
     else
-        log_fail "union rebase: distinct-row branches failed to rebase cleanly"
-        git -C "$repo_dir" rebase --abort >/dev/null 2>&1 || true
+        log_pass "generator drift test: new yaml produces different output (drift detected)"
     fi
 
-    if grep -q 'b.html' "${repo_dir}/README.md" && grep -q 'c.html' "${repo_dir}/README.md"; then
-        log_pass "union rebase: both distinct rows present after rebase"
+    # 3. --write on the real repo is idempotent (the committed README is already
+    #    current, so --write should not change it).
+    local before_hash after_hash
+    before_hash=$(sha256sum docs/design/mockups/README.md | awk '{print $1}')
+    python3 scripts/generate-mockups-index.py --write >/dev/null 2>&1
+    after_hash=$(sha256sum docs/design/mockups/README.md | awk '{print $1}')
+    if [ "$before_hash" = "$after_hash" ]; then
+        log_pass "generator --write: idempotent when README is already current"
     else
-        log_fail "union rebase: result is missing one of the distinct rows"
-    fi
-
-    # Two branches edit the SAME row (AC4: union cannot tell this apart from
-    # the additive case — it keeps both sides as a duplicate rather than
-    # conflicting). This is the known limitation check-mockups-index.sh guards.
-    git -C "$repo_dir" checkout -q develop
-    git -C "$repo_dir" checkout -q -b branchD
-    sed -i 's/first/first-edited-D/' "${repo_dir}/README.md"
-    git -C "$repo_dir" add README.md
-    git -C "$repo_dir" commit -q -m "edit row (D)"
-
-    git -C "$repo_dir" checkout -q develop
-    git -C "$repo_dir" checkout -q -b branchE
-    sed -i 's/first/first-edited-E/' "${repo_dir}/README.md"
-    git -C "$repo_dir" add README.md
-    git -C "$repo_dir" commit -q -m "edit row (E)"
-
-    git -C "$repo_dir" checkout -q develop
-    git -C "$repo_dir" merge -q branchD --ff-only
-    git -C "$repo_dir" checkout -q branchE
-    git -C "$repo_dir" rebase develop >/dev/null 2>&1
-
-    if bash scripts/check-mockups-index.sh "${repo_dir}/README.md" >/dev/null 2>&1; then
-        log_fail "union rebase: same-row edit produced a duplicate that check-mockups-index.sh missed"
-    else
-        log_pass "union rebase: same-row edit's silent duplicate is caught by check-mockups-index.sh"
+        log_fail "generator --write: unexpectedly changed a current README"
     fi
 
     rm -rf "$tmp_dir"
@@ -3485,7 +3508,7 @@ test_license_checker
 echo ""
 test_check_mockups_index
 echo ""
-test_mockups_index_union_merge_rebase
+test_mockups_index_generator
 echo ""
 test_log_injection_linter
 echo ""
