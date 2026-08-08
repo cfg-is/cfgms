@@ -28,6 +28,11 @@ var ErrNotImplemented = errors.New("entitygraph: not implemented")
 // cursor to resume (ADR-023 §7).
 var ErrCursorExpired = errors.New("entitygraph: watch cursor expired; resync via fresh snapshot read")
 
+// ErrNotFound is returned when the requested entity, edge, or drift record does
+// not exist or is outside the caller's tenant subtree. Cross-tenant reads are
+// deliberately indistinguishable from missing entities (ADR-022 §7).
+var ErrNotFound = errors.New("entitygraph: not found")
+
 // EIDRef is an alias for types.EID so callers can import only this package.
 type EIDRef = types.EID
 

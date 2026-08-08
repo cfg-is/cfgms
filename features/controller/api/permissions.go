@@ -125,6 +125,9 @@ var knownPermissions = map[string]bool{
 	// Per-tenant assurance-policy management (Issue #2839)
 	"assurance-policy:get": true,
 	"assurance-policy:set": true,
+	// Entity graph read API (Issue #2880)
+	"entity:list": true,
+	"entity:read": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

@@ -159,6 +159,7 @@ type Server struct {
 	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
+	egProvider                     egReadProvider                        // Issue #2880: entity graph read API
 	terminalHandler                http.Handler                          // Issue #2761: terminal WebSocket relay handler
 	tenantStore                    business.TenantStore                  // Issue #2839: tenant hierarchy for per-tenant assurance resolution
 	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
@@ -1432,6 +1433,14 @@ func (s *Server) SetConfigStoreWriter(w egConfigstoreIngestor) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.egConfigstoreWriter = w
+}
+
+// SetEntityGraphProvider wires the entity graph read provider into the REST
+// API, enabling the /api/v1/entities/* endpoints (Issue #2880).
+func (s *Server) SetEntityGraphProvider(p egReadProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egProvider = p
 }
 
 // getHTTPListenAddr determines the HTTP listen address with the
