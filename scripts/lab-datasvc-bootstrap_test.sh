@@ -452,6 +452,52 @@ DOCKERFILE
     rm -rf "$DOCKER_TLS_DIR"
 fi
 
+# ── Test 13: private key generation happens under a restrictive umask ─────────
+# generate_tls_certs() writes ca.key/server.key via `openssl genrsa -out`, then
+# chmod 600s them afterward — a caller-inherited permissive umask (e.g. 022 from
+# a typical root shell) would otherwise leave a window where the key sits at its
+# umask-derived default mode before the chmod lands. This wraps `openssl` with a
+# shim that records the ambient umask at each invocation, so the assertion
+# reflects the umask actually in effect while the key material is being written,
+# not just the final (always-chmod'd) file mode.
+
+T13_DIR="$(mktemp -d)"
+T13_FAKE_BIN="$(mktemp -d)"
+T13_UMASK_LOG="$(mktemp)"
+T13_REAL_OPENSSL="$(command -v openssl)"
+
+cat > "${T13_FAKE_BIN}/openssl" <<SHIM
+#!/usr/bin/env bash
+umask >> "${T13_UMASK_LOG}"
+exec "${T13_REAL_OPENSSL}" "\$@"
+SHIM
+chmod +x "${T13_FAKE_BIN}/openssl"
+
+(
+    umask 022
+    PATH="${T13_FAKE_BIN}:${PATH}"
+    hash -r
+    generate_tls_certs "$T13_DIR" "127.0.0.1" "localhost" "$TEST_KEY_BITS"
+)
+
+T13_PASS=true
+if [[ ! -s "$T13_UMASK_LOG" ]]; then
+    fail "test13: umask shim did not observe any openssl invocations"
+    T13_PASS=false
+else
+    while read -r observed_umask; do
+        if [[ "$observed_umask" != *077 ]]; then
+            fail "test13: openssl invoked with ambient umask ${observed_umask} (expected *077) — key material may be written world/group-readable before chmod"
+            T13_PASS=false
+        fi
+    done < "$T13_UMASK_LOG"
+fi
+if [[ "$T13_PASS" == "true" ]]; then
+    pass "test13: CA/server private key generation runs under umask 077, regardless of the caller's ambient umask"
+fi
+rm -rf "$T13_DIR" "$T13_FAKE_BIN"
+rm -f "$T13_UMASK_LOG"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

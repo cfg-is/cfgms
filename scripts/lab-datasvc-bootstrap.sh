@@ -53,6 +53,14 @@ log() { echo "[bootstrap] $*"; }
 # sslmode=verify-full succeeds by either address form.
 generate_tls_certs() {
     local tls_dir="$1" server_ip="$2" server_fqdn="$3" key_bits="${4:-4096}"
+    # CA/server private keys are written by `openssl genrsa -out` before the
+    # explicit chmod 600 below lands; without this, a caller-inherited
+    # permissive umask (e.g. 022) leaves the key at its umask-derived default
+    # mode for that window. Restored at the end of the function so it does not
+    # affect permissions of files created later in the script.
+    local old_umask
+    old_umask="$(umask)"
+    umask 077
 
     mkdir -p "$tls_dir"
 
@@ -93,6 +101,8 @@ EXTEOF
         chmod 644 "${tls_dir}/server.pem"
         rm -f "${tls_dir}/server.csr" "${tls_dir}/server.ext" "${tls_dir}/ca.srl"
     fi
+
+    umask "$old_umask"
 }
 
 # apply_pg_conf_tls <postgresql_conf> <cert_path> <key_path>
