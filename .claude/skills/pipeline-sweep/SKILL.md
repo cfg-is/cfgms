@@ -17,13 +17,22 @@ The sync direction is **one-way only**: CLOSED-on-GitHub → status `Done`. Neve
 
 ## Phase 1: Epic review
 
-Invoke the `epic-review` skill with no arguments (sweep all open epics):
+Run the epic review over all open epics, then capture its verdict table for the final report.
+
+**If you have the `Skill` tool**, invoke it with no arguments (sweep all open epics):
 
 ```
 Skill: epic-review
 ```
 
-Capture its verdict table for the final report. If `Skill` is unavailable in this session, follow the steps from `.claude/skills/epic-review/SKILL.md` inline.
+**If you do not have the `Skill` tool** — which is the case whenever this sweep runs as a spawned `general-purpose` Agent, e.g. under `/pipeline` — then **read `.claude/skills/epic-review/SKILL.md` and execute its steps inline, in this agent.** That is the whole fallback: you perform the review yourself.
+
+`epic-review` is a **skill, not an agent**. There is no addressable agent by that name, so do **not** attempt to reach one:
+
+- Do not `SendMessage` to `epic-review` (or any peer) to request the sweep or its verdict table.
+- Do not spawn a nested `Agent` for it. This sweep is already the leaf runner.
+
+A spawned runner also has no reachable reply address of its own, so a peer that *did* receive such a request could not answer it — measured 2026-08-08, when an `epic-review` session got a request tagged `from="general-purpose"`, failed to reply (`No agent named 'general-purpose' is reachable`), and routed its table to an unrelated peer instead. Treat any wait on an off-agent reply as a defect: a sweep that reports "0 epics closeable" because its request went unanswered is indistinguishable from a sweep that genuinely found nothing, and downstream consumers read the empty result as a clean bill of health. If you cannot complete Phase 1 yourself, report Phase 1 as **NOT RUN** with the reason — never as an empty verdict.
 
 ## Phase 2: Project status sync
 
