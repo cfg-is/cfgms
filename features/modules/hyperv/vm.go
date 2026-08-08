@@ -57,6 +57,10 @@ var (
 	// ErrInvalidSourceOnExisting is returned when source on_existing is not never or recreate.
 	ErrInvalidSourceOnExisting = errors.New("hyperv: invalid source on_existing: must be never or recreate")
 
+	// ErrInvalidSourceSecureBoot is returned when source secure_boot is not
+	// enforce, best-effort, or disabled (or empty, which defaults to enforce).
+	ErrInvalidSourceSecureBoot = errors.New("hyperv: invalid source secure_boot: must be enforce, best-effort, or disabled")
+
 	// ErrInvalidHARoleSeedDir is returned when an HA-role VM places its primary
 	// VHDX on a Cluster Shared Volume but the module-level seed_dir is empty or
 	// also on CSV. The provisioning seed directory must be host-local so the
@@ -128,6 +132,13 @@ type SourceConfig struct {
 	// Evaluation (Desktop Experience)"). Optional; when empty the built-in
 	// defaultWindowsEdition is used. Ignored for os_family: linux.
 	Edition string `yaml:"edition,omitempty"`
+	// SecureBoot controls Gen2 secure-boot enforcement: "enforce" (default,
+	// matches pre-#3169 behavior — a Set-VMFirmware template failure blocks
+	// provisioning), "best-effort" (a template failure is logged and secure
+	// boot is explicitly turned off instead of blocking convergence forever),
+	// or "disabled" (secure boot is turned off immediately, the template call
+	// is never attempted). Ignored for Gen1 (no secure boot).
+	SecureBoot string `yaml:"secure_boot,omitempty"`
 }
 
 // VMNetworkAdapter holds the observed MAC address of a VM's virtual network
@@ -552,7 +563,22 @@ func (s *SourceConfig) validate() error {
 	default:
 		return ErrInvalidSourceOnExisting
 	}
+	switch s.SecureBoot {
+	case "", "enforce", "best-effort", "disabled":
+	default:
+		return ErrInvalidSourceSecureBoot
+	}
 	return nil
+}
+
+// secureBootMode returns the effective secure-boot mode: the declared value,
+// or "enforce" when unset (backward-compatible default — matches the
+// pre-#3169 behavior of every existing config).
+func (s *SourceConfig) secureBootMode() string {
+	if s.SecureBoot == "" {
+		return "enforce"
+	}
+	return s.SecureBoot
 }
 
 // parseSourceMap reconstructs a *SourceConfig from the generic config map shape
@@ -570,6 +596,7 @@ func parseSourceMap(v interface{}) *SourceConfig {
 	src.Unattend, _ = m["unattend"].(string)
 	src.OnExisting, _ = m["on_existing"].(string)
 	src.Edition, _ = m["edition"].(string)
+	src.SecureBoot, _ = m["secure_boot"].(string)
 	// resize_gb may arrive as int or int64 (YAML/JSON numeric shapes).
 	switch v := m["resize_gb"].(type) {
 	case int:
@@ -585,7 +612,8 @@ func parseSourceMap(v interface{}) *SourceConfig {
 	}
 	// An entirely empty source map (all fields zero) is treated as no source.
 	if src.ISO == "" && src.Image == "" && src.OSFamily == "" && src.Unattend == "" &&
-		src.OnExisting == "" && src.Completion.Mode == "" && src.Completion.Timeout == "" {
+		src.OnExisting == "" && src.Completion.Mode == "" && src.Completion.Timeout == "" &&
+		src.SecureBoot == "" {
 		return nil
 	}
 	return src
@@ -653,6 +681,7 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 			},
 			"on_existing": c.Source.OnExisting,
 			"edition":     c.Source.Edition,
+			"secure_boot": c.Source.SecureBoot,
 		}
 	}
 	// ha_role is only emitted when present so a non-HA VMConfig round-trips

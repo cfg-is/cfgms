@@ -358,6 +358,13 @@ function Cfgms-SetVMFirmware {
     Set-VMFirmware -VMName $Name -EnableSecureBoot On -SecureBootTemplate $Template
 }
 
+# Cfgms-DisableVMFirmwareSecureBoot turns secure boot off explicitly (#3169
+# secure_boot: disabled/best-effort). $Name travels via ArgumentList.
+function Cfgms-DisableVMFirmwareSecureBoot {
+    param([Parameter(Mandatory)][string]$Name)
+    Set-VMFirmware -VMName $Name -EnableSecureBoot Off
+}
+
 # Cfgms-SetDVDFirstBoot makes the INSTALL DVD (matched by $ISOPath) the Gen2
 # firmware's first boot device so the VM boots the installer rather than the
 # empty OS disk or the (bootloader-less) answer ISO. Two DVDs are attached for
