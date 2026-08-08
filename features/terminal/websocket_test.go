@@ -62,10 +62,19 @@ func waitForSessionCleanup(t *testing.T, manager SessionManager, expectedCount i
 	assert.Len(t, activeSessions, expectedCount, "Expected %d sessions after cleanup, but found %d", expectedCount, len(activeSessions))
 }
 
-// waitForActiveSessions polls until the manager has at least minCount active sessions.
+// waitForActiveSessions polls until the manager has at least minCount active
+// sessions. This is a hang detector, not a performance budget: what callers
+// assert on is that registration happens at all, not how fast. Server-side
+// registration is a single mutex-guarded map write that follows the client's
+// completed handshake — near-instant floor — but a loaded Windows CI runner
+// can stall the goroutine well past a couple hundred milliseconds (merge
+// queue eviction 2026-08-08, run 31254640418: TestWebSocketOriginCheck/
+// port_qualified_allowlist timed out at the previous 2s deadline). 10s keeps
+// generous headroom over that floor while still failing fast on a genuine
+// hang.
 func waitForActiveSessions(t *testing.T, manager SessionManager, minCount int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(manager.GetActiveSessions()) >= minCount {
 			return
@@ -616,6 +625,62 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		require.NotNil(t, resp)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
+}
+
+// delayedActiveSessionManager is a minimal SessionManager whose GetActiveSessions
+// only reports a session once activateAt has passed. It models the Windows CI
+// race where the server-side session write lags the client's completed
+// handshake by more than the old 2s poll deadline under runner load (merge
+// queue eviction 2026-08-08, run 31254640418: TestWebSocketOriginCheck/
+// port_qualified_allowlist, "0" is not >= "1", "timed out waiting for 1 active
+// session(s)").
+type delayedActiveSessionManager struct {
+	activateAt time.Time
+}
+
+func (m *delayedActiveSessionManager) CreateSession(ctx context.Context, req *SessionRequest) (*Session, error) {
+	return nil, nil
+}
+
+func (m *delayedActiveSessionManager) GetSession(sessionID string) (*Session, error) {
+	return nil, nil
+}
+
+func (m *delayedActiveSessionManager) TerminateSession(ctx context.Context, sessionID string) error {
+	return nil
+}
+
+func (m *delayedActiveSessionManager) GetActiveSessions() []*Session {
+	if time.Now().Before(m.activateAt) {
+		return nil
+	}
+	return []*Session{{}}
+}
+
+func (m *delayedActiveSessionManager) RecordData(sessionID string, data []byte, direction DataDirection) error {
+	return nil
+}
+
+func (m *delayedActiveSessionManager) GetSessionRecording(sessionID string) (*SessionRecording, error) {
+	return nil, nil
+}
+
+func (m *delayedActiveSessionManager) Stop(ctx context.Context) error { return nil }
+
+// TestWaitForActiveSessionsToleratesSlowRegistration proves waitForActiveSessions
+// survives session registration that lands after the old 2s deadline but
+// within the current one — the exact shape of the Windows CI race above. Under
+// the old 2s deadline this subtest would fail.
+func TestWaitForActiveSessionsToleratesSlowRegistration(t *testing.T) {
+	const delay = 3 * time.Second
+	manager := &delayedActiveSessionManager{activateAt: time.Now().Add(delay)}
+
+	start := time.Now()
+	ok := t.Run("waits past the old 2s deadline", func(t *testing.T) {
+		waitForActiveSessions(t, manager, 1)
+	})
+	require.True(t, ok, "waitForActiveSessions must tolerate registration delayed beyond the old 2s deadline")
+	require.GreaterOrEqual(t, time.Since(start), delay)
 }
 
 // TestGenerateSecureToken verifies the token is cryptographically random and properly encoded.
