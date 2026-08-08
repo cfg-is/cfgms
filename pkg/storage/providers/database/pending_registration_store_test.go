@@ -198,3 +198,63 @@ func TestDatabasePendingRegistrationStore_ExpireStale_RemovesFromListPending(t *
 	require.Len(t, entries, 1)
 	assert.Equal(t, "pr-db-fresh", entries[0].PendingID)
 }
+
+// TestDatabasePendingRegistrationStore_ListAll_IncludesEveryStatus verifies that
+// ListAll, unlike ListPending, returns entries in every lifecycle status. Storage
+// migration relies on this full-fidelity enumeration path (Issue #3173).
+func TestDatabasePendingRegistrationStore_ListAll_IncludesEveryStatus(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-all-pend", "tenant-db-all")))
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-all-appr", "tenant-db-all")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-all-appr", business.PendingRegistrationStatusApproved))
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-all-claim", "tenant-db-all")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-all-claim", business.PendingRegistrationStatusApproved))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-all-claim", business.PendingRegistrationStatusClaimed))
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-all-deny", "tenant-db-all")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-all-deny", business.PendingRegistrationStatusDenied))
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-all-exp", "tenant-db-all")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-all-exp", business.PendingRegistrationStatusExpired))
+
+	entries, err := store.ListAll(ctx, "tenant-db-all")
+	require.NoError(t, err)
+
+	byID := make(map[string]*business.PendingRegistrationEntry, len(entries))
+	for _, e := range entries {
+		byID[e.PendingID] = e
+	}
+	require.Len(t, byID, 5, "ListAll must return entries in every status")
+	assert.Equal(t, business.PendingRegistrationStatusPending, byID["pr-db-all-pend"].Status)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, byID["pr-db-all-appr"].Status)
+	assert.Equal(t, business.PendingRegistrationStatusClaimed, byID["pr-db-all-claim"].Status)
+	assert.Equal(t, business.PendingRegistrationStatusDenied, byID["pr-db-all-deny"].Status)
+	assert.Equal(t, business.PendingRegistrationStatusExpired, byID["pr-db-all-exp"].Status)
+}
+
+// TestDatabasePendingRegistrationStore_ListAll_TenantFilter verifies ListAll's
+// optional tenant_id predicate scopes results without also filtering by status.
+func TestDatabasePendingRegistrationStore_ListAll_TenantFilter(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-allt-t1-pend", "tenant-db-allt-1")))
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-allt-t1-appr", "tenant-db-allt-1")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-allt-t1-appr", business.PendingRegistrationStatusApproved))
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-allt-t2-pend", "tenant-db-allt-2")))
+
+	entries, err := store.ListAll(ctx, "tenant-db-allt-1")
+	require.NoError(t, err)
+
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.PendingID)
+	}
+	assert.ElementsMatch(t, []string{"pr-db-allt-t1-pend", "pr-db-allt-t1-appr"}, ids)
+}

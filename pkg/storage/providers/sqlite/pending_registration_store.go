@@ -166,6 +166,41 @@ func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenant
 	return entries, rows.Err()
 }
 
+// ListAll returns entries in every status for the given tenantID, ordered by
+// registered_at ascending. An empty tenantID returns entries for all tenants.
+func (s *SQLitePendingRegistrationStore) ListAll(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
+	var (
+		query string
+		args  []interface{}
+	)
+	if tenantID == "" {
+		query = `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			FROM cfgms_pending_registrations ORDER BY registered_at ASC`
+	} else {
+		query = `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			FROM cfgms_pending_registrations WHERE tenant_id = ? ORDER BY registered_at ASC`
+		args = []interface{}{tenantID}
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to list all pending registrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*business.PendingRegistrationEntry
+	for rows.Next() {
+		e, err := scanPendingRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: failed to scan pending registration row: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
 // ExpireStale marks entries whose expires_at is at or before cutoff and whose status
 // is "pending" as "expired". Returns the number of entries updated.
 func (s *SQLitePendingRegistrationStore) ExpireStale(ctx context.Context, cutoff time.Time) (int, error) {

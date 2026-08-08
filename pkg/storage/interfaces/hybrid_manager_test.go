@@ -762,6 +762,10 @@ func (s *mockPendingRegistrationStore) ListPending(_ context.Context, _ string) 
 	return nil, nil
 }
 
+func (s *mockPendingRegistrationStore) ListAll(_ context.Context, _ string) ([]*business.PendingRegistrationEntry, error) {
+	return nil, nil
+}
+
 func (s *mockPendingRegistrationStore) ExpireStale(_ context.Context, _ time.Time) (int, error) {
 	return 0, nil
 }

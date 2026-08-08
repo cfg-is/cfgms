@@ -189,6 +189,47 @@ func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tena
 	return entries, rows.Err()
 }
 
+// ListAll returns entries in every status for the given tenantID, or all
+// tenants if empty, ordered by registered_at ascending.
+func (s *DatabasePendingRegistrationStore) ListAll(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID == "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			FROM cfgms_pending_registrations ORDER BY registered_at ASC`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			FROM cfgms_pending_registrations WHERE tenant_id = $1 ORDER BY registered_at ASC`,
+			tenantID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("database: failed to list all pending registrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*business.PendingRegistrationEntry
+	for rows.Next() {
+		e := &business.PendingRegistrationEntry{}
+		var claimedAt sql.NullTime
+		if err := rows.Scan(
+			&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
+			&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
+		); err != nil {
+			return nil, fmt.Errorf("database: failed to scan pending registration: %w", err)
+		}
+		if claimedAt.Valid {
+			t := claimedAt.Time.UTC()
+			e.ClaimedAt = &t
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
 // ExpireStale marks pending entries whose expires_at is at or before cutoff as expired.
 func (s *DatabasePendingRegistrationStore) ExpireStale(ctx context.Context, cutoff time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx, `

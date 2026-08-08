@@ -702,8 +702,10 @@ func exportPendingRefresh(ctx context.Context, mgr *interfaces.StorageManager) (
 	return recs, nil
 }
 
-// exportPendingRegistrations exports all in-flight registration entries across
-// all tenants. ListPending with an empty tenantID returns entries for all tenants.
+// exportPendingRegistrations exports registration entries across all tenants and
+// all lifecycle statuses. ListAll (not ListPending, which is narrowed to
+// status = "pending" as of Issue #3173) is used so that approved, claimed,
+// denied, and expired entries survive the migration too.
 func exportPendingRegistrations(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
 	store := mgr.GetPendingRegistrationStore()
 	if store == nil {
@@ -714,7 +716,7 @@ func exportPendingRegistrations(ctx context.Context, mgr *interfaces.StorageMana
 			return nil, fmt.Errorf("initialize pending registration store: %w", err)
 		}
 	}
-	entries, err := store.ListPending(ctx, "")
+	entries, err := store.ListAll(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("list pending registrations: %w", err)
 	}

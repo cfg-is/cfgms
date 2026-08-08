@@ -90,6 +90,17 @@ type PendingRegistrationStore interface {
 	// Approved, denied, claimed, and expired entries are never included.
 	ListPending(ctx context.Context, tenantID string) ([]*PendingRegistrationEntry, error)
 
+	// ListAll returns entries in every status (pending, approved, claimed, denied,
+	// expired), ordered by registered_at ascending. An empty tenantID returns
+	// entries for all tenants.
+	//
+	// This is a full-fidelity enumeration for internal consumers that must
+	// preserve every entry regardless of lifecycle state — e.g. storage
+	// migration (Issue #3173). Operator-facing list views must use ListPending
+	// instead; do not use ListAll to add resolved-entry visibility to the
+	// pending-registration API or CLI.
+	ListAll(ctx context.Context, tenantID string) ([]*PendingRegistrationEntry, error)
+
 	// ExpireStale marks entries whose expires_at is at or before cutoff and whose status
 	// is "pending" as "expired". Returns the number of entries updated.
 	ExpireStale(ctx context.Context, cutoff time.Time) (int, error)
