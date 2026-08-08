@@ -22,6 +22,16 @@ interfaces:
   - Set
   - Test
 
+# Bounded, inventory-worthy domain (ACME-managed certificate lifecycle). Active
+# on any steward OS — the ACME store can be enumerated on any platform.
+observe_when:
+  - fact: os
+    equals: linux
+  - fact: os
+    equals: darwin
+  - fact: os
+    equals: windows
+
 security:
   requires_root: false
   capabilities: [net_bind_service]  # HTTP-01 on port 80

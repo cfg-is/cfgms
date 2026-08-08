@@ -24,8 +24,11 @@ owns:
       - hostname  # device identity — required in every full-os-device DNA snapshot
       - os        # device identity — required in every full-os-device DNA snapshot
 
-# observe_when: omitted — pending module-tagging story (bounded inventory-worthy
-# domain; observe_when predicate will be added by the ADR-024 epic).
+# Bounded, inventory-worthy domain (firewall rule enumeration). Currently
+# Linux-only per the platforms declaration above.
+observe_when:
+  - fact: os
+    equals: linux
 
 security:
   requires_root: true

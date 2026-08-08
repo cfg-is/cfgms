@@ -92,6 +92,12 @@ monitoring:
     - "ad_local_errors_total"
     - "ad_dna_collection_status"
 
+# Bounded, inventory-worthy domain (local AD objects via ADSI/DirectoryServices).
+# Windows-only — the in-process ADSI API is a Windows-exclusive interface.
+observe_when:
+  - fact: os
+    equals: windows
+
 # Security considerations
 security:
   sensitive_fields: []  # No stored credentials

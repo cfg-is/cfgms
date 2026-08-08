@@ -44,6 +44,14 @@ security:
 # re-signed by the publisher and re-approved before module_trust: strict stewards
 # will accept the updated module — strict stewards verify the signature
 # independently of the controller.
+# Bounded, inventory-worthy domain (VM and cluster inventory on Hyper-V hosts).
+# Predicate matches the already-shipped hyperv_enabled fact emitted by
+# features/steward/dna/hardware_windows.go collectHyperVInfo — the authoritative
+# key established by the #3103 fixture and the observe_test.go convention.
+observe_when:
+  - fact: hyperv_enabled
+    equals: "true"
+
 behavioral_envelope:
   shells_out_to:
     - powershell.exe

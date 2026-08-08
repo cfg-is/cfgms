@@ -29,8 +29,15 @@ owns:
       - hostname  # device identity — required in every full-os-device DNA snapshot
       - os        # device identity — required in every full-os-device DNA snapshot
 
-# observe_when: omitted — pending module-tagging story (bounded inventory-worthy
-# domain; observe_when predicate will be added by the ADR-024 epic).
+# Bounded, inventory-worthy domain (service inventory via systemd/SCM/launchd).
+# Active on any steward OS — every platform ships a service manager.
+observe_when:
+  - fact: os
+    equals: windows
+  - fact: os
+    equals: linux
+  - fact: os
+    equals: darwin
 
 security:
   requires_root: true  # start/stop/enable/disable require elevated privileges
