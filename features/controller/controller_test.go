@@ -11,6 +11,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	testutil "github.com/cfgis/cfgms/pkg/testing"
 	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
 
@@ -90,6 +91,9 @@ func TestControllerCreation(t *testing.T) {
 func TestControllerLifecycle(t *testing.T) {
 	tempDir := t.TempDir()
 
+	// Create a test logger and controller
+	logger := testutil.NewMockLogger(true)
+
 	cfg := config.DefaultConfig()
 	cfg.DataDir = tempDir + "/data"
 	cfg.CertPath = tempDir + "/certs"
@@ -116,12 +120,65 @@ func TestControllerLifecycle(t *testing.T) {
 	// a test that starts the controller.
 	cfg.MetricsListenAddr = pkgtestutil.ReservePrivateListenerAddress(t)
 	cfg.ExternalURL = "https://localhost:8080"
-	ctrl, err := New(cfg, logging.NewNoopLogger())
+	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
+	// Start the controller
 	ctx := context.Background()
-	require.NoError(t, ctrl.Start(ctx), "controller must start without error")
-	require.NoError(t, ctrl.Stop(ctx), "controller must stop without error")
+	err = ctrl.Start(ctx)
+	assert.NoError(t, err)
+
+	// Verify start logged properly - certificate management and REST API adds extra logs
+	infoLogs := logger.GetLogs("info")
+	assert.GreaterOrEqual(t, len(infoLogs), 8)
+
+	// Convert logs to messages for easier checking
+	messages := make([]string, len(infoLogs))
+	for i, log := range infoLogs {
+		messages[i] = log.Message
+	}
+
+	// Verify required messages are present: CA is always loaded (init was done by PreInitControllerForTest)
+	caLoaded := false
+	for _, msg := range messages {
+		if msg == "Loaded existing Certificate Authority" {
+			caLoaded = true
+			break
+		}
+	}
+	assert.True(t, caLoaded, "Expected CA to be loaded from pre-initialized state")
+
+	// M-AUTH-1: No longer generating default API keys (security anti-pattern removed)
+	assert.Contains(t, messages, "Starting controller")
+	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
+	assert.Contains(t, messages, "HTTP API server started")
+	assert.Contains(t, messages, "Controller started successfully")
+
+	// Stop the controller
+	err = ctrl.Stop(ctx)
+	assert.NoError(t, err)
+
+	// Verify stop logged properly - check that required messages exist
+	infoLogs = logger.GetLogs("info")
+	assert.GreaterOrEqual(t, len(infoLogs), 10)
+
+	// Update messages slice with all current logs
+	messages = make([]string, len(infoLogs))
+	for i, log := range infoLogs {
+		messages[i] = log.Message
+	}
+
+	// Verify required startup messages are present
+	assert.Contains(t, messages, "Starting controller")
+	assert.Contains(t, messages, "Controller server started (gRPC-over-QUIC transport mode)")
+	assert.Contains(t, messages, "HTTP API server started")
+	assert.Contains(t, messages, "Controller started successfully")
+
+	// Verify required shutdown messages are present
+	assert.Contains(t, messages, "Stopping controller")
+	assert.Contains(t, messages, "Shutting down REST API server")
+	assert.Contains(t, messages, "Shutting down controller server")
+	assert.Contains(t, messages, "Controller stopped successfully")
 }
 
 func TestModuleRegistration(t *testing.T) {
