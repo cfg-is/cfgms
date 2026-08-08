@@ -129,9 +129,46 @@ func (s *SQLitePendingRegistrationStore) UpdateStatus(ctx context.Context, pendi
 	return nil
 }
 
-// ListPending returns all entries for the given tenantID ordered by registered_at ascending.
-// An empty tenantID returns entries for all tenants.
+// ListPending returns entries whose status is "pending" for the given tenantID,
+// ordered by registered_at ascending. An empty tenantID returns pending entries for all tenants.
+// Approved, denied, claimed, and expired entries are never included.
 func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
+	var (
+		query string
+		args  []interface{}
+	)
+	if tenantID == "" {
+		query = `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			FROM cfgms_pending_registrations WHERE status = ? ORDER BY registered_at ASC`
+		args = []interface{}{business.PendingRegistrationStatusPending}
+	} else {
+		query = `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			FROM cfgms_pending_registrations WHERE tenant_id = ? AND status = ? ORDER BY registered_at ASC`
+		args = []interface{}{tenantID, business.PendingRegistrationStatusPending}
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to list pending registrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*business.PendingRegistrationEntry
+	for rows.Next() {
+		e, err := scanPendingRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: failed to scan pending registration row: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// ListAll returns entries in every status for the given tenantID, ordered by
+// registered_at ascending. An empty tenantID returns entries for all tenants.
+func (s *SQLitePendingRegistrationStore) ListAll(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
 	var (
 		query string
 		args  []interface{}
@@ -149,7 +186,7 @@ func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenant
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: failed to list pending registrations: %w", err)
+		return nil, fmt.Errorf("sqlite: failed to list all pending registrations: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 

@@ -85,6 +85,19 @@ func (s *memPendingStore) ListPending(_ context.Context, tenantID string) ([]*bu
 	return out, nil
 }
 
+func (s *memPendingStore) ListAll(_ context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*business.PendingRegistrationEntry
+	for _, e := range s.entries {
+		if tenantID == "" || e.TenantID == tenantID {
+			cp := *e
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
 // ExpireStale marks entries whose ExpiresAt is at or before cutoff and whose
 // status is "pending" as "expired".
 func (s *memPendingStore) ExpireStale(_ context.Context, cutoff time.Time) (int, error) {
