@@ -683,14 +683,18 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// Assurance check (ADR-021 Decision 2): after confirming the principal
 			// holds the permission, verify the assurance level meets the minimum for
 			// this route. This replaces requireTier(TierMTLSOnly) entirely.
-			if req, found := permissionAssurance[permissionID]; found && principal.Assurance < req.Min {
+			// resolveAssuranceRequirement composes the global floor with any per-tenant
+			// overrides declared by ancestors of tenantID (root→leaf), taking the max
+			// of all Min values and OR-ing RequireUserPresence (ADR-021, Issue #2839).
+			assuranceReq, assuranceFound := s.resolveAssuranceRequirement(r.Context(), tenantID, permissionID)
+			if assuranceFound && principal.Assurance < assuranceReq.Min {
 				decision := &AuthorizationDecision{
 					Granted:      false,
 					PermissionID: permissionID,
 					Resource:     resource,
 					Action:       action,
 					Decision:     "DENY",
-					Reason:       fmt.Sprintf("Insufficient assurance: %s < %s required for %s", principal.Assurance, req.Min, permissionID),
+					Reason:       fmt.Sprintf("Insufficient assurance: %s < %s required for %s", principal.Assurance, assuranceReq.Min, permissionID),
 					CheckedAt:    time.Now(),
 					SubjectID:    userID,
 					TenantID:     tenantID,
@@ -703,7 +707,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					return
 				}
 				// All other callers (AssuranceBasic+) receive a step-up challenge (ADR-021 Decision 6).
-				levelName := req.Min.String()
+				levelName := assuranceReq.Min.String()
 				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s"`, levelName))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
@@ -725,8 +729,8 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// and is passed in X-Presence-Token. It is single-use (LoadAndDelete) and short-lived
 			// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
 			// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
-			if req, found := permissionAssurance[permissionID]; found && req.RequireUserPresence {
-				levelName := req.Min.String()
+			if assuranceFound && assuranceReq.RequireUserPresence {
+				levelName := assuranceReq.Min.String()
 
 				presenceToken := r.Header.Get(presenceTokenHeader)
 				if presenceToken == "" {
@@ -1151,4 +1155,64 @@ func (s *Server) extractTargetTenantFromRequest(r *http.Request, resourceType st
 		}
 	}
 	return ""
+}
+
+// resolveAssuranceRequirement composes the global permissionAssurance floor with any
+// per-tenant overrides declared along the root→leaf path to tenantID (ADR-021, Issue #2839).
+//
+// Resolution rules:
+//   - Min takes the maximum seen across [global floor, ancestor overrides, tenant override].
+//   - RequireUserPresence is true if true anywhere in the chain (OR, never cleared).
+//
+// When assurancePolicyStore or tenantStore is nil, or tenantID is empty, the method
+// returns the global floor unchanged — preserving today's exact behavior in unit tests
+// that build a bare Server without these stores.
+//
+// GetTenantPath or GetPolicy errors are logged at Warn and cause a fall-back to the
+// global floor: an override-resolution error must never turn a storage hiccup into a
+// fleet-wide outage on every gated endpoint. Falling back to the global floor is safe
+// because the floor is always the tightest guaranteed lower bound.
+func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, permissionID string) (Requirement, bool) {
+	floor, found := permissionAssurance[permissionID]
+	if s.assurancePolicyStore == nil || s.tenantStore == nil || tenantID == "" {
+		return floor, found
+	}
+
+	path, err := s.tenantStore.GetTenantPath(ctx, tenantID)
+	if err != nil {
+		s.logger.Warn("resolveAssuranceRequirement: failed to get tenant path; using global floor",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"permission_id", logging.SanitizeLogValue(permissionID),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		return floor, found
+	}
+
+	result := floor
+	for _, t := range path {
+		policy, err := s.assurancePolicyStore.GetPolicy(ctx, t)
+		if err != nil {
+			s.logger.Warn("resolveAssuranceRequirement: failed to get assurance policy; using global floor",
+				"tenant_id", logging.SanitizeLogValue(t),
+				"permission_id", logging.SanitizeLogValue(permissionID),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+			return floor, found
+		}
+		for _, ov := range policy.Overrides {
+			if ov.PermissionID != permissionID {
+				continue
+			}
+			found = true
+			if ov.MinOverride != nil {
+				if ovMin := session.AssuranceLevel(*ov.MinOverride); ovMin > result.Min {
+					result.Min = ovMin
+				}
+			}
+			if ov.RequireUserPresence {
+				result.RequireUserPresence = true
+			}
+		}
+	}
+	return result, found
 }

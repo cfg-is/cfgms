@@ -1224,6 +1224,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if rps := storageManager.GetRefreshPolicyStore(); rps != nil {
 		httpServer.SetRefreshPolicyStore(rps)
 	}
+	if aps := storageManager.GetAssurancePolicyStore(); aps != nil {
+		httpServer.SetAssurancePolicyStore(aps)
+	}
+	// TenantStore is core and always present; wire unconditionally for the assurance resolver.
+	httpServer.SetTenantStore(storageManager.GetTenantStore())
 	if as := storageManager.GetAuditStore(); as != nil {
 		httpServer.SetAuditStore(as)
 	}

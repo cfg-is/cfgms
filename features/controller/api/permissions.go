@@ -122,6 +122,9 @@ var knownPermissions = map[string]bool{
 	"module:list-approvals": true,
 	"module:approve":        true,
 	"module:reject":         true,
+	// Per-tenant assurance-policy management (Issue #2839)
+	"assurance-policy:get": true,
+	"assurance-policy:set": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

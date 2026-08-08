@@ -786,7 +786,7 @@ This is a **three-way adversarial collaboration**, not a relay through the PO. T
 
 **7f. Create stories in the project queue (after consensus):**
 
-Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. Stories that fail those rules are flagged with `parse_warnings` and skipped by the dispatcher. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
+Story bodies must conform to the parser spec in **Reference: Story Body Conventions** below — in particular the `## Dependencies` and `## Files In Scope` rules. A body that fails those rules is flagged with `parse_warnings` but is **still dispatched**: a bad `## Dependencies` section silently drops the dep gate, and a bad `## Files In Scope` section dispatches with file-overlap conflict detection disabled. Both classes of bug (prose-only Dependencies, parent-epic-as-dep) have surfaced repeatedly during decompositions; produce parser-compliant bodies on first try rather than relying on a Tech Lead fix-up step.
 
 Once all stories are APPROVED (or PO-decided), create them via `create-story` — **never `gh issue create`.** Decomposition has exactly one path.
 
@@ -1076,7 +1076,18 @@ gh api graphql -f query='
 
 ## Reference: Story Body Conventions
 
-The dispatcher's preflight parser (`./.claude/scripts/po-cycle-preflight.py`) reads two sections of every story body to gate dispatch decisions: `## Dependencies` and `## Files In Scope`. A story whose body fails parsing is flagged in `parse_warnings` and the dispatcher refuses to dispatch it. The BA / Planning Team must produce parser-compliant bodies on first try.
+The dispatcher's preflight parser (`./.claude/scripts/po-cycle-preflight.py`) reads two sections of every story body to gate dispatch decisions: `## Dependencies` and `## Files In Scope`. A `parse_warning` is a diagnostic, **not** a hold — the dispatcher does not refuse to dispatch a story that warns. The BA / Planning Team must produce parser-compliant bodies on first try, and the reason is not starvation:
+
+**The two sections fail in opposite directions, and the dangerous one is `## Files In Scope`.**
+
+| Section | What a bad body actually does |
+|---|---|
+| `## Dependencies` | **Forgiving.** A missing or unextractable section leaves `deps_parsed` empty, so `open_deps` is empty and the story falls straight through the dep gate — behaviourally identical to a bare `None`. |
+| `## Files In Scope` | **Dangerous.** No parseable paths means the gate hits `if not my_files:` and still emits `action: "dispatch"`, carrying `caveat: no_files_parsed_cannot_check_conflicts`. The story is dispatched **with file-overlap conflict detection disabled** — two agents can then be in flight on the same files, producing colliding PRs and manual rebases. |
+
+So when body-writing effort is scarce, spend it on `## Files In Scope`. Getting `## Dependencies` wrong costs a mis-gated dependency; getting `## Files In Scope` wrong costs a parallel collision that only shows up as a merge conflict later.
+
+The one way `## Dependencies` *does* bite is the opposite of starvation — see the parent-epic trap below, where a phantom `#NNN` creates a dependency that never closes.
 
 ### `## Dependencies`
 
@@ -1092,8 +1103,9 @@ The parser accepts exactly these forms:
 
 **Forbidden patterns** (each one has caused a real dispatch failure during decompositions):
 
-- **Prose with no `#NNN`** — e.g., `None — all three items are self-contained` or `Story A — must be merged first`. The parser sees content but cannot extract issue numbers, so it can't gate. Result: `parse_warnings` set, story skipped every cycle.
+- **Prose with no `#NNN`** — e.g., `None — all three items are self-contained` or `Story A — must be merged first`. The parser sees content but extracts no issue numbers, so it cannot gate. Result: a `parse_warning` and **no dep gate at all** — the story dispatches as if it had declared `None`. If `Story A` really must merge first, that ordering is silently lost. This is a correctness problem, not a starvation one.
 - **Positional / pseudo-references** — `Story A`, `Story 5`, `#761-A`, `#728-S5`. The parser's `#NNN` regex extracts only the leading digits, collapsing `#761-A` to `#761`. If `#761` is the parent epic, the dispatcher treats it as an unsatisfied dep and holds the story forever (parent epics don't close until all children merge).
+- **Any `#NNN` anywhere in the section, including inside an HTML comment.** The regex scans the whole section text with no awareness of markdown or comment syntax, so a placeholder like `<!-- fill in, see epic #1234 -->` is read as a real dependency on `#1234`. Left in a body whose parent epic is `#1234`, that is the parent-epic trap arriving via a comment nobody expects to be parsed. Delete placeholder comments rather than leaving them for later.
 
 **Audit-note form is acceptable** when it contains a real `#NNN`: `None — #1115 merged 2026-05-03; dependency satisfied` is valid. The parser extracts `#1115`, sees it's CLOSED, clears the dep gate. But prefer bare `None` when the dep is already satisfied — keeps the body shorter and the audit trail belongs in the planning summary on the epic, not on individual story bodies.
 
@@ -1101,7 +1113,21 @@ The parser accepts exactly these forms:
 
 Every file the story will touch listed in either backtick-quoted form (`` `path/to/file.go` ``) or bare path form (`path/to/file.go`). The parser uses these to compute file-overlap conflicts between in-flight stories — two stories editing the same file are serialized.
 
-If the section is present but contains no recognizable file paths, `parse_warnings` is set. Do not write prose-only file lists like "all controller package files".
+**This is the section to get right.** No parseable paths does not hold the story; it dispatches with conflict detection off (see the table at the top of this section).
+
+What the parser accepts:
+
+- **Backticked paths anywhere in the section**, including inside a prose sentence. Backticks are an explicit declaration marker.
+- **Bare paths in list items, numbered items and table rows only.** A bare path in a prose sentence is treated as commentary and ignored — that is deliberate, so `Do NOT touch features/.../server.go — owned by #2839` does not become a declaration.
+- **A trailing line reference is stripped**, so `` `handlers_runs.go:114` `` and `` `ci.yml:208-214` `` both resolve to the file. Extensionless names are covered too (`` `Dockerfile:155` ``).
+- **An explicit `None`** — `None`, `n/a`, or a section opening `None — documentation only.` / `None (no code changes)` — is read as a real declaration that the story touches no files, and produces **no** warning.
+
+What it does **not** accept:
+
+- **Bare directory entries.** `test/integration/controller/` matches nothing — the path regexes require a file extension (or a known extensionless name like `Makefile`/`Dockerfile`). A directory-scoped story therefore takes the no-files branch and loses conflict checking, which is easy to write by accident. List representative files instead, or name the directory in prose *and* list the files you will actually touch.
+- **Prose-only lists** such as "all controller package files".
+
+When a story genuinely cannot enumerate its files up front, say so and expect the dispatch recommendation to carry `no_files_parsed_cannot_check_conflicts` — then verify overlap by hand against the open PRs before dispatching. A held story costs a cycle; a story dispatched blind into a file another agent is editing costs a rebase and a merge-queue round trip.
 
 ### `## Environment` (optional)
 
@@ -1133,7 +1159,9 @@ the label wins if both are present.
 
 ### When the parser disagrees with you
 
-The parser is strict on purpose — it's a gate, not a lint. If a story body looks valid to a human but produces a `parse_warning`, normalize the body to match the parser rather than relaxing the gate. The cost of a body edit is one second; the cost of a held story is a wasted cycle.
+The parser is strict on purpose, but it is closer to a lint than a gate: it warns and lets the story through. If a story body looks valid to a human but produces a `parse_warning`, normalize the body to match the parser rather than relaxing the parser. The cost of a body edit is one second; the cost of a warning left in place is a dependency that never gated or a file conflict nobody checked.
+
+Do **not** treat `parse_warnings` as proof a story is stuck. It is proof a gate was skipped.
 
 -----
 

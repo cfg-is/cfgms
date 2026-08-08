@@ -118,6 +118,8 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psSetVMFirmware:
 		return emit("Cfgms-SetVMFirmware -Name " + quoteArg(psArgs, "Name") +
 			" -Template " + quoteArg(psArgs, "Template"))
+	case psDisableVMFirmwareSecureBoot:
+		return emit("Cfgms-DisableVMFirmwareSecureBoot -Name " + quoteArg(psArgs, "Name"))
 	case psSetDVDFirstBoot:
 		return emit("Cfgms-SetDVDFirstBoot -Name " + quoteArg(psArgs, "Name") +
 			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
@@ -570,6 +572,7 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
 		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
+		{"psDisableVMFirmwareSecureBoot", psDisableVMFirmwareSecureBoot, map[string]string{"Name": "cfgms-t__web-01"}},
 		{"psSetDVDFirstBoot", psSetDVDFirstBoot, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
 		{"psBuildAnswerIso", psBuildAnswerIso, map[string]string{"IsoPath": "C:\\cfgms-seeds\\a.iso", "FileName": "autounattend.xml", "Content": "<x/>", "StewardSrc": "", "CASrc": ""}},
 		{"psBootKeypress", psBootKeypress, map[string]string{"Name": "cfgms-t__web-01"}},
