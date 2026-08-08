@@ -116,6 +116,14 @@ monitoring:
     - "ad_errors_total"
     - "ad_connection_status"
 
+# observe_when: omitted — module's domain is remote AD objects accessed via
+# network LDAP; no steward DNA fact indicates AD connectivity, and the module
+# requires explicit domain/auth configuration to operate. The module is a
+# candidate for relocation to the outpost executor once that runtime exists;
+# outpost-kind modules have different observe semantics (ADR-024 §5 targets
+# steward-pull) and this domain does not fit the local host-state inventory
+# model (ADR-024 §3).
+
 # Security considerations
 security:
   sensitive_fields:

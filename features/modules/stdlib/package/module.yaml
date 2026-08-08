@@ -26,8 +26,16 @@ owns:
       - hostname  # device identity — required in every full-os-device DNA snapshot
       - os        # device identity — required in every full-os-device DNA snapshot
 
-# observe_when: omitted — pending module-tagging story (bounded inventory-worthy
-# domain; observe_when predicate will be added by the ADR-024 epic).
+# Bounded, inventory-worthy domain (installed-package inventory). Universal —
+# every steward OS ships a package manager. OS predicates cover all three
+# platforms; no capability check needed since this domain is always present.
+observe_when:
+  - fact: os
+    equals: windows
+  - fact: os
+    equals: linux
+  - fact: os
+    equals: darwin
 
 security:
   requires_root: true

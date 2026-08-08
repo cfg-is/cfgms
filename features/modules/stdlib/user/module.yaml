@@ -29,8 +29,15 @@ interfaces:
 owns:
   - kind: user  # authority over user:* objects this module manages
 
-# observe_when: omitted — pending module-tagging story (bounded inventory-worthy
-# domain; observe_when predicate will be added by the ADR-024 epic).
+# Bounded, inventory-worthy domain (local-user inventory). Active on any
+# steward OS — every platform has a local user database.
+observe_when:
+  - fact: os
+    equals: windows
+  - fact: os
+    equals: linux
+  - fact: os
+    equals: darwin
 
 security:
   requires_root: true  # creating/modifying/deleting accounts requires elevated privileges
