@@ -7,7 +7,7 @@
 ```jsonc
 {
   "name": "go-toolchain",       // string — stable identifier for this pin (used in story titles, override audit log)
-  "kind": "lockstep",           // "lockstep" | "tool" | "mcp"
+  "kind": "lockstep",           // "lockstep" | "tool" | "mcp" | "npm"
   "current": "1.25.10",         // string — version string as it appears in the source (no leading "v" for Go)
   "release_source": "https://go.dev/dl/?mode=json",  // URL or "gh:<owner>/<repo>"
   "ecosystem": "GO",            // GHSA SecurityAdvisoryEcosystem enum, or null if not GHSA-queryable
@@ -27,10 +27,13 @@
   - **GitHub Action SHA pins** (`uses: <owner>/<name>@<sha>` lines in workflows). The name embeds the short SHA (`gha:actions/checkout@34e11487`) so each unique (action, sha) pair is its own inventory entry. `locations[]` lists every workflow file:line that uses that exact SHA. Multiple entries for the same action with different SHAs is the natural representation of SHA drift across workflows — a drift-finder consumer can group by stripping `@<sha>` from `name`.
 - **`mcp`** — a git-pinned MCP server in `.mcp.json` (`git+https://github.com/<owner>/<repo>@<tag>`, e.g. `serena`). `current` is the git tag (with leading `v`), `release_source` is `gh:<owner>/<repo>`, `locations[]` is the `.mcp.json` line. **Distinct downstream handling:** these are agent *tooling* dependencies — their tool names are consumed by name in `.claude/agents/*.md` (`tools:` allowlists + prose). Phase 3 applies the **blast-radius classification** (see `decision-matrix.md` "MCP server pins"): a non-breaking bump is a one-line `.mcp.json` story; a release that renames/removes/changes a consumed tool is a **rewire story** that also touches every agent file using the affected tool.
 
+- **`npm`** — a version pinned as an npm package version string in a file the repo builds from, rather than declared in `dependency-pin-check.yml`. Currently the Claude Code CLI (`ARG CLAUDE_CODE_VERSION` in `.devcontainer/Dockerfile`, consumed by the `npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"` on the following line). `current` is the bare version (no leading `v`), `release_source` is the npm registry document URL, and `locations[]` is the single `ARG` line. **Freshness is `dist-tags.latest`, not a GitHub release** — an unpinned `npm install -g` resolves to that tag, so it is the authoritative "what would we get if the pin were absent" answer. `dependency-pin-check.yml` does check this pin, but through a bespoke npm block rather than a `check_version` call, which is why it needs its own discoverer: a `check_version` parser cannot see it. Bumping requires the agent image to be rebuilt before the change takes effect — note that in any bump story.
+
 ## `release_source` values
 
 - `https://go.dev/dl/?mode=json` — Go release index. Returns array of versions; `[.[] | select(.stable)][0]` is the latest stable.
 - `gh:<owner>/<repo>` — fetch via `gh api repos/<owner>/<repo>/releases/latest` for `tag_name` and `published_at`.
+- `https://registry.npmjs.org/<package>` — npm registry document. `.["dist-tags"].latest` is the version an unpinned install resolves to; `.time["<version>"]` gives each version's publish timestamp, which is what the 3-day cooldown is measured against.
 
 ## `ecosystem` and `package`
 

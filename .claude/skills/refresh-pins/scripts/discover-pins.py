@@ -120,6 +120,49 @@ def discover_go_toolchain(root: Path) -> dict:
     }
 
 
+def discover_claude_code_cli(root: Path) -> list[dict]:
+    """Claude Code CLI pin — `ARG CLAUDE_CODE_VERSION` in .devcontainer/Dockerfile.
+
+    dependency-pin-check.yml does check this pin's freshness, but through a bespoke
+    npm dist-tags block rather than a `check_version` declaration, so
+    discover_tool_pins() — which parses only `check_version` lines — never saw it.
+    The sweep was therefore blind to a pin CI actively tracks. Same root shape as
+    the Go toolchain, which needed its own discoverer for the same reason.
+
+    The version is read from the Dockerfile, matching where
+    dependency-pin-check.yml reads it from, so the two can never disagree about
+    what the image installs. Nothing here hardcodes a version.
+
+    Returns a list so a missing or renamed ARG yields [] rather than a bogus entry
+    with current="unknown" — the workflow already warns loudly in that case, and a
+    silent placeholder in the inventory would invite a story to "bump" a pin that
+    no longer exists.
+    """
+    dockerfile = root / ".devcontainer" / "Dockerfile"
+    if not dockerfile.exists():
+        return []
+
+    arg_re = re.compile(r"^ARG\s+CLAUDE_CODE_VERSION=(\S+)")
+    for i, line in enumerate(dockerfile.read_text().splitlines(), 1):
+        m = arg_re.match(line)
+        if not m:
+            continue
+        return [{
+            "name": "claude-code-cli",
+            "kind": "npm",
+            "current": m.group(1),
+            "release_source": "https://registry.npmjs.org/@anthropic-ai/claude-code",
+            "ecosystem": "NPM",
+            "package": "@anthropic-ai/claude-code",
+            "locations": [{
+                "file": ".devcontainer/Dockerfile",
+                "line": i,
+                "match": line.strip(),
+            }],
+        }]
+    return []
+
+
 def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
     """Grep in-scope paths for additional usage locations of a tool version string.
 
@@ -359,6 +402,7 @@ def main() -> int:
     root = repo_root()
     inventory = [discover_go_toolchain(root)]
     inventory.extend(discover_tool_pins(root))
+    inventory.extend(discover_claude_code_cli(root))
     inventory.extend(discover_github_actions(root))
     inventory.extend(discover_mcp_pins(root))
     json.dump(inventory, sys.stdout, indent=2)
