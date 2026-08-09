@@ -139,9 +139,17 @@ describe('WebSocket lifecycle', () => {
     expect(FakeWebSocket.instances[0]!.url).toMatch(/\/api\/v1\/terminal\/ws\/stw-001$/)
   })
 
-  it('encodes the steward ID in the WS URL', () => {
+  it('encodes the steward ID in the WS URL path segment', () => {
     render(<ShellTab stewardId="stw/special id" />)
     expect(FakeWebSocket.instances[0]!.url).toMatch(/\/api\/v1\/terminal\/ws\/stw%2Fspecial%20id$/)
+  })
+
+  it('asserts no client-supplied identity in the WS URL (identity is server-derived)', () => {
+    render(<ShellTab stewardId="stw-001" />)
+    const url = new URL(FakeWebSocket.instances[0]!.url, 'http://localhost')
+    expect(url.search).toBe('')
+    expect(url.searchParams.get('user_id')).toBeNull()
+    expect(url.searchParams.get('steward_id')).toBeNull()
   })
 
   it('closes the WebSocket on unmount', () => {

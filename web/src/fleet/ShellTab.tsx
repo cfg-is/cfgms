@@ -133,6 +133,9 @@ export default function ShellTab({ stewardId }: ShellTabProps) {
     try { fitAddon.fit() } catch { /* jsdom: no layout engine */ }
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    // Identity is server-derived: the controller reads the operator from the
+    // authenticated session context (terminal_handler.go ServeWebSocket), so
+    // the client must never assert steward_id/user_id in the query string.
     const url = `${proto}//${location.host}/api/v1/terminal/ws/${encodeURIComponent(stewardId)}`
     const ws = new WebSocket(url)
     wsRef.current = ws
