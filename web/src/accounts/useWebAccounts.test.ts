@@ -11,10 +11,13 @@ import {
   JUSTIFICATION_MAX_LENGTH,
   parseWebAccountInfo,
   parseWebAccountList,
+  parseWebAccountCreateResult,
   parseRoleInfo,
   parseRoleList,
   parsePermissionInfo,
   parsePermissionList,
+  createWebAccount,
+  revokeEnrollmentLink,
 } from './useWebAccounts.ts'
 
 describe('parseWebAccountInfo', () => {
@@ -50,6 +53,16 @@ describe('parseWebAccountInfo', () => {
     expect(result?.username).toBe('')
     expect(result?.permissions).toEqual([])
     expect(result?.tenant_id).toBe('')
+    expect(result?.has_outstanding_enrollment_link).toBe(false)
+  })
+
+  it('parses has_outstanding_enrollment_link correctly', () => {
+    const withLink = parseWebAccountInfo({ id: 'x', has_outstanding_enrollment_link: true })
+    expect(withLink?.has_outstanding_enrollment_link).toBe(true)
+    const withoutLink = parseWebAccountInfo({ id: 'x', has_outstanding_enrollment_link: false })
+    expect(withoutLink?.has_outstanding_enrollment_link).toBe(false)
+    const missingField = parseWebAccountInfo({ id: 'x' })
+    expect(missingField?.has_outstanding_enrollment_link).toBe(false)
   })
 
   it('filters non-string entries from permissions', () => {
@@ -347,5 +360,153 @@ describe('role mutations', () => {
       deleteRole('role-1', 'superseded role\r\nX-Injected: yes'),
     ).rejects.toThrow(/plain text/i)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// ── parseWebAccountCreateResult ───────────────────────────────────────────────
+
+describe('parseWebAccountCreateResult', () => {
+  it('parses a valid create response with enrollment_magic_link', () => {
+    const raw = {
+      id: 'acc-1',
+      username: 'fleet-admin',
+      tenant_id: 'tenant-a',
+      permissions: [],
+      created_at: '2026-01-01T00:00:00Z',
+      has_outstanding_enrollment_link: true,
+      enrollment_magic_link: 'deadbeef1234567890abcdef12345678deadbeef',
+    }
+    const result = parseWebAccountCreateResult(raw)
+    expect(result).not.toBeNull()
+    expect(result?.account.id).toBe('acc-1')
+    expect(result?.account.username).toBe('fleet-admin')
+    expect(result?.account.has_outstanding_enrollment_link).toBe(true)
+    expect(result?.enrollment_magic_link).toBe('deadbeef1234567890abcdef12345678deadbeef')
+  })
+
+  it('returns null for non-object input', () => {
+    expect(parseWebAccountCreateResult(null)).toBeNull()
+    expect(parseWebAccountCreateResult('string')).toBeNull()
+    expect(parseWebAccountCreateResult(42)).toBeNull()
+  })
+
+  it('returns null when account id is missing', () => {
+    expect(parseWebAccountCreateResult({ username: 'x' })).toBeNull()
+  })
+
+  it('coerces missing enrollment_magic_link to empty string', () => {
+    const result = parseWebAccountCreateResult({ id: 'x' })
+    expect(result?.enrollment_magic_link).toBe('')
+  })
+})
+
+// ── createWebAccount — no password, step-up transparent ──────────────────────
+
+describe('createWebAccount', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: {
+            id: 'acc-new',
+            username: 'new-admin',
+            tenant_id: 'default',
+            permissions: [],
+            created_at: '2026-01-01T00:00:00Z',
+            has_outstanding_enrollment_link: true,
+            enrollment_magic_link: 'aabbcc112233445566778899aabbcc1122334455',
+          },
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends POST to /api/v1/web/accounts without a password field', async () => {
+    await createWebAccount('new-admin', 'default')
+    const call = fetchMock.mock.calls.at(-1)
+    expect(call).toBeDefined()
+    const init = call![1] as RequestInit
+    expect(init.method).toBe('POST')
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null
+    expect(body).not.toBeNull()
+    expect(body).not.toHaveProperty('password', 'password must never be sent')
+    expect(body).toHaveProperty('username', 'new-admin')
+  })
+
+  it('returns the enrollment_magic_link from the server response', async () => {
+    const result = await createWebAccount('new-admin')
+    expect(result.enrollment_magic_link).toBe('aabbcc112233445566778899aabbcc1122334455')
+    expect(result.account.has_outstanding_enrollment_link).toBe(true)
+  })
+
+  it('throws on server error', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Account already exists' } }),
+        { status: 409 },
+      ),
+    )
+    await expect(createWebAccount('existing')).rejects.toThrow(/Account already exists/i)
+  })
+
+  it('does not include tenantId in body when omitted', async () => {
+    await createWebAccount('new-admin')
+    const call = fetchMock.mock.calls.at(-1)!
+    const body = JSON.parse((call[1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).not.toHaveProperty('tenant_id')
+  })
+})
+
+// ── revokeEnrollmentLink ──────────────────────────────────────────────────────
+
+describe('revokeEnrollmentLink', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: { username: 'fleet-admin', revoked: true } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends POST to the revoke endpoint for the given username', async () => {
+    await revokeEnrollmentLink('fleet-admin')
+    const call = fetchMock.mock.calls.at(-1)
+    expect(call).toBeDefined()
+    expect(call![0]).toContain('/api/v1/web/accounts/fleet-admin/enrollment-link/revoke')
+    expect((call![1] as RequestInit).method).toBe('POST')
+  })
+
+  it('URL-encodes the username in the path', async () => {
+    await revokeEnrollmentLink('fleet.admin_01')
+    const call = fetchMock.mock.calls.at(-1)!
+    expect(call[0]).toContain(encodeURIComponent('fleet.admin_01'))
+  })
+
+  it('throws on server error', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'No outstanding link' } }),
+        { status: 409 },
+      ),
+    )
+    await expect(revokeEnrollmentLink('fleet-admin')).rejects.toThrow(/No outstanding link/i)
   })
 })

@@ -75,6 +75,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"},
 	{"POST", "/api/v1/web/accounts", "web-account:create"},
 	{"DELETE", "/api/v1/web/accounts/test-user", "web-account:delete"},
+	// Enrollment magic-link revocation (Issue #2974) — invalidates an unredeemed
+	// bearer credential that would otherwise enroll a first passkey.
+	{"POST", "/api/v1/web/accounts/test-user/enrollment-link/revoke", "web-account:revoke-enrollment-link"},
 	// Cluster node lifecycle (Issue #2780) — new entries in permissionAssurance.
 	{"POST", "/api/v1/cluster/nodes/test-id/drain", "cluster:drain-node"},
 	{"POST", "/api/v1/cluster/nodes/test-id/decommission", "cluster:decommission-node"},

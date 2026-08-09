@@ -673,6 +673,34 @@ first-passkey magic-link enrollment (this amendment) + backup-passkey management
 (Strong-gated) + the elevation ceremony (Amendment 2). Together they make human accounts
 passkey-only and fully web-manageable.
 
+**Implementation reference — enrollment link mint (Issue #2974):** The admin-UI side of
+Decision 2 ("shown-once in the admin UI") is implemented in Story #2974. It gates the
+`+ New account` button behind `AssuranceStrong` step-up via the `apiFetch` interceptor,
+mints a 160-bit (20-byte) single-use enrollment token on account creation, stores only
+the SHA-256 hex digest in the account record (never the raw token), shows the raw token
+exactly once in the admin UI for out-of-band clipboard handoff, and provides a revoke
+endpoint for outstanding unredeemed links. Email delivery (also mentioned in Decision 2)
+is explicitly deferred to a future notification-provider epic (CLAUDE.md central-provider
+rule). The raw token is never logged or audited; audit records carry the
+`delivery_method` field (`"ui-shown"`) and whether a link was minted.
+
+Two invariants enforce Decisions 3 and 4 on that mint path:
+
+- **A link is minted only against the zero-authenticator state.** `POST
+  /api/v1/web/accounts` refuses to issue a token for an account that already holds a
+  registered credential — Decision 3's "no magic link is involved after the first
+  passkey" — and returns the account record with no `enrollment_magic_link`. The
+  admin-mediated reset of Decision 4 is the request field `reset_credentials`: it
+  discards every registered passkey ("invalidating any residual credentials") and only
+  then issues a fresh link.
+- **Provisioning is tenant-scoped.** Create, list and revoke all confine the caller to
+  its own tenant subtree, so a tenant-scoped web admin cannot obtain an enrollment
+  bearer token for another tenant's account or grant itself a root-scoped one.
+
+Revocation is fail-closed: the durable record is written before the in-memory cache is
+updated, so a store failure leaves a still-revocable outstanding link rather than a
+cache that claims revoked while the persisted link stays live.
+
 ---
 
 ## Amendment 2 (2026-07-24): Web-session Basic→Strong elevation via WebAuthn assertion

@@ -2,15 +2,17 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Web account fetch hooks (Issue #2733, #3133).
+ * Web account fetch hooks (Issue #2733, #3133, #2974).
  *
  * Endpoints covered:
- *   GET    /api/v1/web/accounts          → useWebAccountList
- *   GET    /api/v1/rbac/roles            → useRoleList
- *   GET    /api/v1/rbac/permissions      → usePermissionList
- *   POST   /api/v1/rbac/roles            → createRole
- *   PUT    /api/v1/rbac/roles/{id}       → updateRole
- *   DELETE /api/v1/rbac/roles/{id}       → deleteRole
+ *   GET    /api/v1/web/accounts                                → useWebAccountList
+ *   POST   /api/v1/web/accounts                               → createWebAccount (step-up gated; mints enrollment link)
+ *   POST   /api/v1/web/accounts/{u}/enrollment-link/revoke    → revokeEnrollmentLink
+ *   GET    /api/v1/rbac/roles                                  → useRoleList
+ *   GET    /api/v1/rbac/permissions                           → usePermissionList
+ *   POST   /api/v1/rbac/roles                                 → createRole
+ *   PUT    /api/v1/rbac/roles/{id}                            → updateRole
+ *   DELETE /api/v1/rbac/roles/{id}                            → deleteRole
  *
  * Security A9.1: username/role name/description values originate from
  * user-supplied content. All string fields are coerced via str(). Callers
@@ -19,6 +21,11 @@
  * M-AUTH-2: role create/update/delete are sensitive operations. Each carries
  * an operator justification in the X-Justification header — the controller
  * rejects the operation and records an audit failure without one.
+ *
+ * Step-up (Issue #2974, ADR-021 Decision 6): account-create is gated at
+ * AssuranceStrong. The apiFetch interceptor handles the 401 + CFGMS-StepUp
+ * response transparently via the StepUpModal — callers do not need extra
+ * step-up logic. No password is ever sent or stored.
  *
  * Response shape: list endpoints return the standard { data: [...] }
  * envelope, matching writeSuccessResponse in the server.
@@ -45,6 +52,19 @@ export interface WebAccountInfo {
   tenant_id: string
   permissions: string[]
   created_at: string
+  has_outstanding_enrollment_link: boolean // Issue #2974
+}
+
+/**
+ * Result of creating a new web account (POST /api/v1/web/accounts).
+ * The enrollment_magic_link is the raw token shown ONCE to the admin for
+ * out-of-band handoff. It is never returned in subsequent list or get responses.
+ * No password is ever set — accounts are passkey-only (ADR-021 Amendment 1).
+ */
+export interface WebAccountCreateResult {
+  account: WebAccountInfo
+  /** Raw enrollment token (>=128-bit random, hex-encoded). Shown once. */
+  enrollment_magic_link: string
 }
 
 export interface RoleInfo {
@@ -78,6 +98,22 @@ export function parseWebAccountInfo(value: unknown): WebAccountInfo | null {
     tenant_id: str(r.tenant_id),
     permissions: strArr(r.permissions),
     created_at: str(r.created_at),
+    has_outstanding_enrollment_link: r.has_outstanding_enrollment_link === true,
+  }
+}
+
+/**
+ * Parse a WebAccountCreateResult from POST /api/v1/web/accounts response data.
+ * The enrollment_magic_link is safe to display (hex-encoded, no injection risk).
+ */
+export function parseWebAccountCreateResult(data: unknown): WebAccountCreateResult | null {
+  if (typeof data !== 'object' || data === null) return null
+  const r = data as Record<string, unknown>
+  const account = parseWebAccountInfo(data)
+  if (account === null) return null
+  return {
+    account,
+    enrollment_magic_link: str(r.enrollment_magic_link),
   }
 }
 
@@ -302,6 +338,61 @@ export function usePermissionList(): UsePermissionListResult {
     permissions: current?.data ?? [],
     loading: current === null,
     error: current?.error ?? null,
+  }
+}
+
+// ── Web account mutations (Issue #2974) ──────────────────────────────────────
+
+/**
+ * Create a new web-admin account (step-up gated via apiFetch interceptor).
+ *
+ * No password is ever sent — accounts are passkey-only (ADR-021 Amendment 1).
+ * The response includes a single-use enrollment_magic_link shown exactly once.
+ * The apiFetch interceptor handles the 401 + CFGMS-StepUp challenge transparently
+ * via the StepUpModal, so callers do not need to handle step-up explicitly.
+ */
+export async function createWebAccount(
+  username: string,
+  tenantId?: string,
+  permissions?: string[],
+): Promise<WebAccountCreateResult> {
+  const body: Record<string, unknown> = { username }
+  if (tenantId && tenantId.trim()) body.tenant_id = tenantId.trim()
+  if (permissions && permissions.length > 0) body.permissions = permissions
+
+  const response = await apiFetch('/api/v1/web/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Create failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+  const respBody = (await response.json()) as Record<string, unknown>
+  const result = parseWebAccountCreateResult(respBody.data ?? respBody)
+  if (result === null) throw new Error('Unexpected response shape from account create')
+  return result
+}
+
+/**
+ * Revoke an outstanding (unredeemed) enrollment magic link for an account.
+ * Requires AssuranceStrong — step-up is handled by apiFetch interceptor.
+ */
+export async function revokeEnrollmentLink(username: string): Promise<void> {
+  const response = await apiFetch(
+    `/api/v1/web/accounts/${encodeURIComponent(username)}/enrollment-link/revoke`,
+    { method: 'POST' },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Revoke failed — ${response.status}`
+    throw new Error(errMsg)
   }
 }
 

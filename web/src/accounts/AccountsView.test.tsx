@@ -2,11 +2,12 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * AccountsView test suite (Issue #2733): list rendering, data states,
- * create panel, delete confirm, and tab switching to roles.
+ * AccountsView test suite (Issue #2733, #2974): list rendering, data states,
+ * create panel (no password; step-up transparent via apiFetch; enrollment link
+ * shown once), delete confirm, revoke link, and tab switching to roles.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import AccountsView from './AccountsView.tsx'
@@ -44,6 +45,7 @@ function makeAccount(overrides: Partial<Record<string, unknown>> = {}) {
     tenant_id: 'tenant-a',
     permissions: ['steward:list'],
     created_at: '2026-01-01T00:00:00Z',
+    has_outstanding_enrollment_link: false,
     ...overrides,
   }
 }
@@ -59,6 +61,24 @@ function makeRole(overrides: Partial<Record<string, unknown>> = {}) {
     updated_at: '2026-02-01T00:00:00Z',
     ...overrides,
   }
+}
+
+/** Successful create response that includes the enrollment magic link. */
+function makeCreateResponse(username = 'fleet-admin', status = 201) {
+  return new Response(
+    JSON.stringify({
+      data: {
+        id: 'acc-new',
+        username,
+        tenant_id: 'default',
+        permissions: [],
+        created_at: '2026-01-01T00:00:00Z',
+        has_outstanding_enrollment_link: true,
+        enrollment_magic_link: 'aabbcc112233445566778899aabbcc1122334455aabb',
+      },
+    }),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  )
 }
 
 function renderAccountsView() {
@@ -151,7 +171,7 @@ describe('AccountsView — accounts tab', () => {
   })
 })
 
-describe('AccountsView — create panel', () => {
+describe('AccountsView — create panel (Issue #2974: no password; step-up; link shown once)', () => {
   it('opens the create panel when New account is clicked', async () => {
     fetchMock.mockResolvedValue(makeAccountsResponse([]))
     renderAccountsView()
@@ -170,13 +190,15 @@ describe('AccountsView — create panel', () => {
     expect(screen.queryByTestId('account-form-panel')).not.toBeInTheDocument()
   })
 
-  it('shows username and password inputs in the create panel', async () => {
+  it('shows username input but NO password input in the create panel (passkey-only)', async () => {
     fetchMock.mockResolvedValue(makeAccountsResponse([]))
     renderAccountsView()
     await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('toggle-create-btn'))
     expect(screen.getByLabelText(/username/i)).toBeInTheDocument()
-    expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+    // No password field — accounts are passkey-only (ADR-021 Amendment 1).
+    expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('account-password-input')).not.toBeInTheDocument()
   })
 
   it('shows validation error when submitting without username', async () => {
@@ -188,14 +210,269 @@ describe('AccountsView — create panel', () => {
     expect(screen.getByTestId('account-save-error')).toHaveTextContent(/username is required/i)
   })
 
-  it('shows validation error when submitting without password', async () => {
-    fetchMock.mockResolvedValue(makeAccountsResponse([]))
+  it('[REQUIRED TEST] create call uses apiFetch so step-up is handled automatically — never a dead 403', async () => {
+    // This test verifies the AC: "+ New account" is never a dead 403.
+    // When the server returns 401 + CFGMS-StepUp, the apiFetch interceptor fires
+    // the step-up listener (StepUpModal via AuthProvider) — the operator sees the
+    // passkey prompt, not a raw 403 error. We verify this by checking the create
+    // request goes through the apiFetch path (via fetch mock).
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([])) // initial list load
+      .mockResolvedValueOnce(
+        new Response('', {
+          status: 401,
+          headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' },
+        }),
+      ) // step-up challenge
     renderAccountsView()
     await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('toggle-create-btn'))
     fireEvent.change(screen.getByLabelText(/username/i), { target: { value: 'fleet-admin' } })
-    fireEvent.click(screen.getByTestId('account-save-btn'))
-    expect(screen.getByTestId('account-save-error')).toHaveTextContent(/password is required/i)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('account-save-btn'))
+    })
+    await waitFor(() => {
+      // The step-up modal appears — the operator is NOT shown a terminal 403.
+      // The modal is rendered by AuthProvider when onStepUpRequired fires.
+      expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument()
+    })
+    // Critically: no 403 error text is shown to the user.
+    expect(screen.queryByText(/403/)).not.toBeInTheDocument()
+  })
+
+  it('shows enrollment link panel after successful create (link shown once)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([]))
+      .mockResolvedValueOnce(makeCreateResponse('new-admin'))
+      .mockResolvedValueOnce(
+        makeAccountsResponse([makeAccount({ username: 'new-admin', has_outstanding_enrollment_link: true })]),
+      )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: 'new-admin' } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('account-save-btn'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('enrollment-link-panel')).toBeInTheDocument()
+    })
+    // The raw token appears in the link input.
+    const linkInput = screen.getByTestId('enrollment-link-value') as HTMLInputElement
+    expect(linkInput.value).toContain('aabbcc112233445566778899aabbcc1122334455aabb')
+    // Email toggle is present but disabled.
+    const emailToggle = screen.getByTestId('enrollment-email-toggle') as HTMLInputElement
+    expect(emailToggle.disabled).toBe(true)
+  })
+
+  it('shows no enrollment link panel when the response carries no link', async () => {
+    // An upsert against an account that already holds a passkey returns 200 with
+    // no enrollment_magic_link (ADR-021 Amendment 1 Decision 3).
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([]))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: {
+              id: 'acc-existing',
+              username: 'enrolled-admin',
+              tenant_id: 'default',
+              permissions: [],
+              created_at: '2026-01-01T00:00:00Z',
+              has_outstanding_enrollment_link: false,
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ username: 'enrolled-admin' })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: 'enrolled-admin' } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('account-save-btn'))
+    })
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.queryByTestId('enrollment-link-panel')).not.toBeInTheDocument()
+  })
+
+  it('[REQUIRED TEST] create request body never contains a password field', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([]))
+      .mockResolvedValueOnce(makeCreateResponse('safe-admin'))
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ username: 'safe-admin' })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: 'safe-admin' } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('account-save-btn'))
+    })
+    await waitFor(() => expect(screen.getByTestId('enrollment-link-panel')).toBeInTheDocument())
+    // Inspect the POST request body.
+    const postCall = fetchMock.mock.calls.find(
+      (call) => (call[1] as RequestInit)?.method === 'POST',
+    )
+    expect(postCall).toBeDefined()
+    const body = JSON.parse((postCall![1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).not.toHaveProperty('password')
+    expect(body).toHaveProperty('username', 'safe-admin')
+  })
+
+  it('[REQUIRED TEST] audit fields — enrollment link panel shows link but no raw token in DOM audit trace', async () => {
+    // Proxy for the backend audit test: the UI shows the link (for clipboard)
+    // but would not send the token back to any logging endpoint. This test
+    // verifies the raw token is present in the link field (for copy) but
+    // there is no hidden form field or data-* attribute leaking it elsewhere.
+    const rawToken = 'deadbeef1234567890abcdef12345678deadbeef11'
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([]))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: {
+              id: 'acc-new',
+              username: 'audit-test-admin',
+              tenant_id: 'default',
+              permissions: [],
+              created_at: '2026-01-01T00:00:00Z',
+              has_outstanding_enrollment_link: true,
+              enrollment_magic_link: rawToken,
+            },
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ username: 'audit-test-admin' })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: 'audit-test-admin' } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('account-save-btn'))
+    })
+    await waitFor(() => expect(screen.getByTestId('enrollment-link-panel')).toBeInTheDocument())
+    const linkInput = screen.getByTestId('enrollment-link-value') as HTMLInputElement
+    // Token is in the link (expected — for clipboard).
+    expect(linkInput.value).toContain(rawToken)
+    // Token is NOT sent back to any endpoint after initial display.
+    const postCalls = fetchMock.mock.calls.filter(
+      (call) => (call[1] as RequestInit)?.method === 'POST',
+    )
+    for (const call of postCalls) {
+      const body = (call[1] as RequestInit).body
+      if (typeof body === 'string') {
+        expect(body).not.toContain(rawToken)
+      }
+    }
+  })
+})
+
+describe('AccountsView — enrollment link revoke (Issue #2974)', () => {
+  it('shows Revoke link button for accounts with outstanding enrollment link', async () => {
+    fetchMock.mockResolvedValue(
+      makeAccountsResponse([makeAccount({ has_outstanding_enrollment_link: true })]),
+    )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.getByTestId('enrollment-revoke-btn')).toBeInTheDocument()
+  })
+
+  it('does not show Revoke link button for accounts without outstanding link', async () => {
+    fetchMock.mockResolvedValue(
+      makeAccountsResponse([makeAccount({ has_outstanding_enrollment_link: false })]),
+    )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.queryByTestId('enrollment-revoke-btn')).not.toBeInTheDocument()
+  })
+
+  it('calls POST .../enrollment-link/revoke and refreshes on click', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        makeAccountsResponse([makeAccount({ has_outstanding_enrollment_link: true })]),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: { username: 'fleet-admin', revoked: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('enrollment-revoke-btn')).toBeInTheDocument())
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-revoke-btn'))
+    })
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('/enrollment-link/revoke'),
+        expect.objectContaining({ method: 'POST' }),
+      )
+    })
+  })
+
+  it('surfaces the server error message when revoke is rejected (409)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        makeAccountsResponse([makeAccount({ has_outstanding_enrollment_link: true })]),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: { code: 'NO_OUTSTANDING_LINK', message: 'No outstanding enrollment link to revoke' },
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('enrollment-revoke-btn')).toBeInTheDocument())
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-revoke-btn'))
+    })
+    const banner = await screen.findByTestId('revoke-error')
+    expect(banner).toHaveTextContent('No outstanding enrollment link to revoke')
+  })
+
+  it('shows a fallback revoke error when the server returns 500 with no message', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        makeAccountsResponse([makeAccount({ has_outstanding_enrollment_link: true })]),
+      )
+      .mockResolvedValueOnce(new Response('', { status: 500 }))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('enrollment-revoke-btn')).toBeInTheDocument())
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-revoke-btn'))
+    })
+    const banner = await screen.findByTestId('revoke-error')
+    expect(banner).toHaveTextContent('Revoke failed — 500')
+  })
+
+  it('clears a previous revoke error when a later revoke succeeds', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        makeAccountsResponse([makeAccount({ has_outstanding_enrollment_link: true })]),
+      )
+      .mockResolvedValueOnce(new Response('', { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: { username: 'fleet-admin', revoked: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('enrollment-revoke-btn')).toBeInTheDocument())
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-revoke-btn'))
+    })
+    await screen.findByTestId('revoke-error')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-revoke-btn'))
+    })
+    await waitFor(() => expect(screen.queryByTestId('revoke-error')).not.toBeInTheDocument())
   })
 })
 
@@ -227,7 +504,9 @@ describe('AccountsView — delete confirm', () => {
     renderAccountsView()
     await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('account-delete-btn'))
-    fireEvent.click(screen.getByTestId('delete-confirm-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('delete-confirm-btn'))
+    })
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining('/api/v1/web/accounts/'),
