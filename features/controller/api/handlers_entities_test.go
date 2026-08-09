@@ -181,6 +181,35 @@ func TestHandleGetEntity_Found_Returns200(t *testing.T) {
 	var view egtypes.EntityView
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &view))
 	assert.Equal(t, "host", view.Entity.Kind)
+	assert.Equal(t, "host:ent-test1", view.Entity.EID.String(),
+		"entity EID must round-trip through the JSON response, not decode to a zero value")
+}
+
+// TestHandleGetEntity_ResponseBody_EncodesEIDAsString guards against the entity
+// identifier silently degrading to an opaque "{}" in the wire format: EID has
+// only unexported fields, so without types.EID's MarshalJSON, encoding/json
+// would serialize it as an empty object and callers could never learn which
+// entity a response describes.
+func TestHandleGetEntity_ResponseBody_EncodesEIDAsString(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+
+	reportEntity(t, p, "host:ent-wire1", "test-tenant", "host")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/host:ent-wire1", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "found entity must return 200: %s", rec.Body.String())
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	entity, ok := raw["Entity"].(map[string]interface{})
+	require.True(t, ok, "response must have an Entity object: %s", rec.Body.String())
+	assert.Equal(t, "host:ent-wire1", entity["EID"],
+		"EID must be encoded as its canonical string, not an object: %s", rec.Body.String())
 }
 
 func TestHandleGetEntity_InvalidEID_Returns400(t *testing.T) {

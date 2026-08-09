@@ -2017,6 +2017,253 @@ Returns 404 under the same conditions as `GET /api/v1/clusters/{name}`.
 | 400 | `MISSING_CLUSTER_NAME` | `name` path variable is empty |
 | 404 | `CLUSTER_NOT_FOUND` | Cluster does not exist or is outside the caller's tenant |
 
+### Entity Graph
+
+Read-only access to the entity graph (ADR-022/ADR-023): the accumulation point for
+every typed entity, relationship, observation history, drift record, and change
+event CFGMS knows about. This is the model surface the Web UI renders and the
+external integration surface for the twin.
+
+**Response format differs from the rest of this API.** These endpoints return the
+requested object directly as the JSON body (no `data`/`timestamp` envelope), and
+error bodies are plain text (no `error.code` envelope) — the response and error
+formats documented under [Response Format](#response-format) do not apply here.
+
+**Tenant scoping and non-disclosure (ADR-022 §7):** every handler derives the
+caller's tenant subtree from the authenticated session (`X-API-Key`/Bearer token),
+never from a request parameter. A read for an entity, edge, history record, diff,
+timeline event, or drift record outside the caller's tenant subtree returns
+**404, not 403** — cross-tenant existence is not disclosed. For endpoints whose
+provider method takes no tenant parameter (`GetHistory`, `Diff`, `GetNeighborhood`,
+`GetTimeline`, `GetDriftState`), the handler performs a `GetEntity` access check
+against the root/subject EID before calling the provider.
+
+**Entity ID (EID) format:** `authority_type:authority_name[/local_id]`, e.g.
+`host:CFG-70-02` or `host:CFG-70-02/disk0`. Path segments use `{eid:.+}` so
+an EID containing `/` is matched in full; URL-encode the EID when building request
+paths from untrusted input.
+
+**Required permission** for every endpoint below is `entity:list` (collection
+endpoints) or `entity:read` (single-entity and sub-resource endpoints).
+
+#### GET /api/v1/entities
+
+List entities matching a filter, paginated.
+
+**Required permission:** `entity:list`
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `kind` | string | Filter by entity kind (e.g. `steward`, `service`) |
+| `text_query` | string | Free-text match against entity attributes |
+| `as_of` | RFC 3339 | Project entity state as of this timestamp |
+| `page_token` | string | Opaque continuation cursor from a prior response's `NextToken` |
+| `page_size` | int | 1–1000 (default provider-defined); 400 if out of range |
+
+**Response (200):** `EntityPage`
+
+```json
+{
+  "Entities": [
+    { "Entity": { "EID": "host:CFG-70-02", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" },
+      "Sources": [], "Freshness": { "ObservedAt": "2026-08-08T10:00:00Z", "RecordedAt": "2026-08-08T10:00:01Z", "Stale": false },
+      "CollapseGroup": null }
+  ],
+  "NextToken": ""
+}
+```
+
+Tenant scoping: only entities in the caller's tenant subtree are returned; an
+admin mTLS principal (empty tenant) sees all entities.
+
+#### GET /api/v1/entities/{eid}
+
+Get the current state, provenance, and freshness for a single entity.
+
+**Required permission:** `entity:read`
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `as_of` | RFC 3339 | Project entity state as of this timestamp |
+| `collapse_group` | `true` | Include the merged same-as group view (`CollapseGroup`) |
+
+**Response (200):** `EntityView` (see example fields above)
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Malformed EID, or `as_of` not RFC 3339 |
+| 404 | Entity does not exist, or is outside the caller's tenant subtree |
+
+#### GET /api/v1/entities/{eid}/edges
+
+List edges attached to an entity.
+
+**Required permission:** `entity:read`
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `edge_type` | string, repeatable | Filter by edge type (e.g. `?edge_type=contains&edge_type=runs-on`) |
+| `source` | string | Filter by asserting source identity |
+| `direction` | `outbound` \| `inbound` | Which side of the edge `{eid}` occupies (default `outbound`: edges where `{eid}` is `From`) |
+
+**Response (200):** `[]EdgeView`, each `{ "Edge": {...}, "Freshness": {...} }`
+
+This endpoint does not pre-check entity existence — an unknown or cross-tenant
+`{eid}` returns an empty list (`[]`), not 404, because `GetEdges` filters by the
+EID's `owning_tenant` at the storage layer.
+
+#### GET /api/v1/entities/{eid}/neighborhood
+
+Depth-bounded connected subgraph starting at `{eid}`.
+
+**Required permission:** `entity:read`
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `depth` | int | 1–3 (default 1); 400 outside this range — access-contract cap (ADR-022 §9) |
+| `direction` | `outbound` \| `inbound` \| `both` | Traversal direction (default `outbound`) |
+| `edge_type` | string, repeatable | Restrict traversal to these edge types |
+
+**Response (200):** `Neighborhood`
+
+```json
+{ "Root": "host:CFG-70-02", "Nodes": [ { "EID": "host:CFG-70-02", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" } ], "Edges": [] }
+```
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Malformed EID, `depth` out of 1–3, or invalid `direction` |
+| 404 | Root entity does not exist, or is outside the caller's tenant subtree |
+
+#### GET /api/v1/entities/{eid}/history
+
+Versioned observation log for an entity over a time range.
+
+**Required permission:** `entity:read`
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `from` | RFC 3339 (required) | Range start |
+| `to` | RFC 3339 (required), must be after `from` | Range end |
+
+**Response (200):** `[]ObservationRecord`, each `{ "Observation": {...}, "Version": 3 }`
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Malformed EID, or `from`/`to` missing, malformed, or `to` not after `from` |
+| 404 | Entity does not exist, or is outside the caller's tenant subtree |
+
+#### GET /api/v1/entities/{eid}/diff
+
+Attribute-level delta between two points in time for an entity (ADR-022 §5).
+
+**Required permission:** `entity:read`
+
+**Query parameters:** same as `/history` (`from`, `to`, both required RFC 3339).
+
+**Response (200):** `StateDiff`
+
+```json
+{
+  "Subject": "host:CFG-70-02",
+  "T1": "2026-08-01T00:00:00Z",
+  "T2": "2026-08-08T00:00:00Z",
+  "Changes": [
+    { "Attribute": "os_version", "Before": "10.0.19045", "After": "10.0.22631", "Source": "enforcing-module:os-info" }
+  ]
+}
+```
+
+**Error responses:** same as `/history`.
+
+#### GET /api/v1/entities/timeline
+
+Merged change-event stream across one or more entities.
+
+**Required permission:** `entity:list`
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `eid` | string, repeatable, required | Subject EID(s); at least one required |
+| `from` | RFC 3339 (required) | Range start |
+| `to` | RFC 3339 (required), must be after `from` | Range end |
+
+**Response (200):** `[]TimelineEvent`, each `{ "Subject": "...", "OccurredAt": "...", "Kind": "state-change", "Detail": {} }`
+
+Each `eid` is access-checked individually before the timeline is fetched: if
+**any** requested EID does not exist or is outside the caller's tenant subtree,
+the whole request returns 404 and no data for the other EIDs is disclosed.
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | No `eid` given, a malformed `eid`, or `from`/`to` missing, malformed, or out of order |
+| 404 | Any requested `eid` does not exist, or is outside the caller's tenant subtree |
+
+#### GET /api/v1/entities/{eid}/drift
+
+Persisted desired-vs-actual drift record for one entity (ADR-022 §6).
+
+**Required permission:** `entity:read`
+
+**Response (200):** `DriftState`
+
+```json
+{
+  "EID": "host:CFG-70-02",
+  "DetectedAt": "2026-08-08T09:00:00Z",
+  "Fields": [
+    { "Attribute": "firewall.enabled", "Desired": true, "Actual": false, "Matching": false }
+  ],
+  "ConfigRevision": "a1b2c3d",
+  "LifecycleStatus": "detected"
+}
+```
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Malformed EID |
+| 404 | Entity does not exist, is outside the caller's tenant subtree, or has no drift record |
+
+#### GET /api/v1/entities/drifted
+
+List entities with active drift matching a filter.
+
+**Required permission:** `entity:list`
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lifecycle_status` | `detected` \| `acknowledged` \| `resolved` \| `ignored` | 400 if any other value |
+| `kind` | string | Filter by entity kind |
+
+**Response (200):** `[]DriftState` (see `/drift` example above for shape)
+
+Tenant scoping: only drift records for entities in the caller's tenant subtree
+are returned.
+
 ### Internal Endpoints (not for external use)
 
 #### POST /raft/message
