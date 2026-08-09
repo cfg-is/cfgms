@@ -51,11 +51,23 @@ func init() {
 }
 
 // newTestRegistrationStore creates a real SQLite-backed registration.Store for handler tests.
+//
+// The database is in-memory rather than a file under t.TempDir(). A file-backed
+// path takes the provider's full schema-DDL path (~15 CREATE TABLEs plus indexes
+// and the back-fill probes) against a WAL journal on real disk, measured at
+// 0.4s-2.6s per call under -race; that cost is paid by every test in this file and
+// is what pushed this package past the 10-minute per-binary hang detector. The
+// in-memory path takes the provider's deserialize fast-path instead (~10ms) and is
+// what pkg/testing.SetupTestStorage already uses for every other store in these
+// tests. Isolation is unchanged: pkg/storage/providers/sqlite.openDB collapses any
+// in-memory request to a *private*, single-connection database owned by this pool,
+// so each call still gets its own store with no cross-test sharing. The store is a
+// real SQLite store either way — no fake, no mock.
 func newTestRegistrationStore(t *testing.T) registration.Store {
 	t.Helper()
 	store, err := interfaces.CreateRegistrationTokenStoreFromConfig(
 		"sqlite",
-		map[string]interface{}{"path": t.TempDir() + "/tokens.db"},
+		map[string]interface{}{"path": ":memory:"},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
