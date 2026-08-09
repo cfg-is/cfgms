@@ -401,6 +401,73 @@ func TestSetAdminMarker_Architecture(t *testing.T) {
 			"add to allow-list or move to an allowed file: %v", violations)
 }
 
+// TestSetRootScopeMarker_Architecture enforces the restricted-caller rule for
+// SetRootScopeMarker (ADR-025 Amendment 1 A1.3, founder decision 2026-08-09, PR #3215).
+// Any production file outside the allow-list that calls cert.SetRootScopeMarker fails
+// this test. Test files (_test.go) are excluded — they are test infrastructure, not
+// production code paths.
+//
+// The risk this guards is INVERTED relative to TestSetAdminMarker_Architecture above.
+// SetAdminMarker grants privilege, so an unauthorized caller is a privilege-escalation
+// risk. SetRootScopeMarker instead RESTRICTS privilege: a marked cert becomes subject to
+// ADR-025 Decision 1's root<->MSP boundary, denied every strict descendant of "root"
+// without an active grant or break-glass crossing. So the hazard an unauthorized caller
+// represents here is not escalation but accidental stamping — an operator issuing what
+// they believe is an ordinary unrestricted admin bundle instead silently locking
+// themselves out below "root". Conversely, the security property this marker exists to
+// provide (a SaaS operator's credential reliably identifiable as root-scoped) depends on
+// issuance being deliberate and auditable, not incidental — which is exactly what a
+// closed allow-list plus IssueAdminBundle's audit-on-issue (admin_bundle.go) gives it.
+//
+// Deliberately does NOT allow-list initialization.go: the first-boot / --regenerate
+// system admin bundle (issueAdminBundle, initialization.go) must never carry this marker
+// — see that function's doc comment for why (it is the deployment's only admin
+// credential on single-root/on-prem installs; marking it would be a lockout).
+func TestSetRootScopeMarker_Architecture(t *testing.T) {
+	allowList := map[string]bool{
+		// Founder-directed root-scoped issuance opt-in (bootstrap-admin --root-scoped)
+		"features/controller/initialization/admin_bundle.go": true,
+	}
+
+	repoRoot := findRepoRoot(t)
+
+	var violations []string
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == "worktrees" || d.Name() == ".cache" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path) // #nosec G304 -- repo scan reads controlled source files
+		if err != nil {
+			return nil
+		}
+		if bytes.Contains(content, []byte("cert.SetRootScopeMarker")) {
+			rel, relErr := filepath.Rel(repoRoot, path)
+			if relErr != nil {
+				rel = path
+			}
+			rel = filepath.ToSlash(rel)
+			if !allowList[rel] {
+				violations = append(violations, rel)
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, violations,
+		"unauthorized production callers of cert.SetRootScopeMarker; "+
+			"add to allow-list or move to an allowed file: %v", violations)
+}
+
 // findRepoRoot walks up from the working directory to find the repository root (go.mod presence).
 func findRepoRoot(t *testing.T) string {
 	t.Helper()

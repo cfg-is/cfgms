@@ -463,6 +463,7 @@ func buildBootstrapAdminCommand() *cobra.Command {
 		regenerate bool
 		revoke     string
 		list       bool
+		rootScoped bool
 	)
 
 	cmd := &cobra.Command{
@@ -476,6 +477,14 @@ URL. The holder of a bundle can authenticate to the controller REST API as a ful
 Operations:
   --name <name> --output <path>   Issue a new bundle for a named operator or system.
                                   Name must be alphanumeric+hyphens, max 64 chars.
+  --root-scoped                   Only valid with --name. Marks the issued cert as a
+                                  root-scoped SaaS-operator credential (ADR-025 Decision
+                                  1): subject to the root<->MSP tenant boundary rather
+                                  than unrestricted access, and requires an active grant
+                                  or break-glass crossing to reach tenants below "root".
+                                  Do not use for single-root or on-prem deployments'
+                                  primary admin — that would lock it out of its own
+                                  fleet. Issuance is audited.
   --regenerate                    Regenerate the system admin bundle at the configured
                                   path. Requires interactive confirmation (type 'yes').
                                   After regenerating, revoke the old bundle serial:
@@ -488,7 +497,7 @@ Operations:
 Bundles are written with mode 0600. Treat them like root SSH keys.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBootstrapAdmin(configPath, name, outputPath, regenerate, revoke, list)
+			return runBootstrapAdmin(configPath, name, outputPath, regenerate, revoke, list, rootScoped)
 		},
 	}
 
@@ -498,12 +507,13 @@ Bundles are written with mode 0600. Treat them like root SSH keys.`,
 	cmd.Flags().BoolVar(&regenerate, "regenerate", false, "Regenerate the system admin bundle (requires confirmation)")
 	cmd.Flags().StringVar(&revoke, "revoke", "", "Revoke a bundle by serial number")
 	cmd.Flags().BoolVar(&list, "list", false, "List all issued and revoked admin certs")
+	cmd.Flags().BoolVar(&rootScoped, "root-scoped", false, "Mark the new bundle as a root-scoped SaaS-operator credential (ADR-025 Decision 1); only valid with --name")
 
 	return cmd
 }
 
 // runBootstrapAdmin executes the bootstrap-admin operation.
-func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, revoke string, list bool) error {
+func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, revoke string, list bool, rootScoped bool) error {
 	// Exactly one operation must be specified.
 	active := 0
 	if name != "" {
@@ -527,6 +537,9 @@ func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, rev
 	if name != "" && outputPath == "" {
 		return fmt.Errorf("--output is required with --name")
 	}
+	if rootScoped && name == "" {
+		return fmt.Errorf("--root-scoped is only valid with --name")
+	}
 
 	cfg, err := config.LoadWithPath(configPath)
 	if err != nil {
@@ -537,7 +550,7 @@ func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, rev
 
 	switch {
 	case name != "":
-		if err := initialization.IssueAdminBundle(cfg, logger, name, outputPath); err != nil {
+		if err := initialization.IssueAdminBundle(cfg, logger, name, outputPath, rootScoped); err != nil {
 			return err
 		}
 		fmt.Printf("Admin bundle issued: %s\n", outputPath)

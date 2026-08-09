@@ -377,11 +377,13 @@ got it:
   `RootScoped: cert.HasRootScopeMarker(peerCert)` (`middleware.go`, immediately after the
   existing unconditional `TenantID: ""` assignment) — `TenantID` itself is untouched,
   matching A1.3's own framing that both an unscoped superadmin and a root-scoped operator
-  present `TenantID == ""` and are disambiguated by the new signal alone. No production
-  issuance path sets the marker yet (`cert.SetRootScopeMarker` exists, following
-  `SetAdminMarker`'s restricted-caller convention, but has no allow-listed caller in this
-  story) — every admin cert issued to date, and every one issued by today's Story
-  B/D flows, is unaffected and continues to present as an unscoped superadmin.
+  present `TenantID == ""` and are disambiguated by the new signal alone. The production
+  issuance path is `IssueAdminBundle`'s `--root-scoped` opt-in (`cmd/controller/main.go`'s
+  `bootstrap-admin` subcommand, `features/controller/initialization/admin_bundle.go`) —
+  see A2.6 below. Every admin cert issued to date, and every one issued by the first-boot
+  / `--regenerate` system-bundle path (`issueAdminBundle`, `initialization.go`), remains
+  unaffected and continues to present as an unscoped superadmin: `--root-scoped` is
+  opt-in, defaults to off, and is deliberately not reachable from first boot.
 - **cfg-CLI Bearer sessions.** `session.Session.RootScoped bool`
   (`pkg/session/contract.go`) is set only by a new `Manager.IssueRootScoped(ctx,
   principalID, connectionName)` method (`pkg/session/manager.go`) — a sibling to `Issue`,
@@ -393,8 +395,59 @@ got it:
   it. Persisted through both durable session-token stores (`root_scoped` column,
   `pkg/storage/providers/sqlite/schema.go` and `.../database/schemas.go`, both
   back-filled for pre-existing installations) so the marker survives `Validate`/`Renew`
-  round-trips, not just the initial `Issue` response. No production call site invokes
-  `IssueRootScoped` yet, for the same reason as the cert path above.
+  round-trips, not just the initial `Issue` response. The production call site is
+  `handleSessionCreate` (`features/controller/api/handlers_sessions.go`): it branches to
+  `IssueRootScoped` when the authenticating `Principal.RootScoped` is true, otherwise
+  calls the ordinary `Issue` — a cfg-CLI session inherits its scope from the
+  authenticating credential, never from a request field.
+
+### A2.6 — Root-scoped issuance wired: `bootstrap-admin --root-scoped` (2026-08-09)
+
+Landing Decision 1/2/3 with no issuance path left the boundary provably correct but inert
+— nothing could ever present as `RootScoped`. Rather than merge that gap and track it
+separately, the founder directed the issuance path to land in the same story/PR (#3125 /
+#3215). Scope was deliberately narrow — one opt-in, one call site, no new policy surface:
+
+- **Cert side.** `IssueAdminBundle` (`features/controller/initialization/admin_bundle.go`)
+  gained a `rootScoped bool` parameter. When true, its `TemplateModifier` composes
+  `cert.SetAdminMarker` **and** `cert.SetRootScopeMarker` on the same cert (still a single
+  admin-marked cert — root-scoped is a narrower category of admin, not a separate
+  identity). Surfaced as `bootstrap-admin --name <op> --output <path> --root-scoped`
+  (`cmd/controller/main.go`), rejected when combined with `--regenerate`/`--revoke`/
+  `--list`, or with `--root-scoped` but no `--name`. `SetRootScopeMarker` gained its own
+  architecture allow-list test (`pkg/cert/architecture_test.go`,
+  `TestSetRootScopeMarker_Architecture`, mirroring `TestSetAdminMarker_Architecture`),
+  allow-listing only `admin_bundle.go` — the risk it guards is inverted from the admin
+  marker's: this marker *reduces* privilege, so the hazard is accidental stamping
+  (an operator unexpectedly locked out below `root`), not escalation.
+- **First boot stays unmarked, on purpose.** `issueAdminBundle` (`initialization.go`),
+  shared by first-run `--init` and `--regenerate`, never sets the marker. It mints the
+  deployment's one system admin bundle; on a single-root or on-prem install, "descendants
+  of `root`" is the entire fleet, so marking it would lock that admin out of everything it
+  manages with no self-service way to grant a crossing. Unmarked remains the default
+  everywhere — the opt-in exists only on the named-operator path.
+- **Session side.** No new request field. `handleSessionCreate` reads the already-derived
+  `Principal.RootScoped` and picks `IssueRootScoped` vs. `Issue` accordingly (A2.1 above)
+  — a caller cannot choose its own scope by setting a field on the session-create request.
+- **Audit.** Issuing a root-scoped bundle records a `Critical`-severity `system_access`
+  audit event (`auditRootScopedBundleIssuance`, `admin_bundle.go`; action
+  `root_scoped_admin_bundle_issued`) via a short-lived storage+audit manager opened for
+  that one CLI invocation. A credential that changes which side of the tenant boundary its
+  holder sits on is not mintable without a trace. Storage/audit failure is a hard error
+  from `IssueAdminBundle` even though the bundle file is already on disk at that point —
+  the CLI must not silently produce an unaudited root-scoped credential.
+- **Tests.** `features/controller/initialization/admin_bundle_test.go`:
+  `TestIssueAdminBundle_RootScoped_StampsBothMarkers`,
+  `TestIssueAdminBundle_NotRootScoped_NoRootMarker`,
+  `TestIssueAdminBundle_FirstBoot_NeverRootScoped`,
+  `TestIssueAdminBundle_RootScoped_RecordsAuditEvent`,
+  `TestIssueAdminBundle_NotRootScoped_NoAuditEvent`. Session-side:
+  `features/controller/api/handlers_sessions_test.go`,
+  `TestHandleSessionCreate_RootScopedPrincipal_IssuesRootScopedSession`. Cert-extraction
+  coverage (a cert carrying both markers yields a `RootScoped` principal; an ordinary one
+  does not) already existed pre-issuance-wiring in
+  `features/controller/api/handlers_tenant_crossing_test.go`
+  (`TestExtractAdminPrincipal_RootScopeMarker`) and is unchanged.
 
 ### A2.2 — Why not (b): the measured blast radius that ruled it out
 
@@ -540,8 +593,8 @@ because a list response has no single resource to attach a per-item challenge to
 - ADR-025 Decision 1 is now enforced in practice, not merely mechanically correct against
   a caller type that never occurs — the gap Amendment 1 A1.3 identified ("no principal in
   the system currently presents as `root`-scoped... the boundary has nothing to trigger
-  on") is closed by the explicit marker, even though no production issuance path sets it
-  yet in this story.
+  on") is closed by the explicit marker, and (per A2.6) a production issuance path now
+  sets it: `bootstrap-admin --root-scoped`, opt-in and off by default everywhere else.
 - Every existing `callerTenant == ""` caller (all of them, on `develop` as of this
   amendment) is `RootScoped == false` by construction and is therefore completely
   unaffected — the regression this amendment had to avoid.

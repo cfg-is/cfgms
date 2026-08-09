@@ -4,6 +4,7 @@ package initialization
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // setupInitializedController runs full initialization and returns the config and a
@@ -83,7 +85,7 @@ func TestIssueAdminBundle_CreatesFile(t *testing.T) {
 
 	outputPath := filepath.Join(t.TempDir(), "alice.bundle.yaml")
 
-	err := IssueAdminBundle(setup.cfg, setup.logger, "alice", outputPath)
+	err := IssueAdminBundle(setup.cfg, setup.logger, "alice", outputPath, false)
 	require.NoError(t, err)
 
 	// File must exist
@@ -129,7 +131,7 @@ func TestIssueAdminBundle_ReservedCN_Rejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			outputPath := filepath.Join(t.TempDir(), "should-not-exist.bundle.yaml")
-			err := IssueAdminBundle(setup.cfg, setup.logger, tc.cn, outputPath)
+			err := IssueAdminBundle(setup.cfg, setup.logger, tc.cn, outputPath, false)
 			require.Error(t, err, "reserved CN %q must be rejected", tc.cn)
 			assert.Contains(t, err.Error(), "RESERVED_CN",
 				"error message must contain RESERVED_CN for %q", tc.cn)
@@ -161,7 +163,7 @@ func TestIssueAdminBundle_InvalidCN_Rejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			outputPath := filepath.Join(t.TempDir(), "should-not-exist.bundle.yaml")
-			err := IssueAdminBundle(setup.cfg, setup.logger, tc.cn, outputPath)
+			err := IssueAdminBundle(setup.cfg, setup.logger, tc.cn, outputPath, false)
 			require.Error(t, err, "invalid CN %q must be rejected", tc.cn)
 			assert.NoFileExists(t, outputPath, "no bundle file must be created for invalid CN")
 		})
@@ -174,7 +176,7 @@ func TestIssueAdminBundle_CannotOverwriteSystemBundle(t *testing.T) {
 	setup, cleanup := setupInitializedController(t)
 	defer cleanup()
 
-	err := IssueAdminBundle(setup.cfg, setup.logger, "alice", defaultAdminBundlePath())
+	err := IssueAdminBundle(setup.cfg, setup.logger, "alice", defaultAdminBundlePath(), false)
 	require.Error(t, err, "must reject outputPath equal to the system bundle path")
 	assert.Contains(t, err.Error(), "cannot overwrite the system admin bundle")
 }
@@ -186,7 +188,7 @@ func TestRevokeAdminBundle_IdempotentDoubleRevoke(t *testing.T) {
 	defer cleanup()
 
 	outputPath := filepath.Join(t.TempDir(), "idempotent-revoke.bundle.yaml")
-	require.NoError(t, IssueAdminBundle(setup.cfg, setup.logger, "idempotent-user", outputPath))
+	require.NoError(t, IssueAdminBundle(setup.cfg, setup.logger, "idempotent-user", outputPath, false))
 
 	b, err := bundle.Read(outputPath)
 	require.NoError(t, err)
@@ -204,7 +206,7 @@ func TestIssueAdminBundle_ValidityCap(t *testing.T) {
 	defer cleanup()
 
 	outputPath := filepath.Join(t.TempDir(), "validity-test.bundle.yaml")
-	err := IssueAdminBundle(setup.cfg, setup.logger, "validity-tester", outputPath)
+	err := IssueAdminBundle(setup.cfg, setup.logger, "validity-tester", outputPath, false)
 	require.NoError(t, err)
 
 	x509cert := parseX509FromBundle(t, outputPath)
@@ -222,7 +224,7 @@ func TestRevokeAdminBundle_RevokedThenAuthFails(t *testing.T) {
 	defer cleanup()
 
 	outputPath := filepath.Join(t.TempDir(), "revoke-test.bundle.yaml")
-	err := IssueAdminBundle(setup.cfg, setup.logger, "revoke-test-user", outputPath)
+	err := IssueAdminBundle(setup.cfg, setup.logger, "revoke-test-user", outputPath, false)
 	require.NoError(t, err)
 
 	b, err := bundle.Read(outputPath)
@@ -319,7 +321,7 @@ func TestIssueAdminBundle_RejectsUnsetExternalURL(t *testing.T) {
 	cfg.ExternalURL = ""
 
 	outputPath := filepath.Join(t.TempDir(), "should-not-exist.bundle.yaml")
-	err := IssueAdminBundle(&cfg, setup.logger, "alice", outputPath)
+	err := IssueAdminBundle(&cfg, setup.logger, "alice", outputPath, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "external_url",
 		"error must name the field that needs to be set")
@@ -338,7 +340,7 @@ func TestIssueAdminBundle_RejectsNonHTTPSExternalURL(t *testing.T) {
 	cfg.ExternalURL = "http://controller.example.com:8080"
 
 	outputPath := filepath.Join(t.TempDir(), "should-not-exist.bundle.yaml")
-	err := IssueAdminBundle(&cfg, setup.logger, "alice", outputPath)
+	err := IssueAdminBundle(&cfg, setup.logger, "alice", outputPath, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "https",
 		"error must require the https scheme")
@@ -357,7 +359,7 @@ func TestIssueAdminBundle_HonoursExplicitLocalhostURL(t *testing.T) {
 	cfg.ExternalURL = "https://localhost:8080"
 
 	outputPath := filepath.Join(t.TempDir(), "dev.bundle.yaml")
-	err := IssueAdminBundle(&cfg, setup.logger, "dev-admin", outputPath)
+	err := IssueAdminBundle(&cfg, setup.logger, "dev-admin", outputPath, false)
 	require.NoError(t, err, "explicit https://localhost:8080 must be accepted")
 
 	b, err := bundle.Read(outputPath)
@@ -396,4 +398,120 @@ func TestRegenerate_RecoversFromMissingBundle(t *testing.T) {
 	// Initialization marker must still be intact (controller can start)
 	assert.True(t, IsInitialized(setup.caDir),
 		"initialization marker must remain intact after --regenerate")
+}
+
+// TestIssueAdminBundle_RootScoped_StampsBothMarkers verifies the bootstrap-admin
+// --root-scoped opt-in (ADR-025 Amendment 1 A1.3, founder decision 2026-08-09, PR #3215)
+// composes both cert.SetAdminMarker and cert.SetRootScopeMarker on the issued cert. Before
+// this change SetRootScopeMarker had zero non-test callers anywhere in the codebase, so no
+// credential in a running deployment could ever present as root-scoped; this is the path
+// that closes that gap.
+func TestIssueAdminBundle_RootScoped_StampsBothMarkers(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	outputPath := filepath.Join(t.TempDir(), "root-operator.bundle.yaml")
+	err := IssueAdminBundle(setup.cfg, setup.logger, "root-operator", outputPath, true)
+	require.NoError(t, err)
+
+	x509cert := parseX509FromBundle(t, outputPath)
+	assert.True(t, cert.HasAdminMarker(x509cert), "root-scoped bundle must still carry the admin marker")
+	assert.True(t, cert.HasRootScopeMarker(x509cert), "--root-scoped must stamp the root-scope marker")
+}
+
+// TestIssueAdminBundle_NotRootScoped_NoRootMarker is the no-regression half of the AC:
+// omitting --root-scoped (the default for every existing caller) must never stamp the
+// root-scope marker.
+func TestIssueAdminBundle_NotRootScoped_NoRootMarker(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	outputPath := filepath.Join(t.TempDir(), "ordinary-operator.bundle.yaml")
+	err := IssueAdminBundle(setup.cfg, setup.logger, "ordinary-operator", outputPath, false)
+	require.NoError(t, err)
+
+	x509cert := parseX509FromBundle(t, outputPath)
+	assert.True(t, cert.HasAdminMarker(x509cert))
+	assert.False(t, cert.HasRootScopeMarker(x509cert),
+		"an ordinary admin bundle must never carry the root-scope marker")
+}
+
+// TestIssueAdminBundle_FirstBoot_NeverRootScoped verifies the system admin bundle issued
+// by first-run initialization never carries the root-scope marker. Founder decision:
+// marking the deployment's only admin credential would subject every single-root and
+// on-prem install's admin to the ADR-025 boundary with no way to grant itself a crossing
+// — a lockout, not hardening. Unmarked stays the default everywhere.
+func TestIssueAdminBundle_FirstBoot_NeverRootScoped(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	x509cert := parseX509FromBundle(t, setup.bundlePath)
+	assert.True(t, cert.HasAdminMarker(x509cert))
+	assert.False(t, cert.HasRootScopeMarker(x509cert),
+		"the first-boot system admin bundle must never be root-scoped")
+}
+
+// TestIssueAdminBundle_RootScoped_RecordsAuditEvent verifies that issuing a root-scoped
+// bundle is audited: "a credential that changes which side of the tenant boundary its
+// holder sits on should not be mintable without a trace" (founder decision, PR #3215).
+func TestIssueAdminBundle_RootScoped_RecordsAuditEvent(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	outputPath := filepath.Join(t.TempDir(), "audited-operator.bundle.yaml")
+	err := IssueAdminBundle(setup.cfg, setup.logger, "audited-operator", outputPath, true)
+	require.NoError(t, err)
+
+	sm, err := openStorageManager(setup.cfg, setup.logger)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sm.Close()) }()
+
+	entries, err := sm.GetAuditStore().GetAuditsByAction(context.Background(), "root_scoped_admin_bundle_issued", nil)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "exactly one root-scoped issuance audit event must be recorded")
+	assert.Equal(t, business.AuditSeverityCritical, entries[0].Severity,
+		"minting a credential that crosses the ADR-025 boundary is Critical severity")
+	assert.Equal(t, "audited-operator", entries[0].Details["operator_name"])
+}
+
+// TestIssueAdminBundle_RootScoped_AuditStorageFailureIsHardError verifies that a storage
+// failure while recording the root-scoped issuance audit event fails IssueAdminBundle
+// loudly (fail-closed), not silently: "a credential that changes which side of the
+// tenant boundary its holder sits on should not be mintable without a trace" (founder
+// decision, PR #3215). The bundle is still written to disk when this fires — the
+// operator has a valid credential either way — which is exactly why the CLI must not
+// exit 0 and let that go unnoticed.
+func TestIssueAdminBundle_RootScoped_AuditStorageFailureIsHardError(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	brokenCfg := *setup.cfg
+	brokenCfg.Storage = nil
+
+	outputPath := filepath.Join(t.TempDir(), "broken-storage-operator.bundle.yaml")
+	err := IssueAdminBundle(&brokenCfg, setup.logger, "broken-storage-operator", outputPath, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audit record failed")
+	assert.FileExists(t, outputPath, "the cert bundle is already on disk when the audit failure fires")
+}
+
+// TestIssueAdminBundle_NotRootScoped_NoAuditEvent verifies ordinary (non-root-scoped)
+// bundle issuance does not write to the audit trail this feature adds — the trace exists
+// specifically because a root-scoped credential changes which side of the tenant boundary
+// its holder sits on; an ordinary admin bundle does not.
+func TestIssueAdminBundle_NotRootScoped_NoAuditEvent(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	outputPath := filepath.Join(t.TempDir(), "unaudited-operator.bundle.yaml")
+	err := IssueAdminBundle(setup.cfg, setup.logger, "unaudited-operator", outputPath, false)
+	require.NoError(t, err)
+
+	sm, err := openStorageManager(setup.cfg, setup.logger)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sm.Close()) }()
+
+	entries, err := sm.GetAuditStore().GetAuditsByAction(context.Background(), "root_scoped_admin_bundle_issued", nil)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
 }

@@ -95,42 +95,9 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		return nil, fmt.Errorf("storage configuration is required for initialization")
 	}
 
-	var (
-		storageManager *interfaces.StorageManager
-		err            error
-	)
-
-	if cfg.HA.IsClusterMode() {
-		// Cluster mode: all business stores backed by shared Postgres so every node sees
-		// the same fleet state immediately after --init. S3 blob store is configured
-		// separately at startup; only the DSN is needed here.
-		pgDSN := ""
-		sessionHMACKey := ""
-		if cfg.Storage.Cluster != nil {
-			pgDSN = cfg.Storage.Cluster.PostgresDSN
-			sessionHMACKey = cfg.Storage.Cluster.SessionHMACKey
-		}
-		var s3Config map[string]interface{}
-		if cfg.Storage.Cluster != nil {
-			s3Config = cfg.Storage.Cluster.S3
-		}
-		logger.Info("Cluster mode: initializing Postgres business store backend...",
-			"ha_mode", cfg.HA.Mode)
-		storageManager, err = interfaces.CreateClusterStorageManager(pgDSN, sessionHMACKey, s3Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize cluster storage: %w", err)
-		}
-		logger.Info("Cluster storage backend initialized")
-	} else {
-		// OSS composite path: flatfile (config/audit/steward) + SQLite (business data)
-		logger.Info("Initializing OSS composite storage backend...",
-			"flatfile_root", cfg.Storage.FlatfileRoot,
-			"sqlite_path", cfg.Storage.SQLitePath)
-		storageManager, err = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
-		}
-		logger.Info("OSS composite storage backend initialized")
+	storageManager, err := openStorageManager(cfg, logger)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		if cErr := storageManager.Close(); cErr != nil {
@@ -309,12 +276,68 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	}, nil
 }
 
+// openStorageManager opens the configured business storage backend — shared Postgres in
+// cluster mode, or the OSS flatfile+SQLite composite otherwise. Used by first-run
+// initialization and by any other controller-local tooling (e.g. bootstrap-admin's
+// root-scoped-issuance audit trail) that needs durable storage before the server starts.
+// Callers are responsible for closing the returned manager.
+func openStorageManager(cfg *config.Config, logger logging.Logger) (*interfaces.StorageManager, error) {
+	if cfg.Storage == nil {
+		return nil, fmt.Errorf("storage configuration is required")
+	}
+	if cfg.HA.IsClusterMode() {
+		// Cluster mode: all business stores backed by shared Postgres so every node sees
+		// the same fleet state immediately after --init. S3 blob store is configured
+		// separately at startup; only the DSN is needed here.
+		pgDSN := ""
+		sessionHMACKey := ""
+		if cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+			sessionHMACKey = cfg.Storage.Cluster.SessionHMACKey
+		}
+		var s3Config map[string]interface{}
+		if cfg.Storage.Cluster != nil {
+			s3Config = cfg.Storage.Cluster.S3
+		}
+		logger.Info("Cluster mode: initializing Postgres business store backend...",
+			"ha_mode", cfg.HA.Mode)
+		storageManager, err := interfaces.CreateClusterStorageManager(pgDSN, sessionHMACKey, s3Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize cluster storage: %w", err)
+		}
+		logger.Info("Cluster storage backend initialized")
+		return storageManager, nil
+	}
+
+	// OSS composite path: flatfile (config/audit/steward) + SQLite (business data)
+	logger.Info("Initializing OSS composite storage backend...",
+		"flatfile_root", cfg.Storage.FlatfileRoot,
+		"sqlite_path", cfg.Storage.SQLitePath)
+	storageManager, err := interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", err)
+	}
+	logger.Info("OSS composite storage backend initialized")
+	return storageManager, nil
+}
+
 // issueAdminBundle generates an admin client certificate with the CFGMS admin marker,
-// writes the bundle file, and writes the idempotency marker.
+// writes the bundle file, and writes the idempotency marker. Shared by first-run
+// initialization (Run, above) and RegenerateSystemBundle (admin_bundle.go) — both mint
+// the deployment's one system admin bundle.
 func issueAdminBundle(bundlePath string, cfg *config.Config, certManager *cert.Manager, logger logging.Logger) error {
 	// Issue an admin client cert with the CFGMS admin X.509 extension.
 	// Subject: CN=cfgms-admin, O=CFGMS (no OU — the extension OID is the identity marker).
 	// Validity: 365 days hard cap (Story D enforces renewal).
+	//
+	// Deliberately NOT the root-scope marker (pkg/cert's SetRootScopeMarker; see its own
+	// architecture allow-list test) — ADR-025 Amendment 1 A1.3, founder decision
+	// 2026-08-09, PR #3215. This is the system admin bundle, the deployment's only admin
+	// credential on every single-root and on-prem install. Marking it would subject that
+	// admin to the ADR-025 Decision 1 root<->MSP boundary and lock it out of everything
+	// below "root" with no way to grant itself a crossing — a lockout, not hardening.
+	// Unmarked stays the default everywhere; the opt-in lives only on the named-operator
+	// path (IssueAdminBundle in admin_bundle.go, via bootstrap-admin --root-scoped).
 	adminCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName:       "cfgms-admin",
 		Organization:     "CFGMS",
