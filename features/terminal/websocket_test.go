@@ -66,12 +66,9 @@ func waitForSessionCleanup(t *testing.T, manager SessionManager, expectedCount i
 // sessions. This is a hang detector, not a performance budget: what callers
 // assert on is that registration happens at all, not how fast. Server-side
 // registration is a single mutex-guarded map write that follows the client's
-// completed handshake — near-instant floor — but a loaded Windows CI runner
-// can stall the goroutine well past a couple hundred milliseconds (merge
-// queue eviction 2026-08-08, run 31254640418: TestWebSocketOriginCheck/
-// port_qualified_allowlist timed out at the previous 2s deadline). 10s keeps
-// generous headroom over that floor while still failing fast on a genuine
-// hang.
+// completed handshake — near-instant floor — but a loaded CI runner can stall
+// the goroutine well past a couple hundred milliseconds. 10s keeps generous
+// headroom over that floor while still failing fast on a genuine hang.
 func waitForActiveSessions(t *testing.T, manager SessionManager, minCount int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -518,7 +515,16 @@ func TestWebSocketOriginCheck(t *testing.T) {
 	require.NoError(t, err)
 	stopManagerOnCleanup(t, manager)
 
-	const queryParams = "?steward_id=test-steward&user_id=test-user&shell=bash"
+	// getTestShell(), not a hardcoded "bash": on native Windows CI, "bash" is
+	// not in ValidateShell's Windows set (features/terminal/shell/executor.go
+	// isShellSupported), so CreateSession fails after the WebSocket upgrade
+	// already succeeded — the client Dial reports success while the server
+	// never registers a session, and waitForActiveSessions below times out at
+	// 0 regardless of how generous its deadline is (merge queue eviction
+	// 2026-08-08, run 31277309585: TestWebSocketOriginCheck/same_origin_accepted,
+	// allowlist_origin_accepted, and port_qualified_allowlist all failed at
+	// "0" active sessions).
+	queryParams := "?steward_id=test-steward&user_id=test-user&shell=" + getTestShell()
 
 	t.Run("same_origin_accepted", func(t *testing.T) {
 		handler, err := NewWebSocketHandler(manager, logger, nil)
@@ -627,58 +633,47 @@ func TestWebSocketOriginCheck(t *testing.T) {
 	})
 }
 
-// delayedActiveSessionManager is a minimal SessionManager whose GetActiveSessions
-// only reports a session once activateAt has passed. It models the Windows CI
-// race where the server-side session write lags the client's completed
-// handshake by more than the old 2s poll deadline under runner load (merge
-// queue eviction 2026-08-08, run 31254640418: TestWebSocketOriginCheck/
-// port_qualified_allowlist, "0" is not >= "1", "timed out waiting for 1 active
-// session(s)").
-type delayedActiveSessionManager struct {
-	activateAt time.Time
-}
-
-func (m *delayedActiveSessionManager) CreateSession(ctx context.Context, req *SessionRequest) (*Session, error) {
-	return nil, nil
-}
-
-func (m *delayedActiveSessionManager) GetSession(sessionID string) (*Session, error) {
-	return nil, nil
-}
-
-func (m *delayedActiveSessionManager) TerminateSession(ctx context.Context, sessionID string) error {
-	return nil
-}
-
-func (m *delayedActiveSessionManager) GetActiveSessions() []*Session {
-	if time.Now().Before(m.activateAt) {
-		return nil
-	}
-	return []*Session{{}}
-}
-
-func (m *delayedActiveSessionManager) RecordData(sessionID string, data []byte, direction DataDirection) error {
-	return nil
-}
-
-func (m *delayedActiveSessionManager) GetSessionRecording(sessionID string) (*SessionRecording, error) {
-	return nil, nil
-}
-
-func (m *delayedActiveSessionManager) Stop(ctx context.Context) error { return nil }
-
 // TestWaitForActiveSessionsToleratesSlowRegistration proves waitForActiveSessions
-// survives session registration that lands after the old 2s deadline but
-// within the current one — the exact shape of the Windows CI race above. Under
-// the old 2s deadline this subtest would fail.
+// survives session registration that lands after the old 2s deadline but within
+// the current 10s one. Under the old 2s deadline this test would fail.
+//
+// Registration goes through the real DefaultSessionManager — the same component
+// the WebSocket handler registers sessions in — with the CreateSession call
+// deliberately deferred. That models a server-side session write lagging the
+// client's completed handshake, a generic registration race independent of the
+// shell-selection bug that actually caused the 2026-08-08 Windows merge-queue
+// evictions (TestWebSocketOriginCheck hardcoded shell=bash, which
+// features/terminal/shell/executor.go's isShellSupported rejects on Windows, so
+// CreateSession never succeeded there; see queryParams above).
 func TestWaitForActiveSessionsToleratesSlowRegistration(t *testing.T) {
 	const delay = 3 * time.Second
-	manager := &delayedActiveSessionManager{activateAt: time.Now().Add(delay)}
+
+	manager, err := NewSessionManager(&Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    10,
+	}, logging.NewNoopLogger())
+	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
+
+	createErr := make(chan error, 1)
+	go func() {
+		time.Sleep(delay)
+		_, createSessionErr := manager.CreateSession(context.Background(), &SessionRequest{
+			TenantID:  "test-tenant",
+			StewardID: "test-steward-001",
+			UserID:    "test-user",
+			Shell:     getTestShell(),
+			Cols:      80,
+			Rows:      24,
+		})
+		createErr <- createSessionErr
+	}()
 
 	start := time.Now()
 	ok := t.Run("waits past the old 2s deadline", func(t *testing.T) {
 		waitForActiveSessions(t, manager, 1)
 	})
+	require.NoError(t, <-createErr, "delayed session registration must succeed")
 	require.True(t, ok, "waitForActiveSessions must tolerate registration delayed beyond the old 2s deadline")
 	require.GreaterOrEqual(t, time.Since(start), delay)
 }
