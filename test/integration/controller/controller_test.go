@@ -105,15 +105,14 @@ func (s *ControllerTestSuite) TestStewardContainer() {
 	assert.True(s.T(), s.docker.IsContainerRunning("steward-standalone"),
 		"Steward container should be running")
 
-	// Steward should have produced log output (proves it started)
-	logs, err := s.docker.GetStewardLogs(ctx)
-	require.NoError(s.T(), err, "Should be able to retrieve steward logs")
+	// Steward should have produced log output and registered storage/logging
+	// providers (proves initialization). When infrastructure is managed
+	// externally (e.g. started concurrently by the ha suite's shared
+	// containers), the container can be Running before its startup logging
+	// has completed, so poll instead of checking once.
+	logs, err := s.docker.WaitForLogContent(ctx, "steward-standalone", "Registered", "provider")
+	require.NoError(s.T(), err, "Steward logs should show provider registration (proves initialization)")
 	assert.NotEmpty(s.T(), logs, "Steward should have produced log output")
-
-	// Steward should have registered storage/logging providers (proves initialization)
-	assert.True(s.T(),
-		strings.Contains(logs, "Registered") || strings.Contains(logs, "provider"),
-		"Steward logs should show provider registration (proves initialization)")
 
 	s.T().Log("Steward container validated")
 }
@@ -131,12 +130,12 @@ func (s *ControllerTestSuite) TestStorageInitialization() {
 	require.NoError(s.T(), err, "Health endpoint should be reachable")
 	assert.NotEmpty(s.T(), output, "Health endpoint should return status")
 
-	// Check controller logs for storage initialization evidence
-	logs, logErr := s.docker.GetControllerLogs(ctx)
-	require.NoError(s.T(), logErr)
-	assert.True(s.T(),
-		strings.Contains(logs, "storage") || strings.Contains(logs, "Registered storage provider"),
-		"Controller logs should show storage initialization")
+	// Check controller logs for storage initialization evidence. When
+	// infrastructure is managed externally (e.g. started concurrently by the
+	// ha suite's shared containers), the health endpoint can respond before
+	// startup logging has finished, so poll instead of checking once.
+	_, logErr := s.docker.WaitForLogContent(ctx, "controller-standalone", "storage", "Registered storage provider")
+	require.NoError(s.T(), logErr, "Controller logs should show storage initialization")
 
 	s.T().Log("Controller storage initialized (controller is serving requests)")
 }
@@ -182,6 +181,28 @@ func (s *ControllerTestSuite) TestCertificateManagement() {
 		"Controller should have generated certificate files in /app/certs")
 
 	s.T().Log("Certificate management validated")
+}
+
+// TestWaitForLogContentRejectsUnknownContainer validates that WaitForLogContent
+// refuses container names outside the harness-owned set before any docker
+// process is launched. Runs without Docker infrastructure.
+func TestWaitForLogContentRejectsUnknownContainer(t *testing.T) {
+	h := NewDockerComposeHelper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, name := range []string{"", "unknown-container", "steward-standalone; rm -rf /"} {
+		logs, err := h.WaitForLogContent(ctx, name, "anything")
+		require.Error(t, err, "container name %q should be rejected", name)
+		assert.Contains(t, err.Error(), "only harness-managed containers")
+		assert.Empty(t, logs, "no logs should be returned for a rejected container name")
+	}
+
+	// Harness-owned names pass validation.
+	for _, name := range []string{"controller-standalone", "steward-standalone", "cfgms-timescaledb-test"} {
+		require.NoError(t, validateContainerName(name), "harness container %q should be accepted", name)
+	}
 }
 
 func TestController(t *testing.T) {
