@@ -177,6 +177,7 @@ type Provider struct {
 	started   bool
 	connected bool
 	startTime time.Time
+	now       func() time.Time
 
 	// Subscriptions (client mode)
 	commandHandler interfaces.CommandHandler
@@ -203,15 +204,33 @@ type Provider struct {
 // Compile-time proof that Provider satisfies the central provider interface.
 var _ interfaces.ControlPlaneProvider = (*Provider)(nil)
 
+// Option configures optional Provider behaviour at construction time.
+type Option func(*Provider)
+
+// WithClock overrides the provider's time source, used to compute startTime
+// and Uptime. Tests use it to control elapsed time deterministically instead
+// of depending on real wall-clock resolution; production callers should not
+// need it.
+func WithClock(now func() time.Time) Option {
+	return func(p *Provider) {
+		p.now = now
+	}
+}
+
 // New creates an in-process control plane provider in the given mode.
 // The provider must be initialised with a Bus before it is started.
-func New(mode Mode) *Provider {
-	return &Provider{
+func New(mode Mode, opts ...Option) *Provider {
+	p := &Provider{
 		mode:              mode,
 		logger:            logging.NewNoopLogger(),
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
+		now:               time.Now,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Name returns the provider name.
@@ -293,7 +312,7 @@ func (p *Provider) Start(ctx context.Context) error {
 
 	p.mu.Lock()
 	p.ctx, p.cancel = context.WithCancel(ctx)
-	p.startTime = time.Now()
+	p.startTime = p.now()
 	p.started = true
 	p.connected = true
 	p.mu.Unlock()
@@ -375,7 +394,7 @@ func (p *Provider) Reconnect(ctx context.Context) error {
 		p.ctx, p.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	}
 	if p.startTime.IsZero() {
-		p.startTime = time.Now()
+		p.startTime = p.now()
 	}
 	p.started = true
 	p.connected = true
@@ -636,7 +655,7 @@ func (p *Provider) GetStats(_ context.Context) (*types.ControlPlaneStats, error)
 
 	p.mu.RLock()
 	if !p.startTime.IsZero() {
-		stats.Uptime = time.Since(p.startTime)
+		stats.Uptime = p.now().Sub(p.startTime)
 	}
 	stats.ActiveSubscriptions = int64(len(p.eventHandlers) + len(p.heartbeatHandlers))
 	mode, bus, connected := p.mode, p.bus, p.connected

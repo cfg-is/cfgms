@@ -348,7 +348,39 @@ func TestGetStats_ReportsConnectedStewardsAndSubscriptions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), stats.ConnectedStewards)
 	assert.Equal(t, int64(2), stats.ActiveSubscriptions)
-	assert.Positive(t, stats.Uptime)
+	// Plumbing check only: confirms Uptime is wired to startTime, not a timing
+	// assertion. assert.Positive is unreliable here because Windows timer
+	// granularity (~15.6ms) can put Start and GetStats in the same tick,
+	// producing an observed 0s even though the code is correct. See
+	// TestGetStats_UptimeReflectsClock for a deterministic growth assertion.
+	assert.GreaterOrEqual(t, stats.Uptime, time.Duration(0))
+}
+
+// TestGetStats_UptimeReflectsClock asserts Uptime growth exactly, using an
+// injected clock instead of real elapsed wall-clock time. Asserting a real
+// sleep interval would reintroduce the same clock-resolution flakiness this
+// test is written to avoid; the injectable clock lets the boundary be exact.
+func TestGetStats_UptimeReflectsClock(t *testing.T) {
+	ctx := context.Background()
+	bus := memory.NewBus()
+
+	current := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return current }
+
+	server := memory.New(memory.ModeServer, memory.WithClock(clock))
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, server.Stop(stopCtx))
+	})
+
+	current = current.Add(90 * time.Second)
+
+	stats, err := server.GetStats(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 90*time.Second, stats.Uptime)
 }
 
 func TestGetStats_CountsDeliveryFailures(t *testing.T) {
