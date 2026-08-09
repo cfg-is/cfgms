@@ -32,6 +32,8 @@ var permissionAssurance = map[string]Requirement{
 	"rbac:create-role":             {Min: session.AssuranceStrong}, // POST /rbac/roles
 	"rbac:update-role":             {Min: session.AssuranceStrong}, // PUT  /rbac/roles/{id}
 	"rbac:delete-role":             {Min: session.AssuranceStrong}, // DELETE /rbac/roles/{id}
+	"rbac:assign-role":             {Min: session.AssuranceStrong}, // POST /rbac/subjects/{id}/roles
+	"rbac:revoke-role":             {Min: session.AssuranceStrong}, // DELETE /rbac/subjects/{id}/roles/{role_id}
 	"api-key:create":               {Min: session.AssuranceStrong}, // POST /api-keys
 	"api-key:delete":               {Min: session.AssuranceStrong}, // DELETE /api-keys/{id}
 	"registration:create-token":    {Min: session.AssuranceStrong}, // POST /registration/tokens

@@ -133,6 +133,21 @@ func TestPermissionAssurance_TenantUpdateStrong(t *testing.T) {
 		"tenant:update must not require user presence (not a catastrophic operation)")
 }
 
+// TestPermissionAssurance_SubjectRoleBindingStrong is a REQUIRED test (Issue #3128 AC:
+// "rbac:assign-role and rbac:revoke-role are registered in permissionAssurance at
+// Min: session.AssuranceStrong"). Assigning an existing (possibly powerful) role to a
+// subject is at least as sensitive as editing the role definition itself.
+func TestPermissionAssurance_SubjectRoleBindingStrong(t *testing.T) {
+	for _, perm := range []string{"rbac:assign-role", "rbac:revoke-role"} {
+		req, found := permissionAssurance[perm]
+		require.True(t, found, "permission %q must be in permissionAssurance", perm)
+		assert.Equal(t, session.AssuranceStrong, req.Min,
+			"permission %q must require AssuranceStrong", perm)
+		assert.False(t, req.RequireUserPresence,
+			"permission %q must not require user presence (not a catastrophic operation)", perm)
+	}
+}
+
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {

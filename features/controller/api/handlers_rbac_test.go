@@ -126,11 +126,13 @@ func TestHandleListRoles_NoContextTenant_Returns401(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-// TestServer_RBACSubjectRoutesDeregistered confirms that all 10 RBAC subject, assignment,
-// and permission-check routes are removed from the router. An unregistered route in
-// gorilla/mux returns 404 before any auth middleware fires; a registered-but-unimplemented
-// route would instead return 401 (auth) or 501 (stub handler).
-func TestServer_RBACSubjectRoutesDeregistered(t *testing.T) {
+// TestServer_RBACSubjectCRUDRoutesDeregistered confirms that RBAC subject CRUD routes
+// and unrelated check routes remain unregistered. The three subject-role binding routes
+// (GET/POST /subjects/{id}/roles, DELETE /subjects/{id}/roles/{role_id}) are intentionally
+// absent from this list — they are now registered and handled by Issue #3128.
+// An unregistered route in gorilla/mux returns 404 before any auth middleware fires; a
+// registered-but-unimplemented route would instead return 401 (auth) or 501 (stub handler).
+func TestServer_RBACSubjectCRUDRoutesDeregistered(t *testing.T) {
 	server := setupTestServer(t)
 
 	routes := []struct {
@@ -142,9 +144,6 @@ func TestServer_RBACSubjectRoutesDeregistered(t *testing.T) {
 		{http.MethodGet, "/api/v1/rbac/subjects/test-id"},
 		{http.MethodPut, "/api/v1/rbac/subjects/test-id"},
 		{http.MethodDelete, "/api/v1/rbac/subjects/test-id"},
-		{http.MethodGet, "/api/v1/rbac/subjects/test-id/roles"},
-		{http.MethodPost, "/api/v1/rbac/subjects/test-id/roles"},
-		{http.MethodDelete, "/api/v1/rbac/subjects/test-id/roles/role-id"},
 		{http.MethodGet, "/api/v1/rbac/subjects/test-id/permissions"},
 		{http.MethodPost, "/api/v1/rbac/check"},
 	}
