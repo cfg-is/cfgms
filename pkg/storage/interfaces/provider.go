@@ -51,6 +51,7 @@ type BusinessStoreBundle struct {
 	PendingRefresh      business.PendingRefreshStore  // Issue #2098: registration-refresh approval queue
 	RefreshPolicy       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
 	AssurancePolicy     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
+	TenantCrossing      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -74,6 +75,13 @@ type RefreshStoreCreator interface {
 // Backends that do not implement this interface leave the store nil in the manager.
 type AssuranceStoreCreator interface {
 	CreateAssurancePolicyStore(config map[string]interface{}) (business.AssurancePolicyStore, error)
+}
+
+// TenantCrossingStoreCreator is an optional StorageProvider extension for backends that
+// support ADR-025 Decision 2's tenant-crossing grant and break-glass records.
+// Backends that do not implement this interface leave the store nil in the manager.
+type TenantCrossingStoreCreator interface {
+	CreateTenantCrossingStore(config map[string]interface{}) (business.TenantCrossingStore, error)
 }
 
 // StorageProvider defines the interface that all storage backends must implement.
@@ -553,6 +561,7 @@ type StorageManager struct {
 	pendingRefreshStore      business.PendingRefreshStore  // Issue #2098: registration-refresh approval queue
 	refreshPolicyStore       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
 	assurancePolicyStore     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
+	tenantCrossingStore      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -678,6 +687,17 @@ func (sm *StorageManager) SetAssurancePolicyStore(s business.AssurancePolicyStor
 	sm.assurancePolicyStore = s
 }
 
+// GetTenantCrossingStore returns the ADR-025 Decision 2 tenant-crossing grant/break-glass
+// store. Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetTenantCrossingStore() business.TenantCrossingStore {
+	return sm.tenantCrossingStore
+}
+
+// SetTenantCrossingStore wires the tenant-crossing store after construction.
+func (sm *StorageManager) SetTenantCrossingStore(s business.TenantCrossingStore) {
+	sm.tenantCrossingStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -725,6 +745,7 @@ func (sm *StorageManager) Close() error {
 		sm.refreshPolicyStore,
 		sm.pendingRefreshStore,
 		sm.assurancePolicyStore,
+		sm.tenantCrossingStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -943,6 +964,16 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 			sm.SetAssurancePolicyStore(assurancePolicyStore)
 		}
 	}
+	// Wire tenant crossing store if the provider implements TenantCrossingStoreCreator (ADR-025).
+	if tcc, ok := provider.(TenantCrossingStoreCreator); ok {
+		tenantCrossingStore, err := tcc.CreateTenantCrossingStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create tenant crossing store: %w", err)
+		}
+		if tenantCrossingStore != nil {
+			sm.SetTenantCrossingStore(tenantCrossingStore)
+		}
+	}
 	return sm, nil
 }
 
@@ -1008,6 +1039,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		sm.SetPendingRefreshStore(bundle.PendingRefresh)
 		sm.SetRefreshPolicyStore(bundle.RefreshPolicy)
 		sm.SetAssurancePolicyStore(bundle.AssurancePolicy)
+		sm.SetTenantCrossingStore(bundle.TenantCrossing)
 		return sm, nil
 	}
 

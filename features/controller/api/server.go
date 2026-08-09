@@ -163,6 +163,7 @@ type Server struct {
 	terminalHandler                http.Handler                          // Issue #2761: terminal WebSocket relay handler
 	tenantStore                    business.TenantStore                  // Issue #2839: tenant hierarchy for per-tenant assurance resolution
 	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
+	tenantCrossingStore            business.TenantCrossingStore          // ADR-025 Decision 2: tenant-crossing grants and break-glass
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -1226,6 +1227,17 @@ func (s *Server) SetAuditStore(store business.AuditStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.auditStore = store
+}
+
+// SetTenantCrossingStore wires the ADR-025 Decision 2 tenant-crossing grant/break-glass
+// store. When nil (default), isCallerAuthorizedForTenant fails closed: a root-scoped
+// caller is denied access to any strict descendant of "root" (no crossing mechanism
+// available means no crossing can be active) — no behavior change for existing tests
+// that build a bare Server.
+func (s *Server) SetTenantCrossingStore(store business.TenantCrossingStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tenantCrossingStore = store
 }
 
 // SetPoPVerifier replaces the proof-of-possession verifier.

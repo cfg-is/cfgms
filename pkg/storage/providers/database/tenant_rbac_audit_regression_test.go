@@ -46,6 +46,16 @@ func TestDatabaseTenantStore_CreateDuplicate_ReturnsAlreadyExists(t *testing.T) 
 		"a duplicate CreateTenant must return the documented sentinel so callers can fall back to UpdateTenant")
 }
 
+// TestDatabaseTenantStore_MissingTenantContract holds the Postgres provider to the
+// shared missing-tenant sentinel contract. This provider phrases the condition
+// differently from SQLite, which is exactly why callers must classify with errors.Is:
+// the tenant API handlers previously matched the message text, so on Postgres a
+// missing tenant produced 500 while an out-of-scope tenant produced 404 — a status
+// split that disclosed the existence of tenants outside the caller's subtree.
+func TestDatabaseTenantStore_MissingTenantContract(t *testing.T) {
+	business.TenantStoreMissingTenantContract(t, newTestTenantStore(t))
+}
+
 // TestDatabaseRBACStore_StoreRole_NoParent guards against a regression where
 // an empty ParentRoleId was inserted as a literal empty string instead of
 // NULL. parent_role_id has a self-referential foreign key, so every

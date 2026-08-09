@@ -79,8 +79,14 @@ var knownPermissions = map[string]bool{
 	// Compliance
 	"compliance:read-summary": true,
 	// Tenant management
+	"tenant:list":   true,
 	"tenant:read":   true,
+	"tenant:update": true,
 	"tenant:manage": true,
+	// Tenant-crossing grant and break-glass (ADR-025 Decision 2, Issue #3125)
+	"tenant:crossing-grant":       true,
+	"tenant:crossing-list":        true,
+	"tenant:crossing-break-glass": true,
 	// Script library administration (Issue #1670)
 	"script:admin": true,
 	// Installer artifact management (Issue #1702)

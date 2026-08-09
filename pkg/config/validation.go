@@ -5,6 +5,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -164,7 +165,10 @@ func (vm *ValidationManager) validateTenantContext(ctx context.Context, tenantID
 
 	_, err := vm.tenantStore.GetTenant(ctx, tenantID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		// Sentinel match, not substring: a missing tenant is a validation result
+		// (TenantExists=false), any other error is a store fault. Classifying on
+		// message text made this depend on one provider's phrasing.
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			return result, nil
 		}
 		return nil, fmt.Errorf("tenant store lookup failed: %w", err)

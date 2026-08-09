@@ -1700,6 +1700,85 @@ func TestBearerSession_AssurancePropagatedToPrincipal(t *testing.T) {
 	})
 }
 
+// TestBearerSession_RootScopedPropagatedToPrincipal verifies that authenticationMiddleware
+// carries Session.RootScoped (ADR-025 Amendment 1 A1.3, set only by Manager.IssueRootScoped)
+// onto the Principal it builds for the Bearer/session path. This is the session-issued half
+// of the same control the mTLS path covers via cert.HasRootScopeMarker
+// (TestExtractAdminPrincipal_RootScopeMarker): without propagation, a root-scoped operator's
+// cfg-CLI session would authenticate as an ordinary unscoped superadmin and skip the
+// root<->MSP boundary check in authorizeTenantAccess entirely.
+func TestBearerSession_RootScopedPropagatedToPrincipal(t *testing.T) {
+	captureBearerPrincipal := func(t *testing.T, issue func(session.Manager) string) *Principal {
+		t.Helper()
+		cfg := session.DefaultConfig()
+		store := session.NewMemStore(cfg, time.Now)
+		t.Cleanup(store.Close)
+		mgrWrite := session.NewManager(cfg, store, time.Now)
+		// A separate manager instance for the read side: its in-memory index is empty, so
+		// Validate must reload the session from the shared store — the same path a session
+		// takes across a controller restart or a sibling cluster node.
+		mgrRead := session.NewManager(cfg, store, time.Now)
+
+		srv := setupTestServer(t)
+		srv.SetSessionManager(mgrRead)
+
+		token := issue(mgrWrite)
+
+		var captured *Principal
+		handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.NotNil(t, captured)
+		return captured
+	}
+
+	t.Run("root-scoped session yields RootScoped principal", func(t *testing.T) {
+		principal := captureBearerPrincipal(t, func(mgr session.Manager) string {
+			_, token, err := mgr.IssueRootScoped(context.Background(), "root-operator-1", "cfg-cli")
+			require.NoError(t, err)
+			return token
+		})
+
+		assert.True(t, principal.RootScoped,
+			"a session issued via IssueRootScoped must produce a RootScoped Principal")
+		assert.Equal(t, "", principal.TenantID,
+			"a root-scoped session stays unscoped — RootScoped must not synthesise a TenantID")
+		assert.Equal(t, "root-operator-1", principal.ID)
+	})
+
+	t.Run("ordinary unscoped session is not RootScoped", func(t *testing.T) {
+		principal := captureBearerPrincipal(t, func(mgr session.Manager) string {
+			_, token, err := mgr.Issue(context.Background(), "admin-1", "cfg-cli", "")
+			require.NoError(t, err)
+			return token
+		})
+
+		assert.False(t, principal.RootScoped,
+			"RootScoped must come from the session's explicit marker, never from an empty TenantID")
+		assert.True(t, principal.GlobalScope,
+			"an unscoped session keeps today's cross-tenant visibility (Issue #3194)")
+	})
+
+	t.Run("tenant-scoped session is not RootScoped", func(t *testing.T) {
+		principal := captureBearerPrincipal(t, func(mgr session.Manager) string {
+			_, token, err := mgr.Issue(context.Background(), "msp-a-admin", "cfg-cli", "msp-a")
+			require.NoError(t, err)
+			return token
+		})
+
+		assert.False(t, principal.RootScoped)
+		assert.Equal(t, "msp-a", principal.TenantID)
+	})
+}
+
 // mintPresenceToken injects a presence token directly into the server's presenceTokens map,
 // bypassing the WebAuthn ceremony. For use in middleware tests only — the WebAuthn hardware
 // ceremony is not available in unit tests; this creates the token that

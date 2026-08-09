@@ -146,6 +146,7 @@ func backfillSessionTokenRecords(ctx context.Context, db *sql.DB) error {
 		{"bound_ip", `ALTER TABLE session_token_records ADD COLUMN bound_ip       TEXT    NOT NULL DEFAULT ''`},
 		{"last_proven_at", `ALTER TABLE session_token_records ADD COLUMN last_proven_at TEXT`},
 		{"credential_id", `ALTER TABLE session_token_records ADD COLUMN credential_id  BLOB`},
+		{"root_scoped", `ALTER TABLE session_token_records ADD COLUMN root_scoped    INTEGER NOT NULL DEFAULT 0`},
 	} {
 		present, err := columnExists(ctx, db, "session_token_records", c.name)
 		if err != nil {
@@ -303,6 +304,23 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_tenants_parent_id  ON tenants(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_status      ON tenants(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_name        ON tenants(name)`,
+
+		// Tenant crossings (ADR-025 Decision 2: client-granted support access and
+		// tenant-crossing break-glass elevation, both time-boxed and revocable).
+		`CREATE TABLE IF NOT EXISTS tenant_crossings (
+			id             TEXT PRIMARY KEY,
+			tenant_id      TEXT NOT NULL,
+			principal_id   TEXT NOT NULL,
+			kind           TEXT NOT NULL,
+			granted_by     TEXT NOT NULL,
+			justification  TEXT NOT NULL DEFAULT '',
+			created_at     TEXT NOT NULL,
+			expires_at     TEXT NOT NULL,
+			revoked_at     TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_tenant_id    ON tenant_crossings(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_principal_id ON tenant_crossings(principal_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tenant_crossings_active_lookup ON tenant_crossings(principal_id, tenant_id, expires_at, revoked_at)`,
 
 		// Client tenants (with M365 extension columns per ADR-003 §2)
 		`CREATE TABLE IF NOT EXISTS client_tenants (
@@ -692,7 +710,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			assurance             INTEGER NOT NULL DEFAULT 1,
 			bound_ip              TEXT    NOT NULL DEFAULT '',
 			last_proven_at        TEXT,
-			credential_id         BLOB
+			credential_id         BLOB,
+			root_scoped           INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_token_records_session_id ON session_token_records(session_id)`,
 	}

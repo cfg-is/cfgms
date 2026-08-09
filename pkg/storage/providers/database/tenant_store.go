@@ -176,7 +176,7 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("tenant %s not found", tenantID)
+			return nil, fmt.Errorf("get tenant %s: %w", tenantID, business.ErrTenantDoesNotExist)
 		}
 		return nil, fmt.Errorf("failed to get tenant: %w", err)
 	}
@@ -234,7 +234,7 @@ func (s *DatabaseTenantStore) UpdateTenant(ctx context.Context, tenant *business
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("tenant %s not found", tenant.ID)
+		return fmt.Errorf("update tenant %s: %w", tenant.ID, business.ErrTenantDoesNotExist)
 	}
 
 	return nil
@@ -262,7 +262,7 @@ func (s *DatabaseTenantStore) DeleteTenant(ctx context.Context, tenantID string)
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("tenant %s not found", tenantID)
+		return fmt.Errorf("delete tenant %s: %w", tenantID, business.ErrTenantDoesNotExist)
 	}
 
 	return nil

@@ -13,6 +13,167 @@ import (
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 )
 
+// TenantStoreMissingTenantContract asserts that store signals "this tenant has no
+// row" with the ErrTenantDoesNotExist sentinel from every operation that addresses a
+// tenant by ID. Call it from each TenantStore provider's tests:
+//
+//	func TestMyTenantStore_MissingTenantContract(t *testing.T) {
+//	    business.TenantStoreMissingTenantContract(t, openStore(t))
+//	}
+//
+// Providers are free to phrase the message however they like — callers must use
+// errors.Is, and this contract is what makes that safe. It exists because message
+// phrasing diverged between providers once before: an API handler classifying a
+// missing tenant by substring returned 404 on one provider and 500 on another, while
+// an out-of-scope tenant returned 404 on both, so the status code disclosed the
+// existence of tenants outside the caller's subtree.
+//
+// The store must be initialized and must not contain a tenant named by the probe ID.
+// Lifecycle (Initialize/Close) stays with the caller.
+func TenantStoreMissingTenantContract(t *testing.T, store TenantStore) {
+	t.Helper()
+	ctx := context.Background()
+	const missingID = "contract-probe-tenant-absent"
+
+	t.Run("GetTenant reports the sentinel", func(t *testing.T) {
+		got, err := store.GetTenant(ctx, missingID)
+		require.Error(t, err)
+		assert.Nil(t, got)
+		assert.ErrorIs(t, err, ErrTenantDoesNotExist,
+			"GetTenant on an absent tenant must wrap ErrTenantDoesNotExist so callers need not match message text")
+	})
+
+	t.Run("UpdateTenant reports the sentinel", func(t *testing.T) {
+		err := store.UpdateTenant(ctx, &TenantData{
+			ID:        missingID,
+			Name:      "absent",
+			Status:    TenantStatusActive,
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrTenantDoesNotExist,
+			"UpdateTenant on an absent tenant must wrap ErrTenantDoesNotExist")
+	})
+
+	t.Run("DeleteTenant reports the sentinel", func(t *testing.T) {
+		err := store.DeleteTenant(ctx, missingID)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrTenantDoesNotExist,
+			"DeleteTenant on an absent tenant must wrap ErrTenantDoesNotExist")
+	})
+}
+
+// TenantCrossingStoreContract exercises TenantCrossingStore's full lifecycle: create,
+// get, list, active-lookup, expiry, revoke, and the not-found sentinel. Call it from
+// each provider's tests:
+//
+//	func TestMyTenantCrossingStore_Contract(t *testing.T) {
+//	    business.TenantCrossingStoreContract(t, openStore(t))
+//	}
+//
+// The store must be initialized and must not already contain a crossing for the probe
+// tenant/principal IDs used here. Lifecycle (Initialize/Close) stays with the caller.
+func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
+	t.Helper()
+	ctx := context.Background()
+	const tenantID = "contract-probe-msp"
+	const principalID = "contract-probe-root-operator"
+
+	t.Run("GetTenantCrossing on an absent ID reports the sentinel", func(t *testing.T) {
+		got, err := store.GetTenantCrossing(ctx, "contract-probe-crossing-absent")
+		require.Error(t, err)
+		assert.Nil(t, got)
+		assert.ErrorIs(t, err, ErrTenantCrossingNotFound)
+	})
+
+	t.Run("HasActiveTenantCrossing is false before any crossing exists", func(t *testing.T) {
+		active, err := store.HasActiveTenantCrossing(ctx, principalID, tenantID)
+		require.NoError(t, err)
+		assert.False(t, active)
+	})
+
+	now := time.Now().UTC()
+	crossing := &TenantCrossing{
+		ID:          "contract-probe-crossing-1",
+		TenantID:    tenantID,
+		PrincipalID: principalID,
+		Kind:        TenantCrossingKindGrant,
+		GrantedBy:   "contract-probe-msp-admin",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	require.NoError(t, store.CreateTenantCrossing(ctx, crossing))
+
+	t.Run("GetTenantCrossing round-trips the created record", func(t *testing.T) {
+		got, err := store.GetTenantCrossing(ctx, crossing.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, crossing.TenantID, got.TenantID)
+		assert.Equal(t, crossing.PrincipalID, got.PrincipalID)
+		assert.Equal(t, crossing.Kind, got.Kind)
+		assert.Equal(t, crossing.GrantedBy, got.GrantedBy)
+		assert.Nil(t, got.RevokedAt)
+	})
+
+	t.Run("HasActiveTenantCrossing is true once an unexpired, unrevoked crossing exists", func(t *testing.T) {
+		active, err := store.HasActiveTenantCrossing(ctx, principalID, tenantID)
+		require.NoError(t, err)
+		assert.True(t, active)
+	})
+
+	t.Run("HasActiveTenantCrossing does not match a different principal or tenant", func(t *testing.T) {
+		active, err := store.HasActiveTenantCrossing(ctx, "someone-else", tenantID)
+		require.NoError(t, err)
+		assert.False(t, active)
+
+		active, err = store.HasActiveTenantCrossing(ctx, principalID, "some-other-tenant")
+		require.NoError(t, err)
+		assert.False(t, active)
+	})
+
+	t.Run("ListTenantCrossings returns the created record", func(t *testing.T) {
+		list, err := store.ListTenantCrossings(ctx, tenantID)
+		require.NoError(t, err)
+		require.Len(t, list, 1)
+		assert.Equal(t, crossing.ID, list[0].ID)
+	})
+
+	t.Run("expired crossings are not active", func(t *testing.T) {
+		expired := &TenantCrossing{
+			ID:            "contract-probe-crossing-expired",
+			TenantID:      tenantID,
+			PrincipalID:   "contract-probe-root-operator-expired",
+			Kind:          TenantCrossingKindBreakGlass,
+			GrantedBy:     "contract-probe-root-operator-expired",
+			Justification: "contract probe",
+			CreatedAt:     now.Add(-2 * time.Hour),
+			ExpiresAt:     now.Add(-time.Hour),
+		}
+		require.NoError(t, store.CreateTenantCrossing(ctx, expired))
+		active, err := store.HasActiveTenantCrossing(ctx, expired.PrincipalID, tenantID)
+		require.NoError(t, err)
+		assert.False(t, active, "an expired crossing must not grant access")
+	})
+
+	t.Run("RevokeTenantCrossing ends an active crossing immediately", func(t *testing.T) {
+		require.NoError(t, store.RevokeTenantCrossing(ctx, crossing.ID))
+		active, err := store.HasActiveTenantCrossing(ctx, principalID, tenantID)
+		require.NoError(t, err)
+		assert.False(t, active, "a revoked crossing must not grant access even before its ExpiresAt")
+
+		got, err := store.GetTenantCrossing(ctx, crossing.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.RevokedAt)
+	})
+
+	t.Run("RevokeTenantCrossing on an absent ID reports the sentinel", func(t *testing.T) {
+		err := store.RevokeTenantCrossing(ctx, "contract-probe-crossing-absent")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrTenantCrossingNotFound)
+	})
+}
+
 func newContractBatchJob(id, tenantID string) *batchjob.BatchJob {
 	now := time.Now().UTC()
 	return &batchjob.BatchJob{

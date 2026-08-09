@@ -51,7 +51,21 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, token, err := s.sessionManager.Issue(r.Context(), principal.ID, req.ConnectionName, principal.TenantID)
+	// A cfg-CLI session inherits its root-scope from the authenticating credential
+	// (ADR-025 Amendment 1 A1.3) rather than from a request field — a caller must not
+	// be able to choose its own scope. principal.RootScoped is read from an explicit
+	// certificate/session marker (see extractAdminPrincipal, authenticationMiddleware),
+	// never inferred from an empty TenantID.
+	var (
+		sess  *session.Session
+		token string
+		err   error
+	)
+	if principal.RootScoped {
+		sess, token, err = s.sessionManager.IssueRootScoped(r.Context(), principal.ID, req.ConnectionName)
+	} else {
+		sess, token, err = s.sessionManager.Issue(r.Context(), principal.ID, req.ConnectionName, principal.TenantID)
+	}
 	if err != nil {
 		s.logger.Error("Failed to issue session",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
