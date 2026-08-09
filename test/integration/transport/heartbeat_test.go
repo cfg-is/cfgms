@@ -3,6 +3,7 @@
 package transport
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"testing"
@@ -32,7 +33,31 @@ func (s *HeartbeatTestSuite) SetupSuite() {
 		s.T().Skip("Skipping heartbeat tests in short mode - requires controller infrastructure")
 	}
 
-	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
+	baseURL := GetTestHTTPAddr("https://localhost:8080")
+	s.helper = NewTestHelper(baseURL)
+
+	// Verify the controller is reachable before running any test in this suite.
+	// Without this bound, a goroutine in TestConcurrentHeartbeatConnections can
+	// call t.Fatalf (which invokes runtime.Goexit on the goroutine), exit without
+	// writing to the results channel, and leave the outer receive loop blocked
+	// for the full 10-minute test timeout. Fail here quickly instead.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	healthURL := fmt.Sprintf("%s/api/v1/health", baseURL)
+	for {
+		resp, err := s.helper.httpClient.Get(healthURL)
+		if err == nil {
+			_ = resp.Body.Close()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			s.T().Skipf("controller not reachable at %s within 30s — heartbeat suite requires a running controller (set CFGMS_TEST_HTTP_ADDR to override); skipping to avoid 10-minute hang (Issue #3186)", baseURL)
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // TestRegistrationProvidesTransportAddress verifies that a registered steward
@@ -105,9 +130,18 @@ func (s *HeartbeatTestSuite) TestConcurrentHeartbeatConnections() {
 
 	for i := 0; i < numStewards; i++ {
 		go func(idx int) {
+			// Deferred send guarantees the channel always receives a value even when
+			// RegisterSteward calls t.Fatalf. t.Fatalf invokes runtime.Goexit on the
+			// calling goroutine; runtime.Goexit runs deferred functions before
+			// terminating, so this defer executes even on an early exit. Without it,
+			// the goroutine exits silently and the outer receive loop blocks forever
+			// until the 10-minute test timeout fires (Issue #3186).
+			var r result
+			defer func() { results <- r }()
+
 			token := s.helper.CreateToken(s.T(), "default", fmt.Sprintf("group-%d", idx))
 			regResp := s.helper.RegisterSteward(s.T(), token)
-			results <- result{
+			r = result{
 				stewardID:        regResp.StewardID,
 				transportAddress: regResp.TransportAddress,
 			}
