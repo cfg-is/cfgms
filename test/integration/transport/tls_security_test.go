@@ -158,8 +158,9 @@ func (s *TLSSecurityTestSuite) TestTLSConfigFromRegistration() {
 func (s *TLSSecurityTestSuite) TestRegistrationReturnsCertificates() {
 	s.T().Log("Testing certificate distribution via registration API")
 
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	resp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	resp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	require.NotEmpty(s.T(), resp.StewardID, "Registration should return steward ID")
 	require.NotEmpty(s.T(), resp.ClientCert, "Registration should return client certificate")
@@ -173,15 +174,16 @@ func (s *TLSSecurityTestSuite) TestRegistrationReturnsCertificates() {
 // TestClientCertificateFromRegistration verifies that the client certificate returned
 // during registration is valid and can be loaded for mTLS connections.
 func (s *TLSSecurityTestSuite) TestClientCertificateFromRegistration() {
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	resp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	resp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	certDir := s.T().TempDir()
 	clientCertPath := filepath.Join(certDir, "client.crt")
 	clientKeyPath := filepath.Join(certDir, "client.key")
 	caCertPath := filepath.Join(certDir, "ca.crt")
 
-	err := os.WriteFile(clientCertPath, []byte(resp.ClientCert), 0600)
+	err = os.WriteFile(clientCertPath, []byte(resp.ClientCert), 0600)
 	require.NoError(s.T(), err)
 	err = os.WriteFile(clientKeyPath, []byte(resp.ClientKey), 0600)
 	require.NoError(s.T(), err)

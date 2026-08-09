@@ -3,11 +3,9 @@
 package transport
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/suite"
 )
@@ -33,39 +31,16 @@ func (s *HeartbeatTestSuite) SetupSuite() {
 		s.T().Skip("Skipping heartbeat tests in short mode - requires controller infrastructure")
 	}
 
-	baseURL := GetTestHTTPAddr("https://localhost:8080")
-	s.helper = NewTestHelper(baseURL)
-
-	// Verify the controller is reachable before running any test in this suite.
-	// Without this bound, a goroutine in TestConcurrentHeartbeatConnections can
-	// call t.Fatalf (which invokes runtime.Goexit on the goroutine), exit without
-	// writing to the results channel, and leave the outer receive loop blocked
-	// for the full 10-minute test timeout. Fail here quickly instead.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	healthURL := fmt.Sprintf("%s/api/v1/health", baseURL)
-	for {
-		resp, err := s.helper.httpClient.Get(healthURL)
-		if err == nil {
-			_ = resp.Body.Close()
-			return
-		}
-		select {
-		case <-ctx.Done():
-			s.T().Skipf("controller not reachable at %s within 30s — heartbeat suite requires a running controller (set CFGMS_TEST_HTTP_ADDR to override); skipping to avoid 10-minute hang (Issue #3186)", baseURL)
-			return
-		case <-time.After(2 * time.Second):
-		}
-	}
+	s.helper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 }
 
 // TestRegistrationProvidesTransportAddress verifies that a registered steward
 // receives a gRPC transport address for establishing the control plane stream.
 // This is the prerequisite for all heartbeat and failover functionality.
 func (s *HeartbeatTestSuite) TestRegistrationProvidesTransportAddress() {
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	regResp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	regResp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	s.NotEmpty(regResp.StewardID, "Steward ID should be generated")
 	s.NotEmpty(regResp.TransportAddress, "Transport address should be provided for gRPC stream")
@@ -99,14 +74,16 @@ func (s *HeartbeatTestSuite) TestFailoverDetectionReconnection() {
 	s.T().Log("Testing failover detection via stream break + re-registration")
 
 	// Register first steward
-	token1 := s.helper.CreateToken(s.T(), "default", "integration-test")
-	resp1 := s.helper.RegisterSteward(s.T(), token1)
+	token1 := s.helper.CreateToken("default", "integration-test")
+	resp1, err := s.helper.RegisterSteward(token1)
+	s.Require().NoError(err, "First steward registration should succeed")
 	s.NotEmpty(resp1.StewardID)
 	s.T().Logf("Steward 1 registered: %s", resp1.StewardID)
 
 	// Register second steward — simulates reconnection after failover
-	token2 := s.helper.CreateToken(s.T(), "default", "integration-test")
-	resp2 := s.helper.RegisterSteward(s.T(), token2)
+	token2 := s.helper.CreateToken("default", "integration-test")
+	resp2, err := s.helper.RegisterSteward(token2)
+	s.Require().NoError(err, "Second steward registration should succeed")
 	s.NotEmpty(resp2.StewardID)
 	s.T().Logf("Steward 2 registered: %s", resp2.StewardID)
 
@@ -128,20 +105,20 @@ func (s *HeartbeatTestSuite) TestConcurrentHeartbeatConnections() {
 
 	results := make(chan result, numStewards)
 
+	// Registration runs on worker goroutines, so it must never call a Fatal-family
+	// method: the testing package requires FailNow/Fatal/Fatalf to be called only
+	// from the goroutine running the test function. Each worker therefore reports
+	// success or failure over the buffered channel, and the test goroutine below
+	// does the asserting.
 	for i := 0; i < numStewards; i++ {
 		go func(idx int) {
-			// Deferred send guarantees the channel always receives a value even when
-			// RegisterSteward calls t.Fatalf. t.Fatalf invokes runtime.Goexit on the
-			// calling goroutine; runtime.Goexit runs deferred functions before
-			// terminating, so this defer executes even on an early exit. Without it,
-			// the goroutine exits silently and the outer receive loop blocks forever
-			// until the 10-minute test timeout fires (Issue #3186).
-			var r result
-			defer func() { results <- r }()
-
-			token := s.helper.CreateToken(s.T(), "default", fmt.Sprintf("group-%d", idx))
-			regResp := s.helper.RegisterSteward(s.T(), token)
-			r = result{
+			token := s.helper.CreateToken("default", fmt.Sprintf("group-%d", idx))
+			regResp, err := s.helper.RegisterSteward(token)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{
 				stewardID:        regResp.StewardID,
 				transportAddress: regResp.TransportAddress,
 			}
@@ -151,16 +128,11 @@ func (s *HeartbeatTestSuite) TestConcurrentHeartbeatConnections() {
 	seen := make(map[string]bool)
 	for i := 0; i < numStewards; i++ {
 		r := <-results
-		if r.err != nil {
-			s.T().Logf("Registration %d failed: %v", i, r.err)
-			continue
-		}
+		s.Require().NoErrorf(r.err, "Concurrent registration %d should succeed", i)
 		s.NotEmpty(r.stewardID)
 		s.NotEmpty(r.transportAddress)
 		s.False(seen[r.stewardID], "Each steward should have a unique ID")
 		seen[r.stewardID] = true
-
-		time.Sleep(10 * time.Millisecond) // slight delay to prevent log spam
 	}
 
 	s.Equal(numStewards, len(seen), "All concurrent registrations should produce unique steward IDs")

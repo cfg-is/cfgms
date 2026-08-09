@@ -39,13 +39,14 @@ func (s *RegistrationTestSuite) TearDownSuite() {}
 
 // TestHTTPRegistrationEndpoint tests the HTTP registration endpoint returns transport_address.
 func (s *RegistrationTestSuite) TestHTTPRegistrationEndpoint() {
-	token := s.helper.CreateToken(s.T(), "", "")
+	token := s.helper.CreateToken("", "")
 	expectedTenantID := "test-tenant-integration"
 	expectedGroup := "production"
 
 	s.T().Logf("Using test token: %s", token)
 
-	regResp := s.helper.RegisterSteward(s.T(), token)
+	regResp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	s.NotEmpty(regResp.StewardID, "Steward ID should be generated")
 	s.Equal(expectedTenantID, regResp.TenantID, "Tenant ID should match")
@@ -126,8 +127,9 @@ func (s *RegistrationTestSuite) TestStewardIDUniqueness() {
 	stewardIDs := make([]string, 0, numStewards)
 
 	for i := 0; i < numStewards; i++ {
-		token := s.helper.CreateToken(s.T(), "test-tenant-integration", "production")
-		regResp := s.helper.RegisterSteward(s.T(), token)
+		token := s.helper.CreateToken("test-tenant-integration", "production")
+		regResp, err := s.helper.RegisterSteward(token)
+		s.Require().NoErrorf(err, "Registration #%d should succeed", i+1)
 
 		s.Equal("test-tenant-integration", regResp.TenantID, "Response should have correct tenant ID")
 		stewardIDs = append(stewardIDs, regResp.StewardID)
