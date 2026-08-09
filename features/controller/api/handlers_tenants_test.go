@@ -546,13 +546,11 @@ func TestHandleListTenants_ClientScopedCallerCannotSeeSibling(t *testing.T) {
 // ancestor of "msp-a" in the store — the same result plain sibling-exclusion produces,
 // and NOT a stand-in for ADR-025 Decision 1's root<->MSP boundary check.
 //
-// ADR-025 Decision 1 (a root-scoped caller is walled off from an MSP subtree it *is*
-// the ancestor of, absent an active grant/break-glass session) is intentionally not
-// covered by this test: Amendment 1's A1.3 (distinguishing a genuinely root-scoped
-// caller from an unscoped superadmin — both present as callerTenant == "" today) is an
-// open design question the ADR explicitly leaves to a follow-on decision, and the
-// grant/break-glass override has no store-backed state yet. See
-// isCallerAuthorizedForTenant's doc comment and the follow-up tracked in #3228.
+// ADR-025 Decision 1's actual boundary — a root-scoped caller (explicit marker per
+// Amendment 1 A1.3, not an unscoped superadmin) denied a genuine root/msp-a descendant
+// absent an active grant/break-glass session, and let through with one — is covered by
+// TestHandleListTenants_RootScopedCallerDeniedRealDescendantWithoutCrossing and
+// TestHandleListTenants_RootScopedCallerAllowedWithActiveGrant below.
 func TestHandleListTenants_UnrelatedFlatTenant_NotVisible(t *testing.T) {
 	server := setupTestServer(t)
 
@@ -574,6 +572,68 @@ func TestHandleListTenants_UnrelatedFlatTenant_NotVisible(t *testing.T) {
 	assert.Contains(t, ids, "root", "root-scoped caller must see the root tenant itself")
 	assert.NotContains(t, ids, "msp-a",
 		"a flat tenant ID with no ParentID ancestry relationship to the caller must not be visible")
+}
+
+// TestHandleListTenants_RootScopedCallerDeniedRealDescendantWithoutCrossing is the
+// REQUIRED TEST from ADR-025 Decision 1: a root-scoped caller — identified by the
+// explicit RootScoped marker (Amendment 1 A1.3), never inferred from an empty
+// callerTenant — without an active grant or break-glass session must not see a genuine
+// root/msp-a descendant through GET /api/v1/tenants. List denial is silent (the
+// descendant is simply omitted); the single-resource GET counterpart instead returns a
+// step-up-shaped 401 challenge — see
+// TestAuthorizeRootScopedCaller_DeniedRealDescendantWithoutCrossing in
+// handlers_tenant_crossing_test.go.
+func TestHandleListTenants_RootScopedCallerDeniedRealDescendantWithoutCrossing(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	caller := rootScopedPrincipal("root-operator-list-1")
+	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants", "", caller, nil)
+	rec := httptest.NewRecorder()
+	server.handleListTenants(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	ids := tenantIDsFromListResponse(t, rec.Body.Bytes())
+	assert.Contains(t, ids, "root", "root-scoped caller must see the root tenant itself")
+	assert.NotContains(t, ids, "msp-a",
+		"a real root/msp-a descendant must not be visible absent an active grant or break-glass session")
+}
+
+// TestHandleListTenants_RootScopedCallerAllowedWithActiveGrant is the REQUIRED TEST's
+// counterpart: the same root-scoped caller and the same descendant, but holding an
+// active grant (ADR-025 Decision 2(a)), must see it in the list.
+func TestHandleListTenants_RootScopedCallerAllowedWithActiveGrant(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	caller := rootScopedPrincipal("root-operator-list-2")
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID:          "grant-list-1",
+		TenantID:    "msp-a",
+		PrincipalID: caller.ID,
+		Kind:        business.TenantCrossingKindGrant,
+		GrantedBy:   "msp-a-admin",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+	}))
+
+	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants", "", caller, nil)
+	rec := httptest.NewRecorder()
+	server.handleListTenants(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	ids := tenantIDsFromListResponse(t, rec.Body.Bytes())
+	assert.Contains(t, ids, "root")
+	assert.Contains(t, ids, "msp-a", "caller holds an active crossing for msp-a")
 }
 
 // TestHandleListTenants_ScopedCaller_SeesOwnDescendant is a regression test for the
