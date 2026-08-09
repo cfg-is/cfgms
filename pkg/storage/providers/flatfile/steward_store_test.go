@@ -307,6 +307,39 @@ func TestFlatFileStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
+func TestFlatFileStewardStore_SetStewardHidden(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	require.NoError(t, store.RegisterSteward(ctx, testStewardRecord("s-hide")))
+
+	// Default: not hidden.
+	got, err := store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "freshly registered steward must not be hidden")
+
+	// Hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "s-hide", true))
+	got, err = store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.True(t, got.Hidden, "GetSteward must reflect hidden=true after SetStewardHidden")
+
+	// Un-hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "s-hide", false))
+	got, err = store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "GetSteward must reflect hidden=false after SetStewardHidden")
+}
+
+func TestFlatFileStewardStore_SetStewardHidden_NotFound(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	err = store.SetStewardHidden(context.Background(), "ghost", true)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
 func TestFlatFileStewardStore_UpdateStewardTenant_TenantPersistedInFile(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewFlatFileStewardStore(dir)

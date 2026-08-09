@@ -89,6 +89,10 @@ type StewardRecord struct {
 	// Status is the current lifecycle state of the steward.
 	Status StewardStatus `json:"status"`
 
+	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2944).
+	// Orthogonal to Status: hiding a steward does not change its lifecycle state.
+	Hidden bool `json:"hidden"`
+
 	// RegisteredAt is the time the steward first registered.
 	RegisteredAt time.Time `json:"registered_at"`
 
@@ -165,6 +169,10 @@ type StewardStore interface {
 	// UpdateStewardStatus updates the lifecycle status of the given steward.
 	// Returns ErrStewardNotFound if no record exists.
 	UpdateStewardStatus(ctx context.Context, stewardID string, status StewardStatus) error
+
+	// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
+	// Returns ErrStewardNotFound if no record exists.
+	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
 
 	// UpdateStewardTenant moves a steward to a different tenant.
 	// Returns ErrStewardNotFound if no record exists for stewardID.

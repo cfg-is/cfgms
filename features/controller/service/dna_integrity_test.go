@@ -126,7 +126,7 @@ func TestCheckDNAIntegrity_UnknownConfigType(t *testing.T) {
 // good snapshot.
 func TestSyncDNA_RejectsDegenerateDNA_PriorSnapshotUnchanged(t *testing.T) {
 	storage := newTestFleetStorage(t)
-	log := &logCapture{}
+	log := logging.NewCapturingLogger()
 	svc := NewControllerServiceWithStorage(log, storage)
 	ctx := context.Background()
 
@@ -159,9 +159,10 @@ func TestSyncDNA_RejectsDegenerateDNA_PriorSnapshotUnchanged(t *testing.T) {
 	assert.EqualValues(t, 1, history.TotalCount, "degenerate snapshot must not be appended to history")
 
 	// WARN log entry must have been emitted.
-	entry, found := log.findEntry("dna_integrity_rejected")
+	// CapturingLogger records only Warn/WarnCtx calls, so a hit here is itself
+	// proof the event was emitted at WARN level.
+	_, found := log.FindWarn("dna_integrity_rejected")
 	assert.True(t, found, "expected dna_integrity_rejected WARN log entry")
-	assert.Equal(t, "WARN", entry.level)
 }
 
 // TestSyncDNA_RejectsNilAttributesDNA verifies that a nil-attributes DNA
@@ -293,7 +294,7 @@ func TestSyncDNA_PostHookNotFiredOnRejection(t *testing.T) {
 // TestSyncDNA_WarnLogContainsStewardIDAndMissingFields verifies the WARN log
 // entry names the steward id and the specific missing fields.
 func TestSyncDNA_WarnLogContainsStewardIDAndMissingFields(t *testing.T) {
-	log := &logCapture{}
+	log := logging.NewCapturingLogger()
 	svc := NewControllerService(log)
 	ctx := context.Background()
 
@@ -314,15 +315,15 @@ func TestSyncDNA_WarnLogContainsStewardIDAndMissingFields(t *testing.T) {
 	_, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err)
 
-	entry, found := log.findEntry("dna_integrity_rejected")
+	entry, found := log.FindWarn("dna_integrity_rejected")
 	require.True(t, found, "expected dna_integrity_rejected WARN log entry")
 
 	// steward_id field present.
-	_, hasStewardID := entry.fieldValue("steward_id")
+	_, hasStewardID := entry["steward_id"]
 	assert.True(t, hasStewardID)
 
 	// missing_fields value is a []string containing "os".
-	val, ok := entry.fieldValue("missing_fields")
+	val, ok := entry["missing_fields"]
 	require.True(t, ok)
 	fields, isSlice := val.([]string)
 	require.True(t, isSlice, "missing_fields should be []string")
@@ -337,7 +338,7 @@ func TestSyncDNA_WarnLogContainsStewardIDAndMissingFields(t *testing.T) {
 // structurally succeeds) but leaves the DNA field nil and stores no durable record.
 func TestAcceptRegistration_RejectsDegenerateInitialDNA(t *testing.T) {
 	storage := newTestFleetStorage(t)
-	log := &logCapture{}
+	log := logging.NewCapturingLogger()
 	svc := NewControllerServiceWithStorage(log, storage)
 	ctx := context.Background()
 
@@ -362,9 +363,10 @@ func TestAcceptRegistration_RejectsDegenerateInitialDNA(t *testing.T) {
 	assert.Error(t, err, "no durable record should exist for degenerate initial DNA")
 
 	// WARN log emitted.
-	entry, found := log.findEntry("dna_integrity_rejected")
+	// CapturingLogger records only Warn/WarnCtx calls, so a hit here is itself
+	// proof the event was emitted at WARN level.
+	_, found := log.FindWarn("dna_integrity_rejected")
 	assert.True(t, found, "expected dna_integrity_rejected WARN log entry")
-	assert.Equal(t, "WARN", entry.level)
 }
 
 // TestAcceptRegistration_AcceptsValidInitialDNA verifies a registration with

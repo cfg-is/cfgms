@@ -142,29 +142,23 @@ func RegisterStorageProvider(provider StorageProvider) {
 		"description", provider.Description())
 }
 
-// ValidateProvider ensures a provider implements all required interfaces correctly.
-func ValidateProvider(provider StorageProvider) error {
-	if provider == nil {
-		return fmt.Errorf("provider is nil")
-	}
-
-	if provider.Name() == "" {
+// ValidateProviderMetadata applies the registration rules to a provider's
+// declared metadata. It is separated from ValidateProvider so the rules can be
+// evaluated (and exercised) against provider metadata as plain data, without an
+// implementation of the StorageProvider interface.
+func ValidateProviderMetadata(name, description, version string, capabilities ProviderCapabilities) error {
+	if name == "" {
 		return fmt.Errorf("provider name cannot be empty")
 	}
 
-	if provider.Description() == "" {
+	if description == "" {
 		return fmt.Errorf("provider description cannot be empty")
 	}
 
-	if provider.GetVersion() == "" {
+	if version == "" {
 		return fmt.Errorf("provider version cannot be empty")
 	}
 
-	if available, err := provider.Available(); !available && err != nil {
-		getRegistryLogger().Info(fmt.Sprintf("Note: Provider '%s' reports as unavailable: %v", provider.Name(), err))
-	}
-
-	capabilities := provider.GetCapabilities()
 	if capabilities.MaxBatchSize < 0 {
 		return fmt.Errorf("provider MaxBatchSize cannot be negative")
 	}
@@ -175,6 +169,28 @@ func ValidateProvider(provider StorageProvider) error {
 
 	if capabilities.MaxAuditRetentionDays < 0 {
 		return fmt.Errorf("provider MaxAuditRetentionDays cannot be negative")
+	}
+
+	return nil
+}
+
+// ValidateProvider ensures a provider implements all required interfaces correctly.
+func ValidateProvider(provider StorageProvider) error {
+	if provider == nil {
+		return fmt.Errorf("provider is nil")
+	}
+
+	if err := ValidateProviderMetadata(
+		provider.Name(),
+		provider.Description(),
+		provider.GetVersion(),
+		provider.GetCapabilities(),
+	); err != nil {
+		return err
+	}
+
+	if available, err := provider.Available(); !available && err != nil {
+		getRegistryLogger().Info(fmt.Sprintf("Note: Provider '%s' reports as unavailable: %v", provider.Name(), err))
 	}
 
 	return nil

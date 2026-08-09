@@ -442,6 +442,7 @@ func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 			LastHeartbeat: info.LastHeartbeat,
 			DNAAttributes: attrs,
 			DNAFragments:  frags,
+			Hidden:        info.Hidden,
 		})
 	}
 	return result

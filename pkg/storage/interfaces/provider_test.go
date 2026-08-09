@@ -1,694 +1,184 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-package interfaces
+
+// These tests exercise the storage provider registry and the storage-manager
+// factories against the real OSS providers (flat-file and SQLite). They live in
+// the external interfaces_test package because pkg/storage/providers/* imports
+// pkg/storage/interfaces — an in-package test cannot import a real provider
+// without forming an import cycle. Registry internals are reached through the
+// RegistrySnapshot / RegistryReplace helpers in export_test.go.
+package interfaces_test
 
 import (
 	"context"
-	"fmt"
-	"sync"
+	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// testLogEntry captures a single log call for test assertions.
-type testLogEntry struct {
-	Message string
-	Data    []interface{}
+// withEmptyRegistry empties the global provider registry for the duration of the
+// test and restores the original contents on cleanup.
+func withEmptyRegistry(t *testing.T) {
+	t.Helper()
+	original := interfaces.RegistrySnapshot()
+	interfaces.RegistryReplace(nil)
+	t.Cleanup(func() { interfaces.RegistryReplace(original) })
 }
 
-// testMockLogger captures log calls for assertion without importing pkg/testing
-// (which would create an import cycle via pkg/testing/storage_helper.go).
-type testMockLogger struct {
-	mu   sync.Mutex
-	logs map[string][]testLogEntry
-}
-
-func newTestMockLogger() *testMockLogger {
-	return &testMockLogger{logs: map[string][]testLogEntry{
-		"debug": {}, "info": {}, "warn": {}, "error": {}, "fatal": {},
-	}}
-}
-
-func (l *testMockLogger) record(level, msg string, kv []interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.logs[level] = append(l.logs[level], testLogEntry{Message: msg, Data: kv})
-}
-
-func (l *testMockLogger) GetLogs(level string) []testLogEntry {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.logs[level]
-}
-
-func (l *testMockLogger) Debug(msg string, kv ...interface{}) { l.record("debug", msg, kv) }
-func (l *testMockLogger) Info(msg string, kv ...interface{})  { l.record("info", msg, kv) }
-func (l *testMockLogger) Warn(msg string, kv ...interface{})  { l.record("warn", msg, kv) }
-func (l *testMockLogger) Error(msg string, kv ...interface{}) { l.record("error", msg, kv) }
-func (l *testMockLogger) Fatal(msg string, kv ...interface{}) { l.record("fatal", msg, kv) }
-func (l *testMockLogger) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("debug", msg, kv)
-}
-func (l *testMockLogger) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("info", msg, kv)
-}
-func (l *testMockLogger) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("warn", msg, kv)
-}
-func (l *testMockLogger) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("error", msg, kv)
-}
-func (l *testMockLogger) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("fatal", msg, kv)
-}
-
-var _ logging.Logger = (*testMockLogger)(nil)
-
-// MockStorageProvider implements StorageProvider for testing
-type MockStorageProvider struct {
-	MockName         string
-	MockDescription  string
-	MockVersion      string
-	MockAvailable    bool
-	MockAvailableErr error
-	MockCapabilities ProviderCapabilities
-}
-
-func NewMockStorageProvider() *MockStorageProvider {
-	return &MockStorageProvider{
-		MockName:        "mock",
-		MockDescription: "Mock storage provider for testing",
-		MockVersion:     "1.0.0",
-		MockAvailable:   true,
-		MockCapabilities: ProviderCapabilities{
-			SupportsTransactions:   true,
-			SupportsVersioning:     true,
-			SupportsFullTextSearch: false,
-			SupportsEncryption:     true,
-			SupportsCompression:    false,
-			SupportsReplication:    false,
-			SupportsSharding:       false,
-			MaxBatchSize:           100,
-			MaxConfigSize:          1024 * 1024, // 1MB
-			MaxAuditRetentionDays:  365,
-		},
-	}
-}
-
-func (m *MockStorageProvider) Name() string {
-	return m.MockName
-}
-
-func (m *MockStorageProvider) Description() string {
-	return m.MockDescription
-}
-
-func (m *MockStorageProvider) GetVersion() string {
-	return m.MockVersion
-}
-
-func (m *MockStorageProvider) Available() (bool, error) {
-	return m.MockAvailable, m.MockAvailableErr
-}
-
-func (m *MockStorageProvider) GetCapabilities() ProviderCapabilities {
-	return m.MockCapabilities
-}
-
-func (m *MockStorageProvider) ClusterCapable() bool { return false }
-
-func (m *MockStorageProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return newMockClientTenantStore(), nil
-}
-
-func (m *MockStorageProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
-	return &MockConfigStore{}, nil
-}
-
-func (m *MockStorageProvider) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
-	return &MockAuditStore{}, nil
-}
-
-func (m *MockStorageProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
-	return &MockRBACStore{}, nil
-}
-
-func (m *MockStorageProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
-	return &MockTenantStore{}, nil
-}
-
-func (m *MockStorageProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
-	return &MockRegistrationTokenStore{}, nil
-}
-
-func (m *MockStorageProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-// Mock implementations of store interfaces
-type MockClientTenantStore struct {
-	tenants map[string]*business.ClientTenant
-}
-
-func newMockClientTenantStore() *MockClientTenantStore {
-	return &MockClientTenantStore{tenants: make(map[string]*business.ClientTenant)}
-}
-
-func (m *MockClientTenantStore) StoreClientTenant(ct *business.ClientTenant) error {
-	m.tenants[ct.ID] = ct
-	return nil
-}
-func (m *MockClientTenantStore) GetClientTenant(id string) (*business.ClientTenant, error) {
-	ct, ok := m.tenants[id]
-	if !ok {
-		return nil, business.ErrTenantNotFound
-	}
-	return ct, nil
-}
-func (m *MockClientTenantStore) GetClientTenantByIdentifier(_ string) (*business.ClientTenant, error) {
-	return nil, business.ErrTenantNotFound
-}
-func (m *MockClientTenantStore) ListClientTenants(_ business.ClientTenantStatus) ([]*business.ClientTenant, error) {
-	return nil, nil
-}
-func (m *MockClientTenantStore) UpdateClientTenantStatus(_ string, _ business.ClientTenantStatus) error {
-	return nil
-}
-func (m *MockClientTenantStore) DeleteClientTenant(_ string) error { return nil }
-func (m *MockClientTenantStore) StoreAdminConsentRequest(_ *business.AdminConsentRequest) error {
-	return nil
-}
-func (m *MockClientTenantStore) GetAdminConsentRequest(_ string) (*business.AdminConsentRequest, error) {
-	return nil, business.ErrTenantNotFound
-}
-func (m *MockClientTenantStore) DeleteAdminConsentRequest(_ string) error { return nil }
-func (m *MockClientTenantStore) Close() error                             { return nil }
-
-type MockConfigStore struct{}
-
-func (m *MockConfigStore) StoreConfig(_ context.Context, _ *cfgconfig.ConfigEntry) error {
-	return nil
-}
-func (m *MockConfigStore) GetConfig(_ context.Context, _ *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
-	return nil, cfgconfig.ErrConfigNotFound
-}
-func (m *MockConfigStore) DeleteConfig(_ context.Context, _ *cfgconfig.ConfigKey) error { return nil }
-func (m *MockConfigStore) ListConfigs(_ context.Context, _ *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
-	return nil, nil
-}
-func (m *MockConfigStore) GetConfigHistory(_ context.Context, _ *cfgconfig.ConfigKey, _ int) ([]*cfgconfig.ConfigEntry, error) {
-	return nil, nil
-}
-func (m *MockConfigStore) GetConfigVersion(_ context.Context, _ *cfgconfig.ConfigKey, _ int64) (*cfgconfig.ConfigEntry, error) {
-	return nil, cfgconfig.ErrConfigNotFound
-}
-func (m *MockConfigStore) StoreConfigBatch(_ context.Context, _ []*cfgconfig.ConfigEntry) error {
-	return nil
-}
-func (m *MockConfigStore) DeleteConfigBatch(_ context.Context, _ []*cfgconfig.ConfigKey) error {
-	return nil
-}
-func (m *MockConfigStore) ResolveConfigWithInheritance(_ context.Context, _ *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
-	return nil, cfgconfig.ErrConfigNotFound
-}
-func (m *MockConfigStore) ValidateConfig(_ context.Context, _ *cfgconfig.ConfigEntry) error {
-	return nil
-}
-func (m *MockConfigStore) GetConfigStats(_ context.Context) (*cfgconfig.ConfigStats, error) {
-	return &cfgconfig.ConfigStats{}, nil
-}
-
-type MockAuditStore struct{}
-
-func (m *MockAuditStore) StoreAuditEntry(_ context.Context, _ *business.AuditEntry) error {
-	return nil
-}
-func (m *MockAuditStore) GetAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
-	return nil, business.ErrAuditNotFound
-}
-func (m *MockAuditStore) ListAuditEntries(_ context.Context, _ *business.AuditFilter) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) StoreAuditBatch(_ context.Context, _ []*business.AuditEntry) error {
-	return nil
-}
-func (m *MockAuditStore) GetAuditsByUser(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) GetAuditsByResource(_ context.Context, _, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) GetAuditsByAction(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) GetFailedActions(_ context.Context, _ *business.TimeRange, _ int) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) GetSuspiciousActivity(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) GetAuditStats(_ context.Context) (*business.AuditStats, error) {
-	return &business.AuditStats{}, nil
-}
-func (m *MockAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-func (m *MockAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-
-// GetLastAuditEntry returns nil to satisfy the AuditStore interface. This stub
-// exists because importing a real provider here would create a circular dependency:
-// interfaces_test → pkg/storage/providers/flatfile → pkg/storage/interfaces.
-// Chain integrity is tested end-to-end in pkg/audit/manager_test.go.
-func (m *MockAuditStore) GetLastAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
-	return nil, nil
-}
-func (m *MockAuditStore) Close() error { return nil }
-
-type MockRBACStore struct{}
-
-func (m *MockRBACStore) StorePermission(_ context.Context, _ *common.Permission) error {
-	return nil
-}
-func (m *MockRBACStore) GetPermission(_ context.Context, _ string) (*common.Permission, error) {
-	return nil, fmt.Errorf("permission not found")
-}
-func (m *MockRBACStore) ListPermissions(_ context.Context, _ string) ([]*common.Permission, error) {
-	return nil, nil
-}
-func (m *MockRBACStore) UpdatePermission(_ context.Context, _ *common.Permission) error {
-	return nil
-}
-func (m *MockRBACStore) DeletePermission(_ context.Context, _ string) error { return nil }
-func (m *MockRBACStore) StoreRole(_ context.Context, _ *common.Role) error  { return nil }
-func (m *MockRBACStore) GetRole(_ context.Context, _ string) (*common.Role, error) {
-	return nil, fmt.Errorf("role not found")
-}
-func (m *MockRBACStore) ListRoles(_ context.Context, _ string) ([]*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRBACStore) UpdateRole(_ context.Context, _ *common.Role) error      { return nil }
-func (m *MockRBACStore) DeleteRole(_ context.Context, _ string) error            { return nil }
-func (m *MockRBACStore) StoreSubject(_ context.Context, _ *common.Subject) error { return nil }
-func (m *MockRBACStore) GetSubject(_ context.Context, _ string) (*common.Subject, error) {
-	return nil, fmt.Errorf("subject not found")
-}
-func (m *MockRBACStore) ListSubjects(_ context.Context, _ string, _ common.SubjectType) ([]*common.Subject, error) {
-	return nil, nil
-}
-func (m *MockRBACStore) UpdateSubject(_ context.Context, _ *common.Subject) error { return nil }
-func (m *MockRBACStore) DeleteSubject(_ context.Context, _ string) error          { return nil }
-func (m *MockRBACStore) StoreRoleAssignment(_ context.Context, _ *common.RoleAssignment) error {
-	return nil
-}
-func (m *MockRBACStore) GetRoleAssignment(_ context.Context, _ string) (*common.RoleAssignment, error) {
-	return nil, fmt.Errorf("assignment not found")
-}
-func (m *MockRBACStore) ListRoleAssignments(_ context.Context, _, _, _ string) ([]*common.RoleAssignment, error) {
-	return nil, nil
-}
-func (m *MockRBACStore) DeleteRoleAssignment(_ context.Context, _, _, _ string) error {
-	return nil
-}
-func (m *MockRBACStore) StoreBulkPermissions(_ context.Context, _ []*common.Permission) error {
-	return nil
-}
-func (m *MockRBACStore) StoreBulkRoles(_ context.Context, _ []*common.Role) error { return nil }
-func (m *MockRBACStore) StoreBulkSubjects(_ context.Context, _ []*common.Subject) error {
-	return nil
-}
-func (m *MockRBACStore) GetSubjectRoles(_ context.Context, _, _ string) ([]*common.Role, error) {
-	return nil, nil
-}
-func (m *MockRBACStore) GetRolePermissions(_ context.Context, _ string) ([]*common.Permission, error) {
-	return nil, nil
-}
-func (m *MockRBACStore) GetSubjectAssignments(_ context.Context, _, _ string) ([]*common.RoleAssignment, error) {
-	return nil, nil
-}
-func (m *MockRBACStore) Initialize(_ context.Context) error { return nil }
-func (m *MockRBACStore) Close() error                       { return nil }
-
-// MockTenantStore implements business.TenantStore for testing
-type MockTenantStore struct{}
-
-func (m *MockTenantStore) CreateTenant(_ context.Context, _ *business.TenantData) error { return nil }
-func (m *MockTenantStore) GetTenant(_ context.Context, tenantID string) (*business.TenantData, error) {
-	return &business.TenantData{ID: tenantID, Name: "Test Tenant"}, nil
-}
-func (m *MockTenantStore) UpdateTenant(_ context.Context, _ *business.TenantData) error { return nil }
-func (m *MockTenantStore) DeleteTenant(_ context.Context, _ string) error               { return nil }
-func (m *MockTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
-	return nil, nil
-}
-func (m *MockTenantStore) GetTenantHierarchy(_ context.Context, tenantID string) (*business.TenantHierarchy, error) {
-	return &business.TenantHierarchy{TenantID: tenantID}, nil
-}
-func (m *MockTenantStore) GetChildTenants(_ context.Context, _ string) ([]*business.TenantData, error) {
-	return nil, nil
-}
-func (m *MockTenantStore) GetTenantPath(_ context.Context, tenantID string) ([]string, error) {
-	return []string{tenantID}, nil
-}
-func (m *MockTenantStore) IsTenantAncestor(_ context.Context, _, _ string) (bool, error) {
-	return false, nil
-}
-func (m *MockTenantStore) Initialize(_ context.Context) error { return nil }
-func (m *MockTenantStore) Close() error                       { return nil }
-
-// MockRegistrationTokenStore implements business.RegistrationTokenStore for testing
-type MockRegistrationTokenStore struct{}
-
-func (m *MockRegistrationTokenStore) SaveToken(_ context.Context, _ *business.RegistrationTokenData) error {
-	return nil
-}
-func (m *MockRegistrationTokenStore) GetToken(_ context.Context, _ string) (*business.RegistrationTokenData, error) {
-	return nil, fmt.Errorf("token not found")
-}
-func (m *MockRegistrationTokenStore) GetTokenByID(_ context.Context, _ string) (*business.RegistrationTokenData, error) {
-	return nil, fmt.Errorf("registration token not found")
-}
-func (m *MockRegistrationTokenStore) UpdateToken(_ context.Context, _ *business.RegistrationTokenData) error {
-	return nil
-}
-func (m *MockRegistrationTokenStore) DeleteToken(_ context.Context, _ string) error {
-	return nil
-}
-func (m *MockRegistrationTokenStore) ListTokens(_ context.Context, _ *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
-	return nil, nil
-}
-func (m *MockRegistrationTokenStore) RotateToken(_ context.Context, _, _ string) (*business.RegistrationTokenData, error) {
-	return nil, nil
-}
-func (m *MockRegistrationTokenStore) Initialize(_ context.Context) error { return nil }
-func (m *MockRegistrationTokenStore) Close() error                       { return nil }
-
-// MockStewardStore implements business.StewardStore for testing
-type MockStewardStore struct{}
-
-func (m *MockStewardStore) RegisterSteward(_ context.Context, _ *business.StewardRecord) error {
-	return nil
-}
-func (m *MockStewardStore) UpdateHeartbeat(_ context.Context, _ string) error { return nil }
-func (m *MockStewardStore) GetSteward(_ context.Context, _ string) (*business.StewardRecord, error) {
-	return nil, business.ErrStewardNotFound
-}
-func (m *MockStewardStore) ListStewards(_ context.Context) ([]*business.StewardRecord, error) {
-	return nil, nil
-}
-func (m *MockStewardStore) ListStewardsByStatus(_ context.Context, _ business.StewardStatus) ([]*business.StewardRecord, error) {
-	return nil, nil
-}
-func (m *MockStewardStore) UpdateStewardStatus(_ context.Context, _ string, _ business.StewardStatus) error {
-	return nil
-}
-func (m *MockStewardStore) DeregisterSteward(_ context.Context, _ string) error { return nil }
-func (m *MockStewardStore) GetStewardsSeen(_ context.Context, _ time.Time) ([]*business.StewardRecord, error) {
-	return nil, nil
-}
-func (m *MockStewardStore) GetStewardByDeviceID(_ context.Context, _ string) (*business.StewardRecord, error) {
-	return nil, business.ErrStewardNotFound
-}
-func (m *MockStewardStore) UpdateStewardTenant(_ context.Context, _, _ string) error { return nil }
-func (m *MockStewardStore) HealthCheck(_ context.Context) error                      { return nil }
-func (m *MockStewardStore) Initialize(_ context.Context) error                       { return nil }
-func (m *MockStewardStore) Close() error                                             { return nil }
-
-// MockSessionStore implements business.SessionStore for testing
-type MockSessionStore struct{}
-
-func (m *MockSessionStore) CreateSession(_ context.Context, _ *business.Session) error { return nil }
-func (m *MockSessionStore) GetSession(_ context.Context, _ string) (*business.Session, error) {
-	return nil, fmt.Errorf("not found")
-}
-func (m *MockSessionStore) UpdateSession(_ context.Context, _ string, _ *business.Session) error {
-	return nil
-}
-func (m *MockSessionStore) DeleteSession(_ context.Context, _ string) error { return nil }
-func (m *MockSessionStore) ListSessions(_ context.Context, _ *business.SessionFilter) ([]*business.Session, error) {
-	return nil, nil
-}
-func (m *MockSessionStore) SetSessionTTL(_ context.Context, _ string, _ time.Duration) error {
-	return nil
-}
-func (m *MockSessionStore) CleanupExpiredSessions(_ context.Context) (int, error) { return 0, nil }
-func (m *MockSessionStore) GetSessionsByUser(_ context.Context, _ string) ([]*business.Session, error) {
-	return nil, nil
-}
-func (m *MockSessionStore) GetSessionsByTenant(_ context.Context, _ string) ([]*business.Session, error) {
-	return nil, nil
-}
-func (m *MockSessionStore) GetSessionsByType(_ context.Context, _ business.SessionType) ([]*business.Session, error) {
-	return nil, nil
-}
-func (m *MockSessionStore) GetActiveSessionsCount(_ context.Context) (int64, error) { return 0, nil }
-func (m *MockSessionStore) HealthCheck(_ context.Context) error                     { return nil }
-func (m *MockSessionStore) GetStats(_ context.Context) (*business.RuntimeStoreStats, error) {
-	return &business.RuntimeStoreStats{}, nil
-}
-func (m *MockSessionStore) Initialize(_ context.Context) error { return nil }
-func (m *MockSessionStore) Close() error                       { return nil }
-
-// MockCommandStore implements business.CommandStore for testing
-type MockCommandStore struct{}
-
-func (m *MockCommandStore) CreateCommandRecord(_ context.Context, _ *business.CommandRecord) error {
-	return nil
-}
-func (m *MockCommandStore) UpdateCommandStatus(_ context.Context, _ string, _ business.CommandStatus, _ map[string]interface{}, _ string) error {
-	return nil
-}
-func (m *MockCommandStore) GetCommandRecord(_ context.Context, _ string) (*business.CommandRecord, error) {
-	return nil, fmt.Errorf("not found")
-}
-func (m *MockCommandStore) ListCommandRecords(_ context.Context, _ *business.CommandFilter) ([]*business.CommandRecord, error) {
-	return nil, nil
-}
-func (m *MockCommandStore) ListCommandsByDevice(_ context.Context, _ string) ([]*business.CommandRecord, error) {
-	return nil, nil
-}
-func (m *MockCommandStore) ListCommandsByStatus(_ context.Context, _ business.CommandStatus) ([]*business.CommandRecord, error) {
-	return nil, nil
-}
-func (m *MockCommandStore) GetCommandAuditTrail(_ context.Context, _ string) ([]*business.CommandTransition, error) {
-	return nil, nil
-}
-func (m *MockCommandStore) PurgeExpiredRecords(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-func (m *MockCommandStore) HealthCheck(_ context.Context) error { return nil }
-func (m *MockCommandStore) Close() error                        { return nil }
-
-// MockPushStore implements business.PushStore for testing
-type MockPushStore struct{}
-
-func (m *MockPushStore) CreatePush(_ context.Context, _ *business.PushRecord) error {
-	return nil
-}
-func (m *MockPushStore) UpdatePushStatus(_ context.Context, _ string, _ business.PushStatus) error {
-	return nil
-}
-func (m *MockPushStore) GetPendingPushes(_ context.Context) ([]*business.PushRecord, error) {
-	return nil, nil
-}
-func (m *MockPushStore) GetPush(_ context.Context, _ string) (*business.PushRecord, error) {
-	return nil, nil
-}
-func (m *MockPushStore) ListPushesByConfigID(_ context.Context, _, _ string) ([]*business.PushRecord, error) {
-	return []*business.PushRecord{}, nil
-}
-
-// MockIPTrustStore implements business.IPTrustStore for testing
-type MockIPTrustStore struct{}
-
-func (m *MockIPTrustStore) AddTrustedRange(_ context.Context, _, _ string, _ bool) error {
-	return nil
-}
-func (m *MockIPTrustStore) IsTrusted(_ context.Context, _, _ string) (bool, error) {
-	return false, nil
-}
-func (m *MockIPTrustStore) ListTrustedRanges(_ context.Context, _ string) ([]*business.IPTrustEntry, error) {
-	return nil, nil
-}
-func (m *MockIPTrustStore) RevokeTrustedRange(_ context.Context, _, _ string) error {
-	return business.ErrIPTrustEntryNotFound
-}
-func (m *MockIPTrustStore) RecordHealthySteward(_ context.Context, _, _ string, _ time.Time) error {
-	return nil
-}
-func (m *MockIPTrustStore) GetLastActivity(_ context.Context, _, _ string) (*business.IPTrustActivity, error) {
-	return nil, nil
+// ossConfigs returns per-test provider configurations: a flat-file root and a
+// SQLite database file, both under t.TempDir().
+func ossConfigs(t *testing.T) (flatfileCfg, sqliteCfg map[string]interface{}) {
+	t.Helper()
+	return map[string]interface{}{"root": t.TempDir()},
+		map[string]interface{}{"path": filepath.Join(t.TempDir(), "test.db")}
 }
 
 // Test provider registration
 func TestRegisterStorageProvider(t *testing.T) {
-	// Clear registry for test
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
+	withEmptyRegistry(t)
 
-	// Clear registry
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
-
-	defer func() {
-		// Restore original providers
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
-
-	provider := NewMockStorageProvider()
-	RegisterStorageProvider(provider)
+	provider := newFlatFileProvider()
+	interfaces.RegisterStorageProvider(provider)
 
 	// Verify registration
-	names := GetRegisteredProviderNames()
-	if len(names) != 1 || names[0] != "mock" {
-		t.Errorf("Expected provider 'mock' to be registered, got: %v", names)
+	names := interfaces.GetRegisteredProviderNames()
+	if len(names) != 1 || names[0] != "flatfile" {
+		t.Errorf("Expected provider 'flatfile' to be registered, got: %v", names)
 	}
 
 	// Test getting the provider
-	retrieved, err := GetStorageProvider("mock")
+	retrieved, err := interfaces.GetStorageProvider("flatfile")
 	if err != nil {
 		t.Errorf("Failed to get registered provider: %v", err)
 	}
 
-	if retrieved.Name() != "mock" {
-		t.Errorf("Expected provider name 'mock', got: %s", retrieved.Name())
+	if retrieved.Name() != "flatfile" {
+		t.Errorf("Expected provider name 'flatfile', got: %s", retrieved.Name())
 	}
 }
 
 func TestRegisterStorageProviderWithValidation(t *testing.T) {
-	// Clear registry for test
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
+	withEmptyRegistry(t)
 
-	// Clear registry
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
+	_, sqliteCfg := ossConfigs(t)
 
-	defer func() {
-		// Restore original providers
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
-
-	provider := NewMockStorageProvider()
-	testConfig := map[string]interface{}{
-		"test": "config",
-	}
-
-	err := RegisterStorageProviderWithValidation(provider, testConfig)
+	err := interfaces.RegisterStorageProviderWithValidation(newSQLiteProvider(), sqliteCfg)
 	if err != nil {
 		t.Errorf("Failed to register provider with validation: %v", err)
 	}
 
 	// Verify registration
-	names := GetRegisteredProviderNames()
-	if len(names) != 1 || names[0] != "mock" {
-		t.Errorf("Expected provider 'mock' to be registered, got: %v", names)
+	names := interfaces.GetRegisteredProviderNames()
+	if len(names) != 1 || names[0] != "sqlite" {
+		t.Errorf("Expected provider 'sqlite' to be registered, got: %v", names)
 	}
 }
 
+// TestValidateProvider verifies that the real OSS providers satisfy the
+// registration rules and that a nil provider is rejected.
 func TestValidateProvider(t *testing.T) {
+	providers := map[string]interfaces.StorageProvider{
+		"flatfile": newFlatFileProvider(),
+		"sqlite":   newSQLiteProvider(),
+	}
+	for name, provider := range providers {
+		t.Run(name+" is valid", func(t *testing.T) {
+			require.NoError(t, interfaces.ValidateProvider(provider))
+		})
+	}
+
+	t.Run("nil provider is rejected", func(t *testing.T) {
+		require.Error(t, interfaces.ValidateProvider(nil))
+	})
+}
+
+// TestValidateProviderMetadata covers the registration rules a provider's
+// declared metadata must satisfy. The rules are evaluated as data, so no
+// implementation of StorageProvider is needed to reach the rejection paths.
+func TestValidateProviderMetadata(t *testing.T) {
+	validCaps := interfaces.ProviderCapabilities{
+		MaxBatchSize:          100,
+		MaxConfigSize:         1024 * 1024,
+		MaxAuditRetentionDays: 365,
+	}
+
 	tests := []struct {
-		name        string
-		provider    *MockStorageProvider
-		expectError bool
+		name         string
+		providerName string
+		description  string
+		version      string
+		capabilities interfaces.ProviderCapabilities
+		expectError  bool
 	}{
 		{
-			name:        "valid provider",
-			provider:    NewMockStorageProvider(),
-			expectError: false,
+			name:         "valid metadata",
+			providerName: "test",
+			description:  "test provider",
+			version:      "1.0.0",
+			capabilities: validCaps,
+			expectError:  false,
 		},
 		{
-			name: "empty name",
-			provider: &MockStorageProvider{
-				MockName:        "",
-				MockDescription: "test",
-				MockVersion:     "1.0.0",
-				MockAvailable:   true,
-			},
-			expectError: true,
+			name:         "empty name",
+			providerName: "",
+			description:  "test",
+			version:      "1.0.0",
+			capabilities: validCaps,
+			expectError:  true,
 		},
 		{
-			name: "empty description",
-			provider: &MockStorageProvider{
-				MockName:        "test",
-				MockDescription: "",
-				MockVersion:     "1.0.0",
-				MockAvailable:   true,
-			},
-			expectError: true,
+			name:         "empty description",
+			providerName: "test",
+			description:  "",
+			version:      "1.0.0",
+			capabilities: validCaps,
+			expectError:  true,
 		},
 		{
-			name: "empty version",
-			provider: &MockStorageProvider{
-				MockName:        "test",
-				MockDescription: "test",
-				MockVersion:     "",
-				MockAvailable:   true,
-			},
-			expectError: true,
+			name:         "empty version",
+			providerName: "test",
+			description:  "test",
+			version:      "",
+			capabilities: validCaps,
+			expectError:  true,
 		},
 		{
-			name: "negative batch size",
-			provider: &MockStorageProvider{
-				MockName:        "test",
-				MockDescription: "test",
-				MockVersion:     "1.0.0",
-				MockAvailable:   true,
-				MockCapabilities: ProviderCapabilities{
-					MaxBatchSize: -1,
-				},
-			},
-			expectError: true,
+			name:         "negative batch size",
+			providerName: "test",
+			description:  "test",
+			version:      "1.0.0",
+			capabilities: interfaces.ProviderCapabilities{MaxBatchSize: -1},
+			expectError:  true,
+		},
+		{
+			name:         "negative config size",
+			providerName: "test",
+			description:  "test",
+			version:      "1.0.0",
+			capabilities: interfaces.ProviderCapabilities{MaxConfigSize: -1},
+			expectError:  true,
+		},
+		{
+			name:         "negative audit retention",
+			providerName: "test",
+			description:  "test",
+			version:      "1.0.0",
+			capabilities: interfaces.ProviderCapabilities{MaxAuditRetentionDays: -1},
+			expectError:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateProvider(tt.provider)
+			err := interfaces.ValidateProviderMetadata(tt.providerName, tt.description, tt.version, tt.capabilities)
 			if tt.expectError && err == nil {
 				t.Errorf("Expected validation error, got none")
 			}
@@ -700,67 +190,59 @@ func TestValidateProvider(t *testing.T) {
 }
 
 func TestCreateAllStoresFromConfig(t *testing.T) {
-	// Clear registry for test
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
+	t.Run("sqlite provider supplies the business-data tier", func(t *testing.T) {
+		withEmptyRegistry(t)
+		interfaces.RegisterStorageProvider(newSQLiteProvider())
 
-	// Clear registry
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
+		_, sqliteCfg := ossConfigs(t)
+		manager, err := interfaces.CreateAllStoresFromConfig("sqlite", sqliteCfg)
+		if err != nil {
+			t.Fatalf("Failed to create storage manager: %v", err)
+		}
+		t.Cleanup(func() { _ = manager.Close() })
 
-	defer func() {
-		// Restore original providers
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
+		if manager.GetProviderName() != "sqlite" {
+			t.Errorf("Expected provider name 'sqlite', got: %s", manager.GetProviderName())
+		}
 
-	// Register mock provider
-	provider := NewMockStorageProvider()
-	RegisterStorageProvider(provider)
+		ctStore := manager.GetClientTenantStore()
+		if ctStore == nil {
+			t.Fatal("ClientTenantStore should not be nil")
+		}
+		// Round-trip: store a tenant and verify retrieval returns the same value.
+		want := &business.ClientTenant{ID: "rt-tenant-1", TenantID: "rt-tenant-1", TenantName: "Round Trip Tenant"}
+		if err := ctStore.StoreClientTenant(want); err != nil {
+			t.Fatalf("StoreClientTenant failed: %v", err)
+		}
+		got, err := ctStore.GetClientTenant("rt-tenant-1")
+		if err != nil {
+			t.Fatalf("GetClientTenant failed: %v", err)
+		}
+		if got.ID != want.ID || got.TenantName != want.TenantName {
+			t.Errorf("round-trip mismatch: got %+v, want %+v", got, want)
+		}
 
-	config := map[string]interface{}{
-		"test": "config",
-	}
+		if manager.GetAuditStore() == nil {
+			t.Errorf("AuditStore should not be nil")
+		}
+		if manager.GetRBACStore() == nil {
+			t.Errorf("RBACStore should not be nil")
+		}
+		// SQLite does not serve config data (ADR-003) — it reports ErrNotSupported,
+		// which the factory tolerates by leaving the slot nil.
+		if manager.GetConfigStore() != nil {
+			t.Errorf("ConfigStore should be nil for the SQLite provider")
+		}
+	})
 
-	manager, err := CreateAllStoresFromConfig("mock", config)
-	if err != nil {
-		t.Fatalf("Failed to create storage manager: %v", err)
-	}
+	t.Run("unregistered provider name returns an error", func(t *testing.T) {
+		withEmptyRegistry(t)
 
-	if manager.GetProviderName() != "mock" {
-		t.Errorf("Expected provider name 'mock', got: %s", manager.GetProviderName())
-	}
-
-	ctStore := manager.GetClientTenantStore()
-	if ctStore == nil {
-		t.Fatal("ClientTenantStore should not be nil")
-	}
-	// Round-trip: store a tenant and verify retrieval returns the same value.
-	want := &business.ClientTenant{ID: "rt-tenant-1", TenantName: "Round Trip Tenant"}
-	if err := ctStore.StoreClientTenant(want); err != nil {
-		t.Fatalf("StoreClientTenant failed: %v", err)
-	}
-	got, err := ctStore.GetClientTenant("rt-tenant-1")
-	if err != nil {
-		t.Fatalf("GetClientTenant failed: %v", err)
-	}
-	if got.ID != want.ID || got.TenantName != want.TenantName {
-		t.Errorf("round-trip mismatch: got %+v, want %+v", got, want)
-	}
-
-	if manager.GetConfigStore() == nil {
-		t.Errorf("ConfigStore should not be nil")
-	}
-
-	if manager.GetAuditStore() == nil {
-		t.Errorf("AuditStore should not be nil")
-	}
+		_, err := interfaces.CreateAllStoresFromConfig("nonexistent", nil)
+		if err == nil {
+			t.Fatal("expected an error for an unregistered provider name")
+		}
+	})
 }
 
 func TestConfigKeyString(t *testing.T) {
@@ -801,55 +283,58 @@ func TestConfigKeyString(t *testing.T) {
 }
 
 func TestListProvidersV2(t *testing.T) {
-	// Clear registry for test
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
+	withEmptyRegistry(t)
 
-	// Clear registry
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
+	provider := newFlatFileProvider()
+	interfaces.RegisterStorageProvider(provider)
 
-	defer func() {
-		// Restore original providers
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
-
-	// Register mock provider
-	provider := NewMockStorageProvider()
-	RegisterStorageProvider(provider)
-
-	providers := ListProvidersV2()
+	providers := interfaces.ListProvidersV2()
 	if len(providers) != 1 {
-		t.Errorf("Expected 1 provider, got %d", len(providers))
+		t.Fatalf("Expected 1 provider, got %d", len(providers))
 	}
 
-	if providers[0].Name != "mock" {
-		t.Errorf("Expected provider name 'mock', got: %s", providers[0].Name)
+	if providers[0].Name != "flatfile" {
+		t.Errorf("Expected provider name 'flatfile', got: %s", providers[0].Name)
 	}
 
-	if providers[0].Version != "1.0.0" {
-		t.Errorf("Expected version '1.0.0', got: %s", providers[0].Version)
+	if providers[0].Version != provider.GetVersion() {
+		t.Errorf("Expected version %q, got: %s", provider.GetVersion(), providers[0].Version)
 	}
 
-	if !providers[0].Capabilities.SupportsTransactions {
-		t.Errorf("Expected provider to support transactions")
+	if !providers[0].Available {
+		t.Errorf("Expected the flat-file provider to report as available")
+	}
+
+	if providers[0].Capabilities != provider.GetCapabilities() {
+		t.Errorf("Expected reported capabilities to match the provider's own: got %+v, want %+v",
+			providers[0].Capabilities, provider.GetCapabilities())
 	}
 }
 
 func TestNewStorageManagerFromStores(t *testing.T) {
 	t.Run("composite provider name and nil provider", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(
-			&MockConfigStore{}, &MockAuditStore{}, &MockRBACStore{},
-			&MockTenantStore{}, newMockClientTenantStore(), &MockRegistrationTokenStore{},
+		flatfileCfg, sqliteCfg := ossConfigs(t)
+		ff, sq := newFlatFileProvider(), newSQLiteProvider()
+
+		configStore, err := ff.CreateConfigStore(flatfileCfg)
+		require.NoError(t, err)
+		auditStore, err := ff.CreateAuditStore(flatfileCfg)
+		require.NoError(t, err)
+		rbacStore, err := sq.CreateRBACStore(sqliteCfg)
+		require.NoError(t, err)
+		tenantStore, err := sq.CreateTenantStore(sqliteCfg)
+		require.NoError(t, err)
+		clientTenantStore, err := sq.CreateClientTenantStore(sqliteCfg)
+		require.NoError(t, err)
+		registrationTokenStore, err := sq.CreateRegistrationTokenStore(sqliteCfg)
+		require.NoError(t, err)
+
+		sm := interfaces.NewStorageManagerFromStores(
+			configStore, auditStore, rbacStore,
+			tenantStore, clientTenantStore, registrationTokenStore,
 			nil, nil, nil, nil, nil,
 		)
+		t.Cleanup(func() { _ = sm.Close() })
 
 		if sm.GetProviderName() != "composite" {
 			t.Errorf("expected providerName %q, got %q", "composite", sm.GetProviderName())
@@ -860,7 +345,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetCapabilities returns zero value without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		caps := sm.GetCapabilities()
 		// Zero value - no field should be set
 		if caps.SupportsTransactions || caps.SupportsVersioning || caps.MaxBatchSize != 0 {
@@ -869,33 +354,44 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("GetVersion returns composite without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetVersion() != "composite" {
 			t.Errorf("expected version %q, got %q", "composite", sm.GetVersion())
 		}
 	})
 
 	t.Run("GetProvider returns nil without panic", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if sm.GetProvider() != nil {
 			t.Errorf("expected nil from GetProvider on composite manager")
 		}
 	})
 
 	t.Run("all store parameters accepted and retrievable", func(t *testing.T) {
-		configStore := &MockConfigStore{}
-		auditStore := &MockAuditStore{}
-		rbacStore := &MockRBACStore{}
-		tenantStore := &MockTenantStore{}
-		clientTenantStore := newMockClientTenantStore()
-		registrationTokenStore := &MockRegistrationTokenStore{}
-		pushStore := &MockPushStore{}
+		flatfileCfg, sqliteCfg := ossConfigs(t)
+		ff, sq := newFlatFileProvider(), newSQLiteProvider()
 
-		sm := NewStorageManagerFromStores(
+		configStore, err := ff.CreateConfigStore(flatfileCfg)
+		require.NoError(t, err)
+		auditStore, err := ff.CreateAuditStore(flatfileCfg)
+		require.NoError(t, err)
+		rbacStore, err := sq.CreateRBACStore(sqliteCfg)
+		require.NoError(t, err)
+		tenantStore, err := sq.CreateTenantStore(sqliteCfg)
+		require.NoError(t, err)
+		clientTenantStore, err := sq.CreateClientTenantStore(sqliteCfg)
+		require.NoError(t, err)
+		registrationTokenStore, err := sq.CreateRegistrationTokenStore(sqliteCfg)
+		require.NoError(t, err)
+		pushStore, err := sq.CreatePushStore(sqliteCfg)
+		require.NoError(t, err)
+
+		sm := interfaces.NewStorageManagerFromStores(
 			configStore, auditStore, rbacStore,
 			tenantStore, clientTenantStore, registrationTokenStore,
 			nil, nil, nil, nil, pushStore,
 		)
+		t.Cleanup(func() { _ = sm.Close() })
 
 		if sm.GetConfigStore() != configStore {
 			t.Errorf("ConfigStore mismatch")
@@ -933,7 +429,7 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 	})
 
 	t.Run("nil values allowed for all stores", func(t *testing.T) {
-		sm := NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		// Should not panic
 		if sm.GetConfigStore() != nil {
 			t.Errorf("expected nil ConfigStore")
@@ -945,65 +441,39 @@ func TestNewStorageManagerFromStores(t *testing.T) {
 }
 
 func TestCreateOSSStorageManager(t *testing.T) {
-	// Register flatfile and sqlite providers for this test
-	// We use the mock provider approach since the real providers require CGo (sqlite) / filesystem
-	// and are exercised by their own provider-level integration tests.
-
-	// Save registry state
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
-
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
-
-	defer func() {
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
-
 	t.Run("error when flatfile provider not registered", func(t *testing.T) {
-		_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+		withEmptyRegistry(t)
+
+		_, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "test.db"))
 		if err == nil {
 			t.Fatal("expected error when flatfile provider not registered")
 		}
 	})
 
 	t.Run("error when sqlite provider not registered", func(t *testing.T) {
-		// Register only flatfile
-		ffMock := &MockOSSProvider{providerName: "flatfile"}
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers["flatfile"] = ffMock
-		globalRegistry.mutex.Unlock()
+		withEmptyRegistry(t)
+		interfaces.RegistryReplace(map[string]interfaces.StorageProvider{
+			"flatfile": newFlatFileProvider(),
+		})
 
-		_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+		_, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "test.db"))
 		if err == nil {
 			t.Fatal("expected error when sqlite provider not registered")
 		}
-
-		globalRegistry.mutex.Lock()
-		delete(globalRegistry.providers, "flatfile")
-		globalRegistry.mutex.Unlock()
 	})
 
-	t.Run("creates composite manager with correct providerName", func(t *testing.T) {
-		ffMock := &MockOSSProvider{providerName: "flatfile"}
-		sqMock := &MockOSSProvider{providerName: "sqlite"}
+	t.Run("creates composite manager backed by the real OSS providers", func(t *testing.T) {
+		withEmptyRegistry(t)
+		interfaces.RegistryReplace(map[string]interfaces.StorageProvider{
+			"flatfile": newFlatFileProvider(),
+			"sqlite":   newSQLiteProvider(),
+		})
 
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers["flatfile"] = ffMock
-		globalRegistry.providers["sqlite"] = sqMock
-		globalRegistry.mutex.Unlock()
-
-		sm, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
+		sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "test.db"))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		t.Cleanup(func() { _ = sm.Close() })
 
 		if sm.GetProviderName() != "composite" {
 			t.Errorf("expected providerName %q, got %q", "composite", sm.GetProviderName())
@@ -1012,7 +482,7 @@ func TestCreateOSSStorageManager(t *testing.T) {
 			t.Errorf("expected nil provider")
 		}
 
-		// Config/Audit/Steward come from flatfile
+		// Config/Audit/Steward/IPTrust come from flatfile
 		if sm.GetConfigStore() == nil {
 			t.Errorf("ConfigStore should not be nil")
 		}
@@ -1021,6 +491,9 @@ func TestCreateOSSStorageManager(t *testing.T) {
 		}
 		if sm.GetStewardStore() == nil {
 			t.Errorf("StewardStore should not be nil")
+		}
+		if sm.GetIPTrustStore() == nil {
+			t.Errorf("IPTrustStore should not be nil — flatfile provider supplies it")
 		}
 
 		// Business stores come from sqlite
@@ -1036,344 +509,110 @@ func TestCreateOSSStorageManager(t *testing.T) {
 		if sm.GetRegistrationTokenStore() == nil {
 			t.Errorf("RegistrationTokenStore should not be nil")
 		}
-		// TriggerStore: MockOSSProvider returns ErrNotSupported so it will be nil
-		if sm.GetTriggerStore() != nil {
-			t.Errorf("TriggerStore should be nil when provider returns ErrNotSupported")
+		if sm.GetTriggerStore() == nil {
+			t.Errorf("TriggerStore should not be nil — the SQLite provider supplies it")
+		}
+		if sm.GetPendingRefreshStore() == nil {
+			t.Errorf("PendingRefreshStore should not be nil — the SQLite bundle supplies it")
+		}
+		if sm.GetRefreshPolicyStore() == nil {
+			t.Errorf("RefreshPolicyStore should not be nil — the SQLite bundle supplies it")
 		}
 
-		// IPTrustStore comes from the flatfile provider (Issue #1900)
-		if sm.GetIPTrustStore() == nil {
-			t.Errorf("IPTrustStore should not be nil — flatfile provider supplies it")
-		}
-
-		globalRegistry.mutex.Lock()
-		delete(globalRegistry.providers, "flatfile")
-		delete(globalRegistry.providers, "sqlite")
-		globalRegistry.mutex.Unlock()
+		// The composed manager must be usable end to end: write and read a steward
+		// record through the flat-file store the factory wired up.
+		ctx := context.Background()
+		record := &business.StewardRecord{ID: "oss-steward-1", TenantID: "tenant-1", Status: business.StewardStatusRegistered}
+		require.NoError(t, sm.GetStewardStore().RegisterSteward(ctx, record))
+		got, err := sm.GetStewardStore().GetSteward(ctx, "oss-steward-1")
+		require.NoError(t, err)
+		assert.Equal(t, "tenant-1", got.TenantID)
 	})
 }
 
-// MockOSSProvider is a minimal StorageProvider for testing OSS factory wiring.
-// Unlike MockStorageProvider, it always returns non-nil stores for all supported methods.
-type MockOSSProvider struct {
-	providerName string
-}
-
-func (m *MockOSSProvider) Name() string        { return m.providerName }
-func (m *MockOSSProvider) Description() string { return "mock oss provider for testing" }
-func (m *MockOSSProvider) GetVersion() string  { return "1.0.0" }
-func (m *MockOSSProvider) Available() (bool, error) {
-	return true, nil
-}
-func (m *MockOSSProvider) GetCapabilities() ProviderCapabilities { return ProviderCapabilities{} }
-func (m *MockOSSProvider) ClusterCapable() bool                  { return false }
-
-func (m *MockOSSProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
-	return &MockConfigStore{}, nil
-}
-func (m *MockOSSProvider) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
-	return &MockAuditStore{}, nil
-}
-func (m *MockOSSProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
-	return &MockStewardStore{}, nil
-}
-func (m *MockOSSProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
-	return &MockRBACStore{}, nil
-}
-func (m *MockOSSProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
-	return &MockTenantStore{}, nil
-}
-func (m *MockOSSProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	return newMockClientTenantStore(), nil
-}
-func (m *MockOSSProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
-	return &MockRegistrationTokenStore{}, nil
-}
-func (m *MockOSSProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
-	return &MockSessionStore{}, nil
-}
-func (m *MockOSSProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
-	return &MockCommandStore{}, nil
-}
-func (m *MockOSSProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
-	return nil, business.ErrNotSupported
-}
-func (m *MockOSSProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockOSSProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockOSSProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return &MockIPTrustStore{}, nil
-}
-
-// MockOSSProviderWithError is an interface stub that returns an error from a designated Create* method.
-// It is used to test that CreateOSSStorageManager propagates store-creation errors correctly.
-// Real providers cannot be used here because pkg/storage/providers/* imports this package
-// (pkg/storage/interfaces), which would create an import cycle.
-type MockOSSProviderWithError struct {
-	providerName string
-	failMethod   string // name of the Create* method that should fail
-}
-
-func (m *MockOSSProviderWithError) Name() string             { return m.providerName }
-func (m *MockOSSProviderWithError) Description() string      { return "error mock" }
-func (m *MockOSSProviderWithError) GetVersion() string       { return "1.0.0" }
-func (m *MockOSSProviderWithError) Available() (bool, error) { return true, nil }
-func (m *MockOSSProviderWithError) GetCapabilities() ProviderCapabilities {
-	return ProviderCapabilities{}
-}
-func (m *MockOSSProviderWithError) ClusterCapable() bool { return false }
-
-func (m *MockOSSProviderWithError) mayFail(method string) error {
-	if m.failMethod == method {
-		return fmt.Errorf("injected %s failure", method)
-	}
-	return nil
-}
-
-func (m *MockOSSProviderWithError) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
-	if err := m.mayFail("CreateConfigStore"); err != nil {
-		return nil, err
-	}
-	return &MockConfigStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
-	if err := m.mayFail("CreateAuditStore"); err != nil {
-		return nil, err
-	}
-	return &MockAuditStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
-	if err := m.mayFail("CreateStewardStore"); err != nil {
-		return nil, err
-	}
-	return &MockStewardStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
-	if err := m.mayFail("CreateRBACStore"); err != nil {
-		return nil, err
-	}
-	return &MockRBACStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
-	if err := m.mayFail("CreateTenantStore"); err != nil {
-		return nil, err
-	}
-	return &MockTenantStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
-	if err := m.mayFail("CreateClientTenantStore"); err != nil {
-		return nil, err
-	}
-	return newMockClientTenantStore(), nil
-}
-func (m *MockOSSProviderWithError) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
-	if err := m.mayFail("CreateRegistrationTokenStore"); err != nil {
-		return nil, err
-	}
-	return &MockRegistrationTokenStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
-	if err := m.mayFail("CreateSessionStore"); err != nil {
-		return nil, err
-	}
-	return &MockSessionStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
-	if err := m.mayFail("CreateCommandStore"); err != nil {
-		return nil, err
-	}
-	return &MockCommandStore{}, nil
-}
-func (m *MockOSSProviderWithError) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
-	if err := m.mayFail("CreateTriggerStore"); err != nil {
-		return nil, err
-	}
-	return nil, business.ErrNotSupported
-}
-func (m *MockOSSProviderWithError) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
-	if err := m.mayFail("CreatePushStore"); err != nil {
-		return nil, err
-	}
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockOSSProviderWithError) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
-	if err := m.mayFail("CreatePendingRegistrationStore"); err != nil {
-		return nil, err
-	}
-	return nil, business.ErrNotSupported
-}
-
-func (m *MockOSSProviderWithError) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	if err := m.mayFail("CreateIPTrustStore"); err != nil {
-		return nil, err
-	}
-	return &MockIPTrustStore{}, nil
-}
-
+// TestCreateOSSStorageManager_StoreCreationErrors verifies that store-creation
+// failures propagate out of the factory instead of yielding a half-built
+// manager. Both failures are genuine provider errors: the flat-file provider
+// rejects a root that is not a directory, and the SQLite provider cannot open a
+// database file in a directory that does not exist.
 func TestCreateOSSStorageManager_StoreCreationErrors(t *testing.T) {
-	// Save and clear registry
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
-
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
-
-	defer func() {
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
-
-	// Each subtest injects an error from one of the flatfile Create* methods
-	// to verify CreateOSSStorageManager propagates all store-creation errors.
-	flatfileFailures := []string{
-		"CreateConfigStore",
-		"CreateAuditStore",
-		"CreateStewardStore",
-		"CreateIPTrustStore",
-	}
-	sqliteFailures := []string{
-		"CreateRBACStore",
-		"CreateTenantStore",
-		"CreateClientTenantStore",
-		"CreateRegistrationTokenStore",
-		"CreateSessionStore",
-		"CreateCommandStore",
-		"CreatePushStore",
-	}
-
-	for _, failMethod := range flatfileFailures {
-		failMethod := failMethod
-		t.Run("flatfile_"+failMethod+"_returns_error", func(t *testing.T) {
-			globalRegistry.mutex.Lock()
-			globalRegistry.providers = map[string]StorageProvider{
-				"flatfile": &MockOSSProviderWithError{providerName: "flatfile", failMethod: failMethod},
-				"sqlite":   &MockOSSProvider{providerName: "sqlite"},
-			}
-			globalRegistry.mutex.Unlock()
-
-			_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
-			if err == nil {
-				t.Errorf("expected error when flatfile %s fails, got nil", failMethod)
-			}
+	t.Run("flatfile store creation failure propagates", func(t *testing.T) {
+		withEmptyRegistry(t)
+		interfaces.RegistryReplace(map[string]interfaces.StorageProvider{
+			"flatfile": newFlatFileProvider(),
+			"sqlite":   newSQLiteProvider(),
 		})
-	}
 
-	for _, failMethod := range sqliteFailures {
-		failMethod := failMethod
-		t.Run("sqlite_"+failMethod+"_returns_error", func(t *testing.T) {
-			globalRegistry.mutex.Lock()
-			globalRegistry.providers = map[string]StorageProvider{
-				"flatfile": &MockOSSProvider{providerName: "flatfile"},
-				"sqlite":   &MockOSSProviderWithError{providerName: "sqlite", failMethod: failMethod},
-			}
-			globalRegistry.mutex.Unlock()
+		// A regular file cannot serve as the flat-file root.
+		notADir := filepath.Join(t.TempDir(), "root-is-a-file")
+		require.NoError(t, os.WriteFile(notADir, []byte("not a directory"), 0600))
 
-			_, err := CreateOSSStorageManager(t.TempDir(), t.TempDir()+"/test.db")
-			if err == nil {
-				t.Errorf("expected error when sqlite %s fails, got nil", failMethod)
-			}
+		_, err := interfaces.CreateOSSStorageManager(notADir, filepath.Join(t.TempDir(), "test.db"))
+		require.Error(t, err, "a flat-file root that is not a directory must fail the factory")
+	})
+
+	t.Run("sqlite store creation failure propagates", func(t *testing.T) {
+		withEmptyRegistry(t)
+		interfaces.RegistryReplace(map[string]interfaces.StorageProvider{
+			"flatfile": newFlatFileProvider(),
+			"sqlite":   newSQLiteProvider(),
 		})
-	}
+
+		// The parent directory does not exist, so the database cannot be opened.
+		missingDir := filepath.Join(t.TempDir(), "no-such-dir", "test.db")
+
+		_, err := interfaces.CreateOSSStorageManager(t.TempDir(), missingDir)
+		require.Error(t, err, "an unopenable SQLite path must fail the factory")
+	})
 }
 
 func TestUnregisterStorageProvider(t *testing.T) {
-	// Clear registry for test
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
+	withEmptyRegistry(t)
 
-	// Clear registry
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
-
-	defer func() {
-		// Restore original providers
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
-
-	// Register mock provider
-	provider := NewMockStorageProvider()
-	RegisterStorageProvider(provider)
+	interfaces.RegisterStorageProvider(newFlatFileProvider())
 
 	// Verify it's registered
-	names := GetRegisteredProviderNames()
+	names := interfaces.GetRegisteredProviderNames()
 	if len(names) != 1 {
 		t.Errorf("Expected 1 provider, got %d", len(names))
 	}
 
 	// Unregister it
-	success := UnregisterStorageProvider("mock")
+	success := interfaces.UnregisterStorageProvider("flatfile")
 	if !success {
 		t.Errorf("Failed to unregister provider")
 	}
 
 	// Verify it's gone
-	names = GetRegisteredProviderNames()
+	names = interfaces.GetRegisteredProviderNames()
 	if len(names) != 0 {
 		t.Errorf("Expected 0 providers after unregistration, got %d", len(names))
 	}
 
 	// Try to unregister non-existent provider
-	success = UnregisterStorageProvider("nonexistent")
+	success = interfaces.UnregisterStorageProvider("nonexistent")
 	if success {
 		t.Errorf("Should not succeed unregistering non-existent provider")
 	}
 }
 
+// TestRegisterStorageProvider_routesThroughInjectedLogger verifies the registry
+// emits its messages through the injected logger rather than a package-global
+// default. Registering the same provider name twice is the registry's
+// overwrite path, which logs a warning — captured here by the real
+// logging.CapturingLogger.
 func TestRegisterStorageProvider_routesThroughInjectedLogger(t *testing.T) {
-	// Save and clear registry
-	originalProviders := make(map[string]StorageProvider)
-	globalRegistry.mutex.RLock()
-	for name, provider := range globalRegistry.providers {
-		originalProviders[name] = provider
-	}
-	globalRegistry.mutex.RUnlock()
+	withEmptyRegistry(t)
 
-	globalRegistry.mutex.Lock()
-	globalRegistry.providers = make(map[string]StorageProvider)
-	globalRegistry.mutex.Unlock()
+	capturing := logging.NewCapturingLogger()
+	interfaces.SetStorageLogger(capturing)
+	t.Cleanup(func() { interfaces.SetStorageLogger(logging.NewNoopLogger()) })
 
-	defer func() {
-		globalRegistry.mutex.Lock()
-		globalRegistry.providers = originalProviders
-		globalRegistry.mutex.Unlock()
-	}()
+	provider := newFlatFileProvider()
+	interfaces.RegisterStorageProvider(provider)
+	interfaces.RegisterStorageProvider(provider) // second registration overwrites
 
-	mock := newTestMockLogger()
-	SetStorageLogger(mock)
-	defer SetStorageLogger(logging.NewNoopLogger())
-
-	testProvider := &MockStorageProvider{
-		MockName:        "test",
-		MockDescription: "test provider",
-		MockVersion:     "1.0",
-		MockAvailable:   true,
-	}
-	RegisterStorageProvider(testProvider)
-
-	logs := mock.GetLogs("info")
-	if len(logs) == 0 {
-		t.Fatal("expected at least one info log entry after RegisterStorageProvider")
-	}
-	if logs[0].Message != "Registered storage provider: test v1.0" {
-		t.Errorf("unexpected log message: %q", logs[0].Message)
-	}
+	require.NotEmpty(t, capturing.WarnMessages,
+		"expected the overwrite warning to reach the injected logger")
+	assert.Contains(t, capturing.WarnMessages[0], "Overwriting existing storage provider 'flatfile'")
 }
