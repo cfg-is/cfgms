@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 	testutil "github.com/cfgis/cfgms/pkg/testing"
 	pkgtestutil "github.com/cfgis/cfgms/pkg/testutil"
 )
@@ -23,8 +24,7 @@ func (m *testModule) Set(_ context.Context, _, _ string) error          { return
 func (m *testModule) Test(_ context.Context, _, _ string) (bool, error) { return true, nil }
 
 func TestControllerCreation(t *testing.T) {
-	// Create a test logger
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 
 	// Test cases
 	tests := []struct {
@@ -89,7 +89,6 @@ func TestControllerCreation(t *testing.T) {
 }
 
 func TestControllerLifecycle(t *testing.T) {
-	// Use a temporary directory for this test
 	tempDir := t.TempDir()
 
 	// Create a test logger and controller
@@ -116,10 +115,11 @@ func TestControllerLifecycle(t *testing.T) {
 	if cfg.Transport != nil {
 		cfg.Transport.ListenAddr = "127.0.0.1:0"
 	}
-	// DefaultConfig leaves metrics_listen_addr empty so startup fails closed
-	// rather than binding a metrics listener nobody chose. Deployments set it
-	// explicitly; so must a test that starts the controller.
+	// DefaultConfig leaves metrics_listen_addr and external_url empty so startup
+	// fails closed when they are absent. Deployments set them explicitly; so must
+	// a test that starts the controller.
 	cfg.MetricsListenAddr = pkgtestutil.ReservePrivateListenerAddress(t)
+	cfg.ExternalURL = "https://localhost:8080"
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)
 
@@ -182,9 +182,8 @@ func TestControllerLifecycle(t *testing.T) {
 }
 
 func TestModuleRegistration(t *testing.T) {
-	// Create a test logger and controller
-	logger := testutil.NewMockLogger(true)
 	tempDir := t.TempDir()
+	logger := logging.NewNoopLogger()
 	cfg := config.DefaultConfig()
 	cfg.DataDir = tempDir + "/data"
 	cfg.CertPath = tempDir + "/certs"
@@ -238,7 +237,7 @@ func TestModuleRegistration(t *testing.T) {
 // return a non-empty address confirming the server was initialized.
 func TestControllerSingleHTTPServer(t *testing.T) {
 	tempDir := t.TempDir()
-	logger := testutil.NewMockLogger(true)
+	logger := logging.NewNoopLogger()
 
 	cfg := config.DefaultConfig()
 	cfg.DataDir = tempDir + "/data"
@@ -261,6 +260,7 @@ func TestControllerSingleHTTPServer(t *testing.T) {
 	// Use an ephemeral HTTP port to avoid conflicts with parallel tests.
 	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
 	cfg.MetricsListenAddr = pkgtestutil.ReservePrivateListenerAddress(t)
+	cfg.ExternalURL = "https://localhost:8080" // Required; DefaultConfig leaves this empty
 
 	ctrl, err := New(cfg, logger)
 	require.NoError(t, err)

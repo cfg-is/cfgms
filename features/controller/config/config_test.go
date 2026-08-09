@@ -31,6 +31,16 @@ func TestDefaultConfig_RequiresExplicitPrivateMetricsListener(t *testing.T) {
 		"metrics listener must not be silently defaulted by production configuration")
 }
 
+// TestDefaultConfig_ExternalURLEmpty verifies that DefaultConfig does not set a
+// plausible-looking default for external_url. That field's entire purpose is
+// external reachability — silently shipping https://localhost:8080 produces wrong
+// admin bundles on any non-dev controller without a clear error.
+func TestDefaultConfig_ExternalURLEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.Empty(t, cfg.ExternalURL,
+		"external_url must not be silently defaulted; operators must set it explicitly")
+}
+
 func TestValidatePrivateListenerAddress(t *testing.T) {
 	t.Parallel()
 

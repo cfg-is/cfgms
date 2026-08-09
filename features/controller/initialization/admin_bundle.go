@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -32,11 +33,38 @@ var stewardCNPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
 // All admin cert issuance paths pass this value explicitly; no caller can supply higher.
 const adminCertValidityDays = 365
 
+// validateBundleExternalURL returns an actionable error if cfg.ExternalURL is
+// unset or invalid. Both admin bundle issuance paths call this before writing any
+// cert or init marker — a controller whose config omits external_url must not
+// silently produce bundles with a wrong ControllerURL that surfaces only as a
+// connection error on the operator's machine.
+func validateBundleExternalURL(cfg *config.Config) error {
+	if cfg.ExternalURL == "" {
+		return fmt.Errorf("external_url must be set in the controller config before issuing admin bundles; " +
+			"it is the externally-reachable HTTPS address operators use to connect " +
+			"(e.g. external_url: https://controller.example.com:8080)")
+	}
+	u, err := url.Parse(cfg.ExternalURL)
+	if err != nil {
+		return fmt.Errorf("external_url %q is not a valid URL: %w", cfg.ExternalURL, err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("external_url must use the https scheme, got %q", cfg.ExternalURL)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("external_url must include a hostname, got %q", cfg.ExternalURL)
+	}
+	return nil
+}
+
 // IssueAdminBundle issues a new admin client cert+key bundle for the named operator.
 // The name must be non-empty, alphanumeric+hyphens only, max 64 chars, and must not
 // match any reserved CN or steward UUID pattern. The bundle is written to outputPath
 // with mode 0600 (enforced by bundle.Write).
 func IssueAdminBundle(cfg *config.Config, logger logging.Logger, name, outputPath string) error {
+	if err := validateBundleExternalURL(cfg); err != nil {
+		return err
+	}
 	if err := validateCN(name); err != nil {
 		return err
 	}

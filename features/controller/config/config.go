@@ -638,8 +638,8 @@ func DefaultConfig() *Config {
 	cfg := &Config{
 		SecurityProfile:   SecurityProfileDevelopment,
 		ListenAddr:        "127.0.0.1:8080",
-		MetricsListenAddr: "",                       // Required explicitly; startup fails closed when absent.
-		ExternalURL:       "https://localhost:8080", // Default external URL
+		MetricsListenAddr: "", // Required explicitly; startup fails closed when absent.
+		ExternalURL:       "", // Intentionally empty — operators must set this explicitly. A plausible-looking default silently produces wrong admin bundles on any non-localhost deployment.
 		CertPath:          "certs/",
 		DataDir:           "data/",
 		LogLevel:          "info",

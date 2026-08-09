@@ -53,6 +53,12 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		return nil, fmt.Errorf("certificate management must be enabled for initialization (certificate.enable_cert_management: true)")
 	}
 
+	// Check external_url before any CA material or markers are written so that
+	// a misconfigured operator gets a clear error without a half-initialized controller.
+	if err := validateBundleExternalURL(cfg); err != nil {
+		return nil, err
+	}
+
 	caPath := cfg.Certificate.CAPath
 	if caPath == "" {
 		return nil, fmt.Errorf("certificate CA path is required for initialization (certificate.ca_path)")
