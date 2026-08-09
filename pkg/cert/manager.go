@@ -61,7 +61,12 @@ type ManagerConfig struct {
 	// CA configuration (required for new CAs)
 	CAConfig *CAConfig
 
-	// Storage path for certificates and CA
+	// StoragePath is the parent directory that contains (or will contain) the "ca/"
+	// subdirectory where CA cert and key files live.  NewManager always derives the
+	// real CA directory as filepath.Join(StoragePath, "ca"), so callers must pass the
+	// parent of the configured CA path — not the CA path itself.  For example, if
+	// certificate.ca_path is "/var/lib/cfgms/certs/ca", StoragePath must be
+	// "/var/lib/cfgms/certs" (i.e. filepath.Dir(caPath)).
 	StoragePath string
 
 	// Whether to load existing CA or create new one

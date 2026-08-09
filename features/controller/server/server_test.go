@@ -724,15 +724,15 @@ func TestServerNewPublicBetaRejectsInvalidSigningRoots(t *testing.T) {
 	require.NoError(t, os.MkdirAll(caRoot, 0700))
 	require.NoError(t, os.WriteFile(filepath.Join(caRoot, "ca.crt"), []byte("invalid CA certificate"), 0600))
 	require.NoError(t, os.WriteFile(filepath.Join(caRoot, "ca.key"), []byte("invalid CA key"), 0600))
-	require.NoError(t, initialization.CreateLegacyMarker(certRoot))
+	// Marker lives at caRoot (== cfg.Certificate.CAPath) so IsInitialized(caRoot) is true.
+	require.NoError(t, initialization.CreateLegacyMarker(caRoot))
 
 	cfg := config.DefaultConfig()
 	cfg.SecurityProfile = config.SecurityProfilePublicBeta
 	cfg.Execution.RequireSignedAdhoc = true
 	cfg.DataDir = filepath.Join(root, "data")
 	cfg.Storage = createTestStorageConfig(root, "public-beta-invalid-roots")
-	cfg.CertPath = certRoot
-	cfg.Certificate.CAPath = certRoot
+	cfg.Certificate.CAPath = caRoot
 	cfg.Transport.ExternalAddress = "controller.test"
 
 	server, err := New(cfg, logging.NewNoopLogger())
@@ -750,25 +750,26 @@ func TestServerNewPublicBetaRejectsExpiredSigningRoots(t *testing.T) {
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(root, "secrets"))
 
 	certRoot := filepath.Join(root, "certs")
+	caRoot := filepath.Join(certRoot, "ca")
+	// cert.NewManager stores the CA at certRoot/ca/ (StoragePath/ca/).
 	_, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath: certRoot,
 		CAConfig: &cert.CAConfig{
 			Organization: "Expired Public Beta Root",
 			Country:      "US",
 			ValidityDays: -1,
-			StoragePath:  certRoot,
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, initialization.CreateLegacyMarker(certRoot))
+	// Marker lives at caRoot (== cfg.Certificate.CAPath) so IsInitialized(caRoot) is true.
+	require.NoError(t, initialization.CreateLegacyMarker(caRoot))
 
 	cfg := config.DefaultConfig()
 	cfg.SecurityProfile = config.SecurityProfilePublicBeta
 	cfg.Execution.RequireSignedAdhoc = true
 	cfg.DataDir = filepath.Join(root, "data")
 	cfg.Storage = createTestStorageConfig(root, "public-beta-expired-roots")
-	cfg.CertPath = certRoot
-	cfg.Certificate.CAPath = certRoot
+	cfg.Certificate.CAPath = caRoot
 	cfg.Transport.ExternalAddress = "controller.test"
 
 	server, err := New(cfg, logging.NewNoopLogger())

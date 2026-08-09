@@ -116,10 +116,9 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		return os.RemoveAll(caPath)
 	})
 
-	certPath := cfg.CertPath
-	if certPath == "" {
-		certPath = caPath
-	}
+	// StoragePath for cert.NewManager must be the parent of the "ca/" subdirectory;
+	// NewManager always stores the CA at filepath.Join(StoragePath,"ca").
+	certPath := filepath.Dir(filepath.Clean(caPath))
 
 	caConfig := &cert.CAConfig{
 		Organization: "CFGMS",

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -575,13 +576,12 @@ func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, rev
 
 // runBootstrapAdminList prints all issued admin certs and their revocation status.
 func runBootstrapAdminList(cfg *config.Config) error {
-	certPath := cfg.CertPath
-	if certPath == "" && cfg.Certificate != nil {
-		certPath = cfg.Certificate.CAPath
+	if cfg.Certificate == nil || cfg.Certificate.CAPath == "" {
+		return fmt.Errorf("certificate path not configured (certificate.ca_path required)")
 	}
-	if certPath == "" {
-		return fmt.Errorf("certificate path not configured (cert_path or certificate.ca_path required)")
-	}
+	// StoragePath must be the parent of the "ca/" subdirectory; NewManager derives the
+	// real CA directory as filepath.Join(StoragePath,"ca").
+	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
 
 	certManager, err := certpkg.NewManager(&certpkg.ManagerConfig{
 		StoragePath:    certPath,

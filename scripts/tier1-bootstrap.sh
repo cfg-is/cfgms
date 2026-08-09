@@ -287,7 +287,6 @@ data_dir: "/var/lib/cfgms"
 certificate:
   enable_cert_management: true
   ca_path: "/var/lib/cfgms/certs/ca"
-  cert_path: "/var/lib/cfgms/certs"
   renewal_threshold_days: 30
   server_cert_validity_days: 365
   client_cert_validity_days: 365

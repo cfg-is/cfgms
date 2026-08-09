@@ -494,8 +494,9 @@ func TestRun_TransportCertHonorsExternalHostname(t *testing.T) {
 
 	// Reopen the cert manager and inspect the InternalServer (PurposeTransport)
 	// certificate that --init persisted to the store.
+	// StoragePath is the parent of "ca/" — matching the invariant in cert.NewManager.
 	certManager, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath:    caDir,
+		StoragePath:    tempDir,
 		LoadExistingCA: true,
 	})
 	require.NoError(t, err)
@@ -675,6 +676,112 @@ func TestRun_ClusterMode_UsesDatabaseProvider(t *testing.T) {
 // Regression test for Issue #3170: the bootstrap template omitted the top-level
 // external_url key, so cfg.ExternalURL stayed at its compiled default "https://localhost:8080"
 // and every issued admin bundle pointed at the wrong address.
+// TestRun_HonorsAbsoluteCAPath verifies that initialization.Run writes CA files at
+// exactly the configured certificate.ca_path (an absolute path), regardless of the
+// test process's working directory. This is the core regression test for Issue #3171,
+// where cfg.CertPath (a non-empty compiled relative default) shadowed CAPath and caused
+// CA files to land under <CWD>/certs/ca/ instead of the configured absolute location.
+func TestRun_HonorsAbsoluteCAPath(t *testing.T) {
+	tempDir := t.TempDir()
+	// Use a nested directory to make the absolute path unambiguous.
+	caDir := filepath.Join(tempDir, "certs", "ca")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://controller.test:9080",
+		AdminBundlePath: bundlePath,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir,
+			RenewalThresholdDays: 7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				DNSNames:     []string{"localhost"},
+				IPAddresses:  []string{"127.0.0.1"},
+				Organization: "Test Org",
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
+		},
+	}
+
+	_, err := Run(cfg, logger)
+	require.NoError(t, err)
+
+	// CA files must exist at the configured caDir — not at a CWD-relative location.
+	assert.FileExists(t, filepath.Join(caDir, "ca.crt"),
+		"ca.crt must be written at the configured certificate.ca_path, not at a CWD-relative path")
+	assert.FileExists(t, filepath.Join(caDir, "ca.key"),
+		"ca.key must be written at the configured certificate.ca_path")
+
+	// Init marker must be at caDir too (IsInitialized checks caDir/.cfgms-initialized).
+	assert.True(t, IsInitialized(caDir),
+		"init marker must be written at the configured certificate.ca_path")
+
+	// A cert.NewManager using StoragePath=filepath.Dir(caDir) must reload the CA without
+	// error — this mirrors what loadExistingCertificateManager does on server startup,
+	// proving that --init and startup agree on the same storage location.
+	reloadManager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    filepath.Dir(caDir),
+		LoadExistingCA: true,
+	})
+	require.NoError(t, err, "cert manager must reload CA written by initialization.Run")
+	require.NotNil(t, reloadManager)
+}
+
+// TestRun_HonorsTrailingSlashCAPath verifies that a trailing slash in
+// certificate.ca_path is handled correctly by filepath.Clean — the CA must still land
+// at the configured directory, not at a wrong nested path.
+func TestRun_HonorsTrailingSlashCAPath(t *testing.T) {
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "certs", "ca")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://controller.test:9080",
+		AdminBundlePath: bundlePath,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir + "/", // trailing slash — filepath.Clean must normalize it
+			RenewalThresholdDays: 7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				DNSNames:     []string{"localhost"},
+				IPAddresses:  []string{"127.0.0.1"},
+				Organization: "Test Org",
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
+		},
+	}
+
+	_, err := Run(cfg, logger)
+	require.NoError(t, err)
+
+	// CA files must exist at caDir (without the trailing slash).
+	assert.FileExists(t, filepath.Join(caDir, "ca.crt"),
+		"trailing slash in ca_path must not change where CA files land")
+	assert.FileExists(t, filepath.Join(caDir, "ca.key"))
+
+	// Server-startup equivalent: reload via StoragePath=filepath.Dir(filepath.Clean(caDir+"/"))=filepath.Dir(caDir).
+	reloadManager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    filepath.Dir(caDir),
+		LoadExistingCA: true,
+	})
+	require.NoError(t, err, "trailing-slash ca_path must not break CA reload")
+	require.NotNil(t, reloadManager)
+}
+
 func TestRun_AdminBundleControllerURLMatchesTier1BootstrapTemplate(t *testing.T) {
 	tempDir := t.TempDir()
 	caDir := filepath.Join(tempDir, "ca")

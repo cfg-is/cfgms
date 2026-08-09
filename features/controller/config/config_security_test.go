@@ -51,10 +51,11 @@ func TestLoad_EnvironmentVariableSecurityInjection(t *testing.T) {
 	// Test that environment variables can't be used for injection attacks
 
 	tests := []struct {
-		name     string
-		envVar   string
-		envValue string
-		testFunc func(*testing.T, *Config)
+		name        string
+		envVar      string
+		envValue    string
+		expectError bool
+		testFunc    func(*testing.T, *Config)
 	}{
 		{
 			name:     "path traversal in listen addr",
@@ -93,12 +94,10 @@ func TestLoad_EnvironmentVariableSecurityInjection(t *testing.T) {
 			},
 		},
 		{
-			name:     "malicious CA path",
-			envVar:   "CFGMS_CERT_CA_PATH",
-			envValue: "/dev/null; rm -rf /",
-			testFunc: func(t *testing.T, cfg *Config) {
-				assert.Equal(t, "/dev/null; rm -rf /", cfg.Certificate.CAPath)
-			},
+			name:        "malicious CA path",
+			envVar:      "CFGMS_CERT_CA_PATH",
+			envValue:    "/dev/null; rm -rf /",
+			expectError: true, // ValidateCAPath rejects paths whose final component is not "ca"
 		},
 	}
 
@@ -119,11 +118,17 @@ func TestLoad_EnvironmentVariableSecurityInjection(t *testing.T) {
 
 			// Load configuration
 			config, err := Load()
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 			require.NotNil(t, config)
 
 			// Run test-specific validation
-			tt.testFunc(t, config)
+			if tt.testFunc != nil {
+				tt.testFunc(t, config)
+			}
 		})
 	}
 }
@@ -202,14 +207,9 @@ cert_path: "/dev/null"
 certificate:
   ca_path: "/tmp/../../../etc/passwd"
 `,
-			expectError: false,
-			securityChecks: []func(*testing.T, *Config){
-				func(t *testing.T, cfg *Config) {
-					assert.Equal(t, "/dev/null", cfg.CertPath)
-					assert.Equal(t, "/tmp/../../../etc/passwd", cfg.Certificate.CAPath)
-					// Path validation should happen during certificate operations
-				},
-			},
+			// ValidateCAPath now rejects ca_path values whose final component is not "ca",
+			// so traversal paths like "/tmp/../../../etc/passwd" are caught at load time.
+			expectError: true,
 		},
 		{
 			name: "valid secure configuration",
