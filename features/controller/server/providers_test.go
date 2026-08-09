@@ -26,6 +26,18 @@ func newFlatFileStewardStore(t *testing.T) business.StewardStore {
 	return st
 }
 
+// newFlatFileIPTrustStore returns a real flat-file IPTrustStore rooted at root.
+// The caller supplies the root so tests can inspect — or deliberately corrupt —
+// the on-disk state the store reads back. The concrete flatfile import is
+// confined to this allowlisted */providers_test.go path (see
+// scripts/check-providers.sh).
+func newFlatFileIPTrustStore(t *testing.T, root string) business.IPTrustStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileIPTrustStore(root)
+	require.NoError(t, err, "creating flat-file IP trust store")
+	return st
+}
+
 // requireInMemoryUpgradeStore asserts that store is the in-memory fallback
 // UpgradeStore. The concrete memoryprovider import is confined to this
 // allowlisted */providers_test.go path (see scripts/check-providers.sh) so that

@@ -52,13 +52,17 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 		if keyPub == nil {
 			keyPub = []byte{}
 		}
+		hiddenInt := 0
+		if record.Hidden {
+			hiddenInt = 1
+		}
 		_, e := s.db.ExecContext(ctx, `
 			INSERT INTO stewards
 				(id, hostname, platform, arch, version, ip_address, status,
 				 registered_at, last_seen, last_heartbeat_at,
 				 device_id, identity_key_pub, key_protection_level, last_provenance_json,
-				 tenant_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 tenant_id, hidden)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			record.ID,
 			record.Hostname,
 			record.Platform,
@@ -74,6 +78,7 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 			record.KeyProtectionLevel,
 			record.LastProvenanceJSON,
 			record.TenantID,
+			hiddenInt,
 		)
 		return e
 	})
@@ -114,7 +119,7 @@ func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
-		       tenant_id
+		       tenant_id, hidden
 		FROM stewards WHERE id = ?`, stewardID)
 	return scanStewardRow(row)
 }
@@ -129,7 +134,7 @@ func (s *SQLiteStewardStore) GetStewardByDeviceID(ctx context.Context, deviceID 
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
-		       tenant_id
+		       tenant_id, hidden
 		FROM stewards WHERE device_id = ? LIMIT 1`, deviceID)
 	return scanStewardRow(row)
 }
@@ -140,7 +145,7 @@ func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*business.Stew
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
-		       tenant_id
+		       tenant_id, hidden
 		FROM stewards ORDER BY registered_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to list stewards: %w", err)
@@ -155,7 +160,7 @@ func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status bu
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
-		       tenant_id
+		       tenant_id, hidden
 		FROM stewards WHERE status = ? ORDER BY registered_at ASC`,
 		string(status),
 	)
@@ -187,6 +192,31 @@ func (s *SQLiteStewardStore) UpdateStewardStatus(ctx context.Context, stewardID 
 	return nil
 }
 
+// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
+func (s *SQLiteStewardStore) SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error {
+	hiddenInt := 0
+	if hidden {
+		hiddenInt = 1
+	}
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET hidden = ? WHERE id = ?`,
+			hiddenInt, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to set hidden flag for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *SQLiteStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
@@ -198,7 +228,7 @@ func (s *SQLiteStewardStore) GetStewardsSeen(ctx context.Context, since time.Tim
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
-		       tenant_id
+		       tenant_id, hidden
 		FROM stewards WHERE last_seen > ? ORDER BY last_seen DESC`,
 		formatTime(since),
 	)
@@ -242,11 +272,12 @@ func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
 	r := &business.StewardRecord{}
 	var statusStr, regStr, lastSeenStr, lastHBStr string
 	var keyPub []byte
+	var hiddenInt int
 	err := row.Scan(
 		&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &regStr, &lastSeenStr, &lastHBStr,
 		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.LastProvenanceJSON,
-		&r.TenantID,
+		&r.TenantID, &hiddenInt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrStewardNotFound
@@ -255,6 +286,7 @@ func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
 		return nil, fmt.Errorf("sqlite: failed to scan steward: %w", err)
 	}
 	r.IdentityKeyPub = keyPub
+	r.Hidden = hiddenInt != 0
 	return populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr), nil
 }
 
@@ -265,15 +297,17 @@ func scanStewardRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 		r := &business.StewardRecord{}
 		var statusStr, regStr, lastSeenStr, lastHBStr string
 		var keyPub []byte
+		var hiddenInt int
 		if err := rows.Scan(
 			&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 			&statusStr, &regStr, &lastSeenStr, &lastHBStr,
 			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.LastProvenanceJSON,
-			&r.TenantID,
+			&r.TenantID, &hiddenInt,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: failed to scan steward row: %w", err)
 		}
 		r.IdentityKeyPub = keyPub
+		r.Hidden = hiddenInt != 0
 		records = append(records, populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr))
 	}
 	return records, rows.Err()

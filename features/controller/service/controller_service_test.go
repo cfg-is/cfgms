@@ -22,68 +22,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// logCapture records log calls for assertion in internal package tests (package service).
-// Implements logging.Logger by storing each call; assertions use findEntry.
-type logCapture struct {
-	mu      sync.Mutex
-	entries []logCaptureEntry
-}
-
-type logCaptureEntry struct {
-	level  string
-	msg    string
-	fields []interface{}
-}
-
-func (l *logCapture) record(level, msg string, kv []interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.entries = append(l.entries, logCaptureEntry{level: level, msg: msg, fields: kv})
-}
-
-// findEntry returns the first entry whose message equals msg (case-sensitive).
-func (l *logCapture) findEntry(msg string) (logCaptureEntry, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, e := range l.entries {
-		if e.msg == msg {
-			return e, true
-		}
-	}
-	return logCaptureEntry{}, false
-}
-
-// fieldValue returns the value for a given key in a log entry's key-value pairs.
-func (e logCaptureEntry) fieldValue(key string) (interface{}, bool) {
-	for i := 0; i+1 < len(e.fields); i += 2 {
-		if fmt.Sprintf("%v", e.fields[i]) == key {
-			return e.fields[i+1], true
-		}
-	}
-	return nil, false
-}
-
-func (l *logCapture) Debug(msg string, kv ...interface{}) { l.record("DEBUG", msg, kv) }
-func (l *logCapture) Info(msg string, kv ...interface{})  { l.record("INFO", msg, kv) }
-func (l *logCapture) Warn(msg string, kv ...interface{})  { l.record("WARN", msg, kv) }
-func (l *logCapture) Error(msg string, kv ...interface{}) { l.record("ERROR", msg, kv) }
-func (l *logCapture) Fatal(msg string, kv ...interface{}) { l.record("FATAL", msg, kv) }
-func (l *logCapture) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("DEBUG", msg, kv)
-}
-func (l *logCapture) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("INFO", msg, kv)
-}
-func (l *logCapture) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("WARN", msg, kv)
-}
-func (l *logCapture) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("ERROR", msg, kv)
-}
-func (l *logCapture) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
-	l.record("FATAL", msg, kv)
-}
-
 // newTestFleetStorage creates a real SQLite storage manager for controller service tests.
 func newTestFleetStorage(t *testing.T) *fleetStorage.Manager {
 	t.Helper()
@@ -997,7 +935,7 @@ func TestApplyRingResolution_AbsentRing_FallsToDefault(t *testing.T) {
 // a WARN log entry with event name "deployment_ring_fallback" and the correct
 // field values when ring fallback occurs (invalid ring name).
 func TestApplyRingResolution_FallbackLogsWarn(t *testing.T) {
-	lc := &logCapture{}
+	lc := logging.NewCapturingLogger()
 	svc := NewControllerService(lc)
 	svc.SetRingConfig(makeTestRingConfig())
 
@@ -1016,16 +954,17 @@ func TestApplyRingResolution_FallbackLogsWarn(t *testing.T) {
 		"ResolvedRing must reflect the fallback ring, not the invalid input")
 
 	// Log assertions — WARN with event name and field values must be emitted.
-	entry, ok := lc.findEntry("deployment_ring_fallback")
+	// CapturingLogger only records Warn/WarnCtx into WarnEntries, so finding the
+	// entry there is itself proof the event was emitted at WARN level.
+	entry, ok := lc.FindWarn("deployment_ring_fallback")
 	require.True(t, ok, "expected WARN log entry with msg='deployment_ring_fallback'")
-	assert.Equal(t, "WARN", entry.level, "fallback must be logged at WARN level")
 
-	ringValue, hasRingValue := entry.fieldValue("ring_value")
+	ringValue, hasRingValue := entry["ring_value"]
 	assert.True(t, hasRingValue, "log entry must include ring_value field")
 	assert.Contains(t, fmt.Sprintf("%v", ringValue), "does-not-exist",
 		"ring_value field must carry the invalid ring name (possibly sanitized)")
 
-	fallbackRing, hasFallbackRing := entry.fieldValue("fallback_ring")
+	fallbackRing, hasFallbackRing := entry["fallback_ring"]
 	assert.True(t, hasFallbackRing, "log entry must include fallback_ring field")
 	assert.Contains(t, fmt.Sprintf("%v", fallbackRing), "default",
 		"fallback_ring field must name the fallback ring (possibly sanitized)")
@@ -1034,19 +973,20 @@ func TestApplyRingResolution_FallbackLogsWarn(t *testing.T) {
 // TestSetRingConfig_AuditLogsOnChange verifies SetRingConfig emits a "ring_set_changed"
 // INFO audit log entry with actor, before, and after fields when the ring set changes.
 func TestSetRingConfig_AuditLogsOnChange(t *testing.T) {
-	lc := &logCapture{}
+	lc := logging.NewCapturingLogger()
 	svc := NewControllerService(lc)
 
 	initial := makeTestRingConfig()
 	svc.SetRingConfig(initial)
 
 	// First set emits ring_set_changed (from empty → initial config).
-	entry, ok := lc.findEntry("ring_set_changed")
+	// CapturingLogger only records Info/InfoCtx into InfoEntries, so finding the
+	// entry there is itself proof the audit event was emitted at INFO level.
+	entry, ok := lc.FindInfo("ring_set_changed")
 	require.True(t, ok, "expected INFO log entry with msg='ring_set_changed' on first SetRingConfig")
-	assert.Equal(t, "INFO", entry.level, "ring_set_changed must be logged at INFO level")
-	_, hasActor := entry.fieldValue("actor")
+	_, hasActor := entry["actor"]
 	assert.True(t, hasActor, "ring_set_changed entry must include actor field")
-	_, hasAfter := entry.fieldValue("after")
+	_, hasAfter := entry["after"]
 	assert.True(t, hasAfter, "ring_set_changed entry must include after field")
 
 	// State is persisted correctly.
@@ -1056,18 +996,14 @@ func TestSetRingConfig_AuditLogsOnChange(t *testing.T) {
 	assert.Equal(t, "v0.5.21", got.Rings[1].DesiredVersion)
 
 	// Record current entry count; a second change must add exactly one more.
-	lc.mu.Lock()
-	countBefore := len(lc.entries)
-	lc.mu.Unlock()
+	countBefore := lc.InfoCount()
 
 	// Update the ring config (version bump on early ring).
 	updated := makeTestRingConfig()
 	updated.Rings[1].DesiredVersion = "v0.5.22"
 	svc.SetRingConfig(updated)
 
-	lc.mu.Lock()
-	countAfter := len(lc.entries)
-	lc.mu.Unlock()
+	countAfter := lc.InfoCount()
 	assert.Equal(t, countBefore+1, countAfter,
 		"SetRingConfig on changed config must emit exactly one additional log entry")
 
@@ -1272,4 +1208,50 @@ func TestSetTagStore_ConcurrentAccess_NoRace(t *testing.T) {
 	wg.Wait()
 
 	require.Same(t, store, svc.TagStore(), "final TagStore() must return the wired store")
+}
+
+// ---------------------------------------------------------------------------
+// SetStewardHidden tests (Issue #2944)
+// ---------------------------------------------------------------------------
+
+func TestSetStewardHidden_Success(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, svc.RegisterSteward("s-hide", "tenant-a", "addr", "active"))
+
+	// Default: not hidden.
+	all := svc.GetAllStewards()
+	require.Len(t, all, 1)
+	assert.False(t, all[0].Hidden, "freshly registered steward must not be hidden")
+
+	// Hide it.
+	require.NoError(t, svc.SetStewardHidden("s-hide", true))
+	all = svc.GetAllStewards()
+	require.Len(t, all, 1)
+	assert.True(t, all[0].Hidden, "GetAllStewards must reflect hidden=true after SetStewardHidden")
+
+	// Un-hide it.
+	require.NoError(t, svc.SetStewardHidden("s-hide", false))
+	all = svc.GetAllStewards()
+	require.Len(t, all, 1)
+	assert.False(t, all[0].Hidden, "GetAllStewards must reflect hidden=false after SetStewardHidden")
+}
+
+func TestSetStewardHidden_NotFound(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	err := svc.SetStewardHidden("nonexistent", true)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestSetStewardHidden_PreservesOtherFields(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, svc.RegisterSteward("s-preserve-hide", "tenant-b", "addr-2", "active"))
+
+	require.NoError(t, svc.SetStewardHidden("s-preserve-hide", true))
+
+	info, ok := svc.GetStewardInfo("s-preserve-hide")
+	require.True(t, ok)
+	assert.True(t, info.Hidden, "Hidden must be set")
+	assert.Equal(t, "active", info.Status, "Status must not change on SetStewardHidden")
+	assert.Equal(t, "tenant-b", info.TenantID, "TenantID must not change on SetStewardHidden")
 }
