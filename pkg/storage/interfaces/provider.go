@@ -9,6 +9,7 @@ package interfaces
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -196,6 +197,27 @@ func ValidateProvider(provider StorageProvider) error {
 	return nil
 }
 
+// validateStoreCreation creates a store purely to prove that create(testConfig)
+// succeeds, then closes it immediately — the store is never returned to a
+// caller. Left open, each of these holds its own backing handle (e.g. a
+// sqlite *sql.DB); on Windows an unclosed handle keeps the underlying file
+// locked, which fails a later cleanup (e.g. t.TempDir()) with "the process
+// cannot access the file because it is being used by another process" even
+// though nothing was ever using the store (Issue #2944, PR #3254 CI failure).
+func validateStoreCreation[T io.Closer](name string, testConfig map[string]interface{}, create func(map[string]interface{}) (T, error)) error {
+	store, err := create(testConfig)
+	if err != nil {
+		if errors.Is(err, business.ErrNotSupported) {
+			return nil
+		}
+		return fmt.Errorf("failed to create %s: %w", name, err)
+	}
+	if err := store.Close(); err != nil {
+		getRegistryLogger().Warn(fmt.Sprintf("failed to close validation %s: %v", name, err))
+	}
+	return nil
+}
+
 // RegisterStorageProviderWithValidation registers a provider with full validation.
 // This is an enhanced version that tests interface creation with a test config.
 func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig map[string]interface{}) error {
@@ -204,36 +226,36 @@ func RegisterStorageProviderWithValidation(provider StorageProvider, testConfig 
 	}
 
 	if available, _ := provider.Available(); available {
-		if _, err := provider.CreateClientTenantStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
-			return fmt.Errorf("failed to create ClientTenantStore: %w", err)
+		if err := validateStoreCreation("ClientTenantStore", testConfig, provider.CreateClientTenantStore); err != nil {
+			return err
 		}
 
 		if _, err := provider.CreateConfigStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
 			return fmt.Errorf("failed to create ConfigStore: %w", err)
 		}
 
-		if _, err := provider.CreateAuditStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
-			return fmt.Errorf("failed to create AuditStore: %w", err)
+		if err := validateStoreCreation("AuditStore", testConfig, provider.CreateAuditStore); err != nil {
+			return err
 		}
 
-		if _, err := provider.CreateRBACStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
-			return fmt.Errorf("failed to create RBACStore: %w", err)
+		if err := validateStoreCreation("RBACStore", testConfig, provider.CreateRBACStore); err != nil {
+			return err
 		}
 
-		if _, err := provider.CreateTenantStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
-			return fmt.Errorf("failed to create TenantStore: %w", err)
+		if err := validateStoreCreation("TenantStore", testConfig, provider.CreateTenantStore); err != nil {
+			return err
 		}
 
-		if _, err := provider.CreateRegistrationTokenStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
-			return fmt.Errorf("failed to create RegistrationTokenStore: %w", err)
+		if err := validateStoreCreation("RegistrationTokenStore", testConfig, provider.CreateRegistrationTokenStore); err != nil {
+			return err
 		}
 
-		if _, err := provider.CreateStewardStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
-			return fmt.Errorf("failed to create StewardStore: %w", err)
+		if err := validateStoreCreation("StewardStore", testConfig, provider.CreateStewardStore); err != nil {
+			return err
 		}
 
-		if _, err := provider.CreateTriggerStore(testConfig); err != nil && !errors.Is(err, business.ErrNotSupported) {
-			return fmt.Errorf("failed to create TriggerStore: %w", err)
+		if err := validateStoreCreation("TriggerStore", testConfig, provider.CreateTriggerStore); err != nil {
+			return err
 		}
 	}
 

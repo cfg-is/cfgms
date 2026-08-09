@@ -82,6 +82,163 @@ func TestRegisterStorageProviderWithValidation(t *testing.T) {
 	}
 }
 
+// closeCountingProvider wraps a real StorageProvider and counts how many of
+// the stores it creates are later closed. It delegates every Create*Store
+// call to the wrapped real provider (so sqlite performs real I/O) and only
+// instruments the returned store's Close method — it fakes nothing about
+// store behavior.
+type closeCountingProvider struct {
+	interfaces.StorageProvider
+	closes int
+}
+
+func (p *closeCountingProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
+	store, err := p.StorageProvider.CreateClientTenantStore(config)
+	if err != nil {
+		return store, err
+	}
+	return closeCountingClientTenantStore{ClientTenantStore: store, p: p}, nil
+}
+
+func (p *closeCountingProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
+	store, err := p.StorageProvider.CreateAuditStore(config)
+	if err != nil {
+		return store, err
+	}
+	return closeCountingAuditStore{AuditStore: store, p: p}, nil
+}
+
+func (p *closeCountingProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
+	store, err := p.StorageProvider.CreateRBACStore(config)
+	if err != nil {
+		return store, err
+	}
+	return closeCountingRBACStore{RBACStore: store, p: p}, nil
+}
+
+func (p *closeCountingProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
+	store, err := p.StorageProvider.CreateTenantStore(config)
+	if err != nil {
+		return store, err
+	}
+	return closeCountingTenantStore{TenantStore: store, p: p}, nil
+}
+
+func (p *closeCountingProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
+	store, err := p.StorageProvider.CreateRegistrationTokenStore(config)
+	if err != nil {
+		return store, err
+	}
+	return closeCountingRegistrationTokenStore{RegistrationTokenStore: store, p: p}, nil
+}
+
+func (p *closeCountingProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
+	store, err := p.StorageProvider.CreateStewardStore(config)
+	if err != nil {
+		return store, err
+	}
+	return closeCountingStewardStore{StewardStore: store, p: p}, nil
+}
+
+func (p *closeCountingProvider) CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error) {
+	store, err := p.StorageProvider.CreateTriggerStore(config)
+	if err != nil {
+		return store, err
+	}
+	return closeCountingTriggerStore{TriggerStore: store, p: p}, nil
+}
+
+type closeCountingClientTenantStore struct {
+	business.ClientTenantStore
+	p *closeCountingProvider
+}
+
+func (s closeCountingClientTenantStore) Close() error {
+	s.p.closes++
+	return s.ClientTenantStore.Close()
+}
+
+type closeCountingAuditStore struct {
+	business.AuditStore
+	p *closeCountingProvider
+}
+
+func (s closeCountingAuditStore) Close() error {
+	s.p.closes++
+	return s.AuditStore.Close()
+}
+
+type closeCountingRBACStore struct {
+	business.RBACStore
+	p *closeCountingProvider
+}
+
+func (s closeCountingRBACStore) Close() error {
+	s.p.closes++
+	return s.RBACStore.Close()
+}
+
+type closeCountingTenantStore struct {
+	business.TenantStore
+	p *closeCountingProvider
+}
+
+func (s closeCountingTenantStore) Close() error {
+	s.p.closes++
+	return s.TenantStore.Close()
+}
+
+type closeCountingRegistrationTokenStore struct {
+	business.RegistrationTokenStore
+	p *closeCountingProvider
+}
+
+func (s closeCountingRegistrationTokenStore) Close() error {
+	s.p.closes++
+	return s.RegistrationTokenStore.Close()
+}
+
+type closeCountingStewardStore struct {
+	business.StewardStore
+	p *closeCountingProvider
+}
+
+func (s closeCountingStewardStore) Close() error {
+	s.p.closes++
+	return s.StewardStore.Close()
+}
+
+type closeCountingTriggerStore struct {
+	business.TriggerStore
+	p *closeCountingProvider
+}
+
+func (s closeCountingTriggerStore) Close() error {
+	s.p.closes++
+	return s.TriggerStore.Close()
+}
+
+// TestRegisterStorageProviderWithValidation_ClosesValidationStores guards
+// against the Windows-only CI failure diagnosed against PR #3254: validation
+// creates seven stores (ClientTenantStore, AuditStore, RBACStore, TenantStore,
+// RegistrationTokenStore, StewardStore, TriggerStore) purely to prove
+// Create*Store succeeds, then discarded them without closing. On Linux a
+// leaked *sql.DB handle is invisible because the OS allows unlinking an open
+// file; on Windows the leaked handle keeps the file locked, so a caller's
+// later cleanup (t.TempDir() in this suite) fails with "the process cannot
+// access the file because it is being used by another process." Real sqlite
+// I/O runs through the wrapped provider; only Close() is instrumented.
+func TestRegisterStorageProviderWithValidation_ClosesValidationStores(t *testing.T) {
+	withEmptyRegistry(t)
+
+	_, sqliteCfg := ossConfigs(t)
+	provider := &closeCountingProvider{StorageProvider: newSQLiteProvider()}
+
+	require.NoError(t, interfaces.RegisterStorageProviderWithValidation(provider, sqliteCfg))
+
+	assert.Equal(t, 7, provider.closes, "RegisterStorageProviderWithValidation must close every validation store it creates")
+}
+
 // TestValidateProvider verifies that the real OSS providers satisfy the
 // registration rules and that a nil provider is rejected.
 func TestValidateProvider(t *testing.T) {
