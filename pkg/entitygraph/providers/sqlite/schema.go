@@ -16,7 +16,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -28,9 +27,10 @@ import (
 // Compile-time assertion that SQLiteEntityGraphProvider satisfies the contract.
 var _ interfaces.EntityGraphProvider = (*SQLiteEntityGraphProvider)(nil)
 
-// ErrNotFound is returned when a requested entity has no current-state
-// projection (or is filtered out by the caller's tenant cut).
-var ErrNotFound = errors.New("entitygraph: not found")
+// ErrNotFound is the canonical not-found sentinel for this provider,
+// re-exported from interfaces so callers using either package can use
+// errors.Is against the same value (ADR-022 §7).
+var ErrNotFound = interfaces.ErrNotFound
 
 // SQLiteEntityGraphProvider is the SQLite-backed EntityGraphProvider.
 // It is safe for concurrent use: all writes go through short transactions and

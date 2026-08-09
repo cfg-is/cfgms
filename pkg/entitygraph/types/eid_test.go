@@ -3,6 +3,7 @@
 package types_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -96,6 +97,64 @@ func TestNewEID_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "host:a1b2/file:/etc/hosts", eid3.String())
 	assert.True(t, eid3.HasLocalID())
+}
+
+// TestEID_JSONRoundTrip guards against EID losing its identity across JSON
+// encoding. EID's fields are unexported (authorityType/authorityName/localID);
+// without MarshalJSON/UnmarshalJSON, encoding/json serializes it as "{}" and
+// every REST response field of type EID (Entity.EID, Edge.From/To,
+// Neighborhood.Root, StateDiff.Subject, DriftState.EID, ...) would silently
+// discard the entity identifier.
+func TestEID_JSONRoundTrip(t *testing.T) {
+	cases := []string{
+		"host:a1b2c3",
+		"host:a1b2c3/service:sshd",
+		"host:a1b2/file:/etc/hosts",
+		"cluster:hv-east-guid",
+		"directory:inst-42/user:alice",
+	}
+
+	for _, input := range cases {
+		t.Run(input, func(t *testing.T) {
+			eid, err := types.ParseEID(input)
+			require.NoError(t, err)
+
+			b, err := json.Marshal(eid)
+			require.NoError(t, err)
+			assert.JSONEq(t, `"`+input+`"`, string(b), "EID must marshal to its canonical string form, not an opaque object")
+
+			var decoded types.EID
+			require.NoError(t, json.Unmarshal(b, &decoded))
+			assert.Equal(t, eid, decoded)
+			assert.Equal(t, input, decoded.String())
+		})
+	}
+}
+
+// TestEID_JSONRoundTrip_Embedded proves the struct-field case that the REST
+// handlers actually rely on: an EID nested inside another struct must survive
+// a JSON encode/decode cycle, not collapse to an empty object.
+func TestEID_JSONRoundTrip_Embedded(t *testing.T) {
+	type wrapper struct {
+		Subject types.EID
+	}
+
+	eid, err := types.ParseEID("host:CFG-70-02")
+	require.NoError(t, err)
+
+	b, err := json.Marshal(wrapper{Subject: eid})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"Subject":"host:CFG-70-02"}`, string(b))
+
+	var decoded wrapper
+	require.NoError(t, json.Unmarshal(b, &decoded))
+	assert.Equal(t, "host:CFG-70-02", decoded.Subject.String())
+}
+
+func TestEID_JSONUnmarshal_RejectsMalformed(t *testing.T) {
+	var eid types.EID
+	err := json.Unmarshal([]byte(`"bogus:a1b2c3"`), &eid)
+	assert.Error(t, err, "unmarshaling an unregistered authority type must fail, not silently zero out")
 }
 
 func TestParseEID_RejectMalformed(t *testing.T) {

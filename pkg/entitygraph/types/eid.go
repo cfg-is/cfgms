@@ -4,6 +4,7 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -121,3 +122,24 @@ func (e EID) String() string {
 
 // IsZero reports whether the EID is the zero value (not yet set).
 func (e EID) IsZero() bool { return e.authorityType == "" }
+
+// MarshalJSON encodes the EID as its canonical string form. Without this,
+// encoding/json would serialize EID's unexported fields as "{}", silently
+// discarding the entity identifier from every REST response.
+func (e EID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(e.String())
+}
+
+// UnmarshalJSON parses the EID from its canonical string form (see ParseEID).
+func (e *EID) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	parsed, err := ParseEID(s)
+	if err != nil {
+		return err
+	}
+	*e = parsed
+	return nil
+}
