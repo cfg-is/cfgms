@@ -247,6 +247,19 @@ func (p *DatabaseProvider) CreateAssurancePolicyStore(config map[string]interfac
 	return store, nil
 }
 
+// CreateTenantCrossingStore creates a PostgreSQL-backed TenantCrossingStore (ADR-025 Decision 2).
+func (p *DatabaseProvider) CreateTenantCrossingStore(config map[string]interface{}) (business.TenantCrossingStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseTenantCrossingStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database tenant crossing store: %w", err)
+	}
+	return store, nil
+}
+
 // CreatePendingRefreshStore creates a PostgreSQL-backed PendingRefreshStore (Issue #2329).
 func (p *DatabaseProvider) CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error) {
 	dsn, err := p.getDSN(config)

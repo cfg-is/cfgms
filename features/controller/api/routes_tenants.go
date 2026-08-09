@@ -25,6 +25,14 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
+	// Tenant-crossing grant and break-glass endpoints (ADR-025 Decision 2, Issue #3125).
+	tenants.Handle("/{id}/access-grants",
+		s.requirePermission("tenant", "crossing-grant")(http.HandlerFunc(s.handleCreateTenantCrossingGrant))).Methods("POST")
+	tenants.Handle("/{id}/access-grants",
+		s.requirePermission("tenant", "crossing-list")(http.HandlerFunc(s.handleListTenantCrossings))).Methods("GET")
+	tenants.Handle("/{id}/break-glass",
+		s.requirePermission("tenant", "crossing-break-glass")(http.HandlerFunc(s.handleTenantBreakGlass))).Methods("POST")
+
 	// Per-tenant refresh policy endpoints (Issue #2097).
 	// {tenant_path:.+} allows '/' in the path variable for hierarchical tenant IDs.
 	tenants.Handle("/{tenant_path:.+}/refresh-policy",

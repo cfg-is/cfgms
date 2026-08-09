@@ -32,6 +32,9 @@ type stubManager struct{}
 func (s *stubManager) Issue(_ context.Context, _, _, _ string) (*session.Session, string, error) {
 	return nil, "", nil
 }
+func (s *stubManager) IssueRootScoped(_ context.Context, _, _ string) (*session.Session, string, error) {
+	return nil, "", nil
+}
 func (s *stubManager) Validate(_ context.Context, _ string) (*session.Session, error) {
 	return nil, nil
 }
@@ -309,10 +312,13 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 	})
 
 	// ContinuityFieldsRoundTrip verifies that all four device-continuity fields
-	// (Assurance, CredentialID, BoundIP, LastProvenAt) survive a Set → Get round-trip
-	// with non-zero / non-nil values. This exercises the nullable-column deserialization
-	// branches in SQLite and Postgres stores that are never reached by makeTestSession
-	// (which always leaves these fields at their zero defaults).
+	// (Assurance, CredentialID, BoundIP, LastProvenAt) plus the ADR-025 Amendment 1
+	// A1.3 RootScoped marker survive a Set → Get round-trip with non-zero / non-nil
+	// values. This exercises the nullable-column deserialization branches in SQLite and
+	// Postgres stores that are never reached by makeTestSession (which always leaves
+	// these fields at their zero defaults). RootScoped is security-relevant: a session
+	// that loses the marker on reload is silently promoted from a boundary-checked
+	// root-scoped operator to an unrestricted unscoped superadmin.
 	t.Run("ContinuityFieldsRoundTrip", func(t *testing.T) {
 		tok, err := session.GenerateToken()
 		if err != nil {
@@ -334,6 +340,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 			CredentialID:      credID,
 			BoundIP:           "198.51.100.42",
 			LastProvenAt:      now,
+			RootScoped:        true,
 		}
 
 		if err := store.Set(ctx, hash, sess); err != nil {
@@ -351,6 +358,9 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		}
 		if got.LastProvenAt.IsZero() {
 			t.Error("LastProvenAt: got zero, want non-zero")
+		}
+		if !got.RootScoped {
+			t.Error("RootScoped: got false, want true — the ADR-025 A1.3 marker must survive Set → Get")
 		}
 		if !got.LastProvenAt.Equal(now) {
 			t.Errorf("LastProvenAt: got %v, want %v", got.LastProvenAt, now)
@@ -391,6 +401,28 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		}
 		if len(found.CredentialID) != len(credID) {
 			t.Errorf("ListAll CredentialID length: got %d, want %d", len(found.CredentialID), len(credID))
+		}
+		if !found.RootScoped {
+			t.Error("ListAll RootScoped: got false, want true")
+		}
+
+		// A session that was never root-scoped must come back false from both read
+		// paths — the marker is never inferred, and never leaks across rows.
+		ordinaryTok, err := session.GenerateToken()
+		if err != nil {
+			t.Fatalf("GenerateToken: %v", err)
+		}
+		ordinaryHash := session.HashToken(ordinaryTok)
+		ordinary := makeTestSession("sc-not-root-scoped", cfg)
+		if err := store.Set(ctx, ordinaryHash, ordinary); err != nil {
+			t.Fatalf("Set (ordinary): %v", err)
+		}
+		gotOrdinary, err := store.Get(ctx, ordinaryHash)
+		if err != nil {
+			t.Fatalf("Get (ordinary): %v", err)
+		}
+		if gotOrdinary.RootScoped {
+			t.Error("RootScoped: got true for a session issued without the marker, want false")
 		}
 	})
 }

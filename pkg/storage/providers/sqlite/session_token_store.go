@@ -53,8 +53,8 @@ func (s *SQLiteSessionTokenStore) Set(ctx context.Context, tokenHash string, ses
 		INSERT INTO session_token_records
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
 			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+			 assurance, bound_ip, last_proven_at, credential_id, root_scoped)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = excluded.session_id,
 			principal_id        = excluded.principal_id,
@@ -66,7 +66,8 @@ func (s *SQLiteSessionTokenStore) Set(ctx context.Context, tokenHash string, ses
 			assurance           = excluded.assurance,
 			bound_ip            = excluded.bound_ip,
 			last_proven_at      = excluded.last_proven_at,
-			credential_id       = excluded.credential_id`,
+			credential_id       = excluded.credential_id,
+			root_scoped         = excluded.root_scoped`,
 		tokenHash,
 		sess.ID,
 		sess.PrincipalID,
@@ -79,6 +80,7 @@ func (s *SQLiteSessionTokenStore) Set(ctx context.Context, tokenHash string, ses
 		sess.BoundIP,
 		lastProvenAt,
 		sess.CredentialID,
+		sess.RootScoped,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: session token set failed: %w", err)
@@ -99,14 +101,14 @@ func (s *SQLiteSessionTokenStore) Get(ctx context.Context, tokenHash string) (*s
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id
+		       assurance, bound_ip, last_proven_at, credential_id, root_scoped
 		FROM session_token_records
 		WHERE token_hash = ?
 		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)`, tokenHash, now,
 	).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&issuedAt, &lastActivity, &absoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -152,7 +154,7 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT token_hash, session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id
+		       assurance, bound_ip, last_proven_at, credential_id, root_scoped
 		FROM session_token_records
 		WHERE hash_expires_at IS NULL OR hash_expires_at > ?
 		ORDER BY rowid`, now)
@@ -173,7 +175,7 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 		if err := rows.Scan(
 			&tokenHash, &sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 			&issuedAt, &lastActivity, &absoluteExpiresAt,
-			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID,
+			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: session token list scan failed: %w", err)
 		}

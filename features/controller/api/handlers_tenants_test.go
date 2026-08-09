@@ -211,6 +211,71 @@ func TestHandleSuspendTenant_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+// TestHandleSuspendTenant_ScopeGuard pins handleSuspendTenant's own scope guard, called
+// directly so the result is attributable to the handler rather than to requirePermission's
+// boundary check (which TestRootScopedPrincipal_BlockedOnEveryTenantRoute covers). Suspend
+// is a denial of service against everything inside the target tenant, so it must refuse a
+// caller outside its subtree even on a call path that skips the middleware.
+func TestHandleSuspendTenant_ScopeGuard(t *testing.T) {
+	suspendAs := func(t *testing.T, server *Server, principal *Principal, targetID string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/"+targetID+"/suspend", nil)
+		req = mux.SetURLVars(req, map[string]string{"id": targetID})
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, principal.TenantID)
+		ctx = context.WithValue(ctx, principalContextKey, principal)
+		rec := httptest.NewRecorder()
+		server.handleSuspendTenant(rec, req.WithContext(ctx))
+		return rec
+	}
+
+	t.Run("cross-tenant caller gets 404 and the tenant stays active", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-victim"})
+		require.NoError(t, err)
+
+		rec := suspendAs(t, server, &Principal{ID: "other-admin", TenantID: "suspend-other"}, "suspend-victim")
+		require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "suspend-victim")
+		require.NoError(t, err)
+		assert.NotEqual(t, business.TenantStatusSuspended, td.Status,
+			"a refused cross-tenant suspend must not change the target's status")
+	})
+
+	t.Run("root-scoped caller without a crossing gets a challenge", func(t *testing.T) {
+		server := setupCrossingTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+		require.NoError(t, err)
+
+		rec := suspendAs(t, server, rootScopedPrincipal("root-operator-1"), "msp-a")
+		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+
+		td, err := server.tenantManager.GetTenant(ctx, "msp-a")
+		require.NoError(t, err)
+		assert.NotEqual(t, business.TenantStatusSuspended, td.Status,
+			"a challenged suspend must not change the target's status")
+	})
+
+	t.Run("own tenant is still suspendable", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-self"})
+		require.NoError(t, err)
+
+		rec := suspendAs(t, server, &Principal{ID: "self-admin", TenantID: "suspend-self"}, "suspend-self")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "suspend-self")
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusSuspended, td.Status)
+	})
+}
+
 func TestHandleSuspendTenant_MissingPermission(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{"tenant:read"})
@@ -363,6 +428,41 @@ func TestHandleGetTenant_SiblingPrefix_Returns404(t *testing.T) {
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetTenant_ScopedCaller_SeesOwnDescendant is a regression test for the
+// same defect TestHandleListTenants_ScopedCaller_SeesOwnDescendant covers for List:
+// handleGetTenant used to call the prefix-based isWithinTenantScope instead of
+// isCallerAuthorizedForTenant, so an MSP admin scoped to "msp-a" could not GET its own
+// child tenant "client-1" (ParentID: "msp-a") — real tenant hierarchy is carried by
+// ParentID, not tenant-ID string concatenation. Found in PR #3215 acceptance review
+// round 2 (Medium).
+func TestHandleGetTenant_ScopedCaller_SeesOwnDescendant(t *testing.T) {
+	server := setupTestServer(t)
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "get-desc-msp-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ID:       "get-desc-client-1",
+		ParentID: "get-desc-msp-a",
+	})
+	require.NoError(t, err)
+
+	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:read"}, "get-desc-msp-a", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/get-desc-client-1", nil)
+	req.Header.Set("X-API-Key", callerKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"caller must see its real child tenant via ParentID ancestry, not tenant-ID prefix matching")
+	var resp APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "get-desc-client-1", data["id"])
 }
 
 // --- handleListTenants tests ---
@@ -690,7 +790,12 @@ func putTenantAsScopedCaller(t *testing.T, server *Server, callerTenant, targetI
 	req.Header.Set("Content-Type", "application/json")
 	// Inject mux path variables (not populated when calling the handler directly).
 	req = mux.SetURLVars(req, map[string]string{"id": targetID})
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, callerTenant))
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, callerTenant)
+	// Direct handler calls bypass authenticationMiddleware, which normally sets both
+	// context values together — authorizeTenantAccess reads TenantID/RootScoped off the
+	// Principal, so it must be present here too, not just ctxkeys.TenantID.
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{TenantID: callerTenant})
+	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
 	server.handleUpdateTenant(rec, req)

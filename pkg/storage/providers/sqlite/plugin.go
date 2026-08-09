@@ -510,7 +510,18 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		PendingRefresh:      &SQLitePendingRefreshStore{db: db},
 		RefreshPolicy:       &SQLiteRefreshPolicyStore{db: db},
 		AssurancePolicy:     &SQLiteAssurancePolicyStore{db: db},
+		TenantCrossing:      &SQLiteTenantCrossingStore{db: db},
 	}, nil
+}
+
+// CreateTenantCrossingStore returns a SQLite-backed TenantCrossingStore
+// (ADR-025 Decision 2). Implements interfaces.TenantCrossingStoreCreator.
+func (p *SQLiteProvider) CreateTenantCrossingStore(config map[string]interface{}) (business.TenantCrossingStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteTenantCrossingStore{db: db}, nil
 }
 
 // init auto-registers the SQLite provider so it is available after a blank import.

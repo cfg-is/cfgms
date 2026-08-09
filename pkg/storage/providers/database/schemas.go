@@ -886,6 +886,36 @@ func (s DatabaseSchemas) CreateAssurancePolicyOverridesTable(ctx context.Context
 	return nil
 }
 
+// CreateTenantCrossingsTable creates the tenant_crossings table (ADR-025 Decision 2:
+// client-granted support access and tenant-crossing break-glass elevation).
+func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS tenant_crossings (
+			id             TEXT PRIMARY KEY,
+			tenant_id      TEXT NOT NULL,
+			principal_id   TEXT NOT NULL,
+			kind           TEXT NOT NULL,
+			granted_by     TEXT NOT NULL,
+			justification  TEXT NOT NULL DEFAULT '',
+			created_at     TIMESTAMPTZ NOT NULL,
+			expires_at     TIMESTAMPTZ NOT NULL,
+			revoked_at     TIMESTAMPTZ
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create tenant_crossings table: %w", err)
+	}
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_tenant_crossings_tenant_id ON tenant_crossings(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_tenant_crossings_active_lookup ON tenant_crossings(principal_id, tenant_id, expires_at, revoked_at);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create tenant_crossings index: %w", err)
+		}
+	}
+	return nil
+}
+
 // CreateRefreshPoliciesTable creates the refresh_policies table (Issue #2329).
 func (s DatabaseSchemas) CreateRefreshPoliciesTable(ctx context.Context, db *sql.DB) error {
 	ddl := `
@@ -1164,7 +1194,8 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 			assurance           INTEGER NOT NULL DEFAULT 1,
 			bound_ip            TEXT    NOT NULL DEFAULT '',
 			last_proven_at      TIMESTAMP WITH TIME ZONE,
-			credential_id       BYTEA
+			credential_id       BYTEA,
+			root_scoped         BOOLEAN NOT NULL DEFAULT FALSE
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create session_token_store table: %w", err)
@@ -1214,6 +1245,7 @@ func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS bound_ip       TEXT    NOT NULL DEFAULT ''`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS last_proven_at TIMESTAMP WITH TIME ZONE`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS credential_id  BYTEA`,
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS root_scoped    BOOLEAN NOT NULL DEFAULT FALSE`,
 	}
 	for _, stmt := range alters {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {

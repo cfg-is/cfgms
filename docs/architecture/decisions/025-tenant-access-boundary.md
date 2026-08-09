@@ -7,6 +7,9 @@
 **Amended:** 2026-08-01 — [Amendment 1](#amendment-1-2026-08-01--boundary-check-must-use-ancestry-lookup-not-path-prefix-matching):
 Decision 1's boundary mechanism (`strings.HasPrefix` on tenant IDs) cannot work — tenant IDs
 are not paths — and is replaced with an `IsTenantAncestor`-based check.
+**Amended:** 2026-08-09 — [Amendment 2](#amendment-2-2026-08-09--a13-resolved-approach-a-decision-123-implemented):
+A1.3 resolved (explicit root-scope marker, never inferred from an empty tenant); Decisions
+1-3 implemented (`authorizeTenantAccess`, `TenantCrossingStore`, step-up challenge).
 
 **Deciders:** Founder, Architecture
 
@@ -342,3 +345,229 @@ resolve before Decision 1 can be considered actually enforced** — added as Rem
 5. **How to identify a `root`-scoped caller distinctly from an unscoped superadmin (A1.3)**
    — genuinely open; the implementing story must propose an approach for founder sign-off
    rather than assume one.
+
+---
+
+## Amendment 2 (2026-08-09) — A1.3 resolved (approach (a)); Decision 1/2/3 implemented
+
+Founder sign-off on A1.3, 2026-08-08, recorded on #3125/#3228 (#3228 folded into #3125
+and closed as not planned once the deadlock — each story blocked on the other's output —
+was recognized). This amendment records the decision and what #3125 built against it.
+
+### A2.1 — A1.3 decision: approach (a), an explicit marker, never inferred from an empty tenant
+
+Approach (b) (Amendment 1's alternative — treating `callerTenant == ""` as `root`-scoped)
+is **rejected**. A root-scoped SaaS-operator principal is identified by an **explicit
+marker set only at issuance**, distinct from — and never derived from — `TenantID` being
+empty or `GlobalScope` being true.
+
+**Precedent this extends, not invents.** Half of approach (a) already shipped under Issue
+\#2919: `RootScope bool` on web accounts (`handlers_web_accounts.go:57-68`), stated
+outright as "must be set explicitly at creation — an empty TenantID alone never grants
+root scope (defense-in-depth)," enforced mutually-exclusive with `tenant_id`
+(`handlers_web_accounts.go:317`), and consumed at session-build time
+(`middleware.go:418-428` computes `globalScope = acct.RootScope`, not from tenant
+emptiness). This amendment finishes that pattern on the two human auth paths that never
+got it:
+
+- **mTLS admin certs.** `Principal.RootScoped bool` (`middleware.go:81-99`) is read from a
+  new certificate extension, `cert.RootScopeMarkerOID` = `1.3.6.1.4.1.99999.1.2`
+  (`pkg/cert/root_scope_marker.go`), sibling to `AdminMarkerOID` (`.1.1`,
+  `pkg/cert/admin_marker.go`). `extractAdminPrincipal` sets
+  `RootScoped: cert.HasRootScopeMarker(peerCert)` (`middleware.go`, immediately after the
+  existing unconditional `TenantID: ""` assignment) — `TenantID` itself is untouched,
+  matching A1.3's own framing that both an unscoped superadmin and a root-scoped operator
+  present `TenantID == ""` and are disambiguated by the new signal alone. No production
+  issuance path sets the marker yet (`cert.SetRootScopeMarker` exists, following
+  `SetAdminMarker`'s restricted-caller convention, but has no allow-listed caller in this
+  story) — every admin cert issued to date, and every one issued by today's Story
+  B/D flows, is unaffected and continues to present as an unscoped superadmin.
+- **cfg-CLI Bearer sessions.** `session.Session.RootScoped bool`
+  (`pkg/session/contract.go`) is set only by a new `Manager.IssueRootScoped(ctx,
+  principalID, connectionName)` method (`pkg/session/manager.go`) — a sibling to `Issue`,
+  not a parameter added to it (`Issue`'s 4-arg signature has 47 call sites across the
+  repo; changing it was rejected as unnecessary blast radius). `IssueRootScoped` always
+  issues with `TenantID: ""`, exactly like `Issue`, and there is deliberately no method to
+  flip `RootScoped` on an already-issued session — only fresh issuance by a caller that
+  has independently verified the principal is a legitimate root-scoped operator may set
+  it. Persisted through both durable session-token stores (`root_scoped` column,
+  `pkg/storage/providers/sqlite/schema.go` and `.../database/schemas.go`, both
+  back-filled for pre-existing installations) so the marker survives `Validate`/`Renew`
+  round-trips, not just the initial `Issue` response. No production call site invokes
+  `IssueRootScoped` yet, for the same reason as the cert path above.
+
+### A2.2 — Why not (b): the measured blast radius that ruled it out
+
+On the `develop` tip this amendment was written against, an empty `callerTenant` is
+load-bearing at **31 explicit branches across 14 files** in `features/controller/api/` —
+4 written as `callerTenant == ""`, 27 as the inverse guard `if callerTenant != ""
+{ …scope… }` — plus `isWithinTenantScope` (`middleware.go:255-261`), whose own first line
+is `if callerTenant == "" { return true }`, reached from 14 further call sites. Treating
+that condition as "scoped to `root`" (approach (b)) would have changed what every one of
+those branches means, including the CFG-70-02 admin-read behaviour A1.3 itself cites
+(`middleware.go`'s comment on `extractAdminPrincipal`: hardcoding a fallback tenant once
+made `handleListStewards` return zero records for an admin on a deployment with
+non-default tenants). Approach (a) touches none of those 31 branches or
+`isWithinTenantScope`'s empty-caller return — confirmed by the full `features/controller/api`
+test suite passing unchanged.
+
+**`GlobalScope` is not the A1.3 marker either**, for two reasons recorded here so the
+distinction doesn't get re-collapsed later: (1) post-Issue #3194 (PR #3240), the bearer
+path computes `globalScope := sess.TenantID == ""` — deriving cross-tenant visibility
+*from tenant emptiness*, the exact ambiguity A1.3 exists to resolve; a principal that is
+`GlobalScope=true` under that rule is merely "unscoped," not "scoped to `root`." (2) Only
+one path still hardcodes `GlobalScope: true` unconditionally post-#3240:
+`extractAdminPrincipal` (`middleware.go`). `RootScoped` and `GlobalScope` are set from
+independent signals on every principal type and neither is derived from the other.
+
+### A2.3 — Decision 1 implemented: `authorizeTenantAccess`
+
+`features/controller/api/handlers_tenants.go` replaces the story's original
+`isCallerAuthorizedForTenant` (Amendment 1 A1.2's ancestry-only check) with
+`authorizeTenantAccess(ctx, principal, resourceTenant) tenantAuthDecision`:
+
+- An unscoped, non-`RootScoped` principal (`TenantID == ""`, today's only shape) keeps
+  unrestricted access — byte-identical to pre-Amendment-2 behavior, verified by
+  `TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess`.
+- A tenant-scoped principal keeps the A1.2 ancestry check (`IsTenantAncestor`), unchanged.
+- A `RootScoped` principal is confined to the literal tenant ID `"root"`
+  (`rootTenantID` constant) plus any descendant it holds an active crossing for
+  (Decision 2, A2.4 below); a strict descendant of `"root"` without one denies with
+  `tenantAuthNeedsCrossing`, not a silent `tenantAuthDenied` — see A2.5.
+- A tenant genuinely outside `"root"`'s own subtree (a second top-level tenant, in a
+  multi-root deployment) is an ordinary out-of-scope `tenantAuthDenied` (404) for a
+  `RootScoped` caller — there is no crossing that could remedy access to a subtree that
+  was never `root`'s to begin with.
+
+Covered by `TestAuthorizeRootScopedCaller_DeniedRealDescendantWithoutCrossing` (the
+REQUIRED TEST), `_AllowedWithActiveGrant`, `_RootItselfAlwaysAllowed`, and
+`_UnrelatedTopLevelTenant_Returns404NotChallenge` (`handlers_tenant_crossing_test.go`).
+
+**Enforcement point: `requirePermission`, not the individual handlers.** A `RootScoped`
+principal presents `GlobalScope == true` and `TenantID == ""`, so the pre-existing
+tenant-isolation block in `requirePermission` (`if !principal.GlobalScope &&
+principal.TenantID != ""`) is structurally unreachable for it. Calling
+`authorizeTenantAccess` only from the handlers that happen to have a scope guard would
+therefore leave the boundary open on every other tenant-targeting route — `tenant:manage`'s
+suspend and config-source/test, and the per-tenant refresh-policy and assurance-policy
+endpoints — where a root-scoped operator could suspend an MSP tenant or drive a
+config-source test against that tenant's git credential with no crossing and no
+break-glass record. `requirePermission` therefore applies the Decision 1 check for every
+`RootScoped` principal on any request that names a tenant, resolving the target through
+`extractBoundaryTenantFromRequest` (the isolation-engine extractor plus the `tenant_path`
+variable those two policy routes use). Two permissions are exempt, listed in
+`tenantCrossingRemedyPermissions`: `tenant:crossing-break-glass` (the remedy itself —
+gating it on holding a crossing would make the boundary unopenable) and
+`tenant:crossing-grant` (whose handler refuses root-scoped callers outright, a stricter
+answer than a challenge).
+
+`tenantBoundaryRouteTable` (`middleware_tenant_boundary_test.go`) is asserted against a
+`mux` route walk, so a newly added tenant-targeting route fails the test suite until it is
+listed and thereby covered by the boundary assertions —
+`TestRootScopedPrincipal_BlockedOnEveryTenantRoute`,
+`_RemedyRoutesNotPreEmpted`, `_AllowedOnEveryTenantRouteWithActiveCrossing`,
+`_RootTenantItselfAlwaysAllowed`, and `TestUnscopedAdmin_UnaffectedOnEveryTenantRoute`.
+`handleSuspendTenant` additionally keeps its own `authorizeTenantAccess` guard: suspension
+is a denial of service against everything inside the target tenant, so it carries the same
+handler-level second line of defence as `handleUpdateTenant`.
+
+### A2.4 — Decision 2 implemented: `TenantCrossingStore`
+
+A single storage contract backs both crossing kinds — they are the same shape (a
+time-boxed, revocable, auditable authorization record for one principal on one tenant
+subtree), differing only in `Kind`, `GrantedBy`, and justification requirements, which
+the calling handler enforces:
+
+- `pkg/storage/interfaces/business/tenant_crossing_store.go` — the `TenantCrossingStore`
+  interface, `TenantCrossing` record, and `TenantCrossingKindGrant` /
+  `TenantCrossingKindBreakGlass` constants. Following the Central Provider System's
+  pluggable-by-default rule (CLAUDE.md), it is wired as an **optional** `StorageProvider`
+  extension (`TenantCrossingStoreCreator`, `pkg/storage/interfaces/provider.go`) —
+  the same pattern `AssuranceStoreCreator` (Issue #2845) already established — rather
+  than a mandatory method every provider must implement.
+- Implemented for both business-store backends: SQLite
+  (`pkg/storage/providers/sqlite/tenant_crossing_store.go`, `tenant_crossings` table) and
+  PostgreSQL (`pkg/storage/providers/database/tenant_crossing_store.go`,
+  same table name). A shared contract test
+  (`business.TenantCrossingStoreContract`, `pkg/storage/interfaces/business/contract.go`)
+  exercises both.
+- **(a) Client-granted access** — `POST /api/v1/tenants/{id}/access-grants`
+  (`tenant:crossing-grant`, `AssuranceStrong`), callable only by a caller already
+  authorized for `{id}` under `authorizeTenantAccess` above — an MSP admin can grant
+  access into a tenant it already controls, never an arbitrary one. No justification
+  required (client opt-in). Time-boxed by caller-supplied `duration_minutes`, capped at
+  `maxTenantCrossingGrantDuration` (24h, an implementation default — Remaining Tunable 3
+  stays open on whether this should be founder-fixed).
+- **(b) Break-glass** — `POST /api/v1/tenants/{id}/break-glass`
+  (`tenant:crossing-break-glass`, `AssuranceStrong`), callable only by a `RootScoped`
+  principal, mandatory `X-Justification` header (10-1000 chars, mirroring
+  `features/rbac.ValidateSensitiveOperation`'s M-AUTH-2 convention without reusing that
+  helper's RBAC-CRUD-scoped `SensitiveOperationType` enum). Fixed 30-minute window
+  (`tenantCrossingBreakGlassDuration`), deliberately shorter than
+  `emergency.break-glass`'s 4h system-resource window because this elevation reaches a
+  specific MSP's own configuration and data, not shared platform infrastructure. **Dual
+  approval is not implemented** — Remaining Tunable 1 stays open; self-invocation with
+  justification and full audit is what shipped.
+- A parallel, declarative RBAC permission and template —
+  `tenant.crossing-break-glass` (`features/rbac/defaults.go`,
+  `features/rbac/templates.go`) — models the capability for role-assignment purposes in
+  the richer RBAC engine, explicitly not a reuse of `emergency.break-glass`. This is
+  documentation/role-modeling surface; it does not itself gate the REST endpoints above,
+  which enforce via the flat `knownPermissions`/`permissionAssurance` registries
+  (`features/controller/api/permissions.go`, `assurance.go`) like every other endpoint in
+  this package.
+- Both kinds audit via `pkg/audit` (`recordTenantCrossingAudit`,
+  `handlers_tenant_crossing.go`), tenant-scoped to the affected MSP so the existing
+  `GET /api/v1/audit/entries` endpoint — which always scopes to the caller's own context
+  tenant — surfaces crossing activity to that MSP without a bespoke activity-view
+  endpoint. `GET /api/v1/tenants/{id}/access-grants` (`tenant:crossing-list`) additionally
+  lists the raw crossing records (active, expired, and revoked) for a tenant.
+
+### A2.5 — Decision 3 implemented: step-up-shaped challenge, not a bare 403/404
+
+`writeTenantCrossingChallenge` (`handlers_tenants.go`) responds to a `RootScoped` caller
+denied solely for lacking an active crossing with `401` + `WWW-Authenticate: CFGMS-StepUp
+realm="cfgms", required="tenant-crossing"` + a JSON body naming the break-glass endpoint
+— the same envelope shape ADR-021 Decision 6 defines for assurance step-up
+(`middleware.go:715-727`), reusing its pattern without touching the `AssuranceLevel` enum
+itself ("tenant-crossing" is not a session assurance level). This is deliberately
+**not** issued from `handleListTenants`: a bulk list silently omits tenants the caller
+lacks a crossing for (matching how any other out-of-scope item is already omitted),
+because a list response has no single resource to attach a per-item challenge to.
+
+### Consequences of this amendment
+
+- ADR-025 Decision 1 is now enforced in practice, not merely mechanically correct against
+  a caller type that never occurs — the gap Amendment 1 A1.3 identified ("no principal in
+  the system currently presents as `root`-scoped... the boundary has nothing to trigger
+  on") is closed by the explicit marker, even though no production issuance path sets it
+  yet in this story.
+- Every existing `callerTenant == ""` caller (all of them, on `develop` as of this
+  amendment) is `RootScoped == false` by construction and is therefore completely
+  unaffected — the regression this amendment had to avoid.
+- Remaining Tunables 1 (dual-approval default) and 3 (grant-expiry default/fixed-vs-open)
+  are still open; this story picked concrete, narrower-than-required implementation
+  defaults (no dual approval; 24h grant cap, 30m break-glass window) rather than resolving
+  them as founder-fixed policy. A future story should either ratify these defaults
+  explicitly or revisit them.
+- Tunable 2 (exact permission names) is resolved by this implementation:
+  `tenant:crossing-grant`, `tenant:crossing-list`, `tenant:crossing-break-glass` (flat
+  registry) and `tenant.crossing-break-glass` (RBAC template), following each
+  subsystem's own existing naming convention.
+- Tunable 4 (carve-out allowlist's precise audit-event-type enum) is **not** addressed by
+  this amendment — Decision 4's logging/metrics carve-out has no implementation in this
+  story; it remains fully open.
+
+### New Remaining Tunables (added by this amendment)
+
+6. **Whether the 24h client-grant cap and 30-minute break-glass window should be
+   founder-fixed policy** (Tunable 3, narrowed) rather than implementation defaults set by
+   this story.
+7. **Whether tenant-crossing break-glass should require a fresh presence proof**
+   (`RequireUserPresence`, ADR-021 Decision 4's shape) in addition to `AssuranceStrong` —
+   not added in this story because it is unconfirmed whether every principal type able to
+   reach `RootScoped` status (mTLS admin, cfg-CLI bearer) has a path to a WebAuthn
+   presence ceremony at all; adding the requirement without confirming that could make the
+   endpoint unusable for its intended callers.
+8. **Decision 4's logging/metrics carve-out remains entirely unimplemented** (Tunable 4)
+   — no code in this story touches it.

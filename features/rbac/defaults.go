@@ -236,6 +236,20 @@ var DefaultPermissions = []*common.Permission{
 		Actions:      []string{"emergency.access"},
 	},
 
+	// ADR-025 Decision 2(b): tenant.crossing-break-glass authorises a root-scoped
+	// SaaS-operator principal (Amendment 1 A1.3) to cross the root<->MSP boundary
+	// (Decision 1) into a specific MSP tenant it does not otherwise have access to.
+	// Deliberately a separate permission from emergency.break-glass above — that one
+	// is scoped to system resources only and must never be extended to reach a
+	// tenant's own configuration or data.
+	{
+		Id:           "tenant.crossing-break-glass",
+		Name:         "Tenant-Crossing Break-Glass Access",
+		Description:  "Authorises a justified, time-boxed break-glass elevation across the ADR-025 root<->MSP tenant boundary. Must never be granted to non-emergency roles.",
+		ResourceType: "tenant",
+		Actions:      []string{"crossing.break-glass"},
+	},
+
 	// Rollback Permissions
 	{
 		Id:           "rollback.emergency",
