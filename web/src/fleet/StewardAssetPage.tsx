@@ -24,6 +24,7 @@ import DnaDrawer from './DnaDrawer.tsx'
 import LiveActivityTab from './LiveActivityTab.tsx'
 import LogsPanel from './LogsPanel.tsx'
 import ModulesPanel from './ModulesPanel.tsx'
+import ShellTab from './ShellTab.tsx'
 
 type TabKey = 'dna' | 'config' | 'shell' | 'logs' | 'modules' | 'live'
 
@@ -39,10 +40,15 @@ function LiveActivityPanel() {
   return <LiveActivityTab stewardId={stewardId} />
 }
 
+function ShellPanel() {
+  const { id: stewardId = '' } = useParams<{ id: string }>()
+  return <ShellTab stewardId={stewardId} />
+}
+
 export const TABS: readonly TabSpec[] = [
   { key: 'dna', label: 'DNA', soon: false, Panel: DnaDrawer },
   { key: 'config', label: 'Config', soon: true },
-  { key: 'shell', label: 'Shell', soon: true },
+  { key: 'shell', label: 'Shell', soon: false, Panel: ShellPanel },
   { key: 'logs', label: 'Logs', soon: false, Panel: LogsPanel },
   { key: 'modules', label: 'Modules', soon: false, Panel: ModulesPanel },
   { key: 'live', label: 'Live Activity', soon: false, Panel: LiveActivityPanel },

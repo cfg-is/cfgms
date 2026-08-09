@@ -2,40 +2,74 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * StewardAssetPage suite (Story #2723 + #2766): tab switching, inert-placeholder
- * rendering for Config/Shell, DNA-tab content parity with the pre-router
- * DnaDrawer behavior, and live tab mounts LiveActivityTab (Story #2766).
+ * StewardAssetPage suite (Story #2723 + #2766 + #2762): tab switching,
+ * inert-placeholder rendering for Config, DNA-tab content parity with the
+ * pre-router DnaDrawer behavior, live tab mounts LiveActivityTab (#2766),
+ * and shell tab mounts ShellTab (#2762).
  *
  * The component reads :id from the route param; tests use MemoryRouter to
  * provide the steward ID without a real browser.
  *
- * WebSocket is stubbed so the LiveActivityTab panel does not attempt real
- * network connections when the live tab is activated in tests.
+ * WebSocket is stubbed so LiveActivityTab and ShellTab do not attempt real
+ * network connections when their tabs are activated. xterm/addon-fit are
+ * mocked so ShellTab renders without a canvas/layout engine in jsdom.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import StewardAssetPage, { PanelContent, TABS } from './StewardAssetPage.tsx'
 
+// Mock xterm modules so ShellTab renders cleanly in jsdom (no canvas needed).
+vi.mock('@xterm/xterm', () => {
+  function Terminal(this: Record<string, unknown>) {
+    this.open = vi.fn()
+    this.write = vi.fn()
+    this.clear = vi.fn()
+    this.dispose = vi.fn()
+    this.getSelection = vi.fn().mockReturnValue('')
+    this.loadAddon = vi.fn()
+    this.onData = vi.fn().mockReturnValue({ dispose: vi.fn() })
+    this.onResize = vi.fn().mockReturnValue({ dispose: vi.fn() })
+    this.cols = 80
+    this.rows = 24
+  }
+  return { Terminal }
+})
+vi.mock('@xterm/addon-fit', () => {
+  function FitAddon(this: Record<string, unknown>) {
+    this.fit = vi.fn()
+    this.dispose = vi.fn()
+  }
+  return { FitAddon }
+})
+
 const fetchMock = vi.fn<typeof fetch>()
 
-// Minimal WebSocket stub — keeps LiveActivityPanel from throwing when the
-// live tab mounts during StewardAssetPage tests.
+// Minimal WebSocket stub — keeps LiveActivityPanel and ShellTab from throwing
+// when their tabs mount during StewardAssetPage tests.
 class StubWebSocket {
   readyState: number = WebSocket.CONNECTING
   onopen: (() => void) | null = null
   onclose: ((ev: { code: number }) => void) | null = null
   onmessage: ((ev: { data: string }) => void) | null = null
   onerror: (() => void) | null = null
+  send() {}
   close() {
     this.readyState = WebSocket.CLOSED
   }
+}
+
+class StubResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
 }
 
 beforeEach(() => {
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('WebSocket', StubWebSocket)
+  vi.stubGlobal('ResizeObserver', StubResizeObserver)
 })
 
 afterEach(() => {
@@ -106,14 +140,18 @@ describe('tab strip', () => {
     )
   })
 
-  it('inert tabs (Config, Shell) carry the soon badge text', () => {
+  it('Config tab carries the soon badge text; Shell no longer does', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
     renderAssetPage()
 
+    // Only Config remains soon; Shell was promoted in Story #2762.
     for (const tab of TABS.filter((t) => t.soon)) {
       const tabEl = screen.getByRole('tab', { name: (n) => n.startsWith(tab.label) })
       expect(within(tabEl).getByText(/soon/i)).toBeInTheDocument()
     }
+    // Shell tab must have no soon badge.
+    const shellTab = screen.getByRole('tab', { name: /^Shell/i })
+    expect(within(shellTab).queryByText(/soon/i)).not.toBeInTheDocument()
   })
 
   it('clicking an inert tab switches selection and shows a coming-soon placeholder', () => {
@@ -133,12 +171,22 @@ describe('tab strip', () => {
     expect(screen.getByRole('tabpanel').textContent).toContain('Config')
   })
 
-  it('clicking Shell shows a coming-soon placeholder', () => {
+  it('clicking Shell mounts ShellTab (not a SoonPanel)', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
     renderAssetPage()
 
     fireEvent.click(screen.getByRole('tab', { name: /^Shell/i }))
-    expect(screen.getByRole('tabpanel').textContent).toContain('Shell')
+
+    expect(screen.getByTestId('shell-tab')).toBeInTheDocument()
+    expect(screen.queryByText(/Shell is not yet available/i)).not.toBeInTheDocument()
+  })
+
+  it('Shell tab has no soon badge', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    renderAssetPage()
+
+    const shellTab = screen.getByRole('tab', { name: /^Shell/i })
+    expect(within(shellTab).queryByText(/soon/i)).not.toBeInTheDocument()
   })
 
   it('clicking Logs tab mounts LogsPanel (shows loading state, not a SoonPanel)', () => {
