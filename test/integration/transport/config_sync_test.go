@@ -39,8 +39,9 @@ func (s *ConfigSyncTestSuite) SetupSuite() {
 func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
 	s.T().Log("Testing config sync command flow")
 
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	regResp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	regResp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	s.NotEmpty(regResp.StewardID, "Steward ID should be generated")
 	s.NotEmpty(regResp.TransportAddress, "Transport address required for gRPC DP config sync")
@@ -52,8 +53,9 @@ func (s *ConfigSyncTestSuite) TestConfigSyncCommand() {
 // TestConfigUploadAPI tests that configuration can be uploaded via the HTTP test endpoint.
 // The controller will then push the config to connected stewards via gRPC.
 func (s *ConfigSyncTestSuite) TestConfigUploadAPI() {
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	regResp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	regResp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 	s.NotEmpty(regResp.StewardID)
 
 	config := map[string]interface{}{
@@ -171,8 +173,9 @@ func (s *ConfigSyncTestSuite) TestLargeConfigPayload() {
 // TestConfigSyncTransportAddressFormat tests that the transport_address in the
 // registration response has the correct format for gRPC-over-QUIC connections.
 func (s *ConfigSyncTestSuite) TestConfigSyncTransportAddressFormat() {
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	regResp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	regResp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	s.NotEmpty(regResp.TransportAddress,
 		"Registration must return transport_address for gRPC-over-QUIC data plane")

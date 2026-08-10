@@ -76,27 +76,39 @@ func (h *TestHelper) BaseURL() string {
 // use the same shared token with pre-configured metadata. Multi-tenant isolation
 // tests verify unique steward IDs but do NOT validate per-tenant token boundaries.
 // Per-tenant tokens require seeding distinct tokens in the controller test setup.
-func (h *TestHelper) CreateToken(_ *testing.T, _, _ string) string {
+//
+// It takes no *testing.T: suites call it from worker goroutines, where the
+// testing package forbids Fatal-family calls, so no test handle is handed out.
+func (h *TestHelper) CreateToken(_, _ string) string {
 	return "integration_reusable" //nolint:gosec // test-only token, requires CFGMS_SEED_TEST_TOKENS=1 on the controller
 }
 
 // generateTestDeviceIdentity generates a fresh Ed25519 key pair for integration test device identity.
 // Each call produces unique credentials to prevent DeviceID conflicts within the same tenant.
-func generateTestDeviceIdentity(t *testing.T) (deviceID, identityKeyPub string) {
-	t.Helper()
+// It returns an error instead of failing the test so that callers running on a
+// goroutine other than the test goroutine can propagate the failure back.
+func generateTestDeviceIdentity() (deviceID, identityKeyPub string, err error) {
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("Failed to generate Ed25519 key for device identity: %v", err)
+		return "", "", fmt.Errorf("generate Ed25519 key for device identity: %w", err)
 	}
 	h := sha256.Sum256(pub)
-	return hex.EncodeToString(h[:]), base64.StdEncoding.EncodeToString(pub)
+	return hex.EncodeToString(h[:]), base64.StdEncoding.EncodeToString(pub), nil
 }
 
 // RegisterSteward registers a steward via HTTP API and returns the response.
-func (h *TestHelper) RegisterSteward(t *testing.T, token string) *RegistrationResponse {
-	t.Helper()
+//
+// It reports failures as an error rather than calling t.Fatalf. The testing
+// package requires FailNow/Fatal/Fatalf to be called only from the goroutine
+// running the test function; several suites register stewards concurrently from
+// their own goroutines, so this helper must be safe to call from any goroutine.
+// Callers assert on the returned error from the test goroutine.
+func (h *TestHelper) RegisterSteward(token string) (*RegistrationResponse, error) {
+	deviceID, identityKeyPub, err := generateTestDeviceIdentity()
+	if err != nil {
+		return nil, err
+	}
 
-	deviceID, identityKeyPub := generateTestDeviceIdentity(t)
 	reqBody := map[string]string{
 		"token":            token,
 		"device_id":        deviceID,
@@ -104,31 +116,31 @@ func (h *TestHelper) RegisterSteward(t *testing.T, token string) *RegistrationRe
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	if err != nil {
-		t.Fatalf("Failed to marshal registration request: %v", err)
+		return nil, fmt.Errorf("marshal registration request: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/api/v1/register", h.baseURL)
 	resp, err := h.httpClient.Post(url, "application/json", bytes.NewBuffer(reqJSON))
 	if err != nil {
-		t.Fatalf("HTTP registration request failed: %v", err)
+		return nil, fmt.Errorf("HTTP registration request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("Failed to read response body: %v", err)
+		return nil, fmt.Errorf("read registration response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Registration failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var regResp RegistrationResponse
 	if err := json.Unmarshal(body, &regResp); err != nil {
-		t.Fatalf("Failed to parse registration response: %v", err)
+		return nil, fmt.Errorf("parse registration response: %w", err)
 	}
 
-	return &regResp
+	return &regResp, nil
 }
 
 // RegistrationResponse represents the registration API response.
@@ -147,8 +159,11 @@ type RegistrationResponse struct {
 func (h *TestHelper) GetTLSConfigFromRegistration(t *testing.T, tenantID, group string) (*tls.Config, string) {
 	t.Helper()
 
-	token := h.CreateToken(t, tenantID, group)
-	resp := h.RegisterSteward(t, token)
+	token := h.CreateToken(tenantID, group)
+	resp, err := h.RegisterSteward(token)
+	if err != nil {
+		t.Fatalf("Failed to register steward: %v", err)
+	}
 
 	if resp.ClientCert == "" || resp.ClientKey == "" || resp.CACert == "" {
 		t.Fatalf("Registration did not return certificates (ClientCert=%v, ClientKey=%v, CACert=%v)",
