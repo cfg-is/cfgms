@@ -3,20 +3,110 @@
 package build_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// windowsMockTrampolineSource is a tiny Go program that re-execs the shell
+// script sibling of whatever name it was copied to (see buildMockTrampoline).
+const windowsMockTrampolineSource = `package main
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	self := os.Args[0]
+	base := strings.TrimSuffix(filepath.Base(self), filepath.Ext(self))
+	script := filepath.Join(filepath.Dir(self), base)
+	cmd := exec.Command("bash", append([]string{script}, os.Args[1:]...)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		os.Exit(1)
+	}
+}
+`
+
+var (
+	mockTrampolineOnce sync.Once
+	mockTrampolinePath string
+	mockTrampolineErr  error
+)
+
+// buildMockTrampoline compiles windowsMockTrampolineSource once per test
+// binary run, to a stable path under os.TempDir() (not t.TempDir() — see
+// below), and returns that path.
+//
+// Stable and reused deliberately, mirroring scripts/check-binary-artifacts.sh's
+// own fix for the same underlying cause: on a host where process creation is
+// expensive (observed: real-time antivirus scanning each *new* executable
+// before allowing it to run), a fresh binary at a fresh path pays that cost
+// on every single build; the same binary reused across runs pays it once.
+// os.TempDir() (not a per-test t.TempDir()) is required for that reuse to
+// actually happen across separate `go test` invocations on the same machine.
+func buildMockTrampoline(t *testing.T) string {
+	t.Helper()
+	mockTrampolineOnce.Do(func() {
+		srcPath := filepath.Join(os.TempDir(), "cfgms-mock-trampoline-src.go")
+		mockTrampolinePath = filepath.Join(os.TempDir(), "cfgms-mock-trampoline.exe")
+		if writeErr := os.WriteFile(srcPath, []byte(windowsMockTrampolineSource), 0o644); writeErr != nil {
+			mockTrampolineErr = writeErr
+			return
+		}
+		cmd := exec.Command("go", "build", "-o", mockTrampolinePath, srcPath)
+		if out, buildErr := cmd.CombinedOutput(); buildErr != nil {
+			mockTrampolineErr = fmt.Errorf("build mock trampoline: %v: %s", buildErr, out)
+		}
+	})
+	require.NoError(t, mockTrampolineErr)
+	return mockTrampolinePath
+}
+
 func writeMockTool(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755))
+
+	if runtime.GOOS == "windows" {
+		// GNU Make bypasses the shell entirely for recipe lines with no shell
+		// metacharacters (e.g. `@gosec -conf ... ./...`, unlike a wrapped
+		// invocation such as `bash scripts/security-trivy.sh`), invoking the
+		// command via a direct CreateProcess-style call instead. That
+		// resolves bare command names by checking each PATHEXT extension
+		// (.COM, .EXE, .BAT, .CMD, ...) across *every* PATH directory before
+		// moving to the next extension — i.e. extension-outer,
+		// directory-inner — not directory-outer as POSIX PATH search and
+		// bash's own `command -v` both do. A same-named real gosec.exe
+		// anywhere later on PATH is therefore found (via the .EXE pass)
+		// before this mock's .cmd or extensionless sibling is ever
+		// considered, regardless of how early this directory sits in PATH.
+		// Verified empirically: a .cmd-only mock still lost to a real
+		// gosec.exe elsewhere on PATH; only matching the .exe extension
+		// itself makes directory order (i.e. this mock winning) apply.
+		exePath := path + ".exe"
+		trampoline := buildMockTrampoline(t)
+		data, err := os.ReadFile(trampoline)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(exePath, data, 0o755))
+	}
+
 	return path
 }
 
@@ -140,7 +230,16 @@ func TestSecurityScanReportsSkippedDependencyScan(t *testing.T) {
 	)
 
 	require.Equal(t, 0, code, output)
-	assert.Contains(t, output, "Nancy dependency scan: ⏭️  SKIPPED (no GUIDE_TOKEN)")
+	// Asserted as two ASCII-safe substrings rather than one exact match
+	// including the ⏭️ emoji: on a host where make.exe's child process is
+	// console-attached rather than pipe-only, the active Windows console
+	// codepage (observed: 437, not UTF-8) mangles multi-byte emoji bytes in
+	// transit even though the underlying script correctly emits UTF-8 — a
+	// real byte-level corruption of decorative output, not a logic error.
+	// The substance of what this test verifies (the skip message reaching
+	// the aggregate summary) doesn't depend on that emoji surviving intact.
+	assert.Contains(t, output, "Nancy dependency scan: ")
+	assert.Contains(t, output, "SKIPPED (no GUIDE_TOKEN)")
 	assert.Contains(t, output, "not complete evidence")
 }
 

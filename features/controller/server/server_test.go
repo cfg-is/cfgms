@@ -548,6 +548,47 @@ func TestNew_ClusterModeRequiresClusterCapableProviders(t *testing.T) {
 	})
 }
 
+// TestLoadExistingCertificateManager_ClusterMode_UsesVaultNotLocalDisk is the
+// REQUIRED regression test for Issue #3130: a cluster-mode CA's private key is
+// never written to local disk (cert.NewManagerFromSecretStore keeps it
+// in-process only, sourced from the shared OpenBao vault), so the *regular*
+// (non---init) controller startup path must re-fetch it from the vault on every
+// process start rather than falling back to cert.NewManager's LoadExistingCA
+// path, which hard-requires a local ca.key and would make every cluster node
+// fail to restart after its one-time --init. This is exercised without a live
+// OpenBao instance: an unreachable vault_address still proves which branch was
+// taken, because the two paths fail with distinguishable errors.
+func TestLoadExistingCertificateManager_ClusterMode_UsesVaultNotLocalDisk(t *testing.T) {
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "ca")
+
+	cfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir,
+			RenewalThresholdDays: 7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				Organization: "Test Org",
+			},
+			ClusterCA: &config.ClusterCAConfig{
+				// Deliberately unreachable: proves the vault branch was taken
+				// without requiring a live OpenBao instance in this test.
+				VaultAddress: "https://127.0.0.1:1/",
+				VaultKeyPath: "test-tenant/cluster-ca",
+			},
+		},
+		HA: &config.HAConfig{Mode: "cluster"},
+	}
+
+	_, err := loadExistingCertificateManager(cfg, logging.NewNoopLogger())
+	require.Error(t, err, "unreachable vault must surface as an error, not a silent local-disk fallback")
+	assert.Contains(t, strings.ToLower(err.Error()), "vault",
+		"error must come from the vault-loading branch (Issue #3130)")
+	assert.NotContains(t, strings.ToLower(err.Error()), "ca.key",
+		"must not fall through to the local-disk LoadExistingCA path, which cluster nodes never have a ca.key for")
+}
+
 // TestBuiltinWorkflowSeedingIPTrust verifies that a controller started with no
 // registration config (defaulting to ip-trust) does NOT seed a built-in workflow,
 // because ip-trust approval is handled by the IPTrustApprovalHook directly in code

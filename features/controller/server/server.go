@@ -2402,6 +2402,20 @@ func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (
 	// the real CA directory as filepath.Join(StoragePath,"ca").
 	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
 
+	// Cluster-mode CA: the private key lives only in the shared OpenBao vault
+	// (cert.NewManagerFromSecretStore never writes it to local disk), so it must
+	// be re-fetched from the vault on every regular startup, not just --init.
+	// Without this branch, cert.NewManager's LoadExistingCA path below would try
+	// (and fail) to read a local ca.key that a cluster-mode node never has.
+	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
+		manager, err := initialization.BuildClusterCertManager(context.Background(), cfg, certPath, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load cluster CA from vault: %w", err)
+		}
+		logger.Info("Loaded cluster Certificate Authority from vault", "vault_key_path", cfg.Certificate.ClusterCA.VaultKeyPath)
+		return manager, nil
+	}
+
 	manager, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath:          certPath,
 		LoadExistingCA:       true,
