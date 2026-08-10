@@ -35,22 +35,18 @@ go.sum      text eol=lf
 # Markdown — keep LF to avoid noisy diffs on cross-platform commits
 *.md        text eol=lf
 
-# Mockups index: additive row appends from concurrent PRs should resolve
-# automatically. The union driver keeps both sides of a conflicting hunk
-# (identical to the manual resolution performed for #3012/#3020/#3024/#3025),
-# eliminating the merge-queue serialization caused by simultaneous appends.
-# `union` is a low-level merge attribute compiled into git itself (not an
-# external driver requiring local git config), so it applies identically
-# regardless of what performs the merge/rebase.
+# Mockups index: README.md is generated from per-mockup *.yaml sidecar files
+# by scripts/generate-mockups-index.py (Issue #3166). Adding a new mockup
+# requires only a new *.yaml + *.html pair — no manual edit to the shared
+# README.md — so concurrent mockup PRs no longer conflict on this file.
 #
-# Trade-off: union cannot distinguish "two additive rows" from "two edits of
-# the same row" — both are add/add hunks to a line-based merge, and union
-# keeps both sides either way. A same-row conflict therefore does not stop
-# the merge; it lands as a duplicate row. `scripts/check-mockups-index.sh`
-# (wired into `scripts/test-scripts.sh`, run by `make test`) is the backstop:
-# it fails loudly the moment a duplicate row or header appears, so the
-# silent case above is caught mechanically instead of relying on a reviewer
-# to notice it.
+# The merge=union attribute below is NOT relied upon to resolve merge-queue
+# conflicts (GitHub's server-side rebase ignores .gitattributes merge drivers,
+# as measured on #3042 2026-08-02). It is retained solely as a local-git hint:
+# if a developer manually rebases and there is a transient conflict on
+# README.md (e.g., two PRs both ran the generator from a slightly different
+# develop tip), union keeps both sides, and the developer resolves by
+# re-running `scripts/generate-mockups-index.py --write`.
 docs/design/mockups/README.md merge=union
 
 # Binary catch-all (Git auto-detects but explicit is clearer)

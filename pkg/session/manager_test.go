@@ -68,6 +68,113 @@ func TestManagerIssueAndValidate(t *testing.T) {
 	}
 }
 
+// TestManagerIssueRootScoped exercises Manager.IssueRootScoped (ADR-025 Amendment 1
+// A1.3). The marker gates the root<->MSP boundary in the controller API
+// (authorizeTenantAccess), so it must be set on issuance, be readable through every
+// lifecycle path a request can take (Validate, Renew, List), and be present on
+// root-scoped sessions ONLY — never inferred from an empty TenantID.
+func TestManagerIssueRootScoped(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, store := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	sess, token, err := mgr.IssueRootScoped(ctx, "root-operator-1", "my-ctrl")
+	if err != nil {
+		t.Fatalf("IssueRootScoped: %v", err)
+	}
+	if len(token) != 43 {
+		t.Errorf("token length = %d, want 43 (base64url no-padding for 32 bytes)", len(token))
+	}
+	if sess.ID == "" || sess.PrincipalID != "root-operator-1" || sess.ConnectionName != "my-ctrl" {
+		t.Errorf("unexpected session: %+v", sess)
+	}
+	if !sess.RootScoped {
+		t.Error("IssueRootScoped: RootScoped = false, want true")
+	}
+	if sess.TenantID != "" {
+		t.Errorf("IssueRootScoped: TenantID = %q, want \"\" (a root-scoped session is unscoped)", sess.TenantID)
+	}
+	if sess.Assurance != session.AssuranceBasic {
+		t.Errorf("IssueRootScoped: Assurance = %v, want AssuranceBasic (root scope is not a strong factor)", sess.Assurance)
+	}
+
+	// The marker must be persisted, not merely returned: the middleware reads it off
+	// the Validate result on every request, including after a cache miss.
+	stored, err := store.Get(ctx, session.HashToken(token))
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !stored.RootScoped {
+		t.Error("store record: RootScoped = false, want true")
+	}
+
+	validated, err := mgr.Validate(ctx, token)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if validated.ID != sess.ID {
+		t.Errorf("session ID mismatch: got %q, want %q", validated.ID, sess.ID)
+	}
+	if !validated.RootScoped {
+		t.Error("Validate: RootScoped = false, want true")
+	}
+
+	// Token rotation must not drop the marker — a renewed root-scoped session is still
+	// bounded by the ADR-025 Decision 1 boundary.
+	renewed, newToken, err := mgr.Renew(ctx, token)
+	if err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+	if !renewed.RootScoped {
+		t.Error("Renew: RootScoped = false, want true")
+	}
+	afterRenew, err := mgr.Validate(ctx, newToken)
+	if err != nil {
+		t.Fatalf("Validate after Renew: %v", err)
+	}
+	if !afterRenew.RootScoped {
+		t.Error("Validate after Renew: RootScoped = false, want true")
+	}
+
+	// An ordinary unscoped session (Issue with tenantID == "") must NOT be marked:
+	// this is the pre-existing superadmin shape, which keeps unrestricted access.
+	ordinary, _, err := mgr.Issue(ctx, "admin-1", "my-ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if ordinary.RootScoped {
+		t.Error("Issue with empty tenantID: RootScoped = true, want false — the marker must never be inferred from TenantID")
+	}
+
+	listed, err := mgr.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var seenRootScoped, seenOrdinary bool
+	for _, s := range listed {
+		switch s.ID {
+		case sess.ID:
+			seenRootScoped = true
+			if !s.RootScoped {
+				t.Error("List: root-scoped session reported RootScoped = false")
+			}
+		case ordinary.ID:
+			seenOrdinary = true
+			if s.RootScoped {
+				t.Error("List: ordinary unscoped session reported RootScoped = true")
+			}
+		}
+	}
+	if !seenRootScoped || !seenOrdinary {
+		t.Errorf("List: missing sessions (root-scoped seen=%v, ordinary seen=%v)", seenRootScoped, seenOrdinary)
+	}
+}
+
 func TestManagerRevoke(t *testing.T) {
 	cfg := session.Config{
 		IdleTimeout:     5 * time.Minute,

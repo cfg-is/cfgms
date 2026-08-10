@@ -1,0 +1,4 @@
+file: registration-console.html
+order: 5
+status: **Reference**
+what: The **Registration** console (Epic #2931 · #2934/#2935/#2936) — one page, three tabs: **Pending** (enrollment queue, Deny live), **Tokens** (prefix-only, status badges), **IP-Trust** (CIDRs, pre-seeded vs manual). Write controls (Approve/Approve-all/Approve-by-CIDR · Mint/Rotate/Revoke · Add range) drawn in a deferred **"SOON"** state. Tenant-scoped, both themes.

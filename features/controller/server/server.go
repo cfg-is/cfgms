@@ -105,16 +105,16 @@ type ObserveManifestProvider interface {
 	ListObservableManifests() ([]*modules.ModuleMetadata, error)
 }
 
-// moduleCacheManifestProvider adapts *modulecache.ModuleCache as
+// moduleManifestAdapter adapts *modulecache.ModuleCache as
 // ObserveManifestProvider. Only approved bundles are returned; manifests with no
 // observe_when predicates are silently filtered out.
-type moduleCacheManifestProvider struct {
+type moduleManifestAdapter struct {
 	cache *modulecache.ModuleCache
 }
 
-var _ ObserveManifestProvider = (*moduleCacheManifestProvider)(nil)
+var _ ObserveManifestProvider = (*moduleManifestAdapter)(nil)
 
-func (p *moduleCacheManifestProvider) ListObservableManifests() ([]*modules.ModuleMetadata, error) {
+func (p *moduleManifestAdapter) ListObservableManifests() ([]*modules.ModuleMetadata, error) {
 	entries, err := p.cache.List()
 	if err != nil {
 		return nil, fmt.Errorf("list module cache: %w", err)
@@ -428,7 +428,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	logger.Info("RBAC initialization completed")
 
 	// Initialize tenant management with durable storage
-	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager)
+	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager).
+		WithAuditManager(auditManager)
 
 	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
 	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode
@@ -1224,6 +1225,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if rps := storageManager.GetRefreshPolicyStore(); rps != nil {
 		httpServer.SetRefreshPolicyStore(rps)
 	}
+	if aps := storageManager.GetAssurancePolicyStore(); aps != nil {
+		httpServer.SetAssurancePolicyStore(aps)
+	}
+	if tcs := storageManager.GetTenantCrossingStore(); tcs != nil {
+		httpServer.SetTenantCrossingStore(tcs)
+	}
+	// TenantStore is core and always present; wire unconditionally for the assurance resolver.
+	httpServer.SetTenantStore(storageManager.GetTenantStore())
 	if as := storageManager.GetAuditStore(); as != nil {
 		httpServer.SetAuditStore(as)
 	}
@@ -1392,7 +1401,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// When the cache failed to initialize, moduleCache is nil and Tier-2 is disabled.
 	// (Issue #3104, ADR-024 Amendment 1 §3)
 	if moduleCache != nil {
-		srv.observeManifestProvider = &moduleCacheManifestProvider{cache: moduleCache}
+		srv.observeManifestProvider = &moduleManifestAdapter{cache: moduleCache}
 		logger.Info("Tier-2 observe manifest provider wired to module cache")
 	}
 
@@ -2338,6 +2347,13 @@ func (s *Server) GetTenantManager() *tenant.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.tenantManager
+}
+
+// GetAuditManager returns the audit manager instance
+func (s *Server) GetAuditManager() *audit.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.auditManager
 }
 
 // GetRBACManager returns the RBAC manager instance

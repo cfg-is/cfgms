@@ -117,7 +117,7 @@ func (s *SQLiteTenantStore) UpdateTenant(ctx context.Context, tenant *business.T
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("tenant %s not found", tenant.ID)
+		return fmt.Errorf("update tenant %s: %w", tenant.ID, business.ErrTenantDoesNotExist)
 	}
 	return nil
 }
@@ -134,7 +134,7 @@ func (s *SQLiteTenantStore) DeleteTenant(ctx context.Context, tenantID string) e
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("tenant %s not found", tenantID)
+		return fmt.Errorf("delete tenant %s: %w", tenantID, business.ErrTenantDoesNotExist)
 	}
 	return nil
 }
@@ -264,7 +264,7 @@ func scanTenant(row *sql.Row) (*business.TenantData, error) {
 		&createdStr, &updatedStr,
 	)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("tenant not found")
+		return nil, business.ErrTenantDoesNotExist
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan tenant: %w", err)

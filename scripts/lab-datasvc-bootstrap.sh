@@ -21,6 +21,11 @@ set -euo pipefail
 PG_DB="cfgms"
 PG_ROLE="cfgms"
 PG_LISTEN_SUBNET="192.168.234.0/24"
+PG_TLS_DIR="${CFGMS_LAB_DATASVC_TLS_DIR:-/etc/postgresql/tls}"
+PG_CA_KEY="${PG_TLS_DIR}/ca.key"
+PG_CA_CERT="${PG_TLS_DIR}/ca.pem"
+PG_SERVER_KEY="${PG_TLS_DIR}/server.key"
+PG_SERVER_CERT="${PG_TLS_DIR}/server.pem"
 
 MINIO_USER="minio-server"
 MINIO_DATA_DIR="/var/lib/minio/data"
@@ -31,6 +36,142 @@ MINIO_API_PORT=9000
 MINIO_CONSOLE_PORT=9001
 
 log() { echo "[bootstrap] $*"; }
+
+# ── Provisioning functions ────────────────────────────────────────────────────
+#
+# Defined before any side effect so that scripts/lab-datasvc-bootstrap_test.sh
+# (and the test's PostgreSQL container fixture) can source this file and
+# exercise the exact logic that runs on the lab VM, rather than a re-implemented
+# copy that can drift from it. See the sourcing guard below.
+
+# generate_tls_certs <tls_dir> <server_ip> <server_fqdn> [key_bits]
+#
+# Generates the self-managed CA and the PostgreSQL server cert in <tls_dir>.
+# Idempotent: an existing ca.pem / server.pem is never regenerated or rotated,
+# so a re-run does not invalidate the sslrootcert already distributed to
+# controller nodes. The server SAN covers <server_ip> and <server_fqdn> so
+# sslmode=verify-full succeeds by either address form.
+generate_tls_certs() {
+    local tls_dir="$1" server_ip="$2" server_fqdn="$3" key_bits="${4:-4096}"
+    # CA/server private keys are written by `openssl genrsa -out` before the
+    # explicit chmod 600 below lands; without this, a caller-inherited
+    # permissive umask (e.g. 022) leaves the key at its umask-derived default
+    # mode for that window. Restored at the end of the function so it does not
+    # affect permissions of files created later in the script.
+    local old_umask
+    old_umask="$(umask)"
+    umask 077
+
+    mkdir -p "$tls_dir"
+
+    if [[ ! -f "${tls_dir}/ca.pem" ]]; then
+        openssl genrsa -out "${tls_dir}/ca.key" "$key_bits" 2>/dev/null
+        openssl req -new -x509 -days 3650 \
+            -key "${tls_dir}/ca.key" \
+            -subj "/CN=cfgms-lab-datasvc-pg-ca/O=cfgms-lab" \
+            -out "${tls_dir}/ca.pem" 2>/dev/null
+        chmod 600 "${tls_dir}/ca.key"
+        chmod 644 "${tls_dir}/ca.pem"
+    fi
+
+    if [[ ! -f "${tls_dir}/server.pem" ]]; then
+        openssl genrsa -out "${tls_dir}/server.key" "$key_bits" 2>/dev/null
+
+        cat > "${tls_dir}/server.ext" <<EXTEOF
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = IP:${server_ip},DNS:${server_fqdn}
+EXTEOF
+
+        openssl req -new \
+            -key "${tls_dir}/server.key" \
+            -subj "/CN=${server_fqdn}/O=cfgms-lab" \
+            -out "${tls_dir}/server.csr" 2>/dev/null
+
+        openssl x509 -req -days 3650 \
+            -in "${tls_dir}/server.csr" \
+            -CA "${tls_dir}/ca.pem" \
+            -CAkey "${tls_dir}/ca.key" \
+            -CAcreateserial \
+            -extfile "${tls_dir}/server.ext" \
+            -out "${tls_dir}/server.pem" 2>/dev/null
+
+        chmod 600 "${tls_dir}/server.key"
+        chmod 644 "${tls_dir}/server.pem"
+        rm -f "${tls_dir}/server.csr" "${tls_dir}/server.ext" "${tls_dir}/ca.srl"
+    fi
+
+    umask "$old_umask"
+}
+
+# apply_pg_conf_tls <postgresql_conf> <cert_path> <key_path>
+#
+# Turns TLS on and points PostgreSQL at the generated cert/key.
+# Uses sed-replace, never append-if-absent: Debian's pg_createcluster writes
+# UNCOMMENTED snakeoil defaults (ssl = on, ssl_cert_file =
+# '/etc/ssl/certs/ssl-cert-snakeoil.pem') into postgresql.conf, so an
+# append-if-absent guard would find the keys present, skip the append, and leave
+# the server serving the snakeoil cert — which is not signed by the CA this
+# script generates, breaking every verify-full client while the run still
+# reports success.
+apply_pg_conf_tls() {
+    local pg_conf="$1" cert_path="$2" key_path="$3"
+
+    if grep -q "^#\?ssl =" "$pg_conf" 2>/dev/null; then
+        sed -i "s/^#\?ssl =.*/ssl = on/" "$pg_conf"
+    else
+        echo "ssl = on" >> "$pg_conf"
+    fi
+
+    if grep -q "^#\?ssl_cert_file" "$pg_conf" 2>/dev/null; then
+        sed -i "s|^#\?ssl_cert_file.*|ssl_cert_file = '${cert_path}'|" "$pg_conf"
+    else
+        echo "ssl_cert_file = '${cert_path}'" >> "$pg_conf"
+    fi
+
+    if grep -q "^#\?ssl_key_file" "$pg_conf" 2>/dev/null; then
+        sed -i "s|^#\?ssl_key_file.*|ssl_key_file = '${key_path}'|" "$pg_conf"
+    else
+        echo "ssl_key_file = '${key_path}'" >> "$pg_conf"
+    fi
+}
+
+# apply_pg_hba_tls <pg_hba_conf> <subnet> <auth_method>
+#
+# Writes the TLS-enforcing host-based auth rules for <subnet>:
+#   hostnossl … reject      — a client connecting with sslmode=disable is
+#                             refused outright instead of getting a cleartext
+#                             session across the lab LAN
+#   hostssl   … <auth>      — TLS-only, with the given auth method
+#
+# A plain `host` rule matches BOTH SSL and non-SSL connections, so the `host …
+# scram-sha-256` rule written by story #3124 (before server TLS existed) is
+# upgraded in place rather than left alongside the new rules — leaving it would
+# make the TLS machinery optional and silently downgradable.
+apply_pg_hba_tls() {
+    local pg_hba="$1" subnet="$2" auth="$3"
+    local subnet_re="${subnet//./\\.}"
+    local nossl_line="hostnossl all           all             ${subnet}        reject"
+    local ssl_line="hostssl all             all             ${subnet}        ${auth}"
+
+    [[ -f "$pg_hba" ]] || touch "$pg_hba"
+
+    # `^host` followed by whitespace matches only the plaintext-capable form —
+    # `hostssl` / `hostnossl` have no whitespace after `host`, so they are left
+    # untouched and re-application stays idempotent.
+    sed -i -E "s|^host[[:space:]]+all[[:space:]]+all[[:space:]]+${subnet_re}[[:space:]]+.*|${ssl_line}|" "$pg_hba"
+
+    grep -qF -- "$nossl_line" "$pg_hba" || echo "$nossl_line" >> "$pg_hba"
+    grep -qF -- "$ssl_line" "$pg_hba" || echo "$ssl_line" >> "$pg_hba"
+}
+
+# Sourcing guard: when this file is sourced (by the test suite or by the test's
+# container fixture) stop here — only the constants and functions above are
+# wanted. When executed, run the bootstrap steps below.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    return 0
+fi
 
 # ── Step 1: Pre-flight ────────────────────────────────────────────────────────
 
@@ -74,17 +215,69 @@ else
     log "listen_addresses already set to '*'."
 fi
 
-HBA_LINE="host    all             all             ${PG_LISTEN_SUBNET}        scram-sha-256"
-if ! grep -qF "$HBA_LINE" "$PG_HBA" 2>/dev/null; then
-    echo "$HBA_LINE" >> "$PG_HBA"
-    log "Added pg_hba.conf entry for ${PG_LISTEN_SUBNET}."
-else
-    log "pg_hba.conf entry for ${PG_LISTEN_SUBNET} already present."
-fi
+# TLS-only access for the lab subnet: hostssl for authenticated TLS sessions,
+# hostnossl … reject so a sslmode=disable client is refused rather than served
+# in cleartext. Any plaintext-capable `host` rule from story #3124 is upgraded.
+apply_pg_hba_tls "$PG_HBA" "$PG_LISTEN_SUBNET" "scram-sha-256"
+log "pg_hba.conf: hostssl (scram-sha-256) + hostnossl reject applied for ${PG_LISTEN_SUBNET}."
 
 systemctl enable postgresql &>/dev/null || true
+
+# ── Step 2.5: PostgreSQL TLS certificate provisioning ─────────────────────────
+
+log "Step 2.5: PostgreSQL TLS certificate provisioning"
+
+# SAN covers the VM's LAN IP and hostname so verify-full connections work from
+# controller nodes on the same subnet. generate_tls_certs is idempotent: an
+# existing CA or server cert is never regenerated or rotated.
+PG_VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+PG_FQDN="$(hostname -f 2>/dev/null || hostname)"
+
+if [[ -f "$PG_CA_CERT" ]]; then
+    log "TLS CA already present — not rotating: ${PG_CA_CERT}"
+fi
+if [[ -f "$PG_SERVER_CERT" ]]; then
+    log "TLS server cert already present — not rotating: ${PG_SERVER_CERT}"
+fi
+
+generate_tls_certs "$PG_TLS_DIR" "$PG_VM_IP" "$PG_FQDN" 4096
+
+log "TLS material in place (CA: ${PG_CA_CERT}, server cert SAN: IP:${PG_VM_IP}, DNS:${PG_FQDN})."
+
+# CA key must not be readable by the postgres runtime account — only root needs
+# it (for re-signing future server certs). The postgres user needs the server
+# cert + key only.
+chown root:root "$PG_TLS_DIR" "$PG_CA_KEY" "$PG_CA_CERT"
+chown root:postgres "$PG_SERVER_KEY" "$PG_SERVER_CERT"
+chmod 755 "$PG_TLS_DIR"   # world-traversable so postgres can reach its files
+chmod 600 "$PG_CA_KEY"    # CA private key: root-only
+chmod 644 "$PG_CA_CERT"   # CA cert: world-readable (distributed as sslrootcert)
+chmod 640 "$PG_SERVER_KEY" # server key: postgres-readable, others denied
+chmod 644 "$PG_SERVER_CERT" # server cert: world-readable
+
+# Configure postgresql.conf to enable TLS and point at the generated cert/key.
+apply_pg_conf_tls "$PG_CONF" "$PG_SERVER_CERT" "$PG_SERVER_KEY"
+
 systemctl restart postgresql
-log "PostgreSQL configured and (re)started."
+
+# Verify against the running server rather than trusting the edit: Debian ships
+# uncommented snakeoil cert paths, and any config-file surprise must fail the
+# run loudly instead of leaving a server that serves an untrusted cert while the
+# bootstrap reports TLS as configured.
+PG_LIVE_SSL="$(sudo -u postgres psql -tAc "SHOW ssl" 2>/dev/null || echo "unknown")"
+PG_LIVE_CERT="$(sudo -u postgres psql -tAc "SHOW ssl_cert_file" 2>/dev/null || echo "unknown")"
+PG_LIVE_KEY="$(sudo -u postgres psql -tAc "SHOW ssl_key_file" 2>/dev/null || echo "unknown")"
+
+if [[ "$PG_LIVE_SSL" != "on" || "$PG_LIVE_CERT" != "$PG_SERVER_CERT" || "$PG_LIVE_KEY" != "$PG_SERVER_KEY" ]]; then
+    echo "Error: PostgreSQL did not come up with the generated TLS material." >&2
+    echo "  ssl           = ${PG_LIVE_SSL} (expected: on)" >&2
+    echo "  ssl_cert_file = ${PG_LIVE_CERT} (expected: ${PG_SERVER_CERT})" >&2
+    echo "  ssl_key_file  = ${PG_LIVE_KEY} (expected: ${PG_SERVER_KEY})" >&2
+    echo "  Check ${PG_CONF} for a later override and re-run." >&2
+    exit 1
+fi
+
+log "PostgreSQL (re)started; verified live: ssl=${PG_LIVE_SSL}, cert=${PG_LIVE_CERT}, key=${PG_LIVE_KEY}"
 
 # ── Step 3: PostgreSQL role + database ────────────────────────────────────────
 
@@ -226,13 +419,21 @@ fi
 
 # ── Step 7: Final output ──────────────────────────────────────────────────────
 
+PG_VM_IP_OUT="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
 echo ""
 echo "=========================================="
 echo " cfg-lab data-services bootstrap complete"
 echo "=========================================="
 echo ""
-echo "PostgreSQL: db=${PG_DB} role=${PG_ROLE} port=5432"
-echo "MinIO:      endpoint_url=http://$(hostname -I | awk '{print $1}'):${MINIO_API_PORT} bucket=${MINIO_BUCKET}"
+echo "PostgreSQL: db=${PG_DB} role=${PG_ROLE} port=5432 (TLS-only: hostssl + hostnossl reject for ${PG_LISTEN_SUBNET})"
+echo "  TLS CA cert: ${PG_CA_CERT}"
+echo "  Copy it to each controller node, e.g.:"
+echo "    scp ${PG_VM_IP_OUT}:${PG_CA_CERT} /etc/cfgms/datasvc-ca.pem"
+echo "  Connection string (sslmode=verify-full, path as seen on the controller node):"
+echo "    postgres://cfgms:<password>@${PG_VM_IP_OUT}:5432/cfgms?sslmode=verify-full&sslrootcert=/etc/cfgms/datasvc-ca.pem"
+echo "  Use the raw dsn string config path (not the keyword-builder) to pass sslrootcert — see story #3127."
+echo "MinIO:      endpoint_url=http://${PG_VM_IP_OUT}:${MINIO_API_PORT} bucket=${MINIO_BUCKET}"
 echo ""
 
 if [[ "$PG_PASSWORD_PRINTED" == "true" ]]; then

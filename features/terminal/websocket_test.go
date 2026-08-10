@@ -62,10 +62,16 @@ func waitForSessionCleanup(t *testing.T, manager SessionManager, expectedCount i
 	assert.Len(t, activeSessions, expectedCount, "Expected %d sessions after cleanup, but found %d", expectedCount, len(activeSessions))
 }
 
-// waitForActiveSessions polls until the manager has at least minCount active sessions.
+// waitForActiveSessions polls until the manager has at least minCount active
+// sessions. This is a hang detector, not a performance budget: what callers
+// assert on is that registration happens at all, not how fast. Server-side
+// registration is a single mutex-guarded map write that follows the client's
+// completed handshake — near-instant floor — but a loaded CI runner can stall
+// the goroutine well past a couple hundred milliseconds. 10s keeps generous
+// headroom over that floor while still failing fast on a genuine hang.
 func waitForActiveSessions(t *testing.T, manager SessionManager, minCount int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(manager.GetActiveSessions()) >= minCount {
 			return
@@ -509,7 +515,16 @@ func TestWebSocketOriginCheck(t *testing.T) {
 	require.NoError(t, err)
 	stopManagerOnCleanup(t, manager)
 
-	const queryParams = "?steward_id=test-steward&user_id=test-user&shell=bash"
+	// getTestShell(), not a hardcoded "bash": on native Windows CI, "bash" is
+	// not in ValidateShell's Windows set (features/terminal/shell/executor.go
+	// isShellSupported), so CreateSession fails after the WebSocket upgrade
+	// already succeeded — the client Dial reports success while the server
+	// never registers a session, and waitForActiveSessions below times out at
+	// 0 regardless of how generous its deadline is (merge queue eviction
+	// 2026-08-08, run 31277309585: TestWebSocketOriginCheck/same_origin_accepted,
+	// allowlist_origin_accepted, and port_qualified_allowlist all failed at
+	// "0" active sessions).
+	queryParams := "?steward_id=test-steward&user_id=test-user&shell=" + getTestShell()
 
 	t.Run("same_origin_accepted", func(t *testing.T) {
 		handler, err := NewWebSocketHandler(manager, logger, nil)
@@ -522,9 +537,18 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {server.URL}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "same-origin request must be accepted")
+		// The WebSocket handshake completes before the server goroutine calls
+		// CreateSession, so the accepted Dial races the server-side session's
+		// creation and teardown. Wait for both ends deterministically instead of
+		// letting the subtest return (and eventually the manager Stop / t.TempDir
+		// cleanup run) while the server is still creating or recording the
+		// session — an in-flight StartRecording can create the .rec file after
+		// t.TempDir's RemoveAll has already listed the directory.
+		waitForActiveSessions(t, manager, 1)
 		if err := conn.Close(); err != nil {
 			t.Logf("Failed to close connection: %v", err)
 		}
+		waitForSessionCleanup(t, manager, 0)
 	})
 
 	t.Run("cross_origin_rejected", func(t *testing.T) {
@@ -554,9 +578,13 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {"http://trusted.example.com"}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "allowlist-matched origin must be accepted")
+		// See same_origin_accepted above: wait for the server-side session
+		// lifecycle to fully settle before this subtest returns.
+		waitForActiveSessions(t, manager, 1)
 		if err := conn.Close(); err != nil {
 			t.Logf("Failed to close connection: %v", err)
 		}
+		waitForSessionCleanup(t, manager, 0)
 	})
 
 	t.Run("empty_origin_rejected", func(t *testing.T) {
@@ -588,9 +616,13 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		headers := http.Header{"Origin": {"http://trusted.example.com:8443"}}
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
 		require.NoError(t, err, "port-qualified allowlist origin must be accepted")
+		// See same_origin_accepted above: wait for the server-side session
+		// lifecycle to fully settle before this subtest returns.
+		waitForActiveSessions(t, manager, 1)
 		if err := conn.Close(); err != nil {
 			t.Logf("Failed to close connection: %v", err)
 		}
+		waitForSessionCleanup(t, manager, 0)
 
 		// Same host without port is rejected — allowlist matching is port-sensitive.
 		headers = http.Header{"Origin": {"http://trusted.example.com"}}
@@ -599,6 +631,51 @@ func TestWebSocketOriginCheck(t *testing.T) {
 		require.NotNil(t, resp)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
+}
+
+// TestWaitForActiveSessionsToleratesSlowRegistration proves waitForActiveSessions
+// survives session registration that lands after the old 2s deadline but within
+// the current 10s one. Under the old 2s deadline this test would fail.
+//
+// Registration goes through the real DefaultSessionManager — the same component
+// the WebSocket handler registers sessions in — with the CreateSession call
+// deliberately deferred. That models a server-side session write lagging the
+// client's completed handshake, a generic registration race independent of the
+// shell-selection bug that actually caused the 2026-08-08 Windows merge-queue
+// evictions (TestWebSocketOriginCheck hardcoded shell=bash, which
+// features/terminal/shell/executor.go's isShellSupported rejects on Windows, so
+// CreateSession never succeeded there; see queryParams above).
+func TestWaitForActiveSessionsToleratesSlowRegistration(t *testing.T) {
+	const delay = 3 * time.Second
+
+	manager, err := NewSessionManager(&Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    10,
+	}, logging.NewNoopLogger())
+	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
+
+	createErr := make(chan error, 1)
+	go func() {
+		time.Sleep(delay)
+		_, createSessionErr := manager.CreateSession(context.Background(), &SessionRequest{
+			TenantID:  "test-tenant",
+			StewardID: "test-steward-001",
+			UserID:    "test-user",
+			Shell:     getTestShell(),
+			Cols:      80,
+			Rows:      24,
+		})
+		createErr <- createSessionErr
+	}()
+
+	start := time.Now()
+	ok := t.Run("waits past the old 2s deadline", func(t *testing.T) {
+		waitForActiveSessions(t, manager, 1)
+	})
+	require.NoError(t, <-createErr, "delayed session registration must succeed")
+	require.True(t, ok, "waitForActiveSessions must tolerate registration delayed beyond the old 2s deadline")
+	require.GreaterOrEqual(t, time.Since(start), delay)
 }
 
 // TestGenerateSecureToken verifies the token is cryptographically random and properly encoded.

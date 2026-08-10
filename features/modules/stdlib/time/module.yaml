@@ -29,8 +29,15 @@ interfaces:
 owns:
   - kind: time  # authority over time:* objects this module manages
 
-# observe_when: omitted — pending module-tagging story (bounded inventory-worthy
-# domain; observe_when predicate will be added by the ADR-024 epic).
+# Bounded, inventory-worthy domain (single-value timezone + NTP-sync facts).
+# Active on any steward OS — correct time is foundational on every platform.
+observe_when:
+  - fact: os
+    equals: windows
+  - fact: os
+    equals: linux
+  - fact: os
+    equals: darwin
 
 security:
   requires_root: true  # writing /etc/timezone, /etc/systemd/timesyncd.conf, and calling timedatectl require root

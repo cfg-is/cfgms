@@ -514,11 +514,42 @@ untouched, matching the precedent set by `RefreshPolicyStore`.
 / PUT semantics). `GetPolicy` returns `{TenantID: id, Overrides: nil}` without
 error when no record exists — absence and "no override" are equivalent.
 
-**Resolution (follow-on story):** A follow-on story resolves the per-tenant
-overrides root→leaf against the global `permissionAssurance` map so that
-`requirePermission` and `scanAPIKeysForPrivilegedAccess` enforce the stricter of
-the global floor and any ancestor-chain override. Until that story lands,
-`permissionAssurance` is the sole source of truth.
+**Resolution (Issue #2839):** `requirePermission` calls
+`s.resolveAssuranceRequirement(ctx, tenantID, permissionID)`, which composes
+the global `permissionAssurance` floor with any per-tenant overrides declared
+along the root→leaf path to the requesting tenant:
+
+- `Min` takes the **maximum** across [global floor, each ancestor, the tenant itself].
+- `RequireUserPresence` is true if true anywhere in that chain (OR, never cleared by a
+  descendant).
+- When `assurancePolicyStore` or `tenantStore` is nil, or `tenantID` is empty, the
+  resolver returns the global floor unchanged — preserving today's exact behaviour for
+  bare `Server` instances (e.g. unit tests that do not wire a store).
+- Store errors cause a Warn log and fall back to the global floor — a storage hiccup
+  must never turn a permitted action into a fleet-wide outage.
+
+**Admin endpoint (Issue #2839):**
+
+- `GET /api/v1/tenants/{tenant_path}/assurance-policy` — reads the stored override set
+  for a tenant. Gated by `requirePermission("assurance-policy", "get")`. `assurance-policy:get`
+  is intentionally absent from `permissionAssurance` so reads stay unrestricted at the
+  assurance layer (matching `refresh:get-policy`'s absence from that map).
+- `PUT /api/v1/tenants/{tenant_path}/assurance-policy` — replaces the full override set
+  (full-replace / PUT semantics). Gated by `requirePermission("assurance-policy", "set")`.
+  `assurance-policy:set` IS in `permissionAssurance` at `Min: AssuranceStrong` — a
+  strongly-authenticated admin is required to raise a tenant's own posture.
+
+**Tighten-only enforcement (Issue #2839):** `handleSetAssurancePolicy` validates each
+requested `MinOverride` against the ancestor-resolved requirement (global floor + ancestor
+path, excluding the tenant being written) **before** calling `SetPolicy`. A `MinOverride`
+below the ancestor-resolved `Min` is rejected with 400. `RequireUserPresence` needs no
+such check — because resolution ORs it across the whole chain including ancestors, a
+leaf tenant structurally cannot lower it by omitting or setting it false.
+
+**Note on `scanAPIKeysForPrivilegedAccess`:** The startup scan reads `permissionAssurance`
+directly (global-only). Overrides only ever tighten, so the global-floor scan remains a
+correct (if conservative) lower bound on which API keys are unreachable. Tenant overrides
+do not affect this scan — they cannot make a key reachable that is already blocked.
 
 ---
 

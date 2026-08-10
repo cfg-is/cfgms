@@ -407,6 +407,48 @@ func TestInit_MarkerPresent_BundleMissing_Errors(t *testing.T) {
 	assert.Contains(t, err.Error(), "bootstrap-admin --regenerate")
 }
 
+// TestRun_RejectsUnsetExternalURL verifies that Run fails with an actionable error
+// when external_url is not configured, and that no CA material or init marker is
+// written (the check fires before any side-effecting initialization step).
+func TestRun_RejectsUnsetExternalURL(t *testing.T) {
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "ca")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	cfg := makeTestConfig(t, tempDir, caDir, bundlePath)
+	cfg.ExternalURL = ""
+
+	_, err := Run(cfg, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "external_url",
+		"error must name the field that needs to be set")
+	assert.NoFileExists(t, bundlePath,
+		"no admin bundle must be written when external_url is unset")
+	assert.False(t, IsInitialized(caDir),
+		"init marker must not be written when external_url is unset: check must fire before CA material")
+}
+
+// TestRun_BundleHonoursExternalURL verifies that the ControllerURL in the system
+// admin bundle matches the configured external_url after initialization.
+func TestRun_BundleHonoursExternalURL(t *testing.T) {
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "ca")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	cfg := makeTestConfig(t, tempDir, caDir, bundlePath)
+	cfg.ExternalURL = "https://controller.example.com:9080"
+
+	_, err := Run(cfg, logger)
+	require.NoError(t, err)
+
+	b, err := bundle.Read(bundlePath)
+	require.NoError(t, err)
+	assert.Equal(t, "https://controller.example.com:9080", b.ControllerURL,
+		"bundle ControllerURL must reflect the configured external_url")
+}
+
 // makeTestConfig builds a minimal valid Config for initialization tests using temp dirs.
 // TestRun_TransportCertHonorsExternalHostname is the regression test for the
 // fleet-e2e failure on PR #1820: the fleet-controller container ran --init

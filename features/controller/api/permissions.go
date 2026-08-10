@@ -79,8 +79,14 @@ var knownPermissions = map[string]bool{
 	// Compliance
 	"compliance:read-summary": true,
 	// Tenant management
+	"tenant:list":   true,
 	"tenant:read":   true,
+	"tenant:update": true,
 	"tenant:manage": true,
+	// Tenant-crossing grant and break-glass (ADR-025 Decision 2, Issue #3125)
+	"tenant:crossing-grant":       true,
+	"tenant:crossing-list":        true,
+	"tenant:crossing-break-glass": true,
 	// Script library administration (Issue #1670)
 	"script:admin": true,
 	// Installer artifact management (Issue #1702)
@@ -122,6 +128,12 @@ var knownPermissions = map[string]bool{
 	"module:list-approvals": true,
 	"module:approve":        true,
 	"module:reject":         true,
+	// Per-tenant assurance-policy management (Issue #2839)
+	"assurance-policy:get": true,
+	"assurance-policy:set": true,
+	// Entity graph read API (Issue #2880)
+	"entity:list": true,
+	"entity:read": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

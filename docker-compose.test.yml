@@ -445,6 +445,10 @@ services:
     environment:
       CFGMS_NODE_ID: "controller-standalone"
       CFGMS_EXTERNAL_HOSTNAME: "controller-standalone"  # Story #312: External hostname for steward connections
+      # Issue #3196: admin bundle issuance (./controller --init below) fails
+      # closed without this. Same hostname as CFGMS_EXTERNAL_HOSTNAME above,
+      # which the cert manager already adds to the server certificate's SANs.
+      CFGMS_EXTERNAL_URL: "https://controller-standalone:9080"
       # Unified gRPC-over-QUIC transport (Story #515: replaces separate MQTT+QUIC)
       CFGMS_TRANSPORT_LISTEN_ADDR: "0.0.0.0:4433"
       CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"

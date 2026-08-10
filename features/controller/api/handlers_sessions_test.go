@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -242,6 +243,53 @@ func TestHandleSessionCreate_InvalidJSON(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for invalid JSON body", rec.Code)
 	}
+}
+
+// TestHandleSessionCreate_RootScopedPrincipal_IssuesRootScopedSession verifies that
+// handleSessionCreate mints a session via sessionManager.IssueRootScoped (not the
+// ordinary Issue) when the authenticated principal carries RootScoped==true — a cfg-CLI
+// session inherits its scope from the authenticating credential (ADR-025 Amendment 1
+// A1.3, founder decision 2026-08-09, PR #3215), never from a request field. Before this
+// change, session.Manager.IssueRootScoped had zero non-test callers.
+func TestHandleSessionCreate_RootScopedPrincipal_IssuesRootScopedSession(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+
+	body := `{"connection_name":"root-op-ctrl"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(body))
+	p := &Principal{
+		ID:         "root-operator-1",
+		Name:       "mtls-admin:root-operator-1",
+		Assurance:  session.AssuranceStrong,
+		RootScoped: true,
+	}
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, p))
+	rec := httptest.NewRecorder()
+
+	srv.handleSessionCreate(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var resp sessionCreateResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	got, err := mgr.Validate(context.Background(), resp.Token)
+	require.NoError(t, err)
+	assert.True(t, got.RootScoped, "session minted for a RootScoped principal must itself be RootScoped")
+	assert.Empty(t, got.TenantID, "a root-scoped session stays unscoped, same as IssueRootScoped's own contract")
+
+	// No-regression companion: an ordinary (non-root-scoped) principal still gets an
+	// ordinary session via Issue, not IssueRootScoped.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(body))
+	req2 = injectAdminPrincipal(req2, "ordinary-admin")
+	rec2 := httptest.NewRecorder()
+	srv.handleSessionCreate(rec2, req2)
+	require.Equal(t, http.StatusCreated, rec2.Code, rec2.Body.String())
+
+	var resp2 sessionCreateResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
+	got2, err := mgr.Validate(context.Background(), resp2.Token)
+	require.NoError(t, err)
+	assert.False(t, got2.RootScoped, "an ordinary admin principal must not produce a RootScoped session")
 }
 
 // TestHandleSessionRevoke_ImmediateRevocation verifies DELETE /api/v1/sessions/{id}

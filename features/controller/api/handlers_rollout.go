@@ -105,12 +105,15 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 	// Tenant scope: a caller may only target its own tenant subtree via req.TenantID; a
 	// caller that supplies a tenant outside that subtree is rejected rather than silently
 	// redirected. Only an unscoped caller (empty tenant — mTLS admin) may target any tenant.
-	// The principal's GlobalScope flag is deliberately NOT consulted: the web-session
-	// middleware sets GlobalScope=true on every session principal regardless of its tenant
-	// scope, so gating on it let a tenant-scoped web caller drive another tenant's rollout
-	// (Issue #3143). This mirrors the cross-tenant guard in handlers_upgrade.go and closes
-	// the isolation gap where a tenant-scoped caller holding installer:dispatch:steward
-	// could drive orchestration against a victim tenant's fleet (Issue #2340).
+	// The principal's GlobalScope flag is deliberately NOT consulted: GlobalScope is a
+	// read-visibility axis (cross-tenant fleet queries), not an authorization gate for
+	// which tenants a caller may target. Both session paths now compute it from actual
+	// scope — web-session from acct.RootScope (middleware.go:433), cfg-CLI Bearer from
+	// sess.TenantID=="" (middleware.go:357) — but using it for write isolation would be
+	// the wrong signal. The explicit callerTenantID + isWithinTenantScope check was the
+	// fix for Issue #3143 (a tenant-scoped caller could drive another tenant's rollout
+	// when GlobalScope was relied on) and is the correct isolation mechanism here. This
+	// mirrors the cross-tenant guard in handlers_upgrade.go (Issue #2340).
 	tenantID := callerTenantID
 	if req.TenantID != "" && req.TenantID != callerTenantID {
 		if !isWithinTenantScope(callerTenantID, req.TenantID) {

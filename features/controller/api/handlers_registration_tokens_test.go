@@ -62,12 +62,15 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
 
-	// Create registration token store
-	tokenStorePath := t.TempDir()
-
+	// Create registration token store. In-memory for the same reason as
+	// newTestRegistrationStore in handlers_registration_test.go: the file-backed
+	// path runs the full schema DDL against a WAL journal on disk (0.4s-2.6s under
+	// -race) where the in-memory path takes the provider's deserialize fast-path
+	// (~10ms). openDB gives every in-memory request a private, single-connection
+	// database, so this store stays isolated from every other test's.
 	regTokenStore, err := interfaces.CreateRegistrationTokenStoreFromConfig(
 		"sqlite",
-		map[string]interface{}{"path": tokenStorePath + "/tokens.db"},
+		map[string]interface{}{"path": ":memory:"},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = regTokenStore.Close() })

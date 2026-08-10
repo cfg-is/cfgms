@@ -4,16 +4,21 @@ package initialization
 
 import (
 	"bufio"
+	"context"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // reservedCNs are CN values that cannot be used for operator admin bundles.
@@ -32,11 +37,46 @@ var stewardCNPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
 // All admin cert issuance paths pass this value explicitly; no caller can supply higher.
 const adminCertValidityDays = 365
 
+// validateBundleExternalURL returns an actionable error if cfg.ExternalURL is
+// unset or invalid. Both admin bundle issuance paths call this before writing any
+// cert or init marker — a controller whose config omits external_url must not
+// silently produce bundles with a wrong ControllerURL that surfaces only as a
+// connection error on the operator's machine.
+func validateBundleExternalURL(cfg *config.Config) error {
+	if cfg.ExternalURL == "" {
+		return fmt.Errorf("external_url must be set in the controller config before issuing admin bundles; " +
+			"it is the externally-reachable HTTPS address operators use to connect " +
+			"(e.g. external_url: https://controller.example.com:8080)")
+	}
+	u, err := url.Parse(cfg.ExternalURL)
+	if err != nil {
+		return fmt.Errorf("external_url %q is not a valid URL: %w", cfg.ExternalURL, err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("external_url must use the https scheme, got %q", cfg.ExternalURL)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("external_url must include a hostname, got %q", cfg.ExternalURL)
+	}
+	return nil
+}
+
 // IssueAdminBundle issues a new admin client cert+key bundle for the named operator.
 // The name must be non-empty, alphanumeric+hyphens only, max 64 chars, and must not
 // match any reserved CN or steward UUID pattern. The bundle is written to outputPath
 // with mode 0600 (enforced by bundle.Write).
-func IssueAdminBundle(cfg *config.Config, logger logging.Logger, name, outputPath string) error {
+//
+// rootScoped is the ADR-025 Amendment 1 A1.3 opt-in (founder decision 2026-08-09,
+// PR #3215): when true, the issued cert also carries cert.SetRootScopeMarker, marking
+// its holder as a root-scoped SaaS-operator principal subject to ADR-025 Decision 1's
+// root<->MSP boundary rather than an unrestricted superadmin. The marker is never
+// inferred — this is the only production path that sets it, and issuance is audited.
+// The system admin bundle (first boot / --regenerate, issueAdminBundle in
+// initialization.go) never sets it; see that function's doc comment for why.
+func IssueAdminBundle(cfg *config.Config, logger logging.Logger, name, outputPath string, rootScoped bool) error {
+	if err := validateBundleExternalURL(cfg); err != nil {
+		return err
+	}
 	if err := validateCN(name); err != nil {
 		return err
 	}
@@ -49,11 +89,19 @@ func IssueAdminBundle(cfg *config.Config, logger logging.Logger, name, outputPat
 		return fmt.Errorf("failed to load cert manager: %w", err)
 	}
 
+	templateModifier := cert.SetAdminMarker
+	if rootScoped {
+		templateModifier = func(template *x509.Certificate) {
+			cert.SetAdminMarker(template)
+			cert.SetRootScopeMarker(template)
+		}
+	}
+
 	adminCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName:       name,
 		Organization:     "CFGMS",
 		ValidityDays:     adminCertValidityDays,
-		TemplateModifier: cert.SetAdminMarker,
+		TemplateModifier: templateModifier,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to issue admin certificate: %w", err)
@@ -99,7 +147,65 @@ func IssueAdminBundle(cfg *config.Config, logger logging.Logger, name, outputPat
 	logger.Info("Admin bundle issued",
 		"path", logging.SanitizeLogValue(outputPath),
 		"name", logging.SanitizeLogValue(name),
-		"serial", adminCert.SerialNumber)
+		"serial", adminCert.SerialNumber,
+		"root_scoped", rootScoped)
+
+	if rootScoped {
+		// A credential that changes which side of the ADR-025 Decision 1 tenant boundary
+		// its holder sits on must not be mintable without a trace (founder decision,
+		// PR #3215, 2026-08-09). Fail closed: the bundle is already on disk at this point
+		// (the operator has a valid credential either way), but a storage/audit failure
+		// here is still returned as a hard error so the CLI never silently produces an
+		// unaudited root-scoped credential — the operator sees the failure and can
+		// investigate or revoke.
+		if auditErr := auditRootScopedBundleIssuance(cfg, logger, name, adminCert); auditErr != nil {
+			return fmt.Errorf("root-scoped admin bundle issued but audit record failed: %w", auditErr)
+		}
+	}
+	return nil
+}
+
+// auditRootScopedBundleIssuance records a Critical-severity audit event for the issuance
+// of a root-scoped admin bundle. Opens a short-lived storage+audit manager scoped to this
+// single call — bootstrap-admin is a one-shot CLI invocation with no long-running server
+// to own a persistent audit manager.
+func auditRootScopedBundleIssuance(cfg *config.Config, logger logging.Logger, name string, adminCert *cert.Certificate) error {
+	storageManager, err := openStorageManager(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("failed to open storage for issuance audit: %w", err)
+	}
+	defer func() {
+		if cErr := storageManager.Close(); cErr != nil {
+			logger.Warn("failed to close storage manager after issuance audit", "error", cErr)
+		}
+	}()
+
+	auditManager, err := audit.NewManager(storageManager.GetAuditStore(), "bootstrap-admin")
+	if err != nil {
+		return fmt.Errorf("failed to create audit manager: %w", err)
+	}
+
+	ctx := context.Background()
+	recordErr := auditManager.RecordEvent(ctx, audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(business.AuditEventSystemAccess).
+		Action("root_scoped_admin_bundle_issued").
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("admin_bundle", adminCert.SerialNumber, "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityCritical).
+		Detail("operator_name", logging.SanitizeLogValue(name)).
+		Detail("cert_fingerprint", adminCert.Fingerprint))
+
+	// Stop flushes the queued entry to durable storage before this one-shot process
+	// exits; without it RecordEvent's async enqueue could be lost on process exit.
+	if stopErr := auditManager.Stop(ctx); stopErr != nil {
+		logger.Warn("failed to stop audit manager cleanly after issuance audit", "error", stopErr)
+	}
+
+	if recordErr != nil {
+		return fmt.Errorf("failed to record root-scoped issuance audit event: %w", recordErr)
+	}
 	return nil
 }
 

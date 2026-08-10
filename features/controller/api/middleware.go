@@ -96,6 +96,14 @@ type Principal struct {
 	// Confinement middleware and routing layers use this to distinguish "no passkeys" (0)
 	// from "unknown" (-1) or "has passkeys" (>0) without a per-request store query.
 	AuthenticatorCount int
+	// RootScoped marks a principal as a root-scoped SaaS-operator (ADR-025 Amendment 1
+	// A1.3), a distinct and narrower category than an unscoped superadmin. Both present
+	// TenantID == "" — that field alone MUST NOT be read as root scope — but only a
+	// RootScoped principal is subject to ADR-025 Decision 1's root<->MSP boundary
+	// (isCallerAuthorizedForTenant in handlers_tenants.go). Set from an explicit signal
+	// only: cert.HasRootScopeMarker for mTLS admin certs, Session.RootScoped for cfg-CLI
+	// Bearer sessions. Always false for API-key, web-session, and relay principals.
+	RootScoped bool
 }
 
 // loggingMiddleware logs HTTP requests
@@ -246,6 +254,10 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		CertSerial:      serial,
 		CertFingerprint: hex.EncodeToString(fpSum[:]),
 		CertNotAfter:    peerCert.NotAfter,
+		// RootScoped is read from an explicit certificate extension (ADR-025 Amendment 1
+		// A1.3) — never inferred from TenantID being empty. Absent on every admin cert
+		// issued before this marker existed, so existing deployments are unaffected.
+		RootScoped: cert.HasRootScopeMarker(peerCert),
 	}
 }
 
@@ -349,15 +361,25 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// Build a Principal from session state. Assurance is read directly from
 					// the session so that IP-change downgrades (ADR-021 Decision 5) and future
 					// WebAuthn upgrades are reflected on every request rather than fixed at issuance.
+					//
+					// GlobalScope mirrors the session's actual scope (Issue #3194): unscoped sessions
+					// (TenantID=="", matching an unscoped mTLS admin cert) receive cross-tenant
+					// visibility; tenant-scoped sessions are confined to their subtree. Fail-closed:
+					// explicit scope → GlobalScope=false, matching the web-session path's shape.
+					globalScope := sess.TenantID == ""
 					sessionPrincipal := &Principal{
 						ID:           sess.PrincipalID,
 						Name:         "session:" + logging.SanitizeLogValue(sess.PrincipalID),
 						Assurance:    sess.Assurance,
 						LastProvenAt: sess.LastProvenAt,
-						GlobalScope:  true,
+						GlobalScope:  globalScope,
 						// TenantID mirrors the issuing admin cert; "" means no tenant scope
 						// (same semantics as extractAdminPrincipal for mTLS admin certs).
 						TenantID: sess.TenantID,
+						// RootScoped mirrors the session's own explicit marker (ADR-025
+						// Amendment 1 A1.3, set only by session.Manager.IssueRootScoped) —
+						// never derived from TenantID or GlobalScope.
+						RootScoped: sess.RootScoped,
 					}
 					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
 					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
@@ -622,6 +644,26 @@ type AuthorizationDecision struct {
 	ConditionalVars map[string]interface{} `json:"conditional_vars,omitempty"`
 }
 
+// tenantCrossingRemedyPermissions lists the ADR-025 Decision 2 endpoints whose handlers
+// own the root-scoped decision themselves, so requirePermission's boundary check must not
+// pre-empt them:
+//
+//   - tenant:crossing-break-glass is the remedy for lacking a crossing. Gating it on
+//     already holding one would make the boundary unopenable — a root-scoped operator
+//     could never obtain a first crossing, and ADR-025 Decision 2(b) would be dead code.
+//   - tenant:crossing-grant refuses every root-scoped caller outright
+//     (handlers_tenant_crossing.go, ROOT_SCOPED_CANNOT_GRANT) because a grant is the MSP's
+//     consent, never the operator's self-dealing. That refusal is strictly stricter than a
+//     crossing check, and a challenge here would advertise a remedy that does not unlock
+//     the endpoint.
+//
+// tenant:crossing-list is deliberately absent: reading an MSP's crossing history is
+// ordinary tenant-scoped data and its handler already applies authorizeTenantAccess.
+var tenantCrossingRemedyPermissions = map[string]bool{
+	"tenant:crossing-break-glass": true,
+	"tenant:crossing-grant":       true,
+}
+
 // requirePermission creates middleware that enforces specific permission requirements.
 // Human administrator principals carry nil Permissions and are implicitly
 // authorized; web accounts carry an explicit (possibly empty) permission slice.
@@ -683,14 +725,18 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// Assurance check (ADR-021 Decision 2): after confirming the principal
 			// holds the permission, verify the assurance level meets the minimum for
 			// this route. This replaces requireTier(TierMTLSOnly) entirely.
-			if req, found := permissionAssurance[permissionID]; found && principal.Assurance < req.Min {
+			// resolveAssuranceRequirement composes the global floor with any per-tenant
+			// overrides declared by ancestors of tenantID (root→leaf), taking the max
+			// of all Min values and OR-ing RequireUserPresence (ADR-021, Issue #2839).
+			assuranceReq, assuranceFound := s.resolveAssuranceRequirement(r.Context(), tenantID, permissionID)
+			if assuranceFound && principal.Assurance < assuranceReq.Min {
 				decision := &AuthorizationDecision{
 					Granted:      false,
 					PermissionID: permissionID,
 					Resource:     resource,
 					Action:       action,
 					Decision:     "DENY",
-					Reason:       fmt.Sprintf("Insufficient assurance: %s < %s required for %s", principal.Assurance, req.Min, permissionID),
+					Reason:       fmt.Sprintf("Insufficient assurance: %s < %s required for %s", principal.Assurance, assuranceReq.Min, permissionID),
 					CheckedAt:    time.Now(),
 					SubjectID:    userID,
 					TenantID:     tenantID,
@@ -703,7 +749,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					return
 				}
 				// All other callers (AssuranceBasic+) receive a step-up challenge (ADR-021 Decision 6).
-				levelName := req.Min.String()
+				levelName := assuranceReq.Min.String()
 				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s"`, levelName))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
@@ -725,8 +771,8 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// and is passed in X-Presence-Token. It is single-use (LoadAndDelete) and short-lived
 			// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
 			// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
-			if req, found := permissionAssurance[permissionID]; found && req.RequireUserPresence {
-				levelName := req.Min.String()
+			if assuranceFound && assuranceReq.RequireUserPresence {
+				levelName := assuranceReq.Min.String()
 
 				presenceToken := r.Header.Get(presenceTokenHeader)
 				if presenceToken == "" {
@@ -807,14 +853,88 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				)
 			}
 
+			// ADR-025 Decision 1 root<->MSP boundary for root-scoped principals.
+			//
+			// This must sit outside the tenant-scoped block below: a RootScoped principal
+			// presents GlobalScope == true and TenantID == "" (extractAdminPrincipal and
+			// the Bearer/session path both keep the unscoped shape), so that block is
+			// structurally unreachable for it. Enforcing the boundary only inside the
+			// handlers that happen to call authorizeTenantAccess left every other
+			// tenant-targeting route open — tenant:manage's suspend and config-source/test,
+			// and the per-tenant refresh-policy and assurance-policy endpoints — letting a
+			// root-scoped SaaS-operator suspend an MSP tenant or drive a config-source test
+			// against that tenant's git credential with no active grant and no break-glass
+			// record. Checking here covers every current and future tenant-targeting route
+			// by construction rather than by handler-by-handler discipline.
+			if principal.RootScoped && !tenantCrossingRemedyPermissions[permissionID] {
+				if targetTenant := s.extractBoundaryTenantFromRequest(r, resourceType); targetTenant != "" {
+					switch s.authorizeTenantAccess(r.Context(), principal, targetTenant) {
+					case tenantAuthAllowed:
+						// Root itself, or a tenant covered by an active crossing.
+					case tenantAuthNeedsCrossing:
+						s.auditAuthorizationDecision(r, &AuthorizationDecision{
+							Granted:      false,
+							PermissionID: permissionID,
+							Resource:     resource,
+							Action:       action,
+							Decision:     "DENY",
+							Reason:       "Root-scoped principal has no active tenant crossing for target tenant",
+							CheckedAt:    time.Now(),
+							SubjectID:    userID,
+							TenantID:     tenantID,
+						})
+						// The tenant is real and inside root's own subtree, so a challenge
+						// discloses nothing this caller cannot already learn, and it is the
+						// only way a legitimate break-glass invocation learns its remedy
+						// (ADR-025 Decision 3).
+						s.writeTenantCrossingChallenge(w, targetTenant)
+						return
+					default:
+						isoDecision := &AuthorizationDecision{
+							Granted:      false,
+							PermissionID: permissionID,
+							Resource:     resource,
+							Action:       action,
+							Decision:     "DENY",
+							Reason:       "Target tenant is outside the root-scoped principal's boundary",
+							CheckedAt:    time.Now(),
+							SubjectID:    userID,
+							TenantID:     tenantID,
+						}
+						s.auditAuthorizationDecision(r, isoDecision)
+						// Same existence-oracle stance as handleGetTenant/handleUpdateTenant:
+						// a tenant outside root's subtree must not be distinguishable from one
+						// that does not exist.
+						if resourceType == "tenant" {
+							s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+							return
+						}
+						s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+						return
+					}
+				}
+			}
+
 			// Tenant isolation check for tenant-scoped (non-global) principals.
 			s.mu.RLock()
 			engine := s.isolationEngine
 			s.mu.RUnlock()
 			if !principal.GlobalScope && principal.TenantID != "" {
 				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
-				if targetTenant != "" && targetTenant != principal.TenantID &&
-					!strings.HasPrefix(targetTenant, principal.TenantID+"/") {
+				// Real tenant IDs are flat, ParentID-linked tokens, never hierarchical
+				// paths — string-prefix matching against them is dead code (the same
+				// defect isCallerAuthorizedForTenant's doc comment describes for
+				// isWithinTenantScope). Every other resource type still uses the
+				// path-shaped prefix check, which is unaffected here.
+				var inTargetScope bool
+				if targetTenant == "" || targetTenant == principal.TenantID {
+					inTargetScope = true
+				} else if resourceType == "tenant" {
+					inTargetScope = s.isCallerAuthorizedForTenant(r.Context(), principal, targetTenant)
+				} else {
+					inTargetScope = strings.HasPrefix(targetTenant, principal.TenantID+"/")
+				}
+				if !inTargetScope {
 					isoDecision := &AuthorizationDecision{
 						Granted:      false,
 						PermissionID: permissionID,
@@ -827,7 +947,13 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 						TenantID:     tenantID,
 					}
 					s.auditAuthorizationDecision(r, isoDecision)
-					if resourceType == "tenant" && action == "read" {
+					// tenant:read and tenant:update both resolve a single tenant by ID and
+					// must return an identical 404 for "doesn't exist" and "exists but out
+					// of my subtree" (ADR-025 existence-oracle prevention, Issue #3125) — a
+					// 403 here would let a caller distinguish the two cases via status code
+					// alone, before ever reaching the handler's own isCallerAuthorizedForTenant
+					// check.
+					if resourceType == "tenant" && (action == "read" || action == "update") {
 						s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 						return
 					}
@@ -1151,4 +1277,83 @@ func (s *Server) extractTargetTenantFromRequest(r *http.Request, resourceType st
 		}
 	}
 	return ""
+}
+
+// extractBoundaryTenantFromRequest returns the tenant a request acts on for the ADR-025
+// Decision 1 boundary check, extending extractTargetTenantFromRequest with the
+// "tenant_path" path variable. The per-tenant refresh-policy and assurance-policy routes
+// (routes_tenants.go) name their target tenant under that variable, so they resolve to ""
+// through the isolation-engine extractor and were invisible to any middleware scope check.
+//
+// It is a separate function rather than a widening of extractTargetTenantFromRequest
+// because the tenant-scoped block that consumes the latter answers a cross-tenant denial
+// with 403 CROSS_TENANT_ACCESS_DENIED, whereas those two handlers already enforce the same
+// boundary for tenant-scoped callers and answer with 404 to avoid disclosing that the
+// tenant exists. Routing them through the 403 path would trade one isolation gap for an
+// existence oracle.
+func (s *Server) extractBoundaryTenantFromRequest(r *http.Request, resourceType string) string {
+	if t := s.extractTargetTenantFromRequest(r, resourceType); t != "" {
+		return t
+	}
+	return mux.Vars(r)["tenant_path"]
+}
+
+// resolveAssuranceRequirement composes the global permissionAssurance floor with any
+// per-tenant overrides declared along the root→leaf path to tenantID (ADR-021, Issue #2839).
+//
+// Resolution rules:
+//   - Min takes the maximum seen across [global floor, ancestor overrides, tenant override].
+//   - RequireUserPresence is true if true anywhere in the chain (OR, never cleared).
+//
+// When assurancePolicyStore or tenantStore is nil, or tenantID is empty, the method
+// returns the global floor unchanged — preserving today's exact behavior in unit tests
+// that build a bare Server without these stores.
+//
+// GetTenantPath or GetPolicy errors are logged at Warn and cause a fall-back to the
+// global floor: an override-resolution error must never turn a storage hiccup into a
+// fleet-wide outage on every gated endpoint. Falling back to the global floor is safe
+// because the floor is always the tightest guaranteed lower bound.
+func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, permissionID string) (Requirement, bool) {
+	floor, found := permissionAssurance[permissionID]
+	if s.assurancePolicyStore == nil || s.tenantStore == nil || tenantID == "" {
+		return floor, found
+	}
+
+	path, err := s.tenantStore.GetTenantPath(ctx, tenantID)
+	if err != nil {
+		s.logger.Warn("resolveAssuranceRequirement: failed to get tenant path; using global floor",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"permission_id", logging.SanitizeLogValue(permissionID),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		return floor, found
+	}
+
+	result := floor
+	for _, t := range path {
+		policy, err := s.assurancePolicyStore.GetPolicy(ctx, t)
+		if err != nil {
+			s.logger.Warn("resolveAssuranceRequirement: failed to get assurance policy; using global floor",
+				"tenant_id", logging.SanitizeLogValue(t),
+				"permission_id", logging.SanitizeLogValue(permissionID),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+			return floor, found
+		}
+		for _, ov := range policy.Overrides {
+			if ov.PermissionID != permissionID {
+				continue
+			}
+			found = true
+			if ov.MinOverride != nil {
+				if ovMin := session.AssuranceLevel(*ov.MinOverride); ovMin > result.Min {
+					result.Min = ovMin
+				}
+			}
+			if ov.RequireUserPresence {
+				result.RequireUserPresence = true
+			}
+		}
+	}
+	return result, found
 }

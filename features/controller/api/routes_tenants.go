@@ -14,14 +14,24 @@ func init() { RegisterRoutes(registerTenantRoutes) }
 // Covers two regions of the original setupRouter: the core tenant CRUD (region 1)
 // and the per-tenant refresh-policy endpoints (region 2), both on the same variable.
 func registerTenantRoutes(s *Server, api *mux.Router) {
-	// Tenant management endpoints (Issue #1396, Issue #1848)
+	// Tenant management endpoints (Issue #1396, Issue #1848, Issue #3125)
 	tenants := api.PathPrefix("/tenants").Subrouter()
+	tenants.Handle("", s.requirePermission("tenant", "list")(http.HandlerFunc(s.handleListTenants))).Methods("GET")
 	tenants.Handle("", s.requirePermission("tenant", "create")(http.HandlerFunc(s.handleCreateTenant))).Methods("POST")
 	tenants.Handle("/{id}", s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetTenant))).Methods("GET")
+	tenants.Handle("/{id}", s.requirePermission("tenant", "update")(http.HandlerFunc(s.handleUpdateTenant))).Methods("PUT")
 	tenants.Handle("/{id}/suspend",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleSuspendTenant))).Methods("POST")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
+
+	// Tenant-crossing grant and break-glass endpoints (ADR-025 Decision 2, Issue #3125).
+	tenants.Handle("/{id}/access-grants",
+		s.requirePermission("tenant", "crossing-grant")(http.HandlerFunc(s.handleCreateTenantCrossingGrant))).Methods("POST")
+	tenants.Handle("/{id}/access-grants",
+		s.requirePermission("tenant", "crossing-list")(http.HandlerFunc(s.handleListTenantCrossings))).Methods("GET")
+	tenants.Handle("/{id}/break-glass",
+		s.requirePermission("tenant", "crossing-break-glass")(http.HandlerFunc(s.handleTenantBreakGlass))).Methods("POST")
 
 	// Per-tenant refresh policy endpoints (Issue #2097).
 	// {tenant_path:.+} allows '/' in the path variable for hierarchical tenant IDs.
@@ -29,4 +39,13 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("refresh", "get-policy")(http.HandlerFunc(s.handleGetRefreshPolicy))).Methods("GET")
 	tenants.Handle("/{tenant_path:.+}/refresh-policy",
 		s.requirePermission("refresh", "set-policy")(http.HandlerFunc(s.handleSetRefreshPolicy))).Methods("PUT")
+
+	// Per-tenant assurance-policy endpoints (Issue #2839).
+	// assurance-policy:get is an ordinary RBAC gate (not in permissionAssurance), so reads
+	// stay unrestricted at the assurance layer — matching refresh:get-policy's absence from
+	// that map. assurance-policy:set requires AssuranceStrong (declared in assurance.go).
+	tenants.Handle("/{tenant_path:.+}/assurance-policy",
+		s.requirePermission("assurance-policy", "get")(http.HandlerFunc(s.handleGetAssurancePolicy))).Methods("GET")
+	tenants.Handle("/{tenant_path:.+}/assurance-policy",
+		s.requirePermission("assurance-policy", "set")(http.HandlerFunc(s.handleSetAssurancePolicy))).Methods("PUT")
 }

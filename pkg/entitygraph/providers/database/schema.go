@@ -14,7 +14,6 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
-	"errors"
 	"fmt"
 	"time"
 
@@ -29,10 +28,9 @@ var migrationsSQL string
 // Compile-time assertion that the provider satisfies the central contract.
 var _ interfaces.EntityGraphProvider = (*DatabaseEntityGraphProvider)(nil)
 
-// errNotFound is the provider-local not-found sentinel. The interfaces package
-// intentionally does not export a not-found error, so reads that miss return
-// this value for callers to test with errors.Is.
-var errNotFound = errors.New("entitygraph/database: not found")
+// errNotFound wraps the interfaces.ErrNotFound sentinel so that handler-layer
+// callers can detect not-found across providers via errors.Is(err, interfaces.ErrNotFound).
+var errNotFound = fmt.Errorf("entitygraph/database: %w", interfaces.ErrNotFound)
 
 // DatabaseEntityGraphProvider is the PostgreSQL-backed EntityGraphProvider.
 // It is safe for concurrent use: all state lives in the connection-pooled

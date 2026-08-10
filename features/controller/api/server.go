@@ -159,7 +159,11 @@ type Server struct {
 	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
+	egProvider                     egReadProvider                        // Issue #2880: entity graph read API
 	terminalHandler                http.Handler                          // Issue #2761: terminal WebSocket relay handler
+	tenantStore                    business.TenantStore                  // Issue #2839: tenant hierarchy for per-tenant assurance resolution
+	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
+	tenantCrossingStore            business.TenantCrossingStore          // ADR-025 Decision 2: tenant-crossing grants and break-glass
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -439,6 +443,7 @@ func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 			LastHeartbeat: info.LastHeartbeat,
 			DNAAttributes: attrs,
 			DNAFragments:  frags,
+			Hidden:        info.Hidden,
 		})
 	}
 	return result
@@ -1199,6 +1204,23 @@ func (s *Server) SetRefreshPolicyStore(store business.RefreshPolicyStore) {
 	s.refreshPolicyStore = store
 }
 
+// SetTenantStore wires the TenantStore for tenant-hierarchy resolution (Issue #2839).
+// TenantStore is a core, always-present store — wired unconditionally at startup.
+func (s *Server) SetTenantStore(store business.TenantStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tenantStore = store
+}
+
+// SetAssurancePolicyStore wires the per-tenant AssurancePolicyStore (Issue #2839).
+// When nil (default), resolveAssuranceRequirement returns the global permissionAssurance
+// floor unchanged — no behavior change for existing tests that build a bare Server.
+func (s *Server) SetAssurancePolicyStore(store business.AssurancePolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.assurancePolicyStore = store
+}
+
 // SetAuditStore wires a direct AuditStore reference for the test-mode count endpoint
 // (Issue #2098). Production code uses s.auditManager; this allows test endpoints to
 // query audit entries without needing sqlite3 CLI in the controller container.
@@ -1206,6 +1228,17 @@ func (s *Server) SetAuditStore(store business.AuditStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.auditStore = store
+}
+
+// SetTenantCrossingStore wires the ADR-025 Decision 2 tenant-crossing grant/break-glass
+// store. When nil (default), isCallerAuthorizedForTenant fails closed: a root-scoped
+// caller is denied access to any strict descendant of "root" (no crossing mechanism
+// available means no crossing can be active) — no behavior change for existing tests
+// that build a bare Server.
+func (s *Server) SetTenantCrossingStore(store business.TenantCrossingStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tenantCrossingStore = store
 }
 
 // SetPoPVerifier replaces the proof-of-possession verifier.
@@ -1413,6 +1446,14 @@ func (s *Server) SetConfigStoreWriter(w egConfigstoreIngestor) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.egConfigstoreWriter = w
+}
+
+// SetEntityGraphProvider wires the entity graph read provider into the REST
+// API, enabling the /api/v1/entities/* endpoints (Issue #2880).
+func (s *Server) SetEntityGraphProvider(p egReadProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egProvider = p
 }
 
 // getHTTPListenAddr determines the HTTP listen address with the

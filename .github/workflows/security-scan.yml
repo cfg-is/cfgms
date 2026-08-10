@@ -105,12 +105,12 @@ jobs:
 
     - name: Install Trivy
       env:
-        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.72.0 is
+        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.73.0 is
         # the post-incident clean release. The install helper verifies the
         # archive SHA-256 against this pinned value before extraction. See
         # docs/runbooks/trivy-rollback.md for rollback procedure.
-        TRIVY_VERSION: 'v0.72.0'
-        TRIVY_SHA256: 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'
+        TRIVY_VERSION: 'v0.73.0'
+        TRIVY_SHA256: '2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b'
       run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Run Trivy Scan
@@ -139,7 +139,7 @@ jobs:
         fi
     
     - name: Upload Trivy SARIF
-      uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
       if: always() && hashFiles('sarif-results/trivy.sarif') != ''
       with:
         sarif_file: sarif-results/trivy.sarif
@@ -268,7 +268,7 @@ jobs:
     # configuration, and results are still available via workflow artifacts.
     #
     # - name: Upload gosec SARIF
-    #   uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+    #   uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
     #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
     #   with:
     #     sarif_file: sarif-results/gosec.sarif
@@ -460,10 +460,10 @@ jobs:
         make install-nancy
         
         # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
-        # v0.72.0 is the post-incident clean release. The install helper
+        # v0.73.0 is the post-incident clean release. The install helper
         # verifies the archive SHA-256 against the pinned value before
         # extraction. See docs/runbooks/trivy-rollback.md for rollback.
-        sudo .github/scripts/install-trivy.sh 'v0.72.0' 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea'
+        sudo .github/scripts/install-trivy.sh 'v0.73.0' '2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b'
 
         # Install gosec and staticcheck
         go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0

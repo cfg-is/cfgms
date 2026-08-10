@@ -119,8 +119,8 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		INSERT INTO session_token_store
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
 			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12)
+			 assurance, bound_ip, last_proven_at, credential_id, root_scoped)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12, $13)
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = EXCLUDED.session_id,
 			principal_id        = EXCLUDED.principal_id,
@@ -132,7 +132,8 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 			assurance           = EXCLUDED.assurance,
 			bound_ip            = EXCLUDED.bound_ip,
 			last_proven_at      = EXCLUDED.last_proven_at,
-			credential_id       = EXCLUDED.credential_id`,
+			credential_id       = EXCLUDED.credential_id,
+			root_scoped         = EXCLUDED.root_scoped`,
 		tokenHash,
 		sess.ID,
 		sess.PrincipalID,
@@ -145,6 +146,7 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		sess.BoundIP,
 		lastProvenAt,
 		credentialID,
+		sess.RootScoped,
 	)
 	if err != nil {
 		return fmt.Errorf("database: session token set failed: %w", err)
@@ -162,7 +164,7 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id
+		       assurance, bound_ip, last_proven_at, credential_id, root_scoped
 		FROM session_token_store
 		WHERE token_hash = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())`,
@@ -170,7 +172,7 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -217,7 +219,7 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT token_hash, session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id
+		       assurance, bound_ip, last_proven_at, credential_id, root_scoped
 		FROM session_token_store
 		WHERE hash_expires_at IS NULL OR hash_expires_at > NOW()
 		ORDER BY issued_at`)
@@ -237,7 +239,7 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 		if err := rows.Scan(
 			&tokenHash, &sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 			&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID,
+			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &sess.RootScoped,
 		); err != nil {
 			return nil, fmt.Errorf("database: session token list scan failed: %w", err)
 		}

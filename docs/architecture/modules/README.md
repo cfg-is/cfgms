@@ -287,6 +287,32 @@ In addition to the payload boundary, `make check-stdlib-completeness` (also wire
 
 **Adding a new stdlib module:** satisfy all five payload sources *and* all five completeness checks before the PR will merge (checks 2–6).
 
+### `observe_when` classification (ADR-024 §3)
+
+Every steward-pullable module carries either a real `observe_when` declaration or a
+deliberate-omission comment. The table below documents the call for all 15 modules
+and is the auditable summary of those decisions. The 7 `m365/*` workflow-kind modules
+are excluded from this table — they run on the controller workflow engine (never pulled
+by a steward) and have no steward-pull DNA observation path (see Workflow modules below).
+
+| Module | Kind | `observe_when` | Rationale |
+|--------|------|----------------|-----------|
+| `cert_trust` | stdlib | `os=windows\|linux\|darwin` | Bounded: trust-store enumeration is inventory-worthy on every OS |
+| `file` | stdlib | omitted (permanent) | Unbounded / content-bearing: declared resources live in config + drift only, never enumerated into DNA (ADR-024 §3) |
+| `firewall` | stdlib | `os=linux` | Bounded: firewall rule enumeration; Linux-only in current implementation |
+| `hostname` | stdlib | `os=windows\|linux\|darwin` | Bounded: single-value host-identity fact present on every platform |
+| `package` | stdlib | `os=windows\|linux\|darwin` | Bounded: installed-package inventory; universal domain — every OS ships a package manager |
+| `patch` | stdlib | `os=windows` | Bounded: installed-update inventory; Windows-only (Linux/macOS backends not yet implemented) |
+| `script` | stdlib | omitted (permanent) | Execution primitive with no observation domain; executes signed files on demand (ADR-024 §3) |
+| `service` | stdlib | `os=windows\|linux\|darwin` | Bounded: service inventory via systemd/SCM/launchd; present on every platform |
+| `time` | stdlib | `os=windows\|linux\|darwin` | Bounded: single-value timezone + NTP-sync facts; foundational on every platform |
+| `user` | stdlib | `os=windows\|linux\|darwin` | Bounded: local-user inventory; every platform has a local user database |
+| `hyperv` | extended (steward) | `hyperv_enabled=true` | Bounded: VM + cluster inventory; activates on Hyper-V hosts via the already-shipped `hyperv_enabled` DNA fact |
+| `acme` | extended (steward) | `os=linux\|darwin\|windows` | Bounded: ACME cert-store enumeration; applicable on any steward OS |
+| `activedirectory` | extended (steward) | `os=windows` | Bounded: local AD objects via ADSI; Windows-exclusive interface |
+| `github_runner` | extended (steward) | `os=linux\|windows` | Bounded: runner install state + service state; active on supported platforms |
+| `network_activedirectory` | extended (steward→outpost) | omitted | Remote AD objects via LDAP: no steward DNA fact indicates AD connectivity; domain does not fit local host-state inventory model; outpost relocation candidate (ADR-024 §3) |
+
 ### Current stdlib members
 
 Shipped in the steward installer, all `executors: [steward]` (closed set — see ADR-016):
@@ -317,7 +343,7 @@ CFGMS-authored but used on only a subset of the fleet; built as standalone bundl
 
 **Workflow modules:**
 
-- `m365/*` (workflow kind, hosted by the controller workflow engine, at `features/workflow/modules/m365/`) - Microsoft 365 modules: `auth`, `conditional_access`, `entra_admin_unit`, `entra_application`, `entra_group`, `entra_user`, `intune_policy`. The `gdap/` and `graph/` directories under the same parent are shared support packages, not module roots.
+- `m365/*` (workflow kind, hosted by the controller workflow engine, at `features/workflow/modules/m365/`) - Microsoft 365 modules: `auth`, `conditional_access`, `entra_admin_unit`, `entra_application`, `entra_group`, `entra_user`, `intune_policy`. The `gdap/` and `graph/` directories under the same parent are shared support packages, not module roots. These modules declare `executors: [controller]` — they run on the controller workflow engine against cloud APIs and are never pulled by a steward, so `observe_when` and the omission marker do not apply to them.
 
 ## Script Module — Parameter Environment Variables
 

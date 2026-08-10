@@ -31,6 +31,42 @@ func newOSSManager(t *testing.T) *interfaces.StorageManager {
 	return mgr
 }
 
+// seedPendingRegistration inserts a single pending-registration entry with the
+// given lifecycle status. Used to construct source/destination status pairs for
+// the resync transition tests.
+func seedPendingRegistration(t *testing.T, mgr *interfaces.StorageManager, pendingID, status string) {
+	t.Helper()
+	ctx := context.Background()
+
+	preg := mgr.GetPendingRegistrationStore()
+	require.NotNil(t, preg, "pending registration store")
+
+	entry := &business.PendingRegistrationEntry{
+		PendingID:    pendingID,
+		StewardID:    "steward-" + pendingID,
+		TenantID:     "tenant-seed-1",
+		TokenStr:     "token-seed-1",
+		SourceIP:     "10.0.0.9",
+		RegisteredAt: time.Now(),
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		Status:       status,
+	}
+	if status == business.PendingRegistrationStatusClaimed {
+		claimedAt := time.Now()
+		entry.ClaimedAt = &claimedAt
+	}
+	require.NoError(t, preg.AddPending(ctx, entry))
+}
+
+// pendingRegistrationStatus reads back the stored status for pendingID.
+func pendingRegistrationStatus(t *testing.T, mgr *interfaces.StorageManager, pendingID string) *business.PendingRegistrationEntry {
+	t.Helper()
+	entry, err := mgr.GetPendingRegistrationStore().GetPendingByID(context.Background(), pendingID)
+	require.NoError(t, err, "read back pending registration %s", pendingID)
+	require.NotNil(t, entry)
+	return entry
+}
+
 // seedOSSManager populates an OSS StorageManager with one representative record
 // per store kind covered by the storage migrator.
 func seedOSSManager(t *testing.T, mgr *interfaces.StorageManager) {
@@ -192,5 +228,31 @@ func seedOSSManager(t *testing.T, mgr *interfaces.StorageManager) {
 		Status:                  business.PendingRefreshStatusPending,
 		CreatedAt:               time.Now(),
 		ExpiresAt:               time.Now().Add(24 * time.Hour),
+	}))
+
+	// pending registration entries (one pending, one claimed)
+	preg := mgr.GetPendingRegistrationStore()
+	require.NotNil(t, preg, "pending registration store")
+	require.NoError(t, preg.AddPending(ctx, &business.PendingRegistrationEntry{
+		PendingID:    "pending-reg-seed-1",
+		StewardID:    "steward-seed-1",
+		TenantID:     "tenant-seed-1",
+		TokenStr:     "token-seed-1",
+		SourceIP:     "10.0.0.2",
+		RegisteredAt: time.Now(),
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}))
+	claimedAt := time.Now()
+	require.NoError(t, preg.AddPending(ctx, &business.PendingRegistrationEntry{
+		PendingID:    "pending-reg-seed-2",
+		StewardID:    "steward-seed-2",
+		TenantID:     "tenant-seed-1",
+		TokenStr:     "token-seed-1",
+		SourceIP:     "10.0.0.3",
+		RegisteredAt: time.Now(),
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		ClaimedAt:    &claimedAt,
+		Status:       business.PendingRegistrationStatusClaimed,
 	}))
 }

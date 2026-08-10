@@ -25,6 +25,8 @@ import (
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
@@ -122,6 +124,13 @@ type DNAHandler struct {
 	// for. Set in HandleHeartbeatRoot; consumed and cleared in the delta branch
 	// of HandleGRPC.
 	pendingDeltas sync.Map
+
+	// Entity-graph writer fields (ADR-022 §9, Story #2907). Both nil when the
+	// entity-graph write path is not wired; only set via WithEntityGraph.
+	// The write is additive — alongside the existing ApplyDelta manifest path,
+	// never replacing it.
+	egWriter   *dnasync.Writer
+	egTaxonomy *egtypes.Taxonomy
 }
 
 // deltaRequest is the controller-side record of one outstanding partial-sync
@@ -166,6 +175,26 @@ func NewDNAHandler(logger logging.Logger, queue *TenantQueue, persister DNAPersi
 func (h *DNAHandler) WithPartialSync(store FragmentDeltaStore, publisher CommandPublisher) *DNAHandler {
 	h.store = store
 	h.publisher = publisher
+	return h
+}
+
+// WithEntityGraph wires the DNA-sync → entity-graph writer and the taxonomy
+// required for authority-class-based EID scoping (Story #2907, ADR-022 §9).
+// Returns h for chaining.
+//
+// Both arguments must be non-nil. Calling with either nil is a no-op to avoid
+// a nil-dereference in handleDeltaGRPC; the entity-graph write is then skipped
+// silently (a missing writer is a configuration error, not a data error, and the
+// caller's ApplyDelta write already committed the fragment manifest).
+//
+// The entity-graph write is ADDITIVE: it runs after ApplyDelta succeeds and
+// on failure only emits a warning — the steward's stream is not failed and the
+// committed manifest is not rolled back. Authority confusion (SE threat #1) is
+// structurally impossible: the EID authority segment is built entirely from the
+// mTLS-verified peerID, never from steward-supplied fragment data.
+func (h *DNAHandler) WithEntityGraph(writer *dnasync.Writer, taxonomy *egtypes.Taxonomy) *DNAHandler {
+	h.egWriter = writer
+	h.egTaxonomy = taxonomy
 	return h
 }
 
@@ -526,6 +555,17 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 		return fmt.Errorf("failed to apply delta for %s: %w", safePeerID, applyErr)
 	}
 	h.pendingDeltas.Delete(peerID)
+
+	// Entity-graph write (Story #2907, ADR-022 §9). Additive alongside ApplyDelta
+	// — a write failure emits a warning but does NOT fail the stream or roll back
+	// the committed manifest. peerID is the mTLS-verified identity; no fragment
+	// field can influence the EID authority segment (SE threat #1).
+	if h.egWriter != nil && h.egTaxonomy != nil {
+		if egErr := h.egWriter.WriteFragmentDelta(ctx, peerID, receivedFragments, nil, h.egTaxonomy); egErr != nil {
+			h.logger.Warn("entity-graph write failed for delta; manifest committed, graph may lag",
+				"peer_id", safePeerID, "error", logging.SanitizeLogValue(egErr.Error()))
+		}
+	}
 
 	h.logger.Info("DNA delta sync accepted",
 		"peer_id", safePeerID, "fragment_count", len(receivedFragments))

@@ -139,6 +139,17 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
   the `soon` badge and a short label; they do not throw or navigate.
   Back-navigation is a breadcrumb `Fleet / {hostname}` above the `<h1>`;
   the browser's own back button and the link both return to `/`.
+- **Terminal panel** (Story #2762, mockup [`mockups/asset-shell.html`](mockups/asset-shell.html)) —
+  the Shell tab in the asset-page tab frame renders an interactive remote shell
+  with `@xterm/xterm` + `FitAddon`, sized to its container via `ResizeObserver`.
+  Chrome around the terminal matches the mockup: a connection-status pill
+  (Connected / Connecting / Disconnected / Denied using the same state-pill
+  semantics as §4's other pills), session meta, and a Clear / Copy / Disconnect
+  header. Non-happy states are first-class, not fallback text — **Disconnected**
+  offers Reconnect, **Denied** explains the RBAC rejection. Warm-terminal tokens
+  (light-mode only today; dark-mode xterm theming is an open item, tracked
+  alongside the other §7 items) come from `web-ui-design-tokens.css`, not a
+  separate xterm theme file.
 - **Sortable data table** (Story #2766; convention established in `FleetTable.tsx`) —
   click any `<th>` to sort by that column; a second click on the same header reverses
   direction. Sort state is `{ key: string; direction: 1 | -1 }` (from `FleetTable.tsx`)

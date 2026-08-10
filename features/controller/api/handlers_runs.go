@@ -166,11 +166,12 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 // Only a machine (API-key) principal with no tenant is a genuine auth failure.
 //
 // This deliberately checks principal.Assurance == session.AssuranceMachine rather
-// than !principal.GlobalScope: middleware.go hardcodes GlobalScope=true on every
-// session principal regardless of its actual tenant scope (Issue #3143), so gating
-// on GlobalScope here would be a dead check that can never fire for a session
-// caller. Assurance is the reliable, orthogonal signal that a principal is
-// machine-authenticated (API key) — see the Principal doc comment.
+// than !principal.GlobalScope: Assurance is the direct signal for machine-authenticated
+// principals; GlobalScope models tenant-visibility breadth — an orthogonal axis that
+// must not be collapsed with authentication method (see Principal doc comment). Both
+// session paths now compute GlobalScope from actual scope (web-session: acct.RootScope
+// at middleware.go:433; cfg-CLI Bearer: sess.TenantID=="" at middleware.go:357), so
+// !GlobalScope is no longer a dead check — but it would answer the wrong question.
 //
 // On failure it writes the 401 and returns ok=false (Issue #1990).
 func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principal *Principal, tenantID string, ok bool) {

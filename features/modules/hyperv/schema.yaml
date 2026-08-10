@@ -107,6 +107,21 @@ resources:
               - never
               - recreate
             default: never
+          secure_boot:
+            type: string
+            description: >
+              Gen2 secure-boot enforcement (#3169). enforce (default) fails
+              provisioning if the Set-VMFirmware secure-boot template call
+              fails. best-effort logs the failure, explicitly turns secure
+              boot off, and lets provisioning proceed instead of blocking
+              convergence forever. disabled never attempts the template call
+              and turns secure boot off immediately. Ignored for Gen1 (no
+              secure boot).
+            enum:
+              - enforce
+              - best-effort
+              - disabled
+            default: enforce
       ha_role:
         type: object
         description: >

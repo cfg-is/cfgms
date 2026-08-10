@@ -1,0 +1,4 @@
+file: tenant-admin.html
+order: 13
+status: **Reference**
+what: Tenant admin tree (Epic #2858 · #3131) — built against **ADR-025** (SaaS-operator ↔ MSP access boundary) and **ADR-027** (cascade suspend/restore + Suspend→Hold→Delete). A **Session** switcher demos all three: **MSP admin** — cascade-aware Suspend/Restore with direct-vs-cascade provenance (restoring an ancestor never restores an independently-suspended descendant), a "not fully suspended" delete rejection naming the offending descendant, a hold-eligibility countdown with Cancel, and a distinct dual-control "Approve deletion" action for a second principal; **Root — no grant** — the ADR-025 boundary/empty state; **Root — break-glass active** — the same subtree unlocked under a time-boxed, audited elevation. Both themes.

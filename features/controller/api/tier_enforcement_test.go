@@ -65,8 +65,12 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/registration/ip-trust", "registration:manage-ip-trust"},
 	{"DELETE", "/api/v1/registration/ip-trust/test-tenant/192.168.1.0/24", "registration:manage-ip-trust"},
 	{"POST", "/api/v1/tenants", "tenant:create"},
+	{"PUT", "/api/v1/tenants/test-id", "tenant:update"},                            // Issue #3125: update requires AssuranceStrong (supply-chain-adjacent config transitions)
+	{"POST", "/api/v1/tenants/test-id/access-grants", "tenant:crossing-grant"},     // ADR-025 Decision 2(a): client-granted support access
+	{"POST", "/api/v1/tenants/test-id/break-glass", "tenant:crossing-break-glass"}, // ADR-025 Decision 2(b): tenant-crossing break-glass elevation
 	{"POST", "/api/v1/stewards/refresh/pending-123/approve", "refresh:approve"},
 	{"PUT", "/api/v1/tenants/test-tenant/refresh-policy", "refresh:set-policy"},
+	{"PUT", "/api/v1/tenants/test-tenant/assurance-policy", "assurance-policy:set"}, // Issue #2839: per-tenant assurance override — raises tenant's own posture.
 	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"},
 	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"},
 	{"POST", "/api/v1/web/accounts", "web-account:create"},

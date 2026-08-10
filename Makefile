@@ -1022,10 +1022,10 @@ security-trivy:
 	@if ! command -v trivy >/dev/null 2>&1; then \
 		echo "❌ Error: trivy is not installed"; \
 		echo ""; \
-		echo "Install trivy v0.72.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
+		echo "Install trivy v0.73.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
 		echo "and NEVER use @latest:"; \
-		echo "  ./.github/scripts/install-trivy.sh v0.72.0 \\"; \
-		echo "    bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"; \
+		echo "  ./.github/scripts/install-trivy.sh v0.73.0 \\"; \
+		echo "    2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"; \
 		echo ""; \
 		echo "Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
 		echo "Rollback procedure: docs/runbooks/trivy-rollback.md"; \

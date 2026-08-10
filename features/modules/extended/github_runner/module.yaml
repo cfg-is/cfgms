@@ -32,6 +32,14 @@ interfaces:
   - Set
   - Test
 
+# Bounded, inventory-worthy domain (runner agent install state + service state).
+# Active on Linux and Windows per the platforms declaration above.
+observe_when:
+  - fact: os
+    equals: linux
+  - fact: os
+    equals: windows
+
 security:
   requires_root: true # service enable/start and writing under work_dir need elevation
   capabilities: []

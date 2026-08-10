@@ -443,21 +443,34 @@ func TestRunControllerSignalPath(t *testing.T) {
 }
 
 func TestRunBootstrapAdmin_RequiresOneOperation(t *testing.T) {
-	err := runBootstrapAdmin("", "", "", false, "", false)
+	err := runBootstrapAdmin("", "", "", false, "", false, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--name, --regenerate, --revoke, or --list is required")
 }
 
 func TestRunBootstrapAdmin_RejectsMultipleOperations(t *testing.T) {
-	err := runBootstrapAdmin("", "alice", "", false, "some-serial", false)
+	err := runBootstrapAdmin("", "alice", "", false, "some-serial", false, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "only one of")
 }
 
 func TestRunBootstrapAdmin_RequiresOutputWithName(t *testing.T) {
-	err := runBootstrapAdmin("", "alice", "", false, "", false)
+	err := runBootstrapAdmin("", "alice", "", false, "", false, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--output is required with --name")
+}
+
+// TestRunBootstrapAdmin_RootScopedRequiresName is a REQUIRED regression check for the
+// bootstrap-admin --root-scoped opt-in (ADR-025 Amendment 1 A1.3, PR #3215): the flag
+// only makes sense alongside --name (a named operator bundle), never alone or paired
+// with --regenerate/--revoke/--list.
+func TestRunBootstrapAdmin_RootScopedRequiresName(t *testing.T) {
+	// regenerate=true selects a valid single operation so the check under test
+	// (--root-scoped only valid with --name) is reached rather than short-circuited by
+	// the "exactly one operation" gate.
+	err := runBootstrapAdmin("", "", "", true, "", false, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--root-scoped is only valid with --name")
 }
 
 func TestRunBootstrapAdminList_RequiresCertPath(t *testing.T) {

@@ -62,6 +62,10 @@ type StewardInfo struct {
 	RingResolvedVersion string
 	// ResolvedRing is the ring name that was matched (or fell back to).
 	ResolvedRing string
+
+	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2944).
+	// Orthogonal to Status: hiding a steward does not change its lifecycle state.
+	Hidden bool
 }
 
 // maxVersionLen is the maximum number of bytes stored for a steward-supplied
@@ -802,6 +806,19 @@ func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error 
 		return fmt.Errorf("steward %s not found", stewardID)
 	}
 	steward.Status = status
+	return nil
+}
+
+// SetStewardHidden sets the operator-controlled visibility flag for the given steward
+// in the in-memory registry. Returns an error if the steward is not found.
+func (s *ControllerService) SetStewardHidden(stewardID string, hidden bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steward, exists := s.stewards[stewardID]
+	if !exists {
+		return fmt.Errorf("steward %s not found", stewardID)
+	}
+	steward.Hidden = hidden
 	return nil
 }
 

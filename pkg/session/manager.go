@@ -60,6 +60,16 @@ func NewManager(cfg Config, store Store, clockFn func() time.Time) Manager {
 // record and an opaque 43-char base64url bearer token. The controller stores only
 // SHA-256(token); the raw token is returned once and never persisted.
 func (m *manager) Issue(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error) {
+	return m.issue(ctx, principalID, connectionName, tenantID, false)
+}
+
+// IssueRootScoped mints a new unscoped session marked RootScoped (ADR-025 Amendment 1
+// A1.3). See the Manager interface doc comment for the caller-verification contract.
+func (m *manager) IssueRootScoped(ctx context.Context, principalID, connectionName string) (*Session, string, error) {
+	return m.issue(ctx, principalID, connectionName, "", true)
+}
+
+func (m *manager) issue(ctx context.Context, principalID, connectionName, tenantID string, rootScoped bool) (*Session, string, error) {
 	token, err := GenerateToken()
 	if err != nil {
 		return nil, "", err
@@ -76,7 +86,8 @@ func (m *manager) Issue(ctx context.Context, principalID, connectionName, tenant
 		AbsoluteExpiresAt: now.Add(m.cfg.AbsoluteTimeout),
 		// All Manager-issued sessions are human sessions. Assurance starts at Basic;
 		// it is upgraded to Strong by a successful WebAuthn assertion (later story).
-		Assurance: AssuranceBasic,
+		Assurance:  AssuranceBasic,
+		RootScoped: rootScoped,
 	}
 	ms := &managedSession{
 		session:     sess,
