@@ -2,7 +2,7 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Web account fetch hooks (Issue #2733, #3133, #2974).
+ * Web account fetch hooks (Issue #2733, #3133, #2974, #3134).
  *
  * Endpoints covered:
  *   GET    /api/v1/web/accounts                                → useWebAccountList
@@ -13,14 +13,18 @@
  *   POST   /api/v1/rbac/roles                                 → createRole
  *   PUT    /api/v1/rbac/roles/{id}                            → updateRole
  *   DELETE /api/v1/rbac/roles/{id}                            → deleteRole
+ *   GET    /api/v1/rbac/subjects/{id}/roles                   → useSubjectRoles (Issue #3134)
+ *   POST   /api/v1/rbac/subjects/{id}/roles                   → assignSubjectRole (Issue #3134)
+ *   DELETE /api/v1/rbac/subjects/{id}/roles/{role_id}         → revokeSubjectRole (Issue #3134)
  *
  * Security A9.1: username/role name/description values originate from
  * user-supplied content. All string fields are coerced via str(). Callers
  * must render them as text nodes only, never via dangerouslySetInnerHTML.
  *
- * M-AUTH-2: role create/update/delete are sensitive operations. Each carries
- * an operator justification in the X-Justification header — the controller
- * rejects the operation and records an audit failure without one.
+ * M-AUTH-2: role create/update/delete and subject role grant/revoke are
+ * sensitive operations. Each carries an operator justification in the
+ * X-Justification header — the controller rejects the operation and records an
+ * audit failure without one.
  *
  * Step-up (Issue #2974, ADR-021 Decision 6): account-create is gated at
  * AssuranceStrong. The apiFetch interceptor handles the 401 + CFGMS-StepUp
@@ -430,8 +434,9 @@ export function validateJustification(justification: string): string | null {
 }
 
 /**
- * Build the request headers for a role mutation, throwing when the
- * justification is unusable so no request leaves the browser without one.
+ * Build the request headers for a role mutation (role CRUD and subject role
+ * grant/revoke), throwing when the justification is unusable so no request
+ * leaves the browser without one.
  */
 function mutationHeaders(justification: string, withBody: boolean): Headers {
   const invalid = validateJustification(justification)
@@ -508,6 +513,148 @@ export async function deleteRole(id: string, justification: string): Promise<voi
     const errMsg =
       (errBody?.error as Record<string, unknown>)?.message as string ||
       `Delete failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+}
+
+// ── Subject role management (Issue #3134) ────────────────────────────────────
+
+export interface UseSubjectRolesResult {
+  roles: RoleInfo[]
+  loading: boolean
+  error: string | null
+  retry: () => void
+}
+
+export function useSubjectRoles(subjectId: string): UseSubjectRolesResult {
+  const [attempt, setAttempt] = useState(0)
+  const [outcome, setOutcome] = useState<FetchOutcome<RoleInfo[]> | null>(null)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
+  const key = `subject-roles:${subjectId}:${attempt}`
+
+  useEffect(() => {
+    let cancelled = false
+    apiFetch(`/api/v1/rbac/subjects/${encodeURIComponent(subjectId)}/roles`)
+      .then(async (response) => {
+        if (!response.ok)
+          throw new Error(
+            `GET /api/v1/rbac/subjects/${subjectId}/roles — ${response.status}`,
+          )
+        const body: unknown = await response.json()
+        const parsed = parseRoleList(
+          (body as Record<string, unknown> | null)?.data,
+        )
+        if (cancelled) return
+        setOutcome({ key, data: parsed, fetchedAtMs: Date.now() })
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setOutcome({
+          key,
+          error:
+            cause instanceof Error && cause.message
+              ? cause.message
+              : `GET /api/v1/rbac/subjects/${subjectId}/roles — request failed`,
+          fetchedAtMs: Date.now(),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [key, subjectId, attempt])
+
+  const current = outcome?.key === key ? outcome : null
+  return {
+    roles: current?.data ?? [],
+    loading: current === null,
+    error: current?.error ?? null,
+    retry,
+  }
+}
+
+/**
+ * Thrown when POST /api/v1/rbac/subjects/{id}/roles is refused by the server's
+ * escalation-prevention check, because the assignment would let the subject
+ * escalate their own privileges. The UI renders this as a distinct, non-generic
+ * message block so the admin understands the refusal is intentional, not a
+ * generic server error.
+ */
+export class EscalationError extends Error {
+  readonly isEscalationPrevention = true as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'EscalationError'
+  }
+}
+
+/**
+ * 403 codes the assign endpoint returns that are NOT escalation prevention
+ * (handlers_rbac_subjects.go, handlers_rbac.go). Rendering the
+ * escalation-prevention notice for these would tell the admin the grant was
+ * blocked to stop a privilege escalation when in fact the request was
+ * malformed (no justification) or aimed at an immutable system role.
+ */
+const NON_ESCALATION_FORBIDDEN_CODES = new Set(['JUSTIFICATION_REQUIRED', 'SYSTEM_ROLE_IMMUTABLE'])
+
+function errorEnvelope(errBody: Record<string, unknown>): Record<string, unknown> {
+  const err = errBody?.error
+  return typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : {}
+}
+
+function errorMessage(errBody: Record<string, unknown>): string {
+  const message = errorEnvelope(errBody).message
+  return typeof message === 'string' ? message : ''
+}
+
+function errorCode(errBody: Record<string, unknown>): string {
+  const code = errorEnvelope(errBody).code
+  return typeof code === 'string' ? code : ''
+}
+
+/*
+ * M-AUTH-2: subject role grant and revoke are sensitive operations. Manager.AssignRole
+ * and Manager.RevokeRole (features/rbac/manager.go) run ValidateSensitiveOperation
+ * before any store write and refuse with ErrJustificationRequired unless the context
+ * carries a justification, which the handler reads from the X-Justification header and
+ * records on the audit event. Both mutations therefore travel through mutationHeaders,
+ * which throws on an unusable justification so no privilege change leaves the browser
+ * without an operator reason attached.
+ */
+export async function assignSubjectRole(
+  subjectId: string,
+  roleId: string,
+  justification: string,
+): Promise<void> {
+  const response = await apiFetch(
+    `/api/v1/rbac/subjects/${encodeURIComponent(subjectId)}/roles`,
+    {
+      method: 'POST',
+      headers: mutationHeaders(justification, true),
+      body: JSON.stringify({ role_id: roleId }),
+    },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg = errorMessage(errBody) || `Assign failed — ${response.status}`
+    if (response.status === 403 && !NON_ESCALATION_FORBIDDEN_CODES.has(errorCode(errBody))) {
+      throw new EscalationError(errMsg)
+    }
+    throw new Error(errMsg)
+  }
+}
+
+export async function revokeSubjectRole(
+  subjectId: string,
+  roleId: string,
+  justification: string,
+): Promise<void> {
+  const response = await apiFetch(
+    `/api/v1/rbac/subjects/${encodeURIComponent(subjectId)}/roles/${encodeURIComponent(roleId)}`,
+    { method: 'DELETE', headers: mutationHeaders(justification, false) },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg = errorMessage(errBody) || `Revoke failed — ${response.status}`
     throw new Error(errMsg)
   }
 }

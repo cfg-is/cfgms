@@ -18,6 +18,9 @@ import {
   parsePermissionList,
   createWebAccount,
   revokeEnrollmentLink,
+  assignSubjectRole,
+  revokeSubjectRole,
+  EscalationError,
 } from './useWebAccounts.ts'
 
 describe('parseWebAccountInfo', () => {
@@ -508,5 +511,223 @@ describe('revokeEnrollmentLink', () => {
       ),
     )
     await expect(revokeEnrollmentLink('fleet-admin')).rejects.toThrow(/No outstanding link/i)
+  })
+})
+
+// ── assignSubjectRole (Issue #3134) ───────────────────────────────────────────
+
+describe('assignSubjectRole', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+  const why = 'granting fleet-viewer for on-call rotation'
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: {} }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends POST to /api/v1/rbac/subjects/{id}/roles with the role_id', async () => {
+    await assignSubjectRole('subject-1', 'role-1', why)
+    const call = fetchMock.mock.calls.at(-1)!
+    expect(call[0]).toContain('/api/v1/rbac/subjects/subject-1/roles')
+    expect((call[1] as RequestInit).method).toBe('POST')
+    const body = JSON.parse((call[1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).toHaveProperty('role_id', 'role-1')
+  })
+
+  it('URL-encodes the subject ID', async () => {
+    await assignSubjectRole('subject/1', 'role-1', why)
+    expect(fetchMock.mock.calls.at(-1)![0]).toContain(encodeURIComponent('subject/1'))
+  })
+
+  // M-AUTH-2: the controller's ValidateSensitiveOperation refuses the grant
+  // before any store write unless this header is present.
+  it('sends the trimmed justification in the X-Justification header', async () => {
+    await assignSubjectRole('subject-1', 'role-1', `   ${why}   `)
+    const headers = new Headers((fetchMock.mock.calls.at(-1)![1] as RequestInit).headers)
+    expect(headers.get('X-Justification')).toBe(why)
+    expect(headers.get('Content-Type')).toBe('application/json')
+  })
+
+  it('issues no request when the justification is missing or too short', async () => {
+    await expect(assignSubjectRole('subject-1', 'role-1', '')).rejects.toThrow(/required/i)
+    await expect(assignSubjectRole('subject-1', 'role-1', 'short')).rejects.toThrow(
+      /at least 10 characters/i,
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('throws EscalationError on 403 response', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Assigning this role would allow privilege escalation' } }),
+        { status: 403 },
+      ),
+    )
+    await expect(assignSubjectRole('subject-1', 'role-1', why)).rejects.toBeInstanceOf(
+      EscalationError,
+    )
+  })
+
+  it('includes the server message in the EscalationError', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Escalation prevented' } }),
+        { status: 403 },
+      ),
+    )
+    try {
+      await assignSubjectRole('subject-1', 'role-1', why)
+      expect.fail('should have thrown')
+    } catch (e: unknown) {
+      expect(e).toBeInstanceOf(EscalationError)
+      expect((e as Error).message).toMatch(/Escalation prevented/)
+    }
+  })
+
+  it('EscalationError has isEscalationPrevention property', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: 'blocked' } }), { status: 403 }),
+    )
+    try {
+      await assignSubjectRole('subject-1', 'role-1', why)
+      expect.fail('should have thrown')
+    } catch (e: unknown) {
+      expect(e).toBeInstanceOf(EscalationError)
+      expect((e as EscalationError).isEscalationPrevention).toBe(true)
+    }
+  })
+
+  // A 403 JUSTIFICATION_REQUIRED or SYSTEM_ROLE_IMMUTABLE is not an escalation
+  // refusal — labelling it as one would misstate why the grant was blocked.
+  it('throws a plain Error for non-escalation 403 codes', async () => {
+    for (const code of ['JUSTIFICATION_REQUIRED', 'SYSTEM_ROLE_IMMUTABLE']) {
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ error: { code, message: `refused: ${code}` } }), {
+          status: 403,
+        }),
+      )
+      let thrown: unknown
+      try {
+        await assignSubjectRole('subject-1', 'role-1', why)
+      } catch (e: unknown) {
+        thrown = e
+      }
+      expect(thrown).toBeInstanceOf(Error)
+      expect(thrown).not.toBeInstanceOf(EscalationError)
+      expect((thrown as Error).message).toBe(`refused: ${code}`)
+    }
+  })
+
+  it('throws EscalationError for the ESCALATION_BLOCKED code', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: 'ESCALATION_BLOCKED', message: 'Role assignment blocked' },
+        }),
+        { status: 403 },
+      ),
+    )
+    await expect(assignSubjectRole('subject-1', 'role-1', why)).rejects.toBeInstanceOf(
+      EscalationError,
+    )
+  })
+
+  it('throws a plain Error (not EscalationError) on non-403 failures', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Server error' } }),
+        { status: 500 },
+      ),
+    )
+    let thrown: unknown
+    try {
+      await assignSubjectRole('subject-1', 'role-1', why)
+    } catch (e: unknown) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(Error)
+    expect(thrown).not.toBeInstanceOf(EscalationError)
+  })
+
+  it('uses a fallback message when the server body carries no message', async () => {
+    fetchMock.mockResolvedValue(new Response('', { status: 403 }))
+    await expect(assignSubjectRole('subject-1', 'role-1', why)).rejects.toThrow(
+      /Assign failed — 403/,
+    )
+  })
+})
+
+// ── revokeSubjectRole (Issue #3134) ───────────────────────────────────────────
+
+describe('revokeSubjectRole', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+  const why = 'removing fleet-viewer after rotation ended'
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(new Response('', { status: 200 }))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends DELETE to /api/v1/rbac/subjects/{id}/roles/{role_id}', async () => {
+    await revokeSubjectRole('subject-1', 'role-1', why)
+    const call = fetchMock.mock.calls.at(-1)!
+    expect(call[0]).toContain('/api/v1/rbac/subjects/subject-1/roles/role-1')
+    expect((call[1] as RequestInit).method).toBe('DELETE')
+  })
+
+  it('URL-encodes both the subject and role IDs', async () => {
+    await revokeSubjectRole('sub/1', 'rol/1', why)
+    const url = fetchMock.mock.calls.at(-1)![0] as string
+    expect(url).toContain(encodeURIComponent('sub/1'))
+    expect(url).toContain(encodeURIComponent('rol/1'))
+  })
+
+  // M-AUTH-2: Manager.RevokeRole refuses without a justification on the context.
+  it('sends the trimmed justification in the X-Justification header', async () => {
+    await revokeSubjectRole('subject-1', 'role-1', `  ${why}  `)
+    const headers = new Headers((fetchMock.mock.calls.at(-1)![1] as RequestInit).headers)
+    expect(headers.get('X-Justification')).toBe(why)
+  })
+
+  it('issues no request when the justification is missing or too short', async () => {
+    await expect(revokeSubjectRole('subject-1', 'role-1', '')).rejects.toThrow(/required/i)
+    await expect(revokeSubjectRole('subject-1', 'role-1', 'short')).rejects.toThrow(
+      /at least 10 characters/i,
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('throws with the server message on failure', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Role not assigned to subject' } }),
+        { status: 404 },
+      ),
+    )
+    await expect(revokeSubjectRole('subject-1', 'role-1', why)).rejects.toThrow(
+      /Role not assigned to subject/,
+    )
+  })
+
+  it('uses a fallback message when the server body carries no message', async () => {
+    fetchMock.mockResolvedValue(new Response('', { status: 500 }))
+    await expect(revokeSubjectRole('subject-1', 'role-1', why)).rejects.toThrow(
+      /Revoke failed — 500/,
+    )
   })
 })
