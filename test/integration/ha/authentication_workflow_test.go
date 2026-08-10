@@ -89,9 +89,9 @@ func TestAuthenticationPersistence(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 5*time.Minute, allServices...))
 
 	controllers := []string{
-		"https://localhost:9080",
-		"https://localhost:9081",
-		"https://localhost:9082",
+		controllerEastURL,
+		controllerCentralURL,
+		controllerWestURL,
 	}
 
 	stewards := []string{
@@ -166,9 +166,9 @@ func TestWorkflowExecutionResilience(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 5*time.Minute, allServices...))
 
 	controllers := []string{
-		"https://localhost:9080",
-		"https://localhost:9081",
-		"https://localhost:9082",
+		controllerEastURL,
+		controllerCentralURL,
+		controllerWestURL,
 	}
 
 	stewards := []string{
@@ -609,9 +609,9 @@ func createMultiStepWorkflow(workflowID string, stewardID string) *WorkflowExecu
 
 // controllerURLs is the ordered list of HA controller HTTP endpoints.
 var controllerURLs = []string{
-	"https://localhost:9080",
-	"https://localhost:9081",
-	"https://localhost:9082",
+	controllerEastURL,
+	controllerCentralURL,
+	controllerWestURL,
 }
 
 // firstReachableController returns the first controller URL that accepts TCP connections.

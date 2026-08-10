@@ -59,9 +59,9 @@ func TestConfigurationPushContinuity(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 5*time.Minute, allServices...))
 
 	controllers := []string{
-		"https://localhost:9080",
-		"https://localhost:9081",
-		"https://localhost:9082",
+		controllerEastURL,
+		controllerCentralURL,
+		controllerWestURL,
 	}
 
 	stewards := []string{

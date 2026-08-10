@@ -66,9 +66,9 @@ func TestClusterFormation(t *testing.T) {
 		url    string
 		region string
 	}{
-		{"controller-east", "https://localhost:9080", "us-east"},
-		{"controller-central", "https://localhost:9081", "us-central"},
-		{"controller-west", "https://localhost:9082", "us-west"},
+		{"controller-east", controllerEastURL, "us-east"},
+		{"controller-central", controllerCentralURL, "us-central"},
+		{"controller-west", controllerWestURL, "us-west"},
 	}
 
 	// Wait for all controllers to be healthy
@@ -177,9 +177,9 @@ func TestClusterConsistency(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 2*time.Minute, services...))
 
 	controllers := []string{
-		"https://localhost:9080",
-		"https://localhost:9081",
-		"https://localhost:9082",
+		controllerEastURL,
+		controllerCentralURL,
+		controllerWestURL,
 	}
 
 	// Wait for all controllers and get their cluster views
