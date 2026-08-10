@@ -2,19 +2,30 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Accounts view (Issue #2733) — the /accounts route entry point.
+ * Accounts view (Issue #2733, #2974) — the /accounts route entry point.
  * Fetches GET /api/v1/web/accounts, renders a table, and exposes
  * account create and delete. Roles are surfaced read-only in a tab.
  *
+ * Issue #2974: "+ New account" is step-up gated (AssuranceStrong) via the
+ * apiFetch interceptor — the StepUpModal appears automatically on 401 CFGMS-StepUp.
+ * On successful create, a single-use enrollment magic link is shown once
+ * (copy-to-clipboard) for out-of-band handoff. No password is ever set.
+ * Admins can revoke an outstanding unredeemed link before it is used.
+ *
  * Security A9.1: username values originate from user-supplied content.
  * Every value reaches the DOM as a JSX text node — never dangerouslySetInnerHTML.
- * Passwords are never echoed in any response, log, or UI state.
+ * Passwords are never sent, stored, or echoed (passkey-only, ADR-021 Amendment 1).
  *
  * Delete requires a confirm step (modal) per implementation notes.
  */
 import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
-import { useWebAccountList, type WebAccountInfo } from './useWebAccounts.ts'
+import {
+  useWebAccountList,
+  createWebAccount,
+  revokeEnrollmentLink,
+  type WebAccountInfo,
+} from './useWebAccounts.ts'
 import RolesView from './RolesView.tsx'
 
 function LoadingRows() {
@@ -56,12 +67,116 @@ function AccountEmpty() {
   )
 }
 
+/**
+ * EnrollmentLinkPanel is shown exactly once after a successful account creation
+ * (Issue #2974). It displays the raw enrollment magic link for copy-to-clipboard
+ * and an email delivery toggle (disabled until a notification provider is built).
+ */
+function EnrollmentLinkPanel({
+  username,
+  rawToken,
+  onDismiss,
+}: {
+  username: string
+  rawToken: string
+  onDismiss: () => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const enrollLink = `${window.location.origin}/enroll?token=${rawToken}`
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(enrollLink)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard API may not be available in all environments.
+    }
+  }
+
+  return (
+    <div
+      className="wf-form-panel"
+      data-testid="enrollment-link-panel"
+      role="region"
+      aria-label="Enrollment link"
+    >
+      <div className="wf-form">
+        <div className="wf-form-row">
+          <div className="wf-form-field" style={{ flexGrow: 1 }}>
+            <span className="wf-form-label">
+              Account <b>{username}</b> created — share this enrollment link
+            </span>
+            <p style={{ margin: '4px 0 8px', fontSize: '0.875rem', color: 'var(--color-muted)' }}>
+              This link is shown <b>once</b>. Copy it and send it to the new admin out-of-band.
+              It expires in 72 hours and can be revoked if compromised.
+            </p>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <input
+                type="text"
+                readOnly
+                value={enrollLink}
+                aria-label="Enrollment link"
+                data-testid="enrollment-link-value"
+                style={{ flexGrow: 1 }}
+                onFocus={(e) => e.target.select()}
+              />
+              <button
+                type="button"
+                className="wf-btn"
+                onClick={() => void handleCopy()}
+                data-testid="enrollment-link-copy-btn"
+              >
+                {copied ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="wf-form-row">
+          <div className="wf-form-field">
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'not-allowed' }}>
+              <input
+                type="checkbox"
+                disabled
+                aria-label="Send via email (not yet available)"
+                data-testid="enrollment-email-toggle"
+              />
+              <span style={{ color: 'var(--color-muted)' }}>
+                Send via email
+              </span>
+              <span
+                className="mono2"
+                style={{ fontSize: '0.75rem' }}
+                title="Email delivery is not yet available — a notification provider is required."
+              >
+                (coming soon)
+              </span>
+            </label>
+          </div>
+        </div>
+        <div className="wf-form-actions">
+          <button
+            type="button"
+            className="wf-btn-secondary"
+            onClick={onDismiss}
+            data-testid="enrollment-link-dismiss-btn"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AccountRow({
   account,
   onDelete,
+  onRevoke,
 }: {
   account: WebAccountInfo
   onDelete: () => void
+  onRevoke: () => void
 }) {
   return (
     <tr data-testid="account-row">
@@ -78,6 +193,17 @@ function AccountRow({
         <span className="mono2">{account.created_at ? new Date(account.created_at).toLocaleDateString() : '—'}</span>
       </td>
       <td onClick={(e) => e.stopPropagation()}>
+        {account.has_outstanding_enrollment_link && (
+          <button
+            type="button"
+            className="wf-btn-sm-secondary"
+            onClick={onRevoke}
+            data-testid="enrollment-revoke-btn"
+            title="Revoke the outstanding enrollment link for this account"
+          >
+            Revoke link
+          </button>
+        )}{' '}
         <button
           type="button"
           className="wf-btn-sm-danger"
@@ -93,20 +219,19 @@ function AccountRow({
 
 interface CreateFormState {
   username: string
-  password: string
   tenantId: string
   permissions: string
 }
 
 function defaultCreateForm(): CreateFormState {
-  return { username: '', password: '', tenantId: '', permissions: '' }
+  return { username: '', tenantId: '', permissions: '' }
 }
 
 function CreateAccountPanel({
   onSaved,
   onClose,
 }: {
-  onSaved: () => void
+  onSaved: (username: string, enrollmentLink: string) => void
   onClose: () => void
 }) {
   const [form, setForm] = useState<CreateFormState>(defaultCreateForm)
@@ -122,10 +247,6 @@ function CreateAccountPanel({
       setSaveError('Username is required')
       return
     }
-    if (!form.password) {
-      setSaveError('Password is required')
-      return
-    }
 
     const permissions = form.permissions
       .split(',')
@@ -135,24 +256,12 @@ function CreateAccountPanel({
     setSaving(true)
     setSaveError(null)
     try {
-      const response = await apiFetch('/api/v1/web/accounts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: form.username.trim(),
-          password: form.password,
-          ...(form.tenantId.trim() && { tenant_id: form.tenantId.trim() }),
-          ...(permissions.length > 0 && { permissions }),
-        }),
-      })
-      if (!response.ok) {
-        const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
-        const errMsg =
-          (errBody?.error as Record<string, unknown>)?.message as string ||
-          `Create failed — ${response.status}`
-        throw new Error(errMsg)
-      }
-      onSaved()
+      const result = await createWebAccount(
+        form.username.trim(),
+        form.tenantId.trim() || undefined,
+        permissions.length > 0 ? permissions : undefined,
+      )
+      onSaved(result.account.username, result.enrollment_magic_link)
     } catch (cause: unknown) {
       setSaveError(
         cause instanceof Error && cause.message ? cause.message : 'Create failed',
@@ -175,18 +284,6 @@ function CreateAccountPanel({
               value={form.username}
               onChange={(e) => set('username', e.target.value)}
               data-testid="account-username-input"
-            />
-          </div>
-          <div className="wf-form-field">
-            <span className="wf-form-label">Password *</span>
-            <input
-              type="password"
-              aria-label="Password"
-              placeholder="••••••••"
-              value={form.password}
-              onChange={(e) => set('password', e.target.value)}
-              data-testid="account-password-input"
-              autoComplete="new-password"
             />
           </div>
           <div className="wf-form-field">
@@ -219,7 +316,7 @@ function CreateAccountPanel({
             type="button"
             className="wf-btn"
             disabled={saving}
-            onClick={handleSubmit}
+            onClick={() => void handleSubmit()}
             data-testid="account-save-btn"
           >
             {saving ? 'Creating…' : 'Create account'}
@@ -245,10 +342,21 @@ export default function AccountsView() {
   const [deletingAccount, setDeletingAccount] = useState<WebAccountInfo | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+  // Issue #2974: enrollment link shown once after create.
+  const [enrollmentLink, setEnrollmentLink] = useState<{ username: string; token: string } | null>(null)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
 
-  function handleCreateSaved() {
+  function handleCreateSaved(username: string, token: string) {
     setShowCreate(false)
+    // The controller mints no enrollment link when the target account already
+    // holds a passkey (ADR-021 Amendment 1 Decision 3), so the response may carry
+    // no token. Only show the shown-once panel when a link was actually issued.
+    setEnrollmentLink(token ? { username, token } : null)
     retry()
+  }
+
+  function handleEnrollmentLinkDismiss() {
+    setEnrollmentLink(null)
   }
 
   async function handleConfirmDelete() {
@@ -276,6 +384,18 @@ export default function AccountsView() {
       )
     } finally {
       setDeleting(false)
+    }
+  }
+
+  async function handleRevokeLink(username: string) {
+    setRevokeError(null)
+    try {
+      await revokeEnrollmentLink(username)
+      retry()
+    } catch (cause: unknown) {
+      setRevokeError(
+        cause instanceof Error && cause.message ? cause.message : 'Revoke failed',
+      )
     }
   }
 
@@ -334,9 +454,23 @@ export default function AccountsView() {
             />
           )}
 
+          {enrollmentLink !== null && (
+            <EnrollmentLinkPanel
+              username={enrollmentLink.username}
+              rawToken={enrollmentLink.token}
+              onDismiss={handleEnrollmentLinkDismiss}
+            />
+          )}
+
           {deleteError && (
             <div className="wf-form-error" style={{ padding: '8px 14px' }} data-testid="delete-error">
               {deleteError}
+            </div>
+          )}
+
+          {revokeError && (
+            <div className="wf-form-error" style={{ padding: '8px 14px' }} data-testid="revoke-error">
+              {revokeError}
             </div>
           )}
 
@@ -366,6 +500,7 @@ export default function AccountsView() {
                       setDeleteError(null)
                       setDeletingAccount(account)
                     }}
+                    onRevoke={() => void handleRevokeLink(account.username)}
                   />
                 ))}
               </tbody>
@@ -403,7 +538,7 @@ export default function AccountsView() {
                 type="button"
                 className="wf-btn-danger"
                 disabled={deleting}
-                onClick={handleConfirmDelete}
+                onClick={() => void handleConfirmDelete()}
                 data-testid="delete-confirm-btn"
               >
                 {deleting ? 'Deleting…' : 'Delete account'}

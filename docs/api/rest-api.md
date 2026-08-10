@@ -2410,6 +2410,12 @@ Each web account has exactly one of:
 
 Create a new web admin account, or reset an existing one (upsert: omitted `tenant_id`/`permissions` retained from the existing record). This endpoint provisions the account identity and scope only — there is no password. Passkey credentials are enrolled separately via the WebAuthn registration ceremony (Issue #2782).
 
+A newly created account (or one reset back to zero registered passkeys) has no
+credentials yet, so the response also mints a single-use, TTL-bounded
+**enrollment magic link** that the account's first passkey enrollment redeems
+(Issue #2974). Resetting an account that already holds passkeys does not mint
+a new link.
+
 **Authentication:** Required  
 **Required permission:** `web-account:create`  
 **Assurance:** Strong session (passkey or elevated mTLS) required
@@ -2441,13 +2447,60 @@ Create a new web admin account, or reset an existing one (upsert: omitted `tenan
     "tenant_id": "",
     "root_scope": true,
     "permissions": ["steward:list", "steward:read"],
-    "created_at": "2026-01-12T10:30:00Z"
+    "created_at": "2026-01-12T10:30:00Z",
+    "has_outstanding_enrollment_link": true,
+    "enrollment_magic_link": "<160-bit random token, opaque string>"
   },
   "timestamp": "2026-01-12T10:30:00Z"
 }
 ```
 
 Root-scoped accounts have `tenant_id: ""` and `root_scope: true` in the response. Tenant-scoped accounts have a non-empty `tenant_id` and `root_scope: false`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `data.has_outstanding_enrollment_link` | bool | True when the account has an unredeemed, unexpired, unrevoked enrollment link. |
+| `data.enrollment_magic_link` | string | The raw enrollment token. Present **only** in this response, when a link was minted (zero-credential account) — omitted otherwise. The server stores only a SHA-256 hash of this value and never returns or logs the raw token again; the admin UI shows it once for copy-to-clipboard handoff. Single-use and expires 72 hours after minting. |
+
+#### POST /api/v1/web/accounts/{username}/enrollment-link/revoke
+
+Revoke an outstanding (unredeemed) enrollment magic link, invalidating it before
+it can be used — for a wrong recipient, a departed employee, or a suspected leak
+(Issue #2974). Does not delete or otherwise modify the account itself.
+
+**Authentication:** Required  
+**Required permission:** `web-account:revoke-enrollment-link`  
+**Assurance:** Strong session (passkey or elevated mTLS) required
+
+Callers are authorized only within their own tenant subtree: a caller scoped to
+a tenant that does not contain the target account's tenant receives `403
+FORBIDDEN`, checked before the link's outstanding/expired state is evaluated so
+an out-of-subtree caller cannot use this endpoint to probe an account's
+enrollment status.
+
+**Parameters:**
+
+- `username` (path): Username of the account whose enrollment link should be revoked
+
+**Response (200 OK):**
+
+```json
+{
+  "data": {
+    "username": "alice",
+    "revoked": true
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+**Errors:**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 403 | `FORBIDDEN` | Caller's tenant scope does not contain the account's tenant |
+| 404 | `WEB_ACCOUNT_NOT_FOUND` | No account with that username |
+| 409 | `NO_OUTSTANDING_LINK` | No unredeemed, unexpired, unrevoked link exists for this account |
 
 #### GET /api/v1/web/accounts
 
