@@ -98,9 +98,10 @@ function PermissionSelector({
 
 /**
  * Mandatory justification input (M-AUTH-2). Rendered by every role mutation
- * surface: the create panel, the edit form and the delete confirmation.
+ * surface: the create panel, the edit form, the delete confirmation, and the
+ * subject role assign/revoke surfaces in AccountsView.
  */
-function JustificationField({
+export function JustificationField({
   value,
   onChange,
   testId,

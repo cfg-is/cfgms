@@ -369,6 +369,79 @@ describe('AccountsView — create panel (Issue #2974: no password; step-up; link
   })
 })
 
+describe('AccountsView — enrollment link copy (Issue #2974)', () => {
+  /**
+   * Drives the create flow to the point where the shown-once enrollment panel
+   * is on screen, with navigator.clipboard.writeText backed by `writeText`.
+   * jsdom ships no Clipboard API, so the property is installed (and removed
+   * again by the caller's cleanup) rather than spied on.
+   */
+  async function renderWithClipboard(writeText: (text: string) => Promise<void>) {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      get: () => ({ writeText }),
+    })
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([]))
+      .mockResolvedValueOnce(makeCreateResponse('copy-admin'))
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ username: 'copy-admin' })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-create-btn'))
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: 'copy-admin' } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('account-save-btn'))
+    })
+    await waitFor(() => expect(screen.getByTestId('enrollment-link-panel')).toBeInTheDocument())
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard')
+  })
+
+  it('writes the enrollment link to the clipboard and confirms the copy', async () => {
+    const written: string[] = []
+    await renderWithClipboard(async (text: string) => {
+      written.push(text)
+    })
+    const linkInput = screen.getByTestId('enrollment-link-value') as HTMLInputElement
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-link-copy-btn'))
+    })
+    expect(written).toEqual([linkInput.value])
+    expect(written[0]).toContain('aabbcc112233445566778899aabbcc1122334455aabb')
+    expect(screen.getByTestId('enrollment-link-copy-btn').textContent).toBe('Copied!')
+    expect(screen.queryByTestId('enrollment-link-copy-error')).not.toBeInTheDocument()
+  })
+
+  it('surfaces a clipboard failure instead of silently discarding it', async () => {
+    await renderWithClipboard(() => Promise.reject(new Error('Write permission denied')))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-link-copy-btn'))
+    })
+    const notice = await screen.findByTestId('enrollment-link-copy-error')
+    expect(notice.textContent).toContain('copy it manually')
+    expect(notice.textContent).toContain('Write permission denied')
+    // The button must not claim success when the write failed, and the link
+    // itself stays on screen so the operator can still copy it by hand.
+    expect(screen.getByTestId('enrollment-link-copy-btn').textContent).toBe('Copy')
+    expect(screen.getByTestId('enrollment-link-value')).toBeInTheDocument()
+  })
+
+  it('reports a missing Clipboard API rather than appearing to do nothing', async () => {
+    // Non-secure-context browsers expose no navigator.clipboard at all: the
+    // property access itself throws, which must still reach the operator.
+    await renderWithClipboard(async () => {})
+    Reflect.deleteProperty(navigator, 'clipboard')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('enrollment-link-copy-btn'))
+    })
+    const notice = await screen.findByTestId('enrollment-link-copy-error')
+    expect(notice.textContent).toContain('copy it manually')
+    expect(screen.getByTestId('enrollment-link-copy-btn').textContent).toBe('Copy')
+  })
+})
+
 describe('AccountsView — enrollment link revoke (Issue #2974)', () => {
   it('shows Revoke link button for accounts with outstanding enrollment link', async () => {
     fetchMock.mockResolvedValue(
@@ -538,5 +611,497 @@ describe('AccountsView — roles tab', () => {
     await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('tab-roles'))
     expect(screen.queryByTestId('toggle-create-btn')).not.toBeInTheDocument()
+  })
+})
+
+// ── Subject-role expand panel (Issue #3134) ───────────────────────────────────
+
+describe('AccountsView — subject-role expand panel (Issue #3134)', () => {
+  function makeSubjectRolesResponse(roles: object[], status = 200) {
+    return new Response(
+      JSON.stringify({ data: roles }),
+      { status, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+
+  function makeSubjectRole(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: 'role-1',
+      name: 'fleet-viewer',
+      description: 'Read-only fleet access',
+      permissions: [],
+      tenant_id: 'tenant-a',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-02-01T00:00:00Z',
+      ...overrides,
+    }
+  }
+
+  function setupFetchMocks({
+    accounts = [makeAccount()],
+    subjectRoles = [] as object[],
+    allRoles = [makeRole()] as object[],
+    subjectRolesStatus = 200,
+  } = {}) {
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/rbac/subjects/') && u.includes('/roles')) {
+        return Promise.resolve(makeSubjectRolesResponse(subjectRoles, subjectRolesStatus))
+      }
+      if (u.includes('/rbac/roles')) {
+        return Promise.resolve(makeRolesResponse(allRoles))
+      }
+      if (u.includes('/rbac/permissions')) {
+        return Promise.resolve(makeRolesResponse([]))
+      }
+      return Promise.resolve(makeAccountsResponse(accounts))
+    })
+  }
+
+  // M-AUTH-2: both mutation surfaces demand an operator justification, so every
+  // test that drives an assign or a revoke through to the network fills it in.
+  const ASSIGN_WHY = 'granting fleet-viewer for the on-call rotation'
+  const REVOKE_WHY = 'removing fleet-viewer now the rotation has ended'
+
+  function fillJustification(testId: string, value: string) {
+    fireEvent.change(screen.getByTestId(testId), { target: { value } })
+  }
+
+  it('clicking an account row expands the roles panel', async () => {
+    setupFetchMocks()
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => {
+      expect(screen.getByTestId('account-roles-row')).toBeInTheDocument()
+    })
+  })
+
+  it('clicking the same row again collapses the panel', async () => {
+    setupFetchMocks()
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('account-roles-row')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => {
+      expect(screen.queryByTestId('account-roles-row')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows "No roles assigned" when the subject has no roles', async () => {
+    setupFetchMocks({ subjectRoles: [] })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => {
+      expect(screen.getByTestId('subject-no-roles')).toBeInTheDocument()
+    })
+  })
+
+  it('shows currently assigned roles as chips', async () => {
+    setupFetchMocks({ subjectRoles: [makeSubjectRole({ id: 'r1', name: 'fleet-viewer' })] })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => {
+      expect(screen.getByTestId('role-chip')).toBeInTheDocument()
+      expect(screen.getByTestId('role-chip')).toHaveTextContent('fleet-viewer')
+    })
+  })
+
+  it('shows multiple chips when the subject holds multiple roles', async () => {
+    setupFetchMocks({
+      subjectRoles: [
+        makeSubjectRole({ id: 'r1', name: 'fleet-viewer' }),
+        makeSubjectRole({ id: 'r2', name: 'cert-admin' }),
+      ],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => {
+      expect(screen.getAllByTestId('role-chip')).toHaveLength(2)
+    })
+  })
+
+  it('role picker shows only roles not already assigned', async () => {
+    setupFetchMocks({
+      subjectRoles: [makeSubjectRole({ id: 'role-1', name: 'fleet-viewer' })],
+      allRoles: [
+        makeRole({ id: 'role-1', name: 'fleet-viewer' }),
+        makeRole({ id: 'role-2', name: 'cert-admin' }),
+      ],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => {
+      expect(screen.getByTestId('role-assign-select')).toBeInTheDocument()
+    })
+    const select = screen.getByTestId('role-assign-select') as HTMLSelectElement
+    const options = [...select.options].map((o) => o.text)
+    expect(options).not.toContain('fleet-viewer')
+    expect(options).toContain('cert-admin')
+  })
+
+  it('Assign button calls POST /api/v1/rbac/subjects/{id}/roles with the role_id', async () => {
+    setupFetchMocks({
+      subjectRoles: [],
+      allRoles: [makeRole({ id: 'role-1', name: 'fleet-viewer' })],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => {
+      expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument()
+    })
+    fillJustification('assign-justification-input', ASSIGN_WHY)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    await waitFor(() => {
+      const postCalls = fetchMock.mock.calls.filter(
+        (c) => (c[1] as RequestInit)?.method === 'POST',
+      )
+      const assignCall = postCalls.find((c) => String(c[0]).includes('/rbac/subjects/'))
+      expect(assignCall).toBeDefined()
+      const body = JSON.parse((assignCall![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body).toHaveProperty('role_id', 'role-1')
+    })
+  })
+
+  // ── M-AUTH-2 justification (audit control on privilege grant/revoke) ────────
+
+  it('assign request carries the operator justification in X-Justification', async () => {
+    setupFetchMocks({
+      subjectRoles: [],
+      allRoles: [makeRole({ id: 'role-1', name: 'fleet-viewer' })],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument())
+    fillJustification('assign-justification-input', ASSIGN_WHY)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    await waitFor(() => {
+      const assignCall = fetchMock.mock.calls.find(
+        (c) => (c[1] as RequestInit)?.method === 'POST' && String(c[0]).includes('/rbac/subjects/'),
+      )
+      expect(assignCall).toBeDefined()
+      const headers = new Headers((assignCall![1] as RequestInit).headers)
+      expect(headers.get('X-Justification')).toBe(ASSIGN_WHY)
+    })
+  })
+
+  it('assign with no justification issues no request and shows why', async () => {
+    setupFetchMocks({
+      subjectRoles: [],
+      allRoles: [makeRole({ id: 'role-1', name: 'fleet-viewer' })],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument())
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    expect(screen.getByTestId('assign-generic-error')).toHaveTextContent(/justification is required/i)
+    const assignCalls = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit)?.method === 'POST' && String(c[0]).includes('/rbac/subjects/'),
+    )
+    expect(assignCalls).toHaveLength(0)
+  })
+
+  it('assign with a too-short justification issues no request', async () => {
+    setupFetchMocks({
+      subjectRoles: [],
+      allRoles: [makeRole({ id: 'role-1', name: 'fleet-viewer' })],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument())
+    fillJustification('assign-justification-input', 'too short')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    expect(screen.getByTestId('assign-generic-error')).toHaveTextContent(/at least 10 characters/i)
+    const assignCalls = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit)?.method === 'POST' && String(c[0]).includes('/rbac/subjects/'),
+    )
+    expect(assignCalls).toHaveLength(0)
+  })
+
+  it('revoke request carries the operator justification in X-Justification', async () => {
+    setupFetchMocks({
+      subjectRoles: [makeSubjectRole({ id: 'role-1', name: 'fleet-viewer' })],
+      allRoles: [],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('chip-revoke-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('chip-revoke-btn'))
+    fillJustification('revoke-role-justification-input', REVOKE_WHY)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('revoke-role-confirm-btn'))
+    })
+    await waitFor(() => {
+      const deleteCall = fetchMock.mock.calls.find(
+        (c) =>
+          (c[1] as RequestInit)?.method === 'DELETE' && String(c[0]).includes('/rbac/subjects/'),
+      )
+      expect(deleteCall).toBeDefined()
+      const headers = new Headers((deleteCall![1] as RequestInit).headers)
+      expect(headers.get('X-Justification')).toBe(REVOKE_WHY)
+    })
+  })
+
+  it('revoke with no justification keeps the modal open and issues no DELETE', async () => {
+    setupFetchMocks({
+      subjectRoles: [makeSubjectRole({ id: 'role-1', name: 'fleet-viewer' })],
+      allRoles: [],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('chip-revoke-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('chip-revoke-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('revoke-role-confirm-btn'))
+    })
+    expect(screen.getByTestId('revoke-role-justification-error')).toHaveTextContent(
+      /justification is required/i,
+    )
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    const deleteCalls = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit)?.method === 'DELETE' && String(c[0]).includes('/rbac/subjects/'),
+    )
+    expect(deleteCalls).toHaveLength(0)
+  })
+
+  it('403 JUSTIFICATION_REQUIRED is not shown as an escalation refusal', async () => {
+    fetchMock.mockImplementation((url: unknown, init?: unknown) => {
+      const u = String(url)
+      const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      if (method === 'POST' && u.includes('/rbac/subjects/')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'JUSTIFICATION_REQUIRED',
+                message: 'Justification required for this sensitive operation',
+              },
+            }),
+            { status: 403, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }
+      if (u.includes('/rbac/subjects/') && u.includes('/roles')) {
+        return Promise.resolve(makeSubjectRolesResponse([]))
+      }
+      if (u.includes('/rbac/roles')) {
+        return Promise.resolve(makeRolesResponse([makeRole({ id: 'role-1', name: 'operator' })]))
+      }
+      return Promise.resolve(makeAccountsResponse([makeAccount()]))
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument())
+    fillJustification('assign-justification-input', ASSIGN_WHY)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('assign-generic-error')).toHaveTextContent(
+        /justification required/i,
+      )
+    })
+    expect(screen.queryByTestId('assign-403-error')).not.toBeInTheDocument()
+  })
+
+  it('403 assign response renders the escalation-prevention message block, not a generic error', async () => {
+    const escalationMsg = 'Assigning operator would let this account escalate its own privileges'
+    fetchMock.mockImplementation((url: unknown, init?: unknown) => {
+      const u = String(url)
+      const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      if (method === 'POST' && u.includes('/rbac/subjects/')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ error: { message: escalationMsg } }),
+            { status: 403, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }
+      if (u.includes('/rbac/subjects/') && u.includes('/roles')) {
+        return Promise.resolve(makeSubjectRolesResponse([]))
+      }
+      if (u.includes('/rbac/roles')) {
+        return Promise.resolve(makeRolesResponse([makeRole({ id: 'role-1', name: 'operator' })]))
+      }
+      return Promise.resolve(makeAccountsResponse([makeAccount()]))
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument())
+    fillJustification('assign-justification-input', ASSIGN_WHY)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('assign-403-error')).toBeInTheDocument()
+      expect(screen.getByTestId('assign-403-error')).toHaveTextContent(escalationMsg)
+    })
+    expect(screen.queryByTestId('assign-generic-error')).not.toBeInTheDocument()
+  })
+
+  it('non-403 assign failure renders a generic error, not the escalation block', async () => {
+    fetchMock.mockImplementation((url: unknown, init?: unknown) => {
+      const u = String(url)
+      const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      if (method === 'POST' && u.includes('/rbac/subjects/')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ error: { message: 'Role not found' } }),
+            { status: 404, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }
+      if (u.includes('/rbac/subjects/') && u.includes('/roles')) {
+        return Promise.resolve(makeSubjectRolesResponse([]))
+      }
+      if (u.includes('/rbac/roles')) {
+        return Promise.resolve(makeRolesResponse([makeRole()]))
+      }
+      return Promise.resolve(makeAccountsResponse([makeAccount()]))
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument())
+    fillJustification('assign-justification-input', ASSIGN_WHY)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('assign-generic-error')).toHaveTextContent('Role not found')
+    })
+    expect(screen.queryByTestId('assign-403-error')).not.toBeInTheDocument()
+  })
+
+  it('chip × button opens the revoke confirm modal', async () => {
+    setupFetchMocks({
+      subjectRoles: [makeSubjectRole({ id: 'role-1', name: 'fleet-viewer' })],
+      allRoles: [],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('chip-revoke-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('chip-revoke-btn'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByTestId('revoke-role-confirm-btn')).toBeInTheDocument()
+  })
+
+  it('revoke confirm dialog names the role and subject', async () => {
+    setupFetchMocks({
+      subjectRoles: [makeSubjectRole({ id: 'role-1', name: 'fleet-viewer' })],
+      allRoles: [],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('chip-revoke-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('chip-revoke-btn'))
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('fleet-viewer')
+    expect(dialog).toHaveTextContent('fleet-admin')
+  })
+
+  it('cancel in the revoke dialog closes the modal without calling DELETE', async () => {
+    setupFetchMocks({
+      subjectRoles: [makeSubjectRole({ id: 'role-1', name: 'fleet-viewer' })],
+      allRoles: [],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('chip-revoke-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('chip-revoke-btn'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const deleteCalls = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit)?.method === 'DELETE' && String(c[0]).includes('/rbac/subjects/'),
+    )
+    expect(deleteCalls).toHaveLength(0)
+  })
+
+  it('confirming revoke calls DELETE /api/v1/rbac/subjects/{id}/roles/{role_id}', async () => {
+    setupFetchMocks({
+      subjectRoles: [makeSubjectRole({ id: 'role-1', name: 'fleet-viewer' })],
+      allRoles: [],
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('chip-revoke-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('chip-revoke-btn'))
+    fillJustification('revoke-role-justification-input', REVOKE_WHY)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('revoke-role-confirm-btn'))
+    })
+    await waitFor(() => {
+      const deleteCalls = fetchMock.mock.calls.filter(
+        (c) =>
+          (c[1] as RequestInit)?.method === 'DELETE' &&
+          String(c[0]).includes('/rbac/subjects/acc-1/roles/role-1'),
+      )
+      expect(deleteCalls).toHaveLength(1)
+    })
+  })
+
+  // The error branch of useSubjectRoles: a failed GET must surface in the panel
+  // rather than reading as "no roles assigned" on a privilege-management screen.
+  it('shows the subject-roles error message when the roles fetch fails', async () => {
+    setupFetchMocks({ subjectRolesStatus: 500 })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    const errorEl = await screen.findByTestId('subject-roles-error')
+    expect(errorEl).toHaveTextContent('/api/v1/rbac/subjects/acc-1/roles — 500')
+    // The failure is never rendered as an empty (safe-looking) role set.
+    expect(screen.queryByTestId('subject-no-roles')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('role-chip')).not.toBeInTheDocument()
+  })
+
+  it('shows the subject-roles error when the roles fetch is rejected outright', async () => {
+    fetchMock.mockImplementation((url: unknown) => {
+      const u = String(url)
+      if (u.includes('/rbac/subjects/') && u.includes('/roles')) {
+        return Promise.reject(new Error('NetworkError: connection refused'))
+      }
+      if (u.includes('/rbac/roles')) return Promise.resolve(makeRolesResponse([makeRole()]))
+      return Promise.resolve(makeAccountsResponse([makeAccount()]))
+    })
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-row'))
+    const errorEl = await screen.findByTestId('subject-roles-error')
+    expect(errorEl).toHaveTextContent('connection refused')
+  })
+
+  it('Delete account buttons still work (row click does not swallow them)', async () => {
+    setupFetchMocks()
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-delete-btn'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByTestId('account-roles-row')).not.toBeInTheDocument()
   })
 })

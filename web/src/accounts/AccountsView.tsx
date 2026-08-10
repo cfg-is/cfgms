@@ -2,7 +2,7 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Accounts view (Issue #2733, #2974) — the /accounts route entry point.
+ * Accounts view (Issue #2733, #2974, #3134) — the /accounts route entry point.
  * Fetches GET /api/v1/web/accounts, renders a table, and exposes
  * account create and delete. Roles are surfaced read-only in a tab.
  *
@@ -11,6 +11,18 @@
  * On successful create, a single-use enrollment magic link is shown once
  * (copy-to-clipboard) for out-of-band handoff. No password is ever set.
  * Admins can revoke an outstanding unredeemed link before it is used.
+ *
+ * Issue #3134: each account row is now clickable — expanding it reveals an
+ * inline role management panel (the same expand-row pattern RolesView uses for
+ * permissions). The panel fetches the subject's current roles, lets the admin
+ * assign roles via a picker, and revoke them via chip × buttons + confirm
+ * modal. A 403 from the assign endpoint (escalation-prevention rejection) is
+ * surfaced as a distinct, non-generic message block.
+ *
+ * M-AUTH-2: granting and revoking a role are sensitive operations. Both
+ * surfaces require an operator justification, validated client-side against the
+ * controller's own bounds before the request is built, and sent in the
+ * X-Justification header so it lands on the audit event.
  *
  * Security A9.1: username values originate from user-supplied content.
  * Every value reaches the DOM as a JSX text node — never dangerouslySetInnerHTML.
@@ -22,11 +34,18 @@ import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import {
   useWebAccountList,
+  useSubjectRoles,
+  useRoleList,
   createWebAccount,
   revokeEnrollmentLink,
+  assignSubjectRole,
+  revokeSubjectRole,
+  validateJustification,
+  EscalationError,
   type WebAccountInfo,
+  type RoleInfo,
 } from './useWebAccounts.ts'
-import RolesView from './RolesView.tsx'
+import RolesView, { JustificationField } from './RolesView.tsx'
 
 function LoadingRows() {
   return (
@@ -82,15 +101,25 @@ function EnrollmentLinkPanel({
   onDismiss: () => void
 }) {
   const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState<string | null>(null)
   const enrollLink = `${window.location.origin}/enroll?token=${rawToken}`
 
   async function handleCopy() {
+    setCopyError(null)
     try {
       await navigator.clipboard.writeText(enrollLink)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
-    } catch {
-      // Clipboard API may not be available in all environments.
+    } catch (cause: unknown) {
+      // The Clipboard API is absent outside secure contexts and can be denied
+      // by permissions policy. The link is shown exactly once, so a silent
+      // failure would cost the operator the only copy of it — tell them to
+      // copy the (already selectable) input manually instead.
+      setCopied(false)
+      const detail = cause instanceof Error && cause.message ? ` (${cause.message})` : ''
+      setCopyError(
+        `Couldn't copy automatically${detail} — select the link above and copy it manually.`,
+      )
     }
   }
 
@@ -130,6 +159,15 @@ function EnrollmentLinkPanel({
                 {copied ? 'Copied!' : 'Copy'}
               </button>
             </div>
+            {copyError !== null && (
+              <span
+                className="wf-form-error"
+                role="alert"
+                data-testid="enrollment-link-copy-error"
+              >
+                {copyError}
+              </span>
+            )}
           </div>
         </div>
         <div className="wf-form-row">
@@ -169,51 +207,312 @@ function EnrollmentLinkPanel({
   )
 }
 
+/**
+ * Inline role management panel (Issue #3134). Renders inside the expansion
+ * sub-row of an account row. Shows current roles as chips with a revoke
+ * confirm, plus a role picker + Assign button for new assignments. A 403
+ * from the assign endpoint is surfaced as a distinct non-generic message.
+ */
+function AccountExpandPanel({ account }: { account: WebAccountInfo }) {
+  const { roles: subjectRoles, loading: subjectRolesLoading, error: subjectRolesError, retry: retrySubjectRoles } = useSubjectRoles(account.id)
+  const { roles: allRoles, loading: allRolesLoading } = useRoleList()
+  const [selectedRoleId, setSelectedRoleId] = useState('')
+  const [assignJustification, setAssignJustification] = useState('')
+  const [assigning, setAssigning] = useState(false)
+  const [assignError, setAssignError] = useState<string | null>(null)
+  const [isEscalation, setIsEscalation] = useState(false)
+  const [revokingRole, setRevokingRole] = useState<RoleInfo | null>(null)
+  const [revoking, setRevoking] = useState(false)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
+  const [revokeJustification, setRevokeJustification] = useState('')
+  const [revokeJustificationError, setRevokeJustificationError] = useState<string | null>(null)
+
+  const assignedIds = new Set(subjectRoles.map((r) => r.id))
+  const availableRoles = allRoles.filter((r) => !assignedIds.has(r.id))
+  const effectiveSelectedId =
+    selectedRoleId && availableRoles.some((r) => r.id === selectedRoleId)
+      ? selectedRoleId
+      : availableRoles[0]?.id ?? ''
+
+  function closeRevokeModal() {
+    setRevokingRole(null)
+    setRevokeJustification('')
+    setRevokeJustificationError(null)
+  }
+
+  async function handleAssign() {
+    if (!effectiveSelectedId) return
+    // M-AUTH-2: refuse locally rather than letting the controller answer 403
+    // JUSTIFICATION_REQUIRED — the operator gets the specific reason.
+    const justificationError = validateJustification(assignJustification)
+    if (justificationError !== null) {
+      setIsEscalation(false)
+      setAssignError(justificationError)
+      return
+    }
+    setAssigning(true)
+    setAssignError(null)
+    setIsEscalation(false)
+    try {
+      await assignSubjectRole(account.id, effectiveSelectedId, assignJustification)
+      setSelectedRoleId('')
+      setAssignJustification('')
+      retrySubjectRoles()
+    } catch (cause: unknown) {
+      if (cause instanceof EscalationError) {
+        setIsEscalation(true)
+        setAssignError(cause.message)
+      } else {
+        setIsEscalation(false)
+        setAssignError(cause instanceof Error && cause.message ? cause.message : 'Assign failed')
+      }
+    } finally {
+      setAssigning(false)
+    }
+  }
+
+  async function handleConfirmRevoke() {
+    if (!revokingRole) return
+    const justificationError = validateJustification(revokeJustification)
+    if (justificationError !== null) {
+      setRevokeJustificationError(justificationError)
+      return
+    }
+    const role = revokingRole
+    const justification = revokeJustification
+    setRevoking(true)
+    setRevokeError(null)
+    closeRevokeModal()
+    try {
+      await revokeSubjectRole(account.id, role.id, justification)
+      retrySubjectRoles()
+    } catch (cause: unknown) {
+      setRevokeError(cause instanceof Error && cause.message ? cause.message : 'Revoke failed')
+    } finally {
+      setRevoking(false)
+    }
+  }
+
+  return (
+    <div className="wf-form-panel" style={{ margin: '4px 0 8px' }} data-testid="account-expand-panel">
+      <div style={{ padding: '8px 12px' }}>
+        <span className="wf-form-label">Assigned roles</span>
+        {subjectRolesLoading ? (
+          <span className="mut" style={{ marginLeft: 8, fontSize: 13 }}>Loading…</span>
+        ) : subjectRolesError !== null ? (
+          <span className="wf-form-error" data-testid="subject-roles-error">{subjectRolesError}</span>
+        ) : subjectRoles.length === 0 ? (
+          <span className="mut" data-testid="subject-no-roles" style={{ marginLeft: 8 }}>No roles assigned</span>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+            {subjectRoles.map((role) => (
+              <span key={role.id} className="chip" data-testid="role-chip">
+                {role.name}
+                <button
+                  type="button"
+                  aria-label={`Revoke ${role.name}`}
+                  data-testid="chip-revoke-btn"
+                  onClick={() => {
+                    setRevokeError(null)
+                    setRevokeJustification('')
+                    setRevokeJustificationError(null)
+                    setRevokingRole(role)
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div
+        className="wf-form-actions"
+        style={{ paddingTop: 4, flexWrap: 'wrap', gap: 8 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {allRolesLoading ? (
+          <span className="mut" style={{ fontSize: 13 }}>Loading roles…</span>
+        ) : availableRoles.length === 0 ? (
+          <span className="mut" style={{ fontSize: 13 }}>All roles already assigned</span>
+        ) : (
+          <>
+            <select
+              aria-label="Role to assign"
+              value={effectiveSelectedId}
+              onChange={(e) => setSelectedRoleId(e.target.value)}
+              data-testid="role-assign-select"
+            >
+              {availableRoles.map((role) => (
+                <option key={role.id} value={role.id}>{role.name}</option>
+              ))}
+            </select>
+            <JustificationField
+              value={assignJustification}
+              onChange={(next) => {
+                setAssignJustification(next)
+                setAssignError(null)
+                setIsEscalation(false)
+              }}
+              testId="assign-justification-input"
+            />
+            <button
+              type="button"
+              className="wf-btn"
+              disabled={assigning || !effectiveSelectedId}
+              onClick={() => void handleAssign()}
+              data-testid="role-assign-btn"
+            >
+              {assigning ? 'Assigning…' : 'Assign role'}
+            </button>
+          </>
+        )}
+
+        {isEscalation && assignError !== null && (
+          <div
+            className="notice err"
+            data-testid="assign-403-error"
+            role="alert"
+            style={{ width: '100%', marginTop: 4 }}
+          >
+            <div className="ic">!</div>
+            <span>{assignError}</span>
+          </div>
+        )}
+
+        {!isEscalation && assignError !== null && (
+          <span className="wf-form-error" data-testid="assign-generic-error">{assignError}</span>
+        )}
+
+        {revokeError !== null && (
+          <span className="wf-form-error" data-testid="revoke-error-panel">{revokeError}</span>
+        )}
+      </div>
+
+      {revokingRole !== null && (
+        <div
+          className="wf-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="revoke-role-title"
+          data-testid="revoke-role-overlay"
+        >
+          <div className="wf-modal">
+            <h3 id="revoke-role-title">Revoke role?</h3>
+            <p>
+              This removes <b>{revokingRole.name}</b> from <b>{account.username}</b>.
+              They will lose any access that role alone granted.
+            </p>
+            <div className="wf-form">
+              <div className="wf-form-row">
+                <JustificationField
+                  value={revokeJustification}
+                  onChange={(next) => {
+                    setRevokeJustification(next)
+                    setRevokeJustificationError(null)
+                  }}
+                  testId="revoke-role-justification-input"
+                />
+              </div>
+              {revokeJustificationError && (
+                <span
+                  className="wf-form-error"
+                  data-testid="revoke-role-justification-error"
+                >
+                  {revokeJustificationError}
+                </span>
+              )}
+            </div>
+            <div className="wf-modal-actions">
+              <button
+                type="button"
+                className="wf-btn-secondary"
+                disabled={revoking}
+                onClick={closeRevokeModal}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="wf-btn-danger"
+                disabled={revoking}
+                onClick={() => void handleConfirmRevoke()}
+                data-testid="revoke-role-confirm-btn"
+              >
+                {revoking ? 'Revoking…' : 'Revoke role'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AccountRow({
   account,
+  selected,
   onDelete,
   onRevoke,
+  onExpand,
 }: {
   account: WebAccountInfo
+  selected: boolean
   onDelete: () => void
   onRevoke: () => void
+  onExpand: () => void
 }) {
   return (
-    <tr data-testid="account-row">
-      <td>
-        <span className="nm">{account.username}</span>
-      </td>
-      <td>
-        <span className="mono2">{account.tenant_id || '—'}</span>
-      </td>
-      <td>
-        <span className="mono2">{account.permissions.length > 0 ? account.permissions.join(', ') : '—'}</span>
-      </td>
-      <td>
-        <span className="mono2">{account.created_at ? new Date(account.created_at).toLocaleDateString() : '—'}</span>
-      </td>
-      <td onClick={(e) => e.stopPropagation()}>
-        {account.has_outstanding_enrollment_link && (
+    <>
+      <tr
+        data-testid="account-row"
+        className={selected ? 'selected' : ''}
+        onClick={onExpand}
+        style={{ cursor: 'pointer' }}
+      >
+        <td>
+          <span className="nm">{account.username}</span>
+        </td>
+        <td>
+          <span className="mono2">{account.tenant_id || '—'}</span>
+        </td>
+        <td>
+          <span className="mono2">{account.permissions.length > 0 ? account.permissions.join(', ') : '—'}</span>
+        </td>
+        <td>
+          <span className="mono2">{account.created_at ? new Date(account.created_at).toLocaleDateString() : '—'}</span>
+        </td>
+        <td onClick={(e) => e.stopPropagation()}>
+          {account.has_outstanding_enrollment_link && (
+            <button
+              type="button"
+              className="wf-btn-sm-secondary"
+              onClick={onRevoke}
+              data-testid="enrollment-revoke-btn"
+              title="Revoke the outstanding enrollment link for this account"
+            >
+              Revoke link
+            </button>
+          )}{' '}
           <button
             type="button"
-            className="wf-btn-sm-secondary"
-            onClick={onRevoke}
-            data-testid="enrollment-revoke-btn"
-            title="Revoke the outstanding enrollment link for this account"
+            className="wf-btn-sm-danger"
+            onClick={onDelete}
+            data-testid="account-delete-btn"
           >
-            Revoke link
+            Delete
           </button>
-        )}{' '}
-        <button
-          type="button"
-          className="wf-btn-sm-danger"
-          onClick={onDelete}
-          data-testid="account-delete-btn"
-        >
-          Delete
-        </button>
-      </td>
-    </tr>
+        </td>
+      </tr>
+      {selected && (
+        <tr data-testid="account-roles-row">
+          <td colSpan={5} style={{ paddingTop: 0 }} onClick={(e) => e.stopPropagation()}>
+            <AccountExpandPanel account={account} />
+          </td>
+        </tr>
+      )}
+    </>
   )
 }
 
@@ -339,12 +638,17 @@ export default function AccountsView() {
   const { accounts, loading, error, retry } = useWebAccountList()
   const [tab, setTab] = useState<'accounts' | 'roles'>('accounts')
   const [showCreate, setShowCreate] = useState(false)
+  const [expandedAccountId, setExpandedAccountId] = useState<string | null>(null)
   const [deletingAccount, setDeletingAccount] = useState<WebAccountInfo | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   // Issue #2974: enrollment link shown once after create.
   const [enrollmentLink, setEnrollmentLink] = useState<{ username: string; token: string } | null>(null)
   const [revokeError, setRevokeError] = useState<string | null>(null)
+
+  function handleAccountExpand(id: string) {
+    setExpandedAccountId((prev) => (prev === id ? null : id))
+  }
 
   function handleCreateSaved(username: string, token: string) {
     setShowCreate(false)
@@ -496,11 +800,13 @@ export default function AccountsView() {
                   <AccountRow
                     key={account.id}
                     account={account}
+                    selected={expandedAccountId === account.id}
                     onDelete={() => {
                       setDeleteError(null)
                       setDeletingAccount(account)
                     }}
                     onRevoke={() => void handleRevokeLink(account.username)}
+                    onExpand={() => handleAccountExpand(account.id)}
                   />
                 ))}
               </tbody>
