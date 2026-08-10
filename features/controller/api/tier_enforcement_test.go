@@ -104,6 +104,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Terminal WebSocket relay (Issue #2761) — browser must hold AssuranceStrong before
 	// an interactive terminal to a steward is opened.
 	{"GET", "/api/v1/terminal/ws/test-steward-id", "terminal:create"},
+	// Steward visibility toggle (Issue #2918) — Min=AssuranceBasic: API keys get 403,
+	// web sessions pass, Strong passes. Part (d) uses assertBasicPassesFromRequirePermission.
+	{"PATCH", "/api/v1/stewards/test-steward-id/visibility", "steward:visibility"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

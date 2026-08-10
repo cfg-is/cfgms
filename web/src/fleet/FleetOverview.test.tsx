@@ -855,3 +855,163 @@ describe('bulk selection (Story #2939)', () => {
     expect(screen.getByRole('checkbox', { name: 'Select host-1' })).not.toBeChecked()
   })
 })
+
+/**
+ * Mock fleet list + fleet health with a hidden count.
+ * The visibility PATCH endpoint is handled separately by the caller.
+ */
+function mockFleetWithHiddenHealth(
+  stewards: Steward[],
+  health: { healthy: number; degraded: number; unreachable: number; hidden: number },
+) {
+  fetchMock.mockImplementation((input) => {
+    const url = new URL(String(input), 'https://controller.test')
+
+    if (url.pathname === '/api/v1/fleet/health') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: health }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }
+
+    if (url.pathname.endsWith('/visibility') && url.pathname.startsWith('/api/v1/stewards/')) {
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }))
+    }
+
+    const limit = Number(url.searchParams.get('limit'))
+    const offset = Number(url.searchParams.get('offset'))
+    const body = {
+      data: {
+        stewards: stewards.slice(offset, offset + limit),
+        total: stewards.length,
+        limit,
+        offset,
+      },
+      timestamp: new Date().toISOString(),
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  })
+}
+
+describe('hidden steward toggle and count (Story #2918 AC)', () => {
+  it('renders a "Show hidden / quarantined" checkbox toggle', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    expect(screen.getByTestId('hidden-toggle')).toBeInTheDocument()
+    expect(screen.getByTestId('hidden-toggle-label').textContent).toContain(
+      'Show hidden / quarantined',
+    )
+  })
+
+  it('default (toggle off) — does not append include_hidden to the stewards request', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    const stewardsCall = fetchMock.mock.calls.find((args) =>
+      String(args[0]).includes('/api/v1/stewards'),
+    )
+    expect(String(stewardsCall?.[0])).not.toContain('include_hidden')
+    expect(String(stewardsCall?.[0])).not.toContain('include_quarantined')
+  })
+
+  it('toggle on — appends include_hidden=true and include_quarantined=true to stewards request', async () => {
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+    renderFleet()
+    await screen.findByRole('table')
+
+    fetchMock.mockReset()
+    // Re-supply mock so the refetch after toggle works.
+    mockFleet([makeSteward({ id: 's1', hostname: 'host-1' })])
+
+    fireEvent.click(screen.getByTestId('hidden-toggle'))
+
+    await waitFor(() => {
+      const hiddenCall = fetchMock.mock.calls.find((args) =>
+        String(args[0]).includes('include_hidden=true'),
+      )
+      expect(hiddenCall).toBeDefined()
+    })
+
+    const hiddenCallUrl = fetchMock.mock.calls.find((args) =>
+      String(args[0]).includes('include_hidden=true'),
+    )
+    expect(String(hiddenCallUrl?.[0])).toContain('include_quarantined=true')
+  })
+
+  it('shows "(N hidden)" count when health reports hidden > 0 and toggle is off', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 's1', hostname: 'host-1' })],
+      { healthy: 1, degraded: 0, unreachable: 0, hidden: 3 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('hidden-count')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('hidden-count').textContent).toContain('3')
+    expect(screen.getByTestId('hidden-count').textContent).toContain('hidden')
+  })
+
+  it('hides the "(N hidden)" count when toggle is on (hidden entries are visible)', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 's1', hostname: 'host-1' })],
+      { healthy: 1, degraded: 0, unreachable: 0, hidden: 3 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    await waitFor(() => expect(screen.getByTestId('hidden-count')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('hidden-toggle'))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('hidden-count')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows hidden health tile when health reports hidden > 0', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 's1', hostname: 'host-1' })],
+      { healthy: 2, degraded: 0, unreachable: 0, hidden: 5 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('health-tile-hidden')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('health-tile-hidden').textContent).toContain('5')
+  })
+
+  it('clicking the hide button on a row calls PATCH /api/v1/stewards/{id}/visibility', async () => {
+    mockFleetWithHiddenHealth(
+      [makeSteward({ id: 'stw-abc', hostname: 'my-server' })],
+      { healthy: 1, degraded: 0, unreachable: 0, hidden: 0 },
+    )
+    renderFleet()
+    await screen.findByRole('table')
+
+    const btn = await screen.findByTestId('visibility-btn-stw-abc')
+    fireEvent.click(btn)
+
+    await waitFor(() => {
+      const patchCall = fetchMock.mock.calls.find(
+        (args) => String(args[0]).includes('/api/v1/stewards/stw-abc/visibility'),
+      )
+      expect(patchCall).toBeDefined()
+      const opts = patchCall?.[1] as RequestInit | undefined
+      expect(opts?.method).toBe('PATCH')
+    })
+  })
+})

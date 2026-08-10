@@ -55,6 +55,7 @@ type StewardResult struct {
 	LastHeartbeat  time.Time
 	DNAAttributes  map[string]string
 	RunningVersion string // populated from the steward.version DNA attribute (Issue #2260)
+	Hidden         bool   // operator-controlled fleet-view visibility flag (Issue #2918)
 }
 
 // FleetQuery is the single query path for all device filtering.

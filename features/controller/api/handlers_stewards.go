@@ -273,13 +273,22 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 
 	// No filter: return all stewards including registered-but-not-connected.
 	// Deregistered stewards are excluded by default; pass ?include_deregistered=true to restore them.
+	// Hidden and quarantined stewards are excluded by default (Issue #2918).
 	includeDeregistered := r.URL.Query().Get("include_deregistered") == "true"
+	includeQuarantined := r.URL.Query().Get("include_quarantined") == "true"
+	includeHidden := r.URL.Query().Get("include_hidden") == "true"
 	stewards := s.controllerService.GetAllStewards()
 
 	stewardList := make([]StewardInfo, 0, len(stewards))
 
 	for _, steward := range stewards {
 		if !includeDeregistered && steward.Status == string(business.StewardStatusDeregistered) {
+			continue
+		}
+		if !includeQuarantined && steward.Status == "quarantined" {
+			continue
+		}
+		if !includeHidden && steward.Hidden {
 			continue
 		}
 		info := StewardInfo{
@@ -290,6 +299,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			LastSeen:    steward.LastHeartbeat,
 			ConnectedAt: steward.LastHeartbeat,
 			Metrics:     steward.Metrics,
+			Hidden:      steward.Hidden,
 		}
 
 		if steward.DNA != nil {
@@ -1018,6 +1028,119 @@ func (s *Server) emitDecommissionAudit(ctx context.Context, tenantID, principalI
 		Severity(business.AuditSeverityHigh)
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit decommission audit event",
+			"error", err, "steward_id", logging.SanitizeLogValue(stewardID))
+	}
+}
+
+// setVisibilityRequest is the JSON body for PATCH /api/v1/stewards/{id}/visibility.
+type setVisibilityRequest struct {
+	Hidden bool `json:"hidden"`
+}
+
+// handleSetStewardVisibility handles PATCH /api/v1/stewards/{id}/visibility.
+// Reversibly hides or unhides a steward from the default fleet view.
+// Requires steward:visibility permission at AssuranceBasic (Issue #2918).
+func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	stewardID := vars["id"]
+
+	if !identifierRegex.MatchString(stewardID) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	if s.stewardStore == nil {
+		s.logger.Error("visibility update failed: steward store not configured",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	var req setVisibilityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
+	if err != nil {
+		if errors.Is(err, business.ErrStewardNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+		s.logger.Error("visibility update failed: store lookup error",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up steward", "INTERNAL_ERROR")
+		return
+	}
+
+	// Tenant-scope check: 404 instead of 403 to avoid existence disclosure across tenant boundaries.
+	if callerTenant != "" {
+		sameTenant := record.TenantID == callerTenant
+		ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
+		if !sameTenant && !ancestorTenant {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	}
+
+	// Durable write first — hard-fail the request on error.
+	if err := s.stewardStore.SetStewardHidden(r.Context(), stewardID, req.Hidden); err != nil {
+		s.logger.Error("visibility update failed: durable write error",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update steward visibility", "INTERNAL_ERROR")
+		return
+	}
+
+	// Best-effort in-memory update — log-and-continue on error.
+	if err := s.controllerService.SetStewardHidden(stewardID, req.Hidden); err != nil {
+		s.logger.Warn("visibility update: in-memory update failed (non-fatal)",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	// Emit audit event at Medium severity: concealment-capable but reversible (Issue #2918 security ruling).
+	auditTenantID := callerTenant
+	if auditTenantID == "" {
+		auditTenantID = audit.SystemTenantID
+	}
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principalID := ""
+	if principal != nil {
+		principalID = principal.ID
+	}
+	s.emitVisibilityAudit(r.Context(), auditTenantID, principalID, stewardID, req.Hidden)
+
+	s.logger.Info("Steward visibility updated",
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"hidden", req.Hidden,
+		"principal_id", logging.SanitizeLogValue(principalID))
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"id":     stewardID,
+		"hidden": req.Hidden,
+	})
+}
+
+// emitVisibilityAudit records a steward visibility-changed audit event.
+// Severity: Medium — concealment-capable (drops device from default view) but reversible.
+// No-op when auditManager is nil.
+func (s *Server) emitVisibilityAudit(ctx context.Context, tenantID, principalID, stewardID string, hidden bool) {
+	if s.auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventDataModification).
+		Action("steward.visibility_changed").
+		User(principalID, business.AuditUserTypeHuman).
+		Resource("steward", stewardID, "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityMedium).
+		Detail("hidden", hidden)
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit visibility audit event",
 			"error", err, "steward_id", logging.SanitizeLogValue(stewardID))
 	}
 }
