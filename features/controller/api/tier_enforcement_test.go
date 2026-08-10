@@ -53,6 +53,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/rbac/roles", "rbac:create-role"},
 	{"PUT", "/api/v1/rbac/roles/test-id", "rbac:update-role"},
 	{"DELETE", "/api/v1/rbac/roles/test-id", "rbac:delete-role"},
+	{"POST", "/api/v1/rbac/subjects/test-id/roles", "rbac:assign-role"},                // Issue #3128: subject role binding
+	{"DELETE", "/api/v1/rbac/subjects/test-id/roles/test-role-id", "rbac:revoke-role"}, // Issue #3128: subject role binding
 	{"POST", "/api/v1/api-keys", "api-key:create"},
 	{"DELETE", "/api/v1/api-keys/test-id", "api-key:delete"},
 	{"POST", "/api/v1/registration/tokens", "registration:create-token"},

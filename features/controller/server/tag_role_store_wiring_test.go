@@ -26,16 +26,15 @@ func TestServer_New_WiresTagAndRoleConfigStoresIntoAPIServer(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
 	tempDir := t.TempDir()
-	certDir := tempDir + "/ca"
-
-	// Create the CA up front so EnableCertManagement startup succeeds.
+	// cert.NewManager with StoragePath=tempDir stores the CA at tempDir/ca/;
+	// CAPath is tempDir+"/ca" so loadExistingCertificateManager derives StoragePath=tempDir.
+	caDir := tempDir + "/ca"
 	_, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: certDir,
+		StoragePath: tempDir,
 		CAConfig: &cert.CAConfig{
 			Organization: "Store Wiring Test",
 			Country:      "US",
 			ValidityDays: 3650,
-			StoragePath:  certDir,
 		},
 		LoadExistingCA: false,
 	})
@@ -43,10 +42,9 @@ func TestServer_New_WiresTagAndRoleConfigStoresIntoAPIServer(t *testing.T) {
 
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		CertPath:   certDir,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               certDir,
+			CAPath:               caDir,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "store-wiring-controller",
 				Organization: "Store Wiring Test",

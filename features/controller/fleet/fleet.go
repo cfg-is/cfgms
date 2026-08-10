@@ -18,6 +18,7 @@ type StewardData struct {
 	LastHeartbeat time.Time
 	DNAAttributes map[string]string    // Flattened DNA attributes (hostname, os, arch, platform, tags, ...)
 	DNAFragments  []*commonpb.Fragment // ADR-017 fragments (cluster:* and host:* fragment-shaped state)
+	Hidden        bool                 // Operator-controlled fleet-view visibility flag (Issue #2944)
 }
 
 // StewardProvider is the source of steward data for fleet queries.

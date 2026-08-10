@@ -6,8 +6,12 @@ package ha
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,6 +19,127 @@ import (
 type DockerComposeHelper struct {
 	ComposeFile string
 	ProjectName string
+}
+
+// haControllerServices are the Compose services that form the HA controller
+// cluster. They carry the `ha` profile and their container names are unique to
+// that profile, so this suite can own their lifecycle without touching the
+// shared test infrastructure.
+var haControllerServices = []string{"controller-east", "controller-central", "controller-west"}
+
+// haSupportServices are the remaining `ha`-profile services started after the
+// controllers are healthy: the stewards register against a controller, and the
+// HA git server is addressed by the configuration-continuity tests.
+var haSupportServices = []string{"steward-east", "steward-central", "steward-west", "git-server-ha"}
+
+// sharedDatabaseContainer is the TimescaleDB container the HA controllers use.
+// It carries the `timescale` profile and a fixed container_name, and the CI job
+// starts it before the test binary runs (production-gates.yml,
+// "Set up Docker test infrastructure" -> make test-integration-setup) under a
+// different Compose project. Container names are global to the daemon, so any
+// attempt by this suite to create it again fails the whole `up` with
+// "Conflict. The container name /cfgms-timescaledb-test is already in use".
+const sharedDatabaseContainer = "cfgms-timescaledb-test"
+
+// sharedDatabaseService is the Compose service name for sharedDatabaseContainer.
+const sharedDatabaseService = "timescaledb-test"
+
+// prepareTimeout bounds the one-time credential generation and image build.
+// The suite runs under a 10-minute binary timeout in CI, so an unresponsive
+// Docker daemon must surface as a named error with a diagnosable message
+// rather than consuming the whole budget inside exec.Cmd.Wait.
+const prepareTimeout = 8 * time.Minute
+
+// controllerReadyTimeout bounds `up --wait` for the three HA controllers and
+// databaseReadyTimeout bounds it for the backing store. Both are passed to
+// Compose as --wait-timeout so a container that never reports healthy fails the
+// calling test with the Compose diagnostics instead of stalling until the test
+// binary's own timeout fires.
+const (
+	controllerReadyTimeout = 3 * time.Minute
+	databaseReadyTimeout   = 2 * time.Minute
+)
+
+var (
+	prepareOnce sync.Once
+	prepareErr  error
+)
+
+// ensurePrepared generates test credentials and builds the Compose images at
+// most once per test binary.
+//
+// Image builds are the dominant cost in this suite: a cold build of the
+// controller image takes minutes, and every test calls StartCluster. Building
+// per test made the cumulative Docker time exceed the binary timeout, so the
+// build is hoisted here behind a sync.Once and reuses the layer cache. Cluster
+// lifecycle (down/up) stays per test, which preserves the isolation each test
+// relies on at container-start cost rather than image-build cost.
+func (h *DockerComposeHelper) ensurePrepared() error {
+	prepareOnce.Do(func() {
+		prepareErr = h.prepare()
+	})
+	return prepareErr
+}
+
+func (h *DockerComposeHelper) prepare() error {
+	ctx, cancel := context.WithTimeout(context.Background(), prepareTimeout)
+	defer cancel()
+
+	if err := h.ensureCredentials(ctx); err != nil {
+		return err
+	}
+
+	fmt.Println("HA test setup: building Compose images (once per test binary)...")
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local HA test harness.
+	buildCmd := exec.CommandContext(ctx, "docker", "compose",
+		"-f", h.ComposeFile,
+		"--env-file", h.envFile(),
+		"-p", h.ProjectName,
+		"--profile", "ha",
+		"--profile", "timescale",
+		"build")
+
+	buildOutput, err := buildCmd.CombinedOutput()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("image build did not finish within %v (%w)\nOutput: %s",
+				prepareTimeout, ctxErr, string(buildOutput))
+		}
+		return fmt.Errorf("failed to build images: %w\nOutput: %s", err, string(buildOutput))
+	}
+
+	fmt.Println("HA test setup: Compose images ready")
+	return nil
+}
+
+// ensureCredentials generates .env.test only when it is absent. CI generates it
+// before the suite runs and exports the same values into the test process
+// environment; regenerating would rotate the passwords out from under those
+// exported values.
+func (h *DockerComposeHelper) ensureCredentials(ctx context.Context) error {
+	if _, err := os.Stat(h.envFile()); err == nil {
+		return nil
+	}
+
+	fmt.Println("HA test setup: generating test credentials...")
+	credCmd := exec.CommandContext(ctx, "./scripts/generate-test-credentials.sh")
+	credCmd.Dir = h.repoRoot()
+	if output, err := credCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to generate test credentials: %w\nOutput: %s", err, string(output))
+	}
+	return nil
+}
+
+// repoRoot returns the repository root relative to the package directory, which
+// is where `go test` runs this suite from.
+func (h *DockerComposeHelper) repoRoot() string {
+	return filepath.Join("..", "..", "..")
+}
+
+// envFile returns the path to the generated Compose environment file.
+func (h *DockerComposeHelper) envFile() string {
+	return filepath.Join(h.repoRoot(), ".env.test")
 }
 
 // NewDockerComposeHelper creates a new Docker Compose helper
@@ -26,98 +151,144 @@ func NewDockerComposeHelper() *DockerComposeHelper {
 	}
 }
 
-// StartCluster starts the HA cluster using Docker Compose with --profile ha
+// StartCluster starts the HA cluster using Docker Compose with --profile ha.
+//
+// Credentials and images are prepared once per test binary (see ensurePrepared);
+// each call then recreates the `ha`-profile containers so the test gets freshly
+// started controllers and stewards.
+//
+// Scope: only `ha`-profile services are created, recreated or removed, and every
+// `up` runs with --no-deps. The shared TimescaleDB container is reused when it
+// is already running (see ensureDatabase). Recreating the whole Compose project
+// broke two things at once, both measured in merge-queue run 31202075054, job
+// 92944227941 (2026-08-07):
+//
+//   - `up` aborted with "Conflict. The container name /cfgms-timescaledb-test is
+//     already in use" because the CI job starts that container under a different
+//     Compose project before the test binary runs, and a project-scoped `down`
+//     cannot remove another project's container. Every StartCluster call in that
+//     run failed this way.
+//   - `down -v` on the shared project also removed the database, Gitea and
+//     standalone-controller containers that test/integration/{controller,
+//     standalone,transport} use concurrently in the same `go test ./...`
+//     invocation.
 func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
-	// Step 0: Generate test credentials if not already present
-	fmt.Println("Step 0/5: Ensuring test credentials are generated...")
-	credCmd := exec.CommandContext(ctx, "bash", "-c", "cd ../../../ && ./scripts/generate-test-credentials.sh")
-	credOutput, err := credCmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Credential generation warnings: %s\n", string(credOutput))
+	// Step 1: one-time credential generation and image build.
+	fmt.Println("Step 1/4: Ensuring credentials and images are prepared...")
+	if err := h.ensurePrepared(); err != nil {
+		return err
 	}
 
-	// Step 1: Complete cleanup - remove all containers, networks, volumes, and images
-	fmt.Println("Step 1/5: Cleaning up existing Docker resources...")
-	// #nosec G204 -- integration-only Docker Compose invocation; executable is
-	// fixed and all variable arguments are owned by the local HA test harness.
-	cleanupCmd := exec.CommandContext(ctx, "docker", "compose",
-		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
-		"-p", h.ProjectName,
-		"--profile", "ha",
-		"--profile", "timescale", // Also include timescaledb-test
-		"down", "-v", "--rmi", "all", "--remove-orphans")
-
-	cleanupOutput, err := cleanupCmd.CombinedOutput()
-	if err != nil {
-		// Don't fail on cleanup errors - might not exist
-		fmt.Printf("Cleanup warnings (non-fatal): %s\n", string(cleanupOutput))
+	// Step 2: the controllers need their backing store before they start.
+	fmt.Println("Step 2/4: Ensuring the TimescaleDB backing store is running...")
+	if err := h.ensureDatabase(ctx); err != nil {
+		return err
 	}
 
-	// Step 2: Prune Docker build cache for this project to force complete rebuild
-	fmt.Println("Step 2/5: Pruning Docker build cache...")
-	pruneCmd := exec.CommandContext(ctx, "docker", "builder", "prune", "-f")
-	pruneOutput, err := pruneCmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Build cache prune warnings (non-fatal): %s\n", string(pruneOutput))
-	}
-
-	// Step 3: Build images from scratch with no cache
-	fmt.Println("Step 3/5: Building fresh Docker images (no cache)...")
-	// #nosec G204 -- integration-only Docker Compose invocation; executable is
-	// fixed and all variable arguments are owned by the local HA test harness.
-	buildCmd := exec.CommandContext(ctx, "docker", "compose",
-		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test", // Use generated test credentials
-		"-p", h.ProjectName,
+	// Step 3: recreate the controllers and wait for their healthchecks. --wait
+	// replaces the dependency ordering that --no-deps switches off, so the
+	// stewards started in step 4 still find healthy controllers.
+	fmt.Println("Step 3/4: Recreating HA controllers...")
+	args := append([]string{
+		// Both profiles are enabled so the Compose model resolves: the
+		// controllers declare depends_on the `timescale`-profile database.
+		// --no-deps then keeps this invocation from creating that database,
+		// which ensureDatabase has already accounted for.
 		"--profile", "ha",
 		"--profile", "timescale",
-		"build", "--no-cache", "--pull")
-
-	buildOutput, err := buildCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to build images: %w\nOutput: %s", err, string(buildOutput))
+		"up", "-d", "--force-recreate", "--no-deps",
+		"--wait", "--wait-timeout", strconv.Itoa(int(controllerReadyTimeout.Seconds())),
+	}, haControllerServices...)
+	if output, err := h.compose(ctx, args...); err != nil {
+		return fmt.Errorf("failed to start HA controllers: %w\nOutput: %s", err, output)
 	}
 
-	// Step 4: Start the cluster with freshly built images and test credentials
-	fmt.Println("Step 4/5: Starting HA cluster with credentials...")
-	// #nosec G204 -- integration-only Docker Compose invocation; executable is
-	// fixed and all variable arguments are owned by the local HA test harness.
-	startCmd := exec.CommandContext(ctx, "docker", "compose",
-		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test", // Use generated test credentials
-		"-p", h.ProjectName,
+	// Step 4: recreate the stewards and the HA git server against the
+	// controllers that step 3 confirmed healthy.
+	fmt.Println("Step 4/4: Recreating stewards and HA git server...")
+	args = append([]string{
 		"--profile", "ha",
 		"--profile", "timescale",
-		"up", "-d", "--force-recreate")
-
-	startOutput, err := startCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to start cluster: %w\nOutput: %s", err, string(startOutput))
+		"up", "-d", "--force-recreate", "--no-deps",
+	}, haSupportServices...)
+	if output, err := h.compose(ctx, args...); err != nil {
+		return fmt.Errorf("failed to start HA support services: %w\nOutput: %s", err, output)
 	}
 
-	fmt.Println("Step 5/5: HA cluster started successfully with fresh images")
+	fmt.Println("HA cluster started")
 	return nil
 }
 
-// StopCluster stops the HA cluster and cleans up resources
+// StopCluster stops and removes the HA services this suite owns.
+//
+// The shared TimescaleDB container is deliberately left running: it is started
+// by the CI job (and by `make test-integration-setup` locally) for the whole
+// integration suite, and removing it breaks the packages running alongside this
+// one.
 func (h *DockerComposeHelper) StopCluster(ctx context.Context) error {
-	// #nosec G204 -- integration-only Docker Compose invocation; executable is
-	// fixed and all variable arguments are owned by the local HA test harness.
-	cmd := exec.CommandContext(ctx, "docker", "compose",
-		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
-		"-p", h.ProjectName,
+	services := make([]string, 0, len(haSupportServices)+len(haControllerServices))
+	services = append(services, haSupportServices...)
+	services = append(services, haControllerServices...)
+
+	args := append([]string{
 		"--profile", "ha",
 		"--profile", "timescale",
-		"down", "-v", "--remove-orphans")
-
-	output, err := cmd.CombinedOutput()
+		"rm", "-f", "-s", "-v",
+	}, services...)
+	output, err := h.compose(ctx, args...)
 	if err != nil {
-		return fmt.Errorf("failed to stop cluster: %w\nOutput: %s", err, string(output))
+		return fmt.Errorf("failed to stop HA services: %w\nOutput: %s", err, output)
 	}
 
 	return nil
+}
+
+// ensureDatabase makes sure the TimescaleDB container the HA controllers use is
+// running, without recreating it when another Compose project owns it.
+func (h *DockerComposeHelper) ensureDatabase(ctx context.Context) error {
+	if containerRunning(ctx, sharedDatabaseContainer) {
+		fmt.Printf("Reusing the running %s container\n", sharedDatabaseContainer)
+		return nil
+	}
+
+	output, err := h.compose(ctx,
+		"--profile", "timescale",
+		"up", "-d", "--wait", "--wait-timeout", strconv.Itoa(int(databaseReadyTimeout.Seconds())),
+		sharedDatabaseService)
+	if err != nil {
+		return fmt.Errorf("failed to start %s: %w\nOutput: %s", sharedDatabaseService, err, output)
+	}
+	return nil
+}
+
+// containerRunning reports whether a container with the given name exists and
+// is running. A missing container makes `docker container inspect` exit
+// non-zero, which is reported as "not running" rather than as an error.
+func containerRunning(ctx context.Context, name string) bool {
+	// #nosec G204 -- fixed argv; name is a package-level constant.
+	cmd := exec.CommandContext(ctx, "docker", "container", "inspect", "-f", "{{.State.Running}}", name)
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(output)) == "true"
+}
+
+// compose runs `docker compose` against this suite's file, env file and project
+// and returns the combined output.
+func (h *DockerComposeHelper) compose(ctx context.Context, args ...string) (string, error) {
+	argv := append([]string{
+		"compose",
+		"-f", h.ComposeFile,
+		"--env-file", h.envFile(),
+		"-p", h.ProjectName,
+	}, args...)
+
+	// #nosec G204 -- integration-only Docker Compose invocation; executable is
+	// fixed and all variable arguments are owned by the local HA test harness.
+	cmd := exec.CommandContext(ctx, "docker", argv...)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
 }
 
 // GetContainerLogs retrieves logs from a specific container
@@ -126,7 +297,7 @@ func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service stri
 	// names are local harness inputs and no shell interprets them.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"logs", service)
 
@@ -144,7 +315,7 @@ func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName st
 	// name/count are local harness inputs and no shell interprets them.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"logs", "--tail", fmt.Sprintf("%d", lines), stewardName)
 
@@ -224,7 +395,7 @@ func (h *DockerComposeHelper) StopService(ctx context.Context, service string) e
 	// harness-selected Compose service and no shell interprets it.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"stop", service)
 
@@ -242,7 +413,7 @@ func (h *DockerComposeHelper) RestartService(ctx context.Context, service string
 	// harness-selected Compose service and no shell interprets it.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"restart", service)
 
@@ -260,7 +431,7 @@ func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, 
 	// are local test values passed without a shell.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"up", "-d", "--scale", fmt.Sprintf("%s=%d", service, replicas))
 
@@ -278,7 +449,7 @@ func (h *DockerComposeHelper) GetServiceStatus(ctx context.Context, services ...
 	// fixed argument vector; requested services are filtered in Go afterward.
 	cmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
-		"--env-file", "../../../.env.test",
+		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"ps", "--services", "--filter", "status=running")
 

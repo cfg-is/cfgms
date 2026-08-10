@@ -1046,10 +1046,16 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 			device_id            TEXT NOT NULL DEFAULT '',
 			identity_key_pub     BYTEA,
 			key_protection_level TEXT NOT NULL DEFAULT '',
-			last_provenance_json TEXT NOT NULL DEFAULT ''
+			last_provenance_json TEXT NOT NULL DEFAULT '',
+			hidden               BOOLEAN NOT NULL DEFAULT FALSE
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create steward_records table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE steward_records ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE;`,
+	); err != nil {
+		return fmt.Errorf("failed to add hidden column to steward_records: %w", err)
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_steward_records_tenant_id   ON steward_records(tenant_id);",

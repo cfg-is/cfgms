@@ -313,6 +313,81 @@ func TestSQLiteStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
+func TestSQLiteStewardStore_SetStewardHidden(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.RegisterSteward(ctx, testStewardRec("s-hide")))
+
+	// Default: not hidden.
+	got, err := store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "freshly registered steward must not be hidden")
+
+	// Hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "s-hide", true))
+	got, err = store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.True(t, got.Hidden, "GetSteward must reflect hidden=true after SetStewardHidden")
+
+	// Un-hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "s-hide", false))
+	got, err = store.GetSteward(ctx, "s-hide")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "GetSteward must reflect hidden=false after SetStewardHidden")
+}
+
+func TestSQLiteStewardStore_SetStewardHidden_NotFound(t *testing.T) {
+	store := newTestStewardStore(t)
+	err := store.SetStewardHidden(context.Background(), "ghost", true)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestSQLiteStewardStore_BackfillHidden verifies that a pre-existing stewards table
+// without the hidden column is backfilled correctly on open and defaults Hidden to false.
+func TestSQLiteStewardStore_BackfillHidden(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "backfill-hidden.db")
+	ctx := context.Background()
+
+	// Create a legacy-shape database without the hidden column.
+	db, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS stewards (
+		id TEXT PRIMARY KEY, hostname TEXT NOT NULL DEFAULT '',
+		platform TEXT NOT NULL DEFAULT '', arch TEXT NOT NULL DEFAULT '',
+		version TEXT NOT NULL DEFAULT '', ip_address TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'registered',
+		registered_at TEXT NOT NULL, last_seen TEXT NOT NULL,
+		last_heartbeat_at TEXT NOT NULL DEFAULT '',
+		device_id TEXT NOT NULL DEFAULT '',
+		identity_key_pub BLOB NOT NULL DEFAULT '',
+		key_protection_level TEXT NOT NULL DEFAULT '',
+		last_provenance_json TEXT NOT NULL DEFAULT '',
+		tenant_id TEXT NOT NULL DEFAULT ''
+	)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO stewards (id, registered_at, last_seen) VALUES ('s-legacy','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Re-open with migration: backfillStewardColumns must add the hidden column.
+	db2, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	defer func() { _ = db2.Close() }()
+
+	store := &SQLiteStewardStore{db: db2}
+	got, err := store.GetSteward(ctx, "s-legacy")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "backfilled row must have hidden=false (default)")
+
+	// Verify the flag can be set on the backfilled row.
+	require.NoError(t, store.SetStewardHidden(ctx, "s-legacy", true))
+	got2, err := store.GetSteward(ctx, "s-legacy")
+	require.NoError(t, err)
+	assert.True(t, got2.Hidden, "hidden flag must be settable after backfill")
+}
+
 func TestSQLiteStewardStore_TenantID_PersistedByRegisterAndRetrieved(t *testing.T) {
 	store := newTestStewardStore(t)
 	ctx := context.Background()

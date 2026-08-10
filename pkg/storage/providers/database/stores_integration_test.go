@@ -402,6 +402,37 @@ func TestDatabaseStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
+func TestDatabaseStewardStore_SetStewardHidden(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	rec := makeSampleSteward("sw-hidden", "tenant-sw-hidden")
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	// Default: not hidden.
+	got, err := store.GetSteward(ctx, "sw-hidden")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "freshly registered steward must not be hidden")
+
+	// Hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "sw-hidden", true))
+	got, err = store.GetSteward(ctx, "sw-hidden")
+	require.NoError(t, err)
+	assert.True(t, got.Hidden, "GetSteward must reflect hidden=true after SetStewardHidden")
+
+	// Un-hide it.
+	require.NoError(t, store.SetStewardHidden(ctx, "sw-hidden", false))
+	got, err = store.GetSteward(ctx, "sw-hidden")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "GetSteward must reflect hidden=false after SetStewardHidden")
+}
+
+func TestDatabaseStewardStore_SetStewardHidden_NotFound(t *testing.T) {
+	store := newTestStewardStore(t)
+	err := store.SetStewardHidden(context.Background(), "nonexistent", true)
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
 func TestDatabaseStewardStore_GetStewardsSeen(t *testing.T) {
 	store := newTestStewardStore(t)
 	ctx := context.Background()

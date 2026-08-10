@@ -140,14 +140,13 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/cert-mgmt"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 30,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						ServerCertValidityDays: 90,
 						RenewalThresholdDays:   7,
 						Server: &config.ServerCertificateConfig{
@@ -380,10 +379,9 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/prod-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Storage: &config.StorageConfig{
 						Provider:     "flatfile",
 						FlatfileRoot: tempDir + "/flatfile",
@@ -393,7 +391,7 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 30,
 						ServerCertValidityDays: 90,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						RenewalThresholdDays:   7,
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "prod-controller",
@@ -505,10 +503,9 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/excessive-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Storage: &config.StorageConfig{
 						Provider:     "flatfile",
 						FlatfileRoot: tempDir + "/flatfile",
@@ -518,7 +515,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 36500,
 						ServerCertValidityDays: 36500,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "test-controller",
 							Organization: "Test Org",
@@ -572,10 +569,9 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/wildcard-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "0.0.0.0:0",
-					CertPath:   certDir,
 					Storage: &config.StorageConfig{
 						Provider:     "flatfile",
 						FlatfileRoot: tempDir + "/flatfile",
@@ -583,7 +579,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 					},
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
-						CAPath:               certDir,
+						CAPath:               filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "wildcard-controller",
 							Organization: "Test Org",
@@ -830,16 +826,15 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/short-validity-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement:   true,
 						ClientCertValidityDays: 7,
 						ServerCertValidityDays: 30,
 						RenewalThresholdDays:   3,
-						CAPath:                 certDir,
+						CAPath:                 filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "secure-controller",
 							DNSNames:     []string{"localhost"},
@@ -866,13 +861,12 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/auto-renewal-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, certDir)
+				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
-					CertPath:   certDir,
 					Certificate: &config.CertificateConfig{
 						EnableCertManagement: true,
-						CAPath:               certDir,
+						CAPath:               filepath.Join(certDir, "ca"),
 						Server: &config.ServerCertificateConfig{
 							CommonName:   "auto-controller",
 							Organization: "Auto Org",
@@ -930,17 +924,16 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir2) }()
 
 	// Pre-initialize both CA directories before server creation
-	testutil.PreInitControllerForTest(t, tempDir1, tempDir1)
-	testutil.PreInitControllerForTest(t, tempDir2, tempDir2)
+	testutil.PreInitControllerForTest(t, tempDir1, filepath.Join(tempDir1, "ca"))
+	testutil.PreInitControllerForTest(t, tempDir2, filepath.Join(tempDir2, "ca"))
 
 	// Test that servers created with different configurations are properly isolated
 	config1 := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		DataDir:    tempDir1 + "/data1",
-		CertPath:   tempDir1,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               tempDir1,
+			CAPath:               filepath.Join(tempDir1, "ca"),
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "server1-controller",
 				Organization: "Server1 Org",
@@ -952,10 +945,9 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	config2 := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		DataDir:    tempDir2 + "/data2",
-		CertPath:   tempDir2,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               tempDir2,
+			CAPath:               filepath.Join(tempDir2, "ca"),
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "server2-controller",
 				Organization: "Server2 Org",
@@ -1066,28 +1058,28 @@ func TestServer_New_LegacyCompatibility(t *testing.T) {
 
 	certDir := tempDir + "/legacy-ca"
 
-	// Create CA files without marker (simulates pre-init deployment)
+	// cert.NewManager with StoragePath=certDir creates CA files at certDir/ca/.
 	_, err = cert.NewManager(&cert.ManagerConfig{
 		StoragePath: certDir,
 		CAConfig: &cert.CAConfig{
 			Organization: "Legacy Org",
 			Country:      "US",
 			ValidityDays: 3650,
-			StoragePath:  certDir,
 		},
 		LoadExistingCA: false,
 	})
 	require.NoError(t, err, "Failed to create legacy CA")
 
-	// Verify no marker exists yet
-	assert.False(t, initialization.IsInitialized(certDir), "Should not have marker before server start")
+	caDir := filepath.Join(certDir, "ca")
+
+	// Verify no marker exists yet at the CA directory.
+	assert.False(t, initialization.IsInitialized(caDir), "Should not have marker before server start")
 
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		CertPath:   certDir,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               certDir,
+			CAPath:               caDir,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "legacy-controller",
 				Organization: "Legacy Org",
@@ -1107,8 +1099,8 @@ func TestServer_New_LegacyCompatibility(t *testing.T) {
 		})
 	}
 
-	// Verify marker was created
-	assert.True(t, initialization.IsInitialized(certDir), "Marker should be auto-created for legacy CA")
+	// Verify marker was auto-created at the CA directory.
+	assert.True(t, initialization.IsInitialized(caDir), "Marker should be auto-created for legacy CA")
 }
 
 // TestServer_New_MarkerButNoCA verifies that if the marker exists but CA files
@@ -1120,19 +1112,19 @@ func TestServer_New_MarkerButNoCA(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	certDir := tempDir + "/orphan-marker"
-	require.NoError(t, os.MkdirAll(certDir, 0700))
+	certParent := tempDir + "/orphan-marker"
+	caDir := filepath.Join(certParent, "ca")
+	require.NoError(t, os.MkdirAll(caDir, 0700))
 
-	// Write marker without CA files (simulates deleted/missing CA)
-	err = initialization.CreateLegacyMarker(certDir)
+	// Write marker at caDir (== CAPath) without CA files — simulates deleted/missing CA.
+	err = initialization.CreateLegacyMarker(caDir)
 	require.NoError(t, err)
 
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		CertPath:   certDir,
 		Certificate: &config.CertificateConfig{
 			EnableCertManagement: true,
-			CAPath:               certDir,
+			CAPath:               caDir,
 			Server: &config.ServerCertificateConfig{
 				CommonName:   "orphan-controller",
 				Organization: "Test Org",

@@ -230,6 +230,19 @@ func (s *FlatFileStewardStore) UpdateStewardStatus(_ context.Context, stewardID 
 	return s.writeSteward(record)
 }
 
+// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
+func (s *FlatFileStewardStore) SetStewardHidden(_ context.Context, stewardID string, hidden bool) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	record.Hidden = hidden
+	return s.writeSteward(record)
+}
+
 // UpdateStewardTenant moves a steward to a different tenant by updating its TenantID field.
 func (s *FlatFileStewardStore) UpdateStewardTenant(_ context.Context, stewardID, newTenantID string) error {
 	s.mutex.Lock()

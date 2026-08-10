@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1107,7 +1108,31 @@ func LoadWithPath(configPath string) (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.Certificate != nil && cfg.Certificate.CAPath != "" {
+		if err := ValidateCAPath(cfg.Certificate.CAPath); err != nil {
+			return nil, err
+		}
+	}
+
 	return cfg, nil
+}
+
+// ValidateCAPath returns an error when caPath's final component is not "ca".
+// cert.NewManager always derives its real CA directory as filepath.Join(StoragePath,"ca"),
+// so every caller must pass StoragePath = filepath.Dir(caPath). If the final component
+// is not "ca", that derivation produces the wrong parent and the CA lands in the wrong
+// place — or fails to load — without any obvious error message.
+func ValidateCAPath(caPath string) error {
+	clean := filepath.Clean(caPath)
+	if filepath.Base(clean) != "ca" {
+		return fmt.Errorf(
+			"invalid certificate.ca_path %q: the final path component must be \"ca\" "+
+				"(configured path would derive wrong CA storage parent %q; "+
+				"rename the directory or update ca_path to end in /ca)",
+			caPath, filepath.Dir(clean),
+		)
+	}
+	return nil
 }
 
 // ValidateExecutionSecurity enforces the public-beta connected-execution

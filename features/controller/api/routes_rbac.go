@@ -24,4 +24,9 @@ func registerRBACRoutes(s *Server, api *mux.Router) {
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "read-role")(http.HandlerFunc(s.handleGetRole))).Methods("GET")
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "update-role")(http.HandlerFunc(s.handleUpdateRole))).Methods("PUT")
 	rbac.Handle("/roles/{id}", s.requirePermission("rbac", "delete-role")(http.HandlerFunc(s.handleDeleteRole))).Methods("DELETE")
+
+	// Subject role bindings
+	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "list-subject-roles")(http.HandlerFunc(s.handleGetSubjectRoles))).Methods("GET")
+	rbac.Handle("/subjects/{id}/roles", s.requirePermission("rbac", "assign-role")(http.HandlerFunc(s.handleAssignSubjectRole))).Methods("POST")
+	rbac.Handle("/subjects/{id}/roles/{role_id}", s.requirePermission("rbac", "revoke-role")(http.HandlerFunc(s.handleRevokeSubjectRole))).Methods("DELETE")
 }

@@ -875,3 +875,78 @@ transport:
 	assert.Equal(t, "ctrl.tier1.lab", cfg.Transport.ExternalAddress)
 	assert.Equal(t, "https://ctrl.tier1.lab:9080", cfg.ExternalURL)
 }
+
+// TestValidateCAPath_RejectsNonCAFinalComponent verifies that a ca_path not ending in
+// "ca" is rejected at load time with an actionable error naming both the configured
+// path and the wrongly-derived parent directory — so a misconfiguration that would
+// silently write CA files to the wrong location fails loudly instead.
+func TestValidateCAPath_RejectsNonCAFinalComponent(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		caPath     string
+		wantParent string
+	}{
+		{caPath: "/etc/cfgms/my-ca", wantParent: "/etc/cfgms"},
+		{caPath: "/var/lib/cfgms/certs", wantParent: "/var/lib/cfgms"},
+		{caPath: "/tmp/certs/", wantParent: "/tmp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.caPath, func(t *testing.T) {
+			err := ValidateCAPath(tc.caPath)
+			require.Error(t, err, "ca_path %q should be rejected", tc.caPath)
+			assert.Contains(t, err.Error(), tc.caPath, "error must name the configured ca_path")
+			assert.Contains(t, err.Error(), tc.wantParent, "error must name the wrongly-derived parent")
+		})
+	}
+}
+
+// TestValidateCAPath_AcceptsCAFinalComponent verifies that paths ending in "ca"
+// (the only valid convention) pass validation.
+func TestValidateCAPath_AcceptsCAFinalComponent(t *testing.T) {
+	t.Parallel()
+
+	for _, caPath := range []string{
+		"/var/lib/cfgms/certs/ca",
+		"/etc/cfgms/ca",
+		"certs/ca",
+		"/var/lib/cfgms/certs/ca/",
+	} {
+		t.Run(caPath, func(t *testing.T) {
+			assert.NoError(t, ValidateCAPath(caPath), "ca_path %q should be accepted", caPath)
+		})
+	}
+}
+
+// TestLoadWithPath_RejectsCAPathNotEndingInCA verifies that LoadWithPath returns a
+// descriptive error when certificate.ca_path does not end in "ca", naming both the
+// configured value and the wrongly-derived parent — the repro path from Issue #3171
+// (misconfigured ca_path silently fell back to relative defaults).
+func TestLoadWithPath_RejectsCAPathNotEndingInCA(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+certificate:
+  enable_cert_management: true
+  ca_path: "/etc/cfgms/my-ca"
+`), 0600))
+
+	_, err := LoadWithPath(configPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/etc/cfgms/my-ca", "error must name the configured ca_path")
+	assert.Contains(t, err.Error(), "/etc/cfgms", "error must name the wrongly-derived parent")
+}
+
+// TestLoadWithPath_AcceptsCAPathEndingInCA verifies that LoadWithPath succeeds when
+// certificate.ca_path ends in "ca", the required convention.
+func TestLoadWithPath_AcceptsCAPathEndingInCA(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+certificate:
+  enable_cert_management: true
+  ca_path: "/var/lib/cfgms/certs/ca"
+`), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "/var/lib/cfgms/certs/ca", cfg.Certificate.CAPath)
+}
