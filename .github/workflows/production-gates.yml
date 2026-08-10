@@ -491,6 +491,8 @@ jobs:
           -e GITHUB_ACTIONS=true \
           cfgms-test-runner \
           sh -c '
+            set -e
+
             echo "📦 Installing Go dependencies..."
             go mod download
 
