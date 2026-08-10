@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -307,15 +308,14 @@ func isAlphanumHyphen(c rune) bool {
 }
 
 // loadCertManager loads a cert.Manager from an already-initialized controller.
-// The StoragePath is resolved from cfg.CertPath, falling back to cfg.Certificate.CAPath.
+// StoragePath is derived as filepath.Dir(cfg.Certificate.CAPath) — the parent of the
+// "ca/" subdirectory — matching the invariant that cert.NewManager stores the CA at
+// filepath.Join(StoragePath,"ca").
 func loadCertManager(cfg *config.Config) (*cert.Manager, error) {
-	certPath := cfg.CertPath
-	if certPath == "" && cfg.Certificate != nil {
-		certPath = cfg.Certificate.CAPath
+	if cfg.Certificate == nil || cfg.Certificate.CAPath == "" {
+		return nil, fmt.Errorf("certificate path not configured (certificate.ca_path required)")
 	}
-	if certPath == "" {
-		return nil, fmt.Errorf("certificate path not configured (cert_path or certificate.ca_path required)")
-	}
+	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
 	return cert.NewManager(&cert.ManagerConfig{
 		StoragePath:    certPath,
 		LoadExistingCA: true,

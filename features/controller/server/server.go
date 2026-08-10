@@ -2398,10 +2398,9 @@ func (s *Server) GetHTTPListenAddr() string {
 // Unlike the old initializeCertificateManager, this never creates a new CA — that
 // responsibility belongs to `controller --init` (initialization.Run).
 func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (*cert.Manager, error) {
-	certPath := cfg.CertPath
-	if certPath == "" {
-		certPath = cfg.Certificate.CAPath
-	}
+	// StoragePath must be the parent of the "ca/" subdirectory; NewManager always derives
+	// the real CA directory as filepath.Join(StoragePath,"ca").
+	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
 
 	manager, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath:          certPath,

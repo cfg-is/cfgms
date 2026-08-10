@@ -39,8 +39,10 @@ func setupInitializedController(t *testing.T) (*testControllerSetup, func()) {
 	require.NoError(t, err, "initialization must succeed")
 	require.FileExists(t, bundlePath, "system admin bundle must be created")
 
+	// StoragePath must be the parent of "ca/" — cert.NewManager always derives the CA
+	// directory as filepath.Join(StoragePath,"ca"), matching what initialization.Run does.
 	certManager, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath:    caDir,
+		StoragePath:    tempDir,
 		LoadExistingCA: true,
 	})
 	require.NoError(t, err, "cert manager must load successfully after init")
@@ -51,6 +53,7 @@ func setupInitializedController(t *testing.T) (*testControllerSetup, func()) {
 		certManager: certManager,
 		bundlePath:  bundlePath,
 		caDir:       caDir,
+		tempDir:     tempDir,
 	}, func() {}
 }
 
@@ -60,6 +63,7 @@ type testControllerSetup struct {
 	certManager *cert.Manager
 	bundlePath  string
 	caDir       string
+	tempDir     string
 }
 
 // parseX509FromBundle reads a bundle file and returns the parsed X.509 cert.
@@ -249,7 +253,7 @@ func TestRevokeAdminBundle_RevokedThenAuthFails(t *testing.T) {
 	// After revocation: a fresh cert manager (simulating controller restart) must
 	// report the serial as revoked (CERT_REVOKED — auth would be rejected)
 	freshManager, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath:    setup.caDir,
+		StoragePath:    setup.tempDir,
 		LoadExistingCA: true,
 	})
 	require.NoError(t, err)
