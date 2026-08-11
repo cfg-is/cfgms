@@ -1742,11 +1742,26 @@ func (s *Server) Start() error {
 	if s.haManager != nil {
 		s.logger.Info("Starting HA manager...")
 
-		// Create a context with timeout to prevent infinite hang
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.haManager.Start(ctx); err != nil {
+		// The HA manager's context is its LIFETIME, not a startup deadline.
+		//
+		// ha.Manager.Start derives m.ctx from the context passed here and bounds
+		// every background goroutine it launches on it. This used to be a
+		// 30-second context.WithTimeout with a deferred cancel, so the moment
+		// Server.Start returned, that cancel fired and killed the manager's
+		// background work while the manager still reported itself started.
+		//
+		// The visible damage was cluster membership. publishNodeInfo waits for
+		// leader election and then replicates this node's metadata through the
+		// Raft log; it observed the cancelled context first and returned without
+		// proposing anything, on every node. ClusterState.Nodes stayed empty for
+		// the life of the cluster, so GET /api/v1/ha/cluster reported no members
+		// and no leader while Raft was electing and replicating normally — only
+		// GET /api/v1/ha/status looked correct, because IsLeader reads the raft
+		// state directly rather than through the replicated map.
+		//
+		// Start does not block on the network, so it needs no timeout of its
+		// own; shutdown is Server.Stop's job, which calls haManager.Stop.
+		if err := s.haManager.Start(context.Background()); err != nil {
 			return fmt.Errorf("failed to start HA manager: %w", err)
 		}
 		s.logger.Info("HA manager started successfully")

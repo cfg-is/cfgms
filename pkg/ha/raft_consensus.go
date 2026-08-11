@@ -72,9 +72,31 @@ type ClusterState struct {
 }
 
 // RaftCommand represents commands sent through Raft
+// Data is deliberately json.RawMessage rather than interface{}.
+//
+// Decoding into interface{} turns every JSON number into a float64, and
+// applyCommand then re-marshalled that value to decode it into the concrete
+// command type. Node IDs are uint64 hashes well above 2^53, so the round trip
+// silently rounded them: a leader whose Raft ID was 10972337506993669137 was
+// stored in ClusterState.Nodes under 10972337506993670000. Every subsequent
+// lookup by real node ID missed, so GetLeaderInfo could never resolve the
+// leader and HasNode never saw a node it had just applied.
+//
+// Keeping the payload as raw bytes decodes it exactly once, straight into the
+// typed command, with no float64 in the path.
 type RaftCommand struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+// marshalRaftCommand builds a RaftCommand envelope with its payload encoded
+// exactly once.
+func marshalRaftCommand(cmdType string, payload interface{}) ([]byte, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s payload: %w", cmdType, err)
+	}
+	return json.Marshal(RaftCommand{Type: cmdType, Data: data})
 }
 
 // NodeUpdateCommand is sent when node info changes
@@ -255,9 +277,12 @@ func (rc *RaftConsensus) runRaft() {
 			rc.wg.Add(1)
 			go func(p []byte) {
 				defer rc.wg.Done()
+				rc.logger.Debug("Proposing to Raft", "node_id", rc.nodeID, "bytes", len(p))
 				if err := rc.node.Propose(rc.ctx, p); err != nil {
 					rc.logger.Error("Failed to propose to Raft", "error", err)
+					return
 				}
+				rc.logger.Debug("Proposal accepted by Raft", "node_id", rc.nodeID)
 			}(prop)
 
 		case cc := <-rc.confChangeC:
@@ -439,14 +464,9 @@ func (rc *RaftConsensus) applyCommand(data []byte) error {
 }
 
 // applyNodeUpdate updates node information in cluster state
-func (rc *RaftConsensus) applyNodeUpdate(data interface{}) error {
-	dataBytes, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-
+func (rc *RaftConsensus) applyNodeUpdate(data json.RawMessage) error {
 	var update NodeUpdateCommand
-	if err := json.Unmarshal(dataBytes, &update); err != nil {
+	if err := json.Unmarshal(data, &update); err != nil {
 		return err
 	}
 
@@ -461,14 +481,9 @@ func (rc *RaftConsensus) applyNodeUpdate(data interface{}) error {
 }
 
 // applySessionUpdate updates session state in the cluster state machine
-func (rc *RaftConsensus) applySessionUpdate(data interface{}) error {
-	dataBytes, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-
+func (rc *RaftConsensus) applySessionUpdate(data json.RawMessage) error {
 	var update SessionUpdateCommand
-	if err := json.Unmarshal(dataBytes, &update); err != nil {
+	if err := json.Unmarshal(data, &update); err != nil {
 		return err
 	}
 
@@ -492,18 +507,14 @@ func (rc *RaftConsensus) applySessionUpdate(data interface{}) error {
 // ProposeSessionUpdate replicates a steward connect/disconnect event through the Raft log.
 // It is non-blocking: if proposeC is at capacity it returns an error immediately.
 func (rc *RaftConsensus) ProposeSessionUpdate(stewardID, nodeID string, connected bool) error {
-	cmd := RaftCommand{
-		Type: "session_update",
-		Data: SessionUpdateCommand{
-			StewardID: stewardID,
-			NodeID:    nodeID,
-			Connected: connected,
-			Timestamp: time.Now(),
-		},
-	}
-	data, err := json.Marshal(cmd)
+	data, err := marshalRaftCommand("session_update", SessionUpdateCommand{
+		StewardID: stewardID,
+		NodeID:    nodeID,
+		Connected: connected,
+		Timestamp: time.Now(),
+	})
 	if err != nil {
-		return fmt.Errorf("failed to marshal session update command: %w", err)
+		return err
 	}
 	select {
 	case rc.proposeC <- data:
@@ -621,6 +632,16 @@ func (rc *RaftConsensus) GetLeaderInfo() (*NodeInfo, error) {
 	return info, nil
 }
 
+// HasNode reports whether the applied cluster state contains the given node.
+// Used to confirm a node_update proposal actually committed, since a successful
+// ProposeNodeUpdate only means the proposal was accepted for delivery.
+func (rc *RaftConsensus) HasNode(nodeID uint64) bool {
+	rc.clusterState.mu.RLock()
+	defer rc.clusterState.mu.RUnlock()
+	_, ok := rc.clusterState.Nodes[nodeID]
+	return ok
+}
+
 // GetClusterNodes returns all nodes in the cluster
 func (rc *RaftConsensus) GetClusterNodes() []*NodeInfo {
 	rc.clusterState.mu.RLock()
@@ -637,16 +658,12 @@ func (rc *RaftConsensus) GetClusterNodes() []*NodeInfo {
 // ProposeNodeUpdate replicates updated NodeInfo for this node through the Raft log.
 // It is non-blocking: if proposeC is at capacity it returns an error immediately.
 func (rc *RaftConsensus) ProposeNodeUpdate(nodeInfo *NodeInfo) error {
-	cmd := RaftCommand{
-		Type: "node_update",
-		Data: NodeUpdateCommand{
-			NodeID:   rc.nodeID,
-			NodeInfo: nodeInfo,
-		},
-	}
-	data, err := json.Marshal(cmd)
+	data, err := marshalRaftCommand("node_update", NodeUpdateCommand{
+		NodeID:   rc.nodeID,
+		NodeInfo: nodeInfo,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to marshal node update command: %w", err)
+		return err
 	}
 	select {
 	case rc.proposeC <- data:

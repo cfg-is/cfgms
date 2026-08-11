@@ -759,6 +759,55 @@ func (m *Manager) initializeBlueGreenComponents() error {
 	return nil
 }
 
+// nodeInfoPublishInterval is how long publishNodeInfo waits before re-proposing
+// a node_update that has not yet appeared in the applied cluster state.
+const nodeInfoPublishInterval = 2 * time.Second
+
+// publishNodeInfo replicates this node's metadata through the Raft log and keeps
+// retrying until the entry is observed in the applied state.
+//
+// ProposeNodeUpdate returning nil means only that the proposal was accepted into
+// the raft loop's channel — not that it was committed. etcd/raft drops a
+// proposal whenever the leader is unsettled, which is exactly the moment
+// leaderElectedC fires, so a single shot lost the only node_update a node ever
+// sent. Nothing retried and nothing noticed: ClusterState.Nodes stayed empty for
+// the lifetime of the cluster, and because GetLeaderInfo and GetClusterNodes
+// both resolve through that map, GET /api/v1/ha/cluster reported no leader and
+// no members on a cluster that was electing and replicating perfectly well.
+// GET /api/v1/ha/status disagreed, since IsLeader reads the raft state directly.
+//
+// Membership must converge, so this re-proposes on an interval until the node's
+// own record is applied, then returns.
+func (m *Manager) publishNodeInfo(rc *RaftConsensus, nodeInfo *NodeInfo) {
+	select {
+	case <-rc.leaderElectedC:
+	case <-m.ctx.Done():
+		return
+	}
+
+	nodeID := hashStringToUint64(nodeInfo.ID)
+	ticker := time.NewTicker(nodeInfoPublishInterval)
+	defer ticker.Stop()
+
+	for {
+		m.logger.Debug("Publishing node metadata to cluster state", "node_id", nodeInfo.ID)
+		if err := rc.ProposeNodeUpdate(nodeInfo); err != nil {
+			m.logger.Warn("Failed to propose node update; will retry", "error", err)
+		}
+
+		select {
+		case <-ticker.C:
+		case <-m.ctx.Done():
+			return
+		}
+
+		if rc.HasNode(nodeID) {
+			m.logger.Info("Node metadata replicated to cluster state", "node_id", nodeInfo.ID)
+			return
+		}
+	}
+}
+
 // startClusterMode starts components for cluster mode
 func (m *Manager) startClusterMode() error {
 	// Start Raft consensus (sole authority for membership and leader election)
@@ -773,16 +822,7 @@ func (m *Manager) startClusterMode() error {
 		// before calling ProposeNodeUpdate. The goroutine is bounded by m.ctx.
 		rc := m.raftConsensus
 		nodeInfo := m.nodeInfo
-		go func() {
-			select {
-			case <-rc.leaderElectedC:
-				if err := rc.ProposeNodeUpdate(nodeInfo); err != nil {
-					m.logger.Warn("Failed to propose initial node update", "error", err)
-				}
-			case <-m.ctx.Done():
-				return
-			}
-		}()
+		go m.publishNodeInfo(rc, nodeInfo)
 
 		// Propose add-node ConfChanges for each peer known at startup.
 		// These are non-critical (initial membership is bootstrapped via StartNode);
