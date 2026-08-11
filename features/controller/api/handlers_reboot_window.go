@@ -248,10 +248,11 @@ func (s *Server) handlePutStewardRebootWindow(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Resolve steward's tenant via the in-memory controller registry.
-	stewardTenant, tenantOK := s.resolveStewardTenant(stewardID)
+	// Resolve the steward's tenant via the in-memory controller registry and enforce the
+	// caller's tenant boundary before touching any config. The permission middleware
+	// cannot do this for these routes (see authorizeStewardRebootWindowTenant).
+	stewardTenant, tenantOK := s.authorizeStewardRebootWindowTenant(w, r, stewardID)
 	if !tenantOK {
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return
 	}
 
@@ -359,9 +360,10 @@ func (s *Server) handleGetStewardRebootWindow(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	stewardTenant, tenantOK := s.resolveStewardTenant(stewardID)
+	// Resolve the steward's tenant and enforce the caller's tenant boundary before any
+	// config read (see authorizeStewardRebootWindowTenant).
+	stewardTenant, tenantOK := s.authorizeStewardRebootWindowTenant(w, r, stewardID)
 	if !tenantOK {
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return
 	}
 
@@ -458,6 +460,73 @@ func (s *Server) resolveStewardTenant(stewardID string) (string, bool) {
 		return "", false
 	}
 	return info.TenantID, true
+}
+
+// authorizeStewardRebootWindowTenant resolves the steward's tenant and enforces the
+// caller's tenant boundary for the steward-scoped reboot_window endpoints. It returns
+// the steward's tenant, or writes the refusal response and returns ok=false.
+//
+// The permission middleware cannot enforce this. requirePermission's isolation-engine
+// and ADR-025 boundary checks both derive the target tenant from the request path
+// (extractTargetTenantFromRequest / extractBoundaryTenantFromRequest in middleware.go),
+// which yields the "tenant_id" var — or "id" only when resourceType is "tenant". These
+// routes carry a *steward* ID under {id} with resourceType "reboot_window", so both
+// extractors return "" and both checks are skipped. A steward's tenant is only knowable
+// after a registry lookup, so the check has to happen here, which is the same stance
+// every sibling steward handler takes (handlers_stewards.go).
+//
+// Refusals:
+//   - unknown steward, or a steward outside a tenant-scoped caller's subtree → 404
+//     STEWARD_NOT_FOUND. 404 rather than 403 so a cross-tenant caller cannot use the
+//     status code as an existence oracle for steward IDs.
+//   - root-scoped caller (ADR-025 Amendment 1 A1.3) acting on a tenant below root with
+//     no active crossing → tenant-crossing challenge (ADR-025 Decision 3), so a
+//     legitimate break-glass invocation still learns its remedy.
+func (s *Server) authorizeStewardRebootWindowTenant(w http.ResponseWriter, r *http.Request, stewardID string) (string, bool) {
+	stewardTenant, tenantOK := s.resolveStewardTenant(stewardID)
+	if !tenantOK {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return "", false
+	}
+
+	// API-key, session and relay principals carry a non-empty TenantID; unscoped mTLS
+	// admin principals carry "" and isWithinTenantScope allows them through.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	var callerTenant string
+	if principal != nil {
+		callerTenant = principal.TenantID
+	} else {
+		callerTenant = s.callerTenantID(r)
+	}
+	if !isWithinTenantScope(callerTenant, stewardTenant) {
+		s.logger.Info("Cross-tenant steward reboot_window access refused",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"steward_tenant", logging.SanitizeLogValue(stewardTenant),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return "", false
+	}
+
+	if principal != nil && principal.RootScoped {
+		if s.tenantManager == nil {
+			// No ancestry source wired: fail closed exactly as if no crossing were
+			// active, matching authorizeRootScopedTenantAccess's nil-store stance.
+			s.writeTenantCrossingChallenge(w, stewardTenant)
+			return "", false
+		}
+		switch s.authorizeTenantAccess(r.Context(), principal, stewardTenant) {
+		case tenantAuthAllowed:
+			// Root itself, or a tenant covered by an active crossing.
+		case tenantAuthNeedsCrossing:
+			s.writeTenantCrossingChallenge(w, stewardTenant)
+			return "", false
+		default:
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return "", false
+		}
+	}
+
+	return stewardTenant, true
 }
 
 // buildNextOccurrenceResponse computes the resolved next occurrence from a schedule.Config.

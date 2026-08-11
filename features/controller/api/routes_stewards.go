@@ -55,4 +55,12 @@ func registerStewardRoutes(s *Server, api *mux.Router) {
 
 	// Module inventory endpoint (Issue #1949)
 	stewards.Handle("/{id}/modules", s.requirePermission("steward", "read-modules")(http.HandlerFunc(s.handleGetStewardModules))).Methods("GET")
+
+	// Device-level reboot_window override endpoints (Issue #2979). reboot_window.override is
+	// intentionally distinct from config.update (ADR-026 decision 3) — a holder of
+	// config.update alone must receive 403 on the PUT.
+	stewards.Handle("/{id}/reboot-window",
+		s.requirePermission("reboot_window", "read")(http.HandlerFunc(s.handleGetStewardRebootWindow))).Methods("GET")
+	stewards.Handle("/{id}/reboot-window",
+		s.requirePermission("reboot_window", "override")(http.HandlerFunc(s.handlePutStewardRebootWindow))).Methods("PUT")
 }
