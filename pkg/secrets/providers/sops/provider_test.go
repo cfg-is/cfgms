@@ -114,6 +114,48 @@ func TestSOPSProvider_RejectsOverPermissiveKeyFile(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "permissions"), err.Error())
 }
 
+// TestIsSystemdCredentialPath guards the #3130 regression: systemd's
+// LoadCredential= always exposes files at mode 0440 (owner+group read),
+// scoped to the unit via a POSIX ACL rather than the raw mode bits. Without
+// this exception the strict key-file permission check rejected every
+// credential-backed CFGMS_SECRETS_KEY_FILE, crash-looping the controller on
+// every restart (reproduced live during HA node bootstrap; Tier-1's own
+// systemd unit carries the identical LoadCredential wiring and had not yet
+// been restarted since it was added, so the bug was latent there too).
+func TestIsSystemdCredentialPath(t *testing.T) {
+	assert.True(t, isSystemdCredentialPath("/run/credentials/cfgms-controller.service/cfgms-secrets-key"))
+	assert.False(t, isSystemdCredentialPath("/etc/cfgms/secrets.key"))
+	assert.False(t, isSystemdCredentialPath("/tmp/run/credentials/evil"))
+	assert.False(t, isSystemdCredentialPath(""))
+}
+
+// TestSOPSProvider_AcceptsSystemdCredentialKeyFile proves a LoadCredential-
+// exposed key file (mode 0440, unreadable by "other") is accepted where a
+// regular file at the same permissive mode would be rejected by
+// TestSOPSProvider_RejectsOverPermissiveKeyFile above.
+func TestSOPSProvider_AcceptsSystemdCredentialKeyFile(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	credDir := "/run/credentials/cfgms-sops-provider-test"
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Skipf("cannot create %s in this environment: %v", credDir, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(credDir) })
+
+	base := t.TempDir()
+	keyPath := filepath.Join(credDir, "cfgms-secrets-key")
+	require.NoError(t, os.WriteFile(keyPath, []byte("0123456789abcdef0123456789abcdef"), 0o440))
+
+	p := &SOPSProvider{}
+	_, err := p.CreateSecretStore(map[string]interface{}{
+		"storage_provider": "flatfile",
+		"storage_config":   map[string]interface{}{"root": filepath.Join(base, "data")},
+		"key_file":         keyPath,
+	})
+	require.NoError(t, err, "a systemd-credential-backed key file at mode 0440 must be accepted")
+}
+
 func TestSOPSProvider_EnforcesSecretSizeLimit(t *testing.T) {
 	base := t.TempDir()
 	store, err := NewSOPSSecretStore(&SOPSSecretStoreConfig{

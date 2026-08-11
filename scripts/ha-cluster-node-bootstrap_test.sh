@@ -25,10 +25,11 @@ fail() { echo "FAIL: $1"; ((FAIL++)) || true; }
 # ── Mock binary helper ────────────────────────────────────────────────────────
 
 # make_mock_controller writes a mock cfgms-controller binary to the given
-# prefix directory. The mock implements --init: records the CFGMS_NODE_ID and
-# CFGMS_HA_CLUSTER_NODES it was invoked with (so tests can assert cluster-mode
-# env wiring reached the binary) and creates the init marker + a stub admin
-# bundle, mirroring tier1-bootstrap_test.sh's mock.
+# prefix directory. The mock implements --init: records the CFGMS_NODE_ID,
+# CFGMS_HA_CLUSTER_NODES, CFGMS_HA_CA_CERT_PATH and CFGMS_SECRETS_KEY_FILE it
+# was invoked with (so tests can assert cluster-mode env wiring reached the
+# binary) and creates the init marker + a stub admin bundle, mirroring
+# tier1-bootstrap_test.sh's mock.
 make_mock_controller() {
     local prefix="$1"
     local bin_dir="${prefix}/usr/local/bin"
@@ -59,8 +60,8 @@ if [[ "$DO_INIT" == "true" ]]; then
     fi
     mkdir -p "$ETC"
     touch "$INIT_MARKER"
-    printf 'CFGMS_NODE_ID=%s\nCFGMS_HA_CLUSTER_NODES=%s\nCFGMS_HA_CA_CERT_PATH=%s\n' \
-        "${CFGMS_NODE_ID:-}" "${CFGMS_HA_CLUSTER_NODES:-}" "${CFGMS_HA_CA_CERT_PATH:-}" > "$INIT_ENV_RECORD"
+    printf 'CFGMS_NODE_ID=%s\nCFGMS_HA_CLUSTER_NODES=%s\nCFGMS_HA_CA_CERT_PATH=%s\nCFGMS_SECRETS_KEY_FILE=%s\nOPENBAO_ADDR=%s\n' \
+        "${CFGMS_NODE_ID:-}" "${CFGMS_HA_CLUSTER_NODES:-}" "${CFGMS_HA_CA_CERT_PATH:-}" "${CFGMS_SECRETS_KEY_FILE:-}" "${OPENBAO_ADDR:-}" > "$INIT_ENV_RECORD"
     cat > "$ADMIN_BUNDLE" <<'YAML'
 controller_url: "https://test-host:9080"
 cert_pem: |
@@ -96,6 +97,7 @@ run_bootstrap() {
     LAST_OUTPUT="$(CFGMS_INSTALL_PREFIX="$prefix" \
         CFGMS_STORAGE_DB_PASSWORD="test-pg-password" \
         CFGMS_SESSION_HMAC_KEY="test-session-hmac-key" \
+        CFGMS_SECRETS_KEY_B64="dGVzdC1zZWNyZXRzLWtleS0zMi1ieXRlcy1sb25nISE=" \
         OPENBAO_TOKEN="test-vault-token" \
         bash "$BOOTSTRAP_SH" "$@" 2>&1)" || LAST_EXIT=$?
 }
@@ -138,6 +140,23 @@ else
 fi
 rm -rf "$T2_PREFIX"
 
+# CFGMS_SECRETS_KEY_B64 must be independently required (#3130 — it must be
+# the SAME value on all 3 nodes, so it cannot fall back to self-generation).
+T2B_PREFIX="$(mktemp -d)"
+make_mock_controller "$T2B_PREFIX"
+LAST_EXIT=0
+LAST_OUTPUT="$(CFGMS_INSTALL_PREFIX="$T2B_PREFIX" \
+    CFGMS_STORAGE_DB_PASSWORD="test-pg-password" \
+    CFGMS_SESSION_HMAC_KEY="test-session-hmac-key" \
+    OPENBAO_TOKEN="test-vault-token" \
+    bash "$BOOTSTRAP_SH" "${STD_FLAGS[@]}" 2>&1)" || LAST_EXIT=$?
+if [[ $LAST_EXIT -eq 1 ]] && echo "$LAST_OUTPUT" | grep -q "CFGMS_SECRETS_KEY_B64"; then
+    pass "test2b: missing CFGMS_SECRETS_KEY_B64 exits 1 naming the variable"
+else
+    fail "test2b: expected exit 1 naming CFGMS_SECRETS_KEY_B64 (exit=${LAST_EXIT} output='${LAST_OUTPUT}')"
+fi
+rm -rf "$T2B_PREFIX"
+
 # ── Test 3: Happy path creates expected file structure and wires cluster env ──
 
 T3_PREFIX="$(mktemp -d)"
@@ -165,6 +184,21 @@ else
         PASS_THIS=false
     elif ! grep -q 'bucket: "cfgms-installer-blobs"' "$CFG_FILE"; then
         fail "test3: controller.cfg missing storage.cluster.s3.bucket"
+        PASS_THIS=false
+    # Top-level cert_path (not nested under certificate:, which the config
+    # struct doesn't bind at all — see the script's own comment). A missing or
+    # relative value here breaks --init outside a systemd WorkingDirectory.
+    elif ! grep -Fxq 'cert_path: "/var/lib/cfgms/certs"' "$CFG_FILE"; then
+        fail "test3: controller.cfg missing top-level cert_path"
+        PASS_THIS=false
+    # internal_listen_addr must be a fixed private/loopback IP, never the
+    # 0.0.0.0 wildcard — config.ValidatePrivateListenerAddress rejects it, and
+    # binding all interfaces would risk exposing Raft traffic on a public NIC.
+    elif grep -q 'internal_listen_addr: "0.0.0.0' "$CFG_FILE"; then
+        fail "test3: controller.cfg binds internal_listen_addr to the 0.0.0.0 wildcard"
+        PASS_THIS=false
+    elif ! grep -Eq '^internal_listen_addr: "[0-9.]+:9443"$' "$CFG_FILE"; then
+        fail "test3: controller.cfg internal_listen_addr is not a fixed IP:port"
         PASS_THIS=false
     fi
 
@@ -197,6 +231,20 @@ else
             fail "test3: CFGMS_HA_CLUSTER_NODES not passed to --init"
             PASS_THIS=false
         fi
+        if ! grep -q "^CFGMS_SECRETS_KEY_FILE=${T3_PREFIX}/etc/cfgms/secrets.key$" "$INIT_RECORD"; then
+            fail "test3: CFGMS_SECRETS_KEY_FILE not passed to --init"
+            PASS_THIS=false
+        fi
+        if ! grep -q "^OPENBAO_ADDR=http://192.168.234.105:8200$" "$INIT_RECORD"; then
+            fail "test3: OPENBAO_ADDR not passed to --init"
+            PASS_THIS=false
+        fi
+    fi
+
+    SECRETS_KEY_FILE="${T3_PREFIX}/etc/cfgms/secrets.key"
+    if [[ ! -f "$SECRETS_KEY_FILE" ]]; then
+        fail "test3: secrets.key not generated"
+        PASS_THIS=false
     fi
 
     MARKER="${T3_PREFIX}/etc/cfgms/.admin-bundle-issued"
@@ -217,7 +265,11 @@ else
             'Environment=CFGMS_NODE_ID=cfgms-ha-node2' \
             'NoNewPrivileges=true' \
             'ProtectSystem=strict' \
-            'InaccessiblePaths=/etc/cfgms/ha-secrets.env'; do
+            'LoadCredential=cfgms-secrets-key:/etc/cfgms/secrets.key' \
+            'Environment=CFGMS_SECRETS_KEY_FILE=%d/cfgms-secrets-key' \
+            'Environment=OPENBAO_ADDR=http://192.168.234.105:8200' \
+            'InaccessiblePaths=/etc/cfgms/ha-secrets.env' \
+            'InaccessiblePaths=/etc/cfgms/secrets.key'; do
             if ! grep -Fxq "$directive" "$SERVICE"; then
                 fail "test3: systemd unit missing directive: $directive"
                 PASS_THIS=false

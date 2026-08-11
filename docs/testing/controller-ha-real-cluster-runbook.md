@@ -353,15 +353,228 @@ and untouched; retiring them is a separate, explicit founder decision.
 
 ## 3. Cluster join (story #3130)
 
-*To be filled in when #3130 lands — joins two additional controller nodes to
-the migrated Tier-1 controller, forming a 3-node `CFGMS_HA_MODE=cluster`
-deployment.*
+Joins two new controller nodes (`cfgms-ha-node2`, `cfgms-ha-node3`) to the
+#3127-migrated Tier-1 controller (`cfgms-ctrl-01`), cutting all three over to
+a 3-node `ha.mode: cluster` deployment with a shared OpenBao-sourced CA (see
+[`cluster-ca.md`](../operations/cluster-ca.md)) and shared Postgres/MinIO
+backend (see [`cluster-storage-config.md`](../operations/cluster-storage-config.md)).
+Executed 2026-08-11.
 
-See [`cluster-ca.md`](../operations/cluster-ca.md) for the CA-sourcing
-mechanism this section will document (a shared OpenBao vault, provisioned on
-`cfgms-lab-datasvc` alongside #3124's Postgres/MinIO) and
-[`cluster-storage-config.md`](../operations/cluster-storage-config.md) for
-the storage-side config every node needs.
+### VM provisioning
+
+Both new nodes: Debian 13, Generation 2, 4 vCPU / 4GB RAM, provisioned via the
+raw2vhd/CIDATA cloud-init recipe (`C:\temp\ctrl-vm-create.ps1`, adapted
+per-host — not yet formalized into the repo). `cfgms-ha-node2` on
+`192.168.234.104` (host CFG-AB-02), `cfgms-ha-node3` on `192.168.234.106`
+(host CFG-C3-02). The provisioning template was fixed during this story to
+install `hyperv-daemons` (`hv-kvp-daemon` — required for Hyper-V/
+`Get-VMNetworkAdapter` to see the guest's IP at all) and to send the guest's
+**FQDN**, not short hostname, via DHCP so DNS dynamic-update registers it (see
+"DNS registration" below).
+
+### DNS registration (client + server-side)
+
+Neither new VM's hostname registered in `lab.cfg.is` DNS despite valid DHCP
+leases. Root-caused via PSRemoting to both DCs (`cfg-dc1-02`, `cfg-dc2-02`) as
+two independent gaps:
+
+1. **DHCP server-side**: the DHCP service (`cfg-dc2-02`, itself a domain
+   controller) had no `Set-DhcpServerDnsCredential` configured. Per Microsoft
+   guidance, a DC-hosted DHCP server cannot register DNS on behalf of
+   non-domain clients against a Secure-only zone using its own machine
+   account — it needs an explicit low-privilege service-account credential,
+   which was never provisioned. Relaxed `lab.cfg.is` and its reverse zone
+   (`234.168.192.in-addr.arpa`) from `Secure` to `NonsecureAndSecure` dynamic
+   updates (acceptable for this lab; not recommended in a production AD).
+2. **Client-side**: systemd-networkd's DHCPv4 client only sends option 81
+   (Client FQDN — what Windows DHCP's `OnClientRequest` registration mode
+   requires) when the configured hostname contains a dot. netplan's
+   `dhcp4-overrides`/`dhcp6-overrides` `hostname:` was set to the short
+   hostname; changed to the FQDN (`cfgms-ha-node2.lab.cfg.is`) on both nodes.
+
+Both fixes verified live via the DHCP server's audit log (`DNS Update
+Request` → `DNS Update Successful` event pairs) and a direct `Get-DnsServerResourceRecord`
+query on `cfg-dc1-02`.
+
+### Bugs found and fixed while proving this path live
+
+Six genuine bugs surfaced getting the two new nodes to a stable 3-node quorum
+— none of this path had been exercised end-to-end before:
+
+1. **`ha-cluster-node-bootstrap.sh` never wired `CFGMS_SECRETS_KEY_FILE`** —
+   `--init` failed with "plaintext secret storage is prohibited". Added
+   generation + `LoadCredential=`/`InaccessiblePaths=` wiring mirroring
+   `tier1-bootstrap.sh`.
+2. **`pkg/secrets/providers/openbao`'s `Available()` only reads the
+   `OPENBAO_ADDR` env var**, never the resolved `certificate.cluster_ca.vault_address`
+   — a correctly configured vault address alone still fails the registry's
+   availability gate. Same root cause as a workaround already applied during
+   #3127/#3130's CA migration into vault. Worked around operationally
+   (`OPENBAO_ADDR` set alongside the config value in both scripts' `--init`
+   env and systemd unit); the provider-level fix is a separate, flagged gap.
+3. **`certificate.cert_path` does not correspond to any config struct
+   field** — `CertificateConfig` has no `CertPath`, so the nested YAML key
+   both bootstrap scripts rendered was silently dropped. The only field the
+   code reads is the legacy top-level `cert_path` (`features/controller/config/config.go`),
+   which defaults to the relative `"certs/"` and only resolved correctly
+   because systemd's `WorkingDirectory=/var/lib/cfgms` happened to match —
+   `--init` (run via `runuser`, no such cwd guarantee) failed with `mkdir
+   certs/: permission denied`. Fixed both scripts to render `cert_path` at
+   the top level with an absolute value; this bug was **already latent in
+   `cfgms-ctrl-01`'s live config** (present since #3127) and would have hit
+   the Tier-1 controller on its next restart regardless of #3130.
+4. **`pkg/secrets/providers/sops` rejected `LoadCredential`-backed key
+   files** — systemd's `LoadCredential=` always exposes files at mode `0440`
+   (owner+group read, ACL-scoped to the unit by systemd itself, not by the
+   raw group-owner bits), which the SOPS provider's permission check flatly
+   rejected as "must not grant group or other access". This would have
+   crash-looped **Tier-1 itself** on its next restart, since its systemd unit
+   already carried the identical `LoadCredential` wiring from a prior
+   session but had not restarted since. Fixed in code
+   (`pkg/secrets/providers/sops/store.go`) with an exception scoped precisely
+   to `/run/credentials/` paths.
+5. **`internal_listen_addr: "0.0.0.0:9443"` rejected by design** —
+   `config.ValidatePrivateListenerAddress` requires a fixed loopback/private
+   IP, not the wildcard (binding all interfaces would risk exposing Raft
+   traffic on any public-facing NIC). Fixed the bootstrap script to bind the
+   node's actual private IP instead of `0.0.0.0`.
+6. **`secrets.key` must be identical across all 3 cluster nodes, not
+   independently generated per node** — it encrypts secrets (e.g. the audit
+   HMAC key) persisted as shared rows in the cluster Postgres backend;
+   whichever node writes first encrypts under its own key, and every other
+   node fails to decrypt with `secret ciphertext authentication failed`.
+   `ha-cluster-node-bootstrap.sh` originally self-generated a fresh random
+   key per node via `openssl rand`; fixed to require a `CFGMS_SECRETS_KEY_B64`
+   env var supplying the same value to every node (mirroring
+   `CFGMS_SESSION_HMAC_KEY`'s existing pattern). Captured into the lab
+   secrets inventory (`cfgms-lab-cluster-secrets-key`).
+
+Two further operational fixes, not code bugs: `chmod +x` on this system did
+not reliably grant group/other execute on a binary copied under an active
+`umask 077` left set from generating `secrets.key` earlier in the script (the
+`umask` was never scoped/reset) — fixed by scoping `umask 077` to a subshell
+in both scripts and using explicit `chmod 0755`. And a bare `[[ cond ]] &&
+echo` as the last command inside a `{ ...; } > file` group, when that group
+is itself wrapped in a `(...)` subshell, interacts with `set -e` differently
+than the unwrapped form — converted to explicit `if` statements to remove the
+ambiguity regardless of wrapping.
+
+All fixes are covered by regression tests: `features/controller/initialization/initialization_test.go`,
+`pkg/secrets/providers/sops/provider_test.go`, and both bootstrap scripts'
+`_test.sh` suites (7/6 passing respectively).
+
+### Node bootstrap
+
+Both new nodes bootstrapped via `ha-cluster-node-bootstrap.sh --hostname=<fqdn>
+--node-id=<private-ip> --cluster-nodes=192.168.234.103:9443,192.168.234.104:9443,192.168.234.106:9443
+--postgres-host=192.168.234.105 --s3-endpoint=http://192.168.234.105:9000
+--vault-address=http://192.168.234.105:8200 --vault-key-path=root/cluster-ca`.
+`--node-id` uses the node's private IP (not FQDN) for consistency with the
+existing established addressing scheme, even though DNS now works — changing
+the whole cluster's addressing scheme was out of scope for this pass. Both
+nodes loaded the CA fingerprint `fdac9d4ba886e876a3cfe6626cb4d7fc308310a7e8a325277cfaed40a318dc87`
+from the shared vault, matching each other exactly.
+
+### Tier-1 cutover
+
+`cfgms-ctrl-01`'s pre-cutover single-node config, systemd unit, and binary
+were backed up to `/root/pre-cluster-cutover-backup/` before any change. Its
+`controller.cfg` gained (on top of the existing `storage.provider: database`
+block, kept for continuity): a top-level `cert_path` and
+`internal_listen_addr: "192.168.234.103:9443"`, `ha: { mode: cluster }`,
+`certificate.cluster_ca` (same vault address/key path as the two new nodes),
+and a `storage.cluster` block (`postgres_dsn`, `session_hmac_key`, `s3`)
+alongside the existing `storage.config`. Its systemd unit (an older,
+pre-hardening definition — `User=root`, no sandboxing directives, unlike the
+two new nodes' `User=cfgms` hardened units) was **not** migrated to the
+hardened template in this pass — that's a separable security-hardening
+change, deliberately not bundled with the cluster cutover to keep this
+already-complex, live-production change minimally scoped. It only gained the
+cluster-specific `Environment=` lines (`CFGMS_NODE_ID`,
+`CFGMS_HA_EXTERNAL_ADDRESS`, `CFGMS_HA_CLUSTER_NODES`,
+`CFGMS_HA_CA_CERT_PATH`, `OPENBAO_ADDR`, `CFGMS_SECRETS_KEY_FILE`,
+`CFGMS_S3_INSTALLER_BUCKET`) plus the same `secrets.key` value as the two new
+nodes (ctrl-01 had none — its binary predates the `CFGMS_SECRETS_KEY_FILE`
+requirement).
+
+All 3 nodes were stopped and started **together** for every coordinated
+restart in this story — Raft state is entirely in-memory
+(`raft.MemoryStorage`, never persisted to disk), so a node restarted alone
+while its peers are already running re-bootstraps as a lone self-elected
+leader and diverges from a peer that later tries to join late (reproduced
+live: `panic: tocommit(4) is out of range [lastIndex(3)]` in
+`go.etcd.io/raft/v3`, from `cfgms-ha-node3` joining after `cfgms-ha-node2`
+had run solo for 13+ minutes during debugging). A coordinated cold start of
+all 3 avoids this entirely.
+
+### Downtime
+
+| Leg | Stopped | Healthy | Downtime |
+|-----|---------|---------|----------|
+| Initial 3-way cutover (includes live debugging of bugs #2–#6 above) | 2026-08-11T12:30:09Z | 2026-08-11T12:31:33Z | ~84s |
+| Rollback drill (cluster → single-node, ctrl-01 only) | 2026-08-11T12:36:32Z | 2026-08-11T12:36:38Z | ~6s |
+| Re-cutover (single-node → cluster, final) | 2026-08-11T12:37:59Z | 2026-08-11T12:38:05Z | ~6s |
+
+The two new nodes (`cfgms-ha-node2`/`3`) were never in the production request
+path (no fleet was pointed at them), so their bootstrap iterations carried no
+production downtime; only the `cfgms-ctrl-01` legs above affected the live
+fleet.
+
+### Rollback drill (tested, not just documented)
+
+Executed once against the live `cfgms-ctrl-01`, mirroring #3127's drill
+pattern:
+
+1. Stopped all 3 nodes together.
+2. Restored `cfgms-ctrl-01`'s pre-cutover `controller.cfg`, systemd unit, and
+   binary from `/root/pre-cluster-cutover-backup/` (taken before any
+   cutover change).
+3. `systemctl daemon-reload && systemctl start cfgms-controller` on
+   `cfgms-ctrl-01` alone.
+4. Confirmed `GET /api/v1/health` returned `"status":"healthy"` running as a
+   plain single-node controller (no `ha:`/`cluster_ca` in its active config).
+5. Re-applied the cluster cutover (rebuilt binary, cluster config, cluster
+   systemd unit, shared `secrets.key`) and restarted all 3 nodes together to
+   leave the cluster running for the health soak below.
+
+The pre-cutover backup at `/root/pre-cluster-cutover-backup/` on
+`cfgms-ctrl-01` is left in place, not retired by this story.
+
+### Quorum verification
+
+`GET /api/v1/raft/status` (admin mTLS) on all 3 nodes after the final
+re-cutover, agreeing on `term: 2` and the same elected leader:
+
+```
+cfgms-ctrl-01  {"node_id":11522188196814600707,"is_leader":false,"leader":11522193694372741762,"term":2}
+cfgms-ha-node2 {"node_id":11522193694372741762,"is_leader":true, "leader":11522193694372741762,"term":2}
+cfgms-ha-node3 {"node_id":11522191495349485340,"is_leader":false,"leader":11522193694372741762,"term":2}
+```
+
+`GET /api/v1/ha/cluster` returns `{"leader":"","nodes":null,"health":"healthy"}`
+on all 3 — the higher-level cluster-membership view is not fully populated
+(a separate, pre-existing gap from the low-level Raft consensus proven above,
+not investigated further in this pass).
+
+### Health soak
+
+All 3 nodes confirmed `NRestarts=0` and `active (running)` 20+ seconds after
+the final coordinated start, with zero crash-loop events. `journalctl` on all
+3 shows the expected periodic `Error collecting metrics: System collection
+failed: failed to get CPU metrics: no CPU samples returned` (a pre-existing,
+Hyper-V-guest-specific metrics gap, unrelated to this story and not
+investigated further) and no `panic`/`fatal` lines since the final cutover.
+
+**Steward fleet impact**: `steward_records` in the shared Postgres backend
+was already empty (0 rows) before this story's cutover began — confirmed via
+`audit_entries` timestamps, whose only non-`controller_start`/`controller_stop`
+rows (`steward.exec.dispatched`, `registration_quarantined`) are all dated
+2026-08-01, ten days before this cutover, with nothing in between. This
+predates #3130 entirely and is most likely a gap in #3127's storage
+migration (steward records not carried into the new Postgres schema) —
+flagged as a separate follow-up, not investigated or fixed in this story.
+This story's cutover caused **no additional fleet impact**: there was no live
+steward fleet pointed at `cfgms-ctrl-01` to affect.
 
 ## 4. Leader election and failover validation (story #3094)
 

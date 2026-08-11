@@ -11,18 +11,46 @@
 # Usage:
 #   sudo bash ha-cluster-node-bootstrap.sh \
 #     --hostname=cfgms-ha-node2.lab.cfg.is \
-#     --node-id=cfgms-ha-node2 \
-#     --cluster-nodes=cfgms-ctrl-01:9443,cfgms-ha-node2:9443,cfgms-ha-node3:9443 \
+#     --node-id=cfgms-ha-node2.lab.cfg.is \
+#     --cluster-nodes=cfgms-ctrl-01.lab.cfg.is:9443,cfgms-ha-node2.lab.cfg.is:9443,cfgms-ha-node3.lab.cfg.is:9443 \
 #     --vault-address=http://192.168.234.105:8200 \
 #     --vault-key-path=root/cluster-ca \
 #     [options]
+#
+# --node-id MUST be an FQDN (or otherwise fully cross-host-resolvable name),
+# not a bare hostname: pkg/ha uses the node-id string directly as the raft
+# peer's DIAL TARGET (address = "<node-id>:<port>", see pkg/ha/manager.go),
+# and reuses it as the expected mTLS peer-certificate Common Name. It must
+# also be byte-identical to how every OTHER node's --cluster-nodes list
+# refers to this node — a mismatch breaks both raft peer-ID hashing and mTLS
+# CN verification. FQDNs were chosen over bare hostnames here because they are
+# proven resolvable cluster-wide (already used for SSH to every lab host),
+# whereas bare-name resolution depends on each node's DNS search-domain
+# configuration, which was not independently verified.
 #
 # Required secrets are read from the environment, never from CLI args or the
 # rendered config file (they would be visible in `ps`/shell history/world-readable
 # config otherwise):
 #   CFGMS_STORAGE_DB_PASSWORD   Postgres role password (#3124's shared instance)
 #   CFGMS_SESSION_HMAC_KEY      Cluster session-token HMAC key (same value on all 3 nodes)
+#   CFGMS_SECRETS_KEY_B64       Base64-encoded 32-byte secrets.key (same value on all 3
+#                               nodes — see the CFGMS_SECRETS_KEY_B64 note below)
 #   OPENBAO_TOKEN or BAO_TOKEN  OpenBao service token for cluster CA vault access
+#
+# CFGMS_SECRETS_KEY_B64 MUST be identical across all 3 cluster nodes. It is the
+# encryption key for the SOPS "database" secrets backend, which persists
+# cluster-wide secrets (e.g. the audit HMAC key) as a single shared row in the
+# cluster Postgres instance — whichever node's process writes that row first
+# encrypts it under its own secrets.key, and every other node must decrypt
+# with the SAME key or fail with "secret ciphertext authentication failed" at
+# startup (reproduced live during #3130: an earlier version of this script
+# generated a fresh random key per node via `openssl rand`, which is wrong for
+# cluster mode — only correct for the single-node tier1-bootstrap.sh path).
+# Generate the value ONCE for the whole cluster's lifetime:
+#   openssl rand -base64 32
+# and reuse it for every node's --init, including the Tier-1 controller's
+# cutover. Capture it in the lab secrets inventory immediately (same
+# discipline as CFGMS_SESSION_HMAC_KEY).
 #
 # Flags:
 #   --hostname HOST          Node hostname for cert SAN and external_address (required)
@@ -110,7 +138,8 @@ usage() {
     echo "         --vault-address=<url> --vault-key-path=<tenantID/key-name> [options]" >&2
     echo "" >&2
     echo "See the script header for the full flag list and required environment variables" >&2
-    echo "(CFGMS_STORAGE_DB_PASSWORD, CFGMS_SESSION_HMAC_KEY, OPENBAO_TOKEN or BAO_TOKEN)." >&2
+    echo "(CFGMS_STORAGE_DB_PASSWORD, CFGMS_SESSION_HMAC_KEY, CFGMS_SECRETS_KEY_B64," >&2
+    echo "OPENBAO_TOKEN or BAO_TOKEN)." >&2
     exit 1
 }
 
@@ -133,6 +162,11 @@ if [[ -z "${CFGMS_SESSION_HMAC_KEY:-}" ]]; then
     echo "Error: CFGMS_SESSION_HMAC_KEY must be set in the environment (same value on all 3 nodes)." >&2
     exit 1
 fi
+if [[ -z "${CFGMS_SECRETS_KEY_B64:-}" ]]; then
+    echo "Error: CFGMS_SECRETS_KEY_B64 must be set in the environment (same value on all 3 nodes —" >&2
+    echo "  see the script header for why; generate ONCE with: openssl rand -base64 32)." >&2
+    exit 1
+fi
 if [[ -z "${OPENBAO_TOKEN:-}" && -z "${BAO_TOKEN:-}" ]]; then
     echo "Error: OPENBAO_TOKEN or BAO_TOKEN must be set in the environment." >&2
     exit 1
@@ -151,6 +185,7 @@ CONTROLLER_SERVICE="${CFGMS_SYSTEMD_DIR}/cfgms-controller.service"
 SECRETS_ENV="${CFGMS_ETC_DIR}/ha-secrets.env"
 ADMIN_BUNDLE="${CFGMS_ETC_DIR}/admin.bundle.yaml"
 INIT_MARKER="${CFGMS_ETC_DIR}/.admin-bundle-issued"
+SECRETS_KEY_FILE="${CFGMS_ETC_DIR}/secrets.key"
 
 log() { echo "[ha-node-bootstrap] $*"; }
 
@@ -214,6 +249,15 @@ fi
 
 log "Directory layout ready."
 
+if [[ ! -f "$SECRETS_KEY_FILE" ]]; then
+    (umask 077 && echo "$CFGMS_SECRETS_KEY_B64" | base64 -d > "$SECRETS_KEY_FILE")
+    log "Wrote shared external secret-encryption key from CFGMS_SECRETS_KEY_B64."
+fi
+chmod 0600 "$SECRETS_KEY_FILE"
+if [[ -z "$INSTALL_PREFIX" ]]; then
+    chown cfgms:cfgms "$SECRETS_KEY_FILE"
+fi
+
 # ── Step 3: Binary fetch ──────────────────────────────────────────────────────
 
 log "Step 3: Binary fetch"
@@ -222,7 +266,7 @@ if [[ -x "$CONTROLLER_BIN" ]]; then
     log "Binary already present at $CONTROLLER_BIN — skipping download."
 elif [[ -n "$BINARY_PATH" ]]; then
     cp "$BINARY_PATH" "$CONTROLLER_BIN"
-    chmod +x "$CONTROLLER_BIN"
+    chmod 0755 "$CONTROLLER_BIN"
     log "Installed binary from $BINARY_PATH"
 elif [[ -n "$INSTALL_PREFIX" ]]; then
     echo "Error: test isolation requires cfgms-controller pre-populated at $CONTROLLER_BIN" >&2
@@ -276,7 +320,7 @@ else
         exit 1
     fi
     tar -xzf "$TMPTAR" -C "$CFGMS_BIN_DIR" cfgms-controller
-    chmod +x "$CONTROLLER_BIN"
+    chmod 0755 "$CONTROLLER_BIN"
 
     rm -f "$TMPTAR" "$TMPBUNDLE"
     trap - EXIT INT TERM
@@ -287,13 +331,15 @@ fi
 
 log "Step 4: Secrets env file"
 
-umask 077
-{
-    echo "CFGMS_STORAGE_DB_PASSWORD=${CFGMS_STORAGE_DB_PASSWORD}"
-    echo "CFGMS_SESSION_HMAC_KEY=${CFGMS_SESSION_HMAC_KEY}"
-    [[ -n "${OPENBAO_TOKEN:-}" ]] && echo "OPENBAO_TOKEN=${OPENBAO_TOKEN}"
-    [[ -n "${BAO_TOKEN:-}" ]] && echo "BAO_TOKEN=${BAO_TOKEN}"
-} > "$SECRETS_ENV"
+(
+    umask 077
+    {
+        echo "CFGMS_STORAGE_DB_PASSWORD=${CFGMS_STORAGE_DB_PASSWORD}"
+        echo "CFGMS_SESSION_HMAC_KEY=${CFGMS_SESSION_HMAC_KEY}"
+        if [[ -n "${OPENBAO_TOKEN:-}" ]]; then echo "OPENBAO_TOKEN=${OPENBAO_TOKEN}"; fi
+        if [[ -n "${BAO_TOKEN:-}" ]]; then echo "BAO_TOKEN=${BAO_TOKEN}"; fi
+    } > "$SECRETS_ENV"
+)
 if [[ -z "$INSTALL_PREFIX" ]]; then
     chown root:cfgms "$SECRETS_ENV"
 fi
@@ -303,6 +349,27 @@ log "Secrets env file written to $SECRETS_ENV (never committed, root:cfgms 0640)
 # ── Step 5: Config ─────────────────────────────────────────────────────────────
 
 log "Step 5: Config"
+
+# Included in this node's own server-cert SAN below: clients that reach this
+# node by IP (the reliable path in this lab — see --node-id's doc note above
+# on FQDN resolution not being independently verified) still need the cert to
+# validate. hostname -I lists all addresses; the first is this VM's primary
+# LAN IP.
+NODE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')" || NODE_IP=""
+NODE_IP_SAN_LINE=""
+[[ -n "$NODE_IP" ]] && NODE_IP_SAN_LINE="      - \"${NODE_IP}\""
+
+# internal_listen_addr REQUIRES a fixed, explicit loopback or private IP —
+# config.ValidatePrivateListenerAddress rejects both hostnames and the
+# 0.0.0.0 wildcard (binding all interfaces would risk exposing Raft traffic
+# on any public-facing NIC, which the internal listener must never do). This
+# is therefore a hard requirement here, unlike the cert SAN use above.
+if [[ -z "$NODE_IP" && -z "$INSTALL_PREFIX" ]]; then
+    echo "Error: could not determine this node's private IP (hostname -I)." >&2
+    echo "  internal_listen_addr requires a fixed private IP — see docs/operations/cluster-ca.md" >&2
+    exit 1
+fi
+RAFT_LISTEN_HOST="${NODE_IP:-127.0.0.1}"
 
 if [[ -f "$CONTROLLER_CFG" ]]; then
     log "Config already exists at $CONTROLLER_CFG — skipping generation."
@@ -322,13 +389,29 @@ metrics_listen_addr: "127.0.0.1:9090"
 external_url: "https://${HOSTNAME_FLAG}:9080"
 data_dir: "/var/lib/cfgms"
 
+# Top-level, NOT nested under certificate: — CertificateConfig has no
+# cert_path field, so a nested certificate.cert_path key is silently dropped
+# by the YAML parser. This top-level field is the only one the code reads for
+# certificate storage; its default ("certs/") is relative and only resolves
+# correctly when the process cwd happens to be data_dir, which is true under
+# systemd's WorkingDirectory but NOT for the runuser-invoked --init step below
+# — an unset/relative value here fails --init with "mkdir certs/: permission
+# denied". Must stay in sync with certificate.ca_path (ca/ subdir of this).
+cert_path: "/var/lib/cfgms/certs"
+
+# Private listener for controller-to-controller Raft traffic only — required,
+# top-level (not under ha:), never Internet-published. Must be a fixed private
+# IP, not 0.0.0.0 (config.ValidatePrivateListenerAddress rejects the wildcard
+# — see the RAFT_LISTEN_HOST comment above). Peers dial this node at
+# <this node's --node-id>:${RAFT_PORT}, matching the port here.
+internal_listen_addr: "${RAFT_LISTEN_HOST}:${RAFT_PORT}"
+
 ha:
   mode: cluster
 
 certificate:
   enable_cert_management: true
   ca_path: "/var/lib/cfgms/certs/ca"
-  cert_path: "/var/lib/cfgms/certs"
   renewal_threshold_days: 30
   server_cert_validity_days: 365
   client_cert_validity_days: 365
@@ -339,6 +422,7 @@ certificate:
       - "localhost"
     ip_addresses:
       - "127.0.0.1"
+${NODE_IP_SAN_LINE}
     organization: "CFGMS Tier 1"
   cluster_ca:
     vault_address: "${VAULT_ADDRESS}"
@@ -390,11 +474,20 @@ log "Step 6: Controller init (loads the shared cluster CA from vault — see doc
 if [[ -f "$INIT_MARKER" ]]; then
     log "Init marker found at $INIT_MARKER — controller already initialized, skipping."
 else
+    # OPENBAO_ADDR (not just certificate.cluster_ca.vault_address in the
+    # rendered config) is required: pkg/secrets/providers/openbao's Available()
+    # pre-check is a zero-arg method that only ever reads this env var, with no
+    # visibility into the config map CreateSecretStore later receives — so a
+    # correctly configured vault_address alone still fails the registry's
+    # availability gate. Same root cause hit during the #3127/#3130 CA
+    # migration into vault; tracked as a provider-level gap, not fixed here.
     INIT_ENV=(
         "CFGMS_NODE_ID=${NODE_ID}"
         "CFGMS_HA_EXTERNAL_ADDRESS=${HOSTNAME_FLAG}"
         "CFGMS_HA_CLUSTER_NODES=${CLUSTER_NODES}"
         "CFGMS_HA_CA_CERT_PATH=${CFGMS_DATA_DIR}/certs/ca/ca.crt"
+        "CFGMS_SECRETS_KEY_FILE=${SECRETS_KEY_FILE}"
+        "OPENBAO_ADDR=${VAULT_ADDRESS}"
     )
     if [[ -z "$INSTALL_PREFIX" ]]; then
         # shellcheck disable=SC1090
@@ -426,10 +519,13 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/local/bin/cfgms-controller --config /etc/cfgms/controller.cfg
 EnvironmentFile=/etc/cfgms/ha-secrets.env
+LoadCredential=cfgms-secrets-key:/etc/cfgms/secrets.key
+Environment=CFGMS_SECRETS_KEY_FILE=%d/cfgms-secrets-key
 Environment=CFGMS_NODE_ID=${NODE_ID}
 Environment=CFGMS_HA_EXTERNAL_ADDRESS=${HOSTNAME_FLAG}
 Environment=CFGMS_HA_CLUSTER_NODES=${CLUSTER_NODES}
 Environment=CFGMS_HA_CA_CERT_PATH=/var/lib/cfgms/certs/ca/ca.crt
+Environment=OPENBAO_ADDR=${VAULT_ADDRESS}
 Environment=CFGMS_SECURITY_PROFILE=public-beta
 Environment=CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC=true
 Environment=CFGMS_S3_INSTALLER_BUCKET=${S3_BUCKET}
@@ -453,6 +549,7 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 InaccessiblePaths=/etc/cfgms/ha-secrets.env
+InaccessiblePaths=/etc/cfgms/secrets.key
 ProtectHostname=true
 ProtectClock=true
 ProtectKernelTunables=true

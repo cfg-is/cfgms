@@ -238,6 +238,59 @@ func TestRun_FullInitialization(t *testing.T) {
 	assert.Equal(t, result.CAFingerprint, marker.CAFingerprint)
 }
 
+// TestRun_TopLevelCertPathMustBeAbsolute guards against a regression found
+// live during #3130's HA node bootstrap: certificate.cert_path (nested under
+// the certificate: block) does not correspond to any CertificateConfig field
+// — CertificateConfig has no CertPath — so setting it in YAML is silently a
+// no-op. The only field the code actually reads is the top-level cfg.CertPath
+// (config.go's DefaultConfig defaults it to the relative "certs/"). A config
+// that never sets the top-level cert_path key therefore resolves certificate
+// storage relative to the process's cwd — which happens to work under
+// systemd's WorkingDirectory, but fails wherever cwd isn't the data dir (e.g.
+// `controller --init` invoked via `runuser`, which hit "mkdir certs/:
+// permission denied" in the lab). This test proves an absolute top-level
+// cert_path resolves correctly regardless of cwd, so bootstrap scripts must
+// render cert_path at the top level, not nested under certificate:.
+func TestRun_TopLevelCertPathMustBeAbsolute(t *testing.T) {
+	tempDir := t.TempDir()
+	caDir := filepath.Join(tempDir, "ca")
+	certPath := filepath.Join(tempDir, "certs")
+	bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+	logger := logging.NewNoopLogger()
+
+	cfg := &config.Config{
+		ListenAddr:      "127.0.0.1:0",
+		ExternalURL:     "https://controller.test:9080",
+		CertPath:        certPath, // top-level — the only field actually read for cert storage
+		AdminBundlePath: bundlePath,
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement:   true,
+			CAPath:                 caDir,
+			ServerCertValidityDays: 90,
+			RenewalThresholdDays:   7,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "test-controller",
+				DNSNames:     []string{"localhost"},
+				IPAddresses:  []string{"127.0.0.1"},
+				Organization: "Test Org",
+			},
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
+		},
+	}
+
+	result, err := Run(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	info, err := os.Stat(certPath)
+	require.NoError(t, err, "expected certificate storage to be created under the top-level cert_path")
+	assert.True(t, info.IsDir())
+}
+
 func TestRun_AlreadyInitialized(t *testing.T) {
 	tempDir := t.TempDir()
 	caDir := filepath.Join(tempDir, "ca")
