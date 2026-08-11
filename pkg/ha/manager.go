@@ -162,7 +162,21 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("HA manager is already started")
 	}
 
-	m.ctx, m.cancel = context.WithCancel(ctx)
+	// m.ctx bounds every long-lived background component started below (health
+	// checker, node-info replication goroutine, failover, split-brain
+	// detection) — it must live for the Manager's full lifetime, cancelled only
+	// by Stop(). It is deliberately NOT derived from the ctx parameter: callers
+	// commonly wrap a short startup-timeout context around this call (e.g.
+	// server.go's Start() uses a 30s context.WithTimeout solely to bound this
+	// synchronous call, via `defer cancel()` on return) — reusing that as the
+	// source for m.ctx cancelled every background component within
+	// milliseconds of Start() returning, long before cluster-mode leader
+	// election (~10s+) could complete. Reproduced live during #3130: the
+	// node-info replication goroutine's ctx.Done() fired ~1ms after entering
+	// its select, before leaderElectedC ever had a chance to fire, so
+	// GET /api/v1/ha/cluster always returned an empty node list despite a
+	// genuinely healthy Raft quorum.
+	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.startTime = time.Now()
 	m.nodeInfo.StartedAt = m.startTime
 	m.nodeInfo.LastSeen = m.startTime

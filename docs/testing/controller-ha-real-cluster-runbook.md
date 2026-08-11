@@ -459,9 +459,31 @@ is itself wrapped in a `(...)` subshell, interacts with `set -e` differently
 than the unwrapped form — converted to explicit `if` statements to remove the
 ambiguity regardless of wrapping.
 
+A seventh, genuine `pkg/ha` defect surfaced verifying `GET /api/v1/ha/cluster`
+(required by this story's acceptance criteria) against the live 3-node
+cluster: it returned `{"nodes":null}` despite a healthy, agreed-upon Raft
+quorum on `/api/v1/raft/status`. Root-caused via temporary diagnostic logging
+to `features/controller/server/server.go`'s `Start()`: it creates
+`ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second);
+defer cancel()` solely to bound the synchronous `haManager.Start(ctx)` call —
+every *other* long-running component in that function correctly starts with
+`context.Background()` instead. `ha.Manager.Start(ctx)` stored that same
+short-lived `ctx` as `m.ctx`, the context bounding **every** long-lived
+background component (node-info replication, health checker, failover,
+split-brain detection) — so `defer cancel()` firing on `Start()`'s return
+killed them all within ~1ms, long before cluster-mode leader election (10s+
+under real timings) could ever complete. Fixed in `pkg/ha/manager.go`: `m.ctx`
+is now derived from `context.Background()`, decoupled from the caller-supplied
+parameter, matching the lifecycle every sibling `.Start(context.Background())`
+call in `server.go` already uses. Covered by a new regression test,
+`TestManager_Start_SurvivesCallerContextCancelledAfterReturn`, which
+reproduces the exact caller pattern (cancelling the passed context immediately
+after `Start()` returns, not at test teardown) — verified to fail against the
+pre-fix code and pass against the fix.
+
 All fixes are covered by regression tests: `features/controller/initialization/initialization_test.go`,
-`pkg/secrets/providers/sops/provider_test.go`, and both bootstrap scripts'
-`_test.sh` suites (7/6 passing respectively).
+`pkg/secrets/providers/sops/provider_test.go`, `pkg/ha/manager_test.go`, and
+both bootstrap scripts' `_test.sh` suites (7/6 passing respectively).
 
 ### Node bootstrap
 
@@ -551,10 +573,15 @@ cfgms-ha-node2 {"node_id":11522193694372741762,"is_leader":true, "leader":115221
 cfgms-ha-node3 {"node_id":11522191495349485340,"is_leader":false,"leader":11522193694372741762,"term":2}
 ```
 
-`GET /api/v1/ha/cluster` returns `{"leader":"","nodes":null,"health":"healthy"}`
-on all 3 — the higher-level cluster-membership view is not fully populated
-(a separate, pre-existing gap from the low-level Raft consensus proven above,
-not investigated further in this pass).
+`GET /api/v1/ha/cluster`, after the `pkg/ha` context-lifecycle fix above and a
+fresh coordinated restart, returns all 3 nodes' `NodeInfo` (id, address,
+capabilities, `started_at`) from every node's admin API — the acceptance
+criterion this endpoint exists to satisfy. Its `leader` field (and the
+separate `GET /api/v1/ha/leader` endpoint) still returns empty/`no_leader`
+despite `/api/v1/raft/status` correctly agreeing on a real elected leader
+across all 3 nodes — a distinct, more minor issue in `RaftConsensus.GetLeaderInfo()`'s
+lookup, not required by this story's acceptance criteria (only the `nodes`
+list is), flagged as a follow-up rather than investigated further here.
 
 ### Health soak
 

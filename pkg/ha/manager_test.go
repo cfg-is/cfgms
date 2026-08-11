@@ -307,6 +307,72 @@ func TestManager_ClusterMode(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestManager_Start_SurvivesCallerContextCancelledAfterReturn guards against a
+// regression found live during #3130: server.go's Start() calls
+// `ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second);
+// defer cancel(); haManager.Start(ctx)` — a pattern that cancels ctx almost
+// immediately (on the enclosing function's return), not after the 30s bound.
+// Manager.Start() used to derive its internal m.ctx directly from that
+// parameter, so every long-lived background component (the node-info
+// replication goroutine, health checker, failover, split-brain detection)
+// was killed within milliseconds of Start() returning — long before
+// cluster-mode leader election (which takes 10s+ under real, non-test
+// timings) could ever complete. GET /api/v1/ha/cluster consequently always
+// returned an empty node list despite a genuinely healthy Raft quorum. This
+// test reproduces the exact caller pattern (cancel the passed context
+// immediately after Start() returns, not at test teardown) and proves the
+// background node-info replication still completes.
+func TestManager_Start_SurvivesCallerContextCancelledAfterReturn(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "test-node-ctx-survives-cancel"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{
+				"id":      nodeID,
+				"address": "127.0.0.1:0",
+			},
+		},
+	}
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t))
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	t.Cleanup(func() {
+		assert.NoError(t, manager.raftConsensus.Stop())
+	})
+
+	// Reproduce server.go's exact pattern: a short-lived context whose cancel
+	// fires on this function's return, not tied to the Manager's lifetime.
+	func() {
+		startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		startErr := manager.Start(startCtx)
+		require.NoError(t, startErr)
+	}()
+	// startCtx is now cancelled — m.ctx must NOT be, or every background
+	// component died before this point.
+
+	var nodes []*NodeInfo
+	require.Eventually(t, func() bool {
+		var getErr error
+		nodes, getErr = manager.GetClusterNodes()
+		return getErr == nil && len(nodes) > 0
+	}, 10*time.Second, 25*time.Millisecond,
+		"node-info replication must complete even after the caller's Start(ctx) context is cancelled")
+
+	require.NoError(t, manager.Stop(context.Background()))
+}
+
 // TestManager_IsLeader_UsesRaftConsensus verifies that Manager.IsLeader() delegates
 // exclusively to raftConsensus in ClusterMode — there is no longer a cached local
 // isLeader field that can diverge from the Raft state machine.
