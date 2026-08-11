@@ -1112,9 +1112,18 @@ func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Reque
 	}
 	s.emitVisibilityAudit(r.Context(), auditTenantID, principalID, stewardID, req.Hidden)
 
+	// The logged state is selected through control flow rather than read off the
+	// decoded request body: req is populated from the untrusted HTTP body, so any
+	// field read of it is a taint source into the log sink. Branching to a literal
+	// keeps request-controlled bytes out of the sink entirely.
+	visibilityState := "visible"
+	if req.Hidden {
+		visibilityState = "hidden"
+	}
+
 	s.logger.Info("Steward visibility updated",
 		"steward_id", logging.SanitizeLogValue(stewardID),
-		"hidden", req.Hidden,
+		"visibility", visibilityState,
 		"principal_id", logging.SanitizeLogValue(principalID))
 
 	s.writeSuccessResponse(w, map[string]interface{}{
@@ -1141,7 +1150,7 @@ func (s *Server) emitVisibilityAudit(ctx context.Context, tenantID, principalID,
 		Detail("hidden", hidden)
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit visibility audit event",
-			"error", err, "steward_id", logging.SanitizeLogValue(stewardID))
+			"error", logging.SanitizeLogValue(err.Error()), "steward_id", logging.SanitizeLogValue(stewardID))
 	}
 }
 
