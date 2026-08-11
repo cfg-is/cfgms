@@ -324,9 +324,18 @@ func New(
 		for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
 			if keyVal := os.Getenv(envVar); keyVal != "" {
 				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
-					Key:         keyVal,
-					Permissions: []string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
-					TenantID:    "default",
+					Key: keyVal,
+					// The ha:read-* grants let test/integration/ha observe the
+					// cluster it just started. Every HA route is permission-gated
+					// (routes_ha.go), so without them the suite's polling helpers
+					// read 403 bodies as "no leader" and "empty node ID" and fail
+					// with assertion messages that never mention authorization.
+					Permissions: []string{
+						"steward:read", "steward:auth-refresh",
+						"workflow:execute", "workflow:read",
+						"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+					},
+					TenantID: "default",
 				}
 			}
 		}

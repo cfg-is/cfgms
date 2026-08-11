@@ -1668,9 +1668,17 @@ func TestSeedTestAPIKeys(t *testing.T) {
 			require.True(t, exists, "loop key %s must be seeded", k)
 			require.Equal(t, "default", keyInfo.TenantID, "loop keys use TenantID=default")
 			require.ElementsMatch(t,
-				[]string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
+				[]string{
+					"steward:read", "steward:auth-refresh",
+					"workflow:execute", "workflow:read",
+					// Read-only HA grants so test/integration/ha can observe the
+					// cluster it starts; every HA route is permission-gated.
+					"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+				},
 				keyInfo.Permissions,
 				"loop key %s must NOT have installer permissions (regression guard for Issue #1709)", k)
+			require.NotContains(t, keyInfo.Permissions, "installer:upload",
+				"loop key %s must NOT have installer permissions (Issue #1709)", k)
 		}
 	})
 }
