@@ -438,6 +438,12 @@ fi
 
 log "Step 7: OpenBao install (idempotent)"
 
+if ! command -v jq &>/dev/null; then
+    apt-get -qq update -y
+    apt-get -qq install -y jq
+    log "Installed jq (required for reliably parsing 'bao operator init' JSON output)."
+fi
+
 if ! id "$OPENBAO_USER" &>/dev/null; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$OPENBAO_USER"
     log "Created ${OPENBAO_USER} system user."
@@ -514,13 +520,14 @@ fi
 export BAO_ADDR="http://127.0.0.1:${OPENBAO_PORT}"
 RETRIES=12
 for ((i = 1; i <= RETRIES; i++)); do
-    if /usr/local/bin/bao status -format=json &>/dev/null; then
-        break
-    fi
-    STATUS_EXIT=$?
-    # bao status exits non-zero when sealed/uninitialized too; only retry on
-    # connection failure (exit 2), not on a valid sealed/uninitialized response.
-    if [[ $STATUS_EXIT -ne 2 ]]; then
+    # `bao status`'s own exit code is not a reliable readiness signal here —
+    # it legitimately returns non-zero for "sealed" and "uninitialized" too
+    # (not just connection failure), and under `set -eo pipefail` piping its
+    # output anywhere makes that non-zero abort the whole script even though
+    # it's a valid, expected response. Probe raw HTTP reachability with curl
+    # instead; sealedcode/uninitcode=200 makes any real response count as
+    # "up", regardless of vault state.
+    if curl -fsS -o /dev/null "http://127.0.0.1:${OPENBAO_PORT}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200" 2>/dev/null; then
         break
     fi
     if [[ $i -eq $RETRIES ]]; then
@@ -531,7 +538,10 @@ for ((i = 1; i <= RETRIES; i++)); do
     sleep 5
 done
 
-OPENBAO_INITIALIZED="$(/usr/local/bin/bao status -format=json 2>/dev/null | grep -o '"initialized":[a-z]*' | cut -d: -f2 || echo false)"
+# `|| true` because bao status exits non-zero for sealed/uninitialized too —
+# only its JSON body is meaningful here, not its exit code (see note above).
+OPENBAO_STATUS_JSON="$(/usr/local/bin/bao status -format=json 2>/dev/null || true)"
+OPENBAO_INITIALIZED="$(echo "$OPENBAO_STATUS_JSON" | jq -r '.initialized // false')"
 OPENBAO_TOKEN_PRINTED=false
 
 if [[ "$OPENBAO_INITIALIZED" != "true" ]]; then
@@ -539,8 +549,23 @@ if [[ "$OPENBAO_INITIALIZED" != "true" ]]; then
     # simplification (one keychain-stored unseal key, not a 5-of-3 ceremony) —
     # matches this epic's established "lab-only, no cloud KMS" pragmatism.
     INIT_JSON="$(/usr/local/bin/bao operator init -key-shares=1 -key-threshold=1 -format=json)"
-    OPENBAO_UNSEAL_KEY="$(echo "$INIT_JSON" | grep -o '"unseal_keys_b64":\["[^"]*"' | sed 's/.*\["//')"
-    OPENBAO_ROOT_TOKEN="$(echo "$INIT_JSON" | grep -o '"root_token":"[^"]*"' | cut -d'"' -f4)"
+    OPENBAO_UNSEAL_KEY="$(echo "$INIT_JSON" | jq -r '.unseal_keys_b64[0]')"
+    OPENBAO_ROOT_TOKEN="$(echo "$INIT_JSON" | jq -r '.root_token')"
+
+    # Fail loudly here rather than calling `unseal` with an empty/malformed
+    # value: init has ALREADY run at this point (irreversibly, since a second
+    # init attempt errors "already initialized") — if parsing failed, the
+    # vault is now initialized-but-sealed with no captured key, which is
+    # exactly the unrecoverable state this check exists to prevent silently
+    # compounding (a failed unseal call would just leave it sealed with an
+    # ambiguous error instead of this unambiguous one).
+    if [[ -z "$OPENBAO_UNSEAL_KEY" || "$OPENBAO_UNSEAL_KEY" == "null" || -z "$OPENBAO_ROOT_TOKEN" || "$OPENBAO_ROOT_TOKEN" == "null" ]]; then
+        echo "Error: failed to parse unseal key / root token from 'bao operator init' output." >&2
+        echo "The vault IS initialized now (this cannot be undone) but is sealed with no captured key." >&2
+        echo "Raw init output for manual recovery:" >&2
+        echo "$INIT_JSON" >&2
+        exit 1
+    fi
 
     /usr/local/bin/bao operator unseal "$OPENBAO_UNSEAL_KEY" >/dev/null
 
@@ -553,7 +578,8 @@ if [[ "$OPENBAO_INITIALIZED" != "true" ]]; then
     OPENBAO_TOKEN_PRINTED=true
 else
     log "OpenBao already initialized — unseal key/root token NOT reprinted."
-    SEALED="$(/usr/local/bin/bao status -format=json 2>/dev/null | grep -o '"sealed":[a-z]*' | cut -d: -f2 || echo unknown)"
+    RECHECK_STATUS_JSON="$(/usr/local/bin/bao status -format=json 2>/dev/null || true)"
+    SEALED="$(echo "$RECHECK_STATUS_JSON" | jq -r '.sealed // "unknown"')"
     if [[ "$SEALED" == "true" ]]; then
         log "WARNING: OpenBao is sealed and this script does not retain the unseal key."
         log "  Unseal manually: bao operator unseal <unseal-key-from-your-OS-keychain>"
