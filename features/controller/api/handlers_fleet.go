@@ -23,10 +23,13 @@ import (
 const DegradedHeartbeatAge = 5 * time.Minute
 
 // FleetHealthResponse is the response payload for GET /api/v1/fleet/health.
+// Hidden is always present (non-suppressible) regardless of include_hidden:
+// an operator must always see that concealment is in effect (Issue #2918).
 type FleetHealthResponse struct {
 	Healthy     int `json:"healthy"`
 	Degraded    int `json:"degraded"`
 	Unreachable int `json:"unreachable"`
+	Hidden      int `json:"hidden"`
 }
 
 // SelectorResolveRequest is the request body for POST /api/v1/fleet/resolve.
@@ -140,6 +143,12 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	resp := FleetHealthResponse{}
 	for _, res := range results {
+		// Count hidden stewards in the caller's scope regardless of include_hidden
+		// (non-suppressible: the operator must always see that concealment is in effect).
+		if res.Hidden {
+			resp.Hidden++
+			continue
+		}
 		switch res.Status {
 		case "active":
 			if now.Sub(res.LastHeartbeat) <= DegradedHeartbeatAge {
@@ -157,6 +166,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		"healthy", resp.Healthy,
 		"degraded", resp.Degraded,
 		"unreachable", resp.Unreachable,
+		"hidden", resp.Hidden,
 	)
 	s.writeSuccessResponse(w, resp)
 }

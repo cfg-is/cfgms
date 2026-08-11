@@ -679,3 +679,64 @@ func TestHandleResolveSelector_TenantIDPresentInResponse(t *testing.T) {
 	assert.Equal(t, "tenant-a", item["tenant_id"],
 		"tenant_id must be present in the resolve response so the CLI can derive it without a second round-trip")
 }
+
+// TestHandleFleetHealth_HiddenExcludedFromCounts verifies that a hidden active steward
+// is NOT counted in Healthy/Degraded but IS counted in the non-suppressible Hidden field.
+func TestHandleFleetHealth_HiddenExcludedFromCounts(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			// visible active steward — counted Healthy
+			{ID: "s-visible", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute)},
+			// hidden active steward — must NOT be counted Healthy; counted in Hidden
+			{ID: "s-hidden", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute), Hidden: true},
+		},
+	})
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var h struct {
+		Healthy     int `json:"healthy"`
+		Degraded    int `json:"degraded"`
+		Unreachable int `json:"unreachable"`
+		Hidden      int `json:"hidden"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &h))
+
+	assert.Equal(t, 1, h.Healthy, "only visible active steward counted Healthy")
+	assert.Equal(t, 0, h.Degraded)
+	assert.Equal(t, 0, h.Unreachable)
+	assert.Equal(t, 1, h.Hidden, "hidden steward must be counted in hidden field")
+}
+
+// TestHandleFleetHealth_HiddenCountNonSuppressible verifies that the hidden count appears
+// in the response regardless of any include_hidden param (it is non-suppressible by design).
+func TestHandleFleetHealth_HiddenCountNonSuppressible(t *testing.T) {
+	now := time.Now()
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "s-hidden-2", TenantID: "t", Status: "active", LastHeartbeat: now.Add(-1 * time.Minute), Hidden: true},
+		},
+	})
+
+	// No include_hidden param — hidden count must still be present.
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var h struct {
+		Hidden int `json:"hidden"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &h))
+	assert.Equal(t, 1, h.Hidden, "hidden count must be in health response even without include_hidden")
+}

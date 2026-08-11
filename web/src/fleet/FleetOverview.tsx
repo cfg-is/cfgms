@@ -22,8 +22,9 @@
  * change); middle-click/Ctrl+click on the name-cell anchor opens the full
  * page at /stewards/:id in a new tab.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useOutletContext } from 'react-router'
+import { apiFetch } from '../api/client.ts'
 import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 import StewardDrawer from './StewardDrawer.tsx'
 import {
@@ -34,6 +35,7 @@ import {
   type ColumnKey,
   type Steward,
 } from './columns.ts'
+
 import { deriveHealth, fetchFleetHealth, parseLastSeen, type FleetHealth } from './health.ts'
 import BulkActionBar from './BulkActionBar.tsx'
 import ColumnPicker from './ColumnPicker.tsx'
@@ -89,6 +91,7 @@ export default function FleetOverview() {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set())
 
   const [fleetHealth, setFleetHealth] = useState<FleetHealth | null>(null)
+  const [showHidden, setShowHidden] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -122,6 +125,7 @@ export default function FleetOverview() {
     pageSize,
     pageIndex * pageSize,
     search,
+    showHidden,
   )
 
   // Relative times and staleness anchor at fetch time — the moment the data
@@ -166,6 +170,17 @@ export default function FleetOverview() {
       return next
     })
   }
+
+  const onToggleVisibility = useCallback((steward: Steward) => {
+    const newHidden = !steward.hidden
+    apiFetch(`/api/v1/stewards/${encodeURIComponent(steward.id)}/visibility`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden: newHidden }),
+    }).then((resp) => {
+      if (resp.ok) retry()
+    }).catch(() => { /* best-effort; user can retry */ })
+  }, [retry])
 
   function toggleAll() {
     const allIds = displayRows.map((s) => s.id)
@@ -250,6 +265,12 @@ export default function FleetOverview() {
             <span className="ht-count">{formatCount.format(fleetHealth.unreachable)}</span>
             <span className="ht-label">Unreachable</span>
           </div>
+          {fleetHealth.hidden > 0 && (
+            <div className="ht neutral" data-testid="health-tile-hidden">
+              <span className="ht-count">{formatCount.format(fleetHealth.hidden)}</span>
+              <span className="ht-label">Hidden</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -257,6 +278,20 @@ export default function FleetOverview() {
         <div className="ptool">
           <SavedViews current={currentConfig} onApply={applyView} />
           <ColumnPicker visible={visible} onToggle={onToggleColumn} />
+          <label className="hidden-toggle" data-testid="hidden-toggle-label">
+            <input
+              type="checkbox"
+              data-testid="hidden-toggle"
+              checked={showHidden}
+              onChange={(e) => setShowHidden(e.target.checked)}
+            />
+            {' '}Show hidden / quarantined
+          </label>
+          {fleetHealth !== null && !showHidden && fleetHealth.hidden > 0 && (
+            <span className="hidden-count" data-testid="hidden-count">
+              ({formatCount.format(fleetHealth.hidden)} hidden)
+            </span>
+          )}
           <span className="cnt" data-testid="fleet-count">
             {page === null ? '' : countText}
           </span>
@@ -291,6 +326,7 @@ export default function FleetOverview() {
               selectedIds={selectedIds}
               onToggleRow={toggleRow}
               onToggleAll={toggleAll}
+              onToggleVisibility={onToggleVisibility}
             />
           </>
         )}

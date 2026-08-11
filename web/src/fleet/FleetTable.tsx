@@ -131,6 +131,7 @@ export default function FleetTable({
   selectedIds,
   onToggleRow,
   onToggleAll,
+  onToggleVisibility,
 }: {
   stewards: Steward[]
   columns: ColumnDef[]
@@ -141,6 +142,7 @@ export default function FleetTable({
   selectedIds?: ReadonlySet<string>
   onToggleRow?: (stewardId: string) => void
   onToggleAll?: () => void
+  onToggleVisibility?: (steward: Steward) => void
 }) {
   const hasSelection = selectedIds !== undefined
   const allOnPage =
@@ -233,6 +235,23 @@ export default function FleetTable({
               ))}
               {onRowSelect !== undefined && (
                 <td className="c-act">
+                  {onToggleVisibility !== undefined && (
+                    <button
+                      type="button"
+                      className="row-vis-btn"
+                      aria-label={steward.hidden ? 'Unhide steward' : 'Hide steward'}
+                      data-testid={`visibility-btn-${steward.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onToggleVisibility(steward)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
+                      }}
+                    >
+                      {steward.hidden ? 'Unhide' : 'Hide'}
+                    </button>
+                  )}
                   <RowActionMenu stewardId={steward.id} />
                 </td>
               )}

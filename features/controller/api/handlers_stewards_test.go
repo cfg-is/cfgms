@@ -3531,3 +3531,366 @@ func TestListStewards_NonRootAccount_NoCrossTenantLeakage(t *testing.T) {
 	assert.Len(t, resp.Data, 1, "msp-a-scoped account must see only msp-a stewards")
 	assert.Equal(t, "msp-a", resp.Data[0].TenantID, "returned steward must be in msp-a")
 }
+
+// ---- handleSetStewardVisibility tests (Issue #2918) ----
+
+// setupVisibilityServer creates a test server wired with a real flat-file steward
+// store and a real audit manager, suitable for visibility handler tests.
+func setupVisibilityServer(t *testing.T) (*Server, business.StewardStore) {
+	t.Helper()
+	server := setupTestServer(t)
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+	return server, st
+}
+
+// patchVisibility calls handleSetStewardVisibility directly with an admin mTLS principal.
+func patchVisibility(server *Server, stewardID string, hidden bool) *httptest.ResponseRecorder {
+	body := fmt.Sprintf(`{"hidden":%v}`, hidden)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/stewards/"+stewardID+"/visibility",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""})
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleSetStewardVisibility(rec, req)
+	return rec
+}
+
+// TestHandleSetStewardVisibility_HappyPath verifies that a known steward can be hidden
+// and the response contains {"id":"...","hidden":true}.
+func TestHandleSetStewardVisibility_HappyPath(t *testing.T) {
+	server, st := setupVisibilityServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-vis-ok",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	rec := patchVisibility(server, "s-vis-ok", true)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "s-vis-ok", resp.Data["id"])
+	assert.Equal(t, true, resp.Data["hidden"])
+}
+
+// TestHandleSetStewardVisibility_Reversibility verifies that a steward can be hidden
+// and then unhidden.
+func TestHandleSetStewardVisibility_Reversibility(t *testing.T) {
+	server, st := setupVisibilityServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-vis-rev",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	// Hide the steward.
+	rec := patchVisibility(server, "s-vis-rev", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Unhide the steward.
+	rec2 := patchVisibility(server, "s-vis-rev", false)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp))
+	assert.Equal(t, false, resp.Data["hidden"])
+
+	// Verify durable store reflects the unhidden state.
+	got, err := st.GetSteward(context.Background(), "s-vis-rev")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden)
+}
+
+// TestHandleSetStewardVisibility_CrossTenant verifies that a scoped admin receives 404
+// when trying to set visibility on a steward in a different tenant.
+func TestHandleSetStewardVisibility_CrossTenant(t *testing.T) {
+	server, st := setupVisibilityServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-vis-cross",
+		TenantID: "tenant-b",
+		Status:   business.StewardStatusActive,
+	}))
+
+	body := `{"hidden":true}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/stewards/s-vis-cross/visibility",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "tenant-a-admin", Assurance: session.AssuranceBasic, TenantID: "tenant-a"})
+	req = withVars(req, map[string]string{"id": "s-vis-cross"})
+	rec := httptest.NewRecorder()
+	server.handleSetStewardVisibility(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant visibility must return 404, not 403")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleSetStewardVisibility_AuditEmitted verifies that a successful visibility change
+// writes an audit entry with action "steward.visibility_changed" and AuditSeverityMedium.
+func TestHandleSetStewardVisibility_AuditEmitted(t *testing.T) {
+	server, st := setupVisibilityServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-vis-audit",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	rec := patchVisibility(server, "s-vis-audit", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"steward.visibility_changed"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "visibility audit entry must be written")
+
+	e := entries[0]
+	assert.Equal(t, "steward.visibility_changed", e.Action)
+	assert.Equal(t, business.AuditSeverityMedium, e.Severity)
+	assert.Equal(t, "steward", e.ResourceType)
+	assert.Equal(t, "s-vis-audit", e.ResourceID)
+	assert.Equal(t, business.AuditResultSuccess, e.Result)
+}
+
+// TestHandleSetStewardVisibility_NilStore verifies 503 when stewardStore is nil.
+func TestHandleSetStewardVisibility_NilStore(t *testing.T) {
+	server := setupTestServer(t)
+
+	body := `{"hidden":true}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/stewards/some-steward/visibility",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "some-steward"})
+	rec := httptest.NewRecorder()
+	server.handleSetStewardVisibility(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleSetStewardVisibility_InvalidID verifies 400 for a malformed steward ID.
+func TestHandleSetStewardVisibility_InvalidID(t *testing.T) {
+	server, _ := setupVisibilityServer(t)
+
+	body := `{"hidden":true}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/stewards/bad.id:here/visibility",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceBasic, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "bad.id:here"})
+	rec := httptest.NewRecorder()
+	server.handleSetStewardVisibility(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_STEWARD_ID", errResp.Error.Code)
+}
+
+// TestHandleSetStewardVisibility_AssuranceMachineRejected verifies that a bare API-key
+// caller (AssuranceMachine) cannot use the visibility endpoint (via the full router).
+// AssuranceBasic is the floor for steward:visibility (Issue #2918 security ruling).
+func TestHandleSetStewardVisibility_AssuranceMachineRejected(t *testing.T) {
+	server, _ := setupVisibilityServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:visibility"})
+
+	body := `{"hidden":true}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/stewards/any-steward/visibility",
+		strings.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "API-key callers must be rejected at AssuranceBasic gate")
+}
+
+// TestHandleSetStewardVisibility_ListExclusion verifies that hidden/quarantined stewards
+// are excluded from the default list and restored with the include params.
+func TestHandleSetStewardVisibility_ListExclusion(t *testing.T) {
+	server, st := setupVisibilityServer(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-hidden-list",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+	require.NoError(t, server.controllerService.RegisterSteward("s-hidden-list", "test-tenant", "addr", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward("s-quarantined-list", "test-tenant", "addr", "quarantined"))
+
+	// Hide s-hidden-list via the handler.
+	rec := patchVisibility(server, "s-hidden-list", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Default list must exclude hidden and quarantined stewards.
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req = withTenant(req, "")
+	rec2 := httptest.NewRecorder()
+	server.handleListStewards(rec2, req)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp))
+	for _, s := range resp.Data {
+		assert.NotEqual(t, "s-hidden-list", s.ID, "hidden steward must not appear in default list")
+		assert.NotEqual(t, "s-quarantined-list", s.ID, "quarantined steward must not appear in default list")
+	}
+
+	// With include_hidden=true and include_quarantined=true, both must reappear.
+	req3 := httptest.NewRequest("GET", "/api/v1/stewards?include_hidden=true&include_quarantined=true", nil)
+	req3 = withTenant(req3, "")
+	rec3 := httptest.NewRecorder()
+	server.handleListStewards(rec3, req3)
+	require.Equal(t, http.StatusOK, rec3.Code)
+	var resp3 struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec3.Body).Decode(&resp3))
+	foundHidden := false
+	foundQuarantined := false
+	for _, s := range resp3.Data {
+		if s.ID == "s-hidden-list" {
+			foundHidden = true
+			assert.True(t, s.Hidden, "hidden steward must have Hidden=true in response")
+		}
+		if s.ID == "s-quarantined-list" {
+			foundQuarantined = true
+		}
+	}
+	assert.True(t, foundHidden, "hidden steward must appear with ?include_hidden=true")
+	assert.True(t, foundQuarantined, "quarantined steward must appear with ?include_quarantined=true")
+}
+
+// TestHandleSetStewardVisibility_MalformedBody verifies 400 INVALID_JSON when the request
+// body is not valid JSON, covering the decode error branch at handlers_stewards.go:1060.
+func TestHandleSetStewardVisibility_MalformedBody(t *testing.T) {
+	server, st := setupVisibilityServer(t)
+
+	// Register the steward so the only reason for failure is the malformed body.
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-vis-badjson",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/stewards/s-vis-badjson/visibility",
+		strings.NewReader("not-json{"))
+	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: ""})
+	req = withVars(req, map[string]string{"id": "s-vis-badjson"})
+	rec := httptest.NewRecorder()
+	server.handleSetStewardVisibility(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_JSON", errResp.Error.Code)
+
+	// Durable state must be untouched by a rejected request.
+	got, err := st.GetSteward(context.Background(), "s-vis-badjson")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "malformed body must not change stored visibility")
+}
+
+// TestHandleSetStewardVisibility_NotFound verifies 404 STEWARD_NOT_FOUND when the steward
+// is absent from the durable store (GetSteward returns ErrStewardNotFound), covering the
+// branch at handlers_stewards.go:1069. Distinct from _CrossTenant, where GetSteward
+// succeeds and the tenant-scope check rejects.
+func TestHandleSetStewardVisibility_NotFound(t *testing.T) {
+	server, _ := setupVisibilityServer(t)
+
+	rec := patchVisibility(server, "s-vis-absent", true)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleSetStewardVisibility_StoreLookupFails verifies 500 INTERNAL_ERROR when
+// GetSteward fails with a non-NotFound store error, covering the branch at
+// handlers_stewards.go:1073. The failure is genuine: the steward's on-disk record is
+// corrupted so the flat-file store's unmarshal fails, which is neither ErrStewardNotFound
+// nor a synthetic injected error.
+func TestHandleSetStewardVisibility_StoreLookupFails(t *testing.T) {
+	server := setupTestServer(t)
+	st, root := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-vis-corrupt",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	// Corrupt the backing record: the file exists (so os.IsNotExist is false) but does not
+	// contain a decodable steward record, so GetSteward returns an unmarshal error.
+	recordPath := filepath.Join(root, "stewards", "s-vis-corrupt.json")
+	require.NoError(t, os.WriteFile(recordPath, []byte("{not valid json"), 0o600))
+
+	rec := patchVisibility(server, "s-vis-corrupt", true)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+	assert.NotContains(t, errResp.Error.Message, "unmarshal",
+		"error response must not disclose internal store details")
+}
+
+// TestHandleSetStewardVisibility_DurableStoreWriteFails verifies that when the durable
+// write (SetStewardHidden) fails after lookup and scope checks pass, the handler returns
+// 500 INTERNAL_ERROR and leaves visibility unchanged — the visibility-handler mirror of
+// TestHandleDecommissionSteward_DurableStoreWriteFails, covering handlers_stewards.go:1090.
+func TestHandleSetStewardVisibility_DurableStoreWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX directory permissions on Windows")
+	}
+	server := setupTestServer(t)
+	st, root := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-vis-writefail",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+
+	// Induce a genuine durable-store write failure: make the flat-file store's backing
+	// directory read-only. The record was already written, so GetSteward (a pure read)
+	// still succeeds and the handler reaches SetStewardHidden, whose atomic write
+	// (temp-file creation in the directory) then fails with a permission error. Restore
+	// the mode on cleanup so t.TempDir() removal can delete the tree.
+	stewardDir := filepath.Join(root, "stewards")
+	require.NoError(t, os.Chmod(stewardDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(stewardDir, 0o750) })
+
+	rec := patchVisibility(server, "s-vis-writefail", true)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+
+	// Visibility must not have been persisted: restore write access and confirm the record
+	// is still visible (the failed write left durable state unchanged).
+	require.NoError(t, os.Chmod(stewardDir, 0o750))
+	got, err := st.GetSteward(context.Background(), "s-vis-writefail")
+	require.NoError(t, err)
+	assert.False(t, got.Hidden, "record must remain visible when the durable write fails")
+}

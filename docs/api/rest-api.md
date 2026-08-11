@@ -130,8 +130,21 @@ List registered stewards. The returned set depends on the session's tenant scope
 
 Use the `?q=` selector parameter to narrow further (e.g. `?q=root/msp-a/all` or `?q=hostname:web-01`). The selector grammar is defined in `pkg/fleet/selector`.
 
+By default, **operator-hidden** and **quarantined** stewards are excluded from the response. Use the visibility query parameters to re-include them.
+
 **Authentication:** Required  
 **Required permission:** `steward:list`
+
+**Query parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `q` | (none) | Selector string — see `pkg/fleet/selector` |
+| `limit` | 50 | Page size |
+| `offset` | 0 | Page offset |
+| `include_hidden` | `false` | Set `true` to include operator-hidden stewards |
+| `include_quarantined` | `false` | Set `true` to include quarantined stewards |
+| `include_deregistered` | `false` | Set `true` to include deregistered stewards |
 
 **Response:**
 
@@ -143,6 +156,7 @@ Use the `?q=` selector parameter to narrow further (e.g. `?q=root/msp-a/all` or 
       "status": "connected",
       "last_seen": "2025-01-12T10:29:30Z",
       "version": "0.2.0",
+      "hidden": false,
       "metrics": {
         "cpu_usage": "45%",
         "memory_usage": "512MB"
@@ -250,6 +264,44 @@ Refresh the mTLS credentials for a steward. Called when the steward's certificat
 
 - `id` (path): Steward ID
 
+#### PATCH /api/v1/stewards/{id}/visibility
+
+Set the operator-controlled visibility flag on a steward. Hidden stewards are excluded from the default list response and health tile counts, but their count is always surfaced in `GET /api/v1/fleet/health` as the non-suppressible `hidden` field.
+
+**Reversible:** call again with `{"hidden": false}` to restore normal visibility.
+
+**Authentication:** Required (web session or mTLS admin; API keys are rejected with `403`)  
+**Required permission:** `steward:visibility` (`AssuranceBasic` minimum — API keys cannot hide stewards)  
+**Audit:** emitted at `Medium` severity as `steward.visibility_changed`
+
+**Parameters:**
+
+- `id` (path): Steward ID
+
+**Request body:**
+
+```json
+{ "hidden": true }
+```
+
+**Response:**
+
+```json
+{
+  "id": "steward-001",
+  "hidden": true
+}
+```
+
+**Error responses:**
+
+| Code | Condition |
+|------|-----------|
+| `400` | Malformed request body or invalid steward ID format |
+| `403` | API key (machine-assurance) caller — use a web session |
+| `404` | Steward not found, or steward belongs to a different tenant |
+| `503` | Durable store unavailable |
+
 #### GET /api/v1/stewards/{id}/connection
 
 Get transport-level connection detail for a specific steward: whether it is currently streaming, when it connected, its remote network address, and the last-activity timestamp. Sourced from the live connection registry.
@@ -333,8 +385,11 @@ Return tenant-scoped counts of stewards by health classification.
 | `healthy` | `status == "active"` and heartbeat within 5 minutes |
 | `degraded` | `status == "active"` and heartbeat older than 5 minutes |
 | `unreachable` | `status == "lost"` |
+| `hidden` | `hidden == true` (excluded from healthy/degraded/unreachable buckets) |
 
 Lifecycle terminal states (registered, deregistered, archived, dormant, revoked) are not counted in any bucket. Scoping includes the caller's full tenant subtree (caller plus all descendants).
+
+The `hidden` field is **non-suppressible** — it is always present in the response regardless of query parameters. A non-zero value signals that concealment is in effect, so operators are never blind to hidden stewards even when the default list view excludes them.
 
 **Response:**
 
@@ -343,7 +398,8 @@ Lifecycle terminal states (registered, deregistered, archived, dormant, revoked)
   "data": {
     "healthy": 42,
     "degraded": 3,
-    "unreachable": 1
+    "unreachable": 1,
+    "hidden": 2
   },
   "timestamp": "2026-07-18T10:30:05Z"
 }
