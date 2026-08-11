@@ -250,6 +250,22 @@ var DefaultPermissions = []*common.Permission{
 		Actions:      []string{"crossing.break-glass"},
 	},
 
+	// Reboot Window Permissions (ADR-026 decision 3: distinct from config.update)
+	{
+		Id:           "reboot_window.read",
+		Name:         "Read Reboot Window",
+		Description:  "Read reboot_window configuration and the resolved next occurrence for a tenant or steward",
+		ResourceType: "reboot_window",
+		Actions:      []string{"read"},
+	},
+	{
+		Id:           "reboot_window.override",
+		Name:         "Override Reboot Window",
+		Description:  "Create or update reboot_window configuration at tenant or device level; intentionally distinct from config.update (ADR-026 decision 3)",
+		ResourceType: "reboot_window",
+		Actions:      []string{"create", "update"},
+	},
+
 	// Rollback Permissions
 	{
 		Id:           "rollback.emergency",

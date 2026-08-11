@@ -649,6 +649,97 @@ cfg workflow promote-hv-role MyVM hv01 --cluster fc-east --url=https://controlle
 
 ---
 
+## cfg reboot-window — Reboot Window Authoring (Issue #2979)
+
+A reboot_window constrains when managed endpoints may reboot during patch cycles.
+It is declared at tenant level (inherited by all stewards in that tenant) or
+overridden at the device level for a specific steward.
+
+The schedule YAML is validated server-side by `schedule.Parse()`. The GET endpoint
+returns the full cascaded effective value including the resolved next occurrence; it
+never returns a raw cron rule.
+
+**Required permissions:** `reboot_window:override` (PUT), `reboot_window:read` (GET).
+These are distinct from `config.update` (ADR-026 decision 3).
+
+**Common flags:**
+```
+--url <url>              Controller API URL (env: CFGMS_API_URL)
+--api-key <key>          API key (env: CFGMS_API_KEY)
+--tls-ca-cert <path>     CA certificate path (env: CFGMS_TLS_CA_CERT)
+--tls-insecure           Skip TLS verification (env: CFGMS_TLS_INSECURE)
+--tenant <id>            Target tenant ID
+--steward <id>           Target steward ID
+```
+
+### cfg reboot-window set
+
+Set the reboot_window at tenant or device level. Exactly one of `--tenant` or
+`--steward` must be specified. The schedule file must be a valid reboot_window
+YAML block.
+
+```
+cfg reboot-window set --tenant <tenant-id> --schedule <file.yaml> [--timezone <tz>]
+cfg reboot-window set --steward <steward-id> --schedule <file.yaml>
+```
+
+**Example schedule YAML (`window.yaml`):**
+```yaml
+schedules:
+  - freq: weekly
+    days: [sunday]
+    start: "02:00"
+    end: "04:00"
+```
+
+**Example:**
+```
+cfg reboot-window set --tenant acme-corp --schedule window.yaml --timezone America/New_York
+```
+
+**Output:**
+```
+Reboot window updated
+Target:  acme-corp
+Status:  scheduled
+Next:    Sun 17 Aug 2026, 02:00 (America/New_York)
+Next (ISO-8601): 2026-08-17T06:00:00Z
+Timezone: America/New_York
+```
+
+### cfg reboot-window show
+
+Display the effective reboot_window including the resolved next occurrence. The
+result reflects the full cascade (MSP → client → group → device); if no window
+is declared at any level the status is `unrestricted`.
+
+```
+cfg reboot-window show --tenant <tenant-id>
+cfg reboot-window show --steward <steward-id>
+```
+
+**Example:**
+```
+cfg reboot-window show --steward sw-1234
+```
+
+**Output (window in effect):**
+```
+Target:  sw-1234
+Status:  scheduled
+Next:    Sun 17 Aug 2026, 02:00 (America/New_York)
+Next (ISO-8601): 2026-08-17T06:00:00Z
+```
+
+**Output (no window):**
+```
+Target:  sw-1234
+Status:  unrestricted
+Next:    no reboot_window in effect — unrestricted
+```
+
+---
+
 ## cfg role — Role Config Management (Issue #2543)
 
 Role configs couple a selector expression with a `StewardConfig` fragment. Matching

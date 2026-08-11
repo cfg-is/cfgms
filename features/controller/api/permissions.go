@@ -139,6 +139,14 @@ var knownPermissions = map[string]bool{
 	// Entity graph read API (Issue #2880)
 	"entity:list": true,
 	"entity:read": true,
+	// Reboot-window authoring (Issue #2979). Enforced on the tenant and steward
+	// reboot-window routes and registered in the RBAC catalog as reboot_window.read /
+	// reboot_window.override. Both must be listed here so a least-privilege API key or
+	// web account can actually hold them — otherwise the only principal able to reach
+	// the endpoints is an unscoped one (Permissions == nil), which is the privilege
+	// inflation ADR-026 decision 3 exists to avoid.
+	"reboot_window:read":     true,
+	"reboot_window:override": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
