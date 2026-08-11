@@ -31,7 +31,7 @@ survives even if the checkout itself is lost. Update both together.
 |---|---|---|---|---|
 | `cfgms-lab-datasvc` Postgres role password | Auth for the shared Postgres backend (#3124, backs the migrated Tier-1 controller since #3127 and every HA cluster node since #3130) | `/etc/cfgms/storage-secrets.env` on `cfgms-ctrl-01` (+ each HA node's own `ha-secrets.env`) | Windows Credential Manager on `CFG-70-02`, target `cfgms-lab-datasvc-postgres` | Read from Credential Manager (`cmdkey` cannot print values — see §3) and re-populate the env file(s); the Postgres role's actual password is set once at `lab-datasvc-bootstrap.sh` first-run and never rotated automatically. If the credential itself is also lost, connect to `cfgms-lab-datasvc` directly and `ALTER ROLE cfgms WITH PASSWORD '<new>'`, then update every controller node's secrets file. |
 | MinIO root access/secret key | Admin access to the shared MinIO instance (#3124) | `/etc/minio/minio.env` on `cfgms-lab-datasvc` | Windows Credential Manager on `CFG-70-02`, target `cfgms-lab-datasvc-minio` | Same pattern as Postgres above. If both are lost, MinIO has no password-reset path short of reinstalling with a fresh root user — the installer bucket would need to be recreated and any objects in it are lost (currently 0 objects; see #3124's runbook section). |
-| OpenBao unseal key + root token | Unseals/authenticates to the shared cluster-CA vault (#3130) | Nowhere durable by design — OpenBao never writes the unseal key to disk, and the root token is used directly by all 3 HA controller nodes as `OPENBAO_TOKEN` | **Not yet created as of this writing** — story #3130's live execution mints these. Capture into Credential Manager (`cfgms-lab-datasvc-openbao-unseal` / `cfgms-lab-datasvc-openbao-token`) the moment they're printed — never re-printed on a later run. | **If the unseal key is lost with no other unseal shares captured, the vault's file-storage backend is permanently unrecoverable** (this is Shamir-seal by design — losing the key(s) below the threshold is intentional, unrecoverable data loss, not a bug). Because the vault holds the *cluster CA*, losing it means re-running cluster CA bootstrap from scratch: pick one surviving controller node, wipe the vault's `/var/lib/openbao/data`, re-run `lab-datasvc-bootstrap.sh`'s OpenBao step (mints a fresh CA), then re-`--init` every HA node against the new CA path — this is the multi-node equivalent of the original full-fleet re-enrollment, so guard this credential carefully. |
+| OpenBao unseal key + root token | Unseals/authenticates to the shared cluster-CA vault (#3130) | Nowhere durable by design — OpenBao never writes the unseal key to disk, and the root token is used directly by all 3 HA controller nodes as `OPENBAO_TOKEN` | Windows Credential Manager on `CFG-70-02`, targets `cfgms-lab-datasvc-openbao-unseal` / `cfgms-lab-datasvc-openbao-token` (captured 2026-08-10 — cfgms-lab-datasvc's vault is initialized, unsealed, KV v2 enabled at `secret/`; single-key Shamir seal, no cluster CA migrated in yet) | **If the unseal key is lost with no other unseal shares captured, the vault's file-storage backend is permanently unrecoverable** (this is Shamir-seal by design — losing the key(s) below the threshold is intentional, unrecoverable data loss, not a bug). Because the vault holds the *cluster CA*, losing it means re-running cluster CA bootstrap from scratch: pick one surviving controller node, wipe the vault's `/var/lib/openbao/data`, re-run `lab-datasvc-bootstrap.sh`'s OpenBao step (mints a fresh CA), then re-`--init` every HA node against the new CA path — this is the multi-node equivalent of the original full-fleet re-enrollment, so guard this credential carefully. |
 | Cluster session HMAC key (`CFGMS_SESSION_HMAC_KEY`) | Backs bearer-token hashing for the shared Postgres session store (#3127); must be identical across all cluster nodes | `/etc/cfgms/storage-secrets.env` on `cfgms-ctrl-01` and each HA node's `ha-secrets.env` | Windows Credential Manager on `CFG-70-02`, target `cfgms-lab-session-hmac-key` (captured 2026-08-10) | Read from Credential Manager (`cmdkey` cannot print values — see §3) and re-populate the env file(s). If lost, every issued session/bearer token becomes unverifiable — not catastrophic (users just re-authenticate), but generate + distribute a new key to all nodes together, since a mismatched key across nodes breaks cross-node session validation. |
 | Admin mTLS bundle (`admin.bundle.yaml`) | The `cfg` CLI's admin credential (cert + key) against the controller REST API | `C:\Users\cfg\admin.bundle.yaml` on `CFG-70-02` — **plaintext, permanent, never expires into a keychain** | **Nothing — this is the single biggest gap** (see §2) | If the file and the controller's CA are both lost, there is no way back in: re-run controller `--init` (mints a new CA), which invalidates every previously-issued cert fleet-wide, requiring full steward re-enrollment. This is exactly what happened in the 2026-07-31/08-01 rebuild. |
 | SSH key to every lab VM (`cfgms_lab_ed25519`) | `ssh debian@<host>.lab.cfg.is` access to every Debian VM in the lab | `C:\Users\cfg\.ssh\cfgms_lab_ed25519{,.pub}` on `CFG-70-02` (+ zipped copy `~/.ssh/ssh.zip`) | Windows Credential Manager on `CFG-70-02`, target `cfgms-lab-ssh-key`, value base64-encoded (captured 2026-08-10 — multi-line PEM doesn't survive `cmdkey`'s `/pass` argument cleanly; see §3 for the decode command) | If lost, the public key is still authorized on every VM (`~debian/.ssh/authorized_keys`), so any VM console access (Hyper-V console, `cfg steward exec`) can install a *new* key — not a full rebuild, but still real downtime while every VM is touched by hand. |
@@ -41,10 +41,12 @@ survives even if the checkout itself is lost. Update both together.
 
 ## 2. Remaining gap
 
-Four of the seven lab-critical secrets above are now in a keychain
+Six of the seven lab-critical secrets above are now in a keychain
 (`cfgms-lab-datasvc-minio`, `cfgms-lab-datasvc-postgres`,
-`cfgms-lab-session-hmac-key`, `cfgms-lab-ssh-key` — verified via `cmdkey
-/list` on `CFG-70-02`, captured 2026-08-10). Two remain open:
+`cfgms-lab-session-hmac-key`, `cfgms-lab-ssh-key`,
+`cfgms-lab-datasvc-openbao-unseal`, `cfgms-lab-datasvc-openbao-token` —
+verified via `cmdkey /list` on `CFG-70-02`, captured 2026-08-10/11). One
+remains open:
 
 1. **The admin bundle has no Windows path at all.** `scripts/cfgms-bundle-load`
    and [`tier1-controller-bringup.md`](tier1-controller-bringup.md) §5 only
@@ -59,9 +61,6 @@ Four of the seven lab-critical secrets above are now in a keychain
    `cfgms-bundle-load`-equivalent that can read it back. **Filed as a gap, not
    fixed in this pass** — the story that adds it should also teach
    `cfgms-bundle-load` to detect Windows instead of hard-refusing.
-2. **The OpenBao unseal key and root token** (minted during #3130's live
-   execution) must be captured into Credential Manager the moment they are
-   printed — they are never re-printed on a later run.
 
 ## 3. Windows Credential Manager reference
 
@@ -91,7 +90,7 @@ $cred = Get-StoredCredential -Target 'cfgms-lab-ssh-key'
 # (see scripts/ha-cluster-node-bootstrap.sh's OS-keychain guidance for the equivalent Linux/macOS commands)
 ```
 
-Until the `cfgms-bundle-load` Windows gap (§2 item 2) is closed, treat
+Until the `cfgms-bundle-load` Windows gap (§2) is closed, treat
 `cmdkey /generic:<target> /user:<label> /pass:<value>` as the store step and
 plan on a manual PowerShell `CredentialManager` module read (`Install-Module
 CredentialManager`) to retrieve values — there is no equivalent of
