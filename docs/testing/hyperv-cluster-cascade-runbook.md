@@ -154,6 +154,9 @@ et al.) and skips cleanly when the idiomatic controls are unset.
 $env:CFGMS_E2E_HYPERV_CLUSTER = 'cfg-lab'
 $env:CFGMS_E2E_CFG_BIN        = 'C:\git\cfgms\bin\cfg-dev.exe'
 $env:CFGMS_E2E_ADMIN_BUNDLE   = 'C:\Users\cfg\admin.bundle.yaml'   # or CFGMS_ADMIN_BUNDLE
+# NOTE: "cfg" here is this Windows host's local account name (CFG-70-02),
+# unrelated to the "cfg" SSH user retired in the 2026-07-31/08-01 rebuild —
+# lab VMs are reached via `ssh debian@<host>.lab.cfg.is` now, see lab-secrets-inventory.md.
 $env:CFGMS_E2E_MEMBER_IDS     = 'steward-1780659937223058807,steward-1782769671586775983,steward-1782769748587622286'
 # Optional (defaults shown): CFGMS_E2E_HAROLE_VM=cfgms-e2e-ha-01, CFGMS_E2E_ROLE_TAG=e2e-ha-cluster
 go test -tags e2e -v -run TestIdiomatic -timeout 20m ./test/e2e/hyperv/...

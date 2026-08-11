@@ -92,3 +92,9 @@ path "secret/data/root/cluster-ca-key" {
 Set `ha.mode: single` (or omit `ha`) and leave `certificate.cluster_ca` unconfigured.
 The controller generates the CA on first boot, saves `ca.crt` and `ca.key` locally, and
 loads them from disk on restart. No vault dependency.
+
+## See also
+
+The OpenBao unseal key and root token this mechanism depends on are tracked
+in [`lab-secrets-inventory.md`](lab-secrets-inventory.md) alongside every
+other cfg-lab credential — capture them there the moment they're minted.

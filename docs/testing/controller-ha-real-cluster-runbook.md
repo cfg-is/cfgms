@@ -17,6 +17,10 @@ same physical bed as the module-convergence work — see
 for the underlying hypervisor topology (`CFG-70-02` / `CFG-AB-02` /
 `CFG-C3-02`, CSV01, `HVSwitch_1G`).
 
+`cfgms-ctrl-01` (the Tier-1 controller): `192.168.234.103`, REST API on
+`:9080` (port `443` closed). `cfgms-lab-datasvc` (shared Postgres/MinIO,
+soon OpenBao — see §"Shared data-services VM" below): `192.168.234.105`.
+
 ### Lab rebuild note (2026-07-31/08-01)
 
 While provisioning this story's VM, the lab's exec-dispatch subsystem and
@@ -352,6 +356,12 @@ and untouched; retiring them is a separate, explicit founder decision.
 *To be filled in when #3130 lands — joins two additional controller nodes to
 the migrated Tier-1 controller, forming a 3-node `CFGMS_HA_MODE=cluster`
 deployment.*
+
+See [`cluster-ca.md`](../operations/cluster-ca.md) for the CA-sourcing
+mechanism this section will document (a shared OpenBao vault, provisioned on
+`cfgms-lab-datasvc` alongside #3124's Postgres/MinIO) and
+[`cluster-storage-config.md`](../operations/cluster-storage-config.md) for
+the storage-side config every node needs.
 
 ## 4. Leader election and failover validation (story #3094)
 

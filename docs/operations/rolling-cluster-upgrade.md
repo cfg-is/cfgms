@@ -74,10 +74,12 @@ remaining nodes within one heartbeat interval.
 ### 5. Upgrade the binary on the drained node
 
 SSH to the node and run the upgrade (see [controller-upgrade.md](controller-upgrade.md) for the full
-single-node upgrade runbook):
+single-node upgrade runbook). Use `upgrade restart` — the supported production
+path (Issue #2015) — not `upgrade run`, which is an experimental port-swap
+orchestrator frozen per ADR-007 and explicitly not the supported path:
 
 ```bash
-cfg controller upgrade run \
+cfg controller upgrade restart \
     --binary /opt/cfgms/cfgms-controller-v0.6.0 \
     --config /etc/cfgms/controller.cfg
 ```
