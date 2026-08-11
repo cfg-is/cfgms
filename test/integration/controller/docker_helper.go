@@ -64,12 +64,28 @@ func (h *DockerComposeHelper) StartController(ctx context.Context) error {
 
 	h.startedBySuite = true
 
-	// Generate test credentials if not already present
+	// Generate test credentials only when they are actually absent.
+	//
+	// The comment above always said "if not already present", but the call was
+	// unconditional, and generate-test-credentials.sh rotates every secret it
+	// writes — including .cfgms-test-secrets.key, the master key the SOPS secret
+	// store derives from. Rotating it out from under containers another suite is
+	// already running leaves their ciphertext in the shared database undecryptable,
+	// and every HA controller then dies at startup with:
+	//
+	//	load audit HMAC key: failed to decrypt secret:
+	//	secret ciphertext authentication failed
+	//
+	// These packages run concurrently under `go test ./test/integration/...`, so
+	// this is a live cross-suite hazard, not a local-only one. Same guard as
+	// test/integration/ha's ensureCredentials.
 	fmt.Println("Step 1/3: Ensuring test credentials are generated...")
-	credCmd := exec.CommandContext(ctx, "bash", "-c", "cd ../../../ && ./scripts/generate-test-credentials.sh")
-	credOutput, err := credCmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Credential generation warnings: %s\n", string(credOutput))
+	if _, statErr := os.Stat("../../../.env.test"); os.IsNotExist(statErr) {
+		credCmd := exec.CommandContext(ctx, "bash", "-c", "cd ../../../ && ./scripts/generate-test-credentials.sh")
+		credOutput, err := credCmd.CombinedOutput()
+		if err != nil {
+			fmt.Printf("Credential generation warnings: %s\n", string(credOutput))
+		}
 	}
 
 	// Build and start containers

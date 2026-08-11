@@ -279,6 +279,14 @@ services:
       CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       CFGMS_API_KEY_EAST: "test-api-key-east"
     user: root
+    # cmd/controller/Dockerfile's ENTRYPOINT runs the binary directly with a
+    # default CMD of --config /etc/cfgms/controller.cfg. Wrapping it in a shell
+    # keeps that config path and creates CFGMS_LOG_DIR first: the file logging
+    # provider does not create its own directory, so these nodes wrote no log
+    # records at all and every cluster failure had to be diagnosed from a bare
+    # container exit code.
+    entrypoint: []
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && exec ./controller --config /etc/cfgms/controller.cfg"]
     volumes:
       # Shared CA and server certificate minted by ha-ca-init; peer mTLS only
       # verifies if all three nodes trust the same root.
@@ -379,6 +387,14 @@ services:
       CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       CFGMS_API_KEY_CENTRAL: "test-api-key-central"
     user: root
+    # cmd/controller/Dockerfile's ENTRYPOINT runs the binary directly with a
+    # default CMD of --config /etc/cfgms/controller.cfg. Wrapping it in a shell
+    # keeps that config path and creates CFGMS_LOG_DIR first: the file logging
+    # provider does not create its own directory, so these nodes wrote no log
+    # records at all and every cluster failure had to be diagnosed from a bare
+    # container exit code.
+    entrypoint: []
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && exec ./controller --config /etc/cfgms/controller.cfg"]
     volumes:
       - ha_cluster_certs:/app/certs
       - controller_central_data:/app/data
@@ -475,6 +491,14 @@ services:
       CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       CFGMS_API_KEY_WEST: "test-api-key-west"
     user: root
+    # cmd/controller/Dockerfile's ENTRYPOINT runs the binary directly with a
+    # default CMD of --config /etc/cfgms/controller.cfg. Wrapping it in a shell
+    # keeps that config path and creates CFGMS_LOG_DIR first: the file logging
+    # provider does not create its own directory, so these nodes wrote no log
+    # records at all and every cluster failure had to be diagnosed from a bare
+    # container exit code.
+    entrypoint: []
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && exec ./controller --config /etc/cfgms/controller.cfg"]
     volumes:
       - ha_cluster_certs:/app/certs
       - controller_west_data:/app/data
