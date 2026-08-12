@@ -276,46 +276,68 @@ func testCertificateValidityDuringFailover(t *testing.T, ctx context.Context, he
 	t.Log("✓ Certificate validity maintained during failover")
 }
 
-func testTokenRefreshDuringFailover(t *testing.T, _ context.Context, _ *DockerComposeHelper, _ []string, stewards []string) {
+func testTokenRefreshDuringFailover(t *testing.T, ctx context.Context, helper *DockerComposeHelper, _ []string, stewards []string) {
 	t.Log("Testing token refresh requests during controller failover...")
 
 	for _, steward := range stewards {
-		require.NoError(t, simulateTokenRefresh(steward), "simulateTokenRefresh(%s) must succeed", steward)
+		require.NoError(t, simulateTokenRefresh(ctx, helper, steward), "simulateTokenRefresh(%s) must succeed", steward)
 		t.Logf("✓ Token refresh acknowledged for %s", steward)
 	}
 
 	t.Log("✓ Token refresh during failover verified")
 }
 
-// simulateTokenRefresh calls POST /api/v1/stewards/{id}/auth/refresh on the first
-// reachable controller and returns nil on 200. The steward's registered ID is
-// derived by appending "-1" to the container name (e.g. "steward-east" → "steward-east-1").
-func simulateTokenRefresh(stewardName string) error {
-	controllerURL, err := firstReachableController()
+// simulateTokenRefresh calls POST /api/v1/stewards/{id}/auth/refresh and returns
+// nil as soon as any controller answers 200.
+//
+// The steward ID is the one the controller assigned at registration. Deriving it
+// by appending "-1" to the container name produced "steward-east-1", which no
+// controller ever issues, so every refresh answered 404.
+func simulateTokenRefresh(ctx context.Context, helper *DockerComposeHelper, stewardName string) error {
+	stewardID, err := helper.StewardID(ctx, stewardName)
 	if err != nil {
-		return fmt.Errorf("no reachable controller: %w", err)
+		return err
 	}
 
-	stewardID := stewardName + "-1"
+	// Every controller is tried, not just the first reachable one.
+	// handleStewardAuthRefresh resolves the steward through
+	// ControllerService.GetStewardInfo, which is the node's own registry of the
+	// sessions it holds — so only the controller this steward is connected to can
+	// answer 200, and any other node correctly returns 404. Asking a single
+	// arbitrary node turned that into a test failure whenever the steward
+	// happened to be attached elsewhere.
+	var lastErr error
+	for _, controllerURL := range controllerURLs {
+		refreshErr := requestAuthRefresh(ctx, controllerURL, stewardID)
+		if refreshErr == nil {
+			return nil
+		}
+		lastErr = refreshErr
+	}
+	return fmt.Errorf("no controller accepted an auth refresh for steward %s (%s): %w",
+		stewardName, stewardID, lastErr)
+}
+
+// requestAuthRefresh posts one auth-refresh request to a single controller.
+func requestAuthRefresh(ctx context.Context, controllerURL, stewardID string) error {
 	client := buildTLSClient(containerNameForURL(controllerURL))
-	apiKey := getAPIKeyForURL(controllerURL)
 
 	url := fmt.Sprintf("%s/api/v1/stewards/%s/auth/refresh", controllerURL, stewardID)
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader("{}"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
 	if err != nil {
 		return fmt.Errorf("failed to build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-API-Key", getAPIKeyForURL(controllerURL))
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return fmt.Errorf("request to %s failed: %w", controllerURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("auth refresh returned HTTP %d for steward %s", resp.StatusCode, stewardID)
+		return fmt.Errorf("auth refresh returned HTTP %d from %s", resp.StatusCode, controllerURL)
 	}
 
 	var body map[string]string
@@ -539,8 +561,17 @@ func getAuthenticationState(ctx context.Context, helper *DockerComposeHelper, st
 		connectionCount = 1
 	}
 
+	// Best-effort: this field is diagnostic here, and the caller legitimately
+	// observes stewards that have not registered yet, for which no
+	// controller-assigned ID exists. The Compose service name is the honest
+	// fallback — unlike "<service>-1", it does not read as a real steward ID.
+	stewardID := stewardName
+	if resolved, idErr := helper.StewardID(ctx, stewardName); idErr == nil {
+		stewardID = resolved
+	}
+
 	return &AuthenticationState{
-		StewardID:            fmt.Sprintf("%s-1", stewardName),
+		StewardID:            stewardID,
 		Authenticated:        connected,
 		TokenValid:           connected, // mTLS-based: connection = valid token
 		CertificateValid:     connected, // mTLS-based: connection = valid cert

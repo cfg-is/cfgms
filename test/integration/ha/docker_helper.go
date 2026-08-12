@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,6 +129,7 @@ func (h *DockerComposeHelper) prepare() error {
 		"--profile", "ha",
 		"--profile", "timescale",
 		"build")
+	buildCmd.Env = composeEnv()
 
 	buildOutput, err := buildCmd.CombinedOutput()
 	if err != nil {
@@ -243,6 +245,31 @@ func (h *DockerComposeHelper) StartCluster(ctx context.Context) error {
 	// remaining two then read what it wrote. Subsequent StartCluster calls find
 	// the secrets already present, so this costs one container start, once.
 	fmt.Println("Step 3/4: Recreating HA controllers (bootstrap node first)...")
+
+	// All three controllers come down before the bootstrap node goes back up.
+	//
+	// pkg/ha.RaftConsensus builds its log with raft.NewMemoryStorage() and has no
+	// WAL, so a restarted node rejoins with an empty log. Recreating the
+	// bootstrap node while its peers were still running left those peers holding
+	// a commit index the fresh node could not have, and etcd/raft aborts the
+	// process rather than accept it:
+	//
+	//	panic: tocommit(7) is out of range [lastIndex(3)].
+	//	Was the raft log corrupted, truncated, or lost?
+	//
+	// StopCluster covers the normal sequential-test path, but StartCluster must
+	// not depend on whatever ran before it — a killed test, an interrupted run or
+	// a manually started cluster all leave peers behind, and this failure mode is
+	// a process abort rather than a retryable error.
+	stopArgs := append([]string{
+		"--profile", "ha",
+		"--profile", "timescale",
+		"rm", "-f", "-s", "-v",
+	}, haControllerServices...)
+	if output, err := h.compose(ctx, stopArgs...); err != nil {
+		return fmt.Errorf("failed to stop the HA controllers before recreating them: %w\nOutput: %s", err, output)
+	}
+
 	bootstrapArgs := []string{
 		"--profile", "ha",
 		"--profile", "timescale",
@@ -399,6 +426,10 @@ func (h *DockerComposeHelper) failedServiceLogs(ctx context.Context, services ..
 // in the last few lines, and an unbounded dump would bury it.
 const containerLogTailLines = 40
 
+// allLogLines asks GetStewardLogs for the whole file rather than a tail. `tail
+// -n` with a count larger than the file simply returns the file.
+const allLogLines = 1000000
+
 // tailLines returns the last n lines of s.
 func tailLines(s string, n int) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
@@ -434,8 +465,44 @@ func (h *DockerComposeHelper) compose(ctx context.Context, args ...string) (stri
 	// #nosec G204 -- integration-only Docker Compose invocation; executable is
 	// fixed and all variable arguments are owned by the local HA test harness.
 	cmd := exec.CommandContext(ctx, "docker", argv...)
+	cmd.Env = composeEnv()
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+// composeEnv returns the environment for a `docker compose` invocation: this
+// process's environment with CFGMS_SECRETS_KEY_FILE removed.
+//
+// Compose resolves ${VAR} from the shell environment first and only then from
+// --env-file, so the value TestMain sets via testutil.ProvisionSecretsEnv wins
+// over the one in .env.test. That key is generated fresh per test binary in a
+// temporary directory that is deleted on exit, while the Compose volumes and the
+// cfgms_ha_test database it protects survive between runs. The next run's
+// controllers therefore booted with a new key against secrets sealed under the
+// old one and every node died at startup:
+//
+//	failed to initialize audit manager: load audit HMAC key:
+//	failed to decrypt secret: secret ciphertext authentication failed
+//
+// The audit HMAC key is written once, on first boot, into the shared database
+// (pkg/audit.WithSecretsStore), so this is unrecoverable without wiping state —
+// the suite passed only on a freshly pruned Docker host and failed on every
+// rerun. Dropping the variable here restores the pairing the design intends:
+// containers use the .env.test key, whose lifetime matches the volumes', and
+// the ephemeral key stays scoped to in-process controller construction, which is
+// what ProvisionSecretsEnv documents itself as covering.
+func composeEnv() []string {
+	const secretsKeyVar = "CFGMS_SECRETS_KEY_FILE="
+
+	environ := os.Environ()
+	filtered := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		if strings.HasPrefix(entry, secretsKeyVar) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 // GetContainerLogs retrieves logs from a specific container
@@ -447,6 +514,7 @@ func (h *DockerComposeHelper) GetContainerLogs(ctx context.Context, service stri
 		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"logs", service)
+	cmd.Env = composeEnv()
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -477,6 +545,7 @@ func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName st
 		"-p", h.ProjectName,
 		"exec", "-T", stewardName,
 		"sh", "-c", fmt.Sprintf("cat /tmp/cfgms/*.log 2>/dev/null | tail -n %d", lines))
+	cmd.Env = composeEnv()
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -486,36 +555,70 @@ func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName st
 	return string(output), nil
 }
 
-// CheckStewardConnection checks if a steward is connected to controllers
+// stewardIDPattern matches the identifier the controller assigns at
+// registration, as the steward records it in its own structured log.
+var stewardIDPattern = regexp.MustCompile(`"steward_id":"(steward-[0-9]+)"`)
+
+// StewardID returns the identifier the controller assigned to stewardName.
+//
+// The controller mints this at registration as fmt.Sprintf("steward-%d",
+// time.Now().UnixNano()) (features/controller/api/handlers_registration.go) and
+// returns it in the registration response, which the steward logs. It is not
+// derivable from the Compose service name: these tests previously addressed
+// GET /api/v1/stewards/{id} as "<service>-1" (e.g. "steward-east-1"), a value no
+// controller ever issues, so every lookup answered 404 and every steward was
+// reported "disconnected" no matter how healthy the connection was.
+//
+// The steward's own log is the authority — it is the party that received the
+// assignment. The whole file is read rather than a tail, because registration
+// happens once at startup and later chatter pushes it out of any fixed window.
+func (h *DockerComposeHelper) StewardID(ctx context.Context, stewardName string) (string, error) {
+	logs, err := h.GetStewardLogs(ctx, stewardName, allLogLines)
+	if err != nil {
+		return "", err
+	}
+
+	match := stewardIDPattern.FindStringSubmatch(logs)
+	if match == nil {
+		return "", fmt.Errorf("no controller-assigned steward ID in %s logs; it has not completed registration", stewardName)
+	}
+	return match[1], nil
+}
+
+// controlPlaneAddrPattern captures the control-plane address the steward dialed,
+// as recorded in the structured "Starting gRPC control plane connection" entry.
+var controlPlaneAddrPattern = regexp.MustCompile(`"addr":"([^":]+):[0-9]+"`)
+
+// CheckStewardConnection reports whether stewardName has an established control
+// plane connection, and the host name of the controller it is connected to.
+//
+// The second return value is compared against Compose service names by the
+// failover tests. It used to be produced by splitting the human-readable message
+// "Connected to controller successfully via gRPC transport" on whitespace and
+// taking the word after "controller" — which is the literal string
+// "successfully". Every such comparison was therefore false, and the failover
+// test silently measured an empty set of affected stewards while reporting
+// success. The steward emits its peer address as a structured field, which is
+// the value this actually wants.
 func (h *DockerComposeHelper) CheckStewardConnection(ctx context.Context, stewardName string) (bool, string, error) {
-	logs, err := h.GetStewardLogs(ctx, stewardName, 50)
+	logs, err := h.GetStewardLogs(ctx, stewardName, allLogLines)
 	if err != nil {
 		return false, "", err
 	}
 
-	// Look for connection indicators in logs
-	if strings.Contains(logs, "Connected to controller") ||
-		strings.Contains(logs, "gRPC connection established") ||
-		strings.Contains(logs, "Heartbeat successful") {
-
-		// Extract controller connection info from logs
-		lines := strings.Split(logs, "\n")
-		for _, line := range lines {
-			if strings.Contains(line, "Connected to controller") {
-				// Extract controller name from log line
-				parts := strings.Fields(line)
-				for i, part := range parts {
-					if part == "controller" && i+1 < len(parts) {
-						return true, parts[i+1], nil
-					}
-				}
-			}
-		}
-
-		return true, "unknown", nil
+	if !strings.Contains(logs, "Connected to controller") &&
+		!strings.Contains(logs, "gRPC connection established") &&
+		!strings.Contains(logs, "Heartbeat successful") {
+		return false, "", nil
 	}
 
-	return false, "", nil
+	// The last recorded dial is the current one: a reconnect logs a new entry,
+	// so scanning from the end reflects the connection the steward holds now.
+	matches := controlPlaneAddrPattern.FindAllStringSubmatch(logs, -1)
+	if len(matches) == 0 {
+		return true, "unknown", nil
+	}
+	return true, matches[len(matches)-1][1], nil
 }
 
 // WaitForStewardConnections waits for all stewards to connect to controllers
@@ -557,6 +660,7 @@ func (h *DockerComposeHelper) StopService(ctx context.Context, service string) e
 		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"stop", service)
+	cmd.Env = composeEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -575,6 +679,7 @@ func (h *DockerComposeHelper) RestartService(ctx context.Context, service string
 		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"restart", service)
+	cmd.Env = composeEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -593,6 +698,7 @@ func (h *DockerComposeHelper) ScaleService(ctx context.Context, service string, 
 		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"up", "-d", "--scale", fmt.Sprintf("%s=%d", service, replicas))
+	cmd.Env = composeEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -611,6 +717,7 @@ func (h *DockerComposeHelper) GetServiceStatus(ctx context.Context, services ...
 		"--env-file", h.envFile(),
 		"-p", h.ProjectName,
 		"ps", "--services", "--filter", "status=running")
+	cmd.Env = composeEnv()
 
 	output, err := cmd.Output()
 	if err != nil {
