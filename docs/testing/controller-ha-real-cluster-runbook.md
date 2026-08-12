@@ -576,12 +576,29 @@ cfgms-ha-node3 {"node_id":11522191495349485340,"is_leader":false,"leader":115221
 `GET /api/v1/ha/cluster`, after the `pkg/ha` context-lifecycle fix above and a
 fresh coordinated restart, returns all 3 nodes' `NodeInfo` (id, address,
 capabilities, `started_at`) from every node's admin API — the acceptance
-criterion this endpoint exists to satisfy. Its `leader` field (and the
-separate `GET /api/v1/ha/leader` endpoint) still returns empty/`no_leader`
+criterion this endpoint exists to satisfy.
+
+An eighth bug was found and fixed chasing why its `leader` field (and the
+separate `GET /api/v1/ha/leader` endpoint) still returned empty/`no_leader`
 despite `/api/v1/raft/status` correctly agreeing on a real elected leader
-across all 3 nodes — a distinct, more minor issue in `RaftConsensus.GetLeaderInfo()`'s
-lookup, not required by this story's acceptance criteria (only the `nodes`
-list is), flagged as a follow-up rather than investigated further here.
+across all 3 nodes: `RaftCommand.Data` was typed `interface{}`, so
+`applyCommand`'s `json.Unmarshal` decoded the nested `node_update` payload as
+`map[string]interface{}` — and `encoding/json` always decodes JSON numbers in
+an `interface{}` position as `float64` (53 bits of integer precision). The
+64-bit FNV node-ID hashes this package uses (~10^18 magnitude) silently lost
+precision through that round-trip, so the key `applyNodeUpdate` actually
+stored in `clusterState.Nodes` no longer matched `clusterState.Leader` (set
+directly from the raft library's `uint64` `SoftState.Lead`, never touched by
+this bug) — `GetLeaderInfo()`'s map lookup always missed. **This is more than
+a cosmetic API gap**: a pre-fix reproduction of the regression test showed it
+also triggers `Automatic failover triggered [reason=no_leader_elected]` — the
+failover manager relies on the same `GetLeader()` path, so in a live cluster
+this could have caused spurious failover, not just an empty API field. Fixed
+by typing `RaftCommand.Data` as `json.RawMessage`, which defers decoding
+until the typed unmarshal and never passes through `float64`. Verified live:
+after redeploying the fixed binary and a fresh coordinated restart, all 3
+nodes' `GET /api/v1/ha/cluster` and `GET /api/v1/ha/leader` correctly report
+the elected leader.
 
 ### Health soak
 
