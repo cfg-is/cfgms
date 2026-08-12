@@ -32,6 +32,9 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/session"
 )
 
 // Test vectors from github.com/go-webauthn/webauthn@v0.17.0/protocol/credential_test.go.
@@ -700,6 +703,517 @@ func TestWebAuthnPresenceFinish(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
 	})
+}
+
+// --- Issue #2966: first-passkey enrollment via magic link ---
+
+// setupEnrollServer creates a test server with a WebAuthn RP configured for the
+// supplied rpID/origins, pre-creates a web account for the given username, and
+// returns the server, username, and the raw enrollment magic-link token. The token
+// is minted by handleCreateWebAccount (which issues it for zero-cred accounts).
+func setupEnrollServer(t *testing.T, rpID string, rpOrigins []string, username string) (*Server, string, string) {
+	t.Helper()
+	server := setupTestServer(t)
+	wa, err := NewWebAuthnFromConfig(rpID, rpID, rpOrigins)
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
+
+	var outer APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &outer))
+	raw := outer.Data.(map[string]interface{})
+	rawToken, _ := raw["enrollment_magic_link"].(string)
+	require.NotEmpty(t, rawToken, "enrollment magic link must be minted on account creation")
+	return server, username, rawToken
+}
+
+// doEnrollBegin calls handlePasskeyEnrollBegin directly with the supplied raw token.
+func doEnrollBegin(t *testing.T, server *Server, rawToken string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/enroll/begin", nil)
+	req.Header.Set(enrollmentTokenHeader, rawToken)
+	rec := httptest.NewRecorder()
+	server.handlePasskeyEnrollBegin(rec, req)
+	return rec
+}
+
+// doEnrollFinish calls handlePasskeyEnrollFinish directly with the supplied raw token and body.
+func doEnrollFinish(t *testing.T, server *Server, rawToken string, body *bytes.Reader) *httptest.ResponseRecorder {
+	t.Helper()
+	if body == nil {
+		body = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/enroll/finish", body)
+	req.Header.Set(enrollmentTokenHeader, rawToken)
+	rec := httptest.NewRecorder()
+	server.handlePasskeyEnrollFinish(rec, req)
+	return rec
+}
+
+// injectEnrollSession stores a pending enrollment session keyed by the token's hash,
+// bypassing the begin step — mirrors injectSession for the regular registration path.
+func injectEnrollSession(s *Server, rawToken string, sess webauthn.SessionData, ttl time.Duration) {
+	tokenHash := hashEnrollmentToken(rawToken)
+	s.passkeyEnrollSessions.Store(tokenHash, &webAuthnPendingSession{
+		data:    sess,
+		expires: time.Now().Add(ttl),
+	})
+}
+
+// TestPasskeyEnrollBegin tests the begin handler error paths and the happy path.
+func TestPasskeyEnrollBegin(t *testing.T) {
+	const username = "enroll-begin-user"
+	server, _, rawToken := setupEnrollServer(t, tvRPID, []string{tvOrigin}, username)
+
+	t.Run("NoWebAuthn", func(t *testing.T) {
+		noWaServer := setupTestServer(t)
+		rec := doEnrollBegin(t, noWaServer, rawToken)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "WEBAUTHN_NOT_CONFIGURED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("MissingToken", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/enroll/begin", nil)
+		rec := httptest.NewRecorder()
+		server.handlePasskeyEnrollBegin(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "MISSING_ENROLLMENT_TOKEN", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("InvalidToken", func(t *testing.T) {
+		rec := doEnrollBegin(t, server, "aabbccddeeff001122334455667788990011223344") // valid length, wrong value
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "TOKEN_INVALID", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("ExpiredToken", func(t *testing.T) {
+		// Create a separate account and manually expire the enrollment link.
+		srv2, _, tok2 := setupEnrollServer(t, tvRPID, []string{tvOrigin}, "enroll-expired-user")
+		acct2, err := srv2.getWebAccount(context.Background(), "enroll-expired-user")
+		require.NoError(t, err)
+		// Backdate the expiry by an hour so the token is already expired.
+		acct2.EnrollmentLinkExpiresAt = acct2.EnrollmentLinkExpiresAt.Add(-73 * time.Hour)
+		require.NoError(t, srv2.persistWebAccount(context.Background(), acct2, "test"))
+		srv2.cacheWebAccount(acct2)
+
+		rec := doEnrollBegin(t, srv2, tok2)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "TOKEN_INVALID", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("RevokedToken", func(t *testing.T) {
+		srv3, _, tok3 := setupEnrollServer(t, tvRPID, []string{tvOrigin}, "enroll-revoked-user")
+		acct3, err := srv3.getWebAccount(context.Background(), "enroll-revoked-user")
+		require.NoError(t, err)
+		acct3.EnrollmentLinkRevoked = true
+		require.NoError(t, srv3.persistWebAccount(context.Background(), acct3, "test"))
+		srv3.cacheWebAccount(acct3)
+
+		rec := doEnrollBegin(t, srv3, tok3)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "TOKEN_INVALID", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("Success", func(t *testing.T) {
+		rec := doEnrollBegin(t, server, rawToken)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		// Verify the session is keyed by tokenHash, not by username.
+		tokenHash := hashEnrollmentToken(rawToken)
+		raw, loaded := server.passkeyEnrollSessions.Load(tokenHash)
+		require.True(t, loaded, "session must be stored under tokenHash after enroll begin")
+		pending, ok := raw.(*webAuthnPendingSession)
+		require.True(t, ok)
+		assert.False(t, time.Now().After(pending.expires), "session must not be expired")
+		assert.NotEmpty(t, pending.data.Challenge, "server-side session must carry a challenge")
+
+		// The session must NOT be stored under the username (self-scoping invariant).
+		_, usernameKeyed := server.passkeyEnrollSessions.Load(username)
+		assert.False(t, usernameKeyed, "session must be keyed by tokenHash, not username")
+	})
+}
+
+// TestPasskeyEnrollFinish tests the finish handler error paths and the happy path.
+func TestPasskeyEnrollFinish(t *testing.T) {
+	// --- W3C Level 3 §16.2 NoneES256 spec test vector (same as Finish_Success above) ---
+	const (
+		svRPID          = "example.org"
+		svOrigin        = "https://example.org"
+		svAttObjectHex  = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220" //nolint:gosec
+		svClientDataHex = "7b2274797065223a22776562617574686e2e637265617465222c226368616c6c656e6765223a22414d4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755657345441222c226f726967696e223a2268747470733a2f2f6578616d706c652e6f7267222c2263726f73734f726967696e223a66616c73652c22657874726144617461223a22636c69656e74446174614a534f4e206d617920626520657874656e6465642077697468206164646974696f6e616c206669656c647320696e20746865206675747572652c207375636820617320746869733a20426b5165446a646354427258426941774a544c453551227d"
+		svCredIDHex     = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4" //nolint:gosec
+		svChallengeHex  = "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130"
+		svUsername      = "enroll-finish-user"
+	)
+
+	svAttObj, err := hex.DecodeString(svAttObjectHex)
+	require.NoError(t, err, "decode svAttObjectHex")
+	svCDJ, err := hex.DecodeString(svClientDataHex)
+	require.NoError(t, err, "decode svClientDataHex")
+	svCredIDBytes, err := hex.DecodeString(svCredIDHex)
+	require.NoError(t, err, "decode svCredIDHex")
+	svChallengeBytes, err := hex.DecodeString(svChallengeHex)
+	require.NoError(t, err, "decode svChallengeHex")
+	svCredIDStr := base64.RawURLEncoding.EncodeToString(svCredIDBytes)
+	svChallenge := base64.RawURLEncoding.EncodeToString(svChallengeBytes)
+
+	t.Run("NoWebAuthn", func(t *testing.T) {
+		noWaServer := setupTestServer(t)
+		rec := doEnrollFinish(t, noWaServer, "aabbccddeeff001122334455667788990011223344", nil)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "WEBAUTHN_NOT_CONFIGURED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("MissingToken", func(t *testing.T) {
+		srv, _, _ := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-notoken-user")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/enroll/finish", nil)
+		rec := httptest.NewRecorder()
+		srv.handlePasskeyEnrollFinish(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "MISSING_ENROLLMENT_TOKEN", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("NoActiveCeremony", func(t *testing.T) {
+		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-noceremony-user")
+		// No begin call — no session in the map.
+		rec := doEnrollFinish(t, srv, rawToken, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "NO_ACTIVE_ENROLLMENT", errCode(t, rec.Body.Bytes()))
+	})
+
+	// TestPasskeyEnrollFinish_ConcurrentRedeem: LoadAndDelete is atomic, so only the
+	// first finish call gets the session data. The second gets NO_ACTIVE_ENROLLMENT.
+	t.Run("ConcurrentRedeem_SecondFailsWithNoActiveCeremony", func(t *testing.T) {
+		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-concurrent-user")
+		acct, err := srv.getWebAccount(context.Background(), "enroll-concurrent-user")
+		require.NoError(t, err)
+
+		sess := webauthn.SessionData{
+			Challenge:        svChallenge,
+			UserID:           []byte(acct.ID),
+			UserVerification: protocol.VerificationPreferred,
+			RelyingPartyID:   svRPID,
+			CredParams: []protocol.CredentialParameter{
+				{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256},
+			},
+		}
+		injectEnrollSession(srv, rawToken, sess, 10*time.Minute)
+
+		// First finish: session is consumed (body is wrong, so WebAuthn verify fails
+		// with WEBAUTHN_VERIFY_ERROR — but the session is still deleted).
+		first := doEnrollFinish(t, srv, rawToken, bytes.NewReader(nil))
+		require.NotEqual(t, "NO_ACTIVE_ENROLLMENT", errCode(t, first.Body.Bytes()),
+			"first call must find the session (not return NO_ACTIVE_ENROLLMENT)")
+
+		// Second finish: session already consumed — must get NO_ACTIVE_ENROLLMENT.
+		second := doEnrollFinish(t, srv, rawToken, bytes.NewReader(nil))
+		assert.Equal(t, http.StatusBadRequest, second.Code)
+		assert.Equal(t, "NO_ACTIVE_ENROLLMENT", errCode(t, second.Body.Bytes()),
+			"second call must fail immediately because session was consumed by first")
+	})
+
+	t.Run("ExpiredSession", func(t *testing.T) {
+		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-expiredsession-user")
+		acct, err := srv.getWebAccount(context.Background(), "enroll-expiredsession-user")
+		require.NoError(t, err)
+
+		sess := webauthn.SessionData{
+			Challenge:      svChallenge,
+			UserID:         []byte(acct.ID),
+			RelyingPartyID: svRPID,
+		}
+		injectEnrollSession(srv, rawToken, sess, -1*time.Second) // already expired
+		rec := doEnrollFinish(t, srv, rawToken, bytes.NewReader(nil))
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("TokenInvalidAtFinish", func(t *testing.T) {
+		// Token is revoked between begin and finish: CAS check at finish rejects it.
+		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-tokeninvalid-user")
+		acct, err := srv.getWebAccount(context.Background(), "enroll-tokeninvalid-user")
+		require.NoError(t, err)
+
+		sess := webauthn.SessionData{
+			Challenge:      svChallenge,
+			UserID:         []byte(acct.ID),
+			RelyingPartyID: svRPID,
+			CredParams: []protocol.CredentialParameter{
+				{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256},
+			},
+		}
+		injectEnrollSession(srv, rawToken, sess, 10*time.Minute)
+
+		// Revoke the token (simulating admin action between begin and finish).
+		acct.EnrollmentLinkRevoked = true
+		require.NoError(t, srv.persistWebAccount(context.Background(), acct, "test-admin"))
+		srv.cacheWebAccount(acct)
+
+		// Finish should fail with TOKEN_INVALID.
+		// verifyEnrollmentToken runs before wa.FinishRegistration, so the result
+		// is determinate: 401 TOKEN_INVALID, not a WebAuthn verification error.
+		rec := doEnrollFinish(t, srv, rawToken,
+			finishBody(t, svCredIDStr,
+				base64.RawURLEncoding.EncodeToString(svCDJ),
+				base64.RawURLEncoding.EncodeToString(svAttObj)))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code,
+			"revoked token must produce 401 before WebAuthn verification is reached")
+		assert.Equal(t, "TOKEN_INVALID", errCode(t, rec.Body.Bytes()),
+			"revoked token must return TOKEN_INVALID error code")
+	})
+
+	t.Run("AlreadyEnrolled_CASPreconditionAtFinish", func(t *testing.T) {
+		// A credential is added between begin and finish: CAS check at finish rejects it.
+		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-cas-user")
+		acct, err := srv.getWebAccount(context.Background(), "enroll-cas-user")
+		require.NoError(t, err)
+
+		sess := webauthn.SessionData{
+			Challenge:        svChallenge,
+			UserID:           []byte(acct.ID),
+			UserVerification: protocol.VerificationPreferred,
+			RelyingPartyID:   svRPID,
+			CredParams: []protocol.CredentialParameter{
+				{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256},
+			},
+		}
+		injectEnrollSession(srv, rawToken, sess, 10*time.Minute)
+
+		// Inject a credential directly (simulating another path adding a credential).
+		injectCredential(t, srv, acct.Username, []byte("injected-credential"))
+
+		// The finish should be rejected by the CAS check: account now has credentials.
+		// WebAuthn verification passes first (server is configured for svRPID/svOrigin);
+		// the CAS store-reload then finds the injected credential and returns 409.
+		rec := doEnrollFinish(t, srv, rawToken,
+			finishBody(t, svCredIDStr,
+				base64.RawURLEncoding.EncodeToString(svCDJ),
+				base64.RawURLEncoding.EncodeToString(svAttObj)))
+		assert.Equal(t, http.StatusConflict, rec.Code,
+			"CAS precondition must fire 409 when credentials exist in the store at finish time")
+		assert.Equal(t, "ALREADY_ENROLLED", errCode(t, rec.Body.Bytes()),
+			"CAS precondition must return ALREADY_ENROLLED error code")
+	})
+
+	// Success test: uses the W3C Level 3 §16.2 NoneES256 spec vector.
+	t.Run("Success_FirstPasskeyPersisted", func(t *testing.T) {
+		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, svUsername)
+		acct, err := srv.getWebAccount(context.Background(), svUsername)
+		require.NoError(t, err)
+
+		sess := webauthn.SessionData{
+			Challenge:        svChallenge,
+			UserID:           []byte(acct.ID),
+			UserVerification: protocol.VerificationPreferred,
+			RelyingPartyID:   svRPID,
+			CredParams: []protocol.CredentialParameter{
+				{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256},
+			},
+		}
+		injectEnrollSession(srv, rawToken, sess, 10*time.Minute)
+
+		body := finishBody(t, svCredIDStr,
+			base64.RawURLEncoding.EncodeToString(svCDJ),
+			base64.RawURLEncoding.EncodeToString(svAttObj))
+		rec := doEnrollFinish(t, srv, rawToken, body)
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+		// Credential must be persisted.
+		updated, err := srv.getWebAccount(context.Background(), svUsername)
+		require.NoError(t, err)
+		require.Len(t, updated.Credentials, 1, "exactly one credential after enrollment")
+		assert.Equal(t, svCredIDBytes, updated.Credentials[0].ID,
+			"persisted credential ID must match the spec vector")
+
+		// Enrollment token must be consumed (revoked).
+		assert.True(t, updated.EnrollmentLinkRevoked,
+			"enrollment token must be marked as consumed after successful enrollment")
+
+		// Token must no longer be usable for a second enrollment begin.
+		rec2 := doEnrollBegin(t, srv, rawToken)
+		assert.Equal(t, http.StatusUnauthorized, rec2.Code,
+			"token must be unusable after enrollment (single-use)")
+
+		// Audit event must have been written.
+		require.NoError(t, srv.auditManager.Flush(context.Background()))
+		entries, err := srv.auditManager.QueryEntries(context.Background(),
+			&business.AuditFilter{Actions: []string{"web_account.passkey_enrolled"}})
+		require.NoError(t, err)
+		require.NotEmpty(t, entries, "web_account.passkey_enrolled audit entry must be written on success")
+		e := entries[0]
+		assert.Equal(t, "web_account.passkey_enrolled", e.Action)
+		assert.Equal(t, svUsername, e.ResourceID)
+	})
+}
+
+// TestPasskeyEnroll_SelfScopedToTokenAccount verifies that the enrollment handlers
+// resolve the target account from the TOKEN, not from any caller-supplied identifier.
+// This is the core fix for the cross-account credential injection vulnerability.
+func TestPasskeyEnroll_SelfScopedToTokenAccount(t *testing.T) {
+	// Create two separate accounts: A and B, each with their own enrollment token.
+	server := setupTestServer(t)
+	wa, err := NewWebAuthnFromConfig(tvRPID, tvRPID, []string{tvOrigin})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	recA := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "enroll-account-a"})
+	require.Equal(t, http.StatusCreated, recA.Code)
+	var outerA APIResponse
+	require.NoError(t, json.Unmarshal(recA.Body.Bytes(), &outerA))
+	tokenA := outerA.Data.(map[string]interface{})["enrollment_magic_link"].(string)
+
+	recB := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "enroll-account-b"})
+	require.Equal(t, http.StatusCreated, recB.Code)
+	var outerB APIResponse
+	require.NoError(t, json.Unmarshal(recB.Body.Bytes(), &outerB))
+	tokenB := outerB.Data.(map[string]interface{})["enrollment_magic_link"].(string)
+
+	// Call begin with account A's token: the ceremony is set up for account A.
+	recBegin := doEnrollBegin(t, server, tokenA)
+	require.Equal(t, http.StatusOK, recBegin.Code)
+
+	// The session is keyed by tokenA's hash — not by username "enroll-account-b".
+	hashA := hashEnrollmentToken(tokenA)
+	_, loadedByHashA := server.passkeyEnrollSessions.Load(hashA)
+	assert.True(t, loadedByHashA, "session must be stored under account-A's token hash")
+
+	// Account B's token hash must NOT have a session (its begin was never called).
+	hashB := hashEnrollmentToken(tokenB)
+	_, loadedByHashB := server.passkeyEnrollSessions.Load(hashB)
+	assert.False(t, loadedByHashB, "account-B's token hash must not have a session")
+
+	// Using account B's token on finish with account A's active session must fail:
+	// no session exists under tokenB's hash.
+	recFinish := doEnrollFinish(t, server, tokenB, nil)
+	assert.Equal(t, http.StatusBadRequest, recFinish.Code)
+	assert.Equal(t, "NO_ACTIVE_ENROLLMENT", errCode(t, recFinish.Body.Bytes()),
+		"presenting account-B's token when only account-A has an active session must fail")
+}
+
+// TestEnrollmentConfinement tests the enrollmentConfinementMiddleware server-side gate.
+// AC: a zero-passkey cookie-auth session is refused all api routes; once enrolled (>0
+// passkeys), the same request passes the confinement check.
+func TestEnrollmentConfinement(t *testing.T) {
+	server := setupTestServer(t)
+
+	// A handler that always succeeds — we only test whether confinement blocks it.
+	successHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	withCookieSession := func(req *http.Request, count int) *http.Request {
+		ctx := context.WithValue(req.Context(), cookieAuthContextKey, true)
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{
+			ID:                 "web-session-user",
+			Assurance:          session.AssuranceBasic,
+			AuthenticatorCount: count,
+		})
+		return req.WithContext(ctx)
+	}
+
+	t.Run("ZeroPasskeys_Blocked", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req = withCookieSession(req, 0)
+		rec := httptest.NewRecorder()
+		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "ENROLLMENT_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("NegativeAuthenticatorCount_Blocked", func(t *testing.T) {
+		// -1 means account load failed; fail-closed.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req = withCookieSession(req, -1)
+		rec := httptest.NewRecorder()
+		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "ENROLLMENT_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("OnePasskey_Allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req = withCookieSession(req, 1)
+		rec := httptest.NewRecorder()
+		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
+		// Confinement passes; the handler is reached.
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"one passkey enrolled: confinement must allow the request")
+	})
+
+	t.Run("mTLSAdmin_NotBlockedByConfinement", func(t *testing.T) {
+		// mTLS principal: cookieAuth is false → confinement does not apply.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		ctx := context.WithValue(req.Context(), cookieAuthContextKey, false)
+		ctx = context.WithValue(ctx, principalContextKey, &Principal{
+			ID:                 "mtls-admin",
+			Assurance:          session.AssuranceStrong,
+			AuthenticatorCount: 0, // default zero for non-web-session principals
+		})
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"mTLS admin (cookieAuth=false) must not be blocked even with AuthenticatorCount=0")
+	})
+
+	t.Run("NoCookieAuth_NotBlocked", func(t *testing.T) {
+		// Request with no cookie auth context at all.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		rec := httptest.NewRecorder()
+		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"no cookie auth context must pass through confinement")
+	})
+}
+
+// TestPasskeyEnroll_TokenHashing verifies that the enrollment token is never stored
+// or compared in plaintext — the implementation must use hashEnrollmentToken (SHA-256)
+// and constant-time compare (via verifyEnrollmentToken).
+func TestPasskeyEnroll_TokenHashing(t *testing.T) {
+	server := setupTestServer(t)
+	wa, err := NewWebAuthnFromConfig(tvRPID, tvRPID, []string{tvOrigin})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "token-hash-user"})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var outer APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &outer))
+	rawToken := outer.Data.(map[string]interface{})["enrollment_magic_link"].(string)
+
+	// The stored hash must differ from the raw token.
+	acct, err := server.getWebAccount(context.Background(), "token-hash-user")
+	require.NoError(t, err)
+	assert.NotEqual(t, rawToken, acct.EnrollmentLinkHash,
+		"stored hash must not equal the raw token (must be hashed)")
+
+	// The hash must equal SHA-256(rawToken).
+	expectedHash := hashEnrollmentToken(rawToken)
+	assert.Equal(t, expectedHash, acct.EnrollmentLinkHash,
+		"stored hash must be SHA-256 of the raw token")
+
+	// The passkeyEnrollSessions sync.Map key (after begin) must be the token hash.
+	recBegin := doEnrollBegin(t, server, rawToken)
+	require.Equal(t, http.StatusOK, recBegin.Code)
+
+	_, byHash := server.passkeyEnrollSessions.Load(hashEnrollmentToken(rawToken))
+	assert.True(t, byHash, "session must be stored under the token hash, not the raw token")
+
+	_, byRaw := server.passkeyEnrollSessions.Load(rawToken)
+	assert.False(t, byRaw, "session must NOT be stored under the raw token")
+}
+
+// TestWebAuthnRegisterStaysAtAssuranceStrong verifies that the existing
+// webauthn:register (add-to-existing) permission is NOT lowered by Issue #2966.
+// The enrollment redemption routes are separate and have no entry in permissionAssurance.
+func TestWebAuthnRegisterStaysAtAssuranceStrong(t *testing.T) {
+	req, ok := permissionAssurance["webauthn:register"]
+	require.True(t, ok, "webauthn:register must remain in permissionAssurance")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"webauthn:register must stay at AssuranceStrong (Issue #2966 must not lower it)")
 }
 
 // TestWebAuthnTOTPSeparation confirms that the WebAuthn registration code and the

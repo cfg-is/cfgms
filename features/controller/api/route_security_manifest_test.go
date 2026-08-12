@@ -37,6 +37,8 @@ var publicRouteSecurityPolicies = map[string]routeSecurityPolicy{
 	"POST /api/v1/stewards/{device_id}/refresh/complete":              publicWritePolicy("device proof-of-possession", "refresh.complete"),
 	"OPTIONS /api/v1/stewards/{device_id}/refresh/complete":           publicReadPolicy("none", "CORS preflight"),
 	"GET /api/v1/web/csrf":                                            publicReadPolicy("none", "pre-session CSRF issuance"),
+	"POST /api/v1/web/passkey/enroll/begin":                           publicWritePolicy("enrollment magic-link token (single-use, TTL-bounded)", "web.passkey.enroll.begin"),
+	"POST /api/v1/web/passkey/enroll/finish":                          publicWritePolicy("enrollment magic-link token plus WebAuthn attestation", "web.passkey.enroll.finish"),
 	"POST /api/v1/web/passkey/login/begin":                            publicWritePolicy("pre-session CSRF plus passkey ceremony", "web.passkey.login.begin"),
 	"POST /api/v1/web/passkey/login/finish":                           publicWritePolicy("passkey assertion plus ceremony cookie", "web.passkey.login.finish"),
 	"POST /api/v1/web/logout":                                         publicWritePolicy("web session plus session CSRF", "web.logout"),

@@ -697,6 +697,33 @@ Two invariants enforce Decisions 3 and 4 on that mint path:
   its own tenant subtree, so a tenant-scoped web admin cannot obtain an enrollment
   bearer token for another tenant's account or grant itself a root-scoped one.
 
+**Implementation reference — enrollment link redemption (Issue #2966):** The browser
+side of Decision 2 ("redemption via magic link") and Decisions 5–6 (confinement and
+CAS) is implemented in Story #2966.
+
+- **Redemption endpoints** — `POST /api/v1/web/passkey/enroll/begin` and `.../finish`
+  are registered on the base router (no `authenticationMiddleware`; the token is the
+  credential) with the `authDefense` middleware for DoS protection. They take the raw
+  token in the `X-Enrollment-Token` header; account resolution is fully token-driven
+  (`getWebAccountByEnrollmentToken`). No caller-supplied username or path variable is
+  consulted — eliminating cross-account credential injection.
+- **Single-use gate** — `passkeyEnrollSessions.LoadAndDelete(tokenHash)` makes the
+  in-flight ceremony atomically consume the session; a second concurrent finish call
+  sees no session and gets `NO_ACTIVE_ENROLLMENT`.
+- **CAS precondition at finish** — after WebAuthn verification succeeds, the handler
+  reloads the account from the durable store (`loadWebAccountFromStore`) and rejects
+  the request with `ALREADY_ENROLLED` if any credential is already present, enforcing
+  the zero-authenticator precondition under concurrent access.
+- **Token consumed on success** — `EnrollmentLinkRevoked = true` is persisted
+  immediately; subsequent begin calls with the same token get `TOKEN_INVALID`.
+- **Confinement middleware** — `enrollmentConfinementMiddleware` is added to the `/api/v1`
+  subrouter (runs after authentication, before `requirePermission`). It blocks every
+  request from a cookie-authenticated session whose `AuthenticatorCount` is ≤ 0 with
+  `403 ENROLLMENT_REQUIRED`. mTLS admin and API-key principals are never blocked
+  (their `cookieAuth` context key is false).
+- **`webauthn:register` (add-to-existing) stays at `AssuranceStrong`.** The enrollment
+  redemption routes have no entry in `permissionAssurance`; they are fully public.
+
 Revocation is fail-closed: the durable record is written before the in-memory cache is
 updated, so a store failure leaves a still-revocable outstanding link rather than a
 cache that claims revoked while the persisted link stays live.
