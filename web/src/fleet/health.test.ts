@@ -197,18 +197,31 @@ describe('fetchFleetHealth', () => {
       ),
     )
     const result = await fetchFleetHealth()
-    expect(result).toEqual({ healthy: 5, degraded: 2, unreachable: 1 })
+    // A response without `hidden` (older controller) maps to hidden: 0 (Issue #2918).
+    expect(result).toEqual({ healthy: 5, degraded: 2, unreachable: 1, hidden: 0 })
+  })
+
+  it('returns the hidden count when the server reports one', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ data: { healthy: 5, degraded: 2, unreachable: 1, hidden: 5 } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    const result = await fetchFleetHealth()
+    expect(result.hidden).toBe(5)
+    expect(result).toEqual({ healthy: 5, degraded: 2, unreachable: 1, hidden: 5 })
   })
 
   it('returns zeros when all counts are zero', async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(
-        JSON.stringify({ data: { healthy: 0, degraded: 0, unreachable: 0 } }),
+        JSON.stringify({ data: { healthy: 0, degraded: 0, unreachable: 0, hidden: 0 } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       ),
     )
     const result = await fetchFleetHealth()
-    expect(result).toEqual({ healthy: 0, degraded: 0, unreachable: 0 })
+    expect(result).toEqual({ healthy: 0, degraded: 0, unreachable: 0, hidden: 0 })
   })
 
   it('throws when the server returns a non-2xx status', async () => {

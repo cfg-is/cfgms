@@ -22,8 +22,9 @@ func registerStewardRoutes(s *Server, api *mux.Router) {
 	stewards.Handle("/{id}/dna", s.requirePermission("steward", "read-dna")(http.HandlerFunc(s.handleGetStewardDNA))).Methods("GET")
 	stewards.Handle("/{id}/logs", s.requirePermission("steward", "read-logs")(http.HandlerFunc(s.handleGetStewardLogs))).Methods("GET")
 	stewards.Handle("/{id}/auth/refresh", s.requirePermission("steward", "auth-refresh")(http.HandlerFunc(s.handleStewardAuthRefresh))).Methods("POST")
-	stewards.Handle("/{id}/move", s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward))).Methods("POST")              // Issue #2341, #2780: AssuranceStrong via permissionAssurance
-	stewards.Handle("/{id}", s.requirePermission("steward", "decommission")(http.HandlerFunc(s.handleDecommissionSteward))).Methods("DELETE") // Issue #2408, #2780: AssuranceStrong via permissionAssurance
+	stewards.Handle("/{id}/move", s.requirePermission("steward", "move")(http.HandlerFunc(s.handleMoveSteward))).Methods("POST")                       // Issue #2341, #2780: AssuranceStrong via permissionAssurance
+	stewards.Handle("/{id}/visibility", s.requirePermission("steward", "visibility")(http.HandlerFunc(s.handleSetStewardVisibility))).Methods("PATCH") // Issue #2918: AssuranceBasic via permissionAssurance
+	stewards.Handle("/{id}", s.requirePermission("steward", "decommission")(http.HandlerFunc(s.handleDecommissionSteward))).Methods("DELETE")          // Issue #2408, #2780: AssuranceStrong via permissionAssurance
 
 	// Configuration management endpoints
 	stewards.Handle("/{id}/config", s.requirePermission("steward", "read-config")(http.HandlerFunc(s.handleGetStewardConfig))).Methods("GET")
@@ -55,4 +56,12 @@ func registerStewardRoutes(s *Server, api *mux.Router) {
 
 	// Module inventory endpoint (Issue #1949)
 	stewards.Handle("/{id}/modules", s.requirePermission("steward", "read-modules")(http.HandlerFunc(s.handleGetStewardModules))).Methods("GET")
+
+	// Device-level reboot_window override endpoints (Issue #2979). reboot_window.override is
+	// intentionally distinct from config.update (ADR-026 decision 3) — a holder of
+	// config.update alone must receive 403 on the PUT.
+	stewards.Handle("/{id}/reboot-window",
+		s.requirePermission("reboot_window", "read")(http.HandlerFunc(s.handleGetStewardRebootWindow))).Methods("GET")
+	stewards.Handle("/{id}/reboot-window",
+		s.requirePermission("reboot_window", "override")(http.HandlerFunc(s.handlePutStewardRebootWindow))).Methods("PUT")
 }

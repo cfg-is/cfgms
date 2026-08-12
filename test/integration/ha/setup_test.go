@@ -43,13 +43,18 @@ var (
 // produces STEWARD_NOT_FOUND and 403 rather than a visible authorization error.
 const haStewardTenant = "test-tenant-integration"
 
-// certServerName is the name the controllers' HTTP certificates are minted
-// for. docker-compose.test.yml sets no CFGMS_EXTERNAL_HOSTNAME for the HA
-// controllers, so their server certificate carries the default SAN set from
-// features/controller/config.DefaultConfig ("localhost", "cfgms-controller",
-// "controller-standalone"). When the tests address a controller by its service
-// name, the TLS handshake is still fully verified against the container's CA —
-// the verified name is pinned here rather than taken from the dial address.
+// certServerName is the name verified during the TLS handshake with an HA
+// controller, pinned here rather than taken from the dial address.
+//
+// The controllers' server certificate carries every name the cluster is reached
+// by: test/fixtures/ha/controller-ha.cfg lists localhost, cfgms-controller and
+// all three controller-<region> names under certificate.server.dns_names, and
+// docker-compose.test.yml also sets CFGMS_EXTERNAL_HOSTNAME per node, which
+// initialization.TransportCertSANs merges in. "localhost" is in that set on
+// every node, so pinning it verifies whether the tests address a controller by
+// service name (in-container) or through a published port (on the host). The
+// handshake is fully verified against the cluster's CA either way; only the
+// expected name is fixed.
 const certServerName = "localhost"
 
 // controllerEndpoint returns the base URL for an HA controller service.

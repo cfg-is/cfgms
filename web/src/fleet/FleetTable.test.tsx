@@ -312,3 +312,74 @@ describe('checkbox column (Story #2939 AC)', () => {
     expect(screen.getByRole('button', { name: 'Actions' })).toBeInTheDocument()
   })
 })
+
+describe('per-row visibility button (Story #2918 AC)', () => {
+  function makeHiddenSteward(id: string, hostname = `host-${id}`): Steward {
+    return { ...makeSteward(id, hostname), hidden: true }
+  }
+
+  function renderWithVisibility(stewards: Steward[], onToggleVisibility: (s: Steward) => void) {
+    return render(
+      <MemoryRouter>
+        <FleetTable
+          stewards={stewards}
+          columns={defaultColumns}
+          sort={null}
+          onSort={() => {}}
+          nowMs={NOW_MS}
+          onRowSelect={() => {}}
+          onToggleVisibility={onToggleVisibility}
+        />
+      </MemoryRouter>,
+    )
+  }
+
+  it('no visibility button when onToggleVisibility is not provided', () => {
+    renderTable([makeSteward('stw-1', 'host1')], vi.fn())
+    expect(screen.queryByTestId('visibility-btn-stw-1')).not.toBeInTheDocument()
+  })
+
+  it('shows "Hide" button for a visible (not hidden) steward', () => {
+    renderWithVisibility([makeSteward('stw-1', 'host1')], vi.fn())
+    const btn = screen.getByTestId('visibility-btn-stw-1')
+    expect(btn).toHaveTextContent('Hide')
+    expect(btn).toHaveAttribute('aria-label', 'Hide steward')
+  })
+
+  it('shows "Unhide" button for a hidden steward', () => {
+    renderWithVisibility([makeHiddenSteward('stw-2', 'host2')], vi.fn())
+    const btn = screen.getByTestId('visibility-btn-stw-2')
+    expect(btn).toHaveTextContent('Unhide')
+    expect(btn).toHaveAttribute('aria-label', 'Unhide steward')
+  })
+
+  it('clicking the visibility button calls onToggleVisibility with the steward', () => {
+    const onToggleVisibility = vi.fn()
+    renderWithVisibility([makeSteward('stw-3', 'host3')], onToggleVisibility)
+
+    fireEvent.click(screen.getByTestId('visibility-btn-stw-3'))
+
+    expect(onToggleVisibility).toHaveBeenCalledTimes(1)
+    expect(onToggleVisibility.mock.calls[0]?.[0].id).toBe('stw-3')
+  })
+
+  it('clicking the visibility button does NOT call onRowSelect (drawer stays closed)', () => {
+    const onRowSelect = vi.fn()
+    render(
+      <MemoryRouter>
+        <FleetTable
+          stewards={[makeSteward('stw-4', 'host4')]}
+          columns={defaultColumns}
+          sort={null}
+          onSort={() => {}}
+          nowMs={NOW_MS}
+          onRowSelect={onRowSelect}
+          onToggleVisibility={() => {}}
+        />
+      </MemoryRouter>,
+    )
+
+    fireEvent.click(screen.getByTestId('visibility-btn-stw-4'))
+    expect(onRowSelect).not.toHaveBeenCalled()
+  })
+})

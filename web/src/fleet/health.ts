@@ -95,11 +95,14 @@ export function deriveHealth(
  * Server-side fleet health aggregate returned by GET /api/v1/fleet/health.
  * Counts are tenant-scoped and classified by the same degradation rule as
  * DegradedHeartbeatAge on the controller (5 min stale heartbeat).
+ * hidden is always present (non-suppressible): the operator must always see
+ * that concealment is in effect (Issue #2918).
  */
 export interface FleetHealth {
   healthy: number
   degraded: number
   unreachable: number
+  hidden: number
 }
 
 /**
@@ -125,6 +128,7 @@ export async function fetchFleetHealth(): Promise<FleetHealth> {
     healthy: rec['healthy'] as number,
     degraded: rec['degraded'] as number,
     unreachable: rec['unreachable'] as number,
+    hidden: typeof rec?.['hidden'] === 'number' ? (rec['hidden'] as number) : 0,
   }
 }
 

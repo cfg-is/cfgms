@@ -77,6 +77,11 @@ var permissionAssurance = map[string]Requirement{
 	// before they can perform a fresh presence ceremony.
 	"webauthn:assert-presence": {Min: session.AssuranceStrong}, // POST /webauthn/presence/begin|finish
 
+	// Steward visibility toggle (Issue #2918): AssuranceBasic (not Machine) so bare/compromised
+	// API keys cannot hide an active steward. Reachable from web-session cookies and cfg Bearer
+	// sessions. scanAPIKeysForPrivilegedAccess warns at boot on any key granted this permission.
+	"steward:visibility": {Min: session.AssuranceBasic}, // PATCH /stewards/{id}/visibility
+
 	// WebAuthn step-up elevation endpoint (ADR-021 Amendment 2, Issue #2965).
 	// Callable at AssuranceBasic: this IS the step-up path (the caller cannot already be
 	// at AssuranceStrong via a different path to reach here). AssuranceMachine principals

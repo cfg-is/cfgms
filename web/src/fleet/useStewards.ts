@@ -38,6 +38,7 @@ function parseSteward(value: unknown): Steward | null {
   if (typeof record.status === 'string') steward.status = record.status
   if (typeof record.last_seen === 'string') steward.last_seen = record.last_seen
   if (typeof record.version === 'string') steward.version = record.version
+  if (typeof record.hidden === 'boolean') steward.hidden = record.hidden
   if (typeof record.dna === 'object' && record.dna !== null) {
     const dna = record.dna as Record<string, unknown>
     let attributes: Record<string, string> = {}
@@ -94,7 +95,7 @@ interface FetchOutcome {
   fetchedAtMs: number
 }
 
-export function useStewards(limit: number, offset: number, selector = ''): UseStewardsResult {
+export function useStewards(limit: number, offset: number, selector = '', includeHidden = false): UseStewardsResult {
   const { scope, rootPath, registerObservedPath } = useTenantScope()
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
@@ -115,7 +116,7 @@ export function useStewards(limit: number, offset: number, selector = ''): UseSt
 
   // Loading is derived, not set: the view is loading whenever the latest
   // outcome doesn't answer the current request key.
-  const key = `${limit}:${offset}:${effectiveSelector}:${attempt}`
+  const key = `${limit}:${offset}:${effectiveSelector}:${String(includeHidden)}:${attempt}`
 
   useEffect(() => {
     let cancelled = false
@@ -126,6 +127,11 @@ export function useStewards(limit: number, offset: number, selector = ''): UseSt
     const selectorTrimmed = effectiveSelector.trim()
     if (selectorTrimmed !== '') {
       params.set('q', selectorTrimmed)
+    }
+    // Issue #2918: pass include_hidden and include_quarantined when the toggle is on.
+    if (includeHidden) {
+      params.set('include_hidden', 'true')
+      params.set('include_quarantined', 'true')
     }
     apiFetch(`/api/v1/stewards?${params.toString()}`)
       .then(async (response) => {
@@ -157,7 +163,7 @@ export function useStewards(limit: number, offset: number, selector = ''): UseSt
     return () => {
       cancelled = true
     }
-  }, [key, limit, offset, effectiveSelector, registerObservedPath])
+  }, [key, limit, offset, effectiveSelector, includeHidden, registerObservedPath])
 
   const current = outcome?.key === key ? outcome : null
   return {

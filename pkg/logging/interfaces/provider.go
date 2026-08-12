@@ -261,11 +261,16 @@ const (
 
 // LogLevelToSyslogSeverity maps CFGMS log levels to syslog severity.
 //
-// The comparison is case-insensitive. CFGMS_LOG_LEVEL is written lowercase
-// throughout docker-compose.test.yml and in operator documentation, and a
-// case-sensitive match silently fell through to the informational default —
-// so every container that asked for "debug" logged at INFO instead, with no
-// indication that the setting had been ignored.
+// The comparison is case-insensitive. It previously matched uppercase only and
+// fell through to the informational default for anything else, which would
+// silently downgrade a lowercase "debug" — the spelling used throughout
+// docker-compose.test.yml and operator documentation.
+//
+// This function has no production callers today; it is exported for syslog
+// subscribers and covered by its own test. The case-insensitivity here is
+// hardening against that latent trap, not the fix for containers ignoring their
+// configured level — that was parseLevel and configuredLoggerConfig in
+// pkg/logging, which is where the level actually reaches a logger.
 func LogLevelToSyslogSeverity(level string) SyslogSeverity {
 	switch strings.ToUpper(strings.TrimSpace(level)) {
 	case "FATAL":

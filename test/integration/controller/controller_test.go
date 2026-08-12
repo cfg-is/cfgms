@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -139,8 +140,29 @@ func (s *ControllerTestSuite) TestStorageInitialization() {
 	// to CFGMS_LOG_DIR, so the previous poll for "Registered storage provider"
 	// could only ever spend its 30s budget and fail — one of the two subtests
 	// that kept this suite red.
-	assert.Contains(s.T(), output, "status",
-		"Health endpoint should return a status payload")
+	//
+	// The payload is decoded rather than substring-matched. Asserting that the
+	// body contains "status" passes on any JSON carrying that key anywhere, and
+	// Server.writeResponse wraps every payload in an APIResponse envelope, so
+	// the old check could not distinguish a healthy controller from a degraded
+	// one — or from an error response.
+	var body struct {
+		Data struct {
+			Status   string            `json:"status"`
+			Services map[string]string `json:"services"`
+		} `json:"data"`
+	}
+	require.NoError(s.T(), json.Unmarshal([]byte(output), &body),
+		"Health endpoint should return a JSON APIResponse envelope, got: %s", output)
+	assert.Equal(s.T(), "healthy", body.Data.Status,
+		"Controller should report healthy once storage is initialised, got: %s", output)
+
+	// These two services are constructed from the storage manager, so their
+	// state is the closest the health payload comes to reporting on storage.
+	assert.Equal(s.T(), "healthy", body.Data.Services["controller"],
+		"Controller service should be healthy")
+	assert.Equal(s.T(), "healthy", body.Data.Services["configuration"],
+		"Configuration service should be healthy")
 
 	s.T().Log("Controller storage initialized (controller is serving requests)")
 }

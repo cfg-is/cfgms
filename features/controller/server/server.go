@@ -3037,6 +3037,7 @@ func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardD
 			Status:        info.Status,
 			LastHeartbeat: info.LastHeartbeat,
 			DNAAttributes: attrs,
+			Hidden:        info.Hidden,
 		})
 	}
 	return result

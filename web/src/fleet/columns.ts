@@ -31,6 +31,7 @@ export interface Steward {
   last_seen?: string
   version?: string
   dna?: StewardDNA | null
+  hidden?: boolean
 }
 
 export interface StewardPage {

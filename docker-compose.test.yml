@@ -571,7 +571,6 @@ services:
       # fails the TLS handshake ("certificate signed by unknown authority")
       # and the steward stays in degraded mode, never joining the cluster.
       CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
-      CFGMS_TRANSPORT_ADDRESS: "controller-east:4433"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
@@ -624,7 +623,6 @@ services:
       # fails the TLS handshake ("certificate signed by unknown authority")
       # and the steward stays in degraded mode, never joining the cluster.
       CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
-      CFGMS_TRANSPORT_ADDRESS: "controller-central:4433"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
@@ -673,7 +671,6 @@ services:
       # fails the TLS handshake ("certificate signed by unknown authority")
       # and the steward stays in degraded mode, never joining the cluster.
       CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
-      CFGMS_TRANSPORT_ADDRESS: "controller-west:4433"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"

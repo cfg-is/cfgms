@@ -48,4 +48,12 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("assurance-policy", "get")(http.HandlerFunc(s.handleGetAssurancePolicy))).Methods("GET")
 	tenants.Handle("/{tenant_path:.+}/assurance-policy",
 		s.requirePermission("assurance-policy", "set")(http.HandlerFunc(s.handleSetAssurancePolicy))).Methods("PUT")
+
+	// Tenant-default reboot_window endpoints (Issue #2979). reboot_window.override is
+	// intentionally distinct from config.update (ADR-026 decision 3) — a holder of
+	// config.update alone must receive 403 on the PUT.
+	tenants.Handle("/{tenant_id}/reboot-window",
+		s.requirePermission("reboot_window", "read")(http.HandlerFunc(s.handleGetTenantRebootWindow))).Methods("GET")
+	tenants.Handle("/{tenant_id}/reboot-window",
+		s.requirePermission("reboot_window", "override")(http.HandlerFunc(s.handlePutTenantRebootWindow))).Methods("PUT")
 }
