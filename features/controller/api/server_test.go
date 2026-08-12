@@ -1653,7 +1653,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 			"installer key permissions must allow upload+read+delete on installer artifacts and steward listing for the E2E flow")
 	})
 
-	t.Run("gate on, east/central/west loop: keys seeded with default tenant and steward permissions", func(t *testing.T) {
+	t.Run("gate on, east/central/west loop: keys seeded in the HA steward tenant with steward permissions", func(t *testing.T) {
 		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
 		t.Setenv("CFGMS_API_KEY_EAST", "east-key")
 		t.Setenv("CFGMS_API_KEY_CENTRAL", "central-key")
@@ -1666,11 +1666,23 @@ func TestSeedTestAPIKeys(t *testing.T) {
 			keyInfo, exists := server.apiKeys[k]
 			server.mu.RUnlock()
 			require.True(t, exists, "loop key %s must be seeded", k)
-			require.Equal(t, "default", keyInfo.TenantID, "loop keys use TenantID=default")
+			require.Equal(t, "test-tenant-integration", keyInfo.TenantID,
+				"loop keys must be scoped to the tenant the HA stewards register into; "+
+					"steward lookups are tenant-scoped, so a key in any other tenant reads "+
+					"STEWARD_NOT_FOUND for a steward that registered successfully")
 			require.ElementsMatch(t,
-				[]string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
+				[]string{
+					"steward:read", "steward:read-dna", "steward:auth-refresh",
+					"config:push",
+					"workflow:execute", "workflow:read",
+					// Read-only HA grants so test/integration/ha can observe the
+					// cluster it starts; every HA route is permission-gated.
+					"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+				},
 				keyInfo.Permissions,
 				"loop key %s must NOT have installer permissions (regression guard for Issue #1709)", k)
+			require.NotContains(t, keyInfo.Permissions, "installer:upload",
+				"loop key %s must NOT have installer permissions (Issue #1709)", k)
 		}
 	})
 }

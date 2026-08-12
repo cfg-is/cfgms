@@ -64,12 +64,28 @@ func (h *DockerComposeHelper) StartController(ctx context.Context) error {
 
 	h.startedBySuite = true
 
-	// Generate test credentials if not already present
+	// Generate test credentials only when they are actually absent.
+	//
+	// The comment above always said "if not already present", but the call was
+	// unconditional, and generate-test-credentials.sh rotates every secret it
+	// writes — including .cfgms-test-secrets.key, the master key the SOPS secret
+	// store derives from. Rotating it out from under containers another suite is
+	// already running leaves their ciphertext in the shared database undecryptable,
+	// and every HA controller then dies at startup with:
+	//
+	//	load audit HMAC key: failed to decrypt secret:
+	//	secret ciphertext authentication failed
+	//
+	// These packages run concurrently under `go test ./test/integration/...`, so
+	// this is a live cross-suite hazard, not a local-only one. Same guard as
+	// test/integration/ha's ensureCredentials.
 	fmt.Println("Step 1/3: Ensuring test credentials are generated...")
-	credCmd := exec.CommandContext(ctx, "bash", "-c", "cd ../../../ && ./scripts/generate-test-credentials.sh")
-	credOutput, err := credCmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Credential generation warnings: %s\n", string(credOutput))
+	if _, statErr := os.Stat("../../../.env.test"); os.IsNotExist(statErr) {
+		credCmd := exec.CommandContext(ctx, "bash", "-c", "cd ../../../ && ./scripts/generate-test-credentials.sh")
+		credOutput, err := credCmd.CombinedOutput()
+		if err != nil {
+			fmt.Printf("Credential generation warnings: %s\n", string(credOutput))
+		}
 	}
 
 	// Build and start containers
@@ -150,12 +166,22 @@ func (h *DockerComposeHelper) StopController(ctx context.Context) error {
 	}
 
 	fmt.Println("Stopping controller and cleaning up...")
+	// Scoped to the two services this suite starts.
+	//
+	// `down -v` is project-wide: it removed the HA cluster, the shared database
+	// and the standalone steward that test/integration/{ha,standalone,logging}
+	// are using concurrently in the same `go test ./test/integration/...` run,
+	// and `-v` destroyed the volumes holding their secret-store key material.
+	// Compose projects are shared by every suite here, so a suite may only ever
+	// remove the containers it created.
 	// #nosec G204 -- integration-only Docker Compose invocation; executable is
 	// fixed and all variable arguments are owned by the local test harness.
 	stopCmd := exec.CommandContext(ctx, "docker", "compose",
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
-		"down", "-v")
+		"--profile", "ha",
+		"rm", "-f", "-s", "-v",
+		"controller-standalone", "steward-standalone")
 
 	stopOutput, err := stopCmd.CombinedOutput()
 	if err != nil {
@@ -227,10 +253,19 @@ func (h *DockerComposeHelper) WaitForLogContent(ctx context.Context, containerNa
 	var lastLogs string
 	var lastErr error
 	for {
-		// #nosec G204 -- integration-only Docker log read; the executable and
-		// subcommand are fixed, no shell is involved, and containerName is
-		// checked against the harness-owned allowlist above before use.
-		cmd := exec.CommandContext(ctx, "docker", "logs", containerName)
+		// Read the container's log FILES, not its stdout.
+		//
+		// These containers run with CFGMS_LOG_PROVIDER=file and
+		// CFGMS_LOG_DIR=/tmp/cfgms, so `docker logs` shows only a startup
+		// banner: the records callers wait for are in the files. Waiting on
+		// stdout could only ever time out, which is exactly what the controller
+		// suite did — two subtests burning 30s each before failing.
+		//
+		// #nosec G204 -- integration-only Docker exec; the executable and
+		// subcommand are fixed, the shell command is a constant, and
+		// containerName is checked against the harness-owned allowlist above.
+		cmd := exec.CommandContext(ctx, "docker", "exec", containerName,
+			"sh", "-c", "cat /tmp/cfgms/*.log 2>/dev/null")
 		output, err := cmd.CombinedOutput()
 		if err == nil {
 			lastLogs = string(output)
