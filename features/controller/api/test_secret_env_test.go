@@ -29,4 +29,7 @@ func setTestSecretsEnv(t *testing.T) {
 
 	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(base, "data"))
+	// Tests use t.TempDir() which is under os.TempDir(); allow ephemeral storage
+	// so the guard does not reject the test path.
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "true")
 }
