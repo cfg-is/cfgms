@@ -191,12 +191,23 @@ func testStewardControllerFailover(t *testing.T, ctx context.Context, helper *Do
 
 	// Wait for the affected stewards to re-establish their control plane.
 	//
-	// They reconnect to the same controller, not a different one: each steward in
-	// this fixture is pinned to one node by CFGMS_TRANSPORT_ADDRESS
-	// (docker-compose.test.yml), so there is no client-side failover to another
-	// member for this test to observe. The property that does hold — and that
-	// this restart exercises — is that a controller leaving and rejoining the
-	// cluster does not leave its stewards permanently disconnected.
+	// They reconnect to the same controller, not a different one, and no
+	// client-side failover to another member exists for this test to observe.
+	//
+	// Each steward registers against exactly one node — the STEWARD_CONTROLLER_URL
+	// build arg in docker-compose.test.yml bakes that endpoint into its image. The
+	// controller answers with its own transport address (Server.getTransportAddress
+	// in features/controller/api/handlers_registration.go), the steward persists it
+	// to its identity file, and every reconnect dials that stored address. It never
+	// holds a list of controllers. The one controller-driven redirect,
+	// Manager.handleBecomeLeader in pkg/ha/manager.go, sends a CommandReconnect that
+	// carries no address, and sends it over the sessions the departed node held —
+	// stewards that are by definition already disconnected — so it cannot migrate
+	// anyone either.
+	//
+	// The property that does hold, and that this restart exercises, is that a
+	// controller leaving and rejoining the cluster does not leave its stewards
+	// permanently disconnected.
 	require.Eventually(t, func() bool {
 		reconnectedCount := 0
 
