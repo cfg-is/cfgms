@@ -307,6 +307,66 @@ func TestManager_ClusterMode(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestManager_GetLeader_SurvivesUint64PrecisionThroughRaftLog guards against a
+// regression found live during #3130: RaftCommand.Data was typed interface{},
+// so applyCommand's json.Unmarshal(data, &cmd) decoded the nested node_update
+// payload as map[string]interface{} — and encoding/json always decodes JSON
+// numbers in an interface{} position as float64, which only has 53 bits of
+// integer precision. The 64-bit FNV node-ID hashes used throughout this
+// package (~10^18 magnitude) silently lost precision through that round-trip:
+// ProposeNodeUpdate proposed the correct rc.nodeID, but by the time
+// applyNodeUpdate re-marshaled the already-float64-rounded map back to JSON
+// and unmarshaled it into the typed uint64 field, the key stored in
+// clusterState.Nodes no longer matched clusterState.Leader (itself set
+// directly from the raft library's uint64 SoftState.Lead, never touched by
+// this bug) — so GetLeaderInfo()'s clusterState.Nodes[leaderID] lookup always
+// missed, returning "leader node info not found" despite a genuinely healthy,
+// agreed-upon Raft leader. Fixed by typing RaftCommand.Data as
+// json.RawMessage, which defers decoding until the typed unmarshal and never
+// passes through float64. This test proves GetLeader() succeeds once a
+// single-node cluster elects itself leader (reproduced the failure
+// deterministically pre-fix — not a timing flake).
+func TestManager_GetLeader_SurvivesUint64PrecisionThroughRaftLog(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "test-node-leader-precision"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster.HeartbeatInterval = 100 * time.Millisecond
+	cfg.Cluster.ElectionTimeout = 1 * time.Second
+	cfg.Cluster.ExpectedSize = 1
+	cfg.Cluster.MinQuorum = 1
+	cfg.Cluster.Discovery.Config = map[string]interface{}{
+		"nodes": []interface{}{
+			map[string]interface{}{"id": nodeID, "address": "127.0.0.1:0"},
+		},
+	}
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, manager.raftConsensus.Stop()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+
+	require.Eventually(t, func() bool {
+		nodes, getErr := manager.GetClusterNodes()
+		return getErr == nil && len(nodes) > 0
+	}, 10*time.Second, 25*time.Millisecond, "nodes must populate via the Raft apply path")
+
+	require.Eventually(t, func() bool {
+		leader, getErr := manager.GetLeader()
+		return getErr == nil && leader != nil && leader.ID == nodeID
+	}, 5*time.Second, 25*time.Millisecond,
+		"GetLeader() must resolve the elected leader's NodeInfo — a uint64 precision"+
+			" mismatch between clusterState.Leader and clusterState.Nodes' keys breaks this")
+
+	require.NoError(t, manager.Stop(context.Background()))
+}
+
 // TestManager_Start_SurvivesCallerContextCancelledAfterReturn guards against a
 // regression found live during #3130: server.go's Start() calls
 // `ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second);

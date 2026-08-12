@@ -71,10 +71,17 @@ type ClusterState struct {
 	LastModified time.Time
 }
 
-// RaftCommand represents commands sent through Raft
+// RaftCommand represents commands sent through Raft. Data is deliberately
+// json.RawMessage, not interface{}: unmarshaling a JSON object into an
+// interface{} field decodes it as map[string]interface{}, and encoding/json
+// always decodes JSON numbers in that position as float64 — which only has
+// 53 bits of integer precision. The 64-bit FNV hash node IDs used throughout
+// this package (~10^18 magnitude) silently lose precision through that
+// round-trip. json.RawMessage defers decoding until the typed unmarshal in
+// applyNodeUpdate/applySessionUpdate, which never passes through float64.
 type RaftCommand struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
 }
 
 // NodeUpdateCommand is sent when node info changes
@@ -439,14 +446,9 @@ func (rc *RaftConsensus) applyCommand(data []byte) error {
 }
 
 // applyNodeUpdate updates node information in cluster state
-func (rc *RaftConsensus) applyNodeUpdate(data interface{}) error {
-	dataBytes, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-
+func (rc *RaftConsensus) applyNodeUpdate(data json.RawMessage) error {
 	var update NodeUpdateCommand
-	if err := json.Unmarshal(dataBytes, &update); err != nil {
+	if err := json.Unmarshal(data, &update); err != nil {
 		return err
 	}
 
@@ -461,14 +463,9 @@ func (rc *RaftConsensus) applyNodeUpdate(data interface{}) error {
 }
 
 // applySessionUpdate updates session state in the cluster state machine
-func (rc *RaftConsensus) applySessionUpdate(data interface{}) error {
-	dataBytes, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-
+func (rc *RaftConsensus) applySessionUpdate(data json.RawMessage) error {
 	var update SessionUpdateCommand
-	if err := json.Unmarshal(dataBytes, &update); err != nil {
+	if err := json.Unmarshal(data, &update); err != nil {
 		return err
 	}
 
@@ -492,15 +489,16 @@ func (rc *RaftConsensus) applySessionUpdate(data interface{}) error {
 // ProposeSessionUpdate replicates a steward connect/disconnect event through the Raft log.
 // It is non-blocking: if proposeC is at capacity it returns an error immediately.
 func (rc *RaftConsensus) ProposeSessionUpdate(stewardID, nodeID string, connected bool) error {
-	cmd := RaftCommand{
-		Type: "session_update",
-		Data: SessionUpdateCommand{
-			StewardID: stewardID,
-			NodeID:    nodeID,
-			Connected: connected,
-			Timestamp: time.Now(),
-		},
+	payload, err := json.Marshal(SessionUpdateCommand{
+		StewardID: stewardID,
+		NodeID:    nodeID,
+		Connected: connected,
+		Timestamp: time.Now(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal session update payload: %w", err)
 	}
+	cmd := RaftCommand{Type: "session_update", Data: payload}
 	data, err := json.Marshal(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to marshal session update command: %w", err)
@@ -637,13 +635,14 @@ func (rc *RaftConsensus) GetClusterNodes() []*NodeInfo {
 // ProposeNodeUpdate replicates updated NodeInfo for this node through the Raft log.
 // It is non-blocking: if proposeC is at capacity it returns an error immediately.
 func (rc *RaftConsensus) ProposeNodeUpdate(nodeInfo *NodeInfo) error {
-	cmd := RaftCommand{
-		Type: "node_update",
-		Data: NodeUpdateCommand{
-			NodeID:   rc.nodeID,
-			NodeInfo: nodeInfo,
-		},
+	payload, err := json.Marshal(NodeUpdateCommand{
+		NodeID:   rc.nodeID,
+		NodeInfo: nodeInfo,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal node update payload: %w", err)
 	}
+	cmd := RaftCommand{Type: "node_update", Data: payload}
 	data, err := json.Marshal(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to marshal node update command: %w", err)
