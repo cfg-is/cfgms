@@ -35,6 +35,14 @@ var (
 	controllerWestURL    = controllerEndpoint("controller-west", 9082)
 )
 
+// haStewardTenant is the tenant the HA stewards belong to. They register with
+// the seeded "integration_reusable" token, which carries this tenant
+// (features/controller/server.Server, CFGMS_SEED_TEST_TOKENS block), and the
+// API keys this suite authenticates with are scoped to it. Steward reads and
+// configuration pushes are both tenant-scoped, so naming any other tenant here
+// produces STEWARD_NOT_FOUND and 403 rather than a visible authorization error.
+const haStewardTenant = "test-tenant-integration"
+
 // certServerName is the name the controllers' HTTP certificates are minted
 // for. docker-compose.test.yml sets no CFGMS_EXTERNAL_HOSTNAME for the HA
 // controllers, so their server certificate carries the default SAN set from

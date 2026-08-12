@@ -330,12 +330,25 @@ func New(
 					// (routes_ha.go), so without them the suite's polling helpers
 					// read 403 bodies as "no leader" and "empty node ID" and fail
 					// with assertion messages that never mention authorization.
+					//
+					// steward:read-dna and config:push cover the other endpoints
+					// that suite calls: GET /stewards/{id}/dna for the config hash
+					// and POST /config/push for configuration continuity.
 					Permissions: []string{
-						"steward:read", "steward:auth-refresh",
+						"steward:read", "steward:read-dna", "steward:auth-refresh",
+						"config:push",
 						"workflow:execute", "workflow:read",
 						"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
 					},
-					TenantID: "default",
+					// Steward lookups are tenant-scoped. These keys exist to observe
+					// the stewards started by the HA compose profile, which register
+					// with the seeded "integration_reusable" token and therefore land
+					// in test-tenant-integration (features/controller/server.Server,
+					// CFGMS_SEED_TEST_TOKENS block). Scoping the keys to "default"
+					// put them in a tenant containing no stewards at all, so
+					// GET /api/v1/stewards/{id} answered STEWARD_NOT_FOUND for a
+					// steward that had registered successfully seconds earlier.
+					TenantID: "test-tenant-integration",
 				}
 			}
 		}
