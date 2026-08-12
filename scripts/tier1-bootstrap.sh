@@ -283,15 +283,6 @@ metrics_listen_addr: "127.0.0.1:9090"
 external_url: "https://${HOSTNAME_FLAG}:9080"
 data_dir: "/var/lib/cfgms"
 
-# Top-level, NOT nested under certificate: — CertificateConfig has no
-# cert_path field, so a nested certificate.cert_path key is silently dropped
-# by the YAML parser. This top-level field is the only one the code reads for
-# certificate storage; its default ("certs/") is relative and only resolves
-# correctly when the process cwd happens to be data_dir (true under systemd's
-# WorkingDirectory, not guaranteed for the runuser-invoked --init step below).
-# Must stay in sync with certificate.ca_path (ca/ subdir of this).
-cert_path: "/var/lib/cfgms/certs"
-
 certificate:
   enable_cert_management: true
   ca_path: "/var/lib/cfgms/certs/ca"

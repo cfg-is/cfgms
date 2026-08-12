@@ -389,16 +389,6 @@ metrics_listen_addr: "127.0.0.1:9090"
 external_url: "https://${HOSTNAME_FLAG}:9080"
 data_dir: "/var/lib/cfgms"
 
-# Top-level, NOT nested under certificate: — CertificateConfig has no
-# cert_path field, so a nested certificate.cert_path key is silently dropped
-# by the YAML parser. This top-level field is the only one the code reads for
-# certificate storage; its default ("certs/") is relative and only resolves
-# correctly when the process cwd happens to be data_dir, which is true under
-# systemd's WorkingDirectory but NOT for the runuser-invoked --init step below
-# — an unset/relative value here fails --init with "mkdir certs/: permission
-# denied". Must stay in sync with certificate.ca_path (ca/ subdir of this).
-cert_path: "/var/lib/cfgms/certs"
-
 # Private listener for controller-to-controller Raft traffic only — required,
 # top-level (not under ha:), never Internet-published. Must be a fixed private
 # IP, not 0.0.0.0 (config.ValidatePrivateListenerAddress rejects the wildcard

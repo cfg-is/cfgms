@@ -415,14 +415,25 @@ Six genuine bugs surfaced getting the two new nodes to a stable 3-node quorum
 3. **`certificate.cert_path` does not correspond to any config struct
    field** — `CertificateConfig` has no `CertPath`, so the nested YAML key
    both bootstrap scripts rendered was silently dropped. The only field the
-   code reads is the legacy top-level `cert_path` (`features/controller/config/config.go`),
-   which defaults to the relative `"certs/"` and only resolved correctly
-   because systemd's `WorkingDirectory=/var/lib/cfgms` happened to match —
-   `--init` (run via `runuser`, no such cwd guarantee) failed with `mkdir
-   certs/: permission denied`. Fixed both scripts to render `cert_path` at
-   the top level with an absolute value; this bug was **already latent in
-   `cfgms-ctrl-01`'s live config** (present since #3127) and would have hit
-   the Tier-1 controller on its next restart regardless of #3130.
+   code read at the time was the legacy top-level `cert_path`
+   (`features/controller/config/config.go`), which defaults to the relative
+   `"certs/"` and only resolved correctly because systemd's
+   `WorkingDirectory=/var/lib/cfgms` happened to match — `--init` (run via
+   `runuser`, no such cwd guarantee) failed with `mkdir certs/: permission
+   denied`. Worked around by rendering a top-level `cert_path` key in both
+   scripts. **Superseded during this same story's rebase onto `develop`**:
+   issue #3171 (filed in the "Lab rebuild note" above) was independently
+   fixed properly upstream in the meantime (PR #3257, `2f41f545`) —
+   `certPath` is now derived structurally as `filepath.Dir(ca_path)` in both
+   `initialization.go` and `server.go`, with its own test coverage
+   (`TestRun_HonorsAbsoluteCAPath`, `TestRun_HonorsTrailingSlashCAPath`).
+   This makes the top-level `cert_path` key dead config — removed from both
+   bootstrap scripts (and the now-obsolete
+   `TestRun_TopLevelCertPathMustBeAbsolute` regression test removed) once the
+   rebase surfaced the conflict; `ca_path` alone is sufficient. This bug was
+   **already latent in `cfgms-ctrl-01`'s live config** (present since #3127)
+   and would have hit the Tier-1 controller on its next restart regardless
+   of #3130.
 4. **`pkg/secrets/providers/sops` rejected `LoadCredential`-backed key
    files** — systemd's `LoadCredential=` always exposes files at mode `0440`
    (owner+group read, ACL-scoped to the unit by systemd itself, not by the

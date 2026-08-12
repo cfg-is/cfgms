@@ -185,12 +185,6 @@ else
     elif ! grep -q 'bucket: "cfgms-installer-blobs"' "$CFG_FILE"; then
         fail "test3: controller.cfg missing storage.cluster.s3.bucket"
         PASS_THIS=false
-    # Top-level cert_path (not nested under certificate:, which the config
-    # struct doesn't bind at all — see the script's own comment). A missing or
-    # relative value here breaks --init outside a systemd WorkingDirectory.
-    elif ! grep -Fxq 'cert_path: "/var/lib/cfgms/certs"' "$CFG_FILE"; then
-        fail "test3: controller.cfg missing top-level cert_path"
-        PASS_THIS=false
     # internal_listen_addr must be a fixed private/loopback IP, never the
     # 0.0.0.0 wildcard — config.ValidatePrivateListenerAddress rejects it, and
     # binding all interfaces would risk exposing Raft traffic on a public NIC.
