@@ -46,7 +46,7 @@ func TestRaftConsensus_NodeUpdatePopulatesClusterState(t *testing.T) {
 		Region:  "us-east",
 	}
 
-	rc, err := NewRaftConsensus(ctx, nodeID, nodeInfo, []raft.Peer{{ID: nodeID}}, clusterCfg, logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, nodeID, nodeInfo, []raft.Peer{{ID: nodeID}}, clusterCfg, "", logging.GetLogger())
 	require.NoError(t, err)
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 

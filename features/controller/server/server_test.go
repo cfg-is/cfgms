@@ -446,7 +446,7 @@ func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
 		},
 	}
 
-	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t))
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
 	require.NoError(t, err, "initializeHAManager must succeed with ha.mode=cluster and CFGMS_NODE_ID set")
 	require.NotNil(t, haManager)
 	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
@@ -472,7 +472,7 @@ func TestInitializeHAManager_InvalidMode(t *testing.T) {
 		},
 	}
 
-	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, nil)
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, nil, "")
 	require.Error(t, err, "initializeHAManager must return error for invalid ha.mode")
 	assert.Contains(t, err.Error(), "invalid HA mode",
 		"error must identify the bad mode string")

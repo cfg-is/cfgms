@@ -28,9 +28,10 @@ import (
 
 // Manager implements the ClusterManager interface and coordinates all HA operations
 type Manager struct {
-	mu     sync.RWMutex
-	cfg    *Config
-	logger logging.Logger
+	mu         sync.RWMutex
+	cfg        *Config
+	logger     logging.Logger
+	raftLogDir string // directory for the per-node bbolt WAL; empty means in-memory only
 
 	// Core components
 	nodeInfo      *NodeInfo
@@ -74,7 +75,9 @@ type Manager struct {
 // certManager is required in ClusterMode to mint the mTLS client certificate that
 // the outbound Raft peer transport presents on POST /raft/message. It may be nil in
 // SingleServerMode and BlueGreenMode, which never create a peer transport.
-func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager) (*Manager, error) {
+// raftLogDir, when non-empty, is the directory where the per-node Raft WAL
+// (raft.db) is stored. Pass an empty string in tests to use in-memory state only.
+func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager, raftLogDir string) (*Manager, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
@@ -128,6 +131,7 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		nodeInfo:       nodeInfo,
 		storageManager: storageManager,
 		certManager:    certManager,
+		raftLogDir:     raftLogDir,
 		clusterNodes:   make(map[string]*NodeInfo),
 		healthChecks:   make(map[string]HealthCheckFunc),
 		healthStatus: &HealthStatus{
@@ -632,7 +636,7 @@ func (m *Manager) initializeRaftConsensus() error {
 
 	// Create Raft consensus
 	var err error
-	m.raftConsensus, err = NewRaftConsensus(context.Background(), nodeID, m.nodeInfo, peers, &m.cfg.Cluster, m.logger)
+	m.raftConsensus, err = NewRaftConsensus(context.Background(), nodeID, m.nodeInfo, peers, &m.cfg.Cluster, m.raftLogDir, m.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create Raft consensus: %w", err)
 	}
