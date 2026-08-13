@@ -553,14 +553,16 @@ func (p *Processor) generateComplianceOverview(data interfaces.ReportData) inter
 	}
 
 	avgScore := 0.0
+	complianceRate := 0.0
 	if totalDevices > 0 {
 		avgScore = totalScore / float64(totalDevices)
+		complianceRate = float64(compliantDevices) / float64(totalDevices) * 100
 	}
 
 	content := map[string]interface{}{
 		"total_devices":      totalDevices,
 		"compliant_devices":  compliantDevices,
-		"compliance_rate":    float64(compliantDevices) / float64(totalDevices) * 100,
+		"compliance_rate":    complianceRate,
 		"average_score":      avgScore,
 		"total_drift_events": len(data.DriftEvents),
 	}
