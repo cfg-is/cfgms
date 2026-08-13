@@ -171,14 +171,14 @@ func TestHandleGetTenant_MissingPermission(t *testing.T) {
 
 func TestHandleSuspendTenant_Success(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "suspendable-tenant", 5*time.Minute)
 
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspendable-tenant"})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspendable-tenant/suspend", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert (AssuranceStrong,
+	// unscoped) rather than an API key (AssuranceMachine, which is below the floor).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/suspendable-tenant/suspend", nil)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -200,15 +200,46 @@ func TestHandleSuspendTenant_Success(t *testing.T) {
 
 func TestHandleSuspendTenant_NotFound(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "nonexistent-tenant", 5*time.Minute)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert (AssuranceStrong,
+	// unscoped) rather than an API key (AssuranceMachine, which is below the floor).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestHandleSuspendTenant_DefaultGuard_HTTP verifies that POST /api/v1/tenants/default/suspend
+// returns an error response (not 200) end-to-end through the HTTP handler (Issue #3181 AC).
+// A real "default" tenant is created so the default-tenant guard in SuspendTenant (not a
+// missing-tenant 404 from GetTenant) is what produces the error.
+func TestHandleSuspendTenant_DefaultGuard_HTTP(t *testing.T) {
+	server := setupTestServer(t)
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "default"})
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/default/suspend", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	assert.NotEqual(t, http.StatusOK, w.Code,
+		"suspending the default tenant must return an error, not 200")
+	assert.Equal(t, http.StatusBadRequest, w.Code,
+		"the default-tenant guard must produce 400 PROTECTED_TENANT, not a 500 server fault")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp))
+	assert.Equal(t, "PROTECTED_TENANT", errResp.Error.Code)
+
+	// Status must not have changed.
+	td, err := server.tenantManager.GetTenant(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status,
+		"default tenant must remain Active after a rejected suspend attempt")
 }
 
 // TestHandleSuspendTenant_ScopeGuard pins handleSuspendTenant's own scope guard, called
@@ -274,6 +305,86 @@ func TestHandleSuspendTenant_ScopeGuard(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, business.TenantStatusSuspended, td.Status)
 	})
+}
+
+// TestHandleSuspendTenant_ScopedStrongSession_SiblingReturns404 is a REQUIRED test
+// (Issue #3181 AC): a caller scoped to tenant "suspend-sib-client-a" calling
+// POST /tenants/suspend-sib-client-b/suspend — a sibling tenant, not an
+// ancestor/descendant of client-a — must get 404 TENANT_NOT_FOUND. Unlike
+// TestHandleSuspendTenant_ScopeGuard (which calls the handler directly), this drives
+// the request through server.router with a real Bearer session, so it exercises
+// requirePermission's tenant:manage AssuranceStrong floor and route wiring together
+// with the handler's own scope guard — the actual route, not the guard in isolation.
+func TestHandleSuspendTenant_ScopedStrongSession_SiblingReturns404(t *testing.T) {
+	server, sessionMgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-b"})
+	require.NoError(t, err)
+
+	sess, _, err := sessionMgr.Issue(ctx, "msp-operator", "cfg-cli", "suspend-sib-client-a")
+	require.NoError(t, err)
+	// httptest requests carry RemoteAddr 192.0.2.1:1234; binding the elevation to that
+	// IP keeps the session at AssuranceStrong through the device-continuity check.
+	elevated, token, err := sessionMgr.Elevate(ctx, sess.ID, []byte("test-credential-id"), "192.0.2.1")
+	require.NoError(t, err)
+	require.Equal(t, session.AssuranceStrong, elevated.Assurance,
+		"precondition: the caller must clear the AssuranceStrong gate on tenant:manage")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspend-sib-client-b/suspend", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a tenant-scoped caller must get 404 for a sibling tenant outside its subtree")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code)
+
+	unchanged, err := server.tenantManager.GetTenant(ctx, "suspend-sib-client-b")
+	require.NoError(t, err)
+	assert.NotEqual(t, business.TenantStatusSuspended, unchanged.Status,
+		"a refused sibling-tenant suspend must not change the target's status")
+}
+
+// TestHandleSuspendTenant_ScopedStrongSession_DescendantSucceeds is the positive half
+// of the scope guard (Issue #3181 AC): a caller scoped to "suspend-desc-client-a"
+// calling POST /tenants/suspend-desc-child-1/suspend — a real descendant (ParentID
+// chain, not string prefix) — must still succeed. Without this, a guard that refused
+// every non-exact-match tenant would pass the sibling test above for the wrong reason.
+func TestHandleSuspendTenant_ScopedStrongSession_DescendantSucceeds(t *testing.T) {
+	server, sessionMgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-desc-client-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ID:       "suspend-desc-child-1",
+		ParentID: "suspend-desc-client-a",
+	})
+	require.NoError(t, err)
+
+	sess, _, err := sessionMgr.Issue(ctx, "msp-operator", "cfg-cli", "suspend-desc-client-a")
+	require.NoError(t, err)
+	elevated, token, err := sessionMgr.Elevate(ctx, sess.ID, []byte("test-credential-id"), "192.0.2.1")
+	require.NoError(t, err)
+	require.Equal(t, session.AssuranceStrong, elevated.Assurance,
+		"precondition: the caller must clear the AssuranceStrong gate on tenant:manage")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspend-desc-child-1/suspend", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a tenant-scoped caller must still be able to suspend its own real descendant")
+
+	td, err := server.tenantManager.GetTenant(ctx, "suspend-desc-child-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, td.Status)
 }
 
 func TestHandleSuspendTenant_MissingPermission(t *testing.T) {

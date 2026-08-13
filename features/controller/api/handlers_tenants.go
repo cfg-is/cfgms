@@ -472,6 +472,10 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 			return
 		}
+		if errors.Is(err, tenant.ErrCannotSuspendDefault) {
+			s.writeErrorResponse(w, http.StatusBadRequest, "cannot suspend default tenant", "PROTECTED_TENANT")
+			return
+		}
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to suspend tenant", "SUSPEND_FAILED")
 		return
 	}
