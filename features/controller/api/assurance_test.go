@@ -230,6 +230,55 @@ func TestPermissionAssurance_WebAccountUpdateStrong(t *testing.T) {
 		"web-account:update must not require user presence (not a catastrophic operation)")
 }
 
+// TestPermissionAssurance_CrossRegistryInvariant is a REQUIRED test (Issue #3195).
+// It asserts that every permission ID registered in permissionAssurance is also
+// present in knownPermissions — or is a documented, deliberate exception — so that
+// cross-registry drift is caught mechanically rather than by review.
+//
+// Deliberate exceptions (not grantable by design):
+//   - session:create: the session-creation endpoint enforces this; no principal holds it as an explicit grant
+//   - webauthn:assert-presence: presence ceremony endpoint; implicit capability of any strongly-authenticated principal
+//   - webauthn:elevate: step-up elevation path; it IS the auth upgrade mechanism, not a grantable grant
+//   - publisher-trust:add: forward-declared in knownFuturePermissions; no active REST route yet
+//
+// Pending-audit exceptions (may be the same class of drift as tenant:create; tracked in a follow-up story):
+//   - cluster:drain-node, cluster:decommission-node, refresh:approve, refresh:set-policy, terminal:create
+func TestPermissionAssurance_CrossRegistryInvariant(t *testing.T) {
+	// Deliberate exceptions: permissions in permissionAssurance that are intentionally
+	// absent from knownPermissions because they are not grantable principal grants.
+	deliberate := map[string]bool{
+		"session:create":           true, // session endpoint; no principal holds this as an explicit grant
+		"webauthn:assert-presence": true, // presence ceremony; implicit capability, not a grantable grant
+		"webauthn:elevate":         true, // step-up elevation mechanism; not a grantable permission
+		"publisher-trust:add":      true, // forward-declared (no active route); knownFuturePermissions
+	}
+
+	// Pending-audit: these share the same inconsistency pattern as tenant:create (Issue #3195)
+	// and may need to be added to knownPermissions. Tracked as a follow-up to Issue #3195.
+	pendingAudit := map[string]bool{
+		"cluster:drain-node":        true,
+		"cluster:decommission-node": true,
+		"refresh:approve":           true,
+		"refresh:set-policy":        true,
+		"terminal:create":           true,
+	}
+
+	for permID := range permissionAssurance {
+		if deliberate[permID] || pendingAudit[permID] {
+			continue
+		}
+		assert.True(t, isKnownPermission(permID),
+			"permission %q is in permissionAssurance but missing from knownPermissions — "+
+				"add it to knownPermissions (if it should be grantable) or to the deliberate/pendingAudit "+
+				"exception set in this test with a documented reason (Issue #3195)", permID)
+	}
+
+	// Verify that tenant:create specifically is in knownPermissions — the direct fix for Issue #3195.
+	assert.True(t, isKnownPermission("tenant:create"),
+		"tenant:create must be in knownPermissions: it gates POST /tenants and must be grantable "+
+			"to API keys and web accounts (Issue #3195)")
+}
+
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
