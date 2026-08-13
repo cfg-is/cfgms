@@ -31,6 +31,8 @@ var knownPermissions = map[string]bool{
 	"config:push": true,
 	// Certificate management
 	"certificate:list":      true,
+	"certificate:get":       true, // Issue #3129: get single certificate by serial
+	"certificate:revoke":    true, // Issue #3129: revoke certificate by serial
 	"certificate:provision": true,
 	"certificate:rotate":    true,
 	// RBAC

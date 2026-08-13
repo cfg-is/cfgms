@@ -50,6 +50,7 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Former TierMTLSOnly set — all migrated to permissionAssurance with Min: AssuranceStrong.
 	{"POST", "/api/v1/certificates/provision", "certificate:provision"},
 	{"POST", "/api/v1/certificates/signing/rotate", "certificate:rotate"},
+	{"POST", "/api/v1/certificates/testserial/revoke", "certificate:revoke"}, // Issue #3129: revoke gated at AssuranceStrong (cross-tenant revoke = sabotage)
 	{"POST", "/api/v1/rbac/roles", "rbac:create-role"},
 	{"PUT", "/api/v1/rbac/roles/test-id", "rbac:update-role"},
 	{"DELETE", "/api/v1/rbac/roles/test-id", "rbac:delete-role"},

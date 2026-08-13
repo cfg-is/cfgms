@@ -1370,25 +1370,23 @@ func TestTenantContextKeyType(t *testing.T) {
 	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
 }
 
-// TestServer_CertificateRevokeRouteDeregistered confirms the POST
-// /api/v1/certificates/{serial}/revoke route has been removed.
-// Must return 404 (no route) or 405 (route exists, wrong method) — NOT 501.
-func TestServer_CertificateRevokeRouteDeregistered(t *testing.T) {
+// TestServer_CertificateRevoke_RouteRegisteredAndGated confirms that POST
+// /api/v1/certificates/{serial}/revoke is registered and gated at AssuranceStrong
+// (Issue #3129). A Machine-assurance API key holding certificate:revoke receives
+// 403, not 404 — proving the route exists and the assurance gate fires correctly.
+func TestServer_CertificateRevoke_RouteRegisteredAndGated(t *testing.T) {
 	server := setupTestServer(t)
 
 	revokeKey := NewTestKey(t, server, []string{"certificate:revoke"})
 
-	req := httptest.NewRequest("POST", "/api/v1/certificates/any-serial/revoke", nil)
+	req := httptest.NewRequest("POST", "/api/v1/certificates/12345678901234567890/revoke", nil)
 	req.Header.Set("X-API-Key", revokeKey)
 	rec := httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
 
-	assert.NotEqual(t, http.StatusNotImplemented, rec.Code,
-		"route must not return 501 — handler was deleted")
-	assert.True(t,
-		rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
-		"deregistered revoke route must return 404 or 405, got %d", rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"AssuranceStrong-gated route must reject Machine-assurance API key with 403, not 404")
 }
 
 // TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
