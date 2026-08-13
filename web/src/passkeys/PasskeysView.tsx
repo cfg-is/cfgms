@@ -21,7 +21,7 @@
  * passkey is present, so this page will never show the zero-credential state as
  * its initial condition.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useAuth } from '../auth/AuthContext.tsx'
 import { apiFetch } from '../api/client.ts'
 
@@ -55,6 +55,32 @@ interface CredentialInfo {
 interface ListResponse {
   username: string
   credentials: CredentialInfo[]
+}
+
+type CredentialListResult =
+  | { ok: true; credentials: CredentialInfo[] }
+  | { ok: false; message: string }
+
+// Plain data fetch — no setState here. Kept outside the component so it can
+// be awaited directly from event handlers (immediate reload after add/revoke)
+// and also driven from the mount effect's .then() chain, without either call
+// site risking the react-hooks/set-state-in-effect rule (which flags any
+// function reachable from an effect body that itself sets state).
+async function fetchCredentialList(username: string): Promise<CredentialListResult> {
+  try {
+    const resp = await apiFetch(`/api/v1/web/accounts/${encodeURIComponent(username)}/webauthn/credentials`)
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}))
+      return {
+        ok: false,
+        message: (body as { error?: { message?: string } })?.error?.message ?? `HTTP ${resp.status}`,
+      }
+    }
+    const body = (await resp.json()) as { data: ListResponse }
+    return { ok: true, credentials: body.data.credentials ?? [] }
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : 'Unknown error' }
+  }
 }
 
 // Server-response types for the registration begin endpoint — all binary
@@ -150,7 +176,11 @@ export default function PasskeysView() {
 
   const [credentials, setCredentials] = useState<CredentialInfo[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  // Derived, not a separate setState: the effect below must not call setState
+  // synchronously before its first await (react-hooks/set-state-in-effect), so
+  // there is no "loading start" flag to flip — the initial (pre-first-response)
+  // state is exactly "neither a credential list nor an error is present yet".
+  const loading = credentials === null && loadError === null
 
   const [addState, setAddState] = useState<'idle' | 'busy' | 'error'>('idle')
   const [addError, setAddError] = useState<string | null>(null)
@@ -161,34 +191,38 @@ export default function PasskeysView() {
 
   const [confirmId, setConfirmId] = useState<string | null>(null)
 
-  const abortRef = useRef<AbortController | null>(null)
-
   const loadCredentials = useCallback(async () => {
     if (!username) return
-    setLoading(true)
-    setLoadError(null)
-    try {
-      const resp = await apiFetch(`/api/v1/web/accounts/${encodeURIComponent(username)}/webauthn/credentials`)
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}))
-        setLoadError((body as { error?: { message?: string } })?.error?.message ?? `HTTP ${resp.status}`)
-        return
-      }
-      const body = (await resp.json()) as { data: ListResponse }
-      setCredentials(body.data.credentials ?? [])
-    } catch (e) {
-      setLoadError(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setLoading(false)
+    const result = await fetchCredentialList(username)
+    if (result.ok) {
+      setLoadError(null)
+      setCredentials(result.credentials)
+    } else {
+      setLoadError(result.message)
     }
   }, [username])
 
+  // Mount / username-change load. Inlined (not calling loadCredentials) so
+  // the state updates happen inside a .then() callback rather than
+  // synchronously in the effect body — required by react-hooks/set-state-in-effect.
+  // Reloads triggered by user actions (add/revoke/retry, below) call
+  // loadCredentials directly instead, so those stay immediate and awaitable.
   useEffect(() => {
-    void loadCredentials()
+    if (!username) return
+    let cancelled = false
+    fetchCredentialList(username).then((result) => {
+      if (cancelled) return
+      if (result.ok) {
+        setLoadError(null)
+        setCredentials(result.credentials)
+      } else {
+        setLoadError(result.message)
+      }
+    })
     return () => {
-      abortRef.current?.abort()
+      cancelled = true
     }
-  }, [loadCredentials])
+  }, [username])
 
   async function handleAdd() {
     if (!username) return

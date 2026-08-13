@@ -12,30 +12,150 @@
 //   - Add passkey: cancel (NotAllowedError) is silently swallowed
 //   - Add passkey: server begin error shows error banner
 //
-// Navigator.credentials.create() is stubbed — this test suite exercises
-// the request/response wiring only; full WebAuthn ceremony validation lives
-// in the handler tests (handlers_webauthn_test.go).
+// Real components only: the principal comes from the real <AuthProvider>, driven
+// through its real passkey login ceremony (begin → credentials.get → finish) via
+// the SignedInHarness below — the same mechanism App.tsx's Login screen uses, and
+// the same pattern as UserMenu.test.tsx / SavedViews.test.tsx. Nothing inside
+// web/src is mocked.
 //
-// The fetch global is stubbed (not apiFetch directly) to match the
-// AccountsView.test.tsx pattern used across this project.
+// Only the two browser boundaries are stubbed: the fetch global (answered by a
+// URL router so login traffic and passkey-management traffic cannot interleave
+// into an ordering dependency) and navigator.credentials (jsdom provisions no
+// authenticator). Full WebAuthn ceremony validation lives in the handler tests
+// (handlers_webauthn_test.go).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useEffect } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
+import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import PasskeysView from './PasskeysView.tsx'
 
-// ── auth context mock ─────────────────────────────────────────────────────
+const USERNAME = 'alice'
 
-vi.mock('../auth/AuthContext.tsx', () => ({
-  useAuth: () => ({ principal: { username: 'alice', tenantId: '' } }),
-}))
+// ── response helpers ──────────────────────────────────────────────────────
 
-// ── fetch stub ────────────────────────────────────────────────────────────
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(status === 204 ? null : JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function makeListResp(credentials: object[]): Response {
+  return jsonResponse(200, { data: { username: USERNAME, credentials } })
+}
+
+function makeErrorResp(status: number, code: string, message: string): Response {
+  return jsonResponse(status, { error: { code, message } })
+}
+
+// A per-endpoint FIFO of response factories. Responses are built lazily because a
+// Response body can only be consumed once. An exhausted queue answers 500 so an
+// unexpected extra call fails its test loudly instead of silently reusing a body.
+function makeQueue(name: string) {
+  const items: Array<() => Response> = []
+  return {
+    push(factory: () => Response) {
+      items.push(factory)
+    },
+    reset() {
+      items.length = 0
+    },
+    next(): Response {
+      const factory = items.shift()
+      if (factory === undefined) {
+        return jsonResponse(500, { error: { message: `unexpected extra ${name} request` } })
+      }
+      return factory()
+    },
+  }
+}
+
+const listQueue = makeQueue('credential-list')
+const revokeQueue = makeQueue('revoke')
+const registerBeginQueue = makeQueue('register-begin')
+const registerFinishQueue = makeQueue('register-finish')
+
+// ── browser boundary stubs ────────────────────────────────────────────────
 
 const fetchMock = vi.fn<typeof fetch>()
+const credentialsGet = vi.fn<(opts?: CredentialRequestOptions) => Promise<Credential | null>>()
+const credentialsCreate = vi.fn<(opts?: CredentialCreationOptions) => Promise<Credential | null>>()
+
+const LOGIN_BEGIN_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    timeout: 60000,
+    rpId: 'localhost',
+    allowCredentials: [],
+    userVerification: 'required' as const,
+  },
+}
+
+function makeAssertionCredential(): PublicKeyCredential {
+  const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  return {
+    id: 'login-cred-id',
+    type: 'public-key',
+    rawId: toArrayBuffer('login-cred-id'),
+    response: {
+      clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+      authenticatorData: toArrayBuffer('auth-data'),
+      signature: toArrayBuffer('sig'),
+      userHandle: null,
+    } as AuthenticatorAssertionResponse,
+    getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  } as unknown as PublicKeyCredential
+}
+
+function route(input: RequestInfo | URL): Response {
+  const url = String(input)
+  // Real AuthProvider login ceremony.
+  if (url.endsWith('/api/v1/web/csrf')) {
+    document.cookie = 'cfgms_csrf_pre=pre-tok; path=/'
+    return jsonResponse(204, null)
+  }
+  if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+    return jsonResponse(200, LOGIN_BEGIN_OPTIONS)
+  }
+  if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+    return jsonResponse(200, {
+      data: { ok: true, username: USERNAME, tenant_id: '', root_scope: false },
+    })
+  }
+  // PasskeysView management endpoints.
+  if (url.endsWith(`/api/v1/web/accounts/${USERNAME}/webauthn/credentials`)) {
+    return listQueue.next()
+  }
+  if (url.endsWith('/webauthn/register/begin')) {
+    return registerBeginQueue.next()
+  }
+  if (url.endsWith('/webauthn/register/finish')) {
+    return registerFinishQueue.next()
+  }
+  if (url.includes('/webauthn/revoke/')) {
+    return revokeQueue.next()
+  }
+  return jsonResponse(404, { error: { message: `unrouted request: ${url}` } })
+}
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
+  fetchMock.mockImplementation((input) => Promise.resolve(route(input)))
+  credentialsGet.mockReset()
+  credentialsGet.mockImplementation(() => Promise.resolve(makeAssertionCredential()))
+  credentialsCreate.mockReset()
+  credentialsCreate.mockImplementation(() =>
+    Promise.reject(new Error('credentials.create not configured by this test')),
+  )
+  listQueue.reset()
+  revokeQueue.reset()
+  registerBeginQueue.reset()
+  registerFinishQueue.reset()
+  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('navigator', { credentials: { get: credentialsGet, create: credentialsCreate } })
 })
 
 afterEach(() => {
@@ -43,21 +163,7 @@ afterEach(() => {
   cleanup()
 })
 
-// ── helpers ───────────────────────────────────────────────────────────────
-
-function makeListResp(credentials: object[]): Response {
-  return new Response(
-    JSON.stringify({ data: { username: 'alice', credentials } }),
-    { status: 200, headers: { 'Content-Type': 'application/json' } },
-  )
-}
-
-function makeErrorResp(status: number, code: string, message: string): Response {
-  return new Response(
-    JSON.stringify({ error: { code, message } }),
-    { status, headers: { 'Content-Type': 'application/json' } },
-  )
-}
+// ── fixtures ──────────────────────────────────────────────────────────────
 
 const CRED_A = {
   id: 'aGVsbG8',
@@ -75,20 +181,41 @@ const CRED_B = {
   last_used_at: null,
 }
 
-function renderView() {
-  return render(
+// ── harness ───────────────────────────────────────────────────────────────
+
+/*
+ * Signs in through the real AuthProvider.login() — PasskeysView has no login
+ * form of its own, so a principal only exists once something drives the
+ * provider's real ceremony. PasskeysView mounts only after the session is
+ * established, so its credential-list load fires exactly once per test.
+ */
+function SignedInHarness() {
+  const { status, login } = useAuth()
+  useEffect(() => {
+    if (status === 'signedOut') void login(USERNAME)
+  }, [status, login])
+  if (status !== 'signedIn') return null
+  return <PasskeysView />
+}
+
+async function renderView() {
+  const result = render(
     <MemoryRouter>
-      <PasskeysView />
+      <AuthProvider>
+        <SignedInHarness />
+      </AuthProvider>
     </MemoryRouter>,
   )
+  await screen.findByTestId('passkeys-view')
+  return result
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────
 
 describe('PasskeysView', () => {
   it('renders the credential list', async () => {
-    fetchMock.mockResolvedValueOnce(makeListResp([CRED_A, CRED_B]))
-    renderView()
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
 
     await waitFor(() => expect(screen.queryByTestId('passkeys-loading')).toBeNull())
 
@@ -99,21 +226,16 @@ describe('PasskeysView', () => {
   })
 
   it('shows empty state when no credentials', async () => {
-    fetchMock.mockResolvedValueOnce(makeListResp([]))
-    renderView()
+    listQueue.push(() => makeListResp([]))
+    await renderView()
 
     await waitFor(() => expect(screen.queryByTestId('passkeys-loading')).toBeNull())
     expect(screen.getByTestId('passkeys-empty')).toBeInTheDocument()
   })
 
   it('shows load error and retry button on API failure', async () => {
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { message: 'store unavailable' } }), {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    )
-    renderView()
+    listQueue.push(() => jsonResponse(503, { error: { message: 'store unavailable' } }))
+    await renderView()
 
     await waitFor(() => expect(screen.queryByTestId('passkeys-loading')).toBeNull())
     expect(screen.getByTestId('load-error')).toBeInTheDocument()
@@ -122,8 +244,8 @@ describe('PasskeysView', () => {
 
   it('removes a credential row after successful revoke', async () => {
     // Initial load returns two credentials.
-    fetchMock.mockResolvedValueOnce(makeListResp([CRED_A, CRED_B]))
-    renderView()
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
     // Click "Remove" on the first credential to open the confirm dialog.
@@ -134,9 +256,8 @@ describe('PasskeysView', () => {
     await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
 
     // POST revoke → 204; reload list → 1 cred.
-    fetchMock
-      .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValueOnce(makeListResp([CRED_B]))
+    revokeQueue.push(() => new Response(null, { status: 204 }))
+    listQueue.push(() => makeListResp([CRED_B]))
 
     fireEvent.click(screen.getByTestId('confirm-revoke-btn'))
 
@@ -147,14 +268,14 @@ describe('PasskeysView', () => {
   })
 
   it('shows anti-lockout alert on 409 LAST_CREDENTIAL', async () => {
-    fetchMock.mockResolvedValueOnce(makeListResp([CRED_A]))
-    renderView()
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
     fireEvent.click(screen.getByTestId('revoke-btn'))
     await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
 
-    fetchMock.mockResolvedValueOnce(makeErrorResp(409, 'LAST_CREDENTIAL', 'Cannot remove the last passkey'))
+    revokeQueue.push(() => makeErrorResp(409, 'LAST_CREDENTIAL', 'Cannot remove the last passkey'))
 
     fireEvent.click(screen.getByTestId('confirm-revoke-btn'))
 
@@ -164,15 +285,15 @@ describe('PasskeysView', () => {
   })
 
   it('shows revoke error banner on server error', async () => {
-    fetchMock.mockResolvedValueOnce(makeListResp([CRED_A, CRED_B]))
-    renderView()
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
     // Use getByRole to avoid noUncheckedIndexedAccess issue with getAllByTestId()[0].
     fireEvent.click(screen.getByRole('button', { name: /MacBook Touch ID/i }))
     await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
 
-    fetchMock.mockResolvedValueOnce(makeErrorResp(500, 'STORE_ERROR', 'store write failed'))
+    revokeQueue.push(() => makeErrorResp(500, 'STORE_ERROR', 'store write failed'))
 
     fireEvent.click(screen.getByTestId('confirm-revoke-btn'))
 
@@ -180,33 +301,26 @@ describe('PasskeysView', () => {
   })
 
   it('silently ignores NotAllowedError from credentials.create', async () => {
-    fetchMock.mockResolvedValueOnce(makeListResp([CRED_A]))
-    // Stub navigator.credentials.create to throw NotAllowedError (user cancelled).
-    // jsdom does not provision navigator.credentials, so we stub the global.
+    listQueue.push(() => makeListResp([CRED_A]))
+    // The authenticator rejects with NotAllowedError (user cancelled the prompt).
     const notAllowed = Object.assign(new Error('NotAllowedError'), { name: 'NotAllowedError' })
-    vi.stubGlobal('navigator', {
-      credentials: { create: vi.fn().mockRejectedValue(notAllowed) },
-    })
+    credentialsCreate.mockImplementation(() => Promise.reject(notAllowed))
 
-    renderView()
+    await renderView()
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
     // Begin returns a minimal options object; the authenticator then throws NotAllowedError.
-    const beginOpts = {
-      data: {
-        publicKey: {
-          challenge: 'AAAA',
-          rp: { name: 'CFGMS', id: 'example.com' },
-          user: { id: 'AAAA', name: 'alice', displayName: 'alice' },
-          pubKeyCredParams: [],
-          timeout: 60000,
+    registerBeginQueue.push(() =>
+      jsonResponse(200, {
+        data: {
+          publicKey: {
+            challenge: 'AAAA',
+            rp: { name: 'CFGMS', id: 'example.com' },
+            user: { id: 'AAAA', name: USERNAME, displayName: USERNAME },
+            pubKeyCredParams: [],
+            timeout: 60000,
+          },
         },
-      },
-    }
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify(beginOpts), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
       }),
     )
 
@@ -220,11 +334,13 @@ describe('PasskeysView', () => {
   })
 
   it('shows add error banner when begin returns an error', async () => {
-    fetchMock.mockResolvedValueOnce(makeListResp([CRED_A]))
-    renderView()
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
-    fetchMock.mockResolvedValueOnce(makeErrorResp(503, 'WEBAUTHN_NOT_CONFIGURED', 'WebAuthn not configured'))
+    registerBeginQueue.push(() =>
+      makeErrorResp(503, 'WEBAUTHN_NOT_CONFIGURED', 'WebAuthn not configured'),
+    )
 
     fireEvent.click(screen.getByTestId('add-passkey-btn'))
 
