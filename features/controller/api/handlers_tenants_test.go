@@ -171,14 +171,14 @@ func TestHandleGetTenant_MissingPermission(t *testing.T) {
 
 func TestHandleSuspendTenant_Success(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "suspendable-tenant", 5*time.Minute)
 
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspendable-tenant"})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspendable-tenant/suspend", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert (AssuranceStrong,
+	// unscoped) rather than an API key (AssuranceMachine, which is below the floor).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/suspendable-tenant/suspend", nil)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -200,15 +200,46 @@ func TestHandleSuspendTenant_Success(t *testing.T) {
 
 func TestHandleSuspendTenant_NotFound(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "nonexistent-tenant", 5*time.Minute)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert (AssuranceStrong,
+	// unscoped) rather than an API key (AssuranceMachine, which is below the floor).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestHandleSuspendTenant_DefaultGuard_HTTP verifies that POST /api/v1/tenants/default/suspend
+// returns an error response (not 200) end-to-end through the HTTP handler (Issue #3181 AC).
+// A real "default" tenant is created so the default-tenant guard in SuspendTenant (not a
+// missing-tenant 404 from GetTenant) is what produces the error.
+func TestHandleSuspendTenant_DefaultGuard_HTTP(t *testing.T) {
+	server := setupTestServer(t)
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "default"})
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/default/suspend", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	assert.NotEqual(t, http.StatusOK, w.Code,
+		"suspending the default tenant must return an error, not 200")
+	assert.Equal(t, http.StatusBadRequest, w.Code,
+		"the default-tenant guard must produce 400 PROTECTED_TENANT, not a 500 server fault")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp))
+	assert.Equal(t, "PROTECTED_TENANT", errResp.Error.Code)
+
+	// Status must not have changed.
+	td, err := server.tenantManager.GetTenant(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status,
+		"default tenant must remain Active after a rejected suspend attempt")
 }
 
 // TestHandleSuspendTenant_ScopeGuard pins handleSuspendTenant's own scope guard, called

@@ -57,5 +57,6 @@ var (
 	ErrTenantExists      = business.ErrTenantAlreadyExists
 	ErrInvalidParent     = fmt.Errorf("invalid parent tenant")
 	ErrCircularReference = fmt.Errorf("circular reference in tenant hierarchy")
-	ErrTenantHasChildren = fmt.Errorf("tenant has child tenants")
+	ErrTenantHasChildren     = fmt.Errorf("tenant has child tenants")
+	ErrCannotSuspendDefault  = fmt.Errorf("cannot suspend default tenant")
 )

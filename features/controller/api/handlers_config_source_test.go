@@ -88,13 +88,13 @@ func TestConnectionTest_RateLimitReturns429(t *testing.T) {
 
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
 
 	// Exhaust the per-tenant rate limit.
 	for i := 0; i < configTestMaxPerTenant; i++ {
-		req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
 		code := w.Code
@@ -103,8 +103,7 @@ func TestConnectionTest_RateLimitReturns429(t *testing.T) {
 	}
 
 	// The next request must be rate-limited.
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -118,13 +117,11 @@ func TestConnectionTest_ActorFromContextOnly(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
-
-	// Attempt to inject a fake actor via the request body (must be ignored).
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	body := `{"actor": "injected-actor", "user": "attacker"}`
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -144,11 +141,10 @@ func TestConnectionTest_Returns200WhenReachable(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
-
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -167,11 +163,10 @@ func TestConnectionTest_Returns200WhenUnreachable(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysFailValidator{}, nil)
 
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, tenantID, 5*time.Minute)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
-
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 

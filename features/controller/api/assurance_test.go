@@ -3,6 +3,9 @@
 package api
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -146,6 +149,72 @@ func TestPermissionAssurance_SubjectRoleBindingStrong(t *testing.T) {
 		assert.False(t, req.RequireUserPresence,
 			"permission %q must not require user presence (not a catastrophic operation)", perm)
 	}
+}
+
+// TestPermissionAssurance_TenantManageStrong is a REQUIRED test (Issue #3181 AC:
+// "tenant:manage is registered in permissionAssurance at Min: session.AssuranceStrong").
+// Suspending a tenant is a denial of service against everything inside it, so it sits
+// at the same assurance bar as tenant:create and tenant:update.
+func TestPermissionAssurance_TenantManageStrong(t *testing.T) {
+	req, found := permissionAssurance["tenant:manage"]
+	require.True(t, found, "tenant:manage must be in permissionAssurance (Issue #3181)")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"tenant:manage must require AssuranceStrong (same bar as tenant:create and tenant:update)")
+	assert.False(t, req.RequireUserPresence,
+		"tenant:manage must not require user presence (not a catastrophic operation)")
+}
+
+// TestPermissionAssurance_TenantManage_FloorEnforced is a REQUIRED test (Issue #3181 AC:
+// "A principal at AssuranceBasic is rejected by requirePermission for tenant:manage, while
+// a principal at AssuranceStrong is admitted"). Proves the floor is enforced at runtime by
+// requirePermission, not merely declared in the map.
+func TestPermissionAssurance_TenantManage_FloorEnforced(t *testing.T) {
+	server := setupTestServer(t)
+
+	reached := false
+	probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := server.requirePermission("tenant", "manage")(probe)
+
+	newReq := func(principal *Principal) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/some-tenant/suspend", nil)
+		ctx := context.WithValue(req.Context(), principalContextKey, principal)
+		return req.WithContext(ctx)
+	}
+
+	t.Run("AssuranceBasic is rejected with step-up challenge", func(t *testing.T) {
+		reached = false
+		p := &Principal{
+			ID:          "basic-user",
+			Assurance:   session.AssuranceBasic,
+			Permissions: []string{"tenant:manage"},
+			TenantID:    "some-tenant",
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newReq(p))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code,
+			"AssuranceBasic must be rejected for tenant:manage (step-up required)")
+		assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp",
+			"rejected caller must receive a step-up challenge, not a flat denial")
+		assert.False(t, reached, "probe must not be reached when assurance is insufficient")
+	})
+
+	t.Run("AssuranceStrong is admitted", func(t *testing.T) {
+		reached = false
+		p := &Principal{
+			ID:          "strong-user",
+			Assurance:   session.AssuranceStrong,
+			Permissions: []string{"tenant:manage"},
+			TenantID:    "some-tenant",
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newReq(p))
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"AssuranceStrong must be admitted for tenant:manage")
+		assert.True(t, reached, "probe must be reached when assurance is sufficient")
+	})
 }
 
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
