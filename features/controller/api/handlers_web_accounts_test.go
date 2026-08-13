@@ -1289,6 +1289,18 @@ func parseWebAccountInfo(t *testing.T, rec *httptest.ResponseRecorder) WebAccoun
 	return info
 }
 
+// parseUpdateResponse extracts a WebAccountUpdateResponse from an APIResponse body.
+func parseUpdateResponse(t *testing.T, rec *httptest.ResponseRecorder) WebAccountUpdateResponse {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var ur WebAccountUpdateResponse
+	require.NoError(t, json.Unmarshal(raw, &ur))
+	return ur
+}
+
 // TestWebAccounts_GetWebAccount_Returns200 verifies GET /web/accounts/{username} returns
 // the account's identity fields with no secret material (Issue #3126 AC).
 func TestWebAccounts_GetWebAccount_Returns200(t *testing.T) {
@@ -1950,4 +1962,286 @@ func TestWebAccounts_ResetRetainsDisabled(t *testing.T) {
 	require.Len(t, entries, 1,
 		"exactly one enable — the explicit PUT — may appear in the audit trail; a reset must not enable")
 	assert.Equal(t, "reset-disabled-user", entries[0].ResourceID)
+}
+
+// TestWebAccounts_UpdateResetCredentials_MintsFreshLink covers PR #3298 review follow-up
+// (Issue #3126 AC #2): PUT .../{username} with reset_credentials:true is the passkey-only
+// equivalent of "resets the password" — it re-provisions the account to the
+// zero-authenticator state and mints a fresh enrollment link, mirroring
+// handleCreateWebAccount's ResetCredentials path (ADR-021 Amendment 1 Decision 4).
+func TestWebAccounts_UpdateResetCredentials_MintsFreshLink(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "put-reset-creds-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: "tenant-a"})
+	require.Equal(t, http.StatusCreated, rec.Code)
+	injectCredential(t, server, username, []byte("put-reset-creds-credential"))
+
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	ur := parseUpdateResponse(t, putRec)
+	require.NotEmpty(t, ur.EnrollmentMagicLink,
+		"an explicit credential reset via PUT must issue a fresh enrollment link")
+	assert.True(t, ur.HasOutstandingEnrollmentLink)
+
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Empty(t, acct.Credentials,
+		"residual credentials must be invalidated when a fresh link is issued via PUT")
+	assert.True(t, verifyEnrollmentToken(acct, ur.EnrollmentMagicLink),
+		"the returned token must be the one stored against the reset account")
+}
+
+// TestWebAccounts_UpdateResetCredentials_IndependentOfPermissions verifies that a single
+// PUT can reset credentials and update permissions together, and that a permissions-only
+// PUT (reset_credentials omitted) leaves credentials untouched — the "both optional,
+// independently" half of Issue #3126 AC #2.
+func TestWebAccounts_UpdateResetCredentials_IndependentOfPermissions(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "put-reset-creds-and-perms-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    username,
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+	injectCredential(t, server, username, []byte("put-reset-creds-and-perms-credential"))
+
+	newPerms := []string{"steward:list", "steward:read"}
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{
+		Permissions:      &newPerms,
+		ResetCredentials: true,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	ur := parseUpdateResponse(t, putRec)
+	require.NotEmpty(t, ur.EnrollmentMagicLink, "reset_credentials must mint a link even when permissions also change")
+	assert.Equal(t, newPerms, ur.Permissions, "permissions must be updated in the same request")
+
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Empty(t, acct.Credentials, "credentials must be cleared")
+	assert.Equal(t, newPerms, acct.Permissions, "permissions must be persisted")
+}
+
+// TestWebAccounts_CrossTenantPutResetCredentials_Returns404_And_LeavesCredentialsUnmodified
+// extends the [REQUIRED TEST] cross-tenant PUT invariant to the credential-reset field: a
+// cross-tenant PUT with reset_credentials:true must not mint a link, clear credentials, or
+// leak any token, matching the existing 404-and-unmodified guarantee for permissions/disabled.
+func TestWebAccounts_CrossTenantPutResetCredentials_Returns404_And_LeavesCredentialsUnmodified(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "tenantb-put-reset-creds-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: "tenant-b"})
+	require.Equal(t, http.StatusCreated, rec.Code)
+	injectCredential(t, server, username, []byte("tenantb-put-reset-creds-credential"))
+
+	origAcct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, origAcct)
+	require.Len(t, origAcct.Credentials, 1)
+	origCredID := origAcct.Credentials[0].ID
+	origLinkHash := origAcct.EnrollmentLinkHash
+
+	tenantAAdmin := &Principal{
+		ID:        "tenant-a-admin-reset-creds",
+		TenantID:  "tenant-a",
+		Assurance: session.AssuranceStrong,
+	}
+	putRec := putWebAccount(t, server, tenantAAdmin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	assert.Equal(t, http.StatusNotFound, putRec.Code,
+		"cross-tenant PUT must return 404, not 403 (do not disclose account existence)")
+	assert.NotContains(t, putRec.Body.String(), "enrollment_magic_link",
+		"a forbidden cross-tenant PUT must not return a token")
+
+	afterAcct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, afterAcct)
+	require.Len(t, afterAcct.Credentials, 1, "credentials must be unchanged after a rejected cross-tenant PUT")
+	assert.Equal(t, origCredID, afterAcct.Credentials[0].ID)
+	assert.Equal(t, origLinkHash, afterAcct.EnrollmentLinkHash, "enrollment link state must be unchanged")
+}
+
+// TestWebAccounts_UpdateResetCredentials_AuditEmitted verifies the update endpoint emits a
+// dedicated web_account.credentials_reset audit action, matching the granularity already
+// used for disabled/enabled/updated (Issue #3126).
+func TestWebAccounts_UpdateResetCredentials_AuditEmitted(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "audit-reset-creds-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	require.Equal(t, http.StatusOK, putRec.Code)
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web_account.credentials_reset"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "audit entry for web_account.credentials_reset must be written")
+	e := entries[0]
+	assert.Equal(t, "web-account", e.ResourceType)
+	assert.Equal(t, username, e.ResourceID)
+	assert.Equal(t, admin.ID, e.UserID)
+	// A credential reset mints a bearer enrollment credential, so the audit records
+	// that it was minted and how it is delivered (Issue #2974), matching the POST path.
+	require.NotNil(t, e.Details, "credential-reset audit must carry the mint details")
+	assert.Equal(t, true, e.Details["enrollment_link_minted"])
+	assert.Equal(t, "ui-shown", e.Details["delivery_method"])
+}
+
+// TestWebAccounts_UpdateDisableAndResetCredentials_EmitsBothAudits verifies that a single
+// PUT performing both a disable transition and a credential reset audits both operations.
+//
+// A first-match switch over the two would emit only web_account.disabled, leaving the
+// passkey wipe and the bearer enrollment-link mint with no audit trace at all — an
+// audit-evasion path for a privileged actor (CWE-778).
+func TestWebAccounts_UpdateDisableAndResetCredentials_EmitsBothAudits(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "audit-disable-and-reset-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	disabled := true
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{
+		Disabled:         &disabled,
+		ResetCredentials: true,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	for _, action := range []string{"web_account.disabled", "web_account.credentials_reset"} {
+		entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+			Actions: []string{action},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, entries,
+			"a combined disable + credential reset must emit %s, not just the first-matching action", action)
+		assert.Equal(t, username, entries[0].ResourceID)
+	}
+}
+
+// TestWebAccounts_UpdateResetCredentials_RevokesLiveSessions verifies that a credential
+// reset terminates the account's live browser sessions (CWE-613).
+//
+// In the passkey-only model (ADR-021 Amendment 1 Decision 4) reset_credentials is the
+// "reset the password" operation an admin reaches for on a suspected takeover. Wiping the
+// passkeys without cutting the sessions they already minted would leave the attacker's
+// cookie usable for the remainder of the absolute session lifetime (12h).
+func TestWebAccounts_UpdateResetCredentials_RevokesLiveSessions(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	admin := testAdminPrincipal()
+
+	perms := []string{"steward:list"}
+	permRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Permissions: &perms})
+	require.Equal(t, http.StatusOK, permRec.Code, "grant body: %s", permRec.Body.String())
+
+	loginRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, loginRec.Code, "login body: %s", loginRec.Body.String())
+	sessionToken := extractCookie(loginRec, cookieWebSession)
+	require.NotEmpty(t, sessionToken)
+
+	// The live session works before the reset.
+	beforeReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	beforeReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	beforeRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(beforeRec, beforeReq)
+	require.Equal(t, http.StatusOK, beforeRec.Code, "session must work before reset: %s", beforeRec.Body.String())
+
+	putRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	require.Equal(t, http.StatusOK, putRec.Code, "reset body: %s", putRec.Body.String())
+
+	_, validateErr := srv.webSessionManager.Validate(context.Background(), sessionToken)
+	assert.ErrorIs(t, validateErr, session.ErrSessionRevoked,
+		"resetting credentials must revoke the account's live sessions")
+
+	afterReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	afterReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	afterRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(afterRec, afterReq)
+	require.Equal(t, http.StatusUnauthorized, afterRec.Code,
+		"a reset account's session must lose API access immediately: %s", afterRec.Body.String())
+	assert.Equal(t, "SESSION_REVOKED", errCode(t, afterRec.Body.Bytes()))
+}
+
+// TestWebAccounts_CreateResetCredentials_RevokesLiveSessions covers the same containment
+// gap on the POST reset path (handleCreateWebAccount, reset_credentials). Same feature,
+// same guarantee — DSD rule 2, no pre-existing conditions.
+func TestWebAccounts_CreateResetCredentials_RevokesLiveSessions(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	admin := testAdminPrincipal()
+
+	perms := []string{"steward:list"}
+	permRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Permissions: &perms})
+	require.Equal(t, http.StatusOK, permRec.Code, "grant body: %s", permRec.Body.String())
+
+	loginRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, loginRec.Code, "login body: %s", loginRec.Body.String())
+	sessionToken := extractCookie(loginRec, cookieWebSession)
+	require.NotEmpty(t, sessionToken)
+
+	beforeReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	beforeReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	beforeRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(beforeRec, beforeReq)
+	require.Equal(t, http.StatusOK, beforeRec.Code, "session must work before reset: %s", beforeRec.Body.String())
+
+	postRec := postWebAccount(t, srv, admin, WebAccountRequest{Username: username, ResetCredentials: true})
+	require.Equal(t, http.StatusOK, postRec.Code, "reset body: %s", postRec.Body.String())
+
+	_, validateErr := srv.webSessionManager.Validate(context.Background(), sessionToken)
+	assert.ErrorIs(t, validateErr, session.ErrSessionRevoked,
+		"a POST credential reset must revoke the account's live sessions")
+
+	afterReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	afterReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	afterRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(afterRec, afterReq)
+	require.Equal(t, http.StatusUnauthorized, afterRec.Code,
+		"a reset account's session must lose API access immediately: %s", afterRec.Body.String())
+	assert.Equal(t, "SESSION_REVOKED", errCode(t, afterRec.Body.Bytes()))
+}
+
+// TestWebAccounts_UpdateDisableOnly_DoesNotEmitCredentialsReset guards the inverse of the
+// combined-audit fix: making the two events independent must not make every disable look
+// like a credential reset.
+func TestWebAccounts_UpdateDisableOnly_DoesNotEmitCredentialsReset(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "audit-disable-only-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	disabled := true
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web_account.credentials_reset"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a disable without reset_credentials must not audit a credential reset")
+
+	updatedEntries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web_account.updated"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, updatedEntries,
+		"a disable must not also emit the generic updated action")
 }

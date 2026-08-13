@@ -131,11 +131,28 @@ type WebAccountInfo struct {
 
 // WebAccountUpdateRequest is the PUT /api/v1/web/accounts/{username} body (Issue #3126).
 // All fields are optional — omitted fields retain their current values, allowing
-// independent update of permissions and disabled state without requiring a full
-// account record. A nil pointer means "not provided; keep existing value".
+// independent update of permissions, disabled state, and credentials without
+// requiring a full account record. A nil pointer means "not provided; keep
+// existing value".
+//
+// ResetCredentials is the update-side equivalent of WebAccountRequest.ResetCredentials
+// (ADR-021 Amendment 1 Decision 4): accounts are passkey-only, so "reset the
+// password" re-provisions the account to the zero-authenticator state and mints
+// a fresh enrollment magic link, exactly mirroring handleCreateWebAccount's
+// reset path. It is independent of Permissions and Disabled.
 type WebAccountUpdateRequest struct {
-	Permissions *[]string `json:"permissions"`
-	Disabled    *bool     `json:"disabled"`
+	Permissions      *[]string `json:"permissions"`
+	Disabled         *bool     `json:"disabled"`
+	ResetCredentials bool      `json:"reset_credentials,omitempty"`
+}
+
+// WebAccountUpdateResponse is returned by PUT /api/v1/web/accounts/{username}.
+// EnrollmentMagicLink is present only when reset_credentials was set to true —
+// the same single-use, TTL-bounded token minted by the create/reset path
+// (Issue #2974); absent for all other update shapes since no new link is minted.
+type WebAccountUpdateResponse struct {
+	WebAccountInfo
+	EnrollmentMagicLink string `json:"enrollment_magic_link,omitempty"`
 }
 
 // WebAccountCreateResponse is returned by POST /api/v1/web/accounts only.
@@ -644,6 +661,17 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	}
 	s.cacheWebAccount(acct)
 
+	// Issue #3126: a reset that re-provisions to the zero-authenticator state must also
+	// terminate the account's live browser sessions. Same reasoning as the PUT path —
+	// this is the takeover-containment operation, and sessions minted by the passkeys
+	// being wiped would otherwise stay usable for the absolute session lifetime.
+	if existing != nil && req.ResetCredentials {
+		revoked := s.revokeWebSessionsForPrincipal(r.Context(), acct.ID)
+		s.logger.Info("Revoked live web sessions for credential reset",
+			"username", logging.SanitizeLogValue(acct.Username),
+			"revoked_sessions", revoked)
+	}
+
 	// Audit records account + whether a link was minted and how it is delivered.
 	// The raw token is NEVER logged or audited.
 	auditDetails := map[string]interface{}{"enrollment_link_minted": rawToken != ""}
@@ -996,6 +1024,28 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 		updated.Disabled = *req.Disabled
 	}
 
+	// Issue #3126 (review follow-up): "reset the password" in the passkey-only
+	// model (ADR-021 Amendment 1) is a credential reset — re-provision to the
+	// zero-authenticator state and mint a fresh enrollment link, exactly
+	// mirroring handleCreateWebAccount's ResetCredentials path. Independent of
+	// permissions/disabled changes above.
+	var rawToken string
+	if req.ResetCredentials {
+		updated.Credentials = nil
+		tokenHash := ""
+		var mintErr error
+		rawToken, tokenHash, mintErr = mintEnrollmentToken()
+		if mintErr != nil {
+			s.logger.Error("Failed to mint enrollment token", "error", logging.SanitizeLogValue(mintErr.Error()),
+				"username", logging.SanitizeLogValue(username))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to mint enrollment link", "TOKEN_ERROR")
+			return
+		}
+		updated.EnrollmentLinkHash = tokenHash
+		updated.EnrollmentLinkExpiresAt = time.Now().UTC().Add(s.cfg.Registration.GetEnrollmentLinkTTL())
+		updated.EnrollmentLinkRevoked = false
+	}
+
 	if err := s.persistWebAccount(r.Context(), &updated, actingPrincipalID); err != nil {
 		s.logger.Error("Failed to persist web account update", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
@@ -1004,44 +1054,74 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	}
 	s.cacheWebAccount(&updated)
 
-	// Issue #3126: disabling an account terminates its live browser sessions.
-	// The login gate alone would leave an already-authenticated session usable for
-	// the remainder of the absolute session lifetime, so the disable must reach
-	// sessions that already exist — authenticationMiddleware rejects any that
+	// Issue #3126: both containment operations terminate the account's live browser
+	// sessions. The login gate alone would leave an already-authenticated session
+	// usable for the remainder of the absolute session lifetime, so containment must
+	// reach sessions that already exist — authenticationMiddleware rejects any that
 	// survive a revocation failure, this makes the termination immediate.
-	if disabledChanged && updated.Disabled {
+	//   - disable: the account is being taken out of service.
+	//   - reset_credentials: in the passkey-only model (ADR-021 Amendment 1 Decision 4)
+	//     this is the "reset the password" operation an admin reaches for on a suspected
+	//     account takeover. Wiping the passkeys without cutting the sessions they already
+	//     minted would leave the attacker's cookie live, so the containment operation
+	//     would not contain.
+	if (disabledChanged && updated.Disabled) || req.ResetCredentials {
 		revoked := s.revokeWebSessionsForPrincipal(r.Context(), updated.ID)
-		s.logger.Info("Revoked live web sessions for disabled account",
+		s.logger.Info("Revoked live web sessions for web account",
 			"username", logging.SanitizeLogValue(username),
+			"disabled", updated.Disabled,
+			"credentials_reset", req.ResetCredentials,
 			"revoked_sessions", revoked)
 	}
 
-	// Emit granular audit events: disabled/enabled carry their own action;
-	// other field changes use the generic updated action.
-	action := "web_account.updated"
+	// Emit granular audit events. A disable/enable transition and a credential reset
+	// are independent operations that one request can perform together, so each emits
+	// its own event: a first-match switch would let a combined request bury the
+	// credential reset behind web_account.disabled, leaving the passkey wipe and the
+	// bearer enrollment-link mint with no audit trace at all — an audit-evasion path
+	// for a privileged actor. Other field changes fall back to the generic action.
+	var actions []string
 	if disabledChanged {
+		action := "web_account.enabled"
 		if updated.Disabled {
 			action = "web_account.disabled"
-		} else {
-			action = "web_account.enabled"
 		}
+		actions = append(actions, action)
+		s.emitWebAccountAudit(r.Context(), action, updated.TenantID, actingPrincipalID, username, nil)
 	}
-	s.emitWebAccountAudit(r.Context(), action, updated.TenantID, actingPrincipalID, username, nil)
+	if req.ResetCredentials {
+		// Mirrors handleCreateWebAccount: minting a bearer enrollment credential records
+		// that it was minted and how it is delivered (Issue #2974). The raw token is
+		// NEVER logged or audited.
+		actions = append(actions, "web_account.credentials_reset")
+		s.emitWebAccountAudit(r.Context(), "web_account.credentials_reset", updated.TenantID,
+			actingPrincipalID, username, map[string]interface{}{
+				"enrollment_link_minted": rawToken != "",
+				"delivery_method":        "ui-shown",
+			})
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "web_account.updated")
+		s.emitWebAccountAudit(r.Context(), "web_account.updated", updated.TenantID, actingPrincipalID, username, nil)
+	}
 	s.logger.Info("Web admin account updated",
-		"action", action,
+		"actions", strings.Join(actions, ","),
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(updated.TenantID),
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
-	s.writeSuccessResponse(w, WebAccountInfo{
-		ID:                           updated.ID,
-		Username:                     updated.Username,
-		TenantID:                     updated.TenantID,
-		RootScope:                    updated.RootScope,
-		Permissions:                  updated.Permissions,
-		Disabled:                     updated.Disabled,
-		CreatedAt:                    updated.CreatedAt,
-		HasOutstandingEnrollmentLink: enrollmentLinkOutstanding(&updated),
+	s.writeSuccessResponse(w, WebAccountUpdateResponse{
+		WebAccountInfo: WebAccountInfo{
+			ID:                           updated.ID,
+			Username:                     updated.Username,
+			TenantID:                     updated.TenantID,
+			RootScope:                    updated.RootScope,
+			Permissions:                  updated.Permissions,
+			Disabled:                     updated.Disabled,
+			CreatedAt:                    updated.CreatedAt,
+			HasOutstandingEnrollmentLink: enrollmentLinkOutstanding(&updated),
+		},
+		EnrollmentMagicLink: rawToken,
 	})
 }
 
