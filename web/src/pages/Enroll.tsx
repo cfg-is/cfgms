@@ -107,10 +107,14 @@ export default function Enroll() {
   useEffect(() => {
     if (!token) return  // error state already set via lazy initializer above
 
+    // Capture as a fresh binding: control-flow narrowing on `token` doesn't
+    // carry into the nested function declaration below, so the closure would
+    // otherwise still see `string | undefined`.
+    const enrollmentToken = token
     let aborted = false
 
     async function beginEnrollment() {
-      const result = await passkeyEnrollBeginRequest(token)
+      const result = await passkeyEnrollBeginRequest(enrollmentToken)
       if (aborted) return
 
       if (!result.ok) {

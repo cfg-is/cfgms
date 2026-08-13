@@ -205,7 +205,7 @@ describe('WebAuthn create ceremony', () => {
     fireEvent.click(screen.getByRole('button', { name: /register a passkey/i }))
 
     await waitFor(() => expect(credCreate).toHaveBeenCalledOnce())
-    const createArgs = credCreate.mock.calls[0]?.[0] as PublicKeyCredentialCreationOptions
+    const createArgs = credCreate.mock.calls[0]?.[0] as CredentialCreationOptions
     expect(createArgs.publicKey).toBeDefined()
     const pk = createArgs.publicKey!
     // Challenge is decoded from base64url string to a typed byte buffer
