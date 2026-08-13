@@ -257,11 +257,51 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
     display (1,284 / 12.9 K).
   - `delta` — optional; signed, vs. a named period; colour = direction × whether up
     is good.
-  - `trend` — optional; 12-point sparkline. Mark spec lands in Story #S8 (separate
-    from this story).
+  - `trend` — optional; 12-point sparkline. Mark spec: see "Chart marks &
+    interaction" below (Story #3269).
 
   Tiles use existing `--state-*` tokens only. No new tokens are introduced for the
   tile itself.
+
+- **Chart marks & interaction** (Story #3269 — decided, not a founder taste call):
+
+  **Mark specs — fixed across every CFGMS chart:**
+
+  | Mark | Spec |
+  |---|---|
+  | Bar / column | ≤24px thick; 4px rounded data-end, square at the baseline; single baseline |
+  | Line | 2px, `stroke-linecap: round`, `stroke-linejoin: round` |
+  | Marker / end-dot | ≥8px (r≥4), filled with the series colour |
+  | Area fill | series hue at ~10% opacity — a wash, never a saturated block |
+  | Gridlines / axes | `--border`, hairline 1px solid (never dashed), recessive |
+
+  **Two spacers — white does the separating, never a stroke:** a 2px gap in the
+  surface colour between touching marks (every stacked-bar segment, every adjacent
+  bar); a 2px ring in the surface colour around dots/end-markers so they stay
+  legible crossing a line (the ring is part of the hover target). Never draw a
+  border around a mark to separate it.
+
+  **Sparkline mark:** 2px line, `--text-faint` for history with the current period
+  end marked in `--accent`; end marker ≥8px (r≥4) with the 2px surface ring;
+  optional ~10% area wash; no axis, no gridlines, no per-point labels — the tile's
+  value is the label.
+
+  **Hero figure:** the one number a view leads with, ≥48px, in Inter (never the
+  display/terminal face) — exactly one per view.
+
+  **Labels, legend, interaction:**
+  - Legend always present for ≥2 series; a single series needs no legend box (the
+    title names it).
+  - Label selectively (endpoint, extreme, or the one series the story is about) —
+    never a value on every point.
+  - A label that won't fit is never clipped (`overflow: hidden` on a segment is
+    banned) — move it outside or drop to tooltip.
+  - Hover is default (crosshair+tooltip on line/area, per-mark tooltip on
+    bar/dot/cell, hit targets larger than the mark) except a bare stat tile with
+    no plot.
+  - Filters in one row above the charts; time-range control shared across a view.
+  - Every chart has a table view — identity is never colour-alone, and the table
+    is what makes a sub-3:1 fill or a skipped label legal.
 
 ---
 
