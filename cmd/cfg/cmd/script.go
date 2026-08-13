@@ -128,6 +128,7 @@ func init() {
 		cmd.Flags().StringVar(&scriptLibAPIKey, "api-key", "", "API key for authentication")
 		cmd.Flags().StringVar(&scriptLibTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&scriptLibTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+		cmd.Flags().StringVar(&scriptLibServerName, "server-name", "", "Override TLS server name for certificate verification")
 	}
 	scriptSetPrivilegeCmd.Flags().StringArrayVar(&scriptPrivilegeScopes, "scope", nil, "Required API scope (repeatable)")
 	scriptSetPrivilegeCmd.Flags().StringArrayVar(&scriptPrivilegeBindings, "param-binding", nil, "Parameter→DNA binding key=path (repeatable)")

@@ -128,6 +128,7 @@ func init() {
 		cmd.Flags().StringVar(&roleAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&roleTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&roleTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+		cmd.Flags().StringVar(&roleServerName, "server-name", "", "Override TLS server name for certificate verification")
 		cmd.Flags().StringVar(&roleTenant, "tenant", "", "Target tenant ID (required for a global admin; ignored for a tenant-scoped caller)")
 	}
 

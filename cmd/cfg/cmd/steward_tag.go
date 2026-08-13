@@ -89,6 +89,7 @@ func init() {
 		cmd.Flags().StringVar(&stewardTagAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&stewardTagTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&stewardTagTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+		cmd.Flags().StringVar(&stewardTagServerName, "server-name", "", "Override TLS server name for certificate verification")
 	}
 
 	stewardTagCmd.AddCommand(stewardTagAddCmd)
