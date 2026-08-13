@@ -52,6 +52,7 @@ var permissionAssurance = map[string]Requirement{
 	"steward:move":                       {Min: session.AssuranceStrong}, // POST /stewards/{id}/move
 	"steward:decommission":               {Min: session.AssuranceStrong}, // DELETE /stewards/{id}
 	"web-account:create":                 {Min: session.AssuranceStrong}, // POST /web/accounts
+	"web-account:update":                 {Min: session.AssuranceStrong}, // PUT  /web/accounts/{username} (Issue #3126: can reset password or disable)
 	"web-account:delete":                 {Min: session.AssuranceStrong}, // DELETE /web/accounts/{username}
 	"web-account:revoke-enrollment-link": {Min: session.AssuranceStrong}, // POST /web/accounts/{username}/enrollment-link/revoke
 

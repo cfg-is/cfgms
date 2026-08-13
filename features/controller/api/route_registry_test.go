@@ -97,6 +97,8 @@ var goldenRouteTable = []string{
 	"DELETE /api/v1/stewards/{id}/config",
 	"DELETE /api/v1/stewards/{id}/tags",
 	"DELETE /api/v1/web/accounts/{username}",
+	"GET /api/v1/web/accounts/{username}",
+	"PUT /api/v1/web/accounts/{username}",
 	"GET /api/v1/api-keys",
 	"GET /api/v1/api-keys/{id}",
 	"GET /api/v1/audit/entries",

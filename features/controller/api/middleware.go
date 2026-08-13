@@ -445,6 +445,26 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// root-scope grant.
 				permissions := []string{}
 				if acct, err := s.getWebAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
+					// Issue #3126: an administratively disabled account loses access
+					// immediately, not at session expiry. The login gate in
+					// handlePasskeyLoginFinish only blocks new sessions; without this
+					// check a session issued before the disable keeps full API access
+					// for up to the absolute session timeout (12h) — including the
+					// implicit-admin grant below for a root-scope account, and the
+					// ability to step up assurance. Revoke the session server-side
+					// (best effort) so the rejection is durable, and answer with the
+					// same 401 a revoked session gets: the response must not
+					// distinguish "disabled" from "revoked".
+					if acct.Disabled {
+						s.csrfTokens.Delete(webSess.ID)
+						if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
+							s.logger.Warn("Failed to revoke session of disabled web account",
+								"session_id", logging.SanitizeLogValue(webSess.ID),
+								"error", logging.SanitizeLogValue(revokeErr.Error()))
+						}
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						return
+					}
 					authCount = len(acct.Credentials)
 					globalScope = acct.RootScope
 					if acct.RootScope {

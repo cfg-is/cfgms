@@ -112,9 +112,11 @@ var knownPermissions = map[string]bool{
 	// Cluster registry (Issue #2424)
 	"cluster:list": true,
 	"cluster:read": true,
-	// Web account management (Issue #2733, #2974)
+	// Web account management (Issue #2733, #2974, #3126)
 	"web-account:list":                   true,
 	"web-account:create":                 true,
+	"web-account:get":                    true, // Issue #3126: get-one by username
+	"web-account:update":                 true, // Issue #3126: update permissions and/or disabled state
 	"web-account:delete":                 true,
 	"web-account:revoke-enrollment-link": true, // Issue #2974: revoke an outstanding enrollment magic link
 	// WebAuthn passkey / FIDO2 registration and credential management (Issue #2782, #2783)
