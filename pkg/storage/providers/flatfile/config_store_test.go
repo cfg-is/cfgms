@@ -5,6 +5,9 @@ package flatfile_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -440,6 +443,60 @@ func TestGetConfigStats(t *testing.T) {
 	assert.Greater(t, stats.TotalSize, int64(0))
 	assert.NotNil(t, stats.OldestConfig)
 	assert.NotNil(t, stats.NewestConfig)
+}
+
+// TestGetConfigStats_RootUnreadable_ReturnsError verifies that a root directory
+// which exists but cannot be listed (permission denied, unmounted volume) makes
+// GetConfigStats fail loudly instead of silently reporting an empty store. This
+// is the store's health signal: callers like the secrets provider's
+// HealthCheck rely on GetConfigStats propagating a real error when the store is
+// unusable, not just when the config data underneath a single file is corrupt.
+func TestGetConfigStats_RootUnreadable_ReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX directory permissions on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("permission checks are not enforced for root")
+	}
+
+	root := t.TempDir()
+	store, err := flatfile.NewFlatFileConfigStore(root)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Chmod(root, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(root, 0o750) })
+
+	_, err = store.GetConfigStats(context.Background())
+	require.Error(t, err, "an unreadable store root must surface as a real error")
+}
+
+// TestGetConfigStats_UnreadableEntry_IsSkippedNotFatal verifies that a single
+// unreadable config file deeper in the tree is skipped (not counted, not
+// fatal) rather than failing the whole health check — only the root itself
+// being unusable is a store-wide failure.
+func TestGetConfigStats_UnreadableEntry_IsSkippedNotFatal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX file permissions on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("permission checks are not enforced for root")
+	}
+
+	root := t.TempDir()
+	store, err := flatfile.NewFlatFileConfigStore(root)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	entry := testEntry("t1", "ns", "a", []byte(`data1`), cfgconfig.ConfigFormatJSON)
+	require.NoError(t, store.StoreConfig(ctx, entry))
+
+	configPath := filepath.Join(root, "t1", "configs", "ns", "a.json")
+	require.NoError(t, os.Chmod(configPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0o640) })
+
+	stats, err := store.GetConfigStats(ctx)
+	require.NoError(t, err, "one unreadable file must not fail the whole health check")
+	assert.Equal(t, int64(0), stats.TotalConfigs, "the unreadable entry must be skipped, not counted")
 }
 
 // TestConfigScopeInKey verifies that scope is used in the filename.

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -196,9 +197,9 @@ func TestNewSecretStore_DatabaseMemoryDSN_Rejected(t *testing.T) {
 //
 // A persistent path is used so that the ephemeral guard does not fire first,
 // isolating the test to the store-creation failure path. A missing key file
-// forces a creation-time error (loadExternalKey fails), which is the primary
-// source of "unhealthy store" errors with real components (the flatfile health
-// check always passes for freshly-created directories).
+// forces a creation-time error (loadExternalKey fails). See
+// TestNewSecretStore_HealthCheckFailure_NoOverride below for the distinct
+// post-creation store.HealthCheck() failure path.
 func TestNewSecretStore_FailsOnUnhealthyStore_NoOverride(t *testing.T) {
 	// Use a persistent (non-tmp) path so the ephemeral guard does not fire.
 	persistentBase := persistentDirForGuardTest(t)
@@ -237,6 +238,78 @@ func TestNewSecretStore_OverrideDoesNotSuppressStoreFailure(t *testing.T) {
 	require.Error(t, err, "the ephemeral override must not suppress a broken secret store")
 	assert.NotContains(t, err.Error(), "refusing ephemeral secret storage",
 		"the override must still cover the ephemeral path itself")
+}
+
+// secretsDirUnreadableForHealthCheckTest creates a flatfile secrets root under a
+// persistent (non-ephemeral) directory and revokes all permissions on it, so
+// the flatfile ConfigStore's GetConfigStats — the same call
+// store.HealthCheck() drives — fails with a real permission error rather than
+// treating the store as empty. NewFlatFileConfigStore's os.MkdirAll is a no-op
+// on an already-existing directory (Stat only needs traversal permission on
+// its parents, not on the directory itself), so store creation still succeeds
+// and the failure surfaces only from the post-creation health check.
+func secretsDirUnreadableForHealthCheckTest(t *testing.T, persistentBase string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not enforce POSIX directory permissions on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("permission checks are not enforced for root")
+	}
+
+	secretsDir := filepath.Join(persistentBase, "secrets")
+	require.NoError(t, os.MkdirAll(secretsDir, 0o750))
+	require.NoError(t, os.Chmod(secretsDir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(secretsDir, 0o750) })
+	return secretsDir
+}
+
+// TestNewSecretStore_HealthCheckFailure_NoOverride verifies that a store which
+// is created successfully but fails its post-creation store.HealthCheck() call
+// aborts startup when CFGMS_ALLOW_EPHEMERAL_SECRETS is not set. This is
+// distinct from TestNewSecretStore_FailsOnUnhealthyStore_NoOverride, which
+// covers a store-creation-time failure; this test drives the health-check call
+// itself (server.go's "secret store health check failed" branch) using a real
+// flatfile store whose root directory cannot be listed.
+func TestNewSecretStore_HealthCheckFailure_NoOverride(t *testing.T) {
+	persistentBase := persistentDirForGuardTest(t)
+	secretsDir := secretsDirUnreadableForHealthCheckTest(t, persistentBase)
+	keyPath := setupKeyFileForGuardTest(t, t.TempDir())
+
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", secretsDir)
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "")
+
+	cfg := config.DefaultConfig()
+	cfg.Storage = flatfileConfigForGuardTest()
+
+	_, err := NewSecretStore(cfg)
+	require.Error(t, err, "a real store.HealthCheck() failure must abort startup")
+	assert.Contains(t, err.Error(), "secret store health check failed",
+		"error must name the health-check failure, not a creation or ephemeral-path error")
+}
+
+// TestNewSecretStore_OverrideDoesNotSuppressHealthCheckFailure verifies that
+// CFGMS_ALLOW_EPHEMERAL_SECRETS=true does not downgrade a real
+// store.HealthCheck() failure to a WARN-and-continue. The override governs
+// only the ephemeral-location decision (see NewSecretStore's doc comment);
+// store-health validation is a separate, unconditional fail-closed control.
+func TestNewSecretStore_OverrideDoesNotSuppressHealthCheckFailure(t *testing.T) {
+	persistentBase := persistentDirForGuardTest(t)
+	secretsDir := secretsDirUnreadableForHealthCheckTest(t, persistentBase)
+	keyPath := setupKeyFileForGuardTest(t, t.TempDir())
+
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", secretsDir)
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "true")
+
+	cfg := config.DefaultConfig()
+	cfg.Storage = flatfileConfigForGuardTest()
+
+	_, err := NewSecretStore(cfg)
+	require.Error(t, err, "the ephemeral override must not suppress a real health-check failure")
+	assert.Contains(t, err.Error(), "secret store health check failed",
+		"the override must not turn a broken store into a WARN-and-continue")
 }
 
 // TestNewSecretStore_SQLiteWithoutPath_Rejected verifies that storage.provider:
