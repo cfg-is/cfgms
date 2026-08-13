@@ -1067,10 +1067,21 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	//     would not contain.
 	if (disabledChanged && updated.Disabled) || req.ResetCredentials {
 		revoked := s.revokeWebSessionsForPrincipal(r.Context(), updated.ID)
+		// go/log-injection: derive from an explicit branch to a string literal so no
+		// value flows from the request to the log sink (CodeQL taint-tracks request
+		// booleans through struct fields regardless of type; strconv.FormatBool would
+		// still count as a value-propagating conversion).
+		disabledState, resetState := "false", "false"
+		if updated.Disabled {
+			disabledState = "true"
+		}
+		if req.ResetCredentials {
+			resetState = "true"
+		}
 		s.logger.Info("Revoked live web sessions for web account",
 			"username", logging.SanitizeLogValue(username),
-			"disabled", updated.Disabled,
-			"credentials_reset", req.ResetCredentials,
+			"disabled", disabledState,
+			"credentials_reset", resetState,
 			"revoked_sessions", revoked)
 	}
 
