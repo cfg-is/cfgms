@@ -679,7 +679,9 @@ Decision 2 ("shown-once in the admin UI") is implemented in Story #2974. It gate
 mints a 160-bit (20-byte) single-use enrollment token on account creation, stores only
 the SHA-256 hex digest in the account record (never the raw token), shows the raw token
 exactly once in the admin UI for out-of-band clipboard handoff, and provides a revoke
-endpoint for outstanding unredeemed links. Email delivery (also mentioned in Decision 2)
+endpoint for outstanding unredeemed links. The token TTL defaults to 72 hours and is
+configurable via `registration.enrollment_link_ttl` (`RegistrationConfig.GetEnrollmentLinkTTL`,
+Issue #2966) rather than a hardcoded constant. Email delivery (also mentioned in Decision 2)
 is explicitly deferred to a future notification-provider epic (CLAUDE.md central-provider
 rule). The raw token is never logged or audited; audit records carry the
 `delivery_method` field (`"ui-shown"`) and whether a link was minted.
@@ -696,6 +698,33 @@ Two invariants enforce Decisions 3 and 4 on that mint path:
 - **Provisioning is tenant-scoped.** Create, list and revoke all confine the caller to
   its own tenant subtree, so a tenant-scoped web admin cannot obtain an enrollment
   bearer token for another tenant's account or grant itself a root-scoped one.
+
+**Implementation reference — enrollment link redemption (Issue #2966):** The browser
+side of Decision 2 ("redemption via magic link") and Decisions 5–6 (confinement and
+CAS) is implemented in Story #2966.
+
+- **Redemption endpoints** — `POST /api/v1/web/passkey/enroll/begin` and `.../finish`
+  are registered on the base router (no `authenticationMiddleware`; the token is the
+  credential) with the `authDefense` middleware for DoS protection. They take the raw
+  token in the `X-Enrollment-Token` header; account resolution is fully token-driven
+  (`getWebAccountByEnrollmentToken`). No caller-supplied username or path variable is
+  consulted — eliminating cross-account credential injection.
+- **Single-use gate** — `passkeyEnrollSessions.LoadAndDelete(tokenHash)` makes the
+  in-flight ceremony atomically consume the session; a second concurrent finish call
+  sees no session and gets `NO_ACTIVE_ENROLLMENT`.
+- **CAS precondition at finish** — after WebAuthn verification succeeds, the handler
+  reloads the account from the durable store (`loadWebAccountFromStore`) and rejects
+  the request with `ALREADY_ENROLLED` if any credential is already present, enforcing
+  the zero-authenticator precondition under concurrent access.
+- **Token consumed on success** — `EnrollmentLinkRevoked = true` is persisted
+  immediately; subsequent begin calls with the same token get `TOKEN_INVALID`.
+- **Confinement middleware** — `enrollmentConfinementMiddleware` is added to the `/api/v1`
+  subrouter (runs after authentication, before `requirePermission`). It blocks every
+  request from a cookie-authenticated session whose `AuthenticatorCount` is ≤ 0 with
+  `403 ENROLLMENT_REQUIRED`. mTLS admin and API-key principals are never blocked
+  (their `cookieAuth` context key is false).
+- **`webauthn:register` (add-to-existing) stays at `AssuranceStrong`.** The enrollment
+  redemption routes have no entry in `permissionAssurance`; they are fully public.
 
 Revocation is fail-closed: the durable record is written before the in-memory cache is
 updated, so a store failure leaves a still-revocable outstanding link rather than a

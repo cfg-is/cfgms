@@ -157,6 +157,7 @@ type Server struct {
 	webAuthnElevateThrottle        sync.Map                              // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyLoginSessions           sync.Map                              // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
 	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyEnrollSessions          sync.Map                              // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                     egReadProvider                        // Issue #2880: entity graph read API
@@ -501,7 +502,10 @@ func (s *Server) setupRouter() {
 	// requireTier(TierAny) removed: it was a no-op passthrough (Issue #2780 migrates to assurance-based enforcement).
 	api.Use(s.validationMiddleware)
 	api.Use(s.csrfMiddleware) // Issue #2493: session-bound CSRF for unsafe cookie-auth methods
-	s.apiRouter = api         // saved so Set* methods can lazy-register routes after construction
+	// Issue #2966: enrollment confinement — a cookie-authenticated session with zero enrolled
+	// passkeys is refused all api routes; first-passkey enrollment is on the base router.
+	api.Use(s.enrollmentConfinementMiddleware)
+	s.apiRouter = api // saved so Set* methods can lazy-register routes after construction
 
 	// --- Tier 0 (TierPublic) — no authentication required ---
 	//   GET  /api/v1/health
@@ -604,6 +608,15 @@ func (s *Server) setupRouter() {
 		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginBegin))).Methods("POST")
 	s.router.Handle("/api/v1/web/passkey/login/finish",
 		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginFinish))).Methods("POST")
+
+	// First-passkey enrollment routes (Issue #2966: ADR-021 Amendment 1).
+	// Registered on the BASE router (public pattern): the enrollment token is the bearer
+	// credential; no web session is required. Self-scoped to the account the token identifies —
+	// never to a caller-supplied {username}. Token is passed via X-Enrollment-Token header.
+	s.router.Handle("/api/v1/web/passkey/enroll/begin",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyEnrollBegin))).Methods("POST")
+	s.router.Handle("/api/v1/web/passkey/enroll/finish",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyEnrollFinish))).Methods("POST")
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.

@@ -664,6 +664,37 @@ var tenantCrossingRemedyPermissions = map[string]bool{
 	"tenant:crossing-grant":       true,
 }
 
+// enrollmentConfinementMiddleware blocks cookie-authenticated web sessions whose
+// principal has zero enrolled passkeys (AuthenticatorCount == 0) from all api routes.
+//
+// A zero-passkey session can ONLY redeem a first-passkey enrollment link; that redemption
+// path is on the BASE router (/api/v1/web/passkey/enroll/begin|finish), not the api
+// subrouter, so this middleware does not apply to it — by construction.
+//
+// mTLS admin and API-key principals are not cookie-authenticated (cookieAuthContextKey
+// is false), so they pass through regardless of AuthenticatorCount. AuthenticatorCount==-1
+// (account-load failure) is also blocked: fail-closed is safer than fail-open when the
+// session's enrollable state cannot be determined.
+//
+// This middleware MUST run BEFORE requirePermission (added earlier in the chain) so
+// that confinement is enforced even when the principal holds the required permission.
+func (s *Server) enrollmentConfinementMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookieAuth, _ := r.Context().Value(cookieAuthContextKey).(bool)
+		if cookieAuth {
+			principal, _ := r.Context().Value(principalContextKey).(*Principal)
+			if principal != nil && principal.AuthenticatorCount <= 0 {
+				// Zero or unknown authenticator count on a cookie-auth session.
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Account has no passkey enrolled — redeem your enrollment link first",
+					"ENROLLMENT_REQUIRED")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requirePermission creates middleware that enforces specific permission requirements.
 // Human administrator principals carry nil Permissions and are implicitly
 // authorized; web accounts carry an explicit (possibly empty) permission slice.

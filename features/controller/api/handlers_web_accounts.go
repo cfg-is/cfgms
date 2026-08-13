@@ -48,10 +48,6 @@ const (
 	// mirroring how API-key records use their hash as the key.
 	webAccountKeyPrefix = "web-account-"
 
-	// enrollmentLinkTTL is the default TTL for enrollment magic links (Issue #2974).
-	// 72 hours gives the admin time to hand off the link out-of-band.
-	enrollmentLinkTTL = 72 * time.Hour
-
 	// enrollmentTokenBytes is the random source length for enrollment magic links.
 	// 20 bytes = 160 bits of entropy — exceeds the >=128-bit requirement (Issue #2974).
 	enrollmentTokenBytes = 20
@@ -358,6 +354,53 @@ func (s *Server) emitWebAccountAudit(ctx context.Context, action, tenantID, acti
 	}
 }
 
+// getWebAccountByEnrollmentToken finds the web account whose enrollment token hash
+// matches hash(rawToken). The scan is necessary because tokens identify accounts —
+// the lookup direction is token→account, not account→token. Cache is checked first;
+// if not found there, the durable store is scanned.
+//
+// Returns (nil, nil) when no account with the given token exists. The caller MUST
+// call verifyEnrollmentToken on the returned account to confirm validity, expiry, and
+// revocation status — the store lookup finds by hash only and does not check liveness.
+func (s *Server) getWebAccountByEnrollmentToken(ctx context.Context, rawToken string) (*webAccount, error) {
+	tokenHash := hashEnrollmentToken(rawToken)
+
+	// Check the in-memory cache first — the fresh handler path uses loadWebAccountFromStore
+	// for CAS purposes, but begin can use the cache for a fast validity check.
+	s.mu.RLock()
+	for _, acct := range s.webAccounts {
+		if acct != nil && acct.EnrollmentLinkHash == tokenHash {
+			s.mu.RUnlock()
+			return acct, nil
+		}
+	}
+	s.mu.RUnlock()
+
+	if s.secretStore == nil {
+		return nil, nil
+	}
+	// Cache miss: scan the store by token hash. Filtering by the hash directly avoids
+	// loading all accounts. An account with a consumed/expired token will still match
+	// here; the caller checks validity separately via verifyEnrollmentToken.
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: webAccountSecretType,
+			"enrollment_link_hash":          tokenHash,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan accounts by enrollment token: %w", err)
+	}
+	if len(metas) == 0 {
+		return nil, nil
+	}
+	username := metas[0].Metadata["username"]
+	if username == "" {
+		return nil, fmt.Errorf("account matched by enrollment token is missing username metadata")
+	}
+	return s.loadWebAccountFromStore(ctx, username)
+}
+
 // --- enrollment magic link (Issue #2974) ---
 
 // hashEnrollmentToken returns the SHA-256 hex digest of a raw enrollment token.
@@ -555,7 +598,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		acct.EnrollmentLinkHash = tokenHash
-		acct.EnrollmentLinkExpiresAt = time.Now().UTC().Add(enrollmentLinkTTL)
+		acct.EnrollmentLinkExpiresAt = time.Now().UTC().Add(s.cfg.Registration.GetEnrollmentLinkTTL())
 		acct.EnrollmentLinkRevoked = false
 	} else {
 		acct.EnrollmentLinkHash = existing.EnrollmentLinkHash

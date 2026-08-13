@@ -3,6 +3,7 @@
 //
 // Issue #2782: WebAuthn passkey / FIDO2 registration endpoints.
 // Issue #2783: WebAuthn credential list and revoke endpoints (cfg CLI bootstrap).
+// Issue #2966: first-passkey enrollment via single-use magic link (ADR-021 Amendment 1).
 //
 // Routes (register: webauthn:register permission, AssuranceStrong;
 //
@@ -21,6 +22,20 @@
 //		POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}
 //		     Removes a specific credential. credential_id is base64url-encoded.
 //
+// Enrollment routes (Issue #2966; no assurance requirement — token IS the credential;
+// registered on the BASE router, not under the authenticated api subrouter):
+//
+//	POST /api/v1/web/passkey/enroll/begin
+//	     Header: X-Enrollment-Token: <raw-hex-token>
+//	     Verifies the token, begins WebAuthn registration ceremony self-scoped to the
+//	     account the token identifies (never a caller-supplied username).
+//
+//	POST /api/v1/web/passkey/enroll/finish
+//	     Header: X-Enrollment-Token: <raw-hex-token>
+//	     Body: WebAuthn PublicKeyCredential JSON
+//	     Verifies WebAuthn response, enforces zero-credential CAS precondition, appends
+//	     credential, and atomically consumes the token. Token not reusable after this.
+//
 // Server-side verification enforces: challenge freshness (5-min TTL, server-stored),
 // single-use (session deleted on every finish attempt), origin match, RP-ID match,
 // and cryptographic attestation verification — all via the go-webauthn/webauthn
@@ -29,6 +44,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -39,7 +55,9 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // webAuthnPendingSession holds an in-progress WebAuthn registration ceremony state
@@ -569,6 +587,272 @@ func (s *Server) handleWebAuthnListCredentials(w http.ResponseWriter, r *http.Re
 		Username:    username,
 		Credentials: infos,
 	})
+}
+
+// enrollmentTokenHeader is the HTTP request header that carries the single-use
+// enrollment magic-link token for first-passkey enrollment (Issue #2966).
+// The raw token (hex-encoded, 160-bit) is presented here; the server computes
+// SHA-256 and compares in constant time against the stored hash.
+const enrollmentTokenHeader = "X-Enrollment-Token"
+
+// handlePasskeyEnrollBegin handles POST /api/v1/web/passkey/enroll/begin.
+//
+// The caller presents the raw enrollment token in X-Enrollment-Token. The server:
+//  1. Looks up the account by token hash (never by caller-supplied username).
+//  2. Verifies the token is unexpired and not revoked.
+//  3. Starts a WebAuthn registration ceremony scoped to that account.
+//  4. Stores the pending session keyed by tokenHash (not username) so the finish
+//     step can find it without trusting any caller-supplied identity.
+//
+// This route is on the BASE router (public) — the token IS the auth credential.
+func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn()
+	if wa == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"WebAuthn not configured", "WEBAUTHN_NOT_CONFIGURED")
+		return
+	}
+
+	rawToken := r.Header.Get(enrollmentTokenHeader)
+	if rawToken == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			enrollmentTokenHeader+" header is required", "MISSING_ENROLLMENT_TOKEN")
+		return
+	}
+
+	// Resolve account by token — never by a caller-supplied path variable.
+	// This prevents the cross-account credential injection described in the issue.
+	acct, err := s.getWebAccountByEnrollmentToken(r.Context(), rawToken)
+	if err != nil {
+		s.logger.Error("Failed to look up account for enrollment begin",
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		// No account with this token or token does not exist.
+		// Return the same error as invalid/expired to prevent account enumeration.
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"Invalid or expired enrollment token", "TOKEN_INVALID")
+		return
+	}
+
+	if !verifyEnrollmentToken(acct, rawToken) {
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"Invalid or expired enrollment token", "TOKEN_INVALID")
+		return
+	}
+
+	user := buildWebauthnUser(acct)
+
+	creation, sessionData, err := wa.BeginRegistration(user,
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+			UserVerification: protocol.VerificationRequired,
+		}),
+		webauthn.WithExclusions(webauthn.Credentials(user.credentials).CredentialDescriptors()),
+	)
+	if err != nil {
+		s.logger.Error("WebAuthn BeginRegistration failed for enrollment",
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to begin WebAuthn registration", "WEBAUTHN_BEGIN_ERROR")
+		return
+	}
+
+	// Key the ceremony by tokenHash, not username. This decouples the session lookup
+	// from any caller-supplied identity at finish time (self-scoping invariant).
+	tokenHash := hashEnrollmentToken(rawToken)
+	s.passkeyEnrollSessions.Store(tokenHash, &webAuthnPendingSession{
+		data:    *sessionData,
+		expires: time.Now().Add(webAuthnSessionTTL),
+	})
+
+	s.logger.Info("Passkey enrollment ceremony started",
+		"account_id", logging.SanitizeLogValue(acct.ID))
+
+	s.writeResponse(w, http.StatusOK, creation)
+}
+
+// handlePasskeyEnrollFinish handles POST /api/v1/web/passkey/enroll/finish.
+//
+// The caller presents X-Enrollment-Token and the WebAuthn registration response body.
+// The server:
+//  1. Loads and atomically deletes the pending ceremony (single-use enforcement).
+//  2. Verifies the WebAuthn response cryptographically.
+//  3. Reloads the account from the durable store (for CAS freshness).
+//  4. Under the CAS precondition: token still valid + zero registered credentials.
+//  5. Appends the credential, marks the token consumed, persists, audits.
+//
+// The LoadAndDelete on passkeyEnrollSessions is the primary concurrency gate: only one
+// finish request per ceremony can succeed (the second gets NO_ACTIVE_ENROLLMENT). The
+// store-fresh reload at step 3 guards against admin-mediated mutations between begin and
+// finish (TOCTOU hardening — ADR-021 Amendment 1 security property 3).
+func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn()
+	if wa == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"WebAuthn not configured", "WEBAUTHN_NOT_CONFIGURED")
+		return
+	}
+
+	rawToken := r.Header.Get(enrollmentTokenHeader)
+	if rawToken == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			enrollmentTokenHeader+" header is required", "MISSING_ENROLLMENT_TOKEN")
+		return
+	}
+
+	tokenHash := hashEnrollmentToken(rawToken)
+
+	// LoadAndDelete is the single-use gate: only the first finish call succeeds.
+	rawSession, ok := s.passkeyEnrollSessions.LoadAndDelete(tokenHash)
+	if !ok {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active enrollment session — call begin first", "NO_ACTIVE_ENROLLMENT")
+		return
+	}
+	pending, ok := rawSession.(*webAuthnPendingSession)
+	if !ok {
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Invalid session state", "SESSION_STATE_ERROR")
+		return
+	}
+
+	if time.Now().After(pending.expires) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Enrollment session expired — restart with begin", "SESSION_EXPIRED")
+		return
+	}
+
+	// Resolve account by token for WebAuthn user construction.
+	// We look up from cache here; CAS reload from store follows below.
+	acct, err := s.getWebAccountByEnrollmentToken(r.Context(), rawToken)
+	if err != nil {
+		s.logger.Error("Failed to look up account for enrollment finish",
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up account", "STORE_ERROR")
+		return
+	}
+	if acct == nil || !verifyEnrollmentToken(acct, rawToken) {
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"Enrollment token is no longer valid", "TOKEN_INVALID")
+		return
+	}
+
+	user := buildWebauthnUser(acct)
+
+	// Full library-level WebAuthn verification (challenge, origin, RP-ID, attestation).
+	credential, err := wa.FinishRegistration(user, pending.data, r)
+	if err != nil {
+		s.logger.Warn("WebAuthn FinishRegistration verification failed for enrollment",
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+		return
+	}
+
+	label := logging.SanitizeLogValue(r.URL.Query().Get("label"))
+
+	transports := make([]string, 0, len(credential.Transport))
+	for _, t := range credential.Transport {
+		transports = append(transports, string(t))
+	}
+	stored := WebAuthnCredential{
+		ID:             credential.ID,
+		PublicKey:      credential.PublicKey,
+		SignCount:      credential.Authenticator.SignCount,
+		Transport:      transports,
+		Label:          label,
+		RegisteredAt:   time.Now().UTC(),
+		BackupEligible: credential.Flags.BackupEligible,
+		BackupState:    credential.Flags.BackupState,
+	}
+
+	// CAS reload: re-read from the durable store (not cache) to detect any
+	// admin-mediated mutations that occurred between begin and finish.
+	// Combined with LoadAndDelete above, this closes the TOCTOU window.
+	freshAcct, freshErr := s.loadWebAccountFromStore(r.Context(), acct.Username)
+	if freshErr != nil {
+		s.logger.Error("CAS reload failed for enrollment finish",
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(freshErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to verify account state", "STORE_ERROR")
+		return
+	}
+	if freshAcct == nil || !verifyEnrollmentToken(freshAcct, rawToken) {
+		// Token was revoked or expired by an admin between begin and finish.
+		s.writeErrorResponse(w, http.StatusGone,
+			"Enrollment token is no longer valid", "TOKEN_INVALID")
+		return
+	}
+	if len(freshAcct.Credentials) != 0 {
+		// Another finish raced ahead (impossible via this path due to LoadAndDelete, but
+		// guards against future code paths or direct-store mutations).
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account already has enrolled credentials", "ALREADY_ENROLLED")
+		return
+	}
+
+	// Precondition satisfied. Build updated account: append credential, consume token.
+	updatedAcct := *freshAcct
+	updatedAcct.Credentials = []WebAuthnCredential{stored}
+	updatedAcct.EnrollmentLinkRevoked = true
+
+	if err := s.persistWebAccount(r.Context(), &updatedAcct, ""); err != nil {
+		s.logger.Error("Failed to persist enrollment credential",
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to persist credential", "STORE_ERROR")
+		return
+	}
+	s.cacheWebAccount(&updatedAcct)
+
+	// Audit: record account, credential ID, and delivery channel.
+	credIDStr := base64.RawURLEncoding.EncodeToString(stored.ID)
+	s.emitEnrollmentAudit(r.Context(), &updatedAcct, credIDStr)
+	s.logger.Info("First passkey enrolled via magic link",
+		"account_id", logging.SanitizeLogValue(updatedAcct.ID),
+		"username", logging.SanitizeLogValue(updatedAcct.Username))
+
+	s.writeResponse(w, http.StatusCreated, WebAuthnRegisterFinishResponse{
+		CredentialID: stored.ID,
+		Label:        stored.Label,
+		RegisteredAt: stored.RegisteredAt,
+	})
+}
+
+// emitEnrollmentAudit records a first-passkey enrollment audit event.
+func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *webAccount, credentialID string) {
+	if s.auditManager == nil {
+		return
+	}
+	tenantID := acct.TenantID
+	if tenantID == "" {
+		tenantID = audit.SystemTenantID
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventSystemAccess).
+		Action("web_account.passkey_enrolled").
+		User(acct.ID, business.AuditUserTypeHuman).
+		Resource("web-account", logging.SanitizeLogValue(acct.Username), "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh).
+		Details(map[string]interface{}{
+			"credential_id":    logging.SanitizeLogValue(credentialID),
+			"delivery_channel": "magic_link",
+		})
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit enrollment audit event",
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // handleWebAuthnRevokeCredential handles
