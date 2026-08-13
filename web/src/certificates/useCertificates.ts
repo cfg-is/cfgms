@@ -224,11 +224,33 @@ export async function revokeCertificate(serial: string): Promise<void> {
 }
 
 /**
+ * Thrown when the server rejects a rotation with 409 ROTATION_IN_PROGRESS: the
+ * previous rotation's overlap window is still open. Callers must treat this as a
+ * distinct, recoverable state (wait for the window, or take the explicit forced
+ * override) rather than a generic failure.
+ */
+export class RotationInProgressError extends Error {
+  readonly code = 'ROTATION_IN_PROGRESS'
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'RotationInProgressError'
+  }
+}
+
+/**
  * Rotate the signing CA via POST /api/v1/certificates/signing/rotate.
  * This affects all stewards' trust chain — the UI requires explicit type-to-confirm.
- * force=true bypasses the in-progress guard for operator-initiated rotations.
+ *
+ * force defaults to false so the server's overlap-window guard stays in effect:
+ * while a previous rotation's overlap window is open the accepted-signer set is
+ * {current, rotating}, and forcing a second rotation evicts the earlier signer
+ * immediately, breaking config-signature validation for every steward that has
+ * not yet renewed. A non-forced call hits 409 ROTATION_IN_PROGRESS instead, which
+ * surfaces as RotationInProgressError. Only pass force=true from a UI path that
+ * states that consequence and collects separate consent for it.
  */
-export async function rotateSigningCA(force = true): Promise<RotateSigningCAResult> {
+export async function rotateSigningCA(force = false): Promise<RotateSigningCAResult> {
   const response = await apiFetch('/api/v1/certificates/signing/rotate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -236,9 +258,12 @@ export async function rotateSigningCA(force = true): Promise<RotateSigningCAResu
   })
   if (!response.ok) {
     const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const err = errBody?.error as Record<string, unknown> | undefined
     const errMsg =
-      (errBody?.error as Record<string, unknown>)?.message as string ||
-      `Rotate failed — ${response.status}`
+      (err?.message as string) || `Rotate failed — ${response.status}`
+    if (response.status === 409 || err?.code === 'ROTATION_IN_PROGRESS') {
+      throw new RotationInProgressError(errMsg)
+    }
     throw new Error(errMsg)
   }
   const respBody = (await response.json()) as Record<string, unknown>

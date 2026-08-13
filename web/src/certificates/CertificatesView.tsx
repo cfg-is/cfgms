@@ -21,7 +21,12 @@
  * Revoke (POST /api/v1/certificates/{serial}/revoke) requires a confirm modal.
  * CA rotation (POST /api/v1/certificates/signing/rotate) requires a distinct
  * amber-bordered modal with explicit fleet-impact copy; the confirm button enables
- * only when the operator types ROTATE in the confirmation input.
+ * only when the operator types ROTATE in the confirmation input. The rotation is
+ * sent unforced, so the controller's overlap-window guard applies: a 409
+ * ROTATION_IN_PROGRESS switches the modal to a separate in-progress state whose
+ * copy describes the different (and worse) impact of forcing — the previously
+ * rotated CA leaves the accepted-signer set immediately — and which requires its
+ * own FORCE ROTATE type-to-confirm before force=true is ever sent.
  *
  * Security A9.1: serial_number, common_name, steward_id come from server-controlled
  * data. All values reach the DOM as JSX text nodes — never dangerouslySetInnerHTML.
@@ -32,8 +37,10 @@ import {
   provisionCertificate,
   revokeCertificate,
   rotateSigningCA,
+  RotationInProgressError,
   type CertificateInfo,
 } from './useCertificates.ts'
+import './CertificatesView.css'
 
 // ── Certificate status helpers ────────────────────────────────────────────────
 
@@ -335,17 +342,27 @@ export default function CertificatesView() {
   const [rotateInput, setRotateInput] = useState('')
   const [rotating, setRotating] = useState(false)
   const [rotateError, setRotateError] = useState<string | null>(null)
+  // Set when the server rejects a safe rotation with 409 ROTATION_IN_PROGRESS:
+  // the previous rotation's overlap window is still open. Distinct from
+  // rotateError so the UI can offer the wait-or-override choice instead of a
+  // generic failure message. Holds the server's detail text.
+  const [rotationInProgress, setRotationInProgress] = useState<string | null>(null)
+  const [forceInput, setForceInput] = useState('')
 
   function openRotateModal() {
     setRotateInput('')
+    setForceInput('')
     setRotateError(null)
+    setRotationInProgress(null)
     setShowRotateModal(true)
   }
 
   function closeRotateModal() {
     setShowRotateModal(false)
     setRotateInput('')
+    setForceInput('')
     setRotateError(null)
+    setRotationInProgress(null)
   }
 
   async function handleConfirmRevoke() {
@@ -366,8 +383,37 @@ export default function CertificatesView() {
     }
   }
 
+  // Safe rotation: force is left off so the controller's overlap-window guard
+  // decides. A 409 comes back as RotationInProgressError and switches the modal
+  // into the in-progress state rather than being reported as a failure.
   async function handleConfirmRotate() {
     if (rotateInput.trim() !== 'ROTATE') return
+    setRotating(true)
+    setRotateError(null)
+    setRotationInProgress(null)
+    try {
+      await rotateSigningCA()
+      closeRotateModal()
+    } catch (cause: unknown) {
+      if (cause instanceof RotationInProgressError) {
+        setRotationInProgress(cause.message)
+      } else {
+        setRotateError(
+          cause instanceof Error && cause.message ? cause.message : 'Rotation failed',
+        )
+      }
+    } finally {
+      setRotating(false)
+    }
+  }
+
+  // Forced rotation: only reachable from the in-progress state, behind its own
+  // type-to-confirm. This evicts the previous signing CA from the accepted-signer
+  // set immediately, so stewards that have not renewed lose config-signature
+  // validation — the override copy states that before consent is collected.
+  async function handleForceRotate() {
+    if (rotationInProgress === null) return
+    if (forceInput.trim() !== 'FORCE ROTATE') return
     setRotating(true)
     setRotateError(null)
     try {
@@ -517,54 +563,119 @@ export default function CertificatesView() {
           data-testid="rotate-overlay"
         >
           <div className="wf-modal rotate-modal">
-            <h3 id="rotate-ca-title">Rotate the signing CA?</h3>
-            <div className="rotate-warn" role="note">
-              <span>
-                <b>This affects every steward in the fleet.</b> A new CA is
-                generated and every future certificate is issued under it.
-                Existing steward certs keep working until they are renewed, but
-                any out-of-band trust bundles referencing the current CA
-                fingerprint must be updated.
-              </span>
-            </div>
-            <p>
-              Type <b>ROTATE</b> to confirm.
-            </p>
-            <div className="wf-form-field">
-              <input
-                type="text"
-                aria-label="Type ROTATE to confirm"
-                placeholder="ROTATE"
-                value={rotateInput}
-                onChange={(e) => setRotateInput(e.target.value)}
-                data-testid="rotate-confirm-input"
-                style={{ width: '100%' }}
-              />
-            </div>
-            {rotateError && (
-              <p className="wf-form-error" data-testid="rotate-error">
-                {rotateError}
-              </p>
+            {rotationInProgress !== null ? (
+              <>
+                <h3 id="rotate-ca-title">Rotation already in progress</h3>
+                <div className="rotate-warn" role="note" data-testid="rotation-in-progress">
+                  <span>
+                    <b>The previous rotation&apos;s overlap window is still open.</b>{' '}
+                    Until it closes, both the current and the previously rotated
+                    signing CA are accepted, which is what lets stewards renew on
+                    their own schedule. A new rotation is accepted normally once
+                    the window closes.
+                  </span>
+                </div>
+                <p className="mut" data-testid="rotation-in-progress-detail">
+                  {rotationInProgress}
+                </p>
+                <p>
+                  <b>Forcing a rotation now is not the same operation.</b> It drops
+                  the previously rotated CA from the accepted-signer set
+                  immediately, so every steward that has not yet renewed fails
+                  config-signature validation until it does. Waiting for the
+                  window to close avoids that entirely.
+                </p>
+                <p>
+                  Type <b>FORCE ROTATE</b> to override.
+                </p>
+                <div className="wf-form-field">
+                  <input
+                    type="text"
+                    aria-label="Type FORCE ROTATE to override"
+                    placeholder="FORCE ROTATE"
+                    value={forceInput}
+                    onChange={(e) => setForceInput(e.target.value)}
+                    data-testid="force-rotate-input"
+                    style={{ width: '100%' }}
+                  />
+                </div>
+                {rotateError && (
+                  <p className="wf-form-error" data-testid="rotate-error">
+                    {rotateError}
+                  </p>
+                )}
+                <div className="wf-modal-actions">
+                  <button
+                    type="button"
+                    className="wf-btn-secondary"
+                    disabled={rotating}
+                    onClick={closeRotateModal}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="wf-btn-danger"
+                    disabled={rotating || forceInput.trim() !== 'FORCE ROTATE'}
+                    onClick={() => void handleForceRotate()}
+                    data-testid="force-rotate-btn"
+                  >
+                    {rotating ? 'Rotating…' : 'Force rotate, breaking unrenewed stewards'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 id="rotate-ca-title">Rotate the signing CA?</h3>
+                <div className="rotate-warn" role="note">
+                  <span>
+                    <b>This affects every steward in the fleet.</b> A new CA is
+                    generated and every future certificate is issued under it.
+                    Existing steward certs keep working until they are renewed, but
+                    any out-of-band trust bundles referencing the current CA
+                    fingerprint must be updated.
+                  </span>
+                </div>
+                <p>
+                  Type <b>ROTATE</b> to confirm.
+                </p>
+                <div className="wf-form-field">
+                  <input
+                    type="text"
+                    aria-label="Type ROTATE to confirm"
+                    placeholder="ROTATE"
+                    value={rotateInput}
+                    onChange={(e) => setRotateInput(e.target.value)}
+                    data-testid="rotate-confirm-input"
+                    style={{ width: '100%' }}
+                  />
+                </div>
+                {rotateError && (
+                  <p className="wf-form-error" data-testid="rotate-error">
+                    {rotateError}
+                  </p>
+                )}
+                <div className="wf-modal-actions">
+                  <button
+                    type="button"
+                    className="wf-btn-secondary"
+                    disabled={rotating}
+                    onClick={closeRotateModal}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="wf-btn-danger"
+                    disabled={rotating || rotateInput.trim() !== 'ROTATE'}
+                    onClick={() => void handleConfirmRotate()}
+                    data-testid="rotate-confirm-btn"
+                  >
+                    {rotating ? 'Rotating…' : 'Rotate signing CA'}
+                  </button>
+                </div>
+              </>
             )}
-            <div className="wf-modal-actions">
-              <button
-                type="button"
-                className="wf-btn-secondary"
-                disabled={rotating}
-                onClick={closeRotateModal}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="wf-btn-danger"
-                disabled={rotating || rotateInput.trim() !== 'ROTATE'}
-                onClick={() => void handleConfirmRotate()}
-                data-testid="rotate-confirm-btn"
-              >
-                {rotating ? 'Rotating…' : 'Rotate signing CA'}
-              </button>
-            </div>
           </div>
         </div>
       )}

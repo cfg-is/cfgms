@@ -15,6 +15,7 @@ import {
   provisionCertificate,
   revokeCertificate,
   rotateSigningCA,
+  RotationInProgressError,
 } from './useCertificates.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -334,7 +335,7 @@ function makeRotateResponse(status = 200) {
 }
 
 describe('rotateSigningCA', () => {
-  it('calls POST /api/v1/certificates/signing/rotate with force=true', async () => {
+  it('calls POST /api/v1/certificates/signing/rotate without forcing by default', async () => {
     fetchMock.mockResolvedValue(makeRotateResponse())
     await rotateSigningCA()
     expect(fetchMock).toHaveBeenCalledOnce()
@@ -342,6 +343,13 @@ describe('rotateSigningCA', () => {
     expect(call).toBeDefined()
     expect(String(call?.[0])).toContain('/api/v1/certificates/signing/rotate')
     expect(call?.[1]?.method).toBe('POST')
+    expect(JSON.parse(call?.[1]?.body as string)).toMatchObject({ force: false })
+  })
+
+  it('sends force=true only when explicitly requested', async () => {
+    fetchMock.mockResolvedValue(makeRotateResponse())
+    await rotateSigningCA(true)
+    const call = fetchMock.mock.calls[0]
     expect(JSON.parse(call?.[1]?.body as string)).toMatchObject({ force: true })
   })
 
@@ -354,14 +362,30 @@ describe('rotateSigningCA', () => {
     expect(result.stewards_notified).toBe(42)
   })
 
-  it('throws on rotation failure', async () => {
+  it('throws RotationInProgressError on 409 so callers can offer wait-or-override', async () => {
     fetchMock.mockResolvedValue(
       new Response(
         JSON.stringify({ error: { message: 'Rotation already in progress', code: 'ROTATION_IN_PROGRESS' } }),
         { status: 409, headers: { 'Content-Type': 'application/json' } },
       ),
     )
-    await expect(rotateSigningCA()).rejects.toThrow('Rotation already in progress')
+    const error = await rotateSigningCA().catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(RotationInProgressError)
+    expect((error as Error).message).toBe('Rotation already in progress')
+    expect((error as RotationInProgressError).code).toBe('ROTATION_IN_PROGRESS')
+  })
+
+  it('throws on rotation failure', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Rotation failed', code: 'ROTATION_ERROR' } }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    const error = await rotateSigningCA().catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(RotationInProgressError)
+    expect((error as Error).message).toBe('Rotation failed')
   })
 
   it('throws generic error when no error message', async () => {

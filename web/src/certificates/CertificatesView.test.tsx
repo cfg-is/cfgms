@@ -515,6 +515,9 @@ describe('CertificatesView — CA rotation modal', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('rotate-overlay')).not.toBeInTheDocument()
     })
+    // The confirm path must never bypass the server's overlap-window guard.
+    const rotateCall = fetchMock.mock.calls[1]
+    expect(JSON.parse(rotateCall?.[1]?.body as string)).toMatchObject({ force: false })
   })
 
   it('shows error when rotation API fails', async () => {
@@ -522,8 +525,8 @@ describe('CertificatesView — CA rotation modal', () => {
       .mockReturnValueOnce(new Promise(() => {}))
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({ error: { message: 'Rotation already in progress', code: 'ROTATION_IN_PROGRESS' } }),
-          { status: 409, headers: { 'Content-Type': 'application/json' } },
+          JSON.stringify({ error: { message: 'Rotation failed', code: 'ROTATION_ERROR' } }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
         ),
       )
     renderCertificatesView()
@@ -531,10 +534,11 @@ describe('CertificatesView — CA rotation modal', () => {
     fireEvent.change(screen.getByTestId('rotate-confirm-input'), { target: { value: 'ROTATE' } })
     fireEvent.click(screen.getByTestId('rotate-confirm-btn'))
     await waitFor(() => {
-      expect(screen.getByTestId('rotate-error')).toHaveTextContent('Rotation already in progress')
+      expect(screen.getByTestId('rotate-error')).toHaveTextContent('Rotation failed')
     })
     // Modal stays open after error
     expect(screen.getByTestId('rotate-overlay')).toBeInTheDocument()
+    expect(screen.queryByTestId('rotation-in-progress')).not.toBeInTheDocument()
   })
 
   it('rotation modal shows fleet-impact warning text', () => {
@@ -543,5 +547,100 @@ describe('CertificatesView — CA rotation modal', () => {
     fireEvent.click(screen.getByTestId('rotate-ca-btn'))
     expect(screen.getByTestId('rotate-overlay')).toHaveTextContent('every steward in the fleet')
     expect(screen.getByTestId('rotate-overlay')).toHaveTextContent('trust bundles')
+  })
+})
+
+// ── Rotation-in-progress (409) and the forced override ────────────────────────
+
+function rotationInProgressResponse() {
+  return new Response(
+    JSON.stringify({
+      error: { message: 'Signing rotation already in progress', code: 'ROTATION_IN_PROGRESS' },
+    }),
+    { status: 409, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+async function reachInProgressState() {
+  renderCertificatesView()
+  fireEvent.click(screen.getByTestId('rotate-ca-btn'))
+  fireEvent.change(screen.getByTestId('rotate-confirm-input'), { target: { value: 'ROTATE' } })
+  fireEvent.click(screen.getByTestId('rotate-confirm-btn'))
+  await waitFor(() => {
+    expect(screen.getByTestId('rotation-in-progress')).toBeInTheDocument()
+  })
+}
+
+describe('CertificatesView — rotation in progress', () => {
+  it('shows the distinct in-progress state instead of a generic error on 409', async () => {
+    fetchMock
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce(rotationInProgressResponse())
+    await reachInProgressState()
+    expect(screen.queryByTestId('rotate-error')).not.toBeInTheDocument()
+    expect(screen.getByTestId('rotation-in-progress')).toHaveTextContent('overlap window is still open')
+    expect(screen.getByTestId('rotation-in-progress-detail')).toHaveTextContent(
+      'Signing rotation already in progress',
+    )
+    // The safe-path copy promising unrenewed certs keep working is gone — that
+    // guarantee does not hold for the forced path being offered here.
+    expect(screen.getByTestId('rotate-overlay')).not.toHaveTextContent(
+      'Existing steward certs keep working',
+    )
+    expect(screen.getByTestId('rotate-overlay')).toHaveTextContent(
+      'fails config-signature validation',
+    )
+  })
+
+  it('keeps the forced override disabled until FORCE ROTATE is typed', async () => {
+    fetchMock
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce(rotationInProgressResponse())
+    await reachInProgressState()
+    expect(screen.getByTestId('force-rotate-btn')).toBeDisabled()
+    fireEvent.change(screen.getByTestId('force-rotate-input'), { target: { value: 'ROTATE' } })
+    expect(screen.getByTestId('force-rotate-btn')).toBeDisabled()
+    fireEvent.change(screen.getByTestId('force-rotate-input'), { target: { value: 'FORCE ROTATE' } })
+    expect(screen.getByTestId('force-rotate-btn')).not.toBeDisabled()
+  })
+
+  it('sends force=true only from the explicit override', async () => {
+    fetchMock
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce(rotationInProgressResponse())
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: {
+              old_serial: 'aa:bb',
+              new_serial: 'cc:dd',
+              overlap_days: 7,
+              stewards_notified: 10,
+              overlap_expires_at: '2026-08-20T00:00:00Z',
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+    await reachInProgressState()
+    fireEvent.change(screen.getByTestId('force-rotate-input'), { target: { value: 'FORCE ROTATE' } })
+    fireEvent.click(screen.getByTestId('force-rotate-btn'))
+    await waitFor(() => {
+      expect(screen.queryByTestId('rotate-overlay')).not.toBeInTheDocument()
+    })
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toMatchObject({ force: false })
+    expect(JSON.parse(fetchMock.mock.calls[2]?.[1]?.body as string)).toMatchObject({ force: true })
+  })
+
+  it('reopening the modal returns to the unforced confirm state', async () => {
+    fetchMock
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce(rotationInProgressResponse())
+    await reachInProgressState()
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    fireEvent.click(screen.getByTestId('rotate-ca-btn'))
+    expect(screen.queryByTestId('rotation-in-progress')).not.toBeInTheDocument()
+    expect(screen.getByTestId('rotate-confirm-input')).toHaveValue('')
+    expect(screen.getByTestId('rotate-confirm-btn')).toBeDisabled()
   })
 })
