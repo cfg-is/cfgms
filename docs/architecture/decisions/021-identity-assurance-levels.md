@@ -787,3 +787,35 @@ line — browser first-passkey enrollment is now in scope via Amendment 1. Epic 
 decomposes into the elevation assertion handler (this amendment), the browser self-enrollment
 backend + UI (Amendment 1), the step-up modal + `apiFetch` interceptor, and the held write-action
 wiring (W1–W5) that becomes reachable once elevation works.
+
+---
+
+## Amendment 3 (2026-08-13): Self-service passkey management UI, IDOR fix, and server-side anti-lockout guard
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** §7 (annotation) and Amendment 1 Decision 3/4 (implementation)
+
+### Context
+
+Amendment 1 established that human accounts are passkey-only, that adding/removing a passkey is gated at `AssuranceStrong`, and that losing all passkeys requires the cert path (§7) or an admin-mediated reset. Three gaps remained unimplemented:
+
+1. **IDOR vulnerability in credential management endpoints.** `GET /webauthn/credentials` and `POST /webauthn/revoke/{credential_id}` resolved the target account from the URL path parameter `{username}` rather than from the authenticated session — any cookie-auth user could enumerate or revoke another user's passkeys by changing the path.
+2. **No server-side anti-lockout guard.** The server permitted cookie-auth principals to remove their last passkey, which would produce an unrecoverable browser account (no cert fallback for human web accounts — see annotation to §7 below). The spec comment in the earlier implementation claimed "the guard lives in the CLI", which was incorrect for the browser-session context.
+3. **No self-service passkeys UI.** There was no browser page where a logged-in user could list, add, and remove their own passkeys.
+
+### Decisions
+
+1. **IDOR fix — session-scoped account resolution.** All passkey management endpoints (`list`, `register/begin`, `register/finish`, `revoke`) resolve the target account from the authenticated session (principal UUID from `principalContextKey`), not from the URL path parameter. For cookie-auth sessions: the target account is `getWebAccountByID(ctx, principal.ID)` — a UUID lookup that is not attacker-controlled. The path parameter `{username}` is validated only to confirm it matches the session account; a mismatch returns `403 FORBIDDEN`. mTLS/API-key admin paths are unchanged — they retain the admin-scoped path-parameter lookup, which is correct (admins may manage other accounts).
+
+2. **Server-side anti-lockout guard for cookie-auth principals (Amendment 1 Decision 4 implementation).** `POST /webauthn/revoke/{credential_id}` now enforces: if the caller is cookie-authenticated (`cookieAuthContextKey=true`) and removing the credential would leave the account with zero passkeys, the request is rejected with `409 Conflict` / `LAST_CREDENTIAL`. mTLS/API-key callers are exempt — they retain the cert-based recovery path described in §7. The error message instructs the user to add a backup passkey first, or request an admin reset.
+
+3. **Atomic CAS for the last-credential check.** The last-credential check and the credential removal are a single compare-and-swap: `credentialMu.Lock()` → fresh durable-store reload (`loadWebAccountFromStore`) → check remaining count → persist → unlock. This prevents two concurrent revokes from each observing the pre-removal count, both passing the guard, and both persisting zero credentials.
+
+4. **Self-service passkeys page.** A "My Passkeys" view accessible at `/passkeys` (linked from the user menu) lets a cookie-auth principal list their registered passkeys, add a backup passkey (WebAuthn `navigator.credentials.create()` gated by step-up), and remove a passkey (step-up gated, blocked by the anti-lockout guard if it would be the last).
+
+5. **Audit events.** `web_account.passkey_added` and `web_account.passkey_revoked` audit events are emitted on successful add and remove respectively, matching the pattern of the existing `web_account.passkey_enrolled` event.
+
+### Annotation to §7 — human web accounts have no mTLS cert fallback
+
+§7 states "the cert path" as the recovery route for a lost sole authenticator. This is accurate for mTLS-authenticated principals (CLI operators, service accounts). It is **not applicable to human web accounts** (Amendment 1): human web accounts are passkey-only and have no associated mTLS client certificate. A human who loses all passkeys cannot recover via cert — they require an admin-mediated account reset (Decision 4 of Amendment 1: "an operator at `AssuranceStrong` re-provisions the account to the zero-authenticator state and issues a fresh single-use magic link"). The server-side anti-lockout guard (Decision 2 above) enforces this: it prevents the browser-self-service path from reaching zero credentials, leaving the emergency reset path as the only way out of a total lockout.
+
+**Implementation reference (Issue #2992):** IDOR fix via `resolveWebAccountForCredentials` helper; anti-lockout guard + CAS under `credentialMu` in `handleWebAuthnRevokeCredential`; self-service passkeys page at `web/src/passkeys/PasskeysView.tsx`; audit helpers `emitPasskeyAddedAudit` / `emitPasskeyRevokedAudit` in `features/controller/api/handlers_webauthn.go`.

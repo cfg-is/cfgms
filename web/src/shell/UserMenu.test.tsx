@@ -3,8 +3,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import UserMenu from './UserMenu.tsx'
+
+// UserMenu uses <Link> (react-router) for the "My Passkeys" menu item.
+// All renders must be wrapped in a Router so Link can access route context.
+function renderWithRouter(children: React.ReactNode) {
+  return render(<MemoryRouter>{children}</MemoryRouter>)
+}
 
 function jsonResponse(status: number, body: unknown = {}): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -92,7 +99,7 @@ async function signIn(username: string) {
     }
     return Promise.resolve(jsonResponse(200))
   })
-  render(
+  renderWithRouter(
     <AuthProvider>
       <SignedInHarness username={username} />
     </AuthProvider>,
@@ -124,7 +131,7 @@ describe('UserMenu', () => {
   })
 
   it('shows the fallback avatar when no principal is signed in', () => {
-    render(
+    renderWithRouter(
       <AuthProvider>
         <UserMenu />
       </AuthProvider>,
@@ -134,7 +141,7 @@ describe('UserMenu', () => {
 
   it('opens the menu and dispatches logout on click', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(204))
-    render(
+    renderWithRouter(
       <AuthProvider>
         <UserMenu />
       </AuthProvider>,
@@ -151,7 +158,7 @@ describe('UserMenu', () => {
   })
 
   it('toggles the theme attribute on the document root', () => {
-    render(
+    renderWithRouter(
       <AuthProvider>
         <UserMenu />
       </AuthProvider>,
@@ -166,7 +173,7 @@ describe('UserMenu', () => {
   })
 
   it('persists the theme choice to localStorage under the allowlisted key', () => {
-    render(
+    renderWithRouter(
       <AuthProvider>
         <UserMenu />
       </AuthProvider>,
@@ -178,7 +185,7 @@ describe('UserMenu', () => {
 
   it('restores the persisted theme choice on mount', () => {
     localStorage.setItem('cfgms.theme', 'dark')
-    render(
+    renderWithRouter(
       <AuthProvider>
         <UserMenu />
       </AuthProvider>,
@@ -188,7 +195,7 @@ describe('UserMenu', () => {
 
   it('ignores a corrupt stored theme value and falls back to auto', () => {
     localStorage.setItem('cfgms.theme', 'not-a-real-theme')
-    render(
+    renderWithRouter(
       <AuthProvider>
         <UserMenu />
       </AuthProvider>,
@@ -197,7 +204,7 @@ describe('UserMenu', () => {
   })
 
   it('closes on Escape', () => {
-    render(
+    renderWithRouter(
       <AuthProvider>
         <UserMenu />
       </AuthProvider>,
