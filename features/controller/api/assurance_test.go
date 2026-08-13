@@ -241,8 +241,11 @@ func TestPermissionAssurance_WebAccountUpdateStrong(t *testing.T) {
 //   - webauthn:elevate: step-up elevation path; it IS the auth upgrade mechanism, not a grantable grant
 //   - publisher-trust:add: forward-declared in knownFuturePermissions; no active REST route yet
 //
-// Pending-audit exceptions (may be the same class of drift as tenant:create; tracked in a follow-up story):
-//   - cluster:drain-node, cluster:decommission-node, refresh:approve, refresh:set-policy, terminal:create
+// The former pending-audit set (cluster:drain-node, cluster:decommission-node, refresh:approve,
+// refresh:set-policy, terminal:create) has been fully resolved in Issue #3303: all five are now
+// in knownPermissions with scope guards where required — ADR-025 Decision 1 root-scoped guards
+// for refresh:approve and terminal:create, and clusterLifecycleScopeAllowed for the two
+// cluster:* permissions, whose routes target fleet-wide, non-tenant infrastructure.
 func TestPermissionAssurance_CrossRegistryInvariant(t *testing.T) {
 	// Deliberate exceptions: permissions in permissionAssurance that are intentionally
 	// absent from knownPermissions because they are not grantable principal grants.
@@ -253,23 +256,13 @@ func TestPermissionAssurance_CrossRegistryInvariant(t *testing.T) {
 		"publisher-trust:add":      true, // forward-declared (no active route); knownFuturePermissions
 	}
 
-	// Pending-audit: these share the same inconsistency pattern as tenant:create (Issue #3195)
-	// and may need to be added to knownPermissions. Tracked as a follow-up to Issue #3195.
-	pendingAudit := map[string]bool{
-		"cluster:drain-node":        true,
-		"cluster:decommission-node": true,
-		"refresh:approve":           true,
-		"refresh:set-policy":        true,
-		"terminal:create":           true,
-	}
-
 	for permID := range permissionAssurance {
-		if deliberate[permID] || pendingAudit[permID] {
+		if deliberate[permID] {
 			continue
 		}
 		assert.True(t, isKnownPermission(permID),
 			"permission %q is in permissionAssurance but missing from knownPermissions — "+
-				"add it to knownPermissions (if it should be grantable) or to the deliberate/pendingAudit "+
+				"add it to knownPermissions (if it should be grantable) or to the deliberate "+
 				"exception set in this test with a documented reason (Issue #3195)", permID)
 	}
 

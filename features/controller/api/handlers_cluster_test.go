@@ -104,6 +104,57 @@ func TestHandleClusterNodeDrain_AdminValidNode_Returns202(t *testing.T) {
 	assert.True(t, srv.clusterDraining.Load(), "health gate must be set after drain")
 }
 
+// TestHandleClusterNodeDrain_TenantScopedPrincipal_Returns403 verifies the Issue #3303
+// scope guard: cluster:drain-node is grantable, but the route carries no tenant path
+// variable, so requirePermission's tenant-isolation block admits a tenant-scoped holder.
+// The handler must deny it — controller cluster nodes serve every tenant — and leave
+// membership state and the health gate untouched.
+func TestHandleClusterNodeDrain_TenantScopedPrincipal_Returns403(t *testing.T) {
+	srv, store := setupClusterTestServer(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateActive,
+		RegisteredAt: time.Now(),
+	}))
+
+	req := injectAdminPrincipalWithTenant(drainRequest("node-1"), "alice", "client-1")
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDrain(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateActive, got.State, "state must not change on 403")
+	assert.False(t, srv.clusterDraining.Load(), "health gate must not be set on 403")
+}
+
+// TestHandleClusterNodeDrain_RootScopedPrincipal_Returns202 verifies the in-scope side
+// of the Issue #3303 guard: a root-scoped SaaS operator carries TenantID == "" and owns
+// the controller's own infrastructure, so drain succeeds.
+func TestHandleClusterNodeDrain_RootScopedPrincipal_Returns202(t *testing.T) {
+	srv, store := setupClusterTestServer(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateActive,
+		RegisteredAt: time.Now(),
+	}))
+
+	req := injectAdminPrincipal(drainRequest("node-1"), "alice")
+	principal, ok := req.Context().Value(principalContextKey).(*Principal)
+	require.True(t, ok)
+	principal.RootScoped = true
+
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDrain(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDraining, got.State)
+}
+
 // TestHandleClusterNodeDrain_NodeNotFound_Returns404 verifies HTTP 404 for an
 // unknown node ID with no membership state side-effects.
 func TestHandleClusterNodeDrain_NodeNotFound_Returns404(t *testing.T) {
@@ -227,6 +278,53 @@ func TestAssuranceGate_ClusterDecommission_BasicAssuranceGetsStepUp(t *testing.T
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "Basic-assurance caller must get 401 step-up")
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+}
+
+// TestHandleClusterNodeDecommission_TenantScopedPrincipal_Returns403 verifies the
+// Issue #3303 scope guard on the decommission handler: a tenant-scoped holder of
+// cluster:decommission-node is denied and the node stays draining.
+func TestHandleClusterNodeDecommission_TenantScopedPrincipal_Returns403(t *testing.T) {
+	srv, store := setupClusterTestServerWithRegistry(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateDraining,
+		RegisteredAt: time.Now(),
+	}))
+
+	req := injectAdminPrincipalWithTenant(decommissionRequest("node-1"), "alice", "client-1")
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDecommission(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDraining, got.State, "state must not change on 403")
+}
+
+// TestHandleClusterNodeDecommission_RootScopedPrincipal_Returns200 verifies the in-scope
+// side of the Issue #3303 guard on the decommission handler.
+func TestHandleClusterNodeDecommission_RootScopedPrincipal_Returns200(t *testing.T) {
+	srv, store := setupClusterTestServerWithRegistry(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateDraining,
+		RegisteredAt: time.Now(),
+	}))
+
+	req := injectAdminPrincipal(decommissionRequest("node-1"), "alice")
+	principal, ok := req.Context().Value(principalContextKey).(*Principal)
+	require.True(t, ok)
+	principal.RootScoped = true
+
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDecommission(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDecommissioned, got.State)
 }
 
 // TestHandleClusterNodeDecommission_NilMembershipStore_Returns503 verifies that

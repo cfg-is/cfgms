@@ -999,3 +999,80 @@ func TestRefresh_AutoAccept_NoProvenanceBaseline(t *testing.T) {
 	assert.NotEmpty(t, resp.ClientKey)
 	assert.NotEmpty(t, resp.CACert)
 }
+
+// ---- Root-scoped ADR-025 Decision 1 guard tests for handleApproveRefresh (Issue #3303) ---
+
+// approveRefreshRequest builds a handler-level POST request for the approve endpoint
+// with mux vars set and the given principal injected into context.
+func approveRefreshRequest(pendingID string, principal *Principal) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
+	req = mux.SetURLVars(req, map[string]string{"pending_id": pendingID})
+	ctx := context.WithValue(req.Context(), principalContextKey, principal)
+	return req.WithContext(ctx)
+}
+
+// TestHandleApproveRefresh_RootScoped_NoCrossing_Returns404 is the REQUIRED TEST
+// (Issue #3303, AC "asserts the guard denies a foreign-tenant/foreign-subtree request"):
+// a root-scoped principal without an active crossing for the pending refresh's tenant
+// receives 404 "pending refresh not found" — the same existence-oracle response as the
+// tenant-scoped denial path — so the endpoint does not disclose pending-refresh
+// existence across tenant boundaries.
+func TestHandleApproveRefresh_RootScoped_NoCrossing_Returns404(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	pendingID := "refresh-root-no-crossing"
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID, // "test-tenant" — not under "root" in this hierarchy-less store
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	})
+
+	// root-scoped principal: TenantID == "", RootScoped == true.
+	principal := rootScopedPrincipal("root-op-no-crossing")
+	req := approveRefreshRequest(pendingID, principal)
+	rec := httptest.NewRecorder()
+	f.server.handleApproveRefresh(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"root-scoped caller without a crossing must receive 404, not disclose the pending refresh")
+	assert.Contains(t, rec.Body.String(), "pending refresh not found")
+
+	// Entry must remain pending — nothing was mutated.
+	entry, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status)
+}
+
+// TestHandleApproveRefresh_RootScoped_RootTenantItself_ProceedsGuard is the REQUIRED
+// TEST counterpart (Issue #3303, AC "allows an in-scope one"): a root-scoped principal
+// targeting a pending refresh in the root tenant itself (always allowed, no crossing
+// required) passes the guard. The request proceeds past the guard and reaches the steward
+// lookup, which returns 404 "steward not found" because the steward is not registered —
+// confirming the guard did not block it.
+func TestHandleApproveRefresh_RootScoped_RootTenantItself_ProceedsGuard(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	pendingID := "refresh-root-tenant-itself"
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  "root", // root tenant itself — always allowed for root-scoped principals
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	})
+
+	principal := rootScopedPrincipal("root-op-root-tenant")
+	req := approveRefreshRequest(pendingID, principal)
+	rec := httptest.NewRecorder()
+	f.server.handleApproveRefresh(rec, req)
+
+	// The guard passed — the handler reached the steward lookup, which returns 404
+	// "steward not found" (not 404 "pending refresh not found"), proving the guard allowed it.
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "pending refresh not found",
+		"response must not be the guard's 404 — handler must have proceeded past the guard")
+	assert.Contains(t, rec.Body.String(), "steward not found",
+		"handler must have reached the steward lookup after the guard passed")
+}
