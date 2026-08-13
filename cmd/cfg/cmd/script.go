@@ -71,6 +71,7 @@ var (
 	scriptLibAPIKey      string
 	scriptLibTLSCACert   string
 	scriptLibTLSInsecure bool
+	scriptLibServerName  string
 )
 
 // scriptPrivilegeScopes holds the --scope flag values for set-privilege.
@@ -146,7 +147,13 @@ func getScriptLibClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := scriptLibTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := scriptLibServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -157,11 +164,6 @@ func getScriptLibClient() (*APIClient, error) {
 	apiKey := scriptLibAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := scriptLibTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := scriptLibTLSCACert

@@ -25,6 +25,7 @@ var (
 	healthFormat          string
 	controllerTLSCACert   string
 	controllerTLSInsecure bool
+	controllerServerName  string
 
 	// signing-cert rotate flags
 	signingCertOverlapDays int
@@ -183,6 +184,7 @@ func init() {
 	controllerCmd.PersistentFlags().StringVar(&healthFormat, "format", "text", "Output format (text, json)")
 	controllerCmd.PersistentFlags().StringVar(&controllerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	controllerCmd.PersistentFlags().BoolVar(&controllerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	controllerCmd.PersistentFlags().StringVar(&controllerServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	_ = controllerCmd.MarkPersistentFlagRequired("url")
 
@@ -211,8 +213,14 @@ func getControllerClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
+	tlsInsecure := controllerTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := controllerServerName
+
 	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveSessionOrBundleClient(apiURL)
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -224,11 +232,6 @@ func getControllerClient() (*APIClient, error) {
 	apiKey := healthAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := controllerTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := controllerTLSCACert

@@ -14,7 +14,7 @@ import (
 )
 
 // sessionTokenKey is the key used to store the active session record in the OS keychain.
-const sessionTokenKey = "cfgms/active-session"
+const sessionTokenKey = "cfgms/active-session" // #nosec G101 — keychain storage key, not a credential
 
 // sessionRecord holds the active session state stored in the OS-native secret store.
 // No token material is ever written to a file on disk.

@@ -21,6 +21,7 @@ var (
 	registrationAPIKey           string
 	registrationTLSCACert        string
 	registrationTLSInsecure      bool
+	registrationServerName       string
 	registrationJSONOutput       bool
 	registrationDenyReason       string
 	registrationIPTrustTenantID  string
@@ -168,6 +169,7 @@ func init() {
 	registrationCmd.PersistentFlags().StringVar(&registrationAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	registrationCmd.PersistentFlags().StringVar(&registrationTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	registrationCmd.PersistentFlags().BoolVar(&registrationTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	registrationCmd.PersistentFlags().StringVar(&registrationServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	registrationPendingCmd.Flags().BoolVar(&registrationJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
@@ -199,7 +201,13 @@ func getRegistrationClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := registrationTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := registrationServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -214,11 +222,6 @@ func getRegistrationClient() (*APIClient, error) {
 	apiKey := registrationAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := registrationTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := registrationTLSCACert

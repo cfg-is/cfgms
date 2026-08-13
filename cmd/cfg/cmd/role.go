@@ -32,6 +32,7 @@ var (
 	roleAPIKey      string
 	roleTLSCACert   string
 	roleTLSInsecure bool
+	roleServerName  string
 
 	// roleTenant targets a specific tenant. Role configs are stored per tenant, so
 	// a global/root admin must name the tenant explicitly; a tenant-scoped caller
@@ -150,7 +151,13 @@ func getRoleClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := roleTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := roleServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -161,11 +168,6 @@ func getRoleClient() (*APIClient, error) {
 	apiKey := roleAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := roleTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := roleTLSCACert

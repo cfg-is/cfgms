@@ -25,6 +25,7 @@ var (
 	tokenAPIKey      string
 	tokenTLSCACert   string
 	tokenTLSInsecure bool
+	tokenServerName  string
 )
 
 // tokenCmd represents the token command
@@ -170,6 +171,7 @@ func init() {
 	tokenCmd.PersistentFlags().StringVar(&tokenAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	tokenCmd.PersistentFlags().StringVar(&tokenTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	tokenCmd.PersistentFlags().BoolVar(&tokenTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	tokenCmd.PersistentFlags().StringVar(&tokenServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Create command flags
 	tokenCreateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
@@ -212,8 +214,14 @@ func getAPIClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
+	tlsInsecure := tokenTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := tokenServerName
+
 	// Try active session token first, then admin bundle (mTLS auto-discovery).
-	client, err := resolveSessionOrBundleClient(apiURL)
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("client lookup failed: %w", err)
 	}
@@ -229,11 +237,6 @@ func getAPIClient() (*APIClient, error) {
 	apiKey := tokenAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := tokenTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := tokenTLSCACert
