@@ -1372,7 +1372,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).
 	srv.dnaStorageManager = dnaStorageManager
-	reportsHandler := initializeReportsHandler(dnaStorageManager, logger)
+	reportsHandler := initializeReportsHandler(dnaStorageManager, controllerService, logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
 		logger.Info("Reports engine wired to HTTP API server")
@@ -1623,7 +1623,9 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 // initializeReportsHandler creates the reports API handler over the shared DNA
 // storage manager. Returns nil when DNA storage is unavailable (reports engine
 // disabled) — the manager's lifecycle is owned by the caller. (Issue #1572)
-func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logging.Logger) *reportapi.Handler {
+// controllerService supplies device→tenant ownership so tenant-scoped callers
+// cannot select another tenant's devices.
+func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerService *service.ControllerService, logger logging.Logger) *reportapi.Handler {
 	if dnaStorageManager == nil {
 		return nil
 	}
@@ -1643,7 +1645,9 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logg
 	reportEngine := reportsengine.New(dataProvider, templateProcessor, exporter, reportsCache, logger)
 
 	logger.Info("Reports engine initialized")
-	return reportapi.New(reportEngine, exporter, logger)
+	// The steward registry is the device→tenant authority for the reports
+	// endpoints; a report device ID is a steward ID.
+	return reportapi.New(reportEngine, exporter, controllerService, logger)
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.

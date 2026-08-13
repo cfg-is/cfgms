@@ -3,31 +3,60 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/reports/interfaces"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// DeviceTenantResolver resolves the tenant that owns a device. A report device
+// ID is a steward ID, so the controller's steward registry satisfies this
+// interface; it is declared here, at the point of use, so the reports feature
+// stays independent of the controller packages.
+type DeviceTenantResolver interface {
+	// TenantForDevice returns the tenant ID owning deviceID. known is false
+	// when the device is not present in the registry.
+	TenantForDevice(deviceID string) (tenantID string, known bool)
+}
+
+// Device-scope failures. The device ID is deliberately absent from both: the
+// response must not confirm or deny the existence of another tenant's device.
+var (
+	// errDeviceOutsideTenant means a scoped caller asked for a device that is
+	// unknown or owned by a tenant outside the caller's subtree.
+	errDeviceOutsideTenant = errors.New("device is not within the caller's tenant")
+	// errDeviceScopeUnverifiable means no DeviceTenantResolver is wired, so
+	// device ownership cannot be checked. Requests fail closed.
+	errDeviceScopeUnverifiable = errors.New("device tenant ownership cannot be verified")
 )
 
 // Handler implements HTTP handlers for the reports API
 type Handler struct {
 	engine   interfaces.ReportEngine
 	exporter interfaces.Exporter
+	devices  DeviceTenantResolver
 	logger   logging.Logger
 }
 
-// New creates a new reports API handler
-func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, logger logging.Logger) *Handler {
+// New creates a new reports API handler. devices resolves device ownership for
+// the tenant boundary enforced on every device-selecting endpoint; when it is
+// nil, tenant-scoped callers cannot select devices at all (fail closed).
+func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, devices DeviceTenantResolver, logger logging.Logger) *Handler {
 	return &Handler{
 		engine:   engine,
 		exporter: exporter,
+		devices:  devices,
 		logger:   logger,
 	}
 }
@@ -63,6 +92,19 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// Set default format if not specified
 	if req.Format == "" {
 		req.Format = interfaces.FormatJSON
+	}
+
+	// Tenant scope: the request body is caller-controlled, so its TenantIDs are
+	// advisory only — a scoped caller is pinned to its own tenant — and its
+	// DeviceIDs are authorized against that tenant before reaching the engine.
+	// Without this, generate would bypass the scoping enforced on the GET
+	// endpoints, since the exported report carries per-device rows.
+	if callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string); callerTenant != "" {
+		req.TenantIDs = []string{callerTenant}
+	}
+	if _, err := h.enforceDeviceTenant(r.Context(), req.DeviceIDs); err != nil {
+		h.writeDeviceScopeError(w, err)
+		return
 	}
 
 	// Generate the report
@@ -145,7 +187,11 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs := h.parseDeviceIDs(r)
+	deviceIDs, err := h.scopedDeviceIDs(r)
+	if err != nil {
+		h.writeDeviceScopeError(w, err)
+		return
+	}
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate executive dashboard report
@@ -163,7 +209,7 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate dashboard overview", "error", err)
+		h.logger.Error("failed to generate dashboard overview", "error", logging.SanitizeLogValue(err.Error()))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate dashboard overview", err)
 		return
 	}
@@ -195,7 +241,11 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs := h.parseDeviceIDs(r)
+	deviceIDs, err := h.scopedDeviceIDs(r)
+	if err != nil {
+		h.writeDeviceScopeError(w, err)
+		return
+	}
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate executive dashboard with charts
@@ -213,7 +263,7 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate trends data", "error", err)
+		h.logger.Error("failed to generate trends data", "error", logging.SanitizeLogValue(err.Error()))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate trends data", err)
 		return
 	}
@@ -244,7 +294,11 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs := h.parseDeviceIDs(r)
+	deviceIDs, err := h.scopedDeviceIDs(r)
+	if err != nil {
+		h.writeDeviceScopeError(w, err)
+		return
+	}
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate drift analysis report filtered to critical/warning events
@@ -262,7 +316,7 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate alerts data", "error", err)
+		h.logger.Error("failed to generate alerts data", "error", logging.SanitizeLogValue(err.Error()))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate alerts data", err)
 		return
 	}
@@ -309,7 +363,11 @@ func (h *Handler) getComplianceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs := h.parseDeviceIDs(r)
+	deviceIDs, err := h.scopedDeviceIDs(r)
+	if err != nil {
+		h.writeDeviceScopeError(w, err)
+		return
+	}
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate compliance summary report
@@ -327,7 +385,7 @@ func (h *Handler) getComplianceStatus(w http.ResponseWriter, r *http.Request) {
 
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate compliance status", "error", err)
+		h.logger.Error("failed to generate compliance status", "error", logging.SanitizeLogValue(err.Error()))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate compliance status", err)
 		return
 	}
@@ -368,7 +426,11 @@ func (h *Handler) getDriftSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceIDs := h.parseDeviceIDs(r)
+	deviceIDs, err := h.scopedDeviceIDs(r)
+	if err != nil {
+		h.writeDeviceScopeError(w, err)
+		return
+	}
 	tenantIDs := h.parseTenantIDs(r)
 
 	// Generate drift analysis report
@@ -383,7 +445,7 @@ func (h *Handler) getDriftSummary(w http.ResponseWriter, r *http.Request) {
 
 	report, err := h.engine.GenerateReport(r.Context(), req)
 	if err != nil {
-		h.logger.Error("failed to generate drift summary", "error", err)
+		h.logger.Error("failed to generate drift summary", "error", logging.SanitizeLogValue(err.Error()))
 		h.writeError(w, http.StatusInternalServerError, "Failed to generate drift summary", err)
 		return
 	}
@@ -467,10 +529,69 @@ func (h *Handler) parseDeviceIDs(r *http.Request) []string {
 	return deviceIDs
 }
 
+// scopedDeviceIDs parses the requested device IDs and enforces the caller's
+// tenant boundary on them.
+func (h *Handler) scopedDeviceIDs(r *http.Request) ([]string, error) {
+	return h.enforceDeviceTenant(r.Context(), h.parseDeviceIDs(r))
+}
+
+// enforceDeviceTenant verifies that every requested device belongs to the
+// calling tenant's subtree. TenantIDs alone is not a filter on the data path —
+// DataProvider.GetDNAData and storage.GetHistory select purely on device ID —
+// so device IDs are the actual cross-tenant selector and must be authorized
+// here, at the boundary, before they reach the engine.
+func (h *Handler) enforceDeviceTenant(ctx context.Context, deviceIDs []string) ([]string, error) {
+	callerTenant, _ := ctx.Value(ctxkeys.TenantID).(string)
+	if callerTenant == "" || len(deviceIDs) == 0 {
+		// Root/unscoped caller, or no device selector to authorize.
+		return deviceIDs, nil
+	}
+
+	if h.devices == nil {
+		return nil, errDeviceScopeUnverifiable
+	}
+
+	for _, deviceID := range deviceIDs {
+		owner, known := h.devices.TenantForDevice(deviceID)
+		if !known || !tenantWithinSubtree(owner, callerTenant) {
+			return nil, errDeviceOutsideTenant
+		}
+	}
+
+	return deviceIDs, nil
+}
+
+// tenantWithinSubtree reports whether deviceTenant is callerTenant or one of
+// its descendants in the path-based tenant hierarchy (root/msp-a/client-1).
+func tenantWithinSubtree(deviceTenant, callerTenant string) bool {
+	return deviceTenant == callerTenant || strings.HasPrefix(deviceTenant, callerTenant+"/")
+}
+
+// writeDeviceScopeError renders a device-scope failure. An unknown or
+// out-of-tenant device returns 404 rather than 403 so the response does not
+// disclose the existence of another tenant's device — matching the steward
+// compliance endpoints.
+func (h *Handler) writeDeviceScopeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errDeviceScopeUnverifiable) {
+		h.logger.Error("refusing device-scoped report request: no device tenant resolver wired")
+		h.writeError(w, http.StatusServiceUnavailable, "Device tenant verification unavailable", nil)
+		return
+	}
+
+	h.writeError(w, http.StatusNotFound, "Device not found", nil)
+}
+
 func (h *Handler) parseTenantIDs(r *http.Request) []string {
+	// A tenant-scoped caller may only see their own tenant's data. The caller's
+	// tenant is authoritative; any query param is ignored to prevent cross-tenant
+	// data access. Root/unscoped callers retain query-param-driven filtering.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		return []string{callerTenant}
+	}
+	// Root/unscoped caller: honor query params.
 	tenantIDs := r.URL.Query()["tenant_id"]
 	if tenantIDsStr := r.URL.Query().Get("tenant_ids"); tenantIDsStr != "" {
-		// Support comma-separated tenant IDs
 		var ids []string
 		if err := json.Unmarshal([]byte(tenantIDsStr), &ids); err == nil {
 			tenantIDs = append(tenantIDs, ids...)
@@ -503,7 +624,7 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, data interface{})
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		h.logger.Error("failed to encode JSON response", "error", err)
+		h.logger.Error("failed to encode JSON response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
