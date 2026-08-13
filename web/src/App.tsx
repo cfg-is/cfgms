@@ -14,6 +14,7 @@
  *   /modules         → AppShell layout → ModuleReviewQueue
  *   /workflows       → AppShell layout → WorkflowListView
  *   /accounts        → AppShell layout → AccountsView
+ *   /certificates    → AppShell layout → CertificatesView
  *   /registration    → AppShell layout → RegistrationConsolePage
  *   /refresh         → AppShell layout → RefreshQueuePage
  *   /passkeys        → AppShell layout → PasskeysView (self-service passkey management)
@@ -39,6 +40,7 @@ import AuditView from './audit/AuditView.tsx'
 import ConfigListView from './config/ConfigListView.tsx'
 import WorkflowListView from './workflow/WorkflowListView.tsx'
 import AccountsView from './accounts/AccountsView.tsx'
+import CertificatesView from './certificates/CertificatesView.tsx'
 import ModuleReviewQueue from './modules/ModuleReviewQueue.tsx'
 import ScriptsView from './scripts/ScriptsView.tsx'
 import RegistrationConsolePage from './registration/RegistrationConsolePage.tsx'
@@ -67,6 +69,7 @@ function App() {
                   <Route path="modules" element={<ModuleReviewQueue />} />
                   <Route path="workflows" element={<WorkflowListView />} />
                   <Route path="accounts" element={<AccountsView />} />
+                  <Route path="certificates" element={<CertificatesView />} />
                   <Route path="scripts" element={<ScriptsView />} />
                   <Route path="registration" element={<RegistrationConsolePage />} />
                   <Route path="refresh" element={<RefreshQueuePage />} />
