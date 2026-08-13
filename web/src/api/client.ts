@@ -295,6 +295,117 @@ export async function passkeyLoginFinishRequest(assertion: AssertionJSON): Promi
   return { ok: true, status: response.status, username, tenantId, rootScope }
 }
 
+// ── Passkey enrollment (Issue #2966 / #2968) ─────────────────────────────────
+
+/**
+ * HTTP request header that carries the single-use enrollment magic-link token
+ * for first-passkey enrollment. Must match the server constant (Issue #2966).
+ */
+const enrollmentTokenHeader = 'X-Enrollment-Token'
+
+/**
+ * WebAuthn creation options returned by POST /api/v1/web/passkey/enroll/begin.
+ * go-webauthn/webauthn serialises challenge, user.id, and excludeCredentials
+ * IDs as raw base64url strings; the browser expects ArrayBuffer.
+ */
+export interface PasskeyEnrollOptions {
+  publicKey: {
+    challenge: string
+    rp: { id?: string; name: string }
+    user: { id: string; name: string; displayName: string }
+    pubKeyCredParams: Array<{ type: 'public-key'; alg: number }>
+    timeout?: number
+    excludeCredentials?: Array<{
+      type: 'public-key'
+      id: string
+      transports?: string[]
+    }>
+    authenticatorSelection?: {
+      authenticatorAttachment?: string
+      requireResidentKey?: boolean
+      residentKey?: string
+      userVerification?: UserVerificationRequirement
+    }
+    attestation?: string
+  }
+}
+
+export interface EnrollBeginResult {
+  ok: boolean
+  status: number
+  options?: PasskeyEnrollOptions
+}
+
+/**
+ * Serialized WebAuthn attestation response for POST /api/v1/web/passkey/enroll/finish.
+ * go-webauthn/webauthn expects base64url-encoded attestationObject and clientDataJSON.
+ */
+export interface AttestationJSON {
+  id: string
+  rawId: string
+  response: {
+    attestationObject: string
+    clientDataJSON: string
+  }
+  type: 'public-key'
+  clientExtensionResults: Record<string, unknown>
+}
+
+export interface EnrollFinishResult {
+  ok: boolean
+  status: number
+}
+
+/**
+ * Passkey enrollment begin POST (Issue #2968 / ADR-021 Amendment 1).
+ * Validates the single-use magic-link token server-side and returns the
+ * WebAuthn registration ceremony options. Uses raw fetch (not apiFetch)
+ * because this endpoint is on the public router and the token IS the auth
+ * credential — no session or CSRF cookie is required.
+ *
+ * Returns ok:false when the token is invalid (401), expired, or the server
+ * is not configured for WebAuthn (503).
+ */
+export async function passkeyEnrollBeginRequest(token: string): Promise<EnrollBeginResult> {
+  const response = await fetch('/api/v1/web/passkey/enroll/begin', {
+    method: 'POST',
+    headers: new Headers({ [enrollmentTokenHeader]: token }),
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    return { ok: false, status: response.status }
+  }
+  const options = (await response.json()) as PasskeyEnrollOptions
+  return { ok: true, status: response.status, options }
+}
+
+/**
+ * Passkey enrollment finish POST (Issue #2968 / ADR-021 Amendment 1).
+ * Sends the WebAuthn attestation to the server to complete registration.
+ * Routes through apiFetch so the `onSessionConfirmed` listener fires on a
+ * successful 201 response, establishing the session in AuthContext without a
+ * dedicated probe call (same pattern as the fleet view's data call probe).
+ *
+ * Returns ok:true (201) on success; ok:false otherwise.
+ * Callers must check ok before navigating — a non-401 error response still
+ * triggers onSessionConfirmed (apiFetch fires it on any non-401), so the
+ * caller is responsible for only navigating on genuine success.
+ */
+export async function passkeyEnrollFinishRequest(
+  token: string,
+  attestation: AttestationJSON,
+): Promise<EnrollFinishResult> {
+  const response = await apiFetch('/api/v1/web/passkey/enroll/finish', {
+    method: 'POST',
+    headers: new Headers({
+      'Content-Type': 'application/json',
+      [enrollmentTokenHeader]: token,
+    }),
+    body: JSON.stringify(attestation),
+  })
+  return { ok: response.ok, status: response.status }
+}
+
 /**
  * Server-side logout (CSRF-checked). A 401 means the session was already
  * gone — the caller returns to the signin state either way, so it is not
