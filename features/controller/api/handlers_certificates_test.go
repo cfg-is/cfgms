@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,7 +25,9 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	storageinterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -1359,4 +1362,549 @@ func TestHandleProvisionCertificate_ProvisioningFailure_Returns500(t *testing.T)
 		"the error response must not disclose internal filesystem paths")
 	assert.NotContains(t, body, "BEGIN",
 		"no certificate material may be returned on the failure path")
+}
+
+// ---- GET /api/v1/certificates/{serial} ----
+
+// TestHandleGetCertificate_ReturnsRealData verifies the GET-one endpoint returns
+// CertificateInfo with the correct fields for a known serial number.
+func TestHandleGetCertificate_ReturnsRealData(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"certificate:get"})
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-getone",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-getone",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Data CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, issued.SerialNumber, resp.Data.SerialNumber)
+	assert.Equal(t, "steward-getone", resp.Data.CommonName)
+	assert.Equal(t, "steward-getone", resp.Data.StewardID)
+	assert.True(t, resp.Data.IsValid)
+	assert.False(t, resp.Data.ExpiresAt.IsZero(), "expires_at must be populated")
+}
+
+// TestHandleGetCertificate_UnknownSerial_Returns404 verifies that requesting
+// a non-existent serial returns 404, not a 500 or silent success.
+// The serial uses only digits to pass the path-parameter charset validation
+// (validation_middleware.go: charset:alphanumeric).
+func TestHandleGetCertificate_UnknownSerial_Returns404(t *testing.T) {
+	server, _ := setupCertTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"certificate:get"})
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/99999999999999999999", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetCertificate_NilCertManager_Returns503 verifies 503 when no cert manager
+// is configured. Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleGetCertificate_NilCertManager_Returns503(t *testing.T) {
+	server := setupTestServer(t) // no cert manager
+	apiKey := NewTestKey(t, server, []string{"certificate:get"})
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/12345678901234567890", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleGetCertificate_RequiresAuth verifies the endpoint rejects unauthenticated
+// requests. Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleGetCertificate_RequiresAuth(t *testing.T) {
+	server, _ := setupCertTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/12345678901234567890", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleGetCertificate_TenantScope_OwnTenant_Visible verifies that a caller
+// scoped to client-1 can GET their own tenant's certificate.
+func TestHandleGetCertificate_TenantScope_OwnTenant_Visible(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:get"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "own-tenant cert must be visible")
+	var resp struct {
+		Data CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, issued.SerialNumber, resp.Data.SerialNumber)
+	assert.Equal(t, "steward-client1", resp.Data.StewardID)
+}
+
+// TestHandleGetCertificate_TenantScope_SiblingTenant_Returns404 is a [REQUIRED TEST]:
+// a caller scoped to client-1 cannot GET a certificate whose owning steward belongs
+// to client-2 — the endpoint must return 404 (not 200 or 403) to avoid disclosing
+// cross-tenant certificate existence.
+func TestHandleGetCertificate_TenantScope_SiblingTenant_Returns404(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// certificate:get has no AssuranceStrong requirement — use an API key scoped to client-1.
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:get"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"sibling-tenant certificate must return 404 to avoid disclosing serial existence")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+}
+
+// ---- POST /api/v1/certificates/{serial}/revoke ----
+
+// TestHandleRevokeCertificate_Success verifies the success path for certificate
+// revocation: the response carries IsRevoked=true and the cert manager confirms
+// revocation via IsRevoked.
+func TestHandleRevokeCertificate_Success(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-revoke-ok",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-revoke-ok",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// certificate:revoke requires AssuranceStrong — use mTLS admin cert.
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Data RevokeCertificateResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, issued.SerialNumber, resp.Data.SerialNumber)
+	assert.False(t, resp.Data.IsValid, "revoked cert must report IsValid: false")
+	assert.True(t, resp.Data.IsRevoked, "revoked cert must report IsRevoked: true")
+
+	// Verify actual revocation in the cert manager.
+	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+		"cert must be on the revocation list after successful revoke")
+}
+
+// TestHandleRevokeCertificate_RevokedCertReportsCorrectly verifies that after
+// revocation the certificate still appears in ListCertificates and
+// GetCertificateByCommonName (revocation does not delete the cert), and IsRevoked
+// returns true (Issue #3129 AC: "appears correctly in ListCertificates/
+// GetCertificateByCommonName output").
+func TestHandleRevokeCertificate_RevokedCertReportsCorrectly(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-revoke-report",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-revoke-report",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "revoke must succeed: %s", rec.Body.String())
+
+	// IsRevoked must return true.
+	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+		"IsRevoked must return true after revocation")
+
+	// ListCertificates must still include the cert (revocation doesn't delete it).
+	certInfos, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	found := false
+	for _, c := range certInfos {
+		if c.SerialNumber == issued.SerialNumber {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"revoked cert must still appear in ListCertificates (revocation is not deletion)")
+
+	// GetCertificateByCommonName must still return the cert.
+	byCN, err := certMgr.GetCertificateByCommonName("steward-revoke-report")
+	require.NoError(t, err)
+	found = false
+	for _, c := range byCN {
+		if c.SerialNumber == issued.SerialNumber {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"revoked cert must still appear in GetCertificateByCommonName output")
+}
+
+// TestHandleRevokeCertificate_UnknownSerial_Returns404 is a [REQUIRED TEST]:
+// revoking an unknown serial must return 404, not a 500 or silent success.
+// Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleRevokeCertificate_UnknownSerial_Returns404(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/99999999999999999999/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "unknown serial must return 404, not 500 or 200")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleRevokeCertificate_NilCertManager_Returns503 verifies 503 when no cert
+// manager is configured. Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleRevokeCertificate_NilCertManager_Returns503(t *testing.T) {
+	server, certMgr := setupCertTestServer(t) // certMgr needed for admin cert only
+
+	// Replace server's cert manager with nil to trigger the guard.
+	server.certManager = nil
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/12345678901234567890/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleRevokeCertificate_TenantScope_SiblingTenant_Returns404_AndDoesNotRevoke
+// is a [REQUIRED TEST]: a caller scoped to client-1 cannot revoke a certificate
+// whose owning steward belongs to client-2. The endpoint must return 404 and the
+// certificate must remain un-revoked.
+//
+// certificate:revoke is AssuranceStrong — no API key can reach the endpoint via the
+// router. We call the handler directly, injecting a Strong-assurance principal
+// scoped to client-1, to test the handler's tenant gate independently.
+func TestHandleRevokeCertificate_TenantScope_SiblingTenant_Returns404_AndDoesNotRevoke(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Inject a Strong-assurance principal scoped to client-1 directly into the
+	// context. We call the handler method directly (bypassing requirePermission)
+	// because certificate:revoke is AssuranceStrong and no API key can satisfy that.
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{
+		ID:        "scoped-admin",
+		Name:      "mtls-cert:scoped-admin",
+		Assurance: session.AssuranceStrong,
+		TenantID:  "client-1",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"cross-tenant revoke must return 404 to avoid disclosing cert existence across tenants")
+	assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
+		"cross-tenant revoke must NOT revoke the certificate")
+}
+
+// TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds verifies that a
+// Strong-assurance principal scoped to client-1 CAN revoke a certificate belonging
+// to a steward in client-1. Calls the handler directly (same rationale as the
+// sibling-tenant test above).
+func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{
+		ID:        "scoped-admin",
+		Name:      "mtls-cert:scoped-admin",
+		Assurance: session.AssuranceStrong,
+		TenantID:  "client-1",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"own-tenant revoke must succeed: %s", rec.Body.String())
+	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+		"cert must be revoked after successful own-tenant revoke")
+}
+
+// scopedRevokeContext builds a Strong-assurance principal context scoped to the
+// given tenant. An empty tenant models an unscoped mTLS admin.
+func scopedRevokeContext(tenantID string) context.Context {
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	return context.WithValue(ctx, principalContextKey, &Principal{
+		ID:        "revoke-caller",
+		Name:      "mtls-cert:revoke-caller",
+		Assurance: session.AssuranceStrong,
+		TenantID:  tenantID,
+	})
+}
+
+// internalCertSerial returns the serial of a certificate with no ClientID
+// (controller-internal: CA, signing or server cert).
+func internalCertSerial(t *testing.T, certMgr *cert.Manager) string {
+	t.Helper()
+	certs, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	for _, c := range certs {
+		if c.ClientID == "" {
+			return c.SerialNumber
+		}
+	}
+	t.Fatal("no controller-internal certificate (empty ClientID) found in store")
+	return ""
+}
+
+// TestHandleRevokeCertificate_TenantScope_InternalCert_Returns404_AndDoesNotRevoke
+// verifies the fail-closed rule for the destructive path: a tenant-scoped caller
+// must NOT be able to revoke a controller-internal certificate (empty ClientID —
+// CA, signing or server cert). Revoking one severs mTLS for the entire fleet, so
+// unlike the read/list path it is denied with the same 404 used for out-of-scope
+// certificates.
+func TestHandleRevokeCertificate_TenantScope_InternalCert_Returns404_AndDoesNotRevoke(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	serial := internalCertSerial(t, certMgr)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+serial+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext("client-1"))
+	req = mux.SetURLVars(req, map[string]string{"serial": serial})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"tenant-scoped caller must not revoke a controller-internal certificate")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+	assert.False(t, certMgr.IsRevoked(serial),
+		"controller-internal certificate must remain un-revoked after a tenant-scoped attempt")
+}
+
+// TestHandleRevokeCertificate_InternalCert_UnscopedAdminSucceeds verifies the
+// other half of the fail-closed rule: an unscoped admin (empty caller tenant)
+// retains the ability to revoke controller-internal certificates.
+func TestHandleRevokeCertificate_InternalCert_UnscopedAdminSucceeds(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	serial := internalCertSerial(t, certMgr)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+serial+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext(""))
+	req = mux.SetURLVars(req, map[string]string{"serial": serial})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"unscoped admin must be able to revoke a controller-internal cert: %s", rec.Body.String())
+	assert.True(t, certMgr.IsRevoked(serial),
+		"cert must be revoked after unscoped-admin revoke")
+}
+
+// TestHandleRevokeCertificate_TenantScope_StewardNotInStore_Returns404_AndDoesNotRevoke
+// verifies that a certificate whose owning steward has no durable record is
+// unattributable and therefore NOT revocable by a tenant-scoped caller. It could
+// belong to any tenant; allowing it would let one tenant silently kill another
+// tenant's steward.
+func TestHandleRevokeCertificate_TenantScope_StewardNotInStore_Returns404_AndDoesNotRevoke(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	// Issue a cert for a steward that is NOT registered in the stewardStore.
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "unregistered-steward",
+		Organization: "Test CFGMS",
+		ClientID:     "unregistered-steward",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext("client-1"))
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"unattributable certificate must not be revocable by a tenant-scoped caller")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+	assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
+		"unattributable certificate must remain un-revoked after a tenant-scoped attempt")
+}
+
+// TestHandleRevokeCertificate_StewardNotInStore_UnscopedAdminSucceeds verifies an
+// unscoped admin can still revoke a certificate whose steward has no durable
+// record — orphaned certs remain administratively revocable.
+func TestHandleRevokeCertificate_StewardNotInStore_UnscopedAdminSucceeds(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "unregistered-steward",
+		Organization: "Test CFGMS",
+		ClientID:     "unregistered-steward",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext(""))
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"unscoped admin must be able to revoke an unattributable cert: %s", rec.Body.String())
+	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+		"cert must be revoked after unscoped-admin revoke")
 }
