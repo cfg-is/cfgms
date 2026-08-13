@@ -54,7 +54,10 @@ func newClientFromFlags(url, apiKey, caCertPath string, insecure bool) (*APIClie
 
 // newClientFromBundle creates an mTLS-capable APIClient from an admin bundle file.
 // apiURL overrides bundle.ControllerURL when non-empty; otherwise the bundle URL is used.
-func newClientFromBundle(bundleFilePath, apiURL string) (*APIClient, error) {
+// tlsInsecure skips server certificate verification (development only; prints a warning banner).
+// serverName overrides the TLS server name for certificate verification; when empty, the
+// hostname from apiURL is used.
+func newClientFromBundle(bundleFilePath, apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
 	// #nosec G304 - bundle path comes from CLI flag, env var, or well-known system/user config location
 	b, err := bundle.Read(bundleFilePath)
 	if err != nil {
@@ -66,10 +69,11 @@ func newClientFromBundle(bundleFilePath, apiURL string) (*APIClient, error) {
 		baseURL = b.ControllerURL
 	}
 
-	serverName := ""
-	if baseURL != "" {
+	// Derive server name from URL when not explicitly overridden.
+	resolvedServerName := serverName
+	if resolvedServerName == "" && baseURL != "" {
 		if parsed, parseErr := url.Parse(baseURL); parseErr == nil && parsed.Host != "" {
-			serverName = parsed.Hostname()
+			resolvedServerName = parsed.Hostname()
 		}
 	}
 
@@ -78,7 +82,8 @@ func newClientFromBundle(bundleFilePath, apiURL string) (*APIClient, error) {
 		ClientCertPEM: []byte(b.CertPEM),
 		ClientKeyPEM:  []byte(b.KeyPEM),
 		CACertPEM:     []byte(b.CAPEM),
-		ServerName:    serverName,
+		ServerName:    resolvedServerName,
+		TLSInsecure:   tlsInsecure,
 	}
 
 	return NewAPIClient(cfg)
@@ -87,7 +92,8 @@ func newClientFromBundle(bundleFilePath, apiURL string) (*APIClient, error) {
 // resolveBundleClient walks the admin bundle lookup chain and returns an mTLS-capable
 // APIClient if a bundle file is found. Returns (nil, nil) when bundle discovery is skipped
 // (--no-bundle flag, CFGMS_ADMIN_BUNDLE="" explicitly set) or no bundle file exists.
-func resolveBundleClient(apiURL string) (*APIClient, error) {
+// tlsInsecure and serverName are threaded through to newClientFromBundle.
+func resolveBundleClient(apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
 	// --no-bundle flag explicitly opts out of bundle discovery
 	if noBundle {
 		return nil, nil
@@ -108,7 +114,7 @@ func resolveBundleClient(apiURL string) (*APIClient, error) {
 		return nil, nil
 	}
 
-	return newClientFromBundle(path, apiURL)
+	return newClientFromBundle(path, apiURL, tlsInsecure, serverName)
 }
 
 // resolveSessionOrBundleClient tries the active OS-keychain session token first,
@@ -125,15 +131,28 @@ func resolveBundleClient(apiURL string) (*APIClient, error) {
 // When a valid session is found the returned client has OnTokenRenewed wired
 // to write rolled X-Session-Token values back to the secret store, and
 // OnUnauthorized wired to fall back to bundle auth on server-side 401.
-func resolveSessionOrBundleClient(apiURL string) (*APIClient, error) {
+//
+// tlsInsecure skips server certificate verification. For the session-token path this
+// requires explicit typed confirmation (or CFGMS_TLS_INSECURE_CONFIRM=yes non-interactively)
+// because a session token is a replayable bearer credential.
+// serverName overrides the TLS server name for certificate verification.
+func resolveSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
 	// Explicit one-shot overrides bypass the session entirely.
 	if bundlePath != "" || noBundle || apiURL != "" {
-		return resolveBundleClient(apiURL)
+		return resolveBundleClient(apiURL, tlsInsecure, serverName)
 	}
 
 	rec, err := loadSessionToken()
 	if err != nil || rec == nil || time.Now().After(rec.AbsoluteExpiry) {
-		return resolveBundleClient(apiURL)
+		return resolveBundleClient(apiURL, tlsInsecure, serverName)
+	}
+
+	// Session token is a replayable bearer credential: require explicit confirmation
+	// before allowing the server certificate to go unverified.
+	if tlsInsecure {
+		if confirmErr := requireTLSInsecureForSession(); confirmErr != nil {
+			return nil, confirmErr
+		}
 	}
 
 	// Use the stored CA cert when non-empty; nil → system cert pool (public CA controllers).
@@ -146,14 +165,18 @@ func resolveSessionOrBundleClient(apiURL string) (*APIClient, error) {
 	// The closure is not invoked until after NewAPIClient returns, so client is always set.
 	var client *APIClient
 	cfg := &APIClientConfig{
-		BaseURL:   rec.ControllerURL,
-		APIKey:    rec.Token,
-		CACertPEM: caCertPEM,
+		BaseURL:     rec.ControllerURL,
+		APIKey:      rec.Token,
+		CACertPEM:   caCertPEM,
+		TLSInsecure: tlsInsecure,
+		ServerName:  serverName,
 		OnTokenRenewed: func(newToken string) error {
 			return updateSessionToken(newToken)
 		},
 		OnUnauthorized: func() (*APIClient, error) {
-			return resolveBundleClient("") // let bundle supply the URL
+			// Fallback uses the mTLS banner gate (printed in NewAPIClient), not
+			// another confirmation prompt — confirmation was already obtained above.
+			return resolveBundleClient("", tlsInsecure, serverName)
 		},
 		OnStepUpRequired: func(wwwAuthenticate string) (string, error) {
 			return defaultStepUpHandler(client)(wwwAuthenticate)

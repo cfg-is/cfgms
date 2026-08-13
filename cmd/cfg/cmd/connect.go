@@ -19,9 +19,14 @@ import (
 )
 
 var (
-	connectBundlePath string
-	connectURL        string
-	connectName       string
+	connectBundlePath  string
+	connectURL         string
+	connectName        string
+	connectTLSInsecure bool
+	connectServerName  string
+
+	disconnectTLSInsecure bool
+	disconnectServerName  string
 )
 
 var connectCmd = &cobra.Command{
@@ -57,6 +62,11 @@ func init() {
 	connectCmd.Flags().StringVar(&connectBundlePath, "bundle", "", "Admin bundle file for first-time import (requires --url)")
 	connectCmd.Flags().StringVar(&connectURL, "url", "", "Controller HTTPS URL (required with --bundle)")
 	connectCmd.Flags().StringVar(&connectName, "name", "", "Connection name (default: derived from --url host)")
+	connectCmd.Flags().BoolVar(&connectTLSInsecure, "tls-insecure", false, "Skip TLS certificate verification (development only, env: CFGMS_TLS_INSECURE)")
+	connectCmd.Flags().StringVar(&connectServerName, "server-name", "", "Override TLS server name for certificate verification")
+
+	disconnectCmd.Flags().BoolVar(&disconnectTLSInsecure, "tls-insecure", false, "Skip TLS certificate verification (development only, env: CFGMS_TLS_INSECURE)")
+	disconnectCmd.Flags().StringVar(&disconnectServerName, "server-name", "", "Override TLS server name for certificate verification")
 }
 
 // isLoopback returns true when host is a loopback address or name.
@@ -100,15 +110,19 @@ func parseBundleBytes(data []byte) (*certbundle.Bundle, error) {
 
 // newClientFromBundleData builds an mTLS-capable APIClient from a parsed Bundle struct.
 // apiURL overrides bundle.ControllerURL when non-empty.
-func newClientFromBundleData(b *certbundle.Bundle, apiURL string) (*APIClient, error) {
+// tlsInsecure skips server certificate verification (development only; prints a warning banner).
+// serverName overrides the TLS server name for certificate verification; when empty, the
+// hostname from apiURL is used.
+func newClientFromBundleData(b *certbundle.Bundle, apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
 	baseURL := apiURL
 	if baseURL == "" {
 		baseURL = b.ControllerURL
 	}
-	serverName := ""
-	if baseURL != "" {
+	// Derive server name from URL when not explicitly overridden.
+	resolvedServerName := serverName
+	if resolvedServerName == "" && baseURL != "" {
 		if parsed, err := url.Parse(baseURL); err == nil && parsed.Hostname() != "" {
-			serverName = parsed.Hostname()
+			resolvedServerName = parsed.Hostname()
 		}
 	}
 	return NewAPIClient(&APIClientConfig{
@@ -116,7 +130,8 @@ func newClientFromBundleData(b *certbundle.Bundle, apiURL string) (*APIClient, e
 		ClientCertPEM: []byte(b.CertPEM),
 		ClientKeyPEM:  []byte(b.KeyPEM),
 		CACertPEM:     []byte(b.CAPEM),
-		ServerName:    serverName,
+		ServerName:    resolvedServerName,
+		TLSInsecure:   tlsInsecure,
 	})
 }
 
@@ -137,6 +152,12 @@ func runConnectFirstTime(ctx context.Context, args []string) error {
 	if err := requireHTTPS(connectURL); err != nil {
 		return err
 	}
+
+	tlsInsecure := connectTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := connectServerName
 
 	// Determine connection name.
 	name := connectName
@@ -182,7 +203,7 @@ func runConnectFirstTime(ctx context.Context, args []string) error {
 	}
 
 	// Build mTLS client and issue session.
-	client, err := newClientFromBundleData(b, connectURL)
+	client, err := newClientFromBundleData(b, connectURL, tlsInsecure, serverName)
 	if err != nil {
 		return fmt.Errorf("build mTLS client: %w", err)
 	}
@@ -270,7 +291,13 @@ func runConnectReconnect(ctx context.Context, args []string) error {
 		return fmt.Errorf("parse stored bundle: %w", err)
 	}
 
-	client, err := newClientFromBundleData(b, entry.ControllerURL)
+	tlsInsecure := connectTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := connectServerName
+
+	client, err := newClientFromBundleData(b, entry.ControllerURL, tlsInsecure, serverName)
 	if err != nil {
 		return fmt.Errorf("build mTLS client: %w", err)
 	}
@@ -309,6 +336,20 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	tlsInsecure := disconnectTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := disconnectServerName
+
+	// Session token is a replayable bearer credential: require explicit confirmation
+	// before allowing the server certificate to go unverified.
+	if tlsInsecure {
+		if confirmErr := requireTLSInsecureForSession(); confirmErr != nil {
+			return confirmErr
+		}
+	}
+
 	// Authenticate the revoke request with the stored session token (Bearer).
 	// Use the stored CA cert so the TLS verification matches the original connect.
 	// Nil when empty → system cert pool (public CA controllers).
@@ -317,9 +358,11 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 		caCertPEM = []byte(rec.CACertPEM)
 	}
 	client, err := NewAPIClient(&APIClientConfig{
-		BaseURL:   rec.ControllerURL,
-		APIKey:    rec.Token,
-		CACertPEM: caCertPEM,
+		BaseURL:     rec.ControllerURL,
+		APIKey:      rec.Token,
+		CACertPEM:   caCertPEM,
+		TLSInsecure: tlsInsecure,
+		ServerName:  serverName,
 	})
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)

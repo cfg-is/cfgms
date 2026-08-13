@@ -23,6 +23,7 @@ var (
 	traceFormat      string
 	traceTLSCACert   string
 	traceTLSInsecure bool
+	traceServerName  string
 )
 
 // traceCmd represents the trace command
@@ -53,6 +54,7 @@ func init() {
 	traceCmd.Flags().StringVar(&traceFormat, "format", "text", "Output format (text, json)")
 	traceCmd.Flags().StringVar(&traceTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	traceCmd.Flags().BoolVar(&traceTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	traceCmd.Flags().StringVar(&traceServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	_ = traceCmd.MarkFlagRequired("url")
 }
@@ -65,8 +67,14 @@ func getTraceClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
+	tlsInsecure := traceTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := traceServerName
+
 	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveSessionOrBundleClient(apiURL)
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -78,11 +86,6 @@ func getTraceClient() (*APIClient, error) {
 	apiKey := traceAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := traceTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := traceTLSCACert

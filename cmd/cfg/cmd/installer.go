@@ -23,6 +23,7 @@ var (
 	installerAPIKey      string
 	installerTLSCACert   string
 	installerTLSInsecure bool
+	installerServerName  string
 
 	// publish subcommand flags
 	publishKind      string
@@ -103,6 +104,7 @@ func init() {
 	installerUploadCmd.Flags().StringVar(&installerAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	installerUploadCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	installerUploadCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	installerUploadCmd.Flags().StringVar(&installerServerName, "server-name", "", "Override TLS server name for certificate verification")
 	_ = installerUploadCmd.MarkFlagRequired("platform")
 	_ = installerUploadCmd.MarkFlagRequired("arch")
 
@@ -123,6 +125,7 @@ func init() {
 	installerPublishCmd.Flags().StringVar(&installerAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	installerPublishCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	installerPublishCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	installerPublishCmd.Flags().StringVar(&installerServerName, "server-name", "", "Override TLS server name for certificate verification")
 	_ = installerPublishCmd.MarkFlagRequired("kind")
 	_ = installerPublishCmd.MarkFlagRequired("version")
 	_ = installerPublishCmd.MarkFlagRequired("platform")
@@ -141,7 +144,13 @@ func getInstallerClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	insecure := installerTLSInsecure
+	if !insecure {
+		insecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := installerServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, insecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -152,11 +161,6 @@ func getInstallerClient() (*APIClient, error) {
 	apiKey := installerAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	insecure := installerTLSInsecure
-	if !insecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		insecure = true
 	}
 
 	caCertPath := installerTLSCACert
