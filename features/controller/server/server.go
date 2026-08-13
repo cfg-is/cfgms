@@ -585,9 +585,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
-	// Initialize HA manager
+	// Initialize HA manager. The Raft WAL lives alongside other per-node durable
+	// state, matching the module-cache / workflow-runtime pattern.
 	logger.Info("Initializing HA manager...")
-	haManager, err := initializeHAManager(cfg, logger, storageManager, certManager)
+	raftLogDir := filepath.Join(resolveDNADataRoot(cfg), "raft-log")
+	haManager, err := initializeHAManager(cfg, logger, storageManager, certManager, raftLogDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
 	}
@@ -2481,7 +2483,8 @@ func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) err
 // CFGMS_HA_MODE env overrides YAML (env > YAML precedence) via the re-run inside NewManager.
 // certManager is passed through to ha.NewManager and is required in ClusterMode for mTLS
 // peer transport; it may be nil when cluster mode is not in use.
-func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager) (*ha.Manager, error) {
+// raftLogDir is the directory for the per-node Raft WAL; pass empty in tests.
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager, raftLogDir string) (*ha.Manager, error) {
 	haConfig := ha.DefaultConfig()
 
 	if cfg != nil && cfg.HA != nil && cfg.HA.Mode != "" {
@@ -2496,7 +2499,7 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
-	haManager, err := ha.NewManager(haConfig, logger, storageManager, certManager)
+	haManager, err := ha.NewManager(haConfig, logger, storageManager, certManager, raftLogDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
