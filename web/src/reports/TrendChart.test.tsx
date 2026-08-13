@@ -147,6 +147,74 @@ describe('TrendChart — server-colour ignored', () => {
   })
 })
 
+// Series names deliberately avoid makeChart's `#ff0000`/wire-colour scaffolding —
+// this suite is only about the warn/crit legend icon rule.
+function makeStateChart(names: string[]): ChartData {
+  return {
+    id: 'test-chart',
+    type: 'line',
+    title: 'Test Chart',
+    series: names.map(name => ({ name, data: makePoints(7) })),
+    x_axis: { title: 'Date', type: 'time' },
+    y_axis: { title: 'Count', type: 'numeric' },
+    config: {},
+  }
+}
+
+describe('TrendChart — state-adjacent icon + label', () => {
+  it('renders an icon in the legend for both a warn-like and a crit-like series when both are present', () => {
+    const { container } = render(<TrendChart chart={makeStateChart(['Drift warnings', 'Critical errors'])} />)
+    const warnItem = container.querySelector('[data-testid="legend-item-0"]')
+    const critItem = container.querySelector('[data-testid="legend-item-1"]')
+    expect(warnItem?.querySelector('.trend-legend-icon')).not.toBeNull()
+    expect(critItem?.querySelector('.trend-legend-icon')).not.toBeNull()
+  })
+
+  it('renders the warn icon (triangle path, no circle) for the warn-like series', () => {
+    const { container } = render(<TrendChart chart={makeStateChart(['Drift warnings', 'Critical errors'])} />)
+    const warnItem = container.querySelector('[data-testid="legend-item-0"]')
+    expect(warnItem?.querySelector('.trend-legend-icon circle')).toBeNull()
+    expect(warnItem?.querySelector('.trend-legend-icon path')).not.toBeNull()
+  })
+
+  it('renders the crit icon (circle) for the crit-like series', () => {
+    const { container } = render(<TrendChart chart={makeStateChart(['Drift warnings', 'Critical errors'])} />)
+    const critItem = container.querySelector('[data-testid="legend-item-1"]')
+    expect(critItem?.querySelector('.trend-legend-icon circle')).not.toBeNull()
+  })
+
+  it('still shows the series name as text alongside the icon (identity is never icon-alone)', () => {
+    render(<TrendChart chart={makeStateChart(['Drift warnings', 'Critical errors'])} />)
+    const legend = screen.getByTestId('legend')
+    expect(within(legend).getByText('Drift warnings')).toBeDefined()
+    expect(within(legend).getByText('Critical errors')).toBeDefined()
+  })
+
+  it('does not render legend icons when only a warn-like series is present (no adjacent crit)', () => {
+    const { container } = render(<TrendChart chart={makeStateChart(['Drift warnings', 'Normal traffic'])} />)
+    expect(container.querySelectorAll('.trend-legend-icon')).toHaveLength(0)
+  })
+
+  it('does not render legend icons when only a crit-like series is present (no adjacent warn)', () => {
+    const { container } = render(<TrendChart chart={makeStateChart(['Critical errors', 'Normal traffic'])} />)
+    expect(container.querySelectorAll('.trend-legend-icon')).toHaveLength(0)
+  })
+
+  it('does not render legend icons when neither warn-like nor crit-like series are present', () => {
+    const { container } = render(<TrendChart chart={makeStateChart(['CPU usage', 'Memory usage'])} />)
+    expect(container.querySelectorAll('.trend-legend-icon')).toHaveLength(0)
+  })
+
+  it('only icons the warn/crit series, leaving unrelated series without an icon', () => {
+    const { container } = render(
+      <TrendChart chart={makeStateChart(['Drift warnings', 'Critical errors', 'Normal traffic'])} />,
+    )
+    const normalItem = container.querySelector('[data-testid="legend-item-2"]')
+    expect(normalItem?.querySelector('.trend-legend-icon')).toBeNull()
+    expect(container.querySelectorAll('.trend-legend-icon')).toHaveLength(2)
+  })
+})
+
 describe('TrendChart — structural requirements', () => {
   it('renders the chart title', () => {
     render(<TrendChart chart={makeChart(1)} />)
