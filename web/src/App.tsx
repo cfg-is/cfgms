@@ -5,7 +5,8 @@
  * App root: router + auth provider + route guard around the authenticated
  * app shell (Story #2496).
  *
- * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733, #2941, #2992):
+ * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733, #2941, #2968, #2992):
+ *   /enroll/:token   → Enroll (unauthenticated — magic-link redemption)
  *   /                → AppShell layout → FleetOverview
  *   /stewards/:id    → AppShell layout → StewardAssetPage
  *   /audit           → AppShell layout → AuditView
@@ -22,6 +23,12 @@
  * #2497) doubles as the authenticated probe — a 401 on it is handled
  * centrally and drops the app to the login screen ("session expired"), so
  * the shell no longer fires a separate probe request.
+ *
+ * The /enroll/:token route is a top-level sibling of the RequireAuth-gated
+ * subtree (Story #2968). It is genuinely unauthenticated — no session is
+ * required before enrollment, and RequireAuth is not in its render path.
+ * After a successful enrollment, apiFetch fires onSessionConfirmed and the
+ * navigate('/') call transitions into the authenticated shell.
  */
 import { Routes, Route } from 'react-router'
 import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
@@ -37,27 +44,39 @@ import ScriptsView from './scripts/ScriptsView.tsx'
 import RegistrationConsolePage from './registration/RegistrationConsolePage.tsx'
 import RefreshQueuePage from './refresh/RefreshQueuePage.tsx'
 import PasskeysView from './passkeys/PasskeysView.tsx'
+import Enroll from './pages/Enroll.tsx'
 
 function App() {
   return (
     <AuthProvider>
-      <RequireAuth>
-        <Routes>
-          <Route path="/" element={<AppShell />}>
-            <Route index element={<FleetOverview />} />
-            <Route path="stewards/:id" element={<StewardAssetPage />} />
-            <Route path="audit" element={<AuditView />} />
-            <Route path="config" element={<ConfigListView />} />
-            <Route path="modules" element={<ModuleReviewQueue />} />
-            <Route path="workflows" element={<WorkflowListView />} />
-            <Route path="accounts" element={<AccountsView />} />
-            <Route path="scripts" element={<ScriptsView />} />
-            <Route path="registration" element={<RegistrationConsolePage />} />
-            <Route path="refresh" element={<RefreshQueuePage />} />
-            <Route path="passkeys" element={<PasskeysView />} />
-          </Route>
-        </Routes>
-      </RequireAuth>
+      <Routes>
+        {/* Unauthenticated: magic-link first-passkey enrollment (Story #2968) */}
+        <Route path="/enroll/:token" element={<Enroll />} />
+
+        {/* All other routes require an authenticated session */}
+        <Route
+          path="*"
+          element={
+            <RequireAuth>
+              <Routes>
+                <Route path="/" element={<AppShell />}>
+                  <Route index element={<FleetOverview />} />
+                  <Route path="stewards/:id" element={<StewardAssetPage />} />
+                  <Route path="audit" element={<AuditView />} />
+                  <Route path="config" element={<ConfigListView />} />
+                  <Route path="modules" element={<ModuleReviewQueue />} />
+                  <Route path="workflows" element={<WorkflowListView />} />
+                  <Route path="accounts" element={<AccountsView />} />
+                  <Route path="scripts" element={<ScriptsView />} />
+                  <Route path="registration" element={<RegistrationConsolePage />} />
+                  <Route path="refresh" element={<RefreshQueuePage />} />
+                  <Route path="passkeys" element={<PasskeysView />} />
+                </Route>
+              </Routes>
+            </RequireAuth>
+          }
+        />
+      </Routes>
     </AuthProvider>
   )
 }

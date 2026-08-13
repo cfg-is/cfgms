@@ -5,11 +5,14 @@ import {
   apiFetch,
   passkeyLoginBeginRequest,
   passkeyLoginFinishRequest,
+  passkeyEnrollBeginRequest,
+  passkeyEnrollFinishRequest,
   logoutRequest,
   onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
   type AssertionJSON,
+  type AttestationJSON,
 } from './client.ts'
 
 function clearCookies() {
@@ -555,6 +558,211 @@ describe('passkeyLoginFinishRequest', () => {
     expect(result.ok).toBe(true)
     expect(result.username).toBe('')
     expect(result.tenantId).toBe('')
+  })
+})
+
+// ── passkeyEnrollBeginRequest / passkeyEnrollFinishRequest (Issue #2968) ────────
+
+const MOCK_ENROLL_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    rp: { id: 'localhost', name: 'CFGMS' },
+    user: { id: 'dXNlci1pZA', name: 'admin@msp-a', displayName: 'Admin User' },
+    pubKeyCredParams: [{ type: 'public-key' as const, alg: -7 }],
+    timeout: 60000,
+    excludeCredentials: [],
+  },
+}
+
+const MOCK_ATTESTATION: AttestationJSON = {
+  id: 'Y3JlZA',
+  rawId: 'Y3JlZA',
+  response: {
+    attestationObject: 'YXR0ZXN0YXRpb25PYmplY3Q',
+    clientDataJSON: 'Y2xpZW50RGF0YUpTT04',
+  },
+  type: 'public-key',
+  clientExtensionResults: {},
+}
+
+describe('passkeyEnrollBeginRequest', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionExpired(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs to the enroll/begin endpoint with X-Enrollment-Token header', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+
+    await passkeyEnrollBeginRequest('raw-token-abc')
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const call = fetchMock.mock.calls[0]!
+    expect(String(call[0])).toContain('/api/v1/web/passkey/enroll/begin')
+    expect(call[1]?.method).toBe('POST')
+    const headers = new Headers(call[1]?.headers)
+    expect(headers.get('X-Enrollment-Token')).toBe('raw-token-abc')
+  })
+
+  it('does NOT include a CSRF header (token is the auth credential)', async () => {
+    document.cookie = 'cfgms_csrf=should-not-be-sent; path=/'
+    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+
+    await passkeyEnrollBeginRequest('tok')
+
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers)
+    expect(headers.get('X-CSRF-Token')).toBeNull()
+  })
+
+  it('sends credentials same-origin', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+
+    await passkeyEnrollBeginRequest('tok')
+
+    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBe('same-origin')
+  })
+
+  it('returns ok:true and options on success', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+
+    const result = await passkeyEnrollBeginRequest('tok')
+
+    expect(result.ok).toBe(true)
+    expect(result.status).toBe(200)
+    expect(result.options?.publicKey.challenge).toBe('Y2hhbGxlbmdlLWJ5dGVz')
+  })
+
+  it('returns ok:false on 401 (invalid/expired token)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401))
+
+    const result = await passkeyEnrollBeginRequest('bad-token')
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(401)
+    expect(result.options).toBeUndefined()
+  })
+
+  it('returns ok:false on 400 (missing token)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(400))
+
+    const result = await passkeyEnrollBeginRequest('')
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(400)
+  })
+
+  it('returns ok:false on 503 (WebAuthn not configured)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(503))
+
+    const result = await passkeyEnrollBeginRequest('tok')
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(503)
+  })
+
+  it('does NOT trigger the session-expired listener', async () => {
+    const expired = vi.fn()
+    onSessionExpired(expired)
+    fetchMock.mockResolvedValue(jsonResponse(401))
+
+    await passkeyEnrollBeginRequest('bad-token')
+
+    expect(expired).not.toHaveBeenCalled()
+  })
+})
+
+describe('passkeyEnrollFinishRequest', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionExpired(null)
+    onSessionConfirmed(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs to the enroll/finish endpoint with X-Enrollment-Token and the attestation JSON', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201))
+
+    await passkeyEnrollFinishRequest('raw-token-abc', MOCK_ATTESTATION)
+
+    const call = fetchMock.mock.calls[0]!
+    expect(String(call[0])).toContain('/api/v1/web/passkey/enroll/finish')
+    expect(call[1]?.method).toBe('POST')
+    const headers = new Headers(call[1]?.headers)
+    expect(headers.get('X-Enrollment-Token')).toBe('raw-token-abc')
+    const body = JSON.parse(String(call[1]?.body)) as AttestationJSON
+    expect(body.type).toBe('public-key')
+    expect(body.id).toBe(MOCK_ATTESTATION.id)
+    expect(body.response.attestationObject).toBe(MOCK_ATTESTATION.response.attestationObject)
+  })
+
+  it('sends Content-Type: application/json', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201))
+
+    await passkeyEnrollFinishRequest('tok', MOCK_ATTESTATION)
+
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers)
+    expect(headers.get('Content-Type')).toBe('application/json')
+  })
+
+  it('returns ok:true on 201 (first passkey enrolled)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201))
+
+    const result = await passkeyEnrollFinishRequest('tok', MOCK_ATTESTATION)
+
+    expect(result.ok).toBe(true)
+    expect(result.status).toBe(201)
+  })
+
+  it('returns ok:false on 409 (already enrolled)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(409))
+
+    const result = await passkeyEnrollFinishRequest('tok', MOCK_ATTESTATION)
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(409)
+  })
+
+  it('returns ok:false on 410 (token revoked)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(410))
+
+    const result = await passkeyEnrollFinishRequest('tok', MOCK_ATTESTATION)
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(410)
+  })
+
+  it('fires the session-confirmed listener on 201 (via apiFetch)', async () => {
+    const confirmed = vi.fn()
+    onSessionConfirmed(confirmed)
+    fetchMock.mockResolvedValue(jsonResponse(201))
+
+    await passkeyEnrollFinishRequest('tok', MOCK_ATTESTATION)
+
+    expect(confirmed).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT include a session CSRF header when the session cookie is absent', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201))
+
+    await passkeyEnrollFinishRequest('tok', MOCK_ATTESTATION)
+
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers)
+    expect(headers.get('X-CSRF-Token')).toBeNull()
   })
 })
 
