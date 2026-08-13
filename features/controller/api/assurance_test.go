@@ -217,6 +217,19 @@ func TestPermissionAssurance_TenantManage_FloorEnforced(t *testing.T) {
 	})
 }
 
+// TestPermissionAssurance_WebAccountUpdateStrong is a REQUIRED test (Issue #3126 AC:
+// "web-account:update is registered in permissionAssurance at Min: session.AssuranceStrong").
+// An update endpoint that can reset a password or disable an account is at least as
+// sensitive as web-account:create or web-account:delete, both already at AssuranceStrong.
+func TestPermissionAssurance_WebAccountUpdateStrong(t *testing.T) {
+	req, found := permissionAssurance["web-account:update"]
+	require.True(t, found, "web-account:update must be in permissionAssurance (Issue #3126)")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"web-account:update must require AssuranceStrong (same bar as create and delete)")
+	assert.False(t, req.RequireUserPresence,
+		"web-account:update must not require user presence (not a catastrophic operation)")
+}
+
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {

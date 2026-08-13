@@ -1250,3 +1250,998 @@ func TestWebAccounts_VerifyEnrollmentToken(t *testing.T) {
 	assert.False(t, verifyEnrollmentToken(acct, ""), "empty token must not verify")
 	assert.False(t, verifyEnrollmentToken(nil, rawToken), "nil account must not verify")
 }
+
+// ---- Issue #3126: GET/PUT /api/v1/web/accounts/{username} ----
+
+// getWebAccount calls handleGetWebAccount directly with the given principal.
+func getWebAccountHandler(t *testing.T, server *Server, principal *Principal, username string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts/"+username, nil)
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"username": username})
+	rec := httptest.NewRecorder()
+	server.handleGetWebAccount(rec, req)
+	return rec
+}
+
+// putWebAccount calls handleUpdateWebAccount directly with the given principal.
+func putWebAccount(t *testing.T, server *Server, principal *Principal, username string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/web/accounts/"+username, bytes.NewReader(payload))
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"username": username})
+	rec := httptest.NewRecorder()
+	server.handleUpdateWebAccount(rec, req)
+	return rec
+}
+
+// parseWebAccountInfo extracts a WebAccountInfo from an APIResponse body.
+func parseWebAccountInfo(t *testing.T, rec *httptest.ResponseRecorder) WebAccountInfo {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var info WebAccountInfo
+	require.NoError(t, json.Unmarshal(raw, &info))
+	return info
+}
+
+// parseUpdateResponse extracts a WebAccountUpdateResponse from an APIResponse body.
+func parseUpdateResponse(t *testing.T, rec *httptest.ResponseRecorder) WebAccountUpdateResponse {
+	t.Helper()
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	raw, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+	var ur WebAccountUpdateResponse
+	require.NoError(t, json.Unmarshal(raw, &ur))
+	return ur
+}
+
+// TestWebAccounts_GetWebAccount_Returns200 verifies GET /web/accounts/{username} returns
+// the account's identity fields with no secret material (Issue #3126 AC).
+func TestWebAccounts_GetWebAccount_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "get-user",
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	getRec := getWebAccountHandler(t, server, admin, "get-user")
+	require.Equal(t, http.StatusOK, getRec.Code, "body: %s", getRec.Body.String())
+
+	info := parseWebAccountInfo(t, getRec)
+	assert.Equal(t, "get-user", info.Username)
+	assert.Equal(t, "tenant-a", info.TenantID)
+	assert.Equal(t, []string{"steward:list"}, info.Permissions)
+	assert.NotEmpty(t, info.ID)
+	assert.False(t, info.CreatedAt.IsZero())
+	assert.False(t, info.Disabled, "newly created account must not be disabled")
+
+	// Ensure no secret material in the raw response.
+	body := getRec.Body.String()
+	assert.NotContains(t, body, "$argon2id$", "response must not contain any argon2id hash")
+}
+
+// TestWebAccounts_GetWebAccount_NotFound verifies GET returns 404 for an unknown username (Issue #3126 AC).
+func TestWebAccounts_GetWebAccount_NotFound(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := getWebAccountHandler(t, server, admin, "nonexistent-user")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestWebAccounts_GetWebAccount_CrossTenantGets404 is the [REQUIRED TEST] from Issue #3126 AC:
+// a caller scoped to client-1 calling GET on an account belonging to client-2 gets 404,
+// not 403 — the account's existence in another tenant must not be disclosed.
+func TestWebAccounts_GetWebAccount_CrossTenantGets404(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "client2-get-user",
+		TenantID: "root/msp-a/client-2",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	client1Admin := &Principal{
+		ID:        "client1-admin",
+		TenantID:  "root/msp-a/client-1",
+		Assurance: session.AssuranceStrong,
+	}
+	rec = getWebAccountHandler(t, server, client1Admin, "client2-get-user")
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"cross-tenant GET must return 404, not 403 (do not disclose account existence)")
+}
+
+// TestWebAccounts_UpdatePermissions verifies PUT /web/accounts/{username} updates permissions (Issue #3126 AC).
+func TestWebAccounts_UpdatePermissions(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "update-perms-user",
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	newPerms := []string{"steward:list", "steward:read"}
+	putRec := putWebAccount(t, server, admin, "update-perms-user", WebAccountUpdateRequest{
+		Permissions: &newPerms,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	info := parseWebAccountInfo(t, putRec)
+	assert.Equal(t, []string{"steward:list", "steward:read"}, info.Permissions)
+	assert.False(t, info.Disabled, "update must not alter disabled state")
+
+	// Verify durably persisted.
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), "update-perms-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Equal(t, []string{"steward:list", "steward:read"}, acct.Permissions)
+}
+
+// TestWebAccounts_Disabled_BlocksVerifyWebCredential is the [REQUIRED TEST] from Issue #3126 AC:
+// disabling an account, then attempting VerifyWebCredential, fails with ErrInvalidWebCredential.
+// ("correct password" maps to valid credentials in the passkey-only model — the enforcement
+// point is VerifyWebCredential, called after successful WebAuthn assertion.)
+func TestWebAccounts_Disabled_BlocksVerifyWebCredential(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "disabled-login-user",
+		TenantID: "tenant-a",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Disable the account.
+	disabled := true
+	putRec := putWebAccount(t, server, admin, "disabled-login-user", WebAccountUpdateRequest{
+		Disabled: &disabled,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	// VerifyWebCredential must reject a disabled account.
+	acct, err := server.getWebAccount(context.Background(), "disabled-login-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	require.True(t, acct.Disabled, "account must be persisted as disabled")
+
+	err = server.VerifyWebCredential(acct)
+	assert.ErrorIs(t, err, ErrInvalidWebCredential,
+		"disabled account must be rejected by VerifyWebCredential")
+}
+
+// TestWebAccounts_Disabled_NilAccountRejected verifies VerifyWebCredential rejects nil.
+func TestWebAccounts_Disabled_NilAccountRejected(t *testing.T) {
+	server := setupTestServer(t)
+	err := server.VerifyWebCredential(nil)
+	assert.ErrorIs(t, err, ErrInvalidWebCredential, "nil account must be rejected")
+}
+
+// TestWebAccounts_Disabled_EnabledAccountPasses verifies VerifyWebCredential accepts a non-disabled account.
+func TestWebAccounts_Disabled_EnabledAccountPasses(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "enabled-login-user",
+		TenantID: "tenant-a",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	acct, err := server.getWebAccount(context.Background(), "enabled-login-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+
+	err = server.VerifyWebCredential(acct)
+	assert.NoError(t, err, "non-disabled account must pass VerifyWebCredential")
+}
+
+// TestWebAccounts_ReenableRestoresLogin verifies that re-enabling an account
+// restores VerifyWebCredential success without requiring any credential reset (Issue #3126 AC).
+func TestWebAccounts_ReenableRestoresLogin(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "reenable-user",
+		TenantID: "tenant-a",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Disable.
+	disabled := true
+	putRec := putWebAccount(t, server, admin, "reenable-user", WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code)
+
+	// Re-enable.
+	disabled = false
+	putRec = putWebAccount(t, server, admin, "reenable-user", WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code)
+
+	// VerifyWebCredential must succeed after re-enable.
+	acct, err := server.getWebAccount(context.Background(), "reenable-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.False(t, acct.Disabled, "account must be marked enabled after re-enable")
+	assert.NoError(t, server.VerifyWebCredential(acct),
+		"re-enabled account must pass VerifyWebCredential without credential reset")
+}
+
+// TestWebAccounts_UpdatePermissions_DoesNotAlterCredentials is the [REQUIRED TEST] from
+// Issue #3126 AC: updating permissions alone does not alter the stored credentials (WebAuthn
+// passkeys). In the passkey-only model there is no "password hash" — the equivalent
+// invariant is that registered WebAuthn credentials survive a permissions-only PUT.
+func TestWebAccounts_UpdatePermissions_DoesNotAlterCredentials(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "perms-creds-user",
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Register a WebAuthn credential.
+	injectCredential(t, server, "perms-creds-user", []byte("perms-creds-credential-id"))
+
+	// Record the original credential set.
+	before, err := server.getWebAccount(context.Background(), "perms-creds-user")
+	require.NoError(t, err)
+	require.NotNil(t, before)
+	require.Len(t, before.Credentials, 1, "credential must be registered before update")
+	origCredID := before.Credentials[0].ID
+
+	// Update permissions only — no disabled field.
+	newPerms := []string{"steward:list", "steward:read"}
+	putRec := putWebAccount(t, server, admin, "perms-creds-user", WebAccountUpdateRequest{
+		Permissions: &newPerms,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	// Reload from store (not cache) and assert credentials unchanged.
+	dropWebAccountCache(server)
+	after, err := server.getWebAccount(context.Background(), "perms-creds-user")
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.Equal(t, []string{"steward:list", "steward:read"}, after.Permissions,
+		"permissions must be updated")
+	require.Len(t, after.Credentials, 1, "credential count must be unchanged")
+	assert.Equal(t, origCredID, after.Credentials[0].ID,
+		"credential ID must be unchanged by a permissions-only update")
+}
+
+// TestWebAccounts_CrossTenantPut_Returns404_And_LeavesAccountUnmodified is the [REQUIRED TEST]
+// from Issue #3126 AC: a caller scoped to tenant-a calling PUT on an account belonging to
+// tenant-b gets 404 and leaves the target account completely unmodified.
+func TestWebAccounts_CrossTenantPut_Returns404_And_LeavesAccountUnmodified(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	// Create target account in tenant-b.
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "tenantb-put-user",
+		TenantID:    "tenant-b",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Record the original state from cache (before any cache drop).
+	origAcct, err := server.getWebAccount(context.Background(), "tenantb-put-user")
+	require.NoError(t, err)
+	require.NotNil(t, origAcct)
+	origPermissions := append([]string(nil), origAcct.Permissions...)
+	origDisabled := origAcct.Disabled
+
+	// Caller is scoped to tenant-a — not within tenant-b's subtree.
+	tenantAAdmin := &Principal{
+		ID:        "tenant-a-admin",
+		TenantID:  "tenant-a",
+		Assurance: session.AssuranceStrong,
+	}
+	disabled := true
+	newPerms := []string{"steward:read"}
+	putRec := putWebAccount(t, server, tenantAAdmin, "tenantb-put-user", WebAccountUpdateRequest{
+		Permissions: &newPerms,
+		Disabled:    &disabled,
+	})
+	assert.Equal(t, http.StatusNotFound, putRec.Code,
+		"cross-tenant PUT must return 404, not 403 (do not disclose account existence)")
+
+	// The account in tenant-b must be completely unmodified.
+	// Check from cache — the handler returns before writing, so cache is the pre-PUT state.
+	afterAcct, err := server.getWebAccount(context.Background(), "tenantb-put-user")
+	require.NoError(t, err)
+	require.NotNil(t, afterAcct)
+	assert.Equal(t, origPermissions, afterAcct.Permissions,
+		"permissions must be unchanged after a rejected cross-tenant PUT")
+	assert.Equal(t, origDisabled, afterAcct.Disabled,
+		"disabled state must be unchanged after a rejected cross-tenant PUT")
+}
+
+// TestWebAccounts_DisabledState_DurableAfterCacheDrop verifies the Disabled field
+// survives a cache drop (store round-trip) in both directions (Issue #3126).
+func TestWebAccounts_DisabledState_DurableAfterCacheDrop(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "durable-disabled-user",
+		TenantID: "tenant-a",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Disable and verify durability.
+	disabled := true
+	putRec := putWebAccount(t, server, admin, "durable-disabled-user", WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code)
+
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), "durable-disabled-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.True(t, acct.Disabled, "disabled flag must survive cache drop + store reload")
+
+	// Re-enable and verify durability.
+	disabled = false
+	putRec = putWebAccount(t, server, admin, "durable-disabled-user", WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code)
+
+	dropWebAccountCache(server)
+	acct, err = server.getWebAccount(context.Background(), "durable-disabled-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.False(t, acct.Disabled, "re-enabled flag must survive cache drop + store reload")
+}
+
+// TestWebAccounts_UpdateAuditEmitted verifies that the update endpoint emits the correct
+// audit events: web_account.disabled, web_account.enabled, and web_account.updated (Issue #3126).
+func TestWebAccounts_UpdateAuditEmitted(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: "audit-update-user"})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	disabled := true
+	rec = putWebAccount(t, server, admin, "audit-update-user", WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	disabled = false
+	rec = putWebAccount(t, server, admin, "audit-update-user", WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	newPerms := []string{"steward:list"}
+	rec = putWebAccount(t, server, admin, "audit-update-user", WebAccountUpdateRequest{Permissions: &newPerms})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+
+	for _, action := range []string{
+		"web_account.disabled",
+		"web_account.enabled",
+		"web_account.updated",
+	} {
+		entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+			Actions: []string{action},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, entries, "audit entry for %s must be written", action)
+		e := entries[0]
+		assert.Equal(t, action, e.Action)
+		assert.Equal(t, "web-account", e.ResourceType)
+		assert.Equal(t, "audit-update-user", e.ResourceID)
+		assert.Equal(t, admin.ID, e.UserID)
+	}
+}
+
+// TestWebAccounts_UpdateRoute_MachineAssuranceRejected verifies that an API-key
+// caller (Machine-assurance) is rejected from the update endpoint with 403.
+func TestWebAccounts_UpdateRoute_MachineAssuranceRejected(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"web-account:update"})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/web/accounts/any-user",
+		bytes.NewReader([]byte(`{"disabled":true}`)))
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "INSUFFICIENT_PERMISSIONS", errResp.Error.Code)
+}
+
+// TestWebAccounts_GetRoute_PermissionRequired verifies GET /web/accounts/{username}
+// is permission-gated and returns 401 when unauthenticated (Issue #3126).
+func TestWebAccounts_GetRoute_PermissionRequired(t *testing.T) {
+	server := setupTestServer(t)
+	postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "route-get-user"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts/route-get-user", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"unauthenticated GET must be rejected")
+}
+
+// TestWebAccounts_Disabled_PasskeyLoginFinishRejected drives the disable gate through
+// handlePasskeyLoginFinish rather than calling VerifyWebCredential directly: the account
+// presents a cryptographically valid W3C spec-vector assertion (real go-webauthn
+// verification, no mocks) and must still be refused because it is disabled.
+//
+// Asserts the full handler contract for that path (Issue #3126):
+// 400 WEBAUTHN_VERIFY_ERROR — indistinguishable from an assertion failure, so the
+// response is not a "this account is disabled" oracle — no session or CSRF cookie,
+// and a web.passkey.login.failure authentication audit entry.
+func TestWebAccounts_Disabled_PasskeyLoginFinishRejected(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	admin := testAdminPrincipal()
+
+	// Control: the same assertion succeeds while the account is enabled, proving the
+	// 400 below comes from the disable gate and not from a broken ceremony fixture.
+	okRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, okRec.Code, "enabled account must log in: %s", okRec.Body.String())
+
+	disabled := true
+	putRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "disable body: %s", putRec.Body.String())
+
+	rec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"disabled account must not complete passkey login: %s", rec.Body.String())
+	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
+		"rejection must be indistinguishable from an assertion failure")
+	assert.Empty(t, extractCookie(rec, cookieWebSession),
+		"no session cookie may be issued to a disabled account")
+	assert.Empty(t, extractCookie(rec, cookieCSRFSession),
+		"no session-bound CSRF cookie may be issued to a disabled account")
+
+	require.NoError(t, srv.auditManager.Flush(context.Background()))
+	entries, err := srv.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web.passkey.login.failure"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "rejected login of a disabled account must emit a failure audit entry")
+	assert.Equal(t, business.AuditEventAuthentication, entries[0].EventType)
+	assert.Equal(t, business.AuditResultFailure, entries[0].Result)
+}
+
+// TestWebAccounts_Disabled_RevokesLiveSessions verifies that disabling an account
+// terminates sessions that already exist, not just future logins (Issue #3126).
+//
+// Without this, a disabled account keeps full API access until its absolute session
+// timeout (12h) — the exact window the disable control exists to close.
+func TestWebAccounts_Disabled_RevokesLiveSessions(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	admin := testAdminPrincipal()
+
+	perms := []string{"steward:list"}
+	permRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Permissions: &perms})
+	require.Equal(t, http.StatusOK, permRec.Code, "grant body: %s", permRec.Body.String())
+
+	loginRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, loginRec.Code, "login body: %s", loginRec.Body.String())
+	sessionToken := extractCookie(loginRec, cookieWebSession)
+	require.NotEmpty(t, sessionToken)
+
+	// The live session works before the disable.
+	beforeReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	beforeReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	beforeRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(beforeRec, beforeReq)
+	require.Equal(t, http.StatusOK, beforeRec.Code, "session must work before disable: %s", beforeRec.Body.String())
+
+	disabled := true
+	putRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "disable body: %s", putRec.Body.String())
+
+	// The session is revoked server-side by the disable itself.
+	_, validateErr := srv.webSessionManager.Validate(context.Background(), sessionToken)
+	assert.ErrorIs(t, validateErr, session.ErrSessionRevoked,
+		"disabling an account must revoke its live sessions")
+
+	// And the request path rejects the cookie with a uniform 401.
+	afterReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	afterReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	afterRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(afterRec, afterReq)
+	require.Equal(t, http.StatusUnauthorized, afterRec.Code,
+		"disabled account's session must lose API access immediately: %s", afterRec.Body.String())
+	assert.Equal(t, "SESSION_REVOKED", errCode(t, afterRec.Body.Bytes()))
+}
+
+// TestWebAccounts_Disabled_MiddlewareRejectsSurvivingSession covers the fail-closed
+// half of the control (Issue #3126): even a session that was never revoked — issued
+// directly here, as one issued on another controller replica or by a failed
+// revocation would be — must be rejected by authenticationMiddleware once the
+// account carries Disabled=true.
+func TestWebAccounts_Disabled_MiddlewareRejectsSurvivingSession(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	admin := testAdminPrincipal()
+
+	perms := []string{"steward:list"}
+	permRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Permissions: &perms})
+	require.Equal(t, http.StatusOK, permRec.Code, "grant body: %s", permRec.Body.String())
+
+	disabled := true
+	putRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "disable body: %s", putRec.Body.String())
+
+	acct, err := srv.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	require.True(t, acct.Disabled)
+
+	// Issue a session for the disabled account after the disable, bypassing revocation.
+	_, token, issueErr := srv.webSessionManager.Issue(context.Background(), acct.ID, "web", acct.TenantID)
+	require.NoError(t, issueErr)
+	require.NotEmpty(t, token)
+	_, validateErr := srv.webSessionManager.Validate(context.Background(), token)
+	require.NoError(t, validateErr, "session must be valid at the session layer for this test to mean anything")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: token})
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"middleware must reject a live session whose account is disabled: %s", rec.Body.String())
+	assert.Equal(t, "SESSION_REVOKED", errCode(t, rec.Body.Bytes()))
+}
+
+// putWebAccountRaw calls handleUpdateWebAccount with an arbitrary (possibly malformed)
+// request body, which the typed putWebAccount helper cannot express.
+func putWebAccountRaw(t *testing.T, server *Server, principal *Principal, username, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/web/accounts/"+username, strings.NewReader(body))
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"username": username})
+	rec := httptest.NewRecorder()
+	server.handleUpdateWebAccount(rec, req)
+	return rec
+}
+
+// TestWebAccounts_Update_MalformedJSONRejected covers the PUT INVALID_JSON path:
+// an undecodable body is rejected with 400 before any account lookup or write.
+func TestWebAccounts_Update_MalformedJSONRejected(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "badjson-user",
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	for _, body := range []string{
+		`{"disabled":`,                  // truncated object
+		`{"disabled": "true"}`,          // wrong type for *bool
+		`{"permissions": "all"}` + "\n", // wrong type for *[]string
+		`not json at all`,
+	} {
+		putRec := putWebAccountRaw(t, server, admin, "badjson-user", body)
+		require.Equal(t, http.StatusBadRequest, putRec.Code,
+			"malformed body %q must be rejected: %s", body, putRec.Body.String())
+		assert.Equal(t, "INVALID_JSON", errCode(t, putRec.Body.Bytes()),
+			"malformed body %q must report INVALID_JSON", body)
+	}
+
+	// The account is untouched by every rejected request, in cache and in the store.
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), "badjson-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Equal(t, []string{"steward:list"}, acct.Permissions)
+	assert.False(t, acct.Disabled)
+}
+
+// TestWebAccounts_Update_UnknownPermissionRejected covers the PUT INVALID_PERMISSION
+// guard: web accounts are RBAC-equivalent to API-key principals, so the wildcard and
+// unknown permission IDs must be refused before anything is written to the account.
+func TestWebAccounts_Update_UnknownPermissionRejected(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "update-badperm-user",
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	for _, perms := range [][]string{
+		{"*"},
+		{"not-a-real:permission"},
+		{"steward:list", "*"}, // valid entry must not launder an invalid one
+		{"steward:list", "not-a-real:permission"}, // ditto
+	} {
+		p := perms
+		putRec := putWebAccount(t, server, admin, "update-badperm-user", WebAccountUpdateRequest{
+			Permissions: &p,
+		})
+		require.Equal(t, http.StatusBadRequest, putRec.Code,
+			"permissions %v must be rejected: %s", perms, putRec.Body.String())
+		assert.Equal(t, "INVALID_PERMISSION", errCode(t, putRec.Body.Bytes()),
+			"permissions %v must report INVALID_PERMISSION", perms)
+	}
+
+	// No rejected request may have persisted any part of its permission set.
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), "update-badperm-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Equal(t, []string{"steward:list"}, acct.Permissions,
+		"a rejected permission update must leave the stored permissions unchanged")
+}
+
+// TestWebAccounts_ResetRetainsDisabled verifies that a POST upsert ("reset this admin")
+// of a disabled account does not silently re-enable it. Disable is a containment control,
+// so clearing it must require an explicit PUT {"disabled": false} — which is the only path
+// that emits a web_account.enabled audit event.
+func TestWebAccounts_ResetRetainsDisabled(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    "reset-disabled-user",
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// A registered passkey means the disabled account could log in the moment the
+	// gate is cleared — the exact bypass this test pins shut.
+	injectCredential(t, server, "reset-disabled-user", []byte("reset-disabled-credential-id"))
+
+	disabled := true
+	putRec := putWebAccount(t, server, admin, "reset-disabled-user", WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "disable body: %s", putRec.Body.String())
+
+	// Reset the account (credentials retained — the routine "reset this admin" call).
+	resetRec := postWebAccount(t, server, admin, WebAccountRequest{Username: "reset-disabled-user"})
+	require.Equal(t, http.StatusOK, resetRec.Code, "reset body: %s", resetRec.Body.String())
+
+	var createResp APIResponse
+	require.NoError(t, json.Unmarshal(resetRec.Body.Bytes(), &createResp))
+	raw, err := json.Marshal(createResp.Data)
+	require.NoError(t, err)
+	var info WebAccountInfo
+	require.NoError(t, json.Unmarshal(raw, &info))
+	assert.True(t, info.Disabled, "reset response must report the account as still disabled")
+
+	// Durable: the disable survives the reset write and a store round-trip.
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), "reset-disabled-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.True(t, acct.Disabled, "a POST reset must not clear the disable")
+	assert.ErrorIs(t, server.VerifyWebCredential(acct), ErrInvalidWebCredential,
+		"the reset account must still be refused at login")
+
+	// Same for a reset that re-provisions to zero authenticators and mints a fresh
+	// enrollment link: the link is useless while the account remains disabled.
+	resetRec = postWebAccount(t, server, admin, WebAccountRequest{
+		Username:         "reset-disabled-user",
+		ResetCredentials: true,
+	})
+	require.Equal(t, http.StatusOK, resetRec.Code, "reset body: %s", resetRec.Body.String())
+
+	dropWebAccountCache(server)
+	acct, err = server.getWebAccount(context.Background(), "reset-disabled-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.True(t, acct.Disabled, "a credential-resetting POST must not clear the disable either")
+
+	// The re-enable path stays available and is the only one that reports an enable.
+	enabled := false
+	putRec = putWebAccount(t, server, admin, "reset-disabled-user", WebAccountUpdateRequest{Disabled: &enabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "re-enable body: %s", putRec.Body.String())
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web_account.enabled"},
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1,
+		"exactly one enable — the explicit PUT — may appear in the audit trail; a reset must not enable")
+	assert.Equal(t, "reset-disabled-user", entries[0].ResourceID)
+}
+
+// TestWebAccounts_UpdateResetCredentials_MintsFreshLink covers PR #3298 review follow-up
+// (Issue #3126 AC #2): PUT .../{username} with reset_credentials:true is the passkey-only
+// equivalent of "resets the password" — it re-provisions the account to the
+// zero-authenticator state and mints a fresh enrollment link, mirroring
+// handleCreateWebAccount's ResetCredentials path (ADR-021 Amendment 1 Decision 4).
+func TestWebAccounts_UpdateResetCredentials_MintsFreshLink(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "put-reset-creds-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: "tenant-a"})
+	require.Equal(t, http.StatusCreated, rec.Code)
+	injectCredential(t, server, username, []byte("put-reset-creds-credential"))
+
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	ur := parseUpdateResponse(t, putRec)
+	require.NotEmpty(t, ur.EnrollmentMagicLink,
+		"an explicit credential reset via PUT must issue a fresh enrollment link")
+	assert.True(t, ur.HasOutstandingEnrollmentLink)
+
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Empty(t, acct.Credentials,
+		"residual credentials must be invalidated when a fresh link is issued via PUT")
+	assert.True(t, verifyEnrollmentToken(acct, ur.EnrollmentMagicLink),
+		"the returned token must be the one stored against the reset account")
+}
+
+// TestWebAccounts_UpdateResetCredentials_IndependentOfPermissions verifies that a single
+// PUT can reset credentials and update permissions together, and that a permissions-only
+// PUT (reset_credentials omitted) leaves credentials untouched — the "both optional,
+// independently" half of Issue #3126 AC #2.
+func TestWebAccounts_UpdateResetCredentials_IndependentOfPermissions(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "put-reset-creds-and-perms-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    username,
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+	injectCredential(t, server, username, []byte("put-reset-creds-and-perms-credential"))
+
+	newPerms := []string{"steward:list", "steward:read"}
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{
+		Permissions:      &newPerms,
+		ResetCredentials: true,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	ur := parseUpdateResponse(t, putRec)
+	require.NotEmpty(t, ur.EnrollmentMagicLink, "reset_credentials must mint a link even when permissions also change")
+	assert.Equal(t, newPerms, ur.Permissions, "permissions must be updated in the same request")
+
+	dropWebAccountCache(server)
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Empty(t, acct.Credentials, "credentials must be cleared")
+	assert.Equal(t, newPerms, acct.Permissions, "permissions must be persisted")
+}
+
+// TestWebAccounts_CrossTenantPutResetCredentials_Returns404_And_LeavesCredentialsUnmodified
+// extends the [REQUIRED TEST] cross-tenant PUT invariant to the credential-reset field: a
+// cross-tenant PUT with reset_credentials:true must not mint a link, clear credentials, or
+// leak any token, matching the existing 404-and-unmodified guarantee for permissions/disabled.
+func TestWebAccounts_CrossTenantPutResetCredentials_Returns404_And_LeavesCredentialsUnmodified(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "tenantb-put-reset-creds-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: "tenant-b"})
+	require.Equal(t, http.StatusCreated, rec.Code)
+	injectCredential(t, server, username, []byte("tenantb-put-reset-creds-credential"))
+
+	origAcct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, origAcct)
+	require.Len(t, origAcct.Credentials, 1)
+	origCredID := origAcct.Credentials[0].ID
+	origLinkHash := origAcct.EnrollmentLinkHash
+
+	tenantAAdmin := &Principal{
+		ID:        "tenant-a-admin-reset-creds",
+		TenantID:  "tenant-a",
+		Assurance: session.AssuranceStrong,
+	}
+	putRec := putWebAccount(t, server, tenantAAdmin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	assert.Equal(t, http.StatusNotFound, putRec.Code,
+		"cross-tenant PUT must return 404, not 403 (do not disclose account existence)")
+	assert.NotContains(t, putRec.Body.String(), "enrollment_magic_link",
+		"a forbidden cross-tenant PUT must not return a token")
+
+	afterAcct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, afterAcct)
+	require.Len(t, afterAcct.Credentials, 1, "credentials must be unchanged after a rejected cross-tenant PUT")
+	assert.Equal(t, origCredID, afterAcct.Credentials[0].ID)
+	assert.Equal(t, origLinkHash, afterAcct.EnrollmentLinkHash, "enrollment link state must be unchanged")
+}
+
+// TestWebAccounts_UpdateResetCredentials_AuditEmitted verifies the update endpoint emits a
+// dedicated web_account.credentials_reset audit action, matching the granularity already
+// used for disabled/enabled/updated (Issue #3126).
+func TestWebAccounts_UpdateResetCredentials_AuditEmitted(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "audit-reset-creds-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	require.Equal(t, http.StatusOK, putRec.Code)
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web_account.credentials_reset"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "audit entry for web_account.credentials_reset must be written")
+	e := entries[0]
+	assert.Equal(t, "web-account", e.ResourceType)
+	assert.Equal(t, username, e.ResourceID)
+	assert.Equal(t, admin.ID, e.UserID)
+	// A credential reset mints a bearer enrollment credential, so the audit records
+	// that it was minted and how it is delivered (Issue #2974), matching the POST path.
+	require.NotNil(t, e.Details, "credential-reset audit must carry the mint details")
+	assert.Equal(t, true, e.Details["enrollment_link_minted"])
+	assert.Equal(t, "ui-shown", e.Details["delivery_method"])
+}
+
+// TestWebAccounts_UpdateDisableAndResetCredentials_EmitsBothAudits verifies that a single
+// PUT performing both a disable transition and a credential reset audits both operations.
+//
+// A first-match switch over the two would emit only web_account.disabled, leaving the
+// passkey wipe and the bearer enrollment-link mint with no audit trace at all — an
+// audit-evasion path for a privileged actor (CWE-778).
+func TestWebAccounts_UpdateDisableAndResetCredentials_EmitsBothAudits(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "audit-disable-and-reset-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	disabled := true
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{
+		Disabled:         &disabled,
+		ResetCredentials: true,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	for _, action := range []string{"web_account.disabled", "web_account.credentials_reset"} {
+		entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+			Actions: []string{action},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, entries,
+			"a combined disable + credential reset must emit %s, not just the first-matching action", action)
+		assert.Equal(t, username, entries[0].ResourceID)
+	}
+}
+
+// TestWebAccounts_UpdateResetCredentials_RevokesLiveSessions verifies that a credential
+// reset terminates the account's live browser sessions (CWE-613).
+//
+// In the passkey-only model (ADR-021 Amendment 1 Decision 4) reset_credentials is the
+// "reset the password" operation an admin reaches for on a suspected takeover. Wiping the
+// passkeys without cutting the sessions they already minted would leave the attacker's
+// cookie usable for the remainder of the absolute session lifetime (12h).
+func TestWebAccounts_UpdateResetCredentials_RevokesLiveSessions(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	admin := testAdminPrincipal()
+
+	perms := []string{"steward:list"}
+	permRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Permissions: &perms})
+	require.Equal(t, http.StatusOK, permRec.Code, "grant body: %s", permRec.Body.String())
+
+	loginRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, loginRec.Code, "login body: %s", loginRec.Body.String())
+	sessionToken := extractCookie(loginRec, cookieWebSession)
+	require.NotEmpty(t, sessionToken)
+
+	// The live session works before the reset.
+	beforeReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	beforeReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	beforeRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(beforeRec, beforeReq)
+	require.Equal(t, http.StatusOK, beforeRec.Code, "session must work before reset: %s", beforeRec.Body.String())
+
+	putRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{ResetCredentials: true})
+	require.Equal(t, http.StatusOK, putRec.Code, "reset body: %s", putRec.Body.String())
+
+	_, validateErr := srv.webSessionManager.Validate(context.Background(), sessionToken)
+	assert.ErrorIs(t, validateErr, session.ErrSessionRevoked,
+		"resetting credentials must revoke the account's live sessions")
+
+	afterReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	afterReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	afterRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(afterRec, afterReq)
+	require.Equal(t, http.StatusUnauthorized, afterRec.Code,
+		"a reset account's session must lose API access immediately: %s", afterRec.Body.String())
+	assert.Equal(t, "SESSION_REVOKED", errCode(t, afterRec.Body.Bytes()))
+}
+
+// TestWebAccounts_CreateResetCredentials_RevokesLiveSessions covers the same containment
+// gap on the POST reset path (handleCreateWebAccount, reset_credentials). Same feature,
+// same guarantee — DSD rule 2, no pre-existing conditions.
+func TestWebAccounts_CreateResetCredentials_RevokesLiveSessions(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	admin := testAdminPrincipal()
+
+	perms := []string{"steward:list"}
+	permRec := putWebAccount(t, srv, admin, username, WebAccountUpdateRequest{Permissions: &perms})
+	require.Equal(t, http.StatusOK, permRec.Code, "grant body: %s", permRec.Body.String())
+
+	loginRec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, loginRec.Code, "login body: %s", loginRec.Body.String())
+	sessionToken := extractCookie(loginRec, cookieWebSession)
+	require.NotEmpty(t, sessionToken)
+
+	beforeReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	beforeReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	beforeRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(beforeRec, beforeReq)
+	require.Equal(t, http.StatusOK, beforeRec.Code, "session must work before reset: %s", beforeRec.Body.String())
+
+	postRec := postWebAccount(t, srv, admin, WebAccountRequest{Username: username, ResetCredentials: true})
+	require.Equal(t, http.StatusOK, postRec.Code, "reset body: %s", postRec.Body.String())
+
+	_, validateErr := srv.webSessionManager.Validate(context.Background(), sessionToken)
+	assert.ErrorIs(t, validateErr, session.ErrSessionRevoked,
+		"a POST credential reset must revoke the account's live sessions")
+
+	afterReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	afterReq.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	afterRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(afterRec, afterReq)
+	require.Equal(t, http.StatusUnauthorized, afterRec.Code,
+		"a reset account's session must lose API access immediately: %s", afterRec.Body.String())
+	assert.Equal(t, "SESSION_REVOKED", errCode(t, afterRec.Body.Bytes()))
+}
+
+// TestWebAccounts_UpdateDisableOnly_DoesNotEmitCredentialsReset guards the inverse of the
+// combined-audit fix: making the two events independent must not make every disable look
+// like a credential reset.
+func TestWebAccounts_UpdateDisableOnly_DoesNotEmitCredentialsReset(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "audit-disable-only-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	disabled := true
+	putRec := putWebAccount(t, server, admin, username, WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "body: %s", putRec.Body.String())
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web_account.credentials_reset"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a disable without reset_credentials must not audit a credential reset")
+
+	updatedEntries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"web_account.updated"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, updatedEntries,
+		"a disable must not also emit the generic updated action")
+}

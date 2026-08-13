@@ -78,6 +78,7 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"},
 	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"},
 	{"POST", "/api/v1/web/accounts", "web-account:create"},
+	{"PUT", "/api/v1/web/accounts/test-user", "web-account:update"}, // Issue #3126: update permissions/disabled (Tier-3: can disable accounts)
 	{"DELETE", "/api/v1/web/accounts/test-user", "web-account:delete"},
 	// Enrollment magic-link revocation (Issue #2974) — invalidates an unredeemed
 	// bearer credential that would otherwise enroll a first passkey.
