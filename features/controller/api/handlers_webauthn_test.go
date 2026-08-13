@@ -527,8 +527,11 @@ func TestWebAuthnRevokeCredential(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
-	t.Run("server permits last-credential revocation (guard is in CLI)", func(t *testing.T) {
-		// Re-inject the credential for a fresh test.
+	t.Run("mTLS admin revoke last credential succeeds (no anti-lockout guard for non-cookie-auth)", func(t *testing.T) {
+		// mTLS/API-key principals have no cookieAuthContextKey — the anti-lockout guard
+		// (LAST_CREDENTIAL / 409) only applies to cookie-auth (human web) accounts.
+		// An mTLS admin retains alternative access paths (ADR-021 §7), so the server
+		// permits removal of the last credential for non-cookie-auth callers.
 		_, secondUsername := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 		lastCredID := []byte("last-credential")
 		lastCredIDParam := base64.RawURLEncoding.EncodeToString(lastCredID)
@@ -536,8 +539,213 @@ func TestWebAuthnRevokeCredential(t *testing.T) {
 
 		rec := doRevokeCredential(t, server, secondUsername, lastCredIDParam)
 		assert.Equal(t, http.StatusNoContent, rec.Code,
-			"server must permit last-credential revocation; the guard lives in the CLI")
+			"mTLS admin (cookieAuth=false) must be allowed to revoke the last credential")
 	})
+}
+
+// --- Issue #2992: IDOR fix, anti-lockout guard, and CAS atomicity tests ---
+
+// withCookieAuth returns a request with cookieAuthContextKey=true and a principal
+// whose ID is the given web account's UUID — matching the session layout set by
+// authenticationMiddleware for cookie-authenticated requests.
+func withCookieAuth(req *http.Request, acct *webAccount) *http.Request {
+	ctx := context.WithValue(req.Context(), cookieAuthContextKey, true)
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{
+		ID:        acct.ID,
+		Name:      acct.Username,
+		Assurance: session.AssuranceStrong,
+	})
+	return req.WithContext(ctx)
+}
+
+// doListCredentialsCookieAuth calls handleWebAuthnListCredentials as the account owner
+// via a cookie-authenticated session.
+func doListCredentialsCookieAuth(t *testing.T, server *Server, acct *webAccount, pathUsername string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/credentials", pathUsername), nil)
+	req = withVars(req, map[string]string{"username": pathUsername})
+	req = withCookieAuth(req, acct)
+	rec := httptest.NewRecorder()
+	server.handleWebAuthnListCredentials(rec, req)
+	return rec
+}
+
+// doRevokeCredentialCookieAuth calls handleWebAuthnRevokeCredential as the account
+// owner via a cookie-authenticated session.
+func doRevokeCredentialCookieAuth(t *testing.T, server *Server, acct *webAccount, pathUsername, credIDParam string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/revoke/%s", pathUsername, credIDParam), nil)
+	req = withVars(req, map[string]string{"username": pathUsername, "credential_id": credIDParam})
+	req = withCookieAuth(req, acct)
+	rec := httptest.NewRecorder()
+	server.handleWebAuthnRevokeCredential(rec, req)
+	return rec
+}
+
+// TestWebAuthnCredentialIDOR verifies that cookie-auth principals are confined to their
+// own account (Issue #2992 IDOR fix).
+func TestWebAuthnCredentialIDOR(t *testing.T) {
+	server, usernameA := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+	// Create a second account.
+	recB := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "idor-account-b"})
+	require.Equal(t, http.StatusCreated, recB.Code)
+
+	acctA, err := server.getWebAccount(context.Background(), usernameA)
+	require.NoError(t, err)
+	require.NotNil(t, acctA)
+
+	acctB, err := server.getWebAccount(context.Background(), "idor-account-b")
+	require.NoError(t, err)
+	require.NotNil(t, acctB)
+
+	credID := []byte("idor-target-cred")
+	injectCredential(t, server, acctB.Username, credID)
+	credIDParam := base64.RawURLEncoding.EncodeToString(credID)
+
+	t.Run("cookie-auth list returns 403 when path username != session account", func(t *testing.T) {
+		// acctA's session, acctB's path — must be rejected.
+		rec := doListCredentialsCookieAuth(t, server, acctA, acctB.Username)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "FORBIDDEN", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("cookie-auth revoke returns 403 when path username != session account", func(t *testing.T) {
+		rec := doRevokeCredentialCookieAuth(t, server, acctA, acctB.Username, credIDParam)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "FORBIDDEN", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("cookie-auth list succeeds when path username matches session account", func(t *testing.T) {
+		// acctA listing their own account — path matches session.
+		rec := doListCredentialsCookieAuth(t, server, acctA, acctA.Username)
+		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("credential on acctB still present after blocked revoke attempts", func(t *testing.T) {
+		freshB, err := server.getWebAccount(context.Background(), acctB.Username)
+		require.NoError(t, err)
+		require.Len(t, freshB.Credentials, 1, "acctB credential must not have been touched")
+	})
+}
+
+// TestWebAuthnAntiLockout verifies the server-side anti-lockout guard for cookie-auth
+// principals (Issue #2992).
+func TestWebAuthnAntiLockout(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+
+	credID := []byte("only-passkey")
+	injectCredential(t, server, username, credID)
+	credIDParam := base64.RawURLEncoding.EncodeToString(credID)
+
+	t.Run("cookie-auth last credential returns 409 LAST_CREDENTIAL", func(t *testing.T) {
+		rec := doRevokeCredentialCookieAuth(t, server, acct, username, credIDParam)
+		assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "LAST_CREDENTIAL", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("credential still present after blocked revoke", func(t *testing.T) {
+		fresh, err := server.getWebAccount(context.Background(), username)
+		require.NoError(t, err)
+		require.Len(t, fresh.Credentials, 1, "credential must not have been removed")
+	})
+
+	t.Run("cookie-auth revoke succeeds when two credentials exist", func(t *testing.T) {
+		// Add a second credential so the first can be revoked.
+		secondCredID := []byte("backup-passkey")
+		injectCredential(t, server, username, secondCredID)
+
+		// Reload the account (cache may have stale credential count).
+		acct, err = server.getWebAccount(context.Background(), username)
+		require.NoError(t, err)
+
+		rec := doRevokeCredentialCookieAuth(t, server, acct, username, credIDParam)
+		assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+		fresh, err := server.getWebAccount(context.Background(), username)
+		require.NoError(t, err)
+		assert.Len(t, fresh.Credentials, 1, "exactly one credential must remain")
+	})
+}
+
+// TestWebAuthnRevokeCAS verifies that two concurrent revokes on a two-credential
+// account leave exactly one credential — the CAS mutex prevents both from
+// racing past the last-credential guard and zeroing the account (Issue #2992).
+func TestWebAuthnRevokeCAS(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+
+	credA := []byte("cas-cred-a")
+	credB := []byte("cas-cred-b")
+	injectCredential(t, server, username, credA)
+	injectCredential(t, server, username, credB)
+
+	credAParam := base64.RawURLEncoding.EncodeToString(credA)
+	credBParam := base64.RawURLEncoding.EncodeToString(credB)
+
+	// Reload after injection so the in-memory cache is consistent.
+	acct, err = server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.Len(t, acct.Credentials, 2)
+
+	// Two goroutines each try to revoke one credential concurrently.
+	// The account starts with 2 credentials. Each revoke brings it to 1.
+	// Both should succeed — neither should see LAST_CREDENTIAL.
+	// After both complete, exactly 0 credentials remain (each saw 2→1, then 1→0).
+	// The CAS mutex serialises them, so the post-conditions are deterministic.
+	type result struct {
+		code int
+		body []byte
+	}
+	ch := make(chan result, 2)
+
+	go func() {
+		rec := doRevokeCredentialCookieAuth(t, server, acct, username, credAParam)
+		ch <- result{rec.Code, rec.Body.Bytes()}
+	}()
+	go func() {
+		rec := doRevokeCredentialCookieAuth(t, server, acct, username, credBParam)
+		ch <- result{rec.Code, rec.Body.Bytes()}
+	}()
+
+	r1 := <-ch
+	r2 := <-ch
+
+	// Both revokes target distinct credentials on a 2-credential account.
+	// The serialized order is: first removes one (1 left), second removes the other (0 left).
+	// With cookie-auth the last-credential guard fires if count reaches 0 during a revoke.
+	// The first goroutine sees 2 credentials and removes one → 1 remains.
+	// The second goroutine (now running with a fresh reload) sees 1 credential and its target
+	// is the other, leaving 0 — which triggers LAST_CREDENTIAL if cookieAuth.
+	//
+	// Correct behaviour: exactly one of the two returns 204, the other returns 409.
+	codes := []int{r1.code, r2.code}
+	noContent := 0
+	conflict := 0
+	for _, c := range codes {
+		switch c {
+		case http.StatusNoContent:
+			noContent++
+		case http.StatusConflict:
+			conflict++
+		}
+	}
+	assert.Equal(t, 1, noContent, "exactly one revoke must succeed (204)")
+	assert.Equal(t, 1, conflict, "exactly one revoke must be blocked by the anti-lockout guard (409)")
+
+	// The account must have exactly one credential remaining.
+	final, err := server.getWebAccount(context.Background(), username)
+	require.NoError(t, err)
+	assert.Len(t, final.Credentials, 1, "CAS must leave exactly one credential")
 }
 
 // --- Issue #2784: presence ceremony handler error-path tests ---

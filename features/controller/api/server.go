@@ -158,6 +158,7 @@ type Server struct {
 	passkeyLoginSessions           sync.Map                              // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
 	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyEnrollSessions          sync.Map                              // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
+	credentialMu                   sync.Mutex                            // Issue #2992: guards the credential CAS section in handleWebAuthnRevokeCredential
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                     egReadProvider                        // Issue #2880: entity graph read API
