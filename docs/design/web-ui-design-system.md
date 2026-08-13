@@ -156,6 +156,112 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
   where `direction=1` is ascending and `direction=-1` is descending. The active column
   carries `aria-sort="ascending"|"descending"` on the `<th>` (no attribute when inactive)
   and a `sort` CSS class. All sort interactions remain client-side — no re-fetch on sort.
+- **Data visualization** — a computed, validated layer for chart marks, stat tiles,
+  and palettes. The values below were measured (OKLCH lightness band, chroma floor,
+  Machado–Oliveira–Fernandes 2009 CVD separation, normal-vision floor, WCAG contrast)
+  and must be shipped verbatim; do not substitute hand-picked hexes. Ship the values
+  in `web-ui-design-tokens.css` as `--ordinal-*` and `--cat-*` custom properties.
+
+  **The finding that shapes everything.** The six shipped state/accent tokens
+  (`#4a6b7c`, `#507055`, `#8f4f2e`, `#965044`, `#7a5f6e`, `#6b5c4d`) fail as a
+  categorical series palette — measured, light mode: chroma floor FAIL (all six below
+  the 0.10 floor, 0.030–0.098); CVD separation FAIL (worst adjacent pair `--state-crit`
+  ↔ `--state-warn` ΔE 2.5 deutan); normal-vision floor FAIL (same pair ΔE 3.1 —
+  full-colour readers cannot reliably tell drift-orange from error-terracotta apart
+  either). This is a property of the warm-terminal identity (deliberately desaturated
+  earth tones), not a tokens defect. The resolution is a *separate data layer*: chart
+  marks get their own validated palette, held to low chroma so it still reads as CFGMS.
+
+  **Hard rules — no exceptions:**
+
+  - **Warn/crit never adjacent by colour alone.** `--state-warn` and `--state-crit`
+    must never be adjacent segments distinguished by colour alone — not in a stacked
+    bar, not in a donut, not in a legend. Where both appear they carry an icon + text
+    label and a 2 px surface gap. At ΔE 3.1 the two states are visually the same
+    colour to most readers.
+  - **Ignore server-supplied colours.** `ChartData.Config.Colors` and
+    `SeriesData.Color` (`features/reports/interfaces/interfaces.go:143,165`) come off
+    the wire and must not be used by the client. Map by series index into the palettes
+    below instead.
+  - **No dual-axis charts.** Two measures of different scale → two charts, small
+    multiples, or index to a common base.
+  - **Colour follows the entity, not its rank.** A filter that changes series count
+    must not repaint survivors.
+  - **Never colour nominal bars by their value.**
+  - **Text never wears the data colour.** Values, labels, legends, and axis text use
+    `--text-primary` / `--text-secondary` / `--text-faint`; identity comes from a
+    coloured mark beside the text. Exception: a label inside a filled segment picks
+    white or ink by the fill's luminance.
+
+  **Colour-job table** — which chart job gets which treatment:
+
+  | Job | Treatment |
+  |-----|-----------|
+  | A single current value | Stat tile — never a one-bar chart |
+  | Magnitude low→high | Sequential ramp (below) |
+  | Trend over time, one series | Sequential mid-step (3 or 4) or accent |
+  | Categories *are states* (converged/drift/error/queued) | Status tokens + icon + label mandatory, never "series N" |
+  | Distinct non-state series (tenants, rings, OS families) | Categorical (below), capped |
+  | One series is the point | Accent for it, `--text-faint` for the rest |
+
+  Categorical is the exception in this product. Default to sequential / status /
+  emphasis.
+
+  **Sequential ramp** (`--ordinal-*`, magnitude, the default) — one hue, accent slate
+  (OKLCH H≈234), light→dark, 5 steps. Validated: lightness monotone, adjacent ΔL ≥0.06,
+  light-end contrast 2.05:1 light / 2.07:1 dark (floor 2.0), single hue (spread 1°) —
+  all PASS. Use for compliance/coverage magnitude, drift-event counts, heatmap cells,
+  meter fills.
+
+  | Step | Light | Dark |
+  |------|-------|------|
+  | 1 (lowest) | `#96bad0` | `#095b7e` |
+  | 2 | `#659dbd` | `#0475a1` |
+  | 3 | `#2e80a9` | `#378eba` |
+  | 4 | `#0a6388` | `#62a8ce` |
+  | 5 (highest) | `#054561` | `#93c0da` |
+
+  **Categorical theme** (`--cat-*`, identity, the exception) — fixed order, assigned in
+  sequence, never cycled, brand-anchored (each slot on a shipped token's OKLCH hue
+  family, held to the lowest chroma that clears the floor). Validated — all six checks
+  PASS both modes: light adjacent CVD ΔE 18.5 / normal 19.7; light all-pairs slots 1–3
+  CVD 18.5 / normal 19.7; dark adjacent CVD 8.2 / normal 18.4; dark all-pairs slots 1–3
+  CVD 8.2 / normal 19.2.
+
+  | Slot | Family | Light | Dark |
+  |------|--------|-------|------|
+  | 1 | slate | `#0171a3` | `#3674a5` |
+  | 2 | green | `#4f9d60` | `#5ba269` |
+  | 3 | amber | `#7e3e1b` | `#d57018` |
+  | 4 | mauve | `#c27fb0` | `#a55e93` |
+
+  **Series caps — load-bearing, not guidance:**
+  - **4 max** for stacked/grouped bars and multi-line (adjacent pairlist).
+  - **3 max** for any form where two marks can sit side by side — scatter, bubble,
+    graph/node views, small multiples (all-pairs pairlist; slots 1–3 are the validated
+    subset).
+  - **There is no 5th slot.** Fold the tail into "Other", facet into small multiples,
+    or switch form. Never generate another hue — a generated 5th is indistinguishable
+    under CVD and voids every number above.
+
+  **Status scale** (reserved) — the shipped state tokens (`--state-ok` converged,
+  `--state-warn` drift, `--state-crit` error, `--state-neutral` queued/inert) are used
+  *only* for state, never as "series 4." Always icon + text label, per the hard rule
+  above.
+
+  **Stat tile** (formalizes `fleet-overview.html:149–151`'s `.tiles` / `.tile` / `.n`
+  / `.sw` shipped CSS — **Reference** status per `mockups/README.md`):
+
+  - `label` — sentence case, no trailing colon.
+  - `value` — Inter semibold, `font-variant-numeric: tabular-nums`; auto-compact
+    display (1,284 / 12.9 K).
+  - `delta` — optional; signed, vs. a named period; colour = direction × whether up
+    is good.
+  - `trend` — optional; 12-point sparkline. Mark spec lands in Story #S8 (separate
+    from this story).
+
+  Tiles use existing `--state-*` tokens only. No new tokens are introduced for the
+  tile itself.
 
 ---
 

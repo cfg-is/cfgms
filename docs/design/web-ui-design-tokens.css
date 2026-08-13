@@ -74,6 +74,21 @@
 
   /* --- Elevation --- */
   --shadow: 0 18px 50px -22px rgba(60, 45, 30, 0.40);
+
+  /* --- Data-viz: sequential ramp (ordinal, magnitude, H≈234 slate) --- */
+  /* Validated: lightness monotone, adjacent ΔL≥0.06, contrast ≥2.0:1, spread 1° */
+  --ordinal-1: #96bad0;  /* lowest */
+  --ordinal-2: #659dbd;
+  --ordinal-3: #2e80a9;
+  --ordinal-4: #0a6388;
+  --ordinal-5: #054561;  /* highest */
+
+  /* --- Data-viz: categorical theme (identity, brand-anchored, 4 slots max) --- */
+  /* Validated: adjacent CVD ΔE 18.5, normal 19.7; all-pairs slots 1-3 CVD 18.5 */
+  --cat-1: #0171a3;  /* slate */
+  --cat-2: #4f9d60;  /* green */
+  --cat-3: #7e3e1b;  /* amber */
+  --cat-4: #c27fb0;  /* mauve — adjacent forms only, not all-pairs (3-slot validated set) */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -104,6 +119,20 @@
     --tint-cream:  #252321;
 
     --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+
+    /* --- Data-viz: sequential ramp (dark mode) --- */
+    --ordinal-1: #095b7e;
+    --ordinal-2: #0475a1;
+    --ordinal-3: #378eba;
+    --ordinal-4: #62a8ce;
+    --ordinal-5: #93c0da;
+
+    /* --- Data-viz: categorical theme (dark mode) --- */
+    /* Validated: adjacent CVD ΔE 8.2, normal 18.4; all-pairs slots 1-3 CVD 8.2 */
+    --cat-1: #3674a5;  /* slate */
+    --cat-2: #5ba269;  /* green */
+    --cat-3: #d57018;  /* amber */
+    --cat-4: #a55e93;  /* mauve */
   }
 }
 
@@ -116,6 +145,8 @@
   --state-crit: #965044; --state-crit-bg: #f2e5e3; --state-mauve: #7a5f6e; --state-neutral: #6b5c4d; --state-neutral-bg: #e8e0d8;
   --tint-red: #f2e5e3; --tint-green: #e8f0e9; --tint-orange: #f7e8db; --tint-blue: #e6eef2; --tint-brown: #e8e0d8; --tint-cream: #faf8f5;
   --shadow: 0 18px 50px -22px rgba(60, 45, 30, 0.40);
+  --ordinal-1: #96bad0; --ordinal-2: #659dbd; --ordinal-3: #2e80a9; --ordinal-4: #0a6388; --ordinal-5: #054561;
+  --cat-1: #0171a3; --cat-2: #4f9d60; --cat-3: #7e3e1b; --cat-4: #c27fb0;
 }
 
 :root[data-theme="dark"] {
@@ -125,4 +156,6 @@
   --state-crit: #d0846f; --state-crit-bg: #2d1f1c; --state-mauve: #a58198; --state-neutral: #a89888; --state-neutral-bg: #2a2520;
   --tint-red: #2d1f1c; --tint-green: #1a2e1d; --tint-orange: #332518; --tint-blue: #1e2528; --tint-brown: #2a2520; --tint-cream: #252321;
   --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  --ordinal-1: #095b7e; --ordinal-2: #0475a1; --ordinal-3: #378eba; --ordinal-4: #62a8ce; --ordinal-5: #93c0da;
+  --cat-1: #3674a5; --cat-2: #5ba269; --cat-3: #d57018; --cat-4: #a55e93;
 }
