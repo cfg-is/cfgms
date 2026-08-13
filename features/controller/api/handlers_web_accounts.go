@@ -48,10 +48,6 @@ const (
 	// mirroring how API-key records use their hash as the key.
 	webAccountKeyPrefix = "web-account-"
 
-	// enrollmentLinkTTL is the default TTL for enrollment magic links (Issue #2974).
-	// 72 hours gives the admin time to hand off the link out-of-band.
-	enrollmentLinkTTL = 72 * time.Hour
-
 	// enrollmentTokenBytes is the random source length for enrollment magic links.
 	// 20 bytes = 160 bits of entropy — exceeds the >=128-bit requirement (Issue #2974).
 	enrollmentTokenBytes = 20
@@ -602,7 +598,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		acct.EnrollmentLinkHash = tokenHash
-		acct.EnrollmentLinkExpiresAt = time.Now().UTC().Add(enrollmentLinkTTL)
+		acct.EnrollmentLinkExpiresAt = time.Now().UTC().Add(s.cfg.Registration.GetEnrollmentLinkTTL())
 		acct.EnrollmentLinkRevoked = false
 	} else {
 		acct.EnrollmentLinkHash = existing.EnrollmentLinkHash

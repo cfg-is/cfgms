@@ -476,6 +476,7 @@ The controller promotes a steward's source IP to **trusted status** only after i
 | `registration.ip_trust_threshold` | 30 min | Continuous liveness required before IP is trusted (Issue #1694) |
 | `registration.ip_trust_dark_window` | 30 days | Inactivity period before a trusted IP range is auto-revoked (Issue #1697) |
 | `registration.pending_review_timeout` | 5 days | Maximum time a pending registration may await operator action (Issue #1697) |
+| `registration.enrollment_link_ttl` | 72 hours | Validity window for a single-use passkey enrollment magic link (Issue #2966) |
 
 ### IP-Trust Dark-Window Expiry (Issue #1697)
 

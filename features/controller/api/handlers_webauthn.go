@@ -598,11 +598,11 @@ const enrollmentTokenHeader = "X-Enrollment-Token"
 // handlePasskeyEnrollBegin handles POST /api/v1/web/passkey/enroll/begin.
 //
 // The caller presents the raw enrollment token in X-Enrollment-Token. The server:
-//   1. Looks up the account by token hash (never by caller-supplied username).
-//   2. Verifies the token is unexpired and not revoked.
-//   3. Starts a WebAuthn registration ceremony scoped to that account.
-//   4. Stores the pending session keyed by tokenHash (not username) so the finish
-//      step can find it without trusting any caller-supplied identity.
+//  1. Looks up the account by token hash (never by caller-supplied username).
+//  2. Verifies the token is unexpired and not revoked.
+//  3. Starts a WebAuthn registration ceremony scoped to that account.
+//  4. Stores the pending session keyed by tokenHash (not username) so the finish
+//     step can find it without trusting any caller-supplied identity.
 //
 // This route is on the BASE router (public) — the token IS the auth credential.
 func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request) {

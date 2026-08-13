@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/config"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -682,6 +683,35 @@ func TestWebAccounts_CreateMintsEnrollmentLink(t *testing.T) {
 	// Verify has_outstanding_enrollment_link is true in the create response.
 	assert.True(t, cr.HasOutstandingEnrollmentLink,
 		"has_outstanding_enrollment_link must be true in create response")
+}
+
+// TestWebAccounts_EnrollmentLinkTTL_ConfiguredValue verifies the enrollment link
+// TTL is sourced from cfg.Registration.EnrollmentLinkTTL rather than a hardcoded
+// constant (PR #3277 review: TTL must be configurable, not just defaulted).
+func TestWebAccounts_EnrollmentLinkTTL_ConfiguredValue(t *testing.T) {
+	server := setupTestServer(t)
+	server.cfg.Registration = &config.RegistrationConfig{
+		EnrollmentLinkTTL: config.Duration(2 * time.Hour),
+	}
+	admin := testAdminPrincipal()
+
+	before := time.Now().UTC()
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username: "configured-ttl-user",
+		TenantID: "tenant-a",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	after := time.Now().UTC()
+
+	server.mu.RLock()
+	acct := server.webAccounts["configured-ttl-user"]
+	server.mu.RUnlock()
+	require.NotNil(t, acct)
+
+	assert.True(t, acct.EnrollmentLinkExpiresAt.After(before.Add(2*time.Hour-time.Minute)),
+		"expiry must reflect the configured 2h TTL, not the 72h default")
+	assert.True(t, acct.EnrollmentLinkExpiresAt.Before(after.Add(2*time.Hour+time.Minute)),
+		"expiry must not exceed the configured 2h TTL by more than test slack")
 }
 
 // TestWebAccounts_EnrollmentLinkStoredHashed verifies that the enrollment token is stored

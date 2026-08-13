@@ -679,7 +679,9 @@ Decision 2 ("shown-once in the admin UI") is implemented in Story #2974. It gate
 mints a 160-bit (20-byte) single-use enrollment token on account creation, stores only
 the SHA-256 hex digest in the account record (never the raw token), shows the raw token
 exactly once in the admin UI for out-of-band clipboard handoff, and provides a revoke
-endpoint for outstanding unredeemed links. Email delivery (also mentioned in Decision 2)
+endpoint for outstanding unredeemed links. The token TTL defaults to 72 hours and is
+configurable via `registration.enrollment_link_ttl` (`RegistrationConfig.GetEnrollmentLinkTTL`,
+Issue #2966) rather than a hardcoded constant. Email delivery (also mentioned in Decision 2)
 is explicitly deferred to a future notification-provider epic (CLAUDE.md central-provider
 rule). The raw token is never logged or audited; audit records carry the
 `delivery_method` field (`"ui-shown"`) and whether a link was minted.
