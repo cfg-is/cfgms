@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1825,22 +1826,71 @@ func (s *Server) configureCORS() {
 // its value — one flag must not switch off two independent controls.
 const envAllowEphemeralSecrets = "CFGMS_ALLOW_EPHEMERAL_SECRETS"
 
-// isEphemeralSecretsPath returns true when secretsPath lives under a directory
-// that is wiped on reboot: os.TempDir(), /dev/shm/, or /run/user/. Resolves
-// symlinks so that macOS /tmp → /private/tmp doesn't bypass the check.
-func isEphemeralSecretsPath(secretsPath string) bool {
-	clean := func(p string) string {
-		if resolved, err := filepath.EvalSymlinks(p); err == nil {
-			p = resolved
+// resolveEphemeralPath normalises p for prefix comparison.
+//
+// filepath.EvalSymlinks only succeeds on a path that exists, which made the
+// comparison asymmetric: os.TempDir() always exists and was resolved, while a
+// candidate secrets path that has not been created yet was left as written. The
+// two sides then normalised differently and the prefix check missed — on macOS
+// (/var/folders/… → /private/var/folders/…) and on Windows (8.3 short names such
+// as C:\Users\RUNNER~1 → C:\Users\runneradmin). Linux CI has neither a symlinked
+// TMPDIR nor short-name aliasing, so both sides matched there and the defect was
+// invisible until the cross-platform build ran in the merge queue.
+//
+// Because the caller is a fail-closed guard, a miss returns "not ephemeral" and
+// lets a controller start with its secret store on a volume that is wiped on
+// reboot — the guard failed open on exactly the two platforms it was not
+// exercised on.
+//
+// Resolving the deepest existing ancestor and re-appending the remainder gives
+// both sides the same normalisation whether or not the full path exists yet.
+func resolveEphemeralPath(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if rest == "" {
+				return filepath.Clean(resolved)
+			}
+			return filepath.Clean(filepath.Join(resolved, rest))
 		}
-		return filepath.Clean(p) + string(filepath.Separator)
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the root without finding an existing ancestor: nothing is
+			// resolvable, so compare the path as written.
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
 	}
-	p := clean(secretsPath)
-	if strings.HasPrefix(p, clean(os.TempDir())) {
+}
+
+// hasPathPrefix reports whether path sits under prefix, honouring the platform's
+// path-case semantics. Windows paths are case-insensitive, so a configured
+// C:\TEMP\secrets must match an os.TempDir() of C:\Temp — a case-sensitive
+// comparison there would fail open the same way the symlink asymmetry did.
+func hasPathPrefix(path, prefix string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefix))
+	}
+	return strings.HasPrefix(path, prefix)
+}
+
+// isEphemeralSecretsPath returns true when secretsPath lives under a directory
+// that is wiped on reboot: os.TempDir(), /dev/shm/, or /run/user/. Symlinks and
+// Windows short names are resolved first (see resolveEphemeralPath) so that
+// macOS /tmp → /private/tmp, or a path written through an 8.3 alias, cannot
+// bypass the check.
+func isEphemeralSecretsPath(secretsPath string) bool {
+	withSep := func(p string) string {
+		return resolveEphemeralPath(p) + string(filepath.Separator)
+	}
+	p := withSep(secretsPath)
+	if hasPathPrefix(p, withSep(os.TempDir())) {
 		return true
 	}
 	for _, prefix := range []string{"/dev/shm/", "/run/user/"} {
-		if strings.HasPrefix(p, prefix) {
+		if hasPathPrefix(p, prefix) {
 			return true
 		}
 	}

@@ -496,3 +496,74 @@ func TestIsDatabaseDSNEphemeral(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveEphemeralPath_ResolvesDeepestExistingAncestor pins the normalisation
+// the ephemeral-path guard depends on.
+//
+// filepath.EvalSymlinks only succeeds on a path that exists. The guard compares a
+// configured secrets path against os.TempDir(); the latter always exists and so
+// was always resolved, while a secrets directory that had not been created yet
+// was left as written. Where the temp root is reached through a symlink (macOS
+// /var/folders → /private/var/folders) or an alias (Windows 8.3 short names) the
+// two sides normalised differently, the prefix comparison missed, and a
+// fail-closed guard returned "not ephemeral".
+//
+// Resolving the deepest existing ancestor and re-appending the remainder must
+// give the same answer whether or not the full path exists.
+func TestResolveEphemeralPath_ResolvesDeepestExistingAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows; the Windows alias case is covered by hasPathPrefix")
+	}
+
+	realDir := filepath.Join(t.TempDir(), "real")
+	require.NoError(t, os.MkdirAll(realDir, 0o750))
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(realDir, link))
+
+	existing := resolveEphemeralPath(link)
+	assert.Equal(t, realDir, existing, "an existing symlinked path must resolve to its target")
+
+	// The failing case: the leaf does not exist, so EvalSymlinks fails on the
+	// full path and only an ancestor is resolvable.
+	notYetCreated := resolveEphemeralPath(filepath.Join(link, "a", "b", "c"))
+	assert.Equal(t, filepath.Join(realDir, "a", "b", "c"), notYetCreated,
+		"a not-yet-created path must normalise the same way as an existing one")
+}
+
+// TestIsEphemeralSecretsPath_SymlinkedTempDir reproduces the platform failure on
+// any host by pointing TMPDIR at a symlink, which is what macOS does natively.
+// Without the deepest-existing-ancestor resolution this returns false and the
+// guard fails open, allowing a controller to start with its secret store on a
+// volume that is wiped on reboot.
+func TestIsEphemeralSecretsPath_SymlinkedTempDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+
+	realTmp := filepath.Join(t.TempDir(), "realtmp")
+	require.NoError(t, os.MkdirAll(realTmp, 0o750))
+	linkTmp := filepath.Join(t.TempDir(), "linktmp")
+	require.NoError(t, os.Symlink(realTmp, linkTmp))
+
+	t.Setenv("TMPDIR", linkTmp)
+	require.Equal(t, linkTmp, os.TempDir(), "test precondition: os.TempDir must follow TMPDIR")
+
+	assert.True(t, isEphemeralSecretsPath(filepath.Join(os.TempDir(), "cfgms", "secrets")),
+		"a not-yet-created secrets dir under a symlinked TMPDIR is still ephemeral")
+	assert.True(t, isDatabaseDSNEphemeral(filepath.Join(os.TempDir(), "cfgms.db")),
+		"a database file under a symlinked TMPDIR is still ephemeral")
+	assert.False(t, isEphemeralSecretsPath("/var/lib/cfgms/secrets"),
+		"a persistent path must not be misclassified once resolution changes")
+}
+
+// TestHasPathPrefix_WindowsIsCaseInsensitive covers the Windows half of the same
+// fail-open class: Windows paths compare case-insensitively, so a configured
+// C:\TEMP\secrets must match an os.TempDir() of C:\Temp.
+func TestHasPathPrefix_WindowsIsCaseInsensitive(t *testing.T) {
+	same := hasPathPrefix(`C:\TEMP\secrets`, `C:\Temp\`)
+	if runtime.GOOS == "windows" {
+		assert.True(t, same, "Windows path comparison must ignore case or the guard fails open")
+		return
+	}
+	assert.False(t, same, "case folding must stay Windows-only: POSIX paths are case-sensitive")
+}
