@@ -50,6 +50,38 @@ type SQLiteBackend struct {
 	}
 }
 
+// sqliteTimestampLayout is the canonical on-disk representation for every
+// DATETIME column this backend writes.
+//
+// The column is TEXT-affinity, so `WHERE timestamp >= ?` is a string comparison,
+// not a temporal one. Binding a time.Time directly left the driver to render it
+// with String(), which uses the value's own location — a record written at
+// 01:30 UTC by a controller in UTC-4 was stored as "2026-08-13 21:30:00 -0400"
+// and compared, character by character, against UTC bounds. It sorted into the
+// previous day, so DNA history was attributed to the wrong daily bucket and
+// trend and compliance reporting silently drew from the wrong rows. String()
+// also appends a monotonic reading ("m=+0.02...") when the value carries one,
+// which is neither comparable nor parseable back.
+//
+// Normalising to UTC before formatting makes the comparison temporal again.
+// The layout keeps the shape the driver already round-trips, so reads are
+// unchanged, and it orders correctly under string comparison: the separator
+// after the seconds field is '.' when a fraction follows and ' ' otherwise, and
+// ' ' < '.' < any digit, so shorter fractions sort before longer ones that
+// extend them. Format(".999999999") drops trailing zeros exactly as String()
+// does, which is what keeps the two representations interchangeable.
+//
+// CI never caught this: GitHub runners are UTC, where the rendered zone matches
+// the query zone and the skew is zero.
+const sqliteTimestampLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+
+// sqliteTimestamp renders t in the canonical UTC layout for binding to a
+// DATETIME column. Every write and every time-range bound must pass through
+// here — a single un-normalised site reintroduces the cross-zone comparison.
+func sqliteTimestamp(t time.Time) string {
+	return t.UTC().Format(sqliteTimestampLayout)
+}
+
 // NewSQLiteBackend creates a new SQLite-based DNA storage backend
 func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, error) {
 	// Determine database path from config
@@ -163,7 +195,7 @@ func (b *SQLiteBackend) StoreRecord(ctx context.Context, record *DNARecord, comp
 	// Execute insert with prepared statement
 	_, err = b.stmts.insertRecord.ExecContext(ctx,
 		record.DeviceID,
-		record.StoredAt,
+		sqliteTimestamp(record.StoredAt),
 		record.Version,
 		string(dnaJSON),
 		record.ContentHash,
@@ -210,7 +242,7 @@ func (b *SQLiteBackend) StoreReference(ctx context.Context, record *DNARecord) e
 		record.DeviceID,
 		record.ContentHash,
 		record.Version,
-		record.StoredAt,
+		sqliteTimestamp(record.StoredAt),
 		record.ShardID,
 	)
 

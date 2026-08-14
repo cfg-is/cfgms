@@ -309,8 +309,12 @@ func (b *SQLiteBackend) GetHistoryByDeviceID(ctx context.Context, deviceID strin
 	args := []interface{}{deviceID}
 
 	if options != nil && options.TimeRange != nil {
+		// Bounds are normalised through the same canonical UTC layout the rows
+		// were written with. The column compares as text, so a bound rendered in
+		// any other zone would be compared character-by-character against a
+		// differently-zoned row and select the wrong day. See sqliteTimestamp.
 		conditions = append(conditions, "timestamp >= ?", "timestamp <= ?")
-		args = append(args, options.TimeRange.Start, options.TimeRange.End)
+		args = append(args, sqliteTimestamp(options.TimeRange.Start), sqliteTimestamp(options.TimeRange.End))
 	}
 
 	where := " WHERE " + strings.Join(conditions, " AND ")
