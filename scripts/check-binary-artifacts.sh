@@ -7,8 +7,6 @@ set -euo pipefail
 # shelling out to file(1). This gate runs in CI, in dev containers and from the
 # Makefile security targets; file(1) is an optional distro package, and a gate
 # that hard-fails wherever it is absent is a gate that gets bypassed or ignored.
-# Header bytes are read with od(1), which ships with coreutils and is present
-# anywhere git is.
 #
 # Magic values:
 #   7f454c46  \x7fELF                      ELF executable / shared object / object file
@@ -16,6 +14,7 @@ set -euo pipefail
 #   cafebabe  bebafeca                     Mach-O universal binary (also Java class data)
 #   4d5a....  MZ                           PE32/PE32+ and MS-DOS executables
 #   0061736d  \0asm                        WebAssembly binary module
+#
 # Reading and classifying are separate so an unreadable file is distinguishable
 # from a readable one with no recognised header. Folding them together meant a
 # failed read produced an empty header, which fell through to "not an artifact" —
@@ -48,6 +47,61 @@ describe_magic() {
     esac
 }
 
+# Performance: checking every tracked file by shelling out to od(1) per file is
+# fine on Linux's fast fork/exec, but on Windows each spawn carries real
+# overhead (e.g. real-time antivirus scanning per process creation) that
+# compounds across a multi-thousand-file repo into several minutes —
+# indistinguishable from a genuine hang against a test timeout. The real fix
+# is scripts/check-binary-artifacts/main.go, which reads every tracked file's
+# header in ONE process — not an optimization of the subprocess approach, a
+# different approach that isn't subject to per-process overhead at all. It
+# implements the same fail-closed-on-unreadable-file contract as the bash
+# fallback below.
+#
+# This script builds that program once to a *stable* path (bin/, already
+# gitignored — see Makefile's other `go build -o bin/...` targets) and execs
+# the same file on every subsequent call, rebuilding only when main.go
+# changes. `go run` was measured and rejected here: it links a *fresh* temp
+# binary at a new path every invocation, and something in this class of host
+# environment (observed: real-time antivirus) re-inspects each new
+# executable before letting it run — so `go run` cost 60-90+ seconds on
+# *every* call, even with a warm build cache and near-zero actual CPU time.
+# A stable, reused file path lets that overhead amortize to (at most) once
+# per source change instead of once per invocation.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# GOEXE is determined from uname, not `go env GOEXE` — deliberately: some
+# callers (test/unit/build's security-gate tests) put a mock `go` stub earlier
+# on PATH to exercise unrelated make-target behavior, and that stub cannot
+# answer `go env` correctly. Keeping the extension decision independent of
+# whatever `go` currently resolves to means a stale-but-valid prior build is
+# still found and reused even when PATH is shadowed like that.
+BIN_EXT=""
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) BIN_EXT=".exe" ;;
+esac
+BIN_DIR="${SCRIPT_DIR}/../bin"
+BIN_PATH="${BIN_DIR}/check-binary-artifacts${BIN_EXT}"
+SRC_DIR="${SCRIPT_DIR}/check-binary-artifacts"
+
+if command -v go &>/dev/null; then
+    if [[ ! -x "$BIN_PATH" ]] || [[ "${SRC_DIR}/main.go" -nt "$BIN_PATH" ]]; then
+        mkdir -p "$BIN_DIR"
+        # A shadowed/mock `go` on PATH (see the GOEXE comment above) would
+        # "succeed" here without producing a binary. Don't trust this build's
+        # own exit code — the -x check right below is the real verdict, and
+        # a failed build here must fall through to the bash implementation
+        # rather than abort the whole script under `set -e`.
+        go build -o "$BIN_PATH" "$SRC_DIR" 2>/dev/null || true
+    fi
+fi
+
+if [[ -x "$BIN_PATH" ]]; then
+    exec "$BIN_PATH" "$@"
+fi
+
+echo "check-binary-artifacts: no usable compiled checker at ${BIN_PATH}, falling back to the slower od(1)-based scan" >&2
+
 blocked=0
 while IFS= read -r -d '' tracked; do
     [[ -f "$tracked" ]] || continue
@@ -79,6 +133,7 @@ while IFS= read -r -d '' tracked; do
 done < <(git ls-files -z)
 
 if [[ "$blocked" -ne 0 ]]; then
+    echo "" >&2
     echo "compiled artifacts must be produced by the release pipeline, not committed to source" >&2
     exit 1
 fi

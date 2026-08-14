@@ -2,17 +2,26 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026 Jordan Ritz
 #
-# lab-datasvc-bootstrap.sh — Bootstrap shared PostgreSQL + MinIO on a Debian
-# VM for the cfg-lab controller HA epic (#3090, story #3124).
-# Idempotent. Re-run safe. Never rotates an existing role/user password.
+# lab-datasvc-bootstrap.sh — Bootstrap shared PostgreSQL + MinIO + OpenBao on a
+# Debian VM for the cfg-lab controller HA epic (#3090, stories #3124 and #3130).
+# OpenBao (step 7) hosts the cluster CA that all 3 HA controller nodes share —
+# see docs/operations/cluster-ca.md. Idempotent. Re-run safe. Never rotates an
+# existing role/user password or OpenBao root token.
 #
 # Usage:
 #   sudo bash lab-datasvc-bootstrap.sh
 #
-# On first run this prints the generated PostgreSQL role password and MinIO
-# access/secret key ONCE to stdout. Capture them into an OS keychain
-# immediately — nothing is written to disk in cleartext, and a re-run will
-# not reprint them (see step 3 and step 5 for the idempotency check).
+# On first run this prints the generated PostgreSQL role password, MinIO
+# access/secret key, and OpenBao unseal key + root token ONCE to stdout.
+# Capture them into an OS keychain immediately — nothing is written to disk in
+# cleartext, and a re-run will not reprint them (see step 3, step 5, and step 7
+# for the idempotency checks).
+#
+# OpenBao must be manually unsealed after every process restart (systemd
+# restart, VM reboot) — this is standard Vault/OpenBao behavior for a
+# Shamir-sealed store with no cloud KMS auto-unseal available in this lab.
+# `bao operator unseal <unseal-key>` using the one-time-printed key. A lab
+# outage tolerance judgment call, not an oversight — see docs/operations/cluster-ca.md.
 #
 # See: docs/testing/controller-ha-real-cluster-runbook.md
 
@@ -34,6 +43,14 @@ MINIO_ENV_FILE="${MINIO_CONFIG_DIR}/minio.env"
 MINIO_BUCKET="cfgms-installer-blobs"
 MINIO_API_PORT=9000
 MINIO_CONSOLE_PORT=9001
+
+OPENBAO_VERSION="2.6.1"
+OPENBAO_USER="openbao"
+OPENBAO_DATA_DIR="/var/lib/openbao/data"
+OPENBAO_CONFIG_DIR="/etc/openbao"
+OPENBAO_CONFIG_FILE="${OPENBAO_CONFIG_DIR}/openbao.hcl"
+OPENBAO_INIT_FILE="${OPENBAO_CONFIG_DIR}/.init-output"
+OPENBAO_PORT=8200
 
 log() { echo "[bootstrap] $*"; }
 
@@ -417,7 +434,159 @@ else
     log "Bucket ${MINIO_BUCKET} already exists."
 fi
 
-# ── Step 7: Final output ──────────────────────────────────────────────────────
+# ── Step 7: OpenBao install (cluster CA vault, story #3130) ───────────────────
+
+log "Step 7: OpenBao install (idempotent)"
+
+if ! command -v jq &>/dev/null; then
+    apt-get -qq update -y
+    apt-get -qq install -y jq
+    log "Installed jq (required for reliably parsing 'bao operator init' JSON output)."
+fi
+
+if ! id "$OPENBAO_USER" &>/dev/null; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin "$OPENBAO_USER"
+    log "Created ${OPENBAO_USER} system user."
+fi
+
+mkdir -p "$OPENBAO_DATA_DIR" "$OPENBAO_CONFIG_DIR"
+chown -R "${OPENBAO_USER}:${OPENBAO_USER}" "$OPENBAO_DATA_DIR"
+
+if [[ ! -x /usr/local/bin/bao ]]; then
+    TMPTAR="$(mktemp /tmp/openbao-XXXXXX.tar.gz)"
+    trap 'rm -f "$TMPTAR"' EXIT
+    curl -fsSL "https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/openbao_${OPENBAO_VERSION}_linux_amd64.tar.gz" \
+        -o "$TMPTAR"
+    tar -xzf "$TMPTAR" -C /usr/local/bin bao
+    chmod +x /usr/local/bin/bao
+    rm -f "$TMPTAR"
+    trap - EXIT
+    log "OpenBao ${OPENBAO_VERSION} binary installed to /usr/local/bin/bao."
+else
+    log "OpenBao binary already present."
+fi
+
+LAB_IP="$(hostname -I | awk '{print $1}')"
+
+if [[ ! -f "$OPENBAO_CONFIG_FILE" ]]; then
+    cat > "$OPENBAO_CONFIG_FILE" <<EOF
+storage "file" {
+  path = "${OPENBAO_DATA_DIR}"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:${OPENBAO_PORT}"
+  tls_disable = true
+}
+
+api_addr      = "http://${LAB_IP}:${OPENBAO_PORT}"
+disable_mlock = true
+EOF
+    chown "${OPENBAO_USER}:${OPENBAO_USER}" "$OPENBAO_CONFIG_FILE"
+    chmod 640 "$OPENBAO_CONFIG_FILE"
+    log "OpenBao config rendered to ${OPENBAO_CONFIG_FILE}."
+else
+    log "OpenBao config already exists — skipping generation."
+fi
+
+cat > /etc/systemd/system/openbao.service <<EOF
+[Unit]
+Description=OpenBao (cfgms-lab-datasvc cluster CA vault)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${OPENBAO_USER}
+Group=${OPENBAO_USER}
+ExecStart=/usr/local/bin/bao server -config=${OPENBAO_CONFIG_FILE}
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_IPC_LOCK
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable openbao &>/dev/null || true
+if systemctl is-active --quiet openbao; then
+    log "OpenBao service already running."
+else
+    systemctl start openbao
+    log "OpenBao service started, listening on :${OPENBAO_PORT}."
+fi
+
+export BAO_ADDR="http://127.0.0.1:${OPENBAO_PORT}"
+RETRIES=12
+for ((i = 1; i <= RETRIES; i++)); do
+    # `bao status`'s own exit code is not a reliable readiness signal here —
+    # it legitimately returns non-zero for "sealed" and "uninitialized" too
+    # (not just connection failure), and under `set -eo pipefail` piping its
+    # output anywhere makes that non-zero abort the whole script even though
+    # it's a valid, expected response. Probe raw HTTP reachability with curl
+    # instead; sealedcode/uninitcode=200 makes any real response count as
+    # "up", regardless of vault state.
+    if curl -fsS -o /dev/null "http://127.0.0.1:${OPENBAO_PORT}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200" 2>/dev/null; then
+        break
+    fi
+    if [[ $i -eq $RETRIES ]]; then
+        echo "Error: OpenBao did not become reachable after $((RETRIES * 5))s." >&2
+        exit 1
+    fi
+    log "  Waiting for OpenBao API... (${i}/${RETRIES})"
+    sleep 5
+done
+
+# `|| true` because bao status exits non-zero for sealed/uninitialized too —
+# only its JSON body is meaningful here, not its exit code (see note above).
+OPENBAO_STATUS_JSON="$(/usr/local/bin/bao status -format=json 2>/dev/null || true)"
+OPENBAO_INITIALIZED="$(echo "$OPENBAO_STATUS_JSON" | jq -r '.initialized // false')"
+OPENBAO_TOKEN_PRINTED=false
+
+if [[ "$OPENBAO_INITIALIZED" != "true" ]]; then
+    # Single-key Shamir seal (key-shares=1, key-threshold=1): a deliberate lab
+    # simplification (one keychain-stored unseal key, not a 5-of-3 ceremony) —
+    # matches this epic's established "lab-only, no cloud KMS" pragmatism.
+    INIT_JSON="$(/usr/local/bin/bao operator init -key-shares=1 -key-threshold=1 -format=json)"
+    OPENBAO_UNSEAL_KEY="$(echo "$INIT_JSON" | jq -r '.unseal_keys_b64[0]')"
+    OPENBAO_ROOT_TOKEN="$(echo "$INIT_JSON" | jq -r '.root_token')"
+
+    # Fail loudly here rather than calling `unseal` with an empty/malformed
+    # value: init has ALREADY run at this point (irreversibly, since a second
+    # init attempt errors "already initialized") — if parsing failed, the
+    # vault is now initialized-but-sealed with no captured key, which is
+    # exactly the unrecoverable state this check exists to prevent silently
+    # compounding (a failed unseal call would just leave it sealed with an
+    # ambiguous error instead of this unambiguous one).
+    if [[ -z "$OPENBAO_UNSEAL_KEY" || "$OPENBAO_UNSEAL_KEY" == "null" || -z "$OPENBAO_ROOT_TOKEN" || "$OPENBAO_ROOT_TOKEN" == "null" ]]; then
+        echo "Error: failed to parse unseal key / root token from 'bao operator init' output." >&2
+        echo "The vault IS initialized now (this cannot be undone) but is sealed with no captured key." >&2
+        echo "Raw init output for manual recovery:" >&2
+        echo "$INIT_JSON" >&2
+        exit 1
+    fi
+
+    /usr/local/bin/bao operator unseal "$OPENBAO_UNSEAL_KEY" >/dev/null
+
+    export BAO_TOKEN="$OPENBAO_ROOT_TOKEN"
+    /usr/local/bin/bao secrets enable -path=secret kv-v2 >/dev/null
+    log "OpenBao initialized, unsealed, and KV v2 enabled at secret/."
+
+    touch "$OPENBAO_INIT_FILE"
+    chmod 600 "$OPENBAO_INIT_FILE"
+    OPENBAO_TOKEN_PRINTED=true
+else
+    log "OpenBao already initialized — unseal key/root token NOT reprinted."
+    RECHECK_STATUS_JSON="$(/usr/local/bin/bao status -format=json 2>/dev/null || true)"
+    SEALED="$(echo "$RECHECK_STATUS_JSON" | jq -r '.sealed // "unknown"')"
+    if [[ "$SEALED" == "true" ]]; then
+        log "WARNING: OpenBao is sealed and this script does not retain the unseal key."
+        log "  Unseal manually: bao operator unseal <unseal-key-from-your-OS-keychain>"
+    fi
+fi
+
+# ── Step 8: Final output ──────────────────────────────────────────────────────
 
 PG_VM_IP_OUT="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
@@ -434,6 +603,7 @@ echo "  Connection string (sslmode=verify-full, path as seen on the controller n
 echo "    postgres://cfgms:<password>@${PG_VM_IP_OUT}:5432/cfgms?sslmode=verify-full&sslrootcert=/etc/cfgms/datasvc-ca.pem"
 echo "  Use the raw dsn string config path (not the keyword-builder) to pass sslrootcert — see story #3127."
 echo "MinIO:      endpoint_url=http://${PG_VM_IP_OUT}:${MINIO_API_PORT} bucket=${MINIO_BUCKET}"
+echo "OpenBao:    vault_address=http://${PG_VM_IP_OUT}:${OPENBAO_PORT} (cluster CA — see docs/operations/cluster-ca.md)"
 echo ""
 
 if [[ "$PG_PASSWORD_PRINTED" == "true" ]]; then
@@ -449,9 +619,24 @@ if [[ "$MINIO_PASSWORD_PRINTED" == "true" ]]; then
     echo ""
 fi
 
-echo "Store both in an OS-native keychain immediately, e.g. from the operator workstation:"
+if [[ "$OPENBAO_TOKEN_PRINTED" == "true" ]]; then
+    echo "OpenBao unseal key + root token (ONE-TIME PRINT — store now, required to unseal"
+    echo "after every OpenBao restart; NOT repeated on re-run and NOT retained by this script):"
+    echo "  unseal key: ${OPENBAO_UNSEAL_KEY}"
+    echo "  root token: ${OPENBAO_ROOT_TOKEN}"
+    echo ""
+    echo "This lab uses the OpenBao root token directly as every controller node's"
+    echo "OPENBAO_TOKEN — a deliberate lab-scope simplification (no least-privilege"
+    echo "policy), consistent with this epic's other lab-only relaxations (Postgres"
+    echo "sslmode=disable, MinIO without TLS). See docs/operations/cluster-ca.md."
+    echo ""
+fi
+
+echo "Store all three in an OS-native keychain immediately, e.g. from the operator workstation:"
 echo "  Windows: cmdkey /generic:cfgms-lab-datasvc-postgres /user:${PG_ROLE} /pass:<password>"
 echo "           cmdkey /generic:cfgms-lab-datasvc-minio /user:<access-key> /pass:<secret-key>"
+echo "           cmdkey /generic:cfgms-lab-datasvc-openbao-unseal /user:unseal /pass:<unseal-key>"
+echo "           cmdkey /generic:cfgms-lab-datasvc-openbao-token /user:root /pass:<root-token>"
 echo "  Linux:   secret-tool store --label='cfgms-lab-datasvc postgres' service cfgms-lab-datasvc credential postgres"
 echo "  macOS:   security add-generic-password -s cfgms-lab-datasvc -a postgres -w '<password>'"
 echo ""

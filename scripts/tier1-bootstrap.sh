@@ -146,8 +146,7 @@ fi
 log "Directory layout ready."
 
 if [[ ! -f "$SECRETS_KEY_FILE" ]]; then
-    umask 077
-    openssl rand -out "$SECRETS_KEY_FILE" 32
+    (umask 077 && openssl rand -out "$SECRETS_KEY_FILE" 32)
     log "Generated external secret-encryption key."
 fi
 chmod 0600 "$SECRETS_KEY_FILE"
@@ -163,7 +162,7 @@ if [[ -x "$CONTROLLER_BIN" ]]; then
     log "Binary already present at $CONTROLLER_BIN — skipping download."
 elif [[ -n "$BINARY_PATH" ]]; then
     cp "$BINARY_PATH" "$CONTROLLER_BIN"
-    chmod +x "$CONTROLLER_BIN"
+    chmod 0755 "$CONTROLLER_BIN"
     log "Installed binary from $BINARY_PATH"
 elif [[ -n "$INSTALL_PREFIX" ]]; then
     echo "Error: test isolation requires cfgms-controller pre-populated at $CONTROLLER_BIN" >&2
@@ -229,12 +228,12 @@ else
         exit 1
     fi
     tar -xzf "$TMPTAR" -C "$CFGMS_BIN_DIR" cfgms-controller
-    chmod +x "$CONTROLLER_BIN"
+    chmod 0755 "$CONTROLLER_BIN"
 
     # Extract cfg CLI binary if present in the tarball.
     if tar -tzf "$TMPTAR" cfg >/dev/null 2>&1; then
         tar -xzf "$TMPTAR" -C "$CFGMS_BIN_DIR" cfg
-        chmod +x "$CFG_BIN"
+        chmod 0755 "$CFG_BIN"
         log "cfg CLI installed from tarball."
     fi
 

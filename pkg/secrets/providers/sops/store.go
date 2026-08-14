@@ -99,6 +99,20 @@ func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error)
 	return store, nil
 }
 
+// isSystemdCredentialPath reports whether keyPath is a file systemd's
+// LoadCredential= exposed. Such files are always mode 0440 (owner+group read)
+// when the unit runs as a non-root User= — access is actually scoped to this
+// single unit invocation via a POSIX ACL, not by the raw group-owner bits the
+// mode alone implies. Without this exception, the strict permission check
+// below would reject every systemd-credential-backed key file, which is the
+// documented, intended way to deliver CFGMS_SECRETS_KEY_FILE without ever
+// writing the key to a process-accessible path on real disk (see
+// tier1-bootstrap.sh / ha-cluster-node-bootstrap.sh's LoadCredential +
+// InaccessiblePaths pairing).
+func isSystemdCredentialPath(keyPath string) bool {
+	return strings.HasPrefix(keyPath, "/run/credentials/")
+}
+
 func loadExternalKey(config *SOPSSecretStoreConfig) ([]byte, error) {
 	if strings.TrimSpace(config.KeyFile) == "" {
 		return nil, fmt.Errorf("external encryption key file is required")
@@ -132,7 +146,7 @@ func loadExternalKey(config *SOPSSecretStoreConfig) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("encryption key file must be a regular file")
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS != "windows" && !isSystemdCredentialPath(keyPath) && info.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("encryption key file permissions must not grant group or other access")
 	}
 

@@ -140,7 +140,7 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 
 	var certManager *cert.Manager
 	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
-		certManager, err = initClusterCA(context.Background(), cfg, managerCfg, logger)
+		certManager, err = InitClusterCA(context.Background(), cfg, managerCfg, logger)
 	} else {
 		certManager, err = cert.NewManager(managerCfg)
 	}
@@ -439,12 +439,42 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// initClusterCA creates the cert Manager using a CA sourced from OpenBao. It
+// BuildClusterCertManager loads (or, on first use, creates) a cluster-mode
+// controller's certificate manager from the configured OpenBao vault. A
+// cluster CA's private key is never written to local disk (see
+// cert.NewManagerFromSecretStore) — the vault is its only durable store — so
+// this must be called on *every* process start, not just --init: both
+// Initialize (first-time cluster CA creation, via InitClusterCA below) and
+// the regular controller startup path (server.go's loadExistingCertificateManager,
+// which would otherwise try to load a local ca.key that cluster-mode nodes
+// never have) need it.
+func BuildClusterCertManager(ctx context.Context, cfg *config.Config, certPath string, logger logging.Logger) (*cert.Manager, error) {
+	caConfig := &cert.CAConfig{
+		Organization: "CFGMS",
+		Country:      "US",
+		ValidityDays: 3650, // 10 years for CA
+		StoragePath:  certPath,
+	}
+	if cfg.Certificate.Server != nil && cfg.Certificate.Server.Organization != "" {
+		caConfig.Organization = cfg.Certificate.Server.Organization
+	}
+	managerCfg := &cert.ManagerConfig{
+		StoragePath:          certPath,
+		CAConfig:             caConfig,
+		LoadExistingCA:       false,
+		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
+		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
+	}
+	return InitClusterCA(ctx, cfg, managerCfg, logger)
+}
+
+// InitClusterCA creates the cert Manager using a CA sourced from OpenBao. It
 // builds the vault config from cfg.Certificate.ClusterCA, splits the VaultKeyPath
 // into tenantID and key components, and delegates to cert.NewManagerFromSecretStore.
 // The vault token must come from OPENBAO_TOKEN or BAO_TOKEN env vars; it is not
-// read from the config file.
-func initClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.ManagerConfig, logger logging.Logger) (*cert.Manager, error) {
+// read from the config file. Exported so server.go's regular (post-init)
+// startup path can reuse it via BuildClusterCertManager above.
+func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.ManagerConfig, logger logging.Logger) (*cert.Manager, error) {
 	clusterCA := cfg.Certificate.ClusterCA
 
 	logger.Info("Cluster mode: loading CA from vault",
