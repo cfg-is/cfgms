@@ -67,7 +67,7 @@ func TestSetupManagedTLS_RequestsClientCertWhenCertManagerSet(t *testing.T) {
 func TestSetupManagedTLS_SingleServerMode_VerifyClientCertIfGiven(t *testing.T) {
 	certMgr := newTLSTestCertManager(t)
 
-	haManager, err := ha.NewManager(ha.DefaultConfig(), logging.NewNoopLogger(), nil, nil)
+	haManager, err := ha.NewManager(ha.DefaultConfig(), logging.NewNoopLogger(), nil, nil, "")
 	require.NoError(t, err)
 
 	server := newMinimalTLSServer(t, certMgr, haManager)

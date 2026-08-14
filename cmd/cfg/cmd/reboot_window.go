@@ -36,6 +36,7 @@ var (
 	rebootWindowAPIKey       string
 	rebootWindowTLSCACert    string
 	rebootWindowTLSInsecure  bool
+	rebootWindowServerName   string
 	rebootWindowTenantID     string
 	rebootWindowStewardID    string
 	rebootWindowScheduleFile string
@@ -100,6 +101,7 @@ func init() {
 		cmd.Flags().StringVar(&rebootWindowAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&rebootWindowTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&rebootWindowTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+		cmd.Flags().StringVar(&rebootWindowServerName, "server-name", "", "Override TLS server name for certificate verification")
 		cmd.Flags().StringVar(&rebootWindowTenantID, "tenant", "", "Target tenant ID")
 		cmd.Flags().StringVar(&rebootWindowStewardID, "steward", "", "Target steward ID")
 	}
@@ -118,7 +120,13 @@ func getRebootWindowClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := rebootWindowTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := rebootWindowServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -129,11 +137,6 @@ func getRebootWindowClient() (*APIClient, error) {
 	apiKey := rebootWindowAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := rebootWindowTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := rebootWindowTLSCACert

@@ -14,6 +14,7 @@
  * 'cfgms.theme' inline every time, never factor it into a variable.
  */
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router'
 import { useAuth } from '../auth/AuthContext.tsx'
 
 type ThemeMode = 'auto' | 'light' | 'dark'
@@ -100,6 +101,15 @@ export default function UserMenu() {
               </button>
             ))}
           </div>
+          <div className="sep" />
+          <Link
+            to="/passkeys"
+            role="menuitem"
+            className="row"
+            onClick={() => setOpen(false)}
+          >
+            My Passkeys
+          </Link>
           <div className="sep" />
           <div
             role="menuitem"

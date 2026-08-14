@@ -21,14 +21,15 @@ import (
 // secret storage (ADR-021 Non-Goals). The secrets-store seam is chosen for
 // implementation simplicity (one record, one persistence path).
 type WebAuthnCredential struct {
-	ID             []byte    `json:"id"`
-	PublicKey      []byte    `json:"public_key"`
-	SignCount      uint32    `json:"sign_count"`
-	Transport      []string  `json:"transport,omitempty"`
-	Label          string    `json:"label,omitempty"`
-	RegisteredAt   time.Time `json:"registered_at"`
-	BackupEligible bool      `json:"backup_eligible,omitempty"` // W3C WebAuthn BE flag (stored at registration)
-	BackupState    bool      `json:"backup_state,omitempty"`    // W3C WebAuthn BS flag (stored at registration)
+	ID             []byte     `json:"id"`
+	PublicKey      []byte     `json:"public_key"`
+	SignCount      uint32     `json:"sign_count"`
+	Transport      []string   `json:"transport,omitempty"`
+	Label          string     `json:"label,omitempty"`
+	RegisteredAt   time.Time  `json:"registered_at"`
+	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`    // nil = never used after registration; updated by assertion handlers
+	BackupEligible bool       `json:"backup_eligible,omitempty"` // W3C WebAuthn BE flag (stored at registration)
+	BackupState    bool       `json:"backup_state,omitempty"`    // W3C WebAuthn BS flag (stored at registration)
 }
 
 // webAuthnSessionTTL is the maximum age of a pending WebAuthn registration session.
@@ -46,12 +47,14 @@ type WebAuthnRegisterFinishResponse struct {
 
 // WebAuthnCredentialInfo is the public view of a registered credential, returned
 // by the list endpoint. The public key bytes are omitted — credential ID, label,
-// transport hints, and registration timestamp are sufficient for display and revocation.
+// transport hints, registration timestamp, and last-used timestamp are sufficient
+// for display and revocation.
 type WebAuthnCredentialInfo struct {
-	ID           string    `json:"id"` // base64url-encoded credential ID
-	Label        string    `json:"label,omitempty"`
-	Transport    []string  `json:"transport,omitempty"`
-	RegisteredAt time.Time `json:"registered_at"`
+	ID           string     `json:"id"` // base64url-encoded credential ID
+	Label        string     `json:"label,omitempty"`
+	Transport    []string   `json:"transport,omitempty"`
+	RegisteredAt time.Time  `json:"registered_at"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"` // nil = never used after registration
 }
 
 // WebAuthnListResponse is returned by GET /api/v1/web/accounts/{username}/webauthn/credentials.

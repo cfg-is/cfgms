@@ -585,9 +585,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
-	// Initialize HA manager
+	// Initialize HA manager. The Raft WAL lives alongside other per-node durable
+	// state, matching the module-cache / workflow-runtime pattern.
 	logger.Info("Initializing HA manager...")
-	haManager, err := initializeHAManager(cfg, logger, storageManager, certManager)
+	raftLogDir := filepath.Join(resolveDNADataRoot(cfg), "raft-log")
+	haManager, err := initializeHAManager(cfg, logger, storageManager, certManager, raftLogDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
 	}
@@ -1372,7 +1374,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).
 	srv.dnaStorageManager = dnaStorageManager
-	reportsHandler := initializeReportsHandler(dnaStorageManager, logger)
+	reportsHandler := initializeReportsHandler(dnaStorageManager, controllerService, logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
 		logger.Info("Reports engine wired to HTTP API server")
@@ -1623,7 +1625,9 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 // initializeReportsHandler creates the reports API handler over the shared DNA
 // storage manager. Returns nil when DNA storage is unavailable (reports engine
 // disabled) — the manager's lifecycle is owned by the caller. (Issue #1572)
-func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logging.Logger) *reportapi.Handler {
+// controllerService supplies device→tenant ownership so tenant-scoped callers
+// cannot select another tenant's devices.
+func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerService *service.ControllerService, logger logging.Logger) *reportapi.Handler {
 	if dnaStorageManager == nil {
 		return nil
 	}
@@ -1643,7 +1647,9 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, logger logg
 	reportEngine := reportsengine.New(dataProvider, templateProcessor, exporter, reportsCache, logger)
 
 	logger.Info("Reports engine initialized")
-	return reportapi.New(reportEngine, exporter, logger)
+	// The steward registry is the device→tenant authority for the reports
+	// endpoints; a report device ID is a steward ID.
+	return reportapi.New(reportEngine, exporter, controllerService, logger)
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
@@ -1742,11 +1748,26 @@ func (s *Server) Start() error {
 	if s.haManager != nil {
 		s.logger.Info("Starting HA manager...")
 
-		// Create a context with timeout to prevent infinite hang
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := s.haManager.Start(ctx); err != nil {
+		// The HA manager's context is its LIFETIME, not a startup deadline.
+		//
+		// ha.Manager.Start derives m.ctx from the context passed here and bounds
+		// every background goroutine it launches on it. This used to be a
+		// 30-second context.WithTimeout with a deferred cancel, so the moment
+		// Server.Start returned, that cancel fired and killed the manager's
+		// background work while the manager still reported itself started.
+		//
+		// The visible damage was cluster membership. publishNodeInfo waits for
+		// leader election and then replicates this node's metadata through the
+		// Raft log; it observed the cancelled context first and returned without
+		// proposing anything, on every node. ClusterState.Nodes stayed empty for
+		// the life of the cluster, so GET /api/v1/ha/cluster reported no members
+		// and no leader while Raft was electing and replicating normally — only
+		// GET /api/v1/ha/status looked correct, because IsLeader reads the raft
+		// state directly rather than through the replicated map.
+		//
+		// Start does not block on the network, so it needs no timeout of its
+		// own; shutdown is Server.Stop's job, which calls haManager.Stop.
+		if err := s.haManager.Start(context.Background()); err != nil {
 			return fmt.Errorf("failed to start HA manager: %w", err)
 		}
 		s.logger.Info("HA manager started successfully")
@@ -2462,7 +2483,8 @@ func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) err
 // CFGMS_HA_MODE env overrides YAML (env > YAML precedence) via the re-run inside NewManager.
 // certManager is passed through to ha.NewManager and is required in ClusterMode for mTLS
 // peer transport; it may be nil when cluster mode is not in use.
-func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager) (*ha.Manager, error) {
+// raftLogDir is the directory for the per-node Raft WAL; pass empty in tests.
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager, raftLogDir string) (*ha.Manager, error) {
 	haConfig := ha.DefaultConfig()
 
 	if cfg != nil && cfg.HA != nil && cfg.HA.Mode != "" {
@@ -2477,7 +2499,7 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
 	}
 
-	haManager, err := ha.NewManager(haConfig, logger, storageManager, certManager)
+	haManager, err := ha.NewManager(haConfig, logger, storageManager, certManager, raftLogDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}

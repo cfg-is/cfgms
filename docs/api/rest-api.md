@@ -1296,6 +1296,8 @@ Compliance status for a specific steward.
 **Authentication:** Required  
 **Required permission:** `steward:read-compliance`
 
+**Tenant scope:** Non-root callers are restricted to stewards within their own tenant subtree. A request for a steward outside the caller's tenant returns 404 (not 403, to avoid disclosing steward existence across tenants).
+
 **Parameters:**
 
 - `id` (path): Steward ID
@@ -1307,6 +1309,8 @@ Full compliance report for a specific steward.
 **Authentication:** Required  
 **Required permission:** `steward:read-compliance`
 
+**Tenant scope:** Non-root callers are restricted to stewards within their own tenant subtree. A request for a steward outside the caller's tenant returns 404 (not 403, to avoid disclosing steward existence across tenants).
+
 **Parameters:**
 
 - `id` (path): Steward ID
@@ -1317,6 +1321,8 @@ Fleet-wide compliance summary across all stewards.
 
 **Authentication:** Required  
 **Required permission:** `compliance:read-summary`
+
+**Tenant scope:** Non-root callers are forced to their own tenant (and its descendant tenants) regardless of any `tenant_id` query parameter value. Root/unscoped callers may use `tenant_id` as an optional filter.
 
 ### Tenants
 
@@ -1401,11 +1407,15 @@ List rollback operation history.
 
 Reports endpoints are registered only when a `ReportsHandler` is wired in (`SetReportsHandler()`).
 
+Device selectors (`device_id`, `device_ids`, and `device_ids` in the generate request body) are the selector the report data path actually resolves, so they are authorized against the steward registry before reaching the report engine. A handler wired without a device→tenant authority fails closed: a tenant-scoped caller supplying a device selector receives 503, never unauthorized data.
+
 #### POST /api/v1/reports/generate
 
 Generate a report on demand.
 
 **Authentication:** Required
+
+**Tenant scope:** The request body's `tenant_ids` is advisory — for a non-root caller it is replaced with the caller's own tenant — and each `device_ids` entry is authorized against the caller's tenant subtree, returning 404 for a device owned by another tenant or unknown to the steward registry. Root/unscoped callers may supply any `tenant_ids`/`device_ids`.
 
 #### GET /api/v1/reports/templates
 
@@ -1425,11 +1435,15 @@ Dashboard overview report.
 
 **Authentication:** Required
 
+**Tenant scope:** Non-root callers are forced to their own tenant regardless of any `tenant_id`/`tenant_ids` query parameter, and every `device_id`/`device_ids` value is authorized against the caller's tenant subtree using the steward registry — a device owned by another tenant, or unknown to the registry, returns 404 (not 403, to avoid disclosing device existence across tenants) and the whole request is rejected rather than partially served. Root/unscoped callers may supply `tenant_id` as an optional filter and may select any device.
+
 #### GET /api/v1/reports/dashboard/trends
 
 Dashboard trend data.
 
 **Authentication:** Required
+
+**Tenant scope:** Non-root callers are forced to their own tenant regardless of any `tenant_id`/`tenant_ids` query parameter, and every `device_id`/`device_ids` value is authorized against the caller's tenant subtree using the steward registry — a device owned by another tenant, or unknown to the registry, returns 404 (not 403, to avoid disclosing device existence across tenants) and the whole request is rejected rather than partially served. Root/unscoped callers may supply `tenant_id` as an optional filter and may select any device.
 
 #### GET /api/v1/reports/dashboard/alerts
 
@@ -1437,17 +1451,23 @@ Dashboard alert summary.
 
 **Authentication:** Required
 
+**Tenant scope:** Non-root callers are forced to their own tenant regardless of any `tenant_id`/`tenant_ids` query parameter, and every `device_id`/`device_ids` value is authorized against the caller's tenant subtree using the steward registry — a device owned by another tenant, or unknown to the registry, returns 404 (not 403, to avoid disclosing device existence across tenants) and the whole request is rejected rather than partially served. Root/unscoped callers may supply `tenant_id` as an optional filter and may select any device.
+
 #### GET /api/v1/reports/compliance/status
 
 Compliance status report.
 
 **Authentication:** Required
 
+**Tenant scope:** Non-root callers are forced to their own tenant regardless of any `tenant_id`/`tenant_ids` query parameter, and every `device_id`/`device_ids` value is authorized against the caller's tenant subtree using the steward registry — a device owned by another tenant, or unknown to the registry, returns 404 (not 403, to avoid disclosing device existence across tenants) and the whole request is rejected rather than partially served. Root/unscoped callers may supply `tenant_id` as an optional filter and may select any device.
+
 #### GET /api/v1/reports/drift/summary
 
 Configuration drift summary report.
 
 **Authentication:** Required
+
+**Tenant scope:** Non-root callers are forced to their own tenant regardless of any `tenant_id`/`tenant_ids` query parameter, and every `device_id`/`device_ids` value is authorized against the caller's tenant subtree using the steward registry — a device owned by another tenant, or unknown to the registry, returns 404 (not 403, to avoid disclosing device existence across tenants) and the whole request is rejected rather than partially served. Root/unscoped callers may supply `tenant_id` as an optional filter and may select any device.
 
 ### Workflow Engine
 

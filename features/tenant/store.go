@@ -53,9 +53,10 @@ var (
 	// untouched, so a caller that matched this value while a provider returned the
 	// storage sentinel would never match — the divergence that let a missing-tenant
 	// lookup be misclassified as a backend fault.
-	ErrTenantNotFound    = business.ErrTenantDoesNotExist
-	ErrTenantExists      = business.ErrTenantAlreadyExists
-	ErrInvalidParent     = fmt.Errorf("invalid parent tenant")
-	ErrCircularReference = fmt.Errorf("circular reference in tenant hierarchy")
-	ErrTenantHasChildren = fmt.Errorf("tenant has child tenants")
+	ErrTenantNotFound       = business.ErrTenantDoesNotExist
+	ErrTenantExists         = business.ErrTenantAlreadyExists
+	ErrInvalidParent        = fmt.Errorf("invalid parent tenant")
+	ErrCircularReference    = fmt.Errorf("circular reference in tenant hierarchy")
+	ErrTenantHasChildren    = fmt.Errorf("tenant has child tenants")
+	ErrCannotSuspendDefault = fmt.Errorf("cannot suspend default tenant")
 )

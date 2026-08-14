@@ -2,9 +2,10 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Accounts view (Issue #2733, #2974, #3134) — the /accounts route entry point.
+ * Accounts view (Issue #2733, #2974, #3134, #3132) — the /accounts route entry point.
  * Fetches GET /api/v1/web/accounts, renders a table, and exposes
- * account create and delete. Roles are surfaced read-only in a tab.
+ * account create, edit, delete, password reset, and enable/disable.
+ * Roles are surfaced read-only in a tab.
  *
  * Issue #2974: "+ New account" is step-up gated (AssuranceStrong) via the
  * apiFetch interceptor — the StepUpModal appears automatically on 401 CFGMS-StepUp.
@@ -18,6 +19,12 @@
  * assign roles via a picker, and revoke them via chip × buttons + confirm
  * modal. A 403 from the assign endpoint (escalation-prevention rejection) is
  * surfaced as a distinct, non-generic message block.
+ *
+ * Issue #3132: each account row exposes an edit action (permissions only,
+ * via EditAccountPanel), a passkey-reset action (separate confirm step, mints
+ * an enrollment link the same way create does), and an enable/disable toggle
+ * (confirm step; toggling disabled state via PUT /api/v1/web/accounts/{username};
+ * disabled accounts show a Disabled badge and stay in the list).
  *
  * M-AUTH-2: granting and revoking a role are sensitive operations. Both
  * surfaces require an operator justification, validated client-side against the
@@ -38,6 +45,7 @@ import {
   useRoleList,
   createWebAccount,
   revokeEnrollmentLink,
+  updateWebAccount,
   assignSubjectRole,
   revokeSubjectRole,
   validateJustification,
@@ -456,12 +464,18 @@ function AccountRow({
   onDelete,
   onRevoke,
   onExpand,
+  onEdit,
+  onResetPasskey,
+  onToggleDisable,
 }: {
   account: WebAccountInfo
   selected: boolean
   onDelete: () => void
   onRevoke: () => void
   onExpand: () => void
+  onEdit: () => void
+  onResetPasskey: () => void
+  onToggleDisable: () => void
 }) {
   return (
     <>
@@ -473,6 +487,15 @@ function AccountRow({
       >
         <td>
           <span className="nm">{account.username}</span>
+          {account.disabled && (
+            <span
+              className="chip"
+              data-testid="account-disabled-badge"
+              style={{ marginLeft: 6, opacity: 0.7 }}
+            >
+              Disabled
+            </span>
+          )}
         </td>
         <td>
           <span className="mono2">{account.tenant_id || '—'}</span>
@@ -484,6 +507,31 @@ function AccountRow({
           <span className="mono2">{account.created_at ? new Date(account.created_at).toLocaleDateString() : '—'}</span>
         </td>
         <td onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="wf-btn-sm-secondary"
+            onClick={onEdit}
+            data-testid="account-edit-btn"
+          >
+            Edit
+          </button>{' '}
+          <button
+            type="button"
+            className="wf-btn-sm-secondary"
+            onClick={onResetPasskey}
+            data-testid="account-reset-passkey-btn"
+            title="Revoke all passkeys and send a new enrollment link"
+          >
+            Reset passkey
+          </button>{' '}
+          <button
+            type="button"
+            className="wf-btn-sm-secondary"
+            onClick={onToggleDisable}
+            data-testid="account-toggle-disable-btn"
+          >
+            {account.disabled ? 'Enable' : 'Disable'}
+          </button>{' '}
           {account.has_outstanding_enrollment_link && (
             <button
               type="button"
@@ -634,6 +682,92 @@ function CreateAccountPanel({
   )
 }
 
+/**
+ * EditAccountPanel (Issue #3132). Pre-filled with current permissions; saves
+ * via PUT /api/v1/web/accounts/{username}. Password reset is a separate
+ * action — this panel never touches credentials (passkey-only, ADR-021).
+ */
+function EditAccountPanel({
+  account,
+  onSaved,
+  onClose,
+}: {
+  account: WebAccountInfo
+  onSaved: () => void
+  onClose: () => void
+}) {
+  const [permissions, setPermissions] = useState(account.permissions.join(', '))
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  async function handleSubmit() {
+    const permList = permissions
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean)
+
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await updateWebAccount(account.username, { permissions: permList })
+      onSaved()
+    } catch (cause: unknown) {
+      setSaveError(
+        cause instanceof Error && cause.message ? cause.message : 'Update failed',
+      )
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="wf-form-panel" data-testid="account-edit-panel">
+      <div className="wf-form">
+        <div className="wf-form-row">
+          <div className="wf-form-field" style={{ flexGrow: 1 }}>
+            <span className="wf-form-label">
+              Editing permissions for <b>{account.username}</b>
+            </span>
+          </div>
+        </div>
+        <div className="wf-form-row">
+          <div className="wf-form-field" style={{ flexGrow: 1 }}>
+            <span className="wf-form-label">Permissions (comma-separated)</span>
+            <input
+              type="text"
+              aria-label="Permissions"
+              placeholder="steward:list, steward:read"
+              value={permissions}
+              onChange={(e) => setPermissions(e.target.value)}
+              className="wide"
+              data-testid="edit-permissions-input"
+            />
+          </div>
+        </div>
+        <div className="wf-form-actions">
+          <button
+            type="button"
+            className="wf-btn"
+            disabled={saving}
+            onClick={() => void handleSubmit()}
+            data-testid="edit-save-btn"
+          >
+            {saving ? 'Saving…' : 'Save changes'}
+          </button>
+          <button type="button" className="wf-btn-secondary" onClick={onClose}>
+            Cancel
+          </button>
+          {saveError && (
+            <span className="wf-form-error" data-testid="edit-save-error">
+              {saveError}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function AccountsView() {
   const { accounts, loading, error, retry } = useWebAccountList()
   const [tab, setTab] = useState<'accounts' | 'roles'>('accounts')
@@ -642,9 +776,17 @@ export default function AccountsView() {
   const [deletingAccount, setDeletingAccount] = useState<WebAccountInfo | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
-  // Issue #2974: enrollment link shown once after create.
+  // Issue #2974: enrollment link shown once after create or credential reset.
   const [enrollmentLink, setEnrollmentLink] = useState<{ username: string; token: string } | null>(null)
   const [revokeError, setRevokeError] = useState<string | null>(null)
+  // Issue #3132: edit, password reset, enable/disable.
+  const [editingAccount, setEditingAccount] = useState<WebAccountInfo | null>(null)
+  const [passwordResetAccount, setPasswordResetAccount] = useState<WebAccountInfo | null>(null)
+  const [passwordResetError, setPasswordResetError] = useState<string | null>(null)
+  const [passwordResetting, setPasswordResetting] = useState(false)
+  const [toggleDisableAccount, setToggleDisableAccount] = useState<WebAccountInfo | null>(null)
+  const [disableError, setDisableError] = useState<string | null>(null)
+  const [disabling, setDisabling] = useState(false)
 
   function handleAccountExpand(id: string) {
     setExpandedAccountId((prev) => (prev === id ? null : id))
@@ -703,6 +845,55 @@ export default function AccountsView() {
     }
   }
 
+  function handleEditAccount(account: WebAccountInfo) {
+    setShowCreate(false)
+    setEditingAccount(account)
+  }
+
+  function handleEditSaved() {
+    setEditingAccount(null)
+    retry()
+  }
+
+  async function handleConfirmPasswordReset() {
+    if (!passwordResetAccount) return
+    const { username } = passwordResetAccount
+    setPasswordResetting(true)
+    setPasswordResetAccount(null)
+    setPasswordResetError(null)
+    try {
+      const result = await updateWebAccount(username, { resetCredentials: true })
+      if (result.enrollmentMagicLink) {
+        setEnrollmentLink({ username, token: result.enrollmentMagicLink })
+      }
+      retry()
+    } catch (cause: unknown) {
+      setPasswordResetError(
+        cause instanceof Error && cause.message ? cause.message : 'Reset failed',
+      )
+    } finally {
+      setPasswordResetting(false)
+    }
+  }
+
+  async function handleConfirmToggleDisable() {
+    if (!toggleDisableAccount) return
+    const { username, disabled } = toggleDisableAccount
+    setDisabling(true)
+    setToggleDisableAccount(null)
+    setDisableError(null)
+    try {
+      await updateWebAccount(username, { disabled: !disabled })
+      retry()
+    } catch (cause: unknown) {
+      setDisableError(
+        cause instanceof Error && cause.message ? cause.message : 'Update failed',
+      )
+    } finally {
+      setDisabling(false)
+    }
+  }
+
   return (
     <>
       <div className="htitle">
@@ -739,7 +930,10 @@ export default function AccountsView() {
             <button
               type="button"
               className={showCreate ? 'wf-btn' : 'wf-btn-secondary'}
-              onClick={() => setShowCreate((v) => !v)}
+              onClick={() => {
+                setEditingAccount(null)
+                setShowCreate((v) => !v)
+              }}
               data-testid="toggle-create-btn"
             >
               {showCreate ? 'Close' : '+ New account'}
@@ -755,6 +949,15 @@ export default function AccountsView() {
             <CreateAccountPanel
               onSaved={handleCreateSaved}
               onClose={() => setShowCreate(false)}
+            />
+          )}
+
+          {editingAccount !== null && (
+            <EditAccountPanel
+              key={editingAccount.id}
+              account={editingAccount}
+              onSaved={handleEditSaved}
+              onClose={() => setEditingAccount(null)}
             />
           )}
 
@@ -775,6 +978,18 @@ export default function AccountsView() {
           {revokeError && (
             <div className="wf-form-error" style={{ padding: '8px 14px' }} data-testid="revoke-error">
               {revokeError}
+            </div>
+          )}
+
+          {passwordResetError && (
+            <div className="wf-form-error" style={{ padding: '8px 14px' }} data-testid="password-reset-error">
+              {passwordResetError}
+            </div>
+          )}
+
+          {disableError && (
+            <div className="wf-form-error" style={{ padding: '8px 14px' }} data-testid="disable-error">
+              {disableError}
             </div>
           )}
 
@@ -807,6 +1022,15 @@ export default function AccountsView() {
                     }}
                     onRevoke={() => void handleRevokeLink(account.username)}
                     onExpand={() => handleAccountExpand(account.id)}
+                    onEdit={() => handleEditAccount(account)}
+                    onResetPasskey={() => {
+                      setPasswordResetError(null)
+                      setPasswordResetAccount(account)
+                    }}
+                    onToggleDisable={() => {
+                      setDisableError(null)
+                      setToggleDisableAccount(account)
+                    }}
                   />
                 ))}
               </tbody>
@@ -848,6 +1072,96 @@ export default function AccountsView() {
                 data-testid="delete-confirm-btn"
               >
                 {deleting ? 'Deleting…' : 'Delete account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {passwordResetAccount !== null && (
+        <div
+          className="wf-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reset-passkey-title"
+        >
+          <div className="wf-modal">
+            <h3 id="reset-passkey-title">Reset passkey?</h3>
+            <p>
+              This will revoke all passkeys for <b>{passwordResetAccount.username}</b> and
+              generate a new enrollment link. They will need to re-enroll before they can log in.
+            </p>
+            <p>This action cannot be undone.</p>
+            <div className="wf-modal-actions">
+              <button
+                type="button"
+                className="wf-btn-secondary"
+                disabled={passwordResetting}
+                onClick={() => setPasswordResetAccount(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="wf-btn-danger"
+                disabled={passwordResetting}
+                onClick={() => void handleConfirmPasswordReset()}
+                data-testid="password-reset-confirm-btn"
+              >
+                {passwordResetting ? 'Resetting…' : 'Reset passkey'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toggleDisableAccount !== null && (
+        <div
+          className="wf-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="toggle-disable-title"
+        >
+          <div className="wf-modal">
+            <h3 id="toggle-disable-title">
+              {toggleDisableAccount.disabled ? 'Enable account?' : 'Disable account?'}
+            </h3>
+            <p>
+              {toggleDisableAccount.disabled ? (
+                <>
+                  This will allow <b>{toggleDisableAccount.username}</b> to log in again.
+                  Their account and data are preserved.
+                </>
+              ) : (
+                <>
+                  This will prevent <b>{toggleDisableAccount.username}</b> from logging in.
+                  Their account and data will be preserved.
+                </>
+              )}
+            </p>
+            <div className="wf-modal-actions">
+              <button
+                type="button"
+                className="wf-btn-secondary"
+                disabled={disabling}
+                onClick={() => setToggleDisableAccount(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={toggleDisableAccount.disabled ? 'wf-btn' : 'wf-btn-danger'}
+                disabled={disabling}
+                onClick={() => void handleConfirmToggleDisable()}
+                data-testid="disable-confirm-btn"
+              >
+                {disabling
+                  ? toggleDisableAccount.disabled
+                    ? 'Enabling…'
+                    : 'Disabling…'
+                  : toggleDisableAccount.disabled
+                    ? 'Enable account'
+                    : 'Disable account'}
               </button>
             </div>
           </div>

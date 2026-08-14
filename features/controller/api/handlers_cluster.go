@@ -17,6 +17,24 @@ import (
 // steward sessions to drain before force-marking the node decommissioned.
 const defaultDecommissionTimeout = 5 * time.Minute
 
+// clusterLifecycleScopeAllowed reports whether principal may act on controller
+// HA-cluster membership (Issue #3303).
+//
+// Controller cluster nodes are fleet-wide infrastructure: features/controller/cluster
+// carries no tenant concept, and /cluster/nodes/{id} exposes no tenant path variable.
+// requirePermission therefore resolves an empty target tenant for these routes, so
+// middleware.go's tenant-isolation block admits any tenant-scoped principal that holds
+// the grant, and the ADR-025 Decision 1 root-scoped block is likewise a no-op. Since
+// cluster:drain-node and cluster:decommission-node are grantable permission IDs
+// (permissions.go), a web account confined to a single tenant could otherwise drain or
+// decommission a node serving every tenant. Restrict both operations to principals with
+// no tenant confinement — unscoped admins, and root-scoped SaaS operators, whose
+// TenantID is "" by construction (middleware.go: RootScoped principals keep the unscoped
+// shape) and who own root's own infrastructure.
+func clusterLifecycleScopeAllowed(principal *Principal) bool {
+	return principal.TenantID == ""
+}
+
 // clusterNodeDrainResponse is the JSON body for a successful drain request.
 type clusterNodeDrainResponse struct {
 	NodeID string `json:"node_id"`
@@ -26,13 +44,17 @@ type clusterNodeDrainResponse struct {
 // handleClusterNodeDrain handles POST /api/v1/cluster/nodes/{id}/drain.
 //
 // Authorization is enforced at the router level via requirePermission("cluster", "drain-node"),
-// which requires AssuranceStrong (ADR-021, Issue #2780).
+// which requires AssuranceStrong (ADR-021, Issue #2780), plus the scope guard below.
 //
 // On success returns HTTP 202 Accepted: {"node_id": "...", "state": "draining"}.
 func (s *Server) handleClusterNodeDrain(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.respondError(w, http.StatusForbidden, "authentication required")
+		return
+	}
+	if !clusterLifecycleScopeAllowed(principal) {
+		s.respondError(w, http.StatusForbidden, "cluster node lifecycle requires an unscoped principal")
 		return
 	}
 
@@ -77,8 +99,8 @@ type clusterNodeDecommissionResponse struct {
 // handleClusterNodeDecommission handles POST /api/v1/cluster/nodes/{id}/decommission.
 //
 // Authorization is enforced at the router level via requirePermission("cluster", "decommission-node"),
-// which requires AssuranceStrong (ADR-021, Issue #2780). The node must be in StateDraining;
-// any other state returns HTTP 409.
+// which requires AssuranceStrong (ADR-021, Issue #2780), plus the scope guard below.
+// The node must be in StateDraining; any other state returns HTTP 409.
 //
 // The handler blocks until all active steward sessions on the local node drain
 // or defaultDecommissionTimeout elapses, then marks the node StateDecommissioned
@@ -87,6 +109,10 @@ func (s *Server) handleClusterNodeDecommission(w http.ResponseWriter, r *http.Re
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.respondError(w, http.StatusForbidden, "authentication required")
+		return
+	}
+	if !clusterLifecycleScopeAllowed(principal) {
+		s.respondError(w, http.StatusForbidden, "cluster node lifecycle requires an unscoped principal")
 		return
 	}
 

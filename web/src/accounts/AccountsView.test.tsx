@@ -1105,3 +1105,405 @@ describe('AccountsView — subject-role expand panel (Issue #3134)', () => {
     expect(screen.queryByTestId('account-roles-row')).not.toBeInTheDocument()
   })
 })
+
+// ── Edit account (Issue #3132) ────────────────────────────────────────────────
+
+describe('AccountsView — edit account (Issue #3132)', () => {
+  function makeUpdateResponse(overrides: Partial<Record<string, unknown>> = {}, status = 200) {
+    return new Response(
+      JSON.stringify({
+        data: {
+          id: 'acc-1',
+          username: 'fleet-admin',
+          tenant_id: 'tenant-a',
+          permissions: ['steward:list'],
+          disabled: false,
+          created_at: '2026-01-01T00:00:00Z',
+          has_outstanding_enrollment_link: false,
+          ...overrides,
+        },
+      }),
+      { status, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+
+  it('each account row has an edit button', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.getByTestId('account-edit-btn')).toBeInTheDocument()
+  })
+
+  it('clicking Edit opens the edit panel', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    expect(screen.getByTestId('account-edit-panel')).toBeInTheDocument()
+  })
+
+  it('edit panel is pre-filled with the account permissions', async () => {
+    fetchMock.mockResolvedValue(
+      makeAccountsResponse([makeAccount({ permissions: ['steward:list', 'steward:read'] })]),
+    )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    const input = screen.getByTestId('edit-permissions-input') as HTMLInputElement
+    expect(input.value).toContain('steward:list')
+    expect(input.value).toContain('steward:read')
+  })
+
+  it('edit save calls PUT /api/v1/web/accounts/{username} and refreshes', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(makeUpdateResponse({ permissions: ['steward:list', 'steward:read'] }))
+      .mockResolvedValueOnce(
+        makeAccountsResponse([makeAccount({ permissions: ['steward:list', 'steward:read'] })]),
+      )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    const input = screen.getByTestId('edit-permissions-input')
+    fireEvent.change(input, { target: { value: 'steward:list, steward:read' } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('edit-save-btn'))
+    })
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter(
+        (c) => (c[1] as RequestInit)?.method === 'PUT',
+      )
+      expect(putCalls).toHaveLength(1)
+      const body = JSON.parse((putCalls[0]![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body).toHaveProperty('permissions')
+    })
+  })
+
+  it('edit panel closes after successful save', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(makeUpdateResponse())
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('edit-save-btn'))
+    })
+    await waitFor(() => expect(screen.queryByTestId('account-edit-panel')).not.toBeInTheDocument())
+  })
+
+  it('edit save error is shown when the PUT fails', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: { message: 'Permission not found' } }),
+          { status: 400 },
+        ),
+      )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('edit-save-btn'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('edit-save-error')).toHaveTextContent('Permission not found')
+    })
+    expect(screen.getByTestId('account-edit-panel')).toBeInTheDocument()
+  })
+
+  it('edit cancel closes the panel without calling PUT', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    expect(screen.getByTestId('account-edit-panel')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(screen.queryByTestId('account-edit-panel')).not.toBeInTheDocument()
+    const putCalls = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit)?.method === 'PUT',
+    )
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('edit panel does not contain a password field (passkey-only)', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('account-password-input')).not.toBeInTheDocument()
+  })
+})
+
+// ── Password reset (Issue #3132) ──────────────────────────────────────────────
+
+describe('AccountsView — password reset (Issue #3132)', () => {
+  function makeUpdateResponse(overrides: Partial<Record<string, unknown>> = {}, status = 200) {
+    return new Response(
+      JSON.stringify({
+        data: {
+          id: 'acc-1',
+          username: 'fleet-admin',
+          tenant_id: 'tenant-a',
+          permissions: ['steward:list'],
+          disabled: false,
+          created_at: '2026-01-01T00:00:00Z',
+          has_outstanding_enrollment_link: true,
+          ...overrides,
+        },
+      }),
+      { status, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+
+  it('each account row has a reset passkey button', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.getByTestId('account-reset-passkey-btn')).toBeInTheDocument()
+  })
+
+  it('clicking reset shows a confirm dialog', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-reset-passkey-btn'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByTestId('password-reset-confirm-btn')).toBeInTheDocument()
+  })
+
+  it('confirm dialog names the account being reset', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount({ username: 'my-admin' })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-reset-passkey-btn'))
+    expect(screen.getByRole('dialog')).toHaveTextContent('my-admin')
+  })
+
+  it('cancel in reset dialog closes without calling PUT', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-reset-passkey-btn'))
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('confirming reset calls PUT with reset_credentials: true', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(makeUpdateResponse({ enrollment_magic_link: 'aabbcc1122' }))
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-reset-passkey-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('password-reset-confirm-btn'))
+    })
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+      expect(putCalls).toHaveLength(1)
+      const body = JSON.parse((putCalls[0]![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body).toHaveProperty('reset_credentials', true)
+    })
+  })
+
+  it('shows enrollment link panel when server returns a magic link', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(makeUpdateResponse({ enrollment_magic_link: 'aabbcc112233deadbeef' }))
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-reset-passkey-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('password-reset-confirm-btn'))
+    })
+    await waitFor(() => expect(screen.getByTestId('enrollment-link-panel')).toBeInTheDocument())
+    const linkInput = screen.getByTestId('enrollment-link-value') as HTMLInputElement
+    expect(linkInput.value).toContain('aabbcc112233deadbeef')
+  })
+
+  it('shows reset error when the PUT fails', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: { message: 'Account not found' } }),
+          { status: 404 },
+        ),
+      )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-reset-passkey-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('password-reset-confirm-btn'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('password-reset-error')).toHaveTextContent('Account not found')
+    })
+  })
+})
+
+// ── Enable/disable toggle (Issue #3132) ──────────────────────────────────────
+
+describe('AccountsView — enable/disable toggle (Issue #3132)', () => {
+  function makeUpdateResponse(overrides: Partial<Record<string, unknown>> = {}, status = 200) {
+    return new Response(
+      JSON.stringify({
+        data: {
+          id: 'acc-1',
+          username: 'fleet-admin',
+          tenant_id: 'tenant-a',
+          permissions: ['steward:list'],
+          disabled: false,
+          created_at: '2026-01-01T00:00:00Z',
+          has_outstanding_enrollment_link: false,
+          ...overrides,
+        },
+      }),
+      { status, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+
+  it('each account row has an enable/disable toggle button', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.getByTestId('account-toggle-disable-btn')).toBeInTheDocument()
+  })
+
+  it('shows "Disable" label for an enabled account', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount({ disabled: false })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.getByTestId('account-toggle-disable-btn')).toHaveTextContent('Disable')
+  })
+
+  it('shows "Enable" label for a disabled account', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount({ disabled: true })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.getByTestId('account-toggle-disable-btn')).toHaveTextContent('Enable')
+  })
+
+  it('shows a Disabled badge for disabled accounts', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount({ disabled: true })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.getByTestId('account-disabled-badge')).toBeInTheDocument()
+  })
+
+  it('does not show a Disabled badge for enabled accounts', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount({ disabled: false })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    expect(screen.queryByTestId('account-disabled-badge')).not.toBeInTheDocument()
+  })
+
+  it('clicking Disable shows a confirm dialog', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByTestId('disable-confirm-btn')).toBeInTheDocument()
+  })
+
+  it('confirm dialog names the account being disabled', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount({ username: 'target-admin' })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    expect(screen.getByRole('dialog')).toHaveTextContent('target-admin')
+  })
+
+  it('cancel in disable dialog closes without calling PUT', async () => {
+    fetchMock.mockResolvedValue(makeAccountsResponse([makeAccount()]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('confirming disable calls PUT with disabled: true', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ disabled: false })]))
+      .mockResolvedValueOnce(makeUpdateResponse({ disabled: true }))
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ disabled: true })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disable-confirm-btn'))
+    })
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+      expect(putCalls).toHaveLength(1)
+      const body = JSON.parse((putCalls[0]![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body).toHaveProperty('disabled', true)
+    })
+  })
+
+  it('confirming enable calls PUT with disabled: false', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ disabled: true })]))
+      .mockResolvedValueOnce(makeUpdateResponse({ disabled: false }))
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ disabled: false })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disable-confirm-btn'))
+    })
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+      expect(putCalls).toHaveLength(1)
+      const body = JSON.parse((putCalls[0]![1] as RequestInit).body as string) as Record<string, unknown>
+      expect(body).toHaveProperty('disabled', false)
+    })
+  })
+
+  it('account stays in the list after being disabled', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(makeUpdateResponse({ disabled: true }))
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount({ disabled: true })]))
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disable-confirm-btn'))
+    })
+    await waitFor(() => expect(screen.getByTestId('account-disabled-badge')).toBeInTheDocument())
+    expect(screen.getAllByTestId('account-row')).toHaveLength(1)
+  })
+
+  it('shows disable error when the PUT fails', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: { message: 'Cannot disable the last admin' } }),
+          { status: 400 },
+        ),
+      )
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disable-confirm-btn'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('disable-error')).toHaveTextContent('Cannot disable the last admin')
+    })
+  })
+})

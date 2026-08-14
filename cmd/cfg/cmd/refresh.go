@@ -18,6 +18,7 @@ var (
 	refreshAPIKey      string
 	refreshTLSCACert   string
 	refreshTLSInsecure bool
+	refreshServerName  string
 	refreshTenantID    string
 	refreshReason      string
 	refreshPolicyMode  string
@@ -151,6 +152,7 @@ func init() {
 	refreshCmd.PersistentFlags().StringVar(&refreshAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	refreshCmd.PersistentFlags().StringVar(&refreshTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	refreshCmd.PersistentFlags().BoolVar(&refreshTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	refreshCmd.PersistentFlags().StringVar(&refreshServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// refresh list
 	refreshListCmd.Flags().StringVar(&refreshTenantID, "tenant", "", "Filter by tenant ID")
@@ -186,7 +188,13 @@ func getRefreshClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := refreshTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := refreshServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -201,11 +209,6 @@ func getRefreshClient() (*APIClient, error) {
 	apiKey := refreshAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := refreshTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := refreshTLSCACert

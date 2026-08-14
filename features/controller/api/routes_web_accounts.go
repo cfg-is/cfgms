@@ -11,13 +11,17 @@ import (
 func init() { RegisterRoutes(registerWebAccountRoutes) }
 
 func registerWebAccountRoutes(s *Server, api *mux.Router) {
-	// Web-admin account provisioning endpoints (Issue #2490, #2733, #2780, #2974).
+	// Web-admin account provisioning endpoints (Issue #2490, #2733, #2780, #2974, #3126).
 	// GET /web/accounts — permission-gated only (reads are outside the AssuranceStrong surface; see Issue #2733).
 	// POST/DELETE /web/accounts — AssuranceStrong via permissionAssurance, mirroring the tenants-create registration.
+	// GET /web/accounts/{username} — permission-gated only (read surface; see Issue #3126).
+	// PUT /web/accounts/{username} — AssuranceStrong via permissionAssurance (Issue #3126).
 	// POST /web/accounts/{username}/enrollment-link/revoke — AssuranceStrong; revokes an outstanding magic link (Issue #2974).
 	webAccounts := api.PathPrefix("/web/accounts").Subrouter()
 	webAccounts.Handle("", s.requirePermission("web-account", "list")(http.HandlerFunc(s.handleListWebAccounts))).Methods("GET")
 	webAccounts.Handle("", s.requirePermission("web-account", "create")(http.HandlerFunc(s.handleCreateWebAccount))).Methods("POST")
+	webAccounts.Handle("/{username}", s.requirePermission("web-account", "get")(http.HandlerFunc(s.handleGetWebAccount))).Methods("GET")
+	webAccounts.Handle("/{username}", s.requirePermission("web-account", "update")(http.HandlerFunc(s.handleUpdateWebAccount))).Methods("PUT")
 	webAccounts.Handle("/{username}", s.requirePermission("web-account", "delete")(http.HandlerFunc(s.handleDeleteWebAccount))).Methods("DELETE")
 	// Issue #2974: enrollment magic link revocation endpoint.
 	webAccounts.Handle("/{username}/enrollment-link/revoke",

@@ -5,9 +5,12 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // ComplianceStatusResponse represents the compliance status of a steward
@@ -120,6 +123,21 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "steward not found", http.StatusNotFound)
 		return
 	}
+
+	// Cross-tenant guard: a caller scoped to tenant A must not see tenant B's
+	// steward compliance data. 404 (not 403) avoids disclosing steward existence
+	// across tenants — matching tenantScopedTerminalWrapper behavior.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		stewardTenant := stewardInfo.TenantID
+		sameTenant := stewardTenant == callerTenant
+		descendantTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
+		if !sameTenant && !descendantTenant {
+			http.Error(w, "steward not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	lastChecked = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
 	switch stewardInfo.Status {
 	case "offline":
@@ -206,6 +224,20 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 		http.Error(w, "steward not found", http.StatusNotFound)
 		return
 	}
+
+	// Cross-tenant guard: mirroring tenantScopedTerminalWrapper — 404 to avoid
+	// disclosing steward existence across tenants.
+	callerTenantR, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenantR != "" {
+		stewardTenant := stewardInfo.TenantID
+		sameTenant := stewardTenant == callerTenantR
+		descendantTenant := strings.HasPrefix(stewardTenant, callerTenantR+"/")
+		if !sameTenant && !descendantTenant {
+			http.Error(w, "steward not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	lastPatchDate = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
 	switch stewardInfo.Status {
 	case "offline":
@@ -273,13 +305,23 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 //	  "generated_at": "2024-01-15T10:30:00Z"
 //	}
 func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Request) {
-	// Get optional tenant_id filter from query params
-	tenantID := r.URL.Query().Get("tenant_id")
+	// TenantID is always taken from the authenticated context for scoped callers;
+	// unscoped admins (callerTenant == "") may use the tenant_id query param to filter.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	tenantFilter := r.URL.Query().Get("tenant_id")
 
 	// Build compliance summary from the single authoritative steward registry
 	tenantStats := make(map[string]*TenantComplianceStatus)
 	for _, st := range s.controllerService.GetAllStewards() {
-		if tenantID != "" && st.TenantID != tenantID {
+		if callerTenant != "" {
+			// Scoped caller: restrict to own tenant and its descendant tenants.
+			sameTenant := st.TenantID == callerTenant
+			descendantTenant := strings.HasPrefix(st.TenantID, callerTenant+"/")
+			if !sameTenant && !descendantTenant {
+				continue
+			}
+		} else if tenantFilter != "" && st.TenantID != tenantFilter {
+			// Root/admin caller: honor optional query-param filter.
 			continue
 		}
 		tcs, ok := tenantStats[st.TenantID]

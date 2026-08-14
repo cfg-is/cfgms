@@ -28,9 +28,10 @@ import (
 
 // Manager implements the ClusterManager interface and coordinates all HA operations
 type Manager struct {
-	mu     sync.RWMutex
-	cfg    *Config
-	logger logging.Logger
+	mu         sync.RWMutex
+	cfg        *Config
+	logger     logging.Logger
+	raftLogDir string // directory for the per-node bbolt WAL; empty means in-memory only
 
 	// Core components
 	nodeInfo      *NodeInfo
@@ -74,7 +75,9 @@ type Manager struct {
 // certManager is required in ClusterMode to mint the mTLS client certificate that
 // the outbound Raft peer transport presents on POST /raft/message. It may be nil in
 // SingleServerMode and BlueGreenMode, which never create a peer transport.
-func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager) (*Manager, error) {
+// raftLogDir, when non-empty, is the directory where the per-node Raft WAL
+// (raft.db) is stored. Pass an empty string in tests to use in-memory state only.
+func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager, raftLogDir string) (*Manager, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
@@ -128,6 +131,7 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		nodeInfo:       nodeInfo,
 		storageManager: storageManager,
 		certManager:    certManager,
+		raftLogDir:     raftLogDir,
 		clusterNodes:   make(map[string]*NodeInfo),
 		healthChecks:   make(map[string]HealthCheckFunc),
 		healthStatus: &HealthStatus{
@@ -632,7 +636,7 @@ func (m *Manager) initializeRaftConsensus() error {
 
 	// Create Raft consensus
 	var err error
-	m.raftConsensus, err = NewRaftConsensus(context.Background(), nodeID, m.nodeInfo, peers, &m.cfg.Cluster, m.logger)
+	m.raftConsensus, err = NewRaftConsensus(context.Background(), nodeID, m.nodeInfo, peers, &m.cfg.Cluster, m.raftLogDir, m.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create Raft consensus: %w", err)
 	}
@@ -759,6 +763,94 @@ func (m *Manager) initializeBlueGreenComponents() error {
 	return nil
 }
 
+// nodeInfoPublishInterval is how long publishNodeInfo waits before re-proposing
+// a node_update that has not yet appeared in the applied cluster state.
+const nodeInfoPublishInterval = 2 * time.Second
+
+// nodeInfoPublishMaxInterval caps the backoff publishNodeInfo applies while its
+// own record has not converged, and nodeInfoPublishWarnAfter is how long it
+// stays quiet before saying so.
+//
+// Convergence is not guaranteed: a node removed from the cluster, or one whose
+// node_update never applies, would otherwise re-propose at the base interval for
+// the lifetime of the process — steady traffic against a cluster that will never
+// accept it, with nothing above Debug to show for it. Backing off bounds the
+// cost without abandoning convergence, since a node that becomes able to
+// converge later still does.
+const (
+	nodeInfoPublishMaxInterval = 30 * time.Second
+	nodeInfoPublishWarnAfter   = 2 * time.Minute
+)
+
+// publishNodeInfo replicates this node's metadata through the Raft log and keeps
+// retrying until the entry is observed in the applied state.
+//
+// ProposeNodeUpdate returning nil means only that the proposal was accepted into
+// the raft loop's channel — not that it was committed. etcd/raft drops a
+// proposal whenever the leader is unsettled, which is exactly the moment
+// leaderElectedC fires, so a single shot lost the only node_update a node ever
+// sent. Nothing retried and nothing noticed: ClusterState.Nodes stayed empty for
+// the lifetime of the cluster, and because GetLeaderInfo and GetClusterNodes
+// both resolve through that map, GET /api/v1/ha/cluster reported no leader and
+// no members on a cluster that was electing and replicating perfectly well.
+// GET /api/v1/ha/status disagreed, since IsLeader reads the raft state directly.
+//
+// Membership must converge, so this re-proposes until the node's own record is
+// applied, then returns. The interval doubles up to nodeInfoPublishMaxInterval
+// so a record that never converges costs a bounded trickle rather than a
+// proposal every two seconds forever.
+func (m *Manager) publishNodeInfo(rc *RaftConsensus, nodeInfo *NodeInfo) {
+	select {
+	case <-rc.leaderElectedC:
+	case <-m.ctx.Done():
+		return
+	}
+
+	nodeID := hashStringToUint64(nodeInfo.ID)
+	interval := nodeInfoPublishInterval
+	started := time.Now()
+	warned := false
+
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
+	for {
+		m.logger.Debug("Publishing node metadata to cluster state", "node_id", nodeInfo.ID)
+		if err := rc.ProposeNodeUpdate(nodeInfo); err != nil {
+			m.logger.Warn("Failed to propose node update; will retry",
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+
+		select {
+		case <-timer.C:
+		case <-m.ctx.Done():
+			return
+		}
+
+		if rc.HasNode(nodeID) {
+			m.logger.Info("Node metadata replicated to cluster state",
+				"node_id", nodeInfo.ID, "elapsed", time.Since(started))
+			return
+		}
+
+		// Surface a stall once. Silence here previously looked identical to
+		// success, because only the Debug line above marked an attempt.
+		if !warned && time.Since(started) >= nodeInfoPublishWarnAfter {
+			m.logger.Error("Node metadata has not reached cluster state; still retrying",
+				"node_id", nodeInfo.ID, "elapsed", time.Since(started), "retry_interval", interval)
+			warned = true
+		}
+
+		if interval < nodeInfoPublishMaxInterval {
+			interval *= 2
+			if interval > nodeInfoPublishMaxInterval {
+				interval = nodeInfoPublishMaxInterval
+			}
+		}
+		timer.Reset(interval)
+	}
+}
+
 // startClusterMode starts components for cluster mode
 func (m *Manager) startClusterMode() error {
 	// Start Raft consensus (sole authority for membership and leader election)
@@ -773,16 +865,7 @@ func (m *Manager) startClusterMode() error {
 		// before calling ProposeNodeUpdate. The goroutine is bounded by m.ctx.
 		rc := m.raftConsensus
 		nodeInfo := m.nodeInfo
-		go func() {
-			select {
-			case <-rc.leaderElectedC:
-				if err := rc.ProposeNodeUpdate(nodeInfo); err != nil {
-					m.logger.Warn("Failed to propose initial node update", "error", err)
-				}
-			case <-m.ctx.Done():
-				return
-			}
-		}()
+		go m.publishNodeInfo(rc, nodeInfo)
 
 		// Propose add-node ConfChanges for each peer known at startup.
 		// These are non-critical (initial membership is bootstrapped via StartNode);

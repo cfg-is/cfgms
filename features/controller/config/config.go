@@ -314,6 +314,12 @@ type RegistrationConfig struct {
 	// for operator action before it is automatically expired (Issue #1697).
 	// Default: 5 days.
 	PendingReviewTimeout Duration `yaml:"pending_review_timeout,omitempty"`
+
+	// EnrollmentLinkTTL is the validity window for a single-use passkey
+	// enrollment magic link minted on web-account creation/reset (Issue #2974,
+	// #2966). Default: 72 hours — long enough for an admin to hand the link off
+	// out-of-band, short enough to bound a leaked link's blast radius.
+	EnrollmentLinkTTL Duration `yaml:"enrollment_link_ttl,omitempty"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -1291,4 +1297,13 @@ func (rc *RegistrationConfig) GetPendingReviewTimeout() time.Duration {
 		return 5 * 24 * time.Hour
 	}
 	return rc.PendingReviewTimeout.AsDuration()
+}
+
+// GetEnrollmentLinkTTL returns the validity window for a single-use passkey
+// enrollment magic link, defaulting to 72 hours when not configured (Issue #2966).
+func (rc *RegistrationConfig) GetEnrollmentLinkTTL() time.Duration {
+	if rc == nil || rc.EnrollmentLinkTTL == 0 {
+		return 72 * time.Hour
+	}
+	return rc.EnrollmentLinkTTL.AsDuration()
 }

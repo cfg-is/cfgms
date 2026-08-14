@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -224,4 +225,12 @@ func TestRoleDeleteCmd_NotFound(t *testing.T) {
 	err := runRoleDelete(roleDeleteCmd, []string{"missing"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestRoleCmds_ServerNameFlagRegistered verifies that --server-name is
+// registered on every role subcommand alongside --tls-insecure (Issue #3174).
+func TestRoleCmds_ServerNameFlagRegistered(t *testing.T) {
+	for _, cmd := range []*cobra.Command{roleCreateCmd, roleLsCmd, roleShowCmd, roleDeleteCmd} {
+		assert.NotNil(t, cmd.Flags().Lookup("server-name"), "--server-name flag must be registered on role %s", cmd.Name())
+	}
 }

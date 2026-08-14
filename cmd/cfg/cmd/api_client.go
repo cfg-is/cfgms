@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -17,6 +18,57 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/cert"
 )
+
+// Exact warning and confirmation text — referenced by tests for wording match.
+const tlsInsecureMTLSWarning = "Warning: --tls-insecure: server certificate is not verified." +
+	" mTLS client credential cannot be stolen or replayed (content exposure only).\n"
+
+const tlsInsecureSessionWarning = "Warning: --tls-insecure: server certificate is not verified." +
+	" Session token is a replayable bearer credential — a MITM who captures it can replay it against the real controller.\n"
+
+const tlsInsecureConfirmPrompt = "Type 'I understand the risk' to proceed: "
+
+const tlsInsecureConfirmPhrase = "I understand the risk"
+
+// tlsInsecureWriter is the output sink for TLS-insecure warnings and prompts.
+// Overridable in tests; defaults to stderr.
+var tlsInsecureWriter io.Writer = os.Stderr
+
+// tlsInsecureReader is the input source for TLS-insecure typed confirmation.
+// Overridable in tests; defaults to stdin.
+var tlsInsecureReader io.Reader = os.Stdin
+
+// isTTYFn reports whether the process stdin is an interactive terminal.
+// Overridable in tests.
+var isTTYFn = func() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// requireTLSInsecureForSession prompts for confirmation before connecting with a
+// plain bearer session token over a connection whose server certificate is not verified.
+//
+// On a TTY: prints the warning and prompts for tlsInsecureConfirmPhrase.
+// Non-interactive: requires CFGMS_TLS_INSECURE_CONFIRM=yes.
+// Returns an error if confirmation is denied or unavailable.
+func requireTLSInsecureForSession() error {
+	_, _ = fmt.Fprint(tlsInsecureWriter, tlsInsecureSessionWarning)
+	if isTTYFn() {
+		_, _ = fmt.Fprint(tlsInsecureWriter, tlsInsecureConfirmPrompt)
+		scanner := bufio.NewScanner(tlsInsecureReader)
+		if !scanner.Scan() || strings.TrimSpace(scanner.Text()) != tlsInsecureConfirmPhrase {
+			return fmt.Errorf("--tls-insecure with a session token requires typing %q to proceed", tlsInsecureConfirmPhrase)
+		}
+		return nil
+	}
+	if os.Getenv("CFGMS_TLS_INSECURE_CONFIRM") != "yes" {
+		return fmt.Errorf("--tls-insecure with a session token requires CFGMS_TLS_INSECURE_CONFIRM=yes in non-interactive mode")
+	}
+	return nil
+}
 
 // APIClient provides HTTP client functionality for communicating with the controller API
 type APIClient struct {
@@ -103,12 +155,24 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 	var err error
 
 	if cfg.TLSInsecure {
-		// Development mode: skip verification (requires explicit opt-in).
-		// pkg/cert has no insecure helper; build config via field assignment.
+		// Development mode: skip server certificate verification.
+		// When client certs are provided (mTLS), still include them so the server
+		// can authenticate the client; server-side auth is unaffected by InsecureSkipVerify.
 		// #nosec G402 - InsecureSkipVerify explicitly requested via --tls-insecure flag
 		var insecureCfg tls.Config
 		insecureCfg.MinVersion = tls.VersionTLS12
 		insecureCfg.InsecureSkipVerify = true // #nosec G402
+		if cfg.ServerName != "" {
+			insecureCfg.ServerName = cfg.ServerName
+		}
+		if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
+			_, _ = fmt.Fprint(tlsInsecureWriter, tlsInsecureMTLSWarning)
+			clientCert, certErr := tls.X509KeyPair(cfg.ClientCertPEM, cfg.ClientKeyPEM)
+			if certErr != nil {
+				return nil, fmt.Errorf("failed to load client certificate: %w", certErr)
+			}
+			insecureCfg.Certificates = []tls.Certificate{clientCert}
+		}
 		tlsConfig = &insecureCfg
 	} else if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
 		// mTLS mode: mutual TLS with client certificate and optional CA cert
@@ -502,6 +566,9 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
+	// #nosec G704 — SSRF FP: this is an admin CLI tool; the base URL is set by the
+	// operator via --url / CFGMS_API_URL or the admin bundle (operator-controlled config).
+	// No user-supplied tainted input reaches this URL construction path.
 	req, err := http.NewRequestWithContext(ctx, method, base.String(), bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -519,7 +586,7 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 		req.Header.Set("X-Presence-Token", presenceToken)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) // #nosec G704 — see comment above
 	if err != nil {
 		return nil, err
 	}

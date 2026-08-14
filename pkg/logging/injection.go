@@ -27,8 +27,10 @@ func NewModuleLogger(moduleName, component string) *ModuleLogger {
 	// Get global manager if available
 	manager := GetGlobalLoggingManager()
 
-	// Create fallback logger for compatibility
-	fallback := NewLoggerWithConfig(DefaultConfig("cfgms", component))
+	// Create fallback logger for compatibility. Same level sourcing as
+	// LoggerFactory.CreateLogger: a hardcoded InfoLevel here silently discarded
+	// Debug records whenever the provider path was unavailable.
+	fallback := NewLoggerWithConfig(configuredLoggerConfig("cfgms", component))
 
 	logger := &ModuleLogger{
 		moduleName:     moduleName,
@@ -247,9 +249,30 @@ func (lf *LoggerFactory) CreateComponentLogger(componentName string) *ModuleLogg
 	return NewModuleLogger(componentName, componentName)
 }
 
-// CreateLogger creates a legacy Logger interface for backward compatibility
+// CreateLogger creates a legacy Logger interface for backward compatibility.
+//
+// The level comes from the initialised global logging manager when there is
+// one. DefaultConfig hardcodes InfoLevel, and DefaultLogger.logEntry drops
+// anything below its own level before the entry ever reaches the manager — so
+// every logger built from this factory discarded Debug records no matter what
+// the operator configured. The controller passes exactly such a logger into its
+// server and HA subsystem, which is why an HA cluster configured with
+// `logging.level: DEBUG` still emitted nothing below INFO.
 func (lf *LoggerFactory) CreateLogger() Logger {
-	return NewLoggerWithConfig(DefaultConfig(lf.defaultServiceName, lf.defaultComponent))
+	return NewLoggerWithConfig(configuredLoggerConfig(lf.defaultServiceName, lf.defaultComponent))
+}
+
+// configuredLoggerConfig returns a logger Config seeded from the global logging
+// manager's configured level, falling back to DefaultConfig when no manager has
+// been initialised yet.
+func configuredLoggerConfig(serviceName, component string) *Config {
+	cfg := DefaultConfig(serviceName, component)
+	if manager := GetGlobalLoggingManager(); manager != nil {
+		if managerCfg := manager.GetConfig(); managerCfg != nil && managerCfg.Level != "" {
+			cfg.Level = parseLevel(managerCfg.Level)
+		}
+	}
+	return cfg
 }
 
 // Global factory instance for convenience

@@ -20,6 +20,7 @@ import {
   revokeEnrollmentLink,
   assignSubjectRole,
   revokeSubjectRole,
+  updateWebAccount,
   EscalationError,
 } from './useWebAccounts.ts'
 
@@ -57,6 +58,16 @@ describe('parseWebAccountInfo', () => {
     expect(result?.permissions).toEqual([])
     expect(result?.tenant_id).toBe('')
     expect(result?.has_outstanding_enrollment_link).toBe(false)
+    expect(result?.disabled).toBe(false)
+  })
+
+  it('parses disabled field correctly', () => {
+    const enabled = parseWebAccountInfo({ id: 'x', disabled: false })
+    expect(enabled?.disabled).toBe(false)
+    const disabled = parseWebAccountInfo({ id: 'x', disabled: true })
+    expect(disabled?.disabled).toBe(true)
+    const missing = parseWebAccountInfo({ id: 'x' })
+    expect(missing?.disabled).toBe(false)
   })
 
   it('parses has_outstanding_enrollment_link correctly', () => {
@@ -729,5 +740,139 @@ describe('revokeSubjectRole', () => {
     await expect(revokeSubjectRole('subject-1', 'role-1', why)).rejects.toThrow(
       /Revoke failed — 500/,
     )
+  })
+})
+
+// ── updateWebAccount (Issue #3132) ────────────────────────────────────────────
+
+describe('updateWebAccount', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  function makeUpdateBody(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'acc-1',
+      username: 'fleet-admin',
+      tenant_id: 'tenant-a',
+      permissions: ['steward:list'],
+      disabled: false,
+      created_at: '2026-01-01T00:00:00Z',
+      has_outstanding_enrollment_link: false,
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: makeUpdateBody() }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends PUT to /api/v1/web/accounts/{username}', async () => {
+    await updateWebAccount('fleet-admin', { permissions: ['steward:list'] })
+    const call = fetchMock.mock.calls.at(-1)!
+    expect(call[0]).toContain('/api/v1/web/accounts/fleet-admin')
+    expect((call[1] as RequestInit).method).toBe('PUT')
+  })
+
+  it('URL-encodes the username', async () => {
+    await updateWebAccount('fleet.admin/01', { permissions: [] })
+    const call = fetchMock.mock.calls.at(-1)!
+    expect(call[0]).toContain(encodeURIComponent('fleet.admin/01'))
+  })
+
+  it('sends permissions in the request body when provided', async () => {
+    await updateWebAccount('fleet-admin', { permissions: ['steward:list', 'steward:read'] })
+    const call = fetchMock.mock.calls.at(-1)!
+    const body = JSON.parse((call[1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).toHaveProperty('permissions', ['steward:list', 'steward:read'])
+  })
+
+  it('sends disabled in the request body when provided', async () => {
+    await updateWebAccount('fleet-admin', { disabled: true })
+    const body = JSON.parse((fetchMock.mock.calls.at(-1)![1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).toHaveProperty('disabled', true)
+  })
+
+  it('sends reset_credentials in the request body when provided', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: makeUpdateBody({ enrollment_magic_link: 'deadbeef1234567890' }) }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    await updateWebAccount('fleet-admin', { resetCredentials: true })
+    const body = JSON.parse((fetchMock.mock.calls.at(-1)![1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).toHaveProperty('reset_credentials', true)
+  })
+
+  it('omits permissions when not provided', async () => {
+    await updateWebAccount('fleet-admin', { disabled: false })
+    const body = JSON.parse((fetchMock.mock.calls.at(-1)![1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).not.toHaveProperty('permissions')
+  })
+
+  it('omits disabled when not provided', async () => {
+    await updateWebAccount('fleet-admin', { permissions: [] })
+    const body = JSON.parse((fetchMock.mock.calls.at(-1)![1] as RequestInit).body as string) as Record<string, unknown>
+    expect(body).not.toHaveProperty('disabled')
+  })
+
+  it('returns the updated account info', async () => {
+    const result = await updateWebAccount('fleet-admin', { permissions: ['steward:list'] })
+    expect(result.account.id).toBe('acc-1')
+    expect(result.account.username).toBe('fleet-admin')
+    expect(result.account.disabled).toBe(false)
+  })
+
+  it('returns enrollment_magic_link when reset_credentials triggers one', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: makeUpdateBody({ enrollment_magic_link: 'deadbeef1234567890abcdef' }) }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    const result = await updateWebAccount('fleet-admin', { resetCredentials: true })
+    expect(result.enrollmentMagicLink).toBe('deadbeef1234567890abcdef')
+  })
+
+  it('returns undefined enrollmentMagicLink when not in response', async () => {
+    const result = await updateWebAccount('fleet-admin', { permissions: [] })
+    expect(result.enrollmentMagicLink).toBeUndefined()
+  })
+
+  it('throws with the server message on 400 error', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Permissions list exceeds maximum' } }),
+        { status: 400 },
+      ),
+    )
+    await expect(updateWebAccount('fleet-admin', { permissions: [] })).rejects.toThrow(
+      /Permissions list exceeds maximum/,
+    )
+  })
+
+  it('uses a fallback message when the server body carries no message', async () => {
+    fetchMock.mockResolvedValue(new Response('', { status: 500 }))
+    await expect(updateWebAccount('fleet-admin', {})).rejects.toThrow(/Update failed — 500/)
+  })
+
+  it('throws when the server returns a malformed success body', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    await expect(updateWebAccount('fleet-admin', {})).rejects.toThrow(/Unexpected response shape/)
   })
 })

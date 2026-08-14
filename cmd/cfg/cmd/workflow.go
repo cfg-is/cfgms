@@ -43,6 +43,7 @@ var (
 	workflowAPIKey      string
 	workflowTLSCACert   string
 	workflowTLSInsecure bool
+	workflowServerName  string
 
 	workflowStatusWorkflow string
 	workflowCancelWorkflow string
@@ -158,18 +159,21 @@ func init() {
 	workflowRunCmd.Flags().StringVar(&workflowAPIKey, "api-key", "", "API key for authentication")
 	workflowRunCmd.Flags().StringVar(&workflowTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	workflowRunCmd.Flags().BoolVar(&workflowTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	workflowRunCmd.Flags().StringVar(&workflowServerName, "server-name", "", "Override TLS server name for certificate verification")
 	_ = workflowRunCmd.MarkFlagRequired("url")
 
 	workflowListCmd.Flags().StringVar(&workflowURL, "url", "", "Controller API URL (required)")
 	workflowListCmd.Flags().StringVar(&workflowAPIKey, "api-key", "", "API key for authentication")
 	workflowListCmd.Flags().StringVar(&workflowTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	workflowListCmd.Flags().BoolVar(&workflowTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	workflowListCmd.Flags().StringVar(&workflowServerName, "server-name", "", "Override TLS server name for certificate verification")
 	_ = workflowListCmd.MarkFlagRequired("url")
 
 	workflowStatusCmd.Flags().StringVar(&workflowURL, "url", "", "Controller API URL (required)")
 	workflowStatusCmd.Flags().StringVar(&workflowAPIKey, "api-key", "", "API key for authentication")
 	workflowStatusCmd.Flags().StringVar(&workflowTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	workflowStatusCmd.Flags().BoolVar(&workflowTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	workflowStatusCmd.Flags().StringVar(&workflowServerName, "server-name", "", "Override TLS server name for certificate verification")
 	workflowStatusCmd.Flags().StringVar(&workflowStatusWorkflow, "workflow", "", "Workflow name (required)")
 	_ = workflowStatusCmd.MarkFlagRequired("url")
 	_ = workflowStatusCmd.MarkFlagRequired("workflow")
@@ -178,6 +182,7 @@ func init() {
 	workflowCancelCmd.Flags().StringVar(&workflowAPIKey, "api-key", "", "API key for authentication")
 	workflowCancelCmd.Flags().StringVar(&workflowTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	workflowCancelCmd.Flags().BoolVar(&workflowTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	workflowCancelCmd.Flags().StringVar(&workflowServerName, "server-name", "", "Override TLS server name for certificate verification")
 	workflowCancelCmd.Flags().StringVar(&workflowCancelWorkflow, "workflow", "", "Workflow name (required)")
 	_ = workflowCancelCmd.MarkFlagRequired("url")
 	_ = workflowCancelCmd.MarkFlagRequired("workflow")
@@ -186,6 +191,7 @@ func init() {
 	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowAPIKey, "api-key", "", "API key for authentication")
 	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	workflowPromoteHVRoleCmd.Flags().BoolVar(&workflowTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowServerName, "server-name", "", "Override TLS server name for certificate verification")
 	workflowPromoteHVRoleCmd.Flags().StringVar(&workflowPromoteHVRoleCluster, "cluster", "", "Cluster name (required only to disambiguate a multi-cluster host)")
 	_ = workflowPromoteHVRoleCmd.MarkFlagRequired("url")
 
@@ -233,7 +239,13 @@ func getWorkflowClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := workflowTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := workflowServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -244,11 +256,6 @@ func getWorkflowClient() (*APIClient, error) {
 	apiKey := workflowAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := workflowTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := workflowTLSCACert

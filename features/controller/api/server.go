@@ -156,6 +156,8 @@ type Server struct {
 	webAuthnElevateThrottle        sync.Map                              // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyLoginSessions           sync.Map                              // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
 	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyEnrollSessions          sync.Map                              // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
+	credentialMu                   sync.Mutex                            // Issue #2992: guards the credential CAS section in handleWebAuthnRevokeCredential
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                     egReadProvider                        // Issue #2880: entity graph read API
@@ -323,9 +325,31 @@ func New(
 		for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
 			if keyVal := os.Getenv(envVar); keyVal != "" {
 				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
-					Key:         keyVal,
-					Permissions: []string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
-					TenantID:    "default",
+					Key: keyVal,
+					// The ha:read-* grants let test/integration/ha observe the
+					// cluster it just started. Every HA route is permission-gated
+					// (routes_ha.go), so without them the suite's polling helpers
+					// read 403 bodies as "no leader" and "empty node ID" and fail
+					// with assertion messages that never mention authorization.
+					//
+					// steward:read-dna and config:push cover the other endpoints
+					// that suite calls: GET /stewards/{id}/dna for the config hash
+					// and POST /config/push for configuration continuity.
+					Permissions: []string{
+						"steward:read", "steward:read-dna", "steward:auth-refresh",
+						"config:push",
+						"workflow:execute", "workflow:read",
+						"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+					},
+					// Steward lookups are tenant-scoped. These keys exist to observe
+					// the stewards started by the HA compose profile, which register
+					// with the seeded "integration_reusable" token and therefore land
+					// in test-tenant-integration (features/controller/server.Server,
+					// CFGMS_SEED_TEST_TOKENS block). Scoping the keys to "default"
+					// put them in a tenant containing no stewards at all, so
+					// GET /api/v1/stewards/{id} answered STEWARD_NOT_FOUND for a
+					// steward that had registered successfully seconds earlier.
+					TenantID: "test-tenant-integration",
 				}
 			}
 		}
@@ -478,7 +502,10 @@ func (s *Server) setupRouter() {
 	// requireTier(TierAny) removed: it was a no-op passthrough (Issue #2780 migrates to assurance-based enforcement).
 	api.Use(s.validationMiddleware)
 	api.Use(s.csrfMiddleware) // Issue #2493: session-bound CSRF for unsafe cookie-auth methods
-	s.apiRouter = api         // saved so Set* methods can lazy-register routes after construction
+	// Issue #2966: enrollment confinement — a cookie-authenticated session with zero enrolled
+	// passkeys is refused all api routes; first-passkey enrollment is on the base router.
+	api.Use(s.enrollmentConfinementMiddleware)
+	s.apiRouter = api // saved so Set* methods can lazy-register routes after construction
 
 	// --- Tier 0 (TierPublic) — no authentication required ---
 	//   GET  /api/v1/health
@@ -581,6 +608,15 @@ func (s *Server) setupRouter() {
 		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginBegin))).Methods("POST")
 	s.router.Handle("/api/v1/web/passkey/login/finish",
 		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyLoginFinish))).Methods("POST")
+
+	// First-passkey enrollment routes (Issue #2966: ADR-021 Amendment 1).
+	// Registered on the BASE router (public pattern): the enrollment token is the bearer
+	// credential; no web session is required. Self-scoped to the account the token identifies —
+	// never to a caller-supplied {username}. Token is passed via X-Enrollment-Token header.
+	s.router.Handle("/api/v1/web/passkey/enroll/begin",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyEnrollBegin))).Methods("POST")
+	s.router.Handle("/api/v1/web/passkey/enroll/finish",
+		s.authDefense.Middleware(http.HandlerFunc(s.handlePasskeyEnrollFinish))).Methods("POST")
 
 	// Installer package download — public, no auth required (Issue #1704).
 	// Assembles a per-platform tar.gz on the fly. The download URL is the distribution mechanism.

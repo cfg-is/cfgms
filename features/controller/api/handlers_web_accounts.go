@@ -48,10 +48,6 @@ const (
 	// mirroring how API-key records use their hash as the key.
 	webAccountKeyPrefix = "web-account-"
 
-	// enrollmentLinkTTL is the default TTL for enrollment magic links (Issue #2974).
-	// 72 hours gives the admin time to hand off the link out-of-band.
-	enrollmentLinkTTL = 72 * time.Hour
-
 	// enrollmentTokenBytes is the random source length for enrollment magic links.
 	// 20 bytes = 160 bits of entropy — exceeds the >=128-bit requirement (Issue #2974).
 	enrollmentTokenBytes = 20
@@ -74,12 +70,17 @@ var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 // Credentials holds registered WebAuthn passkeys / FIDO2 credentials (Issue #2782).
 // These are public keys — they are stored in the same secrets-store record as the
 // account identity (one persistence path per account). See WebAuthnCredential.
+//
+// Disabled: true prevents login via VerifyWebCredential regardless of valid
+// credentials. It does not remove RBAC role assignments or WebAuthn credentials
+// (Issue #3126: it is a login gate, not a data-removal operation).
 type webAccount struct {
 	ID          string
 	Username    string
 	TenantID    string
 	RootScope   bool // true when TenantID == "" by explicit grant (Issue #2919)
 	Permissions []string
+	Disabled    bool // Issue #3126: login gate — does not remove credentials or roles
 	CreatedAt   time.Time
 	Credentials []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
 	// Issue #2974: enrollment magic link (minted on create; #2966 redeems it).
@@ -113,17 +114,45 @@ type WebAccountRequest struct {
 	ResetCredentials bool     `json:"reset_credentials,omitempty"` // Issue #2974: ADR-021 Am.1 Decision 4
 }
 
-// WebAccountInfo is the response shape for account list and identity. It never
+// WebAccountInfo is the response shape for account list, get-one, and update. It never
 // carries any secret material. HasOutstandingEnrollmentLink is true when an
 // unredeemed, non-expired, non-revoked link exists for the account (Issue #2974).
+// Disabled is true when the account has been administratively disabled (Issue #3126).
 type WebAccountInfo struct {
 	ID                           string    `json:"id"`
 	Username                     string    `json:"username"`
 	TenantID                     string    `json:"tenant_id"`
 	RootScope                    bool      `json:"root_scope"` // Issue #2919
 	Permissions                  []string  `json:"permissions"`
+	Disabled                     bool      `json:"disabled"` // Issue #3126
 	CreatedAt                    time.Time `json:"created_at"`
 	HasOutstandingEnrollmentLink bool      `json:"has_outstanding_enrollment_link"` // Issue #2974
+}
+
+// WebAccountUpdateRequest is the PUT /api/v1/web/accounts/{username} body (Issue #3126).
+// All fields are optional — omitted fields retain their current values, allowing
+// independent update of permissions, disabled state, and credentials without
+// requiring a full account record. A nil pointer means "not provided; keep
+// existing value".
+//
+// ResetCredentials is the update-side equivalent of WebAccountRequest.ResetCredentials
+// (ADR-021 Amendment 1 Decision 4): accounts are passkey-only, so "reset the
+// password" re-provisions the account to the zero-authenticator state and mints
+// a fresh enrollment magic link, exactly mirroring handleCreateWebAccount's
+// reset path. It is independent of Permissions and Disabled.
+type WebAccountUpdateRequest struct {
+	Permissions      *[]string `json:"permissions"`
+	Disabled         *bool     `json:"disabled"`
+	ResetCredentials bool      `json:"reset_credentials,omitempty"`
+}
+
+// WebAccountUpdateResponse is returned by PUT /api/v1/web/accounts/{username}.
+// EnrollmentMagicLink is present only when reset_credentials was set to true —
+// the same single-use, TTL-bounded token minted by the create/reset path
+// (Issue #2974); absent for all other update shapes since no new link is minted.
+type WebAccountUpdateResponse struct {
+	WebAccountInfo
+	EnrollmentMagicLink string `json:"enrollment_magic_link,omitempty"`
 }
 
 // WebAccountCreateResponse is returned by POST /api/v1/web/accounts only.
@@ -263,6 +292,8 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (
 		acct.TenantID = ""
 		acct.RootScope = true
 	}
+	// Issue #3126: restore the disabled flag. Absent key means not disabled.
+	acct.Disabled = secret.Metadata["disabled"] == "true"
 	// Issue #2782: deserialize stored WebAuthn credentials (public keys; non-secret).
 	if credsJSON, ok := secret.Metadata["credentials"]; ok && credsJSON != "" {
 		var creds []WebAuthnCredential
@@ -297,6 +328,11 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 	// TenantID="" on reload (the store holds them under the "system" sentinel tenant).
 	if acct.RootScope {
 		meta["root_scope"] = "true"
+	}
+	// Issue #3126: persist the disabled flag. Only stored when true to keep
+	// metadata sparse for non-disabled accounts (omitted key == not disabled).
+	if acct.Disabled {
+		meta["disabled"] = "true"
 	}
 	// Issue #2782: persist WebAuthn credentials (public keys) in metadata.
 	if len(acct.Credentials) > 0 {
@@ -356,6 +392,53 @@ func (s *Server) emitWebAccountAudit(ctx context.Context, action, tenantID, acti
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
+}
+
+// getWebAccountByEnrollmentToken finds the web account whose enrollment token hash
+// matches hash(rawToken). The scan is necessary because tokens identify accounts —
+// the lookup direction is token→account, not account→token. Cache is checked first;
+// if not found there, the durable store is scanned.
+//
+// Returns (nil, nil) when no account with the given token exists. The caller MUST
+// call verifyEnrollmentToken on the returned account to confirm validity, expiry, and
+// revocation status — the store lookup finds by hash only and does not check liveness.
+func (s *Server) getWebAccountByEnrollmentToken(ctx context.Context, rawToken string) (*webAccount, error) {
+	tokenHash := hashEnrollmentToken(rawToken)
+
+	// Check the in-memory cache first — the fresh handler path uses loadWebAccountFromStore
+	// for CAS purposes, but begin can use the cache for a fast validity check.
+	s.mu.RLock()
+	for _, acct := range s.webAccounts {
+		if acct != nil && acct.EnrollmentLinkHash == tokenHash {
+			s.mu.RUnlock()
+			return acct, nil
+		}
+	}
+	s.mu.RUnlock()
+
+	if s.secretStore == nil {
+		return nil, nil
+	}
+	// Cache miss: scan the store by token hash. Filtering by the hash directly avoids
+	// loading all accounts. An account with a consumed/expired token will still match
+	// here; the caller checks validity separately via verifyEnrollmentToken.
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: webAccountSecretType,
+			"enrollment_link_hash":          tokenHash,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan accounts by enrollment token: %w", err)
+	}
+	if len(metas) == 0 {
+		return nil, nil
+	}
+	username := metas[0].Metadata["username"]
+	if username == "" {
+		return nil, fmt.Errorf("account matched by enrollment token is missing username metadata")
+	}
+	return s.loadWebAccountFromStore(ctx, username)
 }
 
 // --- enrollment magic link (Issue #2974) ---
@@ -481,6 +564,13 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		if acct.Permissions == nil {
 			acct.Permissions = existing.Permissions
 		}
+		// Issue #3126: a reset must never re-enable a disabled account. Disable is a
+		// containment control (an admin account suspected of takeover); persistWebAccount
+		// rebuilds the metadata from the record it is handed, so dropping this carry-forward
+		// would silently clear the "disabled" key and revive the account — with retained
+		// passkeys — under a web_account.reset audit action that never reads as an enable.
+		// Re-enabling is an explicit PUT {"disabled": false}, which emits web_account.enabled.
+		acct.Disabled = existing.Disabled
 		// Issue #2782: preserve registered WebAuthn credentials across account resets,
 		// unless the admin explicitly re-provisions to the zero-authenticator state
 		// (ADR-021 Amendment 1 Decision 4 — reset_credentials invalidates residual
@@ -555,7 +645,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		acct.EnrollmentLinkHash = tokenHash
-		acct.EnrollmentLinkExpiresAt = time.Now().UTC().Add(enrollmentLinkTTL)
+		acct.EnrollmentLinkExpiresAt = time.Now().UTC().Add(s.cfg.Registration.GetEnrollmentLinkTTL())
 		acct.EnrollmentLinkRevoked = false
 	} else {
 		acct.EnrollmentLinkHash = existing.EnrollmentLinkHash
@@ -570,6 +660,17 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.cacheWebAccount(acct)
+
+	// Issue #3126: a reset that re-provisions to the zero-authenticator state must also
+	// terminate the account's live browser sessions. Same reasoning as the PUT path —
+	// this is the takeover-containment operation, and sessions minted by the passkeys
+	// being wiped would otherwise stay usable for the absolute session lifetime.
+	if existing != nil && req.ResetCredentials {
+		revoked := s.revokeWebSessionsForPrincipal(r.Context(), acct.ID)
+		s.logger.Info("Revoked live web sessions for credential reset",
+			"username", logging.SanitizeLogValue(acct.Username),
+			"revoked_sessions", revoked)
+	}
 
 	// Audit records account + whether a link was minted and how it is delivered.
 	// The raw token is NEVER logged or audited.
@@ -593,6 +694,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 			TenantID:                     acct.TenantID,
 			RootScope:                    acct.RootScope,
 			Permissions:                  acct.Permissions,
+			Disabled:                     acct.Disabled, // Issue #3126: a reset retains the disable
 			CreatedAt:                    acct.CreatedAt,
 			HasOutstandingEnrollmentLink: enrollmentLinkOutstanding(acct),
 		},
@@ -747,12 +849,291 @@ func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 			TenantID:                     tenantID,
 			RootScope:                    rootScope,
 			Permissions:                  parsePermissions(meta.Metadata["permissions"]),
+			Disabled:                     meta.Metadata["disabled"] == "true", // Issue #3126
 			CreatedAt:                    createdAt,
 			HasOutstandingEnrollmentLink: hasOutstandingLink,
 		})
 	}
 
 	s.writeSuccessResponse(w, accounts)
+}
+
+// VerifyWebCredential is the login-gate enforcement point for web accounts (Issue #3126).
+// It is called after successful WebAuthn assertion to check whether the account may
+// proceed to session issuance. Returns ErrInvalidWebCredential when the account is
+// disabled — the caller must not leak whether the account is disabled vs. not found.
+func (s *Server) VerifyWebCredential(acct *webAccount) error {
+	if acct == nil {
+		return ErrInvalidWebCredential
+	}
+	if acct.Disabled {
+		return ErrInvalidWebCredential
+	}
+	return nil
+}
+
+// revokeWebSessionsForPrincipal revokes every live web session belonging to the
+// given web-account ID and drops the session-bound CSRF token for each
+// (Issue #3126). Returns the number of sessions revoked.
+//
+// Revocation is best effort per session: a store failure on one session is logged
+// and does not stop the remaining ones. It is not the only line of defence —
+// authenticationMiddleware re-resolves the account on every request and rejects a
+// disabled one — so a partial failure degrades to "rejected on next request",
+// never to "still authorized".
+func (s *Server) revokeWebSessionsForPrincipal(ctx context.Context, principalID string) int {
+	if principalID == "" {
+		return 0
+	}
+	s.mu.RLock()
+	mgr := s.webSessionManager
+	s.mu.RUnlock()
+	if mgr == nil {
+		return 0
+	}
+
+	sessions, err := mgr.List(ctx)
+	if err != nil {
+		s.logger.Error("Failed to list web sessions for revocation",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return 0
+	}
+
+	revoked := 0
+	for _, sess := range sessions {
+		if sess == nil || sess.PrincipalID != principalID {
+			continue
+		}
+		s.csrfTokens.Delete(sess.ID)
+		if revokeErr := mgr.Revoke(ctx, sess.ID); revokeErr != nil {
+			s.logger.Warn("Failed to revoke web session",
+				"session_id", logging.SanitizeLogValue(sess.ID),
+				"error", logging.SanitizeLogValue(revokeErr.Error()))
+			continue
+		}
+		revoked++
+	}
+	return revoked
+}
+
+// handleGetWebAccount handles GET /api/v1/web/accounts/{username} (Issue #3126).
+// Returns the account's identity and status — no secret material, no WebAuthn credentials.
+// A cross-tenant caller gets 404 to avoid disclosing account existence.
+func (s *Server) handleGetWebAccount(w http.ResponseWriter, r *http.Request) {
+	username := mux.Vars(r)["username"]
+	if err := validateWebUsername(username); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
+		return
+	}
+
+	acct, err := s.getWebAccount(r.Context(), username)
+	if err != nil {
+		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	// Issue #3126: enforce tenant-subtree scope. A cross-tenant caller gets 404 —
+	// not 403 — to avoid disclosing that the account exists in another tenant.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if !isWithinTenantScope(callerTenant, acct.TenantID) {
+		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	s.writeSuccessResponse(w, WebAccountInfo{
+		ID:                           acct.ID,
+		Username:                     acct.Username,
+		TenantID:                     acct.TenantID,
+		RootScope:                    acct.RootScope,
+		Permissions:                  acct.Permissions,
+		Disabled:                     acct.Disabled,
+		CreatedAt:                    acct.CreatedAt,
+		HasOutstandingEnrollmentLink: enrollmentLinkOutstanding(acct),
+	})
+}
+
+// handleUpdateWebAccount handles PUT /api/v1/web/accounts/{username} (Issue #3126, Tier-3).
+// All request fields are optional — omitted fields retain existing values.
+// A cross-tenant caller gets 404 to avoid disclosing account existence.
+func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) {
+	username := mux.Vars(r)["username"]
+	if err := validateWebUsername(username); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
+		return
+	}
+
+	var req WebAccountUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+
+	// Validate any provided permissions against the allow-list.
+	if req.Permissions != nil {
+		for _, p := range *req.Permissions {
+			if !isKnownPermission(p) {
+				s.writeErrorResponse(w, http.StatusBadRequest,
+					"Unknown or reserved permission ID: "+p, "INVALID_PERMISSION")
+				return
+			}
+		}
+	}
+
+	acct, err := s.getWebAccount(r.Context(), username)
+	if err != nil {
+		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	// Issue #3126: enforce tenant-subtree scope before mutating anything.
+	// A cross-tenant caller gets 404 — not 403 — to avoid disclosing account existence.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if !isWithinTenantScope(callerTenant, acct.TenantID) {
+		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	actingPrincipalID := ""
+	if principal != nil {
+		actingPrincipalID = principal.ID
+	}
+
+	// Apply partial updates — only modify fields that were provided.
+	updated := *acct
+	if req.Permissions != nil {
+		updated.Permissions = *req.Permissions
+		if updated.Permissions == nil {
+			updated.Permissions = []string{}
+		}
+	}
+	disabledChanged := req.Disabled != nil && *req.Disabled != acct.Disabled
+	if req.Disabled != nil {
+		updated.Disabled = *req.Disabled
+	}
+
+	// Issue #3126 (review follow-up): "reset the password" in the passkey-only
+	// model (ADR-021 Amendment 1) is a credential reset — re-provision to the
+	// zero-authenticator state and mint a fresh enrollment link, exactly
+	// mirroring handleCreateWebAccount's ResetCredentials path. Independent of
+	// permissions/disabled changes above.
+	var rawToken string
+	if req.ResetCredentials {
+		updated.Credentials = nil
+		tokenHash := ""
+		var mintErr error
+		rawToken, tokenHash, mintErr = mintEnrollmentToken()
+		if mintErr != nil {
+			s.logger.Error("Failed to mint enrollment token", "error", logging.SanitizeLogValue(mintErr.Error()),
+				"username", logging.SanitizeLogValue(username))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to mint enrollment link", "TOKEN_ERROR")
+			return
+		}
+		updated.EnrollmentLinkHash = tokenHash
+		updated.EnrollmentLinkExpiresAt = time.Now().UTC().Add(s.cfg.Registration.GetEnrollmentLinkTTL())
+		updated.EnrollmentLinkRevoked = false
+	}
+
+	if err := s.persistWebAccount(r.Context(), &updated, actingPrincipalID); err != nil {
+		s.logger.Error("Failed to persist web account update", "error", logging.SanitizeLogValue(err.Error()),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update web account", "STORE_ERROR")
+		return
+	}
+	s.cacheWebAccount(&updated)
+
+	// Issue #3126: both containment operations terminate the account's live browser
+	// sessions. The login gate alone would leave an already-authenticated session
+	// usable for the remainder of the absolute session lifetime, so containment must
+	// reach sessions that already exist — authenticationMiddleware rejects any that
+	// survive a revocation failure, this makes the termination immediate.
+	//   - disable: the account is being taken out of service.
+	//   - reset_credentials: in the passkey-only model (ADR-021 Amendment 1 Decision 4)
+	//     this is the "reset the password" operation an admin reaches for on a suspected
+	//     account takeover. Wiping the passkeys without cutting the sessions they already
+	//     minted would leave the attacker's cookie live, so the containment operation
+	//     would not contain.
+	if (disabledChanged && updated.Disabled) || req.ResetCredentials {
+		revoked := s.revokeWebSessionsForPrincipal(r.Context(), updated.ID)
+		// go/log-injection: derive from an explicit branch to a string literal so no
+		// value flows from the request to the log sink (CodeQL taint-tracks request
+		// booleans through struct fields regardless of type; strconv.FormatBool would
+		// still count as a value-propagating conversion).
+		disabledState, resetState := "false", "false"
+		if updated.Disabled {
+			disabledState = "true"
+		}
+		if req.ResetCredentials {
+			resetState = "true"
+		}
+		s.logger.Info("Revoked live web sessions for web account",
+			"username", logging.SanitizeLogValue(username),
+			"disabled", disabledState,
+			"credentials_reset", resetState,
+			"revoked_sessions", revoked)
+	}
+
+	// Emit granular audit events. A disable/enable transition and a credential reset
+	// are independent operations that one request can perform together, so each emits
+	// its own event: a first-match switch would let a combined request bury the
+	// credential reset behind web_account.disabled, leaving the passkey wipe and the
+	// bearer enrollment-link mint with no audit trace at all — an audit-evasion path
+	// for a privileged actor. Other field changes fall back to the generic action.
+	var actions []string
+	if disabledChanged {
+		action := "web_account.enabled"
+		if updated.Disabled {
+			action = "web_account.disabled"
+		}
+		actions = append(actions, action)
+		s.emitWebAccountAudit(r.Context(), action, updated.TenantID, actingPrincipalID, username, nil)
+	}
+	if req.ResetCredentials {
+		// Mirrors handleCreateWebAccount: minting a bearer enrollment credential records
+		// that it was minted and how it is delivered (Issue #2974). The raw token is
+		// NEVER logged or audited.
+		actions = append(actions, "web_account.credentials_reset")
+		s.emitWebAccountAudit(r.Context(), "web_account.credentials_reset", updated.TenantID,
+			actingPrincipalID, username, map[string]interface{}{
+				"enrollment_link_minted": rawToken != "",
+				"delivery_method":        "ui-shown",
+			})
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "web_account.updated")
+		s.emitWebAccountAudit(r.Context(), "web_account.updated", updated.TenantID, actingPrincipalID, username, nil)
+	}
+	s.logger.Info("Web admin account updated",
+		"actions", strings.Join(actions, ","),
+		"username", logging.SanitizeLogValue(username),
+		"tenant_id", logging.SanitizeLogValue(updated.TenantID),
+		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
+
+	s.writeSuccessResponse(w, WebAccountUpdateResponse{
+		WebAccountInfo: WebAccountInfo{
+			ID:                           updated.ID,
+			Username:                     updated.Username,
+			TenantID:                     updated.TenantID,
+			RootScope:                    updated.RootScope,
+			Permissions:                  updated.Permissions,
+			Disabled:                     updated.Disabled,
+			CreatedAt:                    updated.CreatedAt,
+			HasOutstandingEnrollmentLink: enrollmentLinkOutstanding(&updated),
+		},
+		EnrollmentMagicLink: rawToken,
+	})
 }
 
 // handleDeleteWebAccount handles DELETE /api/v1/web/accounts/{username} (Tier-3).
