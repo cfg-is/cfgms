@@ -207,32 +207,85 @@ func (s *Server) cacheWebAccount(acct *webAccount) {
 	s.webAccounts[acct.Username] = acct
 }
 
-// getWebAccount returns the account for username from the cache, falling back to
-// the central secret store on a miss (so accounts survive controller restart).
-// Returns (nil, nil) when the account does not exist.
+// getWebAccount returns the account for username, re-verifying the disabled status
+// from the durable store on every call — including a cache hit — so that a disable
+// performed on another controller node is honoured on this node's very next request
+// (Issue #3311). On a cache hit the store is queried; if the store has no entry (e.g.
+// the account was injected into the cache for testing without a backing store record),
+// the cached value is returned so callers are not surprised by a sudden nil.
 func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccount, error) {
 	s.mu.RLock()
-	acct := s.webAccounts[username]
+	cached := s.webAccounts[username]
 	s.mu.RUnlock()
-	if acct != nil {
-		return acct, nil
+	if cached == nil {
+		return s.loadWebAccountFromStore(ctx, username)
 	}
-	return s.loadWebAccountFromStore(ctx, username)
+	// Issue #3311: Re-verify from the durable store on every cache hit so a status
+	// change written by another controller node propagates on this node's very next
+	// request. If the store returns nil (no matching record — e.g. account injected
+	// into cache for tests but not persisted, or concurrently deleted), fall back to
+	// the cached value so behaviour is equivalent to the pre-fix cache-hit path.
+	fresh, err := s.loadWebAccountFromStore(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if fresh != nil {
+		return fresh, nil
+	}
+	return cached, nil
 }
 
 // getWebAccountByID resolves the durable principal ID stored in a web session
 // back to its account. Session principal IDs are deliberately stable across
 // account updates, so authentication middleware must not treat the ID
 // as a username when loading permissions and tenant scope.
+//
+// Issue #3311: On a cache hit the disabled status is re-verified against the
+// durable store, so a disable on another controller node propagates on this
+// node's very next request. If the store returns no matching record (e.g. account
+// was injected via cacheWebAccount without a backing store record, or was
+// concurrently deleted), the cached value is returned so behaviour matches the
+// pre-fix cache-hit path.
+//
+// The cache is keyed by username while this lookup is by principal ID, so the
+// re-verified record is only trusted when its ID still matches the requested
+// principal. A username that has been deleted and recreated resolves to a
+// different principal, which must never inherit the requesting session's identity.
 func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*webAccount, error) {
 	s.mu.RLock()
+	var cached *webAccount
 	for _, acct := range s.webAccounts {
 		if acct != nil && acct.ID == principalID {
-			s.mu.RUnlock()
-			return acct, nil
+			cached = acct
+			break
 		}
 	}
 	s.mu.RUnlock()
+
+	if cached != nil {
+		// Issue #3311: Re-verify from the durable store on every cache hit.
+		fresh, err := s.loadWebAccountFromStore(ctx, cached.Username)
+		if err != nil {
+			return nil, err
+		}
+		if fresh == nil {
+			// Store has no entry; return the cached account (e.g. injected via
+			// cacheWebAccount for tests, or concurrently deleted from the store).
+			return cached, nil
+		}
+		if fresh.ID == principalID {
+			return fresh, nil
+		}
+		// Identity guard: the cache is keyed by username, but this lookup is by
+		// principal ID, and IDs are minted fresh on every create (uuid.New). A
+		// delete-and-recreate of the same username therefore yields a record whose
+		// ID differs from the one this session holds. Returning it would hand the
+		// caller a different principal's permissions and tenant scope, so the
+		// mismatched record is discarded here. loadWebAccountFromStore has already
+		// replaced the stale username-keyed cache entry with what it just read, so
+		// nothing stale is left behind; fall through to the authoritative
+		// ID-filtered store lookup, which reports the orphaned principal as absent.
+	}
 
 	if s.secretStore == nil {
 		return nil, nil
@@ -259,6 +312,14 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 // loadWebAccountFromStore reloads an account record from the central secret store
 // and re-caches it. The tenant is not known at lookup time, so the record is
 // located by metadata filter.
+//
+// All web-account fields are stored in the ListSecrets metadata map; the secret
+// Value is always empty (Issue #2993 passkey-only). Reading from the metadata
+// returned by ListSecrets avoids a second GetSecret round-trip and works correctly
+// for multi-level tenant IDs (e.g., root/msp-a/client-2) where GetSecret's
+// single-slash key splitting would produce the wrong TenantID. ListSecrets also
+// bypasses the SOPS in-process cache, so the result always reflects the latest
+// on-disk state — which is the property required for cross-node propagation (Issue #3311).
 func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (*webAccount, error) {
 	if s.secretStore == nil {
 		return nil, nil
@@ -275,36 +336,33 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (
 	if len(metas) == 0 {
 		return nil, nil
 	}
-	secret, err := s.secretStore.GetSecret(ctx, metas[0].TenantID+"/"+metas[0].Key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load web account: %w", err)
-	}
+	m := metas[0]
 	acct := &webAccount{
-		ID:          secret.Metadata["id"],
-		Username:    secret.Metadata["username"],
-		TenantID:    secret.TenantID,
-		Permissions: parsePermissions(secret.Metadata["permissions"]),
-		CreatedAt:   secret.CreatedAt,
+		ID:          m.Metadata["id"],
+		Username:    m.Metadata["username"],
+		TenantID:    m.TenantID,
+		Permissions: parsePermissions(m.Metadata["permissions"]),
+		CreatedAt:   m.CreatedAt,
 	}
 	// Issue #2919: restore root-scoped accounts. They are stored under the
 	// "system" sentinel tenant; the metadata flag is the authoritative marker.
-	if secret.Metadata["root_scope"] == "true" {
+	if m.Metadata["root_scope"] == "true" {
 		acct.TenantID = ""
 		acct.RootScope = true
 	}
 	// Issue #3126: restore the disabled flag. Absent key means not disabled.
-	acct.Disabled = secret.Metadata["disabled"] == "true"
+	acct.Disabled = m.Metadata["disabled"] == "true"
 	// Issue #2782: deserialize stored WebAuthn credentials (public keys; non-secret).
-	if credsJSON, ok := secret.Metadata["credentials"]; ok && credsJSON != "" {
+	if credsJSON, ok := m.Metadata["credentials"]; ok && credsJSON != "" {
 		var creds []WebAuthnCredential
 		if err := json.Unmarshal([]byte(credsJSON), &creds); err == nil {
 			acct.Credentials = creds
 		}
 	}
 	// Issue #2974: restore enrollment magic link state (hash only — never plaintext).
-	acct.EnrollmentLinkHash = secret.Metadata["enrollment_link_hash"]
-	acct.EnrollmentLinkRevoked = secret.Metadata["enrollment_link_revoked"] == "true"
-	if ts, ok := secret.Metadata["enrollment_link_expires_at"]; ok && ts != "" {
+	acct.EnrollmentLinkHash = m.Metadata["enrollment_link_hash"]
+	acct.EnrollmentLinkRevoked = m.Metadata["enrollment_link_revoked"] == "true"
+	if ts, ok := m.Metadata["enrollment_link_expires_at"]; ok && ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
 			acct.EnrollmentLinkExpiresAt = t
 		}
