@@ -223,6 +223,9 @@ func TestWebSessionEnforcesAccountPermissionsAndTenantScope(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 	acct.Permissions = []string{"steward:list"}
+	// Persist the permission grant to the store so that the Issue #3311 re-verify
+	// path in getWebAccount/getWebAccountByID reads the updated value from disk.
+	require.NoError(t, srv.persistWebAccount(context.Background(), acct, "test"))
 	srv.cacheWebAccount(acct)
 
 	loginRec := doPasskeyLogin(t, srv, username, "")

@@ -17,9 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // postWebAccount calls handleCreateWebAccount directly with an mTLS admin principal
@@ -904,17 +910,19 @@ func TestWebAccounts_EnrollmentLinkExpiredNotOutstanding(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	// Back-date the expiry in the in-memory cache so the link is past its TTL.
+	// Back-date the expiry directly in the in-memory struct and persist that to the store.
+	// getWebAccount now always re-reads from the store (Issue #3311 cross-node fix), so we
+	// read from the webAccounts map under the lock and persist the mutated value immediately
+	// rather than reading it back via getWebAccount (which would see the on-disk state, not
+	// the in-memory mutation).
+	var acct *webAccount
 	server.mu.Lock()
-	if acct, ok := server.webAccounts["expired-link-user"]; ok {
-		acct.EnrollmentLinkExpiresAt = time.Now().Add(-1 * time.Hour) // already expired
+	if found, ok := server.webAccounts["expired-link-user"]; ok {
+		found.EnrollmentLinkExpiresAt = time.Now().Add(-1 * time.Hour) // already expired
+		acct = found
 	}
 	server.mu.Unlock()
-
-	// Persist the expired state to the store so the list query sees it.
-	acct, err := server.getWebAccount(context.Background(), "expired-link-user")
-	require.NoError(t, err)
-	require.NotNil(t, acct)
+	require.NotNil(t, acct, "account must be in cache after creation")
 	require.NoError(t, server.persistWebAccount(context.Background(), acct, admin.ID))
 
 	dropWebAccountCache(server)
@@ -2244,4 +2252,268 @@ func TestWebAccounts_UpdateDisableOnly_DoesNotEmitCredentialsReset(t *testing.T)
 	require.NoError(t, err)
 	assert.Empty(t, updatedEntries,
 		"a disable must not also emit the generic updated action")
+}
+
+// ---- Issue #3311: cross-node disabled-status propagation ----
+
+// setupTwoNodeSharedStoreServers creates two independent Server instances that share a
+// single durable secret store. The secret-store env vars are set once before constructing
+// either server; both servers therefore resolve to the same on-disk path, which is how
+// a disable written through one node becomes visible to the other (Issue #3311).
+//
+// Non-secret storage (RBAC, tenant, audit) is independent per node — only the secret
+// store needs to be shared for this test to be meaningful. Each node also runs its own
+// independent in-memory web session manager, modelling separate process memory.
+func setupTwoNodeSharedStoreServers(t *testing.T) (*Server, *Server) {
+	t.Helper()
+	// One call to setTestSecretsEnv so both servers share the same on-disk store.
+	// Calling it twice would give each server its own TempDir, preventing sharing.
+	setTestSecretsEnv(t)
+
+	newNode := func() *Server {
+		cfg := config.DefaultConfig()
+		cfg.ExternalURL = "https://localhost:8080"
+		cfg.Certificate.EnableCertManagement = false
+		logger := logging.NewNoopLogger()
+
+		storageManager := pkgtesting.SetupTestStorage(t)
+		rbacManager := rbac.NewManagerWithStorage(
+			storageManager.GetAuditStore(),
+			storageManager.GetClientTenantStore(),
+			storageManager.GetRBACStore(),
+		)
+		err := rbacManager.Initialize(context.Background())
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = rbacManager.Close(closeCtx)
+		})
+
+		tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+		tenantManager := tenant.NewManager(tenantStore, rbacManager)
+		controllerSvc := service.NewControllerService(logger)
+		configSvc := service.NewConfigurationServiceV2(logger, storageManager, controllerSvc)
+		rbacSvc := service.NewRBACService(rbacManager)
+
+		auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+		srv, err := New(
+			cfg, logger, controllerSvc, configSvc,
+			nil, rbacSvc, nil, tenantManager, rbacManager,
+			nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = srv.Close(closeCtx)
+		})
+
+		// Each node runs its own independent in-memory web session manager.
+		// Sessions are NOT shared — only the secret store is. This models separate
+		// controller processes where each issues its own sessions but reads disabled
+		// status from the shared durable store.
+		webCfg := session.Config{
+			IdleTimeout:     60 * time.Minute,
+			AbsoluteTimeout: 12 * time.Hour,
+			GraceWindow:     30 * time.Second,
+		}
+		sessStore := session.NewMemStore(webCfg, time.Now)
+		t.Cleanup(sessStore.Close)
+		srv.SetWebSessionManager(session.NewManager(webCfg, sessStore, time.Now))
+
+		return srv
+	}
+
+	return newNode(), newNode()
+}
+
+// TestWebAccounts_CrossNode_DisabledStatusPropagates is the [REQUIRED TEST] for Issue #3311:
+// two real Server instances share one durable secret store. Disable through node A, then
+// assert node B's authenticationMiddleware rejects on its very next request — with no
+// restart and no explicit cache-drop or warm-up step.
+//
+// Node B's webAccounts map holds a stale Disabled=false entry (injected via cacheWebAccount,
+// bypassing the SOPS store so node B's in-process secret cache is never warmed). When the
+// fix calls loadWebAccountFromStore on the cache hit, the SOPS store has no cached copy for
+// node B and reads fresh from disk — picking up the Disabled=true written by node A.
+func TestWebAccounts_CrossNode_DisabledStatusPropagates(t *testing.T) {
+	nodeA, nodeB := setupTwoNodeSharedStoreServers(t)
+	admin := testAdminPrincipal()
+	const username = "cross-node-disable-user"
+
+	// Step 1: Create the account through node A (writes to the shared secret store and
+	// caches on node A; node B has no knowledge of the account yet).
+	rec := postWebAccount(t, nodeA, admin, WebAccountRequest{
+		Username:    username,
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "create body: %s", rec.Body.String())
+
+	// Step 2: Obtain the account record from node A's store and inject a stale copy into
+	// node B's in-memory webAccounts map via cacheWebAccount. Using cacheWebAccount directly
+	// (rather than nodeB.getWebAccount) ensures node B's SOPS-provider cache is NOT warmed —
+	// only the server-level webAccounts map gets the stale Disabled=false entry. This models
+	// a replica that previously served the account but whose per-provider cache has since
+	// expired (or never covered this particular key). The bug was that the old code returned
+	// that stale map entry without ever touching the store; the fix re-checks the store on
+	// every cache hit, and because node B's SOPS cache is cold, it reads fresh from disk.
+	acctFromA, err := nodeA.loadWebAccountFromStore(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acctFromA, "node A must be able to load the account from the shared store")
+	require.False(t, acctFromA.Disabled, "account must not be disabled before the disable operation")
+	nodeB.cacheWebAccount(acctFromA) // inject stale Disabled=false into nodeB.webAccounts only
+
+	// Step 3: Disable the account through node A, writing Disabled=true to the shared store.
+	// Node A's cache and the store are updated; node B's webAccounts map still holds the
+	// stale Disabled=false pointer, and node B's SOPS cache has no entry for this secret.
+	disabled := true
+	putRec := putWebAccount(t, nodeA, admin, username, WebAccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, putRec.Code, "disable body: %s", putRec.Body.String())
+
+	// Step 4: Mint a session on node B for the account. Node B's session manager is
+	// independent of node A's — as it would be for separate controller processes.
+	// The session is valid at the session layer; only the account status has changed.
+	_, sessionToken, issueErr := nodeB.webSessionManager.Issue(
+		context.Background(), acctFromA.ID, "web", acctFromA.TenantID,
+	)
+	require.NoError(t, issueErr)
+	require.NotEmpty(t, sessionToken)
+
+	// Step 5: Drive a real HTTP request through node B's router using the session cookie.
+	// Node B's webAccounts map has the stale Disabled=false entry from step 2.
+	// The fix makes getWebAccountByID call loadWebAccountFromStore on every cache hit;
+	// node B's SOPS cache is cold, so it reads Disabled=true from disk and the
+	// authenticationMiddleware rejects this first request with SESSION_REVOKED.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(&http.Cookie{Name: cookieWebSession, Value: sessionToken})
+	routerRec := httptest.NewRecorder()
+	nodeB.router.ServeHTTP(routerRec, req)
+	require.Equal(t, http.StatusUnauthorized, routerRec.Code,
+		"node B must reject the session of the account disabled on node A: %s", routerRec.Body.String())
+	assert.Equal(t, "SESSION_REVOKED", errCode(t, routerRec.Body.Bytes()),
+		"rejection must be SESSION_REVOKED — account is disabled and the store re-check identified it")
+}
+
+// cachedWebAccount returns the in-memory cache entry for username, or nil.
+func cachedWebAccount(server *Server, username string) *webAccount {
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	return server.webAccounts[username]
+}
+
+// TestWebAccounts_GetWebAccount_CacheHitPropagatesStoreError covers the error path the
+// Issue #3311 re-verify introduced in getWebAccount: before the fix a cache hit returned
+// immediately, so a failing store could not affect it. Now every cache hit queries the
+// durable store, and a transient failure there must surface as an error rather than
+// silently returning a possibly-disabled cached account.
+func TestWebAccounts_GetWebAccount_CacheHitPropagatesStoreError(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "cachehit-storeerr-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: "tenant-a"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	// Confirm the cache hit is real; otherwise this would exercise the cache-miss path.
+	require.NotNil(t, cachedWebAccount(server, username),
+		"account must be cached after creation so the cache-hit branch is exercised")
+
+	listErr := errors.New("injected ListSecrets failure")
+	server.secretStore = &errListSecretStore{SecretStore: server.secretStore, listErr: listErr}
+
+	acct, err := server.getWebAccount(context.Background(), username)
+	require.Error(t, err, "a store failure during the cache-hit re-verify must not be swallowed")
+	assert.ErrorIs(t, err, listErr, "the underlying store error must be wrapped, not replaced")
+	assert.Nil(t, acct, "no account may be returned when the durable re-verify failed")
+}
+
+// TestWebAccounts_GetWebAccountByID_CacheHitPropagatesStoreError covers the equivalent
+// error path in getWebAccountByID — the authentication-middleware hot path. A store
+// failure during the Issue #3311 re-verify must fail closed (error, no account) instead
+// of returning the stale cached record.
+func TestWebAccounts_GetWebAccountByID_CacheHitPropagatesStoreError(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "cachehit-byid-storeerr-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: "tenant-a"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	cached := cachedWebAccount(server, username)
+	require.NotNil(t, cached, "account must be cached so the by-ID cache-hit branch is exercised")
+	require.NotEmpty(t, cached.ID)
+
+	listErr := errors.New("injected ListSecrets failure")
+	server.secretStore = &errListSecretStore{SecretStore: server.secretStore, listErr: listErr}
+
+	acct, err := server.getWebAccountByID(context.Background(), cached.ID)
+	require.Error(t, err, "a store failure during the by-ID cache-hit re-verify must not be swallowed")
+	assert.ErrorIs(t, err, listErr, "the underlying store error must be wrapped, not replaced")
+	assert.Nil(t, acct, "no account may be returned when the durable re-verify failed")
+}
+
+// TestWebAccounts_GetWebAccountByID_StaleCacheEntryDoesNotResolveToRecreatedAccount is the
+// identity guard for the Issue #3311 re-verify: the cache is keyed by username while this
+// lookup is by principal ID, so a delete-and-recreate of the same username leaves a stale
+// entry whose ID belongs to a principal that no longer exists. Re-loading by username would
+// otherwise return the NEW account's record — handing the orphaned session the recreated
+// account's permissions and tenant scope (root scope here). The lookup must report the
+// old principal as not found and drop the stale entry.
+func TestWebAccounts_GetWebAccountByID_StaleCacheEntryDoesNotResolveToRecreatedAccount(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+	const username = "recreated-user"
+
+	rec := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:    username,
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	original := cachedWebAccount(server, username)
+	require.NotNil(t, original)
+	originalID := original.ID
+	require.NotEmpty(t, originalID)
+
+	// Delete, then recreate the same username as a root-scoped account. The recreate
+	// mints a fresh ID (uuid.New), so the store record no longer matches originalID.
+	require.Equal(t, http.StatusOK, deleteWebAccount(t, server, admin, username).Code)
+	recreated := postWebAccount(t, server, admin, WebAccountRequest{
+		Username:  username,
+		RootScope: true,
+	})
+	require.Equal(t, http.StatusCreated, recreated.Code, "body: %s", recreated.Body.String())
+
+	newAcct := cachedWebAccount(server, username)
+	require.NotNil(t, newAcct)
+	require.NotEqual(t, originalID, newAcct.ID, "recreate must mint a fresh principal ID")
+	require.True(t, newAcct.RootScope, "recreated account must be root-scoped for this test to be meaningful")
+
+	// Model a replica that still holds the pre-delete entry under the same username key.
+	server.cacheWebAccount(original)
+
+	acct, err := server.getWebAccountByID(context.Background(), originalID)
+	require.NoError(t, err)
+	assert.Nil(t, acct,
+		"a principal ID that no longer exists must resolve to no account, never to the recreated account")
+
+	// No stale entry may survive the lookup: the username key now holds the record
+	// read from the store, not the deleted principal.
+	remaining := cachedWebAccount(server, username)
+	require.NotNil(t, remaining)
+	assert.NotEqual(t, originalID, remaining.ID,
+		"the stale cache entry must not survive the identity mismatch")
+
+	// The recreated account is still resolvable by its own (new) ID.
+	byNewID, err := server.getWebAccountByID(context.Background(), newAcct.ID)
+	require.NoError(t, err)
+	require.NotNil(t, byNewID, "the recreated account must still resolve by its own principal ID")
+	assert.Equal(t, newAcct.ID, byNewID.ID)
+	assert.True(t, byNewID.RootScope)
 }
