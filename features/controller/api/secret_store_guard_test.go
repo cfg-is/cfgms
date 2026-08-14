@@ -520,13 +520,22 @@ func TestResolveEphemeralPath_ResolvesDeepestExistingAncestor(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(realDir, link))
 
+	// The expectation must itself be resolved. t.TempDir() can sit under a
+	// symlinked root — on macOS /var/folders/... is reached through /var, which
+	// links to /private/var — so realDir as constructed is not the canonical
+	// path. Asserting against the unresolved form is the same mistake the
+	// production code made, and it fails on exactly the platform this test
+	// exists to protect.
+	wantReal, err := filepath.EvalSymlinks(realDir)
+	require.NoError(t, err)
+
 	existing := resolveEphemeralPath(link)
-	assert.Equal(t, realDir, existing, "an existing symlinked path must resolve to its target")
+	assert.Equal(t, wantReal, existing, "an existing symlinked path must resolve to its target")
 
 	// The failing case: the leaf does not exist, so EvalSymlinks fails on the
 	// full path and only an ancestor is resolvable.
 	notYetCreated := resolveEphemeralPath(filepath.Join(link, "a", "b", "c"))
-	assert.Equal(t, filepath.Join(realDir, "a", "b", "c"), notYetCreated,
+	assert.Equal(t, filepath.Join(wantReal, "a", "b", "c"), notYetCreated,
 		"a not-yet-created path must normalise the same way as an existing one")
 }
 

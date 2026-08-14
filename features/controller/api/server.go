@@ -1889,8 +1889,16 @@ func isEphemeralSecretsPath(secretsPath string) bool {
 	if hasPathPrefix(p, withSep(os.TempDir())) {
 		return true
 	}
+	// The tmpfs prefixes below are written with forward slashes, but
+	// filepath.Clean inside resolveEphemeralPath rewrites separators to the
+	// host's — on Windows "/dev/shm/cfgms" becomes "\dev\shm\cfgms" and no
+	// forward-slash prefix can ever match. Comparing in slash form keeps the
+	// check platform-independent. A POSIX tmpfs path configured on Windows is
+	// nonsense either way, but this guard is fail-closed: classifying it as
+	// ephemeral is the safe direction.
+	slashed := filepath.ToSlash(p)
 	for _, prefix := range []string{"/dev/shm/", "/run/user/"} {
-		if hasPathPrefix(p, prefix) {
+		if hasPathPrefix(slashed, prefix) {
 			return true
 		}
 	}
