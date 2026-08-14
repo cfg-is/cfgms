@@ -72,7 +72,71 @@ For each affected module:
 
 ## Phase 2: Research
 
-For each pin (run in parallel where independent — separate Bash calls in one assistant turn):
+The inventory covers ~100 pins across six kinds. Do **not** issue one upstream
+query per pin — `gomod`, `npm` and `docker` are researched in bulk, and only
+`lockstep`, `tool` and `mcp` get per-pin treatment.
+
+### 2a. Bulk staleness (kinds `gomod`, `npm`)
+
+One command per ecosystem, not one per package:
+
+```bash
+# Go: current + available update for every module, direct and indirect
+go list -m -u -f '{{.Path}} {{.Version}}{{if .Update}} -> {{.Update.Version}}{{end}}' all 2>/dev/null | grep ' -> '
+
+# npm: same shape for the frontend
+cd web && npm outdated --json 2>/dev/null
+```
+
+Match results back to inventory entries by `package`. A module that appears in
+the `go list` output but not in the inventory is **indirect** — do not create a
+staleness story for it (MVS owns its version); it is covered by 2b.
+
+### 2b. Bulk vulnerability (the whole transitive graph)
+
+This is what actually reaches the 334 indirect Go modules and every transitive
+npm package. Run all three — they have different databases and genuinely
+disagree:
+
+```bash
+# Go: authoritative for stdlib + module advisories, reachability-aware
+govulncheck ./... 2>&1 | grep -E '^Vulnerability|Found in|Fixed in'
+
+# Everything in the tree, excluding local-only artifacts. .cache/go-mod is an
+# in-tree module cache that CI does not have; scanning it floods the result
+# with findings from vendored copies rather than what we ship.
+trivy fs . --scanners vuln --severity UNKNOWN,CRITICAL,HIGH,MEDIUM \
+  --skip-dirs .cache --skip-dirs web/node_modules --quiet
+
+# Shipped artifacts — the only check that sees the OS packages and the stdlib
+# compiled into the binary. Base-image and toolchain CVEs appear ONLY here.
+docker build -f cmd/controller/Dockerfile -t cfgms-pin-scan:controller .
+trivy image cfgms-pin-scan:controller --scanners vuln --severity CRITICAL,HIGH,MEDIUM --quiet
+```
+
+Nancy (`make security-deps`) needs `GUIDE_TOKEN`; if it is absent, say the
+dependency scan was **skipped**, never that it was clean — an unauthenticated
+Nancy run returns 401, which is an absence of evidence, not evidence of absence.
+
+Map each finding to the inventory entry whose `package` matches. A finding with
+no matching entry is an indirect dependency: the story targets `go.mod`/`go.sum`
+(or `web/package-lock.json`) and states which direct parent to raise.
+
+### 2c. Base images (kind `docker`)
+
+Staleness for a digest-pinned image is not a version comparison — a tag like
+`alpine:3.23` is repointed at new digests without the tag changing. Resolve the
+tag's current digest and compare:
+
+```bash
+docker buildx imagetools inspect alpine:3.23 --format '{{.Manifest.Digest}}'
+```
+
+Vulnerability comes from the image scan in 2b, not from GHSA.
+
+### 2d. Per-pin research (kinds `lockstep`, `tool`, `mcp`)
+
+For each of these pins (run in parallel where independent — separate Bash calls in one assistant turn):
 
 1. **Latest stable version + published_at**
    - `gh:<owner>/<repo>` release source: `gh api repos/<owner>/<repo>/releases/latest --jq '{tag_name, published_at}'`
@@ -121,7 +185,51 @@ If `$ARGUMENTS` started with `--urgent`, force BUMP NOW for the named pin regard
 
 ## Phase 4: Create stories
 
-For each pin with verdict BUMP or BUMP NOW:
+### Group before you create
+
+A sweep over ~100 pins must not emit ~100 stories. Each story costs a dispatch,
+a review cycle and a merge-queue passage, and a one-line version bump does not
+justify that on its own. **Group pins into the fewest stories that keep each
+story independently reviewable and revertible.**
+
+Group pins together when **all** of these hold:
+
+- same verdict (all BUMP, or all BUMP NOW — never mix urgency)
+- no file overlap between them, or they are already lockstep with each other
+- no interaction: a failure in one does not implicate the others
+- cooldown unlock dates within ~2 days (the latest one governs the group)
+
+Keep a pin in its **own** story when any of these hold:
+
+- it carries a CVE justification the others do not — the urgency and the audit
+  trail belong to that pin alone
+- it is a `mcp` rewire (breaking tool delta), which is human-reviewed
+- it touches more than ~5 files, or its blast radius differs in kind from the
+  rest (e.g. `go-toolchain` rebuilds everything)
+- it is a `gomod`/`npm` bump whose transitive fan-out changes other modules —
+  minimum version selection can raise siblings, so the diff is not what the
+  title says
+
+Natural groupings that usually hold:
+
+| Group | Rationale |
+|---|---|
+| GitHub Action SHA pins | all `.github/workflows/`, mechanical, verified by `zizmor` |
+| Security CLI tools (gosec, trivy, …) | independent binaries, one workflow each |
+| `docker` base images | few files, verified by one image scan |
+| Direct `gomod` bumps with no CVE | one `go mod tidy`, one `go.sum` diff |
+
+Title a grouped story for the group, not the first member — e.g.
+`deps: refresh 6 GitHub Action pins (routine, cooldown elapsed)` — and give it a
+table of every pin with from/to/released/unlock so the dev agent has the full
+list without re-running discovery.
+
+Split a group the moment one member needs real work: a grouped story that turns
+into a debugging session for one pin blocks the other five.
+
+### Per-story mechanics
+
+For each story (one pin, or one group):
 
 > **`kind: mcp` pins** carry an extra blast-radius classification (decision-matrix.md "MCP server pins"). If the consumed-tool delta (Phase 2 step 4) shows a tool we use was renamed/removed/changed, this is a **REWIRE story** — expand the scope to every `.claude/agents/*.md` that names the tool (allowlist + prose) plus `.mcp.json`, title it `deps: rewire <server> ... (breaking: ...)`, require a fresh-spawn smoke test in the ACs, and mark it **not auto-mergeable** (human-reviewed). A non-breaking `mcp` bump uses the standard one-line template below.
 
@@ -216,5 +324,23 @@ Single Markdown summary, sections in this order (omit empty sections):
 - **CI-blocking pins skip cooldown**: a vulnerability that's actively failing required CI is its own justification — don't wait the 3 days.
 - **Dependency CVEs skip cooldown too**: a `Dependency CVEs` finding is published against code already merged, so the vulnerable version is the status quo, not the risk being soaked against. Bump to the first patched version and log the override.
 - **Never report a scan that could not run as clean**: if `make security-deps` reports a missing `GUIDE_TOKEN`, or the weekly `dependency-cve-scan` job failed before scanning, say so explicitly. Nancy returns 401 without a Sonatype Guide token, and an unauthenticated run produces no evidence rather than a clean result.
+- **This applies to every bulk command in Phase 2, not just Nancy.** All of them
+  fail the same way: quietly, with empty output that is indistinguishable from
+  "nothing to report". Check each one actually ran before reporting on it:
+  - `go list -m -u all` needs the module proxy. On a network failure or a proxy
+    error it exits non-zero and prints nothing to stdout — which greps to zero
+    updates and reads as "all modules current". Capture the exit code.
+  - `npm outdated` exits **1 when it finds outdated packages** and 0 when it
+    finds none. Do not treat non-zero as failure; distinguish "exit 1 with JSON
+    on stdout" (findings) from "exit 1 with an error" (did not run).
+  - `govulncheck` and `trivy` exit non-zero on findings *and* on database
+    download failure. `trivy` in particular reports a DB-download error that
+    looks nothing like a vulnerability list — see `scripts/security-trivy.sh`,
+    which exists precisely to keep those two apart.
+  - `docker build` for the image scan can fail before any scanning happens.
+  If a command did not run, the affected pins are **UNKNOWN**, not **OK**. Say
+  which ones and why. An inventory of 100 pins reported as "3 outdated, 97 up to
+  date" is a much stronger claim than "3 outdated, 97 not researched", and only
+  one of them may be true.
 - **Audit every override**: every BUMP NOW that overrides cooldown gets a line in the audit log. No exceptions.
 - **Idempotent**: re-running the skill produces the same stories (or comments on existing ones if they already exist). No duplicates.
