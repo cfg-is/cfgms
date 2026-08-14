@@ -93,15 +93,46 @@ def all_dockerfiles(root: Path) -> list[Path]:
     return out
 
 
-#: FROM <image>[:<tag>][@sha256:<digest>] [AS <stage>]
+#: FROM [--flag=value ...] <ref> [AS <stage>]
+#:
+#: Only the reference is captured here; it is split in parse_image_ref rather
+#: than by regex. A single pattern cannot separate the tag from a registry port
+#: — in `registry.example.com:5000/foo/bar:latest` both are a colon followed by
+#: characters, and a naive alternation binds `:5000` as the tag, yielding
+#: image=registry.example.com tag=5000. That is worse than missing the line:
+#: it emits a confidently wrong pin.
 _FROM_RE = re.compile(
-    r"""^\s*FROM\s+
-        (?P<image>[A-Za-z0-9][A-Za-z0-9._/-]*)
-        (?::(?P<tag>[A-Za-z0-9._-]+))?
-        (?:@(?P<digest>sha256:[a-f0-9]{64}))?
-    """,
-    re.VERBOSE,
+    r"^\s*FROM\s+(?:--[A-Za-z0-9-]+=\S+\s+)*(?P<ref>\S+)",
 )
+
+
+def parse_image_ref(ref: str) -> tuple[str, str, str] | None:
+    """Split a Docker image reference into (image, tag, digest).
+
+    Returns None for a reference that carries no version information — a
+    multi-stage stage name (`FROM builder`) or a bare image with neither tag nor
+    digest. Those are not pins.
+
+    The tag is the part after the LAST colon, and only when that colon comes
+    after the last slash. Anything earlier is a registry port, which belongs to
+    the image. Splitting from the right is what makes a registry host with a
+    port parse correctly.
+    """
+    digest = ""
+    if "@" in ref:
+        ref, _, digest = ref.partition("@")
+        if not digest.startswith("sha256:"):
+            digest = ""
+
+    tag = ""
+    colon = ref.rfind(":")
+    if colon != -1 and colon > ref.rfind("/"):
+        tag = ref[colon + 1:]
+        ref = ref[:colon]
+
+    if not tag and not digest:
+        return None
+    return ref, tag, digest
 
 
 def discover_base_images(root: Path) -> list[dict]:
@@ -135,14 +166,28 @@ def discover_base_images(root: Path) -> list[dict]:
             m = _FROM_RE.match(line)
             if not m:
                 continue
-            image = m.group("image")
-            if image == "golang" or image.startswith("golang/"):
+            ref = m.group("ref")
+
+            # A build-arg-substituted reference (FROM ${BASE}, FROM node:${VER})
+            # cannot be resolved without evaluating the build. Warn on stderr
+            # rather than skipping quietly: a silently dropped FROM line is
+            # exactly the failure this discoverer exists to remove, and stderr
+            # keeps the JSON on stdout parseable.
+            if "$" in ref:
+                print(
+                    f"discover-pins: WARNING {rel}:{i} build-arg FROM not "
+                    f"resolvable, image left untracked: {line.strip()}",
+                    file=sys.stderr,
+                )
                 continue
-            # Multi-stage builds reference earlier stages by name; those are not
-            # external images and have neither tag nor digest.
-            tag = m.group("tag") or ""
-            digest = m.group("digest") or ""
-            if not tag and not digest:
+
+            parsed = parse_image_ref(ref)
+            if parsed is None:
+                # Multi-stage stage reference, or an image with neither tag nor
+                # digest — no version to track.
+                continue
+            image, tag, digest = parsed
+            if image == "golang" or image.endswith("/golang"):
                 continue
             by_pin.setdefault((image, tag, digest), []).append(
                 {"file": rel, "line": i, "match": line.strip()}

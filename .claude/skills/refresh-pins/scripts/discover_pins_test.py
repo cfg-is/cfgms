@@ -118,6 +118,42 @@ def main() -> int:
         check(alpine is not None and alpine["current"].startswith("sha256:"),
               "pins the digest, not the tag, when a digest is present")
 
+        print("image reference parsing")
+        # A registry host with a port is the case a single regex gets wrong:
+        # naive alternation binds ":5000" as the tag, emitting a confidently
+        # wrong pin rather than an absent one.
+        check(dp.parse_image_ref("registry.example.com:5000/foo/bar:1.2") ==
+              ("registry.example.com:5000/foo/bar", "1.2", ""),
+              "registry host with a port keeps its port and finds the real tag",
+              str(dp.parse_image_ref("registry.example.com:5000/foo/bar:1.2")))
+        check(dp.parse_image_ref("alpine:3.23") == ("alpine", "3.23", ""),
+              "plain image:tag")
+        check(dp.parse_image_ref("ghcr.io/org/img@sha256:" + "e" * 64) ==
+              ("ghcr.io/org/img", "", "sha256:" + "e" * 64),
+              "digest-only reference")
+        check(dp.parse_image_ref("builder") is None,
+              "a bare stage name is not a pin")
+        check(dp.parse_image_ref("alpine") is None,
+              "an untagged image carries no version to track")
+
+        print("unresolvable and flagged FROM lines")
+        argrepo = Path(td) / "argrepo"
+        argrepo.mkdir()
+        (argrepo / "go.mod").write_text("module e\n\ngo 1.26\n")
+        (argrepo / "Dockerfile").write_text(
+            "ARG BASE=alpine:3.23\n"
+            "FROM ${BASE}\n"
+            "FROM --platform=$BUILDPLATFORM debian:bookworm-slim@sha256:" + "f" * 64 + "\n"
+        )
+        subprocess.run(["git", "init", "-q"], cwd=argrepo, check=True)
+        argpins = dp.discover_base_images(argrepo)
+        argnames = {p["name"] for p in argpins}
+        check("docker:debian:bookworm-slim" in argnames,
+              "a --platform flag does not hide the image behind it",
+              f"saw {sorted(argnames)}")
+        check(not any("$" in p["name"] for p in argpins),
+              "a build-arg FROM never becomes a bogus pin")
+
         print("go modules")
         mods = {p["package"] for p in modules}
         check("github.com/spf13/cobra" in mods, "discovers a direct requirement",
