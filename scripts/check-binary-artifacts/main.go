@@ -105,7 +105,7 @@ func trackedFiles() ([]string, error) {
 func checkFile(path string) []string {
 	var findings []string
 
-	f, err := os.Open(path) //nolint:gosec // path comes from `git ls-files`, a controlled source
+	f, err := os.Open(path) // #nosec G304 -- path comes from `git ls-files`, a controlled source
 	if err != nil {
 		if os.IsNotExist(err) {
 			// A file git reports but that is missing locally is skipped, not an

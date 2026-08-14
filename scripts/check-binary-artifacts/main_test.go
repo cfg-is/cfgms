@@ -26,6 +26,7 @@ func TestArtifactKind(t *testing.T) {
 		{"machoFat", []byte{0xca, 0xfe, 0xba, 0xbe}, "Mach-O universal binary or Java class data"},
 		{"machoFatBE", []byte{0xbe, 0xba, 0xfe, 0xca}, "Mach-O universal binary or Java class data"},
 		{"pe", []byte{'M', 'Z', 0x90, 0x00}, "PE32/MS-DOS executable"},
+		{"peTruncated", []byte{'M', 'Z'}, "PE32/MS-DOS executable"},
 		{"wasm", []byte{0x00, 'a', 's', 'm'}, "WebAssembly binary module"},
 		{"text", []byte("pack"), ""},
 		{"short", []byte{0x7f, 'E'}, ""},
