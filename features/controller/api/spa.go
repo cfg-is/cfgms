@@ -4,11 +4,85 @@
 package api
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/cfgis/cfgms/web"
 )
+
+// Embedded SPA roots, in preference order.
+//
+// The frontend build writes to web/dist/app/ (vite.config.ts build.outDir), which
+// web/.gitignore excludes wholesale. web/dist/index.html is a tracked placeholder
+// that no build ever rewrites — it exists only so //go:embed all:dist has a file
+// to match, keeping `go build` self-contained with no Node toolchain (Issue #3043).
+const (
+	spaBuildRoot = "dist/app" // real Vite output, present only after npm run build
+	spaEmbedRoot = "dist"     // embed anchor; holds the placeholder on a clean checkout
+)
+
+// distPlaceholderSentinel marks the tracked web/dist/index.html placeholder.
+// Real Vite output never contains it, because the build never writes to that
+// path. Its presence in the embedded index.html therefore means "no frontend
+// build was embedded in this binary".
+const distPlaceholderSentinel = "CFGMS_DIST_PLACEHOLDER"
+
+var (
+	// errSPAPlaceholder reports that the embedded index.html is the tracked
+	// placeholder rather than a frontend build. Serving it would present an
+	// empty shell that looks like a working — but permanently stale — SPA, so
+	// the caller refuses to route "/" instead (Issue #3043, AC5).
+	errSPAPlaceholder = errors.New("embedded SPA is the tracked web/dist placeholder, not a frontend build: run \"npm run build\" in web/ before building the controller binary")
+
+	// errSPANoIndex reports that no index.html exists in the embedded tree.
+	errSPANoIndex = errors.New("embedded SPA has no index.html")
+)
+
+// spaAssets is the embedded asset tree the SPA is served from. It is a variable
+// rather than a direct web.Assets reference so tests can substitute a synthetic
+// tree; production always uses the embedded assets.
+var spaAssets fs.FS = web.Assets
+
+// newEmbeddedSPAHandler resolves the SPA root inside assets and returns a handler
+// for it. It prefers the frontend build at dist/app and falls back to dist, which
+// on a checkout with no build carries only the placeholder.
+//
+// It returns an error — rather than a handler over the placeholder — whenever no
+// real build is embedded, so the caller can refuse to route "/" loudly instead of
+// silently serving a shell that never loads the application.
+func newEmbeddedSPAHandler(assets fs.FS) (*spaHandler, error) {
+	var lastErr error
+	for _, root := range []string{spaBuildRoot, spaEmbedRoot} {
+		sub, err := fs.Sub(assets, root)
+		if err != nil {
+			lastErr = fmt.Errorf("resolve %s: %w", root, err)
+			continue
+		}
+		if err := validateSPARoot(sub); err != nil {
+			lastErr = err
+			continue
+		}
+		return newSPAHandler(sub), nil
+	}
+	return nil, lastErr
+}
+
+// validateSPARoot reports whether root holds a servable frontend build.
+func validateSPARoot(root fs.FS) error {
+	content, err := fs.ReadFile(root, "index.html")
+	if err != nil {
+		return errors.Join(errSPANoIndex, err)
+	}
+	if bytes.Contains(content, []byte(distPlaceholderSentinel)) {
+		return errSPAPlaceholder
+	}
+	return nil
+}
 
 // spaCSP is the Content-Security-Policy applied to all SPA responses.
 // 'self' only — no external origins. Vite emits hashed filenames so no inline

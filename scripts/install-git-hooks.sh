@@ -220,6 +220,16 @@ if [ ${#staged_log_files[@]} -gt 0 ]; then
     fi
 fi
 
+# Built web output gate (Issue #3043) — real Vite output must never be
+# committed. Only runs when something under web/dist/ is staged.
+if git diff --cached --name-only --diff-filter=ACM -- web/dist | grep -q .; then
+    if ! ./scripts/check-web-dist.sh --staged; then
+        echo "Or bypass with --no-verify if you are deliberately changing the placeholder itself."
+        echo ""
+        exit 1
+    fi
+fi
+
 exit 0
 HOOK_EOF
 
@@ -231,6 +241,7 @@ echo "📋 What These Hooks Do:"
 echo "   Pre-commit:"
 echo "   • Blocks commits with files outside allowed project directories"
 echo "   • Catches test artifacts (tenant data, binaries, log output)"
+echo "   • Catches built web output staged under web/dist/ (Issue #3043)"
 echo ""
 echo "   Pre-push:"
 echo "   • Runs 'make test' before every push"

@@ -4,6 +4,7 @@
 package api
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,6 +27,132 @@ func testSPAFS() fstest.MapFS {
 			Data: []byte("/* hashed css */"),
 		},
 	}
+}
+
+// testPlaceholderIndex mirrors the tracked web/dist/index.html: a static shell
+// carrying the sentinel and no content-hashed asset references.
+const testPlaceholderIndex = `<!doctype html>
+<!-- ` + distPlaceholderSentinel + ` this is a tracked placeholder, not a build -->
+<html lang="en"><head><title>CFGMS</title></head><body><div id="root"></div></body></html>`
+
+// testEmbeddedAssetsPlaceholderOnly mimics a clean checkout with no frontend
+// build: web/dist holds only the placeholder, and web/dist/app does not exist.
+func testEmbeddedAssetsPlaceholderOnly() fstest.MapFS {
+	return fstest.MapFS{
+		"dist/index.html": &fstest.MapFile{Data: []byte(testPlaceholderIndex)},
+	}
+}
+
+// testEmbeddedAssetsWithBuild mimics a checkout after npm run build: the
+// placeholder is still tracked at dist/index.html and the real output sits
+// under dist/app/.
+func testEmbeddedAssetsWithBuild() fstest.MapFS {
+	assets := testEmbeddedAssetsPlaceholderOnly()
+	assets["dist/app/index.html"] = &fstest.MapFile{
+		Data: []byte(`<!doctype html><html><head><script type="module" crossorigin src="/assets/app-Dh9fZ4zy.js"></script></head><body><div id="root"></div></body></html>`),
+	}
+	assets["dist/app/assets/app-Dh9fZ4zy.js"] = &fstest.MapFile{Data: []byte("// hashed asset")}
+	return assets
+}
+
+// withEmbeddedSPA substitutes the embedded asset tree the router wires up. It
+// must be called BEFORE the test server is constructed: setupRouter resolves
+// spaAssets once, at construction time.
+func withEmbeddedSPA(t *testing.T, assets fs.FS) {
+	t.Helper()
+	prev := spaAssets
+	spaAssets = assets
+	t.Cleanup(func() { spaAssets = prev })
+}
+
+// Issue #3043 — a binary embedding only the tracked placeholder must fail loudly
+// rather than serve a shell that never loads the application (stale-SPA =
+// patch-lag bug).
+func TestNewEmbeddedSPAHandlerRejectsPlaceholder(t *testing.T) {
+	h, err := newEmbeddedSPAHandler(testEmbeddedAssetsPlaceholderOnly())
+
+	require.Error(t, err, "placeholder-only assets must not produce a servable SPA handler")
+	assert.Nil(t, h)
+	assert.ErrorIs(t, err, errSPAPlaceholder)
+	assert.Contains(t, err.Error(), "npm run build",
+		"the error must tell the operator how to produce a real build")
+}
+
+func TestNewEmbeddedSPAHandlerRejectsMissingIndex(t *testing.T) {
+	assets := fstest.MapFS{
+		"dist/robots.txt": &fstest.MapFile{Data: []byte("User-agent: *\n")},
+	}
+
+	h, err := newEmbeddedSPAHandler(assets)
+
+	require.Error(t, err)
+	assert.Nil(t, h)
+	assert.ErrorIs(t, err, errSPANoIndex)
+}
+
+// The real build lives at dist/app; the placeholder at dist/index.html must not
+// shadow it.
+func TestNewEmbeddedSPAHandlerPrefersBuildOutput(t *testing.T) {
+	h, err := newEmbeddedSPAHandler(testEmbeddedAssetsWithBuild())
+	require.NoError(t, err)
+	require.NotNil(t, h)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.NotContains(t, rr.Body.String(), distPlaceholderSentinel,
+		"the placeholder must never be served when a build is embedded")
+	assert.Contains(t, rr.Body.String(), "/assets/app-Dh9fZ4zy.js")
+
+	// Assets resolve relative to the same root.
+	rrAsset := httptest.NewRecorder()
+	h.ServeHTTP(rrAsset, httptest.NewRequest(http.MethodGet, "/assets/app-Dh9fZ4zy.js", nil))
+	assert.Equal(t, http.StatusOK, rrAsset.Code)
+}
+
+// A real build written directly to dist/ (rather than dist/app/) is still
+// servable — the placeholder sentinel, not the path, is what marks "no build".
+func TestNewEmbeddedSPAHandlerAcceptsBuildAtDistRoot(t *testing.T) {
+	assets := fstest.MapFS{
+		"dist/index.html": &fstest.MapFile{Data: []byte("<!doctype html><html><body>SPA</body></html>")},
+	}
+
+	h, err := newEmbeddedSPAHandler(assets)
+
+	require.NoError(t, err)
+	require.NotNil(t, h)
+}
+
+// Issue #3043 AC5 — end to end through the real router: a controller whose
+// binary embeds only the placeholder must refuse to route "/" rather than serve
+// the placeholder shell as if it were the application.
+func TestSetupRouterRefusesRootWhenOnlyPlaceholderEmbedded(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsPlaceholderOnly())
+	server := setupRouteTestServer(t)
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	assert.Equal(t, http.StatusNotFound, rr.Code,
+		"\"/\" must not be routed when only the dist placeholder is embedded")
+	assert.NotContains(t, rr.Body.String(), distPlaceholderSentinel,
+		"the placeholder must never reach a client")
+	assert.NotContains(t, rr.Body.String(), "<div id=\"root\">",
+		"the placeholder shell must never be served as the SPA")
+}
+
+// The counterpart: with a real build embedded, "/" is routed normally — proving
+// the refusal above is specific to the placeholder, not a broken catch-all.
+func TestSetupRouterServesRootWhenBuildEmbedded(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupRouteTestServer(t)
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), "/assets/app-Dh9fZ4zy.js")
 }
 
 func TestSPAHandlerAssetLongCache(t *testing.T) {

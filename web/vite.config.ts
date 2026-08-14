@@ -21,7 +21,13 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
+    // Build into dist/app/, not dist/, so the build never rewrites the tracked
+    // dist/index.html placeholder. web/.gitignore excludes dist/* wholesale, so
+    // built output stays untracked and concurrent web branches stop conflicting
+    // on a content-hashed entry point (Issue #3043). The controller serves
+    // dist/app when present and refuses to route "/" when only the placeholder
+    // is embedded — see features/controller/api/spa.go.
+    outDir: 'dist/app',
   },
   server: {
     fs: {
