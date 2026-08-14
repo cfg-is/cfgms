@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"io/fs"
@@ -15,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -802,17 +802,39 @@ func (s *Server) internalRaftTLSConfig(publicTLS *tls.Config) (*tls.Config, erro
 	internalTLS := publicTLS.Clone()
 	internalTLS.MinVersion = tls.VersionTLS13
 	internalTLS.ClientAuth = tls.RequireAndVerifyClientCert
-	if internalTLS.ClientCAs == nil {
-		internalTLS.ClientCAs = x509.NewCertPool()
-	}
+
+	var haCA []byte
 	if s.haManager != nil {
-		if haCA := s.haManager.GetCACertPEM(); len(haCA) > 0 {
-			if !internalTLS.ClientCAs.AppendCertsFromPEM(haCA) {
-				return nil, fmt.Errorf("HA peer CA is invalid")
-			}
-		}
+		haCA = s.haManager.GetCACertPEM()
 	}
-	if len(internalTLS.ClientCAs.Subjects()) == 0 {
+
+	if internalTLS.ClientCAs == nil {
+		// The inherited public TLS config carries no client CA pool, so the HA
+		// peer CA is the only trust anchor available for the internal Raft
+		// listener. pkg/cert is the single construction point for CA pools; it
+		// also rejects empty or unparseable PEM, which keeps this listener from
+		// starting with a pool that trusts nothing.
+		pool, err := cert.NewCertPoolFromPEM(haCA)
+		if err != nil {
+			return nil, fmt.Errorf("no trusted client CA is configured: %w", err)
+		}
+		internalTLS.ClientCAs = pool
+		return internalTLS, nil
+	}
+
+	if len(haCA) > 0 {
+		// Adding the HA peer CA to an inherited pool must not silently no-op:
+		// unparseable PEM means peers would be rejected at handshake time.
+		if _, err := cert.NewCertPoolFromPEM(haCA); err != nil {
+			return nil, fmt.Errorf("HA peer CA is invalid: %w", err)
+		}
+		internalTLS.ClientCAs.AppendCertsFromPEM(haCA)
+		return internalTLS, nil
+	}
+
+	// Inherited pool with no HA CA to add: reject an empty pool rather than
+	// serving mTLS that can never verify a client.
+	if len(internalTLS.ClientCAs.Subjects()) == 0 { //nolint:staticcheck // SA1019: Subjects() is only deprecated for system pools; this pool is built in-process from PEM, where it is the only way to detect an empty trust store.
 		return nil, fmt.Errorf("no trusted client CA is configured")
 	}
 	return internalTLS, nil
@@ -1794,9 +1816,232 @@ func (s *Server) configureCORS() {
 	}
 }
 
+// envAllowEphemeralSecrets is the dev/test-only override that downgrades the
+// ephemeral-secret-store hard fail to a WARN. Never set in production: an
+// ephemeral store loses all passkeys and web-account records on controller
+// restart, locking out every human account (ADR-021 Amendment 1).
+//
+// Scope: this flag governs the storage-location decision only. Store creation
+// failures and a failing store health check remain fail-closed regardless of
+// its value — one flag must not switch off two independent controls.
+const envAllowEphemeralSecrets = "CFGMS_ALLOW_EPHEMERAL_SECRETS"
+
+// resolveEphemeralPath normalises p for prefix comparison.
+//
+// filepath.EvalSymlinks only succeeds on a path that exists, which made the
+// comparison asymmetric: os.TempDir() always exists and was resolved, while a
+// candidate secrets path that has not been created yet was left as written. The
+// two sides then normalised differently and the prefix check missed — on macOS
+// (/var/folders/… → /private/var/folders/…) and on Windows (8.3 short names such
+// as C:\Users\RUNNER~1 → C:\Users\runneradmin). Linux CI has neither a symlinked
+// TMPDIR nor short-name aliasing, so both sides matched there and the defect was
+// invisible until the cross-platform build ran in the merge queue.
+//
+// Because the caller is a fail-closed guard, a miss returns "not ephemeral" and
+// lets a controller start with its secret store on a volume that is wiped on
+// reboot — the guard failed open on exactly the two platforms it was not
+// exercised on.
+//
+// Resolving the deepest existing ancestor and re-appending the remainder gives
+// both sides the same normalisation whether or not the full path exists yet.
+func resolveEphemeralPath(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if rest == "" {
+				return filepath.Clean(resolved)
+			}
+			return filepath.Clean(filepath.Join(resolved, rest))
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the root without finding an existing ancestor: nothing is
+			// resolvable, so compare the path as written.
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// hasPathPrefix reports whether path sits under prefix, honouring the platform's
+// path-case semantics. Windows paths are case-insensitive, so a configured
+// C:\TEMP\secrets must match an os.TempDir() of C:\Temp — a case-sensitive
+// comparison there would fail open the same way the symlink asymmetry did.
+func hasPathPrefix(path, prefix string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefix))
+	}
+	return strings.HasPrefix(path, prefix)
+}
+
+// isEphemeralSecretsPath returns true when secretsPath lives under a directory
+// that is wiped on reboot: os.TempDir(), /dev/shm/, or /run/user/. Symlinks and
+// Windows short names are resolved first (see resolveEphemeralPath) so that
+// macOS /tmp → /private/tmp, or a path written through an 8.3 alias, cannot
+// bypass the check.
+func isEphemeralSecretsPath(secretsPath string) bool {
+	withSep := func(p string) string {
+		return resolveEphemeralPath(p) + string(filepath.Separator)
+	}
+	p := withSep(secretsPath)
+	if hasPathPrefix(p, withSep(os.TempDir())) {
+		return true
+	}
+	// The tmpfs prefixes below are written with forward slashes, but
+	// filepath.Clean inside resolveEphemeralPath rewrites separators to the
+	// host's — on Windows "/dev/shm/cfgms" becomes "\dev\shm\cfgms" and no
+	// forward-slash prefix can ever match. Comparing in slash form keeps the
+	// check platform-independent. A POSIX tmpfs path configured on Windows is
+	// nonsense either way, but this guard is fail-closed: classifying it as
+	// ephemeral is the safe direction.
+	slashed := filepath.ToSlash(p)
+	for _, prefix := range []string{"/dev/shm/", "/run/user/"} {
+		if hasPathPrefix(slashed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDatabaseDSNEphemeral returns true when the database DSN points to an
+// in-memory or tmp-path SQLite database that will not survive a restart.
+func isDatabaseDSNEphemeral(dsn string) bool {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return false
+	}
+	if dsn == ":memory:" {
+		return true
+	}
+	// Handle SQLite file URIs: file::memory:, file:/tmp/foo.db, file::memory:?cache=shared
+	if strings.HasPrefix(dsn, "file:") {
+		filePart := strings.SplitN(dsn[len("file:"):], "?", 2)[0]
+		if filePart == ":memory:" || filePart == "" {
+			return true
+		}
+		return isEphemeralSecretsPath(filePart)
+	}
+	// Bare absolute paths (e.g. "/tmp/foo.db")
+	if filepath.IsAbs(dsn) {
+		return isEphemeralSecretsPath(dsn)
+	}
+	return false
+}
+
+// isEphemeralSQLitePath returns true when a SQLite database path resolves to a
+// database that does not survive a restart: an in-memory database (":memory:"
+// or any "mode=memory" DSN) or a file under a directory wiped on reboot.
+func isEphemeralSQLitePath(path string) bool {
+	if path == ":memory:" || strings.Contains(path, "mode=memory") {
+		return true
+	}
+	if strings.HasPrefix(path, "file:") {
+		return isDatabaseDSNEphemeral(path)
+	}
+	return isEphemeralSecretsPath(path)
+}
+
+// sqliteSecretsPath resolves the SQLite database file that backs the secret
+// store: storage.config.path first, then storage.sqlite_path (the key the OSS
+// composite storage manager uses). An empty result means the sqlite backend
+// would fall back to an in-memory database.
+func sqliteSecretsPath(storage *config.StorageConfig) string {
+	if v, ok := storage.Config["path"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(storage.SQLitePath)
+}
+
+// resolveSecretsBackend builds the storage-provider configuration handed to the
+// secrets backend and reports why that configuration is ephemeral, if it is.
+//
+// Constructing the configuration and judging its durability in one place is
+// deliberate: the guard must inspect the exact map the backend receives.
+// Branching on cfg.Storage.Provider alone let storage.provider: sqlite through
+// on the strength of a persistent CFGMS_SECRETS_REPO_PATH — a value the sqlite
+// backend never reads, since it keys off "path" and treats an absent "path" as
+// ":memory:" (pkg/storage/providers/sqlite/plugin.go getPath).
+//
+// The returned map is the storage_config passed to the SOPS provider, so the
+// judged configuration and the used configuration can no longer diverge.
+func resolveSecretsBackend(storage *config.StorageConfig, secretsPath string) (map[string]interface{}, string) {
+	switch strings.ToLower(strings.TrimSpace(storage.Provider)) {
+	case "database":
+		// Database provider consumes the full connection configuration; only an
+		// in-memory or tmp-path SQLite DSN is non-durable.
+		dsn, _ := storage.Config["dsn"].(string)
+		if isDatabaseDSNEphemeral(dsn) {
+			return storage.Config, fmt.Sprintf(
+				"database DSN %q is ephemeral (in-memory or tmp-path SQLite). "+
+					"Passkeys and web-account records will be lost on controller restart. "+
+					"Fix: use a persistent database DSN. "+
+					"Dev/test only: set %s=true to override.",
+				dsn, envAllowEphemeralSecrets)
+		}
+		return storage.Config, ""
+
+	case "sqlite":
+		backend := make(map[string]interface{}, len(storage.Config)+1)
+		for k, v := range storage.Config {
+			backend[k] = v
+		}
+		path := sqliteSecretsPath(storage)
+		backend["path"] = path
+		switch {
+		case path == "":
+			return backend, fmt.Sprintf(
+				"storage.provider is sqlite but no database path is configured, so the secret "+
+					"store resolves to an in-memory database that is discarded on controller "+
+					"restart, locking out all human accounts. CFGMS_SECRETS_REPO_PATH does not "+
+					"apply to a sqlite-backed secret store. "+
+					"Fix: set storage.sqlite_path (or storage.config.path) to a persistent file "+
+					"such as /var/lib/cfgms/secrets.db, or use storage.provider: flatfile. "+
+					"Dev/test only: set %s=true to override.",
+				envAllowEphemeralSecrets)
+		case isEphemeralSQLitePath(path):
+			return backend, fmt.Sprintf(
+				"sqlite database path %q is ephemeral (in-memory, or under a directory wiped on "+
+					"reboot). Passkeys and web-account records will be lost on controller restart. "+
+					"Fix: set storage.sqlite_path to a persistent file outside %s. "+
+					"Dev/test only: set %s=true to override.",
+				path, os.TempDir(), envAllowEphemeralSecrets)
+		}
+		return backend, ""
+
+	default:
+		// File-backed providers (flatfile) store secret data under secretsPath.
+		// storage.flatfile_root configures the business-data composite manager,
+		// not the secret store, so the resolved secrets path is what matters here.
+		backend := map[string]interface{}{"root": secretsPath}
+		if isEphemeralSecretsPath(secretsPath) {
+			return backend, fmt.Sprintf(
+				"secrets path %q is under an ephemeral directory (%s). "+
+					"Passkeys and web-account records stored here will be lost on "+
+					"controller restart, locking out all human accounts. "+
+					"Fix: set CFGMS_SECRETS_REPO_PATH to a persistent directory outside %s, "+
+					"or use storage.provider: database. "+
+					"Dev/test only: set %s=true to override.",
+				secretsPath, os.TempDir(), os.TempDir(), envAllowEphemeralSecrets)
+		}
+		return backend, ""
+	}
+}
+
 // NewSecretStore initializes and returns the central secrets provider for the controller.
 // It is exported so that cmd/controller/main.go can initialize the store before logging
 // is configured, while server.New continues to call it internally unchanged.
+//
+// Fail-closed guard: the function refuses to start when the storage
+// configuration handed to the secrets backend resolves to an ephemeral location
+// — a secrets path under a tmp directory, /dev/shm or /run/user, an in-memory or
+// tmp-path database DSN, or a sqlite backend with a missing/in-memory/tmp-path
+// database file — because a controller restart would wipe every passkey and
+// web-account record, locking out all human accounts (ADR-021 Amendment 1).
+// Set CFGMS_ALLOW_EPHEMERAL_SECRETS=true to downgrade that rejection to a WARN
+// for dev/test environments only; store creation and health-check failures stay
+// fail-closed regardless.
 func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	logger := logging.ForComponent("controller")
 	if cfg == nil || cfg.Storage == nil {
@@ -1818,6 +2063,25 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 		return nil, fmt.Errorf("CFGMS_SECRETS_KEY_FILE is required; plaintext secret storage is prohibited")
 	}
 
+	allowEphemeral := strings.EqualFold(strings.TrimSpace(os.Getenv(envAllowEphemeralSecrets)), "true")
+
+	// Guard: fail closed on ephemeral secret storage (ADR-021 Amendment 1).
+	// A controller restart wipes passkeys and web-account records stored in
+	// ephemeral locations, locking out all human accounts. The decision is made
+	// from the storage configuration actually handed to the secrets backend, so
+	// no provider can pass the guard on a value it never reads.
+	storageConfig, ephemeralReason := resolveSecretsBackend(cfg.Storage, secretsPath)
+
+	if ephemeralReason != "" {
+		if !allowEphemeral {
+			return nil, fmt.Errorf("refusing ephemeral secret storage — %s", ephemeralReason)
+		}
+		logger.Warn("DANGER: secret store is using ephemeral storage",
+			"reason", logging.SanitizeLogValue(ephemeralReason),
+			"risk", "passkeys and web-account records will be lost on controller restart; all human accounts will be locked out",
+			"override", envAllowEphemeralSecrets+"=true")
+	}
+
 	// Create secrets provider configuration
 	// M-AUTH-1: Encrypt before handing bytes to flat-file or database storage.
 	secretsConfig := map[string]interface{}{
@@ -1826,17 +2090,8 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 		"cache_ttl":        300,  // 5 minutes
 		"cache_max_size":   1000, // Cache up to 1000 secrets
 		"key_file":         keyFile,
-	}
-
-	// Pass storage config based on provider type
-	if cfg.Storage.Provider == "database" {
-		// For database provider, use the full database configuration
-		secretsConfig["storage_config"] = cfg.Storage.Config
-	} else {
-		// For flatfile provider, set the root directory
-		secretsConfig["storage_config"] = map[string]interface{}{
-			"root": secretsPath,
-		}
+		// storageConfig is the same map the ephemeral guard judged above.
+		"storage_config": storageConfig,
 	}
 
 	// Create secret store using SOPS provider
@@ -1845,7 +2100,12 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 		return nil, fmt.Errorf("failed to create secret store: %w", err)
 	}
 
-	// Verify store is healthy
+	// Verify store is healthy. Fail closed unconditionally: a broken store at
+	// startup means passkeys and web-account records are inaccessible. This is
+	// a separate control from the ephemeral-path guard and is deliberately not
+	// governed by envAllowEphemeralSecrets — that flag only downgrades the
+	// ephemeral-location rejection, and must never disable store-health
+	// validation as a side effect.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := store.HealthCheck(ctx); err != nil {

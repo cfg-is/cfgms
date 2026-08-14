@@ -28,6 +28,10 @@ func TestNewSecretStore_FailsClosedWithoutExternalKey(t *testing.T) {
 func TestNewSecretStore_FailsClosedWhenKeyProviderUnavailable(t *testing.T) {
 	t.Setenv("CFGMS_SECRETS_KEY_FILE", filepath.Join(t.TempDir(), "missing.key"))
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(t.TempDir(), "data"))
+	// Use the dev override so the ephemeral guard does not fire before the key
+	// file check; this test exercises the key-file error path, not the
+	// ephemeral-storage guard.
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "true")
 	cfg := config.DefaultConfig()
 
 	store, err := NewSecretStore(cfg)

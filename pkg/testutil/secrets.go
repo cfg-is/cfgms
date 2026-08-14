@@ -20,6 +20,10 @@ import (
 // It is intended for TestMain, where no *testing.T exists yet. Tests that
 // exercise path isolation can still override either variable with t.Setenv.
 // The returned cleanup removes the generated key and secret directory.
+//
+// CFGMS_ALLOW_EPHEMERAL_SECRETS is set to "true" because tests necessarily
+// use os.TempDir()-backed paths. Tests that specifically exercise the
+// ephemeral-rejection guard must clear this variable with t.Setenv.
 func ProvisionSecretsEnv(prefix string) (cleanup func(), err error) {
 	base, err := os.MkdirTemp("", prefix)
 	if err != nil {
@@ -40,11 +44,18 @@ func ProvisionSecretsEnv(prefix string) (cleanup func(), err error) {
 		cleanup()
 		return nil, fmt.Errorf("set test secrets path environment: %w", err)
 	}
+	if err := os.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "true"); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("set ephemeral secrets override environment: %w", err)
+	}
 	return cleanup, nil
 }
 
 // SetupSecretsEnvForTest is the single-test form of ProvisionSecretsEnv. It
-// scopes both variables to t via t.Setenv and cleans up with the test.
+// scopes all variables to t via t.Setenv and cleans up with the test.
+// CFGMS_ALLOW_EPHEMERAL_SECRETS is set to "true" because tests use
+// os.TempDir()-backed paths; tests that exercise the rejection guard must
+// clear it with t.Setenv.
 func SetupSecretsEnvForTest(t *testing.T) {
 	t.Helper()
 
@@ -55,6 +66,7 @@ func SetupSecretsEnvForTest(t *testing.T) {
 	}
 	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(base, "secrets"))
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "true")
 }
 
 // writeSecretsKeyFile generates a fresh 256-bit key per invocation — never a
