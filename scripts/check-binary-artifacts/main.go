@@ -41,6 +41,17 @@ import (
 //	4d5a....                                 MZ          PE32/PE32+ and MS-DOS executables
 //	0061736d                                 \0asm       WebAssembly binary module
 func artifactKind(header []byte) string {
+	// MZ is a TWO-byte signature; every other magic below is four bytes. Guarding
+	// the whole function at four bytes meant a two-byte "MZ" file never reached
+	// the MZ case and passed the gate — even though two bytes is a complete PE
+	// signature, not a truncated one. A committed DOS/PE stub trimmed to its
+	// magic would have been waved through.
+	//
+	// Checked before the four-byte guard, and safe to check first: no other
+	// signature here begins 0x4d 0x5a.
+	if len(header) >= 2 && header[0] == 'M' && header[1] == 'Z' {
+		return "PE32/MS-DOS executable"
+	}
 	if len(header) < 4 {
 		return ""
 	}
@@ -55,8 +66,6 @@ func artifactKind(header []byte) string {
 	case bytes.Equal(header, []byte{0xca, 0xfe, 0xba, 0xbe}),
 		bytes.Equal(header, []byte{0xbe, 0xba, 0xfe, 0xca}):
 		return "Mach-O universal binary or Java class data"
-	case header[0] == 'M' && header[1] == 'Z':
-		return "PE32/MS-DOS executable"
 	case bytes.Equal(header, []byte{0x00, 'a', 's', 'm'}):
 		return "WebAssembly binary module"
 	default:
@@ -120,10 +129,11 @@ func checkFile(path string) []string {
 	header := make([]byte, 4)
 	n, err := io.ReadFull(bufio.NewReader(f), header)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-		// A short read (0-3 bytes: ErrUnexpectedEOF/EOF) means the file is too
-		// small to carry magic bytes — not an artifact, not blocking. Any other
-		// read error leaves the header unclassifiable and must fail closed the
-		// same way as an unopenable file above.
+		// A short read (0-3 bytes: ErrUnexpectedEOF/EOF) is not itself an error:
+		// the truncated header is still classified below, and two bytes is enough
+		// to identify an MZ stub. Any other read error leaves the header
+		// unclassifiable and must fail closed the same way as an unopenable file
+		// above.
 		findings = append(findings, fmt.Sprintf("unreadable tracked file: %s (cannot inspect magic bytes)", path))
 		if hasCompiledExtension(path) {
 			findings = append(findings, fmt.Sprintf("tracked compiled artifact extension: %s", path))
