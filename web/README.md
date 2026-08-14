@@ -40,6 +40,17 @@ validate the `dist/` mtime as part of their packaging pipeline.
 - npm (bundled with Node). Dependencies are pinned by `package-lock.json`;
   always install with `npm ci` for reproducible trees.
 
+### Held major upgrades
+
+Two dev dependencies are deliberately held below their latest major because the
+lint gate cannot run on them (measured on 2026-08-14, Issue #3344). Re-check
+when the upstream blocker clears; do not force the bump past the peer conflict.
+
+| Package | Held at | Latest | Blocker |
+|---|---|---|---|
+| `typescript` | 6.x | 7.0.2 | `typescript-eslint` refuses to load against TS 7.0 — it aborts with "typescript-eslint does not support TS 7.0" ([typescript-eslint#10940](https://github.com/typescript-eslint/typescript-eslint/issues/10940), support targeted at TS >= 7.1). TS 7 also ships the native compiler with no in-process JS compiler API. |
+| `eslint` / `@eslint/js` | 9.x | 10.8.1 | `eslint-plugin-react@7.37.5` declares `eslint` peer `<= ^9.7` and crashes on ESLint 10 (`contextOrFilename.getFilename is not a function`). No published release supports ESLint 10; the plugin supplies the `react/no-danger*` bans in the [security lint gate](#security-lint-gate), so it cannot simply be dropped. |
+
 ## Commands
 
 All commands run from `web/`:
