@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -25,6 +26,7 @@ type RaftConsensus struct {
 	// Raft core
 	node         raft.Node
 	storage      *raft.MemoryStorage
+	logStore     *RaftLogStore // durable WAL; nil when logDir was empty (tests)
 	config       *raft.Config
 	tickInterval time.Duration // derived from ClusterConfig.HeartbeatInterval
 
@@ -71,17 +73,32 @@ type ClusterState struct {
 	LastModified time.Time
 }
 
-// RaftCommand represents commands sent through Raft. Data is deliberately
-// json.RawMessage, not interface{}: unmarshaling a JSON object into an
-// interface{} field decodes it as map[string]interface{}, and encoding/json
-// always decodes JSON numbers in that position as float64 — which only has
-// 53 bits of integer precision. The 64-bit FNV hash node IDs used throughout
-// this package (~10^18 magnitude) silently lose precision through that
-// round-trip. json.RawMessage defers decoding until the typed unmarshal in
-// applyNodeUpdate/applySessionUpdate, which never passes through float64.
+// RaftCommand represents commands sent through Raft
+// Data is deliberately json.RawMessage rather than interface{}.
+//
+// Decoding into interface{} turns every JSON number into a float64, and
+// applyCommand then re-marshalled that value to decode it into the concrete
+// command type. Node IDs are uint64 hashes well above 2^53, so the round trip
+// silently rounded them: a leader whose Raft ID was 10972337506993669137 was
+// stored in ClusterState.Nodes under 10972337506993670000. Every subsequent
+// lookup by real node ID missed, so GetLeaderInfo could never resolve the
+// leader and HasNode never saw a node it had just applied.
+//
+// Keeping the payload as raw bytes decodes it exactly once, straight into the
+// typed command, with no float64 in the path.
 type RaftCommand struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
+}
+
+// marshalRaftCommand builds a RaftCommand envelope with its payload encoded
+// exactly once.
+func marshalRaftCommand(cmdType string, payload interface{}) ([]byte, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s payload: %w", cmdType, err)
+	}
+	return json.Marshal(RaftCommand{Type: cmdType, Data: data})
 }
 
 // NodeUpdateCommand is sent when node info changes
@@ -98,10 +115,16 @@ type SessionUpdateCommand struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// NewRaftConsensus creates a new Raft consensus instance. clusterCfg provides the
-// timing source: tickInterval = HeartbeatInterval, HeartbeatTick = 1, and
+// NewRaftConsensus creates a new Raft consensus instance. clusterCfg provides
+// the timing source: tickInterval = HeartbeatInterval, HeartbeatTick = 1, and
 // ElectionTick = ElectionTimeout / HeartbeatInterval. ElectionTick must be >= 5.
-func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, peers []raft.Peer, clusterCfg *ClusterConfig, logger logging.Logger) (*RaftConsensus, error) {
+//
+// logDir, when non-empty, is the directory that holds the per-node bbolt WAL
+// (raft.db). On first boot the directory is created and StartNode is used.
+// On subsequent boots the WAL is replayed into MemoryStorage and RestartNode
+// is used so the node rejoins its cluster at the correct log index rather than
+// re-bootstrapping. When logDir is empty no WAL is opened (tests only).
+func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, peers []raft.Peer, clusterCfg *ClusterConfig, logDir string, logger logging.Logger) (*RaftConsensus, error) {
 	if clusterCfg == nil {
 		return nil, fmt.Errorf("clusterCfg must not be nil")
 	}
@@ -122,7 +145,48 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 		)
 	}
 
+	// Open the durable WAL when a log directory is provided.
+	var logStore *RaftLogStore
+	var recoveredHS raftpb.HardState
+	var recoveredEntries []raftpb.Entry
+	var recoveredSnap raftpb.Snapshot
+	var recoveredApplied uint64
+
+	if logDir != "" {
+		var err error
+		logStore, err = OpenRaftLogStore(filepath.Join(logDir, "raft.db"))
+		if err != nil {
+			return nil, fmt.Errorf("open raft log store: %w", err)
+		}
+		recoveredHS, recoveredEntries, recoveredSnap, recoveredApplied, err = logStore.LoadState()
+		if err != nil {
+			_ = logStore.Close()
+			return nil, fmt.Errorf("load raft log store state: %w", err)
+		}
+	}
+
 	storage := raft.NewMemoryStorage()
+
+	// Replay persisted state into MemoryStorage before constructing the node.
+	// The order matches raft.Storage's contract: snapshot first, then entries.
+	if !raft.IsEmptySnap(recoveredSnap) {
+		if err := storage.ApplySnapshot(recoveredSnap); err != nil {
+			_ = logStore.Close()
+			return nil, fmt.Errorf("replay snapshot into memory storage: %w", err)
+		}
+	}
+	if len(recoveredEntries) > 0 {
+		if err := storage.Append(recoveredEntries); err != nil {
+			_ = logStore.Close()
+			return nil, fmt.Errorf("replay log entries into memory storage: %w", err)
+		}
+	}
+	if !raft.IsEmptyHardState(recoveredHS) {
+		if err := storage.SetHardState(recoveredHS); err != nil {
+			_ = logStore.Close()
+			return nil, fmt.Errorf("replay hard state into memory storage: %w", err)
+		}
+	}
 
 	config := &raft.Config{
 		ID:              nodeID,
@@ -134,14 +198,17 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 		CheckQuorum:     true, // Leader steps down if loses quorum
 		PreVote:         true, // Prevents election storms
 		Logger:          &raftLogger{logger: logger},
+		Applied:         recoveredApplied, // avoids re-delivering already-applied entries
 	}
 
 	rc := &RaftConsensus{
 		nodeID:       nodeID,
 		nodeInfo:     nodeInfo,
 		storage:      storage,
+		logStore:     logStore,
 		config:       config,
 		tickInterval: tickInterval,
+		appliedIndex: recoveredApplied,
 		clusterState: &ClusterState{
 			Nodes:    make(map[uint64]*NodeInfo),
 			Sessions: make(map[string]SessionUpdateCommand),
@@ -156,20 +223,38 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 
 	rc.ctx, rc.cancel = context.WithCancel(ctx)
 
-	// Start Raft node
-	if len(peers) > 0 {
-		// Starting a new cluster
+	// Select StartNode vs RestartNode.
+	//
+	// The key invariant: StartNode re-bootstraps the log from index 0 by
+	// appending one ConfChangeAddNode per peer (3 peers → lastIndex(3)). If
+	// the cluster has already advanced (commit(7)), the restarting node panics:
+	// "tocommit(7) is out of range [lastIndex(3)]". The fix is to use
+	// RestartNode whenever the durable log says we have seen prior state, so
+	// we resume at the correct log position regardless of what peers reports.
+	//
+	// Fallback: when logDir is empty (tests only) we preserve the old
+	// len(peers)-based selection so existing tests that pass nil peers do not
+	// break — RestartNode is safe for a node with no history to replay.
+	hasPersistedState := logStore != nil && logStore.HasData()
+	useRestart := hasPersistedState || len(peers) == 0
+	if useRestart {
+		rc.node = raft.RestartNode(config)
+		if hasPersistedState {
+			logger.Info("Restarted Raft node from persisted log",
+				"node_id", nodeID,
+				"recovered_term", recoveredHS.Term,
+				"recovered_commit", recoveredHS.Commit,
+				"recovered_applied", recoveredApplied,
+				"recovered_entries", len(recoveredEntries))
+		} else {
+			logger.Info("Restarted Raft node", "node_id", nodeID)
+		}
+	} else {
 		rc.node = raft.StartNode(config, peers)
 		logger.Info("Started new Raft node", "node_id", nodeID, "peers", peers)
-
-		// Log Raft status immediately after start
 		status := rc.node.Status()
 		logger.Debug("Initial status after StartNode",
 			"node_id", nodeID, "term", status.Term, "lead", status.Lead, "raft_state", status.RaftState)
-	} else {
-		// Joining existing cluster (will be added via ConfChange)
-		rc.node = raft.RestartNode(config)
-		logger.Info("Restarted Raft node", "node_id", nodeID)
 	}
 
 	// CRITICAL: Start the Raft processing loop IMMEDIATELY
@@ -230,6 +315,11 @@ func (rc *RaftConsensus) Stop() error {
 		rc.node.Stop()
 	})
 	rc.wg.Wait() // all callers block until runRaft has exited
+	if rc.logStore != nil {
+		if err := rc.logStore.Close(); err != nil {
+			rc.logger.Warn("Failed to close raft log store", "node_id", rc.nodeID, "error", err)
+		}
+	}
 	return nil
 }
 
@@ -262,9 +352,12 @@ func (rc *RaftConsensus) runRaft() {
 			rc.wg.Add(1)
 			go func(p []byte) {
 				defer rc.wg.Done()
+				rc.logger.Debug("Proposing to Raft", "node_id", rc.nodeID, "bytes", len(p))
 				if err := rc.node.Propose(rc.ctx, p); err != nil {
 					rc.logger.Error("Failed to propose to Raft", "error", err)
+					return
 				}
+				rc.logger.Debug("Proposal accepted by Raft", "node_id", rc.nodeID)
 			}(prop)
 
 		case cc := <-rc.confChangeC:
@@ -291,13 +384,18 @@ func (rc *RaftConsensus) runRaft() {
 	}
 }
 
-// processReady handles Ready struct from Raft
+// processReady handles a Ready struct from Raft.
+//
+// Ordering is load-bearing: durable write → send messages → apply → advance.
+// The durable write must precede outbound messages so that if the process
+// crashes after the send but before the next boot, peers can reconstruct the
+// correct log position from the persisted state (Raft's safety requirement).
 func (rc *RaftConsensus) processReady(rd raft.Ready) {
-	// Save to storage before sending messages
+	// 1. Update in-memory storage.
 	if !raft.IsEmptySnap(rd.Snapshot) {
 		rc.logger.Debug("Applying snapshot", "node_id", rc.nodeID)
 		if err := rc.storage.ApplySnapshot(rd.Snapshot); err != nil {
-			rc.logger.Error("Failed to apply snapshot", "node_id", rc.nodeID, "error", err)
+			rc.logger.Error("Failed to apply snapshot to memory storage", "node_id", rc.nodeID, "error", err)
 		}
 		rc.publishSnapshot(rd.Snapshot)
 	}
@@ -305,7 +403,7 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 	if len(rd.Entries) > 0 {
 		rc.logger.Debug("Appending entries to storage", "count", len(rd.Entries), "node_id", rc.nodeID)
 		if err := rc.storage.Append(rd.Entries); err != nil {
-			rc.logger.Error("Failed to append entries", "node_id", rc.nodeID, "error", err)
+			rc.logger.Error("Failed to append entries to memory storage", "node_id", rc.nodeID, "error", err)
 		}
 	}
 
@@ -314,11 +412,32 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 		rc.logger.Debug("Setting HardState",
 			"node_id", rc.nodeID, "term", hardState.Term, "vote", hardState.Vote, "commit", hardState.Commit)
 		if err := rc.storage.SetHardState(hardState); err != nil {
-			rc.logger.Error("Failed to set hard state", "node_id", rc.nodeID, "error", err)
+			rc.logger.Error("Failed to set hard state in memory storage", "node_id", rc.nodeID, "error", err)
 		}
 	}
 
-	// Send messages to peers (read transport under lock to avoid race with SetTransport)
+	// 2. Persist to durable WAL BEFORE sending messages.
+	// Raft's durability contract requires entries and HardState to be on stable
+	// storage before the associated messages reach any peer. A crash after this
+	// point is safe: peers may or may not have seen the messages, but the next
+	// boot will replay the persisted state and converge correctly. A crash
+	// before this point is also safe: the messages have not been sent yet.
+	//
+	// Persistence failure violates the safety property — a node that continues
+	// after a failed WAL write can silently lose committed entries. Panic so the
+	// operator gets an explicit signal rather than a later, harder-to-diagnose
+	// inconsistency.
+	if rc.logStore != nil {
+		rc.mu.RLock()
+		applied := rc.appliedIndex
+		rc.mu.RUnlock()
+		if err := rc.logStore.SaveBatch(rd.HardState, rd.Entries, rd.Snapshot, applied); err != nil {
+			panic(fmt.Sprintf("raft log store write failed (node %d): %v — "+
+				"continuing would violate Raft's durability contract", rc.nodeID, err))
+		}
+	}
+
+	// 3. Send messages to peers (after durable write).
 	rc.mu.RLock()
 	transport := rc.transport
 	rc.mu.RUnlock()
@@ -327,13 +446,26 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 		transport.Send(rd.Messages)
 	}
 
-	// Apply committed entries to state machine
+	// 4. Apply committed entries to state machine.
 	if len(rd.CommittedEntries) > 0 {
 		rc.logger.Debug("Applying committed entries", "count", len(rd.CommittedEntries), "node_id", rc.nodeID)
 		rc.publishEntries(rc.entriesToApply(rd.CommittedEntries))
+
+		// Persist the updated applied index so restart knows how far the state
+		// machine has advanced. The entries are already durable from step 2; this
+		// write updates only the applied-index key (monotonic — no-op if unchanged).
+		if rc.logStore != nil {
+			rc.mu.RLock()
+			applied := rc.appliedIndex
+			rc.mu.RUnlock()
+			if err := rc.logStore.SaveBatch(raftpb.HardState{}, nil, raftpb.Snapshot{}, applied); err != nil {
+				panic(fmt.Sprintf("raft log store applied-index write failed (node %d): %v — "+
+					"continuing would violate Raft's durability contract", rc.nodeID, err))
+			}
+		}
 	}
 
-	// Update leadership
+	// 5. Update leadership.
 	if rd.SoftState != nil {
 		softState := rd.SoftState
 		rc.logger.Debug("Updating leadership",
@@ -341,7 +473,7 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 		rc.updateLeadership(softState)
 	}
 
-	// Advance the Raft state machine
+	// 6. Advance the Raft state machine.
 	rc.node.Advance()
 }
 
@@ -489,19 +621,14 @@ func (rc *RaftConsensus) applySessionUpdate(data json.RawMessage) error {
 // ProposeSessionUpdate replicates a steward connect/disconnect event through the Raft log.
 // It is non-blocking: if proposeC is at capacity it returns an error immediately.
 func (rc *RaftConsensus) ProposeSessionUpdate(stewardID, nodeID string, connected bool) error {
-	payload, err := json.Marshal(SessionUpdateCommand{
+	data, err := marshalRaftCommand("session_update", SessionUpdateCommand{
 		StewardID: stewardID,
 		NodeID:    nodeID,
 		Connected: connected,
 		Timestamp: time.Now(),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to marshal session update payload: %w", err)
-	}
-	cmd := RaftCommand{Type: "session_update", Data: payload}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return fmt.Errorf("failed to marshal session update command: %w", err)
+		return err
 	}
 	select {
 	case rc.proposeC <- data:
@@ -619,6 +746,16 @@ func (rc *RaftConsensus) GetLeaderInfo() (*NodeInfo, error) {
 	return info, nil
 }
 
+// HasNode reports whether the applied cluster state contains the given node.
+// Used to confirm a node_update proposal actually committed, since a successful
+// ProposeNodeUpdate only means the proposal was accepted for delivery.
+func (rc *RaftConsensus) HasNode(nodeID uint64) bool {
+	rc.clusterState.mu.RLock()
+	defer rc.clusterState.mu.RUnlock()
+	_, ok := rc.clusterState.Nodes[nodeID]
+	return ok
+}
+
 // GetClusterNodes returns all nodes in the cluster
 func (rc *RaftConsensus) GetClusterNodes() []*NodeInfo {
 	rc.clusterState.mu.RLock()
@@ -635,17 +772,12 @@ func (rc *RaftConsensus) GetClusterNodes() []*NodeInfo {
 // ProposeNodeUpdate replicates updated NodeInfo for this node through the Raft log.
 // It is non-blocking: if proposeC is at capacity it returns an error immediately.
 func (rc *RaftConsensus) ProposeNodeUpdate(nodeInfo *NodeInfo) error {
-	payload, err := json.Marshal(NodeUpdateCommand{
+	data, err := marshalRaftCommand("node_update", NodeUpdateCommand{
 		NodeID:   rc.nodeID,
 		NodeInfo: nodeInfo,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to marshal node update payload: %w", err)
-	}
-	cmd := RaftCommand{Type: "node_update", Data: payload}
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return fmt.Errorf("failed to marshal node update command: %w", err)
+		return err
 	}
 	select {
 	case rc.proposeC <- data:

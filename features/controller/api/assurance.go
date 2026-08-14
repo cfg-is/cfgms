@@ -29,6 +29,7 @@ var permissionAssurance = map[string]Requirement{
 	// Former tier3Permissions set — 20 entries, all migrated to Min: AssuranceStrong.
 	"certificate:provision":              {Min: session.AssuranceStrong}, // POST /certificates/provision
 	"certificate:rotate":                 {Min: session.AssuranceStrong}, // POST /certificates/signing/rotate
+	"certificate:revoke":                 {Min: session.AssuranceStrong}, // POST /certificates/{serial}/revoke (Issue #3129)
 	"rbac:create-role":                   {Min: session.AssuranceStrong}, // POST /rbac/roles
 	"rbac:update-role":                   {Min: session.AssuranceStrong}, // PUT  /rbac/roles/{id}
 	"rbac:delete-role":                   {Min: session.AssuranceStrong}, // DELETE /rbac/roles/{id}
@@ -44,6 +45,7 @@ var permissionAssurance = map[string]Requirement{
 	"registration:manage-ip-trust":       {Min: session.AssuranceStrong}, // POST + DELETE /registration/ip-trust
 	"tenant:create":                      {Min: session.AssuranceStrong}, // POST /tenants
 	"tenant:update":                      {Min: session.AssuranceStrong}, // PUT  /tenants/{id}
+	"tenant:manage":                      {Min: session.AssuranceStrong}, // POST /tenants/{id}/suspend, POST /tenants/{id}/config-source/test
 	"tenant:crossing-grant":              {Min: session.AssuranceStrong}, // POST /tenants/{id}/access-grants
 	"tenant:crossing-break-glass":        {Min: session.AssuranceStrong}, // POST /tenants/{id}/break-glass
 	"refresh:approve":                    {Min: session.AssuranceStrong}, // POST /stewards/refresh/{pending_id}/approve
@@ -51,6 +53,7 @@ var permissionAssurance = map[string]Requirement{
 	"steward:move":                       {Min: session.AssuranceStrong}, // POST /stewards/{id}/move
 	"steward:decommission":               {Min: session.AssuranceStrong}, // DELETE /stewards/{id}
 	"web-account:create":                 {Min: session.AssuranceStrong}, // POST /web/accounts
+	"web-account:update":                 {Min: session.AssuranceStrong}, // PUT  /web/accounts/{username} (Issue #3126: can reset password or disable)
 	"web-account:delete":                 {Min: session.AssuranceStrong}, // DELETE /web/accounts/{username}
 	"web-account:revoke-enrollment-link": {Min: session.AssuranceStrong}, // POST /web/accounts/{username}/enrollment-link/revoke
 

@@ -3,6 +3,9 @@
 package api
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -146,6 +149,127 @@ func TestPermissionAssurance_SubjectRoleBindingStrong(t *testing.T) {
 		assert.False(t, req.RequireUserPresence,
 			"permission %q must not require user presence (not a catastrophic operation)", perm)
 	}
+}
+
+// TestPermissionAssurance_TenantManageStrong is a REQUIRED test (Issue #3181 AC:
+// "tenant:manage is registered in permissionAssurance at Min: session.AssuranceStrong").
+// Suspending a tenant is a denial of service against everything inside it, so it sits
+// at the same assurance bar as tenant:create and tenant:update.
+func TestPermissionAssurance_TenantManageStrong(t *testing.T) {
+	req, found := permissionAssurance["tenant:manage"]
+	require.True(t, found, "tenant:manage must be in permissionAssurance (Issue #3181)")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"tenant:manage must require AssuranceStrong (same bar as tenant:create and tenant:update)")
+	assert.False(t, req.RequireUserPresence,
+		"tenant:manage must not require user presence (not a catastrophic operation)")
+}
+
+// TestPermissionAssurance_TenantManage_FloorEnforced is a REQUIRED test (Issue #3181 AC:
+// "A principal at AssuranceBasic is rejected by requirePermission for tenant:manage, while
+// a principal at AssuranceStrong is admitted"). Proves the floor is enforced at runtime by
+// requirePermission, not merely declared in the map.
+func TestPermissionAssurance_TenantManage_FloorEnforced(t *testing.T) {
+	server := setupTestServer(t)
+
+	reached := false
+	probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := server.requirePermission("tenant", "manage")(probe)
+
+	newReq := func(principal *Principal) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/some-tenant/suspend", nil)
+		ctx := context.WithValue(req.Context(), principalContextKey, principal)
+		return req.WithContext(ctx)
+	}
+
+	t.Run("AssuranceBasic is rejected with step-up challenge", func(t *testing.T) {
+		reached = false
+		p := &Principal{
+			ID:          "basic-user",
+			Assurance:   session.AssuranceBasic,
+			Permissions: []string{"tenant:manage"},
+			TenantID:    "some-tenant",
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newReq(p))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code,
+			"AssuranceBasic must be rejected for tenant:manage (step-up required)")
+		assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp",
+			"rejected caller must receive a step-up challenge, not a flat denial")
+		assert.False(t, reached, "probe must not be reached when assurance is insufficient")
+	})
+
+	t.Run("AssuranceStrong is admitted", func(t *testing.T) {
+		reached = false
+		p := &Principal{
+			ID:          "strong-user",
+			Assurance:   session.AssuranceStrong,
+			Permissions: []string{"tenant:manage"},
+			TenantID:    "some-tenant",
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newReq(p))
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"AssuranceStrong must be admitted for tenant:manage")
+		assert.True(t, reached, "probe must be reached when assurance is sufficient")
+	})
+}
+
+// TestPermissionAssurance_WebAccountUpdateStrong is a REQUIRED test (Issue #3126 AC:
+// "web-account:update is registered in permissionAssurance at Min: session.AssuranceStrong").
+// An update endpoint that can reset a password or disable an account is at least as
+// sensitive as web-account:create or web-account:delete, both already at AssuranceStrong.
+func TestPermissionAssurance_WebAccountUpdateStrong(t *testing.T) {
+	req, found := permissionAssurance["web-account:update"]
+	require.True(t, found, "web-account:update must be in permissionAssurance (Issue #3126)")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"web-account:update must require AssuranceStrong (same bar as create and delete)")
+	assert.False(t, req.RequireUserPresence,
+		"web-account:update must not require user presence (not a catastrophic operation)")
+}
+
+// TestPermissionAssurance_CrossRegistryInvariant is a REQUIRED test (Issue #3195).
+// It asserts that every permission ID registered in permissionAssurance is also
+// present in knownPermissions — or is a documented, deliberate exception — so that
+// cross-registry drift is caught mechanically rather than by review.
+//
+// Deliberate exceptions (not grantable by design):
+//   - session:create: the session-creation endpoint enforces this; no principal holds it as an explicit grant
+//   - webauthn:assert-presence: presence ceremony endpoint; implicit capability of any strongly-authenticated principal
+//   - webauthn:elevate: step-up elevation path; it IS the auth upgrade mechanism, not a grantable grant
+//   - publisher-trust:add: forward-declared in knownFuturePermissions; no active REST route yet
+//
+// The former pending-audit set (cluster:drain-node, cluster:decommission-node, refresh:approve,
+// refresh:set-policy, terminal:create) has been fully resolved in Issue #3303: all five are now
+// in knownPermissions with scope guards where required — ADR-025 Decision 1 root-scoped guards
+// for refresh:approve and terminal:create, and clusterLifecycleScopeAllowed for the two
+// cluster:* permissions, whose routes target fleet-wide, non-tenant infrastructure.
+func TestPermissionAssurance_CrossRegistryInvariant(t *testing.T) {
+	// Deliberate exceptions: permissions in permissionAssurance that are intentionally
+	// absent from knownPermissions because they are not grantable principal grants.
+	deliberate := map[string]bool{
+		"session:create":           true, // session endpoint; no principal holds this as an explicit grant
+		"webauthn:assert-presence": true, // presence ceremony; implicit capability, not a grantable grant
+		"webauthn:elevate":         true, // step-up elevation mechanism; not a grantable permission
+		"publisher-trust:add":      true, // forward-declared (no active route); knownFuturePermissions
+	}
+
+	for permID := range permissionAssurance {
+		if deliberate[permID] {
+			continue
+		}
+		assert.True(t, isKnownPermission(permID),
+			"permission %q is in permissionAssurance but missing from knownPermissions — "+
+				"add it to knownPermissions (if it should be grantable) or to the deliberate "+
+				"exception set in this test with a documented reason (Issue #3195)", permID)
+	}
+
+	// Verify that tenant:create specifically is in knownPermissions — the direct fix for Issue #3195.
+	assert.True(t, isKnownPermission("tenant:create"),
+		"tenant:create must be in knownPermissions: it gates POST /tenants and must be grantable "+
+			"to API keys and web accounts (Issue #3195)")
 }
 
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic

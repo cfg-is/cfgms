@@ -680,6 +680,25 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ADR-025 Decision 1 root-scoped boundary (Issue #3303): the route path carries
+	// {pending_id}, not a tenant ID, so requirePermission's extractBoundaryTenantFromRequest
+	// returns "" and the middleware root-scoped crossing check is skipped entirely. Enforce
+	// the boundary inline using the resolved entry.TenantID after the record is loaded.
+	// Existence-oracle stance: all denial outcomes (no tenantManager, tenantAuthNeedsCrossing,
+	// tenantAuthDenied) return 404 "pending refresh not found" — the same response as the
+	// tenant-scoped case above and the ErrPendingRefreshNotFound path — so the endpoint never
+	// discloses pending-refresh existence across tenant boundaries to a root-scoped caller.
+	if principal, _ := r.Context().Value(principalContextKey).(*Principal); principal != nil && principal.RootScoped {
+		if s.tenantManager == nil {
+			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			return
+		}
+		if s.authorizeTenantAccess(r.Context(), principal, entry.TenantID) != tenantAuthAllowed {
+			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	if s.stewardStore == nil {
 		http.Error(w, "steward store unavailable", http.StatusServiceUnavailable)
 		return

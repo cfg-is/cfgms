@@ -47,6 +47,14 @@ func registerTerminalRoutes(s *Server, api *mux.Router) {
 // or a descendant tenant. Out-of-scope (or unknown) stewards return 404 so the
 // endpoint does not disclose steward existence across tenants. The {steward_id}
 // path variable carries the target steward ID.
+//
+// Root-scoped principals (ADR-025 Decision 1, Issue #3303): the route path carries
+// {steward_id} rather than a tenant ID, so requirePermission's
+// extractBoundaryTenantFromRequest returns "" and the middleware root-scoped crossing
+// check is skipped. The wrapper resolves the steward's tenant from the registry and
+// enforces the ADR-025 Decision 1 boundary inline — same approach as the reboot-window
+// handler. tenantAuthNeedsCrossing emits a step-up-shaped crossing challenge
+// (ADR-025 Decision 3); tenantAuthDenied returns 404 (existence oracle).
 func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
@@ -72,6 +80,24 @@ func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 		} else if !exists {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
+		} else if principal, _ := r.Context().Value(principalContextKey).(*Principal); principal != nil && principal.RootScoped {
+			// callerTenant == "" and steward exists: enforce ADR-025 Decision 1 for root-scoped principals.
+			stewardTenant := info.TenantID
+			if s.tenantManager == nil {
+				// Fail closed: no ancestry source wired, treat as if no crossing is active.
+				s.writeTenantCrossingChallenge(w, stewardTenant)
+				return
+			}
+			switch s.authorizeTenantAccess(r.Context(), principal, stewardTenant) {
+			case tenantAuthAllowed:
+				// Active crossing grant or steward is in the root tenant itself.
+			case tenantAuthNeedsCrossing:
+				s.writeTenantCrossingChallenge(w, stewardTenant)
+				return
+			default:
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

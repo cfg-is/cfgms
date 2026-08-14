@@ -36,6 +36,7 @@ const NAV_ITEMS = [
   { label: 'Refresh Requests', to: '/refresh', soon: false },
   { label: 'Audit', to: '/audit', soon: false },
   { label: 'Accounts', to: '/accounts', soon: false },
+  { label: 'Certificates', to: '/certificates', soon: false },
 ] as const
 
 export default function AppShell() {

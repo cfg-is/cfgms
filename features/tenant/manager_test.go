@@ -734,6 +734,28 @@ func TestManager_SuspendTenant_NotFound(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestManager_SuspendTenant_DefaultGuard verifies that SuspendTenant rejects the
+// "default" tenant ID, does not call the store, and leaves the tenant's status
+// unchanged — matching the guard DeleteTenant already enforces (Issue #3181).
+func TestManager_SuspendTenant_DefaultGuard(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	// Create a tenant named "default" so any status change would be observable.
+	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "default"})
+	require.NoError(t, err)
+
+	suspendErr := manager.SuspendTenant(ctx, "default")
+	require.Error(t, suspendErr, "SuspendTenant must return an error for the default tenant")
+	require.ErrorIs(t, suspendErr, ErrCannotSuspendDefault)
+
+	// Status must remain Active — the guard must not have mutated the tenant.
+	td, err := manager.GetTenant(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status,
+		"default tenant status must be unchanged after a rejected suspend")
+}
+
 // --- slog capture helpers for observable error-branch coverage ---
 
 // capturedLogRecord is a single slog record captured during a test.

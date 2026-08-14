@@ -1370,25 +1370,23 @@ func TestTenantContextKeyType(t *testing.T) {
 	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
 }
 
-// TestServer_CertificateRevokeRouteDeregistered confirms the POST
-// /api/v1/certificates/{serial}/revoke route has been removed.
-// Must return 404 (no route) or 405 (route exists, wrong method) — NOT 501.
-func TestServer_CertificateRevokeRouteDeregistered(t *testing.T) {
+// TestServer_CertificateRevoke_RouteRegisteredAndGated confirms that POST
+// /api/v1/certificates/{serial}/revoke is registered and gated at AssuranceStrong
+// (Issue #3129). A Machine-assurance API key holding certificate:revoke receives
+// 403, not 404 — proving the route exists and the assurance gate fires correctly.
+func TestServer_CertificateRevoke_RouteRegisteredAndGated(t *testing.T) {
 	server := setupTestServer(t)
 
 	revokeKey := NewTestKey(t, server, []string{"certificate:revoke"})
 
-	req := httptest.NewRequest("POST", "/api/v1/certificates/any-serial/revoke", nil)
+	req := httptest.NewRequest("POST", "/api/v1/certificates/12345678901234567890/revoke", nil)
 	req.Header.Set("X-API-Key", revokeKey)
 	rec := httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
 
-	assert.NotEqual(t, http.StatusNotImplemented, rec.Code,
-		"route must not return 501 — handler was deleted")
-	assert.True(t,
-		rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
-		"deregistered revoke route must return 404 or 405, got %d", rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"AssuranceStrong-gated route must reject Machine-assurance API key with 403, not 404")
 }
 
 // TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
@@ -1653,7 +1651,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 			"installer key permissions must allow upload+read+delete on installer artifacts and steward listing for the E2E flow")
 	})
 
-	t.Run("gate on, east/central/west loop: keys seeded with default tenant and steward permissions", func(t *testing.T) {
+	t.Run("gate on, east/central/west loop: keys seeded in the HA steward tenant with steward permissions", func(t *testing.T) {
 		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
 		t.Setenv("CFGMS_API_KEY_EAST", "east-key")
 		t.Setenv("CFGMS_API_KEY_CENTRAL", "central-key")
@@ -1666,11 +1664,23 @@ func TestSeedTestAPIKeys(t *testing.T) {
 			keyInfo, exists := server.apiKeys[k]
 			server.mu.RUnlock()
 			require.True(t, exists, "loop key %s must be seeded", k)
-			require.Equal(t, "default", keyInfo.TenantID, "loop keys use TenantID=default")
+			require.Equal(t, "test-tenant-integration", keyInfo.TenantID,
+				"loop keys must be scoped to the tenant the HA stewards register into; "+
+					"steward lookups are tenant-scoped, so a key in any other tenant reads "+
+					"STEWARD_NOT_FOUND for a steward that registered successfully")
 			require.ElementsMatch(t,
-				[]string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
+				[]string{
+					"steward:read", "steward:read-dna", "steward:auth-refresh",
+					"config:push",
+					"workflow:execute", "workflow:read",
+					// Read-only HA grants so test/integration/ha can observe the
+					// cluster it starts; every HA route is permission-gated.
+					"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+				},
 				keyInfo.Permissions,
 				"loop key %s must NOT have installer permissions (regression guard for Issue #1709)", k)
+			require.NotContains(t, keyInfo.Permissions, "installer:upload",
+				"loop key %s must NOT have installer permissions (Issue #1709)", k)
 		}
 	})
 }

@@ -412,6 +412,8 @@ The `--url` value must be HTTPS for any non-loopback address. On success the bun
 | `--bundle` | — | Path to the admin bundle YAML (required for first-time import) |
 | `--url` | — | Controller HTTPS URL (required with `--bundle`; must be HTTPS for non-loopback) |
 | `--name` | derived from URL host | Human-readable connection name stored in the local registry |
+| `--tls-insecure` | false | Skip TLS certificate verification (development only, env: CFGMS_TLS_INSECURE). Prints an mTLS warning banner; the session-token reconnect path requires typed confirmation (`"I understand the risk"` on a TTY, or `CFGMS_TLS_INSECURE_CONFIRM=yes` non-interactively) |
+| `--server-name` | — | Override the TLS server name used for certificate verification (e.g. when dialing by IP against a cert with a hostname SAN) without disabling verification |
 
 ### cfg connect (reconnect)
 
@@ -439,6 +441,13 @@ cfg disconnect
 ```
 
 Sends `DELETE /api/v1/sessions/{id}` to the controller (best-effort — proceeds even on network error), then removes the token from the OS keychain. Exits 0 with a notice when no active session is found.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tls-insecure` | false | Skip TLS certificate verification (development only, env: CFGMS_TLS_INSECURE). Requires typed confirmation (`"I understand the risk"` on a TTY, or `CFGMS_TLS_INSECURE_CONFIRM=yes` non-interactively) since the revoke call carries the session's bearer token |
+| `--server-name` | — | Override the TLS server name used for certificate verification without disabling verification |
 
 ### cfg connections current
 
@@ -533,6 +542,7 @@ No workflows registered.
 | `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+| `--server-name` | — | Override TLS server name for certificate verification |
 
 ### cfg workflow status
 
@@ -564,6 +574,7 @@ error:         -
 | `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+| `--server-name` | — | Override TLS server name for certificate verification |
 
 ### cfg workflow cancel
 
@@ -590,6 +601,7 @@ Cancelled execution exec_1782879897336049056_1
 | `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+| `--server-name` | — | Override TLS server name for certificate verification |
 
 ### cfg workflow promote-hv-role
 
@@ -646,6 +658,7 @@ cfg workflow promote-hv-role MyVM hv01 --cluster fc-east --url=https://controlle
 | `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
+| `--server-name` | — | Override TLS server name for certificate verification |
 
 ---
 
@@ -668,6 +681,7 @@ These are distinct from `config.update` (ADR-026 decision 3).
 --api-key <key>          API key (env: CFGMS_API_KEY)
 --tls-ca-cert <path>     CA certificate path (env: CFGMS_TLS_CA_CERT)
 --tls-insecure           Skip TLS verification (env: CFGMS_TLS_INSECURE)
+--server-name <name>     Override TLS server name for certificate verification
 --tenant <id>            Target tenant ID
 --steward <id>           Target steward ID
 ```
@@ -784,6 +798,7 @@ Created role config "github-runners" (selector: os:windows tag:github-runner)
 | `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
 | `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |
+| `--server-name` | — | Override TLS server name for certificate verification |
 
 ### cfg role ls
 
@@ -802,7 +817,7 @@ github-runners   os:windows tag:github-runner    ops-admin
 debug-nodes      tag:debug                       ops-admin
 ```
 
-**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure` (same as above).
+**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
 
 ### cfg role show
 
@@ -812,7 +827,7 @@ Display a role config including its selector and fragment.
 cfg role show <name> --url=https://controller.example.com
 ```
 
-**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure` (same as above).
+**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
 
 ### cfg role delete
 
@@ -830,7 +845,7 @@ Output on success:
 Deleted role config "github-runners"
 ```
 
-**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure` (same as above).
+**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
 
 ## cfg steward tag — Steward Tag Management (Issue #2545)
 
@@ -903,6 +918,7 @@ web-server
 | `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
 | `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |
+| `--server-name` | — | Override TLS server name for certificate verification |
 
 ## cfg webauthn — Passkey Bootstrap and Recovery (Issue #2783)
 

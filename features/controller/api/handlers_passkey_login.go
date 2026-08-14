@@ -290,6 +290,18 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Issue #3126: check whether the account is disabled before issuing a session.
+	// VerifyWebCredential returns ErrInvalidWebCredential for disabled accounts.
+	// The error message is deliberately identical to the WebAuthn verification error
+	// so the response does not disclose the reason for rejection.
+	if credErr := s.VerifyWebCredential(acct); credErr != nil {
+		s.recordPasskeyLoginFailure("account:" + acct.Username)
+		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+		return
+	}
+
 	// Persist the advanced sign count.
 	updatedAcct := *acct
 	updatedAcct.Credentials = make([]WebAuthnCredential, len(acct.Credentials))

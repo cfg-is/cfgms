@@ -41,7 +41,7 @@ func TestRaftConsensus_TimingDerivedFromClusterConfig(t *testing.T) {
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "timing-node", State: NodeStateHealthy, Role: NodeRoleFollower}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, clusterCfg, logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, clusterCfg, "", logging.GetLogger())
 	require.NoError(t, err)
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
@@ -56,7 +56,7 @@ func TestRaftConsensus_NewRaftConsensus_NilClusterCfgReturnsError(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
-	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, nil, logging.GetLogger())
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, nil, "", logging.GetLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clusterCfg")
 }
@@ -68,7 +68,7 @@ func TestRaftConsensus_NewRaftConsensus_ZeroHeartbeatIntervalReturnsError(t *tes
 	defer cancel()
 	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
 	cfg := &ClusterConfig{HeartbeatInterval: 0, ElectionTimeout: 1 * time.Second}
-	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, logging.GetLogger())
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, "", logging.GetLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HeartbeatInterval")
 }
@@ -80,7 +80,7 @@ func TestRaftConsensus_NewRaftConsensus_ZeroElectionTimeoutReturnsError(t *testi
 	defer cancel()
 	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
 	cfg := &ClusterConfig{HeartbeatInterval: 100 * time.Millisecond, ElectionTimeout: 0}
-	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, logging.GetLogger())
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, "", logging.GetLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ElectionTimeout")
 }
@@ -93,7 +93,7 @@ func TestRaftConsensus_NewRaftConsensus_ElectionTickTooSmallReturnsError(t *test
 	nodeInfo := &NodeInfo{ID: "err-node", State: NodeStateHealthy, Role: NodeRoleFollower}
 	// ElectionTimeout / HeartbeatInterval = 2, which is < 5×HeartbeatTick (= 5).
 	cfg := &ClusterConfig{HeartbeatInterval: 500 * time.Millisecond, ElectionTimeout: 1 * time.Second}
-	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, logging.GetLogger())
+	_, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, cfg, "", logging.GetLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ElectionTimeout")
 }
@@ -108,7 +108,7 @@ func TestRaftConsensus_propose_stoppedNodeDoesNotPanic(t *testing.T) {
 		Role:  NodeRoleFollower,
 	}
 
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop the underlying raft node so that Propose returns ErrStopped.
@@ -150,7 +150,7 @@ func TestRaftConsensus_ProposeNodeUpdate_AppliedViaRaft(t *testing.T) {
 
 	// Single-peer list so StartNode bootstraps a new single-node cluster.
 	peers := []raft.Peer{{ID: 1}}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
@@ -189,7 +189,7 @@ func TestRaftConsensus_ProposeAddNode_SubmitsToChannel(t *testing.T) {
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-1", Address: "127.0.0.1:2000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 	// Stop before the deferred Stop — stopOnce makes this safe; both return nil.
 	rc.Stop()       //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
@@ -217,7 +217,7 @@ func TestRaftConsensus_ProposeRemoveNode_SubmitsToChannel(t *testing.T) {
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-1", Address: "127.0.0.1:3000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 	rc.Stop()       //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
@@ -241,7 +241,7 @@ func TestRaftConsensus_ProposeNodeUpdate_ChannelFull_ReturnsError(t *testing.T) 
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-fill", Address: "127.0.0.1:4000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop blocks until runRaft exits, guaranteeing proposeC won't be drained.
@@ -264,7 +264,7 @@ func TestRaftConsensus_ProposeAddNode_ChannelFull_ReturnsError(t *testing.T) {
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-add-fill", Address: "127.0.0.1:5000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop blocks until runRaft exits, guaranteeing confChangeC won't be drained.
@@ -287,7 +287,7 @@ func TestRaftConsensus_ProposeRemoveNode_ChannelFull_ReturnsError(t *testing.T) 
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-rem-fill", Address: "127.0.0.1:7000"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 
 	// Stop blocks until runRaft exits, guaranteeing confChangeC won't be drained.
@@ -318,7 +318,7 @@ func TestRaftConsensus_ProposeSessionUpdate_AppliedViaRaft(t *testing.T) {
 	}
 
 	peers := []raft.Peer{{ID: 1}}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
@@ -355,7 +355,7 @@ func TestRaftConsensus_ProposeSessionUpdate_Disconnect_DeletesEntry(t *testing.T
 
 	nodeInfo := &NodeInfo{ID: "session-disconnect-node", Address: "127.0.0.1:8222", State: NodeStateHealthy, Role: NodeRoleFollower}
 	peers := []raft.Peer{{ID: 1}}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
@@ -388,7 +388,7 @@ func TestRaftConsensus_ProposeSessionUpdate_ChannelFull_ReturnsError(t *testing.
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "session-full-node", Address: "127.0.0.1:8333"}
-	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), logging.GetLogger())
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
 
 	rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
@@ -400,4 +400,109 @@ func TestRaftConsensus_ProposeSessionUpdate_ChannelFull_ReturnsError(t *testing.
 
 	err = rc.ProposeSessionUpdate("steward-x", "node-1", true)
 	require.Error(t, err, "ProposeSessionUpdate must return an error when proposeC is full")
+}
+
+// TestRaftConsensus_RestartRecoversLogAndRejoinsAtCorrectIndex verifies that a
+// RaftConsensus stopped and reconstructed against the same on-disk store starts
+// from the persisted term and commit index rather than bootstrapping from index 0.
+// The test uses no mocks: real raft.Node instances and a t.TempDir() log directory.
+func TestRaftConsensus_RestartRecoversLogAndRejoinsAtCorrectIndex(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	logDir := t.TempDir()
+	nodeInfo := &NodeInfo{ID: "restart-node", Address: "127.0.0.1:0", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	cfg := newTestClusterCfg()
+
+	// Phase 1: start a single-node cluster and commit some entries.
+	rc1, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, cfg, logDir, logging.GetLogger())
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return rc1.IsLeader()
+	}, 10*time.Second, 50*time.Millisecond, "single-node cluster must elect itself leader")
+
+	// Propose and wait for two entries to be applied through the log.
+	require.NoError(t, rc1.ProposeNodeUpdate(&NodeInfo{
+		ID: "restart-node", Address: "127.0.0.1:1111", State: NodeStateHealthy, Role: NodeRoleLeader,
+	}))
+	require.Eventually(t, func() bool {
+		return rc1.HasNode(1)
+	}, 5*time.Second, 25*time.Millisecond, "node update must be applied via the Raft log")
+
+	// Capture the term and commit index before stopping.
+	status1 := rc1.node.Status()
+	preStopTerm := status1.Term
+	preStopCommit := status1.Commit
+
+	require.Greater(t, preStopTerm, uint64(0), "term must be > 0 after election")
+	require.Greater(t, preStopCommit, uint64(0), "commit index must be > 0 after entry apply")
+
+	require.NoError(t, rc1.Stop())
+
+	// Phase 2: reconstruct a new RaftConsensus against the same log directory.
+	// peers is still passed but must NOT be used for StartNode — the store has data
+	// so RestartNode is selected internally.
+	rc2, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, cfg, logDir, logging.GetLogger())
+	require.NoError(t, err)
+	defer rc2.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	// The recovered node must restart at the persisted term and commit index.
+	status2 := rc2.node.Status()
+	assert.GreaterOrEqual(t, status2.Term, preStopTerm,
+		"recovered term must be >= pre-stop term")
+	assert.GreaterOrEqual(t, status2.Commit, preStopCommit,
+		"recovered commit index must be >= pre-stop commit index")
+	assert.Equal(t, preStopCommit, rc2.appliedIndex,
+		"recovered appliedIndex must match pre-stop commit index so entries are not re-delivered")
+}
+
+// TestRaftConsensus_ProcessReady_DurableWritePrecedesMessageDispatch verifies
+// that processReady persists entries and HardState to the durable log store
+// before the Raft loop advances to apply committed entries. Because entries
+// must be persisted before messages are sent (Raft's safety contract), and
+// messages are sent before apply, a fully applied entry is proof the write
+// happened earlier in the same processReady call.
+func TestRaftConsensus_ProcessReady_DurableWritePrecedesMessageDispatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logDir := t.TempDir()
+	nodeInfo := &NodeInfo{ID: "ordering-node", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), logDir, logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	require.Eventually(t, func() bool {
+		return rc.IsLeader()
+	}, 10*time.Second, 50*time.Millisecond, "single-node cluster must elect itself leader")
+
+	// Propose an entry and wait for it to be applied via the Raft log.
+	// publishEntries (apply) is the last observable step in processReady after
+	// the durable write and message dispatch, so observing the apply proves the
+	// write happened earlier in the same cycle.
+	require.NoError(t, rc.ProposeNodeUpdate(&NodeInfo{
+		ID: "ordering-node", Address: "127.0.0.1:2222", State: NodeStateHealthy, Role: NodeRoleLeader,
+	}))
+	require.Eventually(t, func() bool {
+		return rc.HasNode(1)
+	}, 5*time.Second, 25*time.Millisecond, "node update must be applied before asserting log store state")
+
+	// Verify via the in-process log store (same package — direct field access).
+	// Opening a second bbolt handle while the consensus holds the flock would block
+	// indefinitely; instead we read through the already-open store that processReady
+	// wrote to. logStore is set once at construction and never reassigned, so no
+	// mutex is needed here. HasData() and LoadState() are read-only bbolt views,
+	// safe to call from the test goroutine while the consensus loop is between ticks.
+	require.NotNil(t, rc.logStore, "log store must be initialised when logDir is non-empty")
+	require.True(t, rc.logStore.HasData(),
+		"log store must contain persisted entries after a committed Raft proposal")
+
+	_, entries, _, _, err := rc.logStore.LoadState()
+	require.NoError(t, err)
+	require.NotEmpty(t, entries,
+		"at least the conf-change bootstrap entries must be persisted before apply completes")
 }

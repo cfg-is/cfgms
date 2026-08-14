@@ -8,6 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -272,6 +276,181 @@ func (s *Server) filterCertsByTenantScope(ctx context.Context, certs []Certifica
 		}
 	}
 	return filtered, nil
+}
+
+// RevokeCertificateResponse is returned by POST /api/v1/certificates/{serial}/revoke.
+// IsValid reflects the post-revocation state (always false after a successful revoke).
+// IsRevoked confirms the serial is on the revocation list so the UI can update
+// without a second round-trip.
+type RevokeCertificateResponse struct {
+	SerialNumber string `json:"serial_number"`
+	IsValid      bool   `json:"is_valid"`
+	IsRevoked    bool   `json:"is_revoked"`
+}
+
+// handleGetCertificate handles GET /api/v1/certificates/{serial}.
+// Returns CertificateInfo for the given serial number. Callers scoped to a tenant
+// may only see certificates whose owning steward lives within their subtree — an
+// out-of-scope serial returns 404 (same as unknown serial) to avoid disclosing
+// cross-tenant certificate existence.
+func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
+	if s.certManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	vars := mux.Vars(r)
+	serial := vars["serial"]
+
+	certData, err := s.certManager.GetCertificate(serial)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to get certificate",
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificate", "INTERNAL_ERROR")
+		}
+		return
+	}
+
+	// Tenant-scope check: callers scoped to a tenant subtree may only see
+	// certificates whose owning steward lives within that subtree.
+	// Unscoped admins (callerTenant == "") see everything.
+	// Controller-internal certs (ClientID == "") have no tenant owner and are always visible.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" && certData.ClientID != "" {
+		if s.stewardStore == nil {
+			s.logger.Error("certificate get failed: steward store not configured",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+
+		record, err := s.stewardStore.GetSteward(r.Context(), certData.ClientID)
+		if err != nil {
+			if !errors.Is(err, business.ErrStewardNotFound) {
+				s.logger.Error("Failed to resolve certificate owner for tenant scope",
+					"serial", logging.SanitizeLogValue(serial),
+					"client_id", logging.SanitizeLogValue(certData.ClientID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificate", "INTERNAL_ERROR")
+				return
+			}
+			// ErrStewardNotFound: no durable record — unattributable, visible fleet-wide
+			// (same rule as filterCertsByTenantScope for the list endpoint).
+		} else if !isWithinTenantScope(callerTenant, record.TenantID) {
+			// Out-of-scope: return 404 to avoid leaking cross-tenant serial existence.
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+	}
+
+	daysUntil := int(time.Until(certData.ExpiresAt).Hours() / 24)
+	s.writeSuccessResponse(w, CertificateInfo{
+		SerialNumber:        certData.SerialNumber,
+		CommonName:          certData.CommonName,
+		StewardID:           certData.ClientID,
+		IsValid:             certData.IsValid,
+		ExpiresAt:           certData.ExpiresAt,
+		DaysUntilExpiration: safeInt32(daysUntil),
+		NeedsRenewal:        daysUntil < 30,
+	})
+}
+
+// handleRevokeCertificate handles POST /api/v1/certificates/{serial}/revoke.
+// Tenant-scope check runs BEFORE calling Revoke — an out-of-scope revoke is a
+// denial-of-service against the owning steward's mTLS connectivity.
+func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request) {
+	if s.certManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	vars := mux.Vars(r)
+	serial := vars["serial"]
+
+	// Resolve the cert first to verify existence and get the owning steward.
+	certData, err := s.certManager.GetCertificate(serial)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to get certificate for revocation",
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke certificate", "INTERNAL_ERROR")
+		}
+		return
+	}
+
+	// Tenant-scope check before revoking. A cross-tenant revoke is sabotage:
+	// it kills a steward's mTLS connectivity without the owning tenant's consent.
+	//
+	// Revoke fails closed: unlike the read/list path, a tenant-scoped caller may
+	// revoke only certificates POSITIVELY attributed to its own subtree. A cert
+	// with an empty ClientID is controller-internal (CA, signing, server) and a
+	// cert whose steward has no durable record is unattributable — revoking
+	// either would let a client-level admin sever mTLS for the whole fleet or
+	// for another tenant's steward. Both are denied with the same 404 used for
+	// out-of-scope certs so no cross-tenant existence is leaked. Only an
+	// unscoped admin (empty caller tenant) may revoke those.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		if certData.ClientID == "" {
+			s.logger.Warn("Denied tenant-scoped revoke of unattributable certificate",
+				"serial", logging.SanitizeLogValue(serial),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+
+		if s.stewardStore == nil {
+			s.logger.Error("certificate revoke failed: steward store not configured",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+
+		record, err := s.stewardStore.GetSteward(r.Context(), certData.ClientID)
+		if err != nil {
+			if !errors.Is(err, business.ErrStewardNotFound) {
+				s.logger.Error("Failed to resolve certificate owner for revocation scope",
+					"serial", logging.SanitizeLogValue(serial),
+					"client_id", logging.SanitizeLogValue(certData.ClientID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke certificate", "INTERNAL_ERROR")
+				return
+			}
+			// ErrStewardNotFound: no durable record, so the cert cannot be
+			// attributed to this caller's subtree — deny.
+			s.logger.Warn("Denied tenant-scoped revoke of certificate with no steward record",
+				"serial", logging.SanitizeLogValue(serial),
+				"client_id", logging.SanitizeLogValue(certData.ClientID),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+		if !isWithinTenantScope(callerTenant, record.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+	}
+
+	if err := s.certManager.Revoke(serial); err != nil {
+		s.logger.Error("Failed to revoke certificate",
+			"serial", logging.SanitizeLogValue(serial),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke certificate", "INTERNAL_ERROR")
+		return
+	}
+
+	s.writeSuccessResponse(w, RevokeCertificateResponse{
+		SerialNumber: serial,
+		IsValid:      false,
+		IsRevoked:    true,
+	})
 }
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision

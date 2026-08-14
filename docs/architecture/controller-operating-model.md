@@ -476,6 +476,7 @@ The controller promotes a steward's source IP to **trusted status** only after i
 | `registration.ip_trust_threshold` | 30 min | Continuous liveness required before IP is trusted (Issue #1694) |
 | `registration.ip_trust_dark_window` | 30 days | Inactivity period before a trusted IP range is auto-revoked (Issue #1697) |
 | `registration.pending_review_timeout` | 5 days | Maximum time a pending registration may await operator action (Issue #1697) |
+| `registration.enrollment_link_ttl` | 72 hours | Validity window for a single-use passkey enrollment magic link (Issue #2966) |
 
 ### IP-Trust Dark-Window Expiry (Issue #1697)
 
@@ -1061,7 +1062,7 @@ The controller runs as a single instance. If it goes down, stewards continue ope
 
 Multiple controller instances form a **Raft consensus cluster**. Raft is the sole authority for cluster membership and leader election — there is no static or geographic node discovery layer, and no ad-hoc election logic outside Raft:
 
-- **Cluster membership** — determined exclusively by Raft consensus; peers are bootstrapped from the `discovery.config.nodes` list and thereafter managed by Raft configuration changes
+- **Cluster membership** — determined exclusively by Raft consensus; a new node bootstraps from `discovery.config.nodes` and thereafter membership is managed by Raft configuration changes; a restarting node recovers its persisted Raft log (HardState, entries, applied index) from the per-node bbolt WAL at `<dna-data-root>/raft-log/raft.db` and rejoins via `raft.RestartNode` without re-bootstrapping from the peer list (ADR-028)
 - **Leader election** — Raft consensus elects one node as leader to handle writes; `CheckQuorum:true` causes the leader to step down automatically when it loses quorum, without any explicit demotion call
 - **State replication** — cfg changes, registration events, and fleet state are replicated across nodes via the Raft log
 - **Automatic failover** — if the leader goes down, Raft elects a new leader automatically

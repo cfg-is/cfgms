@@ -12,9 +12,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +152,98 @@ func TestNewAPIClient(t *testing.T) {
 		transport := client.httpClient.Transport.(*http.Transport)
 		assert.Equal(t, uint16(tls.VersionTLS12), transport.TLSClientConfig.MinVersion)
 	})
+
+	t.Run("TLS insecure with client certs includes cert and sets InsecureSkipVerify", func(t *testing.T) {
+		certPEM, keyPEM := generateTestClientCert(t)
+
+		var buf strings.Builder
+		orig := tlsInsecureWriter
+		tlsInsecureWriter = &buf
+		t.Cleanup(func() { tlsInsecureWriter = orig })
+
+		cfg := &APIClientConfig{
+			BaseURL:       "https://example.com",
+			ClientCertPEM: certPEM,
+			ClientKeyPEM:  keyPEM,
+			TLSInsecure:   true,
+		}
+
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+		require.NotNil(t, client)
+
+		transport := client.httpClient.Transport.(*http.Transport)
+		assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+		assert.Len(t, transport.TLSClientConfig.Certificates, 1, "client cert must be present even when InsecureSkipVerify is set")
+		assert.Contains(t, buf.String(), "mTLS client credential cannot be stolen or replayed")
+	})
+
+	t.Run("TLS insecure without client certs does not print mTLS warning", func(t *testing.T) {
+		var buf strings.Builder
+		orig := tlsInsecureWriter
+		tlsInsecureWriter = &buf
+		t.Cleanup(func() { tlsInsecureWriter = orig })
+
+		cfg := &APIClientConfig{
+			BaseURL:     "https://example.com",
+			TLSInsecure: true,
+		}
+
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+		require.NotNil(t, client)
+
+		transport := client.httpClient.Transport.(*http.Transport)
+		assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+		assert.Empty(t, transport.TLSClientConfig.Certificates)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("TLS insecure mode sets ServerName when provided", func(t *testing.T) {
+		orig := tlsInsecureWriter
+		tlsInsecureWriter = io.Discard
+		t.Cleanup(func() { tlsInsecureWriter = orig })
+
+		cfg := &APIClientConfig{
+			BaseURL:     "https://example.com",
+			TLSInsecure: true,
+			ServerName:  "controller.internal",
+		}
+
+		client, err := NewAPIClient(cfg)
+		require.NoError(t, err)
+		require.NotNil(t, client)
+
+		transport := client.httpClient.Transport.(*http.Transport)
+		assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+		assert.Equal(t, "controller.internal", transport.TLSClientConfig.ServerName)
+	})
+}
+
+// generateTestClientCert creates a self-signed client certificate for testing mTLS.
+func generateTestClientCert(t *testing.T) (certPEM []byte, keyPEM []byte) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject:      pkix.Name{CommonName: "test-admin"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return
 }
 
 func TestAPIClientCreateToken(t *testing.T) {

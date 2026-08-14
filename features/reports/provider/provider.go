@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,16 +15,13 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// dnaHistory is the minimal interface satisfied by *storage.Manager.
-// Defined here (not in storage) to keep the provider package self-contained and to
-// let test components inject a controlled store without depending on the concrete type.
-type dnaHistory interface {
-	GetHistory(ctx context.Context, deviceID string, options *storage.QueryOptions) (*storage.HistoryResult, error)
-}
-
-// DataProvider implements the interfaces.DataProvider interface
+// DataProvider implements the interfaces.DataProvider interface.
+//
+// storageManager is the concrete *storage.Manager: reports read DNA history from
+// the same durable store the fleet writes to, and tests exercise that real store
+// (SQLite under t.TempDir()) rather than substituting its behaviour.
 type DataProvider struct {
-	storageManager dnaHistory
+	storageManager *storage.Manager
 	driftDetector  drift.Detector
 	logger         logging.Logger
 }
@@ -43,6 +41,14 @@ func New(
 
 // GetDNAData retrieves DNA records based on the query parameters
 func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuery) ([]storage.DNARecord, error) {
+	// Per-device storage failures are deliberately swallowed below so a single bad
+	// device never fails a fleet-wide report. A cancelled or expired request is not
+	// a per-device failure: continuing would hammer storage for every remaining
+	// device and then report success with a truncated result set, so it is fatal.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("DNA data query aborted: %w", err)
+	}
+
 	var allRecords []storage.DNARecord
 
 	// If specific devices are requested, query each one
@@ -94,15 +100,116 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 	return allRecords, nil
 }
 
-// GetDriftEvents retrieves drift events based on the query parameters.
+// GetDriftEvents computes drift events on-demand from consecutive DNA history
+// snapshots stored in the DNA store. Pairs of adjacent snapshots per device are
+// diffed via driftDetector.DetectDrift; the aggregate is filtered to events whose
+// Timestamp falls within query.TimeRange.
 //
-// Design decision: drift events are not persisted; this method returns empty until
-// a drift store ships. The drift package generates events in-memory from DNA comparisons
-// but has no historical query interface.
+// A device with fewer than 2 stored snapshots in the queried range contributes
+// zero events, not an error. This does not add a persistent drift-event store —
+// drift is computed at query time from the DNA history CFGMS already stores durably.
 func (p *DataProvider) GetDriftEvents(ctx context.Context, query interfaces.DataQuery) ([]drift.DriftEvent, error) {
-	p.logger.Debug("drift event historical querying unavailable; no drift store exists yet",
+	// A cancelled or expired request is fatal for the same reason it is in
+	// GetDNAData: the per-device error handling below is a resilience measure for
+	// individual bad devices, not a licence to report success on an aborted query.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("drift event query aborted: %w", err)
+	}
+
+	// Resolve target device IDs.
+	// Mirror the GetDeviceStats device-discovery pattern: when empty, discover
+	// devices from the DNA history rather than requiring an explicit list.
+	deviceIDs := query.DeviceIDs
+	if len(deviceIDs) == 0 {
+		records, err := p.GetDNAData(ctx, interfaces.DataQuery{
+			TimeRange: query.TimeRange,
+			Limit:     1000,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to discover devices for drift detection: %w", err)
+		}
+		seen := make(map[string]bool)
+		for _, r := range records {
+			if !seen[r.DeviceID] {
+				seen[r.DeviceID] = true
+				deviceIDs = append(deviceIDs, r.DeviceID)
+			}
+		}
+	}
+
+	var allEvents []drift.DriftEvent
+	for _, deviceID := range deviceIDs {
+		options := &storage.QueryOptions{
+			TimeRange:   &storage.TimeRange{Start: query.TimeRange.Start, End: query.TimeRange.End},
+			IncludeData: true,
+		}
+
+		historyResult, err := p.storageManager.GetHistory(ctx, deviceID, options)
+		if err != nil {
+			// Sequential-reassignment form required for CodeQL's ReplaceSanitizer.
+			safeDeviceID := logging.SanitizeLogValue(deviceID)
+			safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
+			safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
+			safeErr := err.Error()
+			safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+			safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+			p.logger.Warn("failed to get DNA history for drift detection", "device_id", safeDeviceID, "error", safeErr)
+			continue
+		}
+
+		records := historyResult.Records
+
+		// Sort ascending by StoredAt so consecutive pairs progress forward in time.
+		sort.Slice(records, func(i, j int) bool {
+			return records[i].StoredAt.Before(records[j].StoredAt)
+		})
+
+		// A device with fewer than 2 records has no baseline to compare against.
+		if len(records) < 2 {
+			continue
+		}
+
+		for i := 1; i < len(records); i++ {
+			prev := records[i-1]
+			curr := records[i]
+			if prev.DNA == nil || curr.DNA == nil {
+				continue
+			}
+
+			events, err := p.driftDetector.DetectDrift(ctx, prev.DNA, curr.DNA)
+			if err != nil {
+				safeDeviceID := logging.SanitizeLogValue(deviceID)
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
+				safeErr := err.Error()
+				safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+				safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+				p.logger.Warn("drift detection failed for consecutive snapshots", "device_id", safeDeviceID, "error", safeErr)
+				continue
+			}
+
+			for _, e := range events {
+				if e != nil {
+					allEvents = append(allEvents, *e)
+				}
+			}
+		}
+	}
+
+	// Filter to events whose Timestamp falls within the queried range.
+	result := []drift.DriftEvent{}
+	for _, event := range allEvents {
+		if !event.Timestamp.Before(query.TimeRange.Start) && !event.Timestamp.After(query.TimeRange.End) {
+			result = append(result, event)
+		}
+	}
+
+	p.logger.Debug("computed drift events from DNA history",
+		"device_count", len(deviceIDs),
+		"event_count", len(result),
 		"time_range", logging.SanitizeLogValue(fmt.Sprintf("%v to %v", query.TimeRange.Start, query.TimeRange.End)))
-	return []drift.DriftEvent{}, nil
+
+	return result, nil
 }
 
 // GetDeviceStats calculates statistics for specified devices
@@ -340,7 +447,14 @@ func (p *DataProvider) getComplianceTrends(ctx context.Context, query interfaces
 
 		events, err := p.GetDriftEvents(ctx, dayQuery)
 		if err != nil {
-			p.logger.Warn("failed to get events for compliance trend", "date", bucket, "error", err)
+			// One unavailable day must not void the whole trend line: skip the
+			// bucket and keep going. The error text can carry a caller-supplied
+			// device ID out of storage, so it is sanitized before logging.
+			// Sequential-reassignment form required for CodeQL's ReplaceSanitizer.
+			safeErr := logging.SanitizeLogValue(err.Error())
+			safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+			safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+			p.logger.Warn("failed to get events for compliance trend", "date", bucket, "error", safeErr)
 			continue
 		}
 
@@ -374,7 +488,12 @@ func (p *DataProvider) getDeviceCountTrends(ctx context.Context, query interface
 
 		records, err := p.GetDNAData(ctx, dayQuery)
 		if err != nil {
-			p.logger.Warn("failed to get DNA records for device count trend", "date", bucket, "error", err)
+			// Skip the unavailable day rather than voiding the whole trend line.
+			// Sequential-reassignment form required for CodeQL's ReplaceSanitizer.
+			safeErr := logging.SanitizeLogValue(err.Error())
+			safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+			safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+			p.logger.Warn("failed to get DNA records for device count trend", "date", bucket, "error", safeErr)
 			continue
 		}
 

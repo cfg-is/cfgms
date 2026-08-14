@@ -186,15 +186,79 @@ func (s *Server) writeTenantCrossingChallenge(w http.ResponseWriter, resourceTen
 	})
 }
 
+// authorizeTenantCreationParent decides whether principal may create a tenant under
+// parentID, writing the denial response itself and reporting false when it does.
+//
+//   - An unscoped principal that is not RootScoped keeps today's unrestricted behavior
+//     (authorizeTenantAccess's first branch): it may create a root-level tenant or place
+//     one anywhere in the tree.
+//   - Every scope-constrained principal — tenant-scoped (TenantID != "") or root-scoped
+//     (ADR-025 Amendment 1 A1.3) — must name a parent it is authorized for. An omitted
+//     parent_id is a denial, not a default: it would create a new top-level tenant
+//     outside the caller's subtree.
+//
+// A parent that does not exist and a parent in a foreign subtree both fail closed to the
+// same 403 (IsTenantAncestor errors on an unknown descendant, which authorizeTenantAccess
+// maps to tenantAuthDenied), so this guard is not a cross-tenant existence oracle.
+func (s *Server) authorizeTenantCreationParent(w http.ResponseWriter, r *http.Request, principal *Principal, parentID string) bool {
+	if principal == nil || (principal.TenantID == "" && !principal.RootScoped) {
+		return true
+	}
+
+	if parentID == "" {
+		s.logger.Info("Tenant create refused: scope-constrained caller omitted parent_id",
+			"caller_tenant", logging.SanitizeLogValue(principal.TenantID),
+			"principal_id", logging.SanitizeLogValue(principal.ID))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"parent_id is required and must name the caller's own tenant or a descendant",
+			"CROSS_TENANT_ACCESS_DENIED")
+		return false
+	}
+
+	switch s.authorizeTenantAccess(r.Context(), principal, parentID) {
+	case tenantAuthAllowed:
+		return true
+	case tenantAuthNeedsCrossing:
+		// Root-scoped caller, real descendant of "root", no active crossing: same
+		// step-up-shaped remedy handleGetTenant/handleUpdateTenant give (ADR-025 Decision 3).
+		s.writeTenantCrossingChallenge(w, parentID)
+		return false
+	default:
+		s.logger.Info("Cross-tenant tenant create refused",
+			"parent_tenant", logging.SanitizeLogValue(parentID),
+			"caller_tenant", logging.SanitizeLogValue(principal.TenantID))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"parent_id is required and must name the caller's own tenant or a descendant",
+			"CROSS_TENANT_ACCESS_DENIED")
+		return false
+	}
+}
+
 // handleCreateTenant implements POST /api/v1/tenants.
 // Creates a tenant with an optional explicit ID. When req.ID is provided
 // the store uses that exact value (K8s-compatible naming required). Returns
 // HTTP 201 on success, 409 when the tenant ID already exists (idempotent
-// callers should treat 409 as success).
+// callers should treat 409 as success), 403 when a scope-constrained caller
+// asks for a parent outside its own subtree.
+//
+// Scope guard (Issue #3195): this route carries no {id} path variable, so
+// requirePermission's extractTargetTenantFromRequest yields "" and its tenant-isolation
+// block treats the request as in-scope, skipping both the subtree check and the
+// isolation engine (middleware.go). The ADR-025 root-scoped crossing check keys off the
+// same absent target and is skipped too. The parent named in the body is the only tenant
+// this request targets, and Manager.CreateTenant takes req.ParentID verbatim, so the
+// boundary has to be enforced here: without it any scope-constrained principal holding
+// tenant:create could graft a tenant into a foreign subtree, or omit parent_id and create
+// a new root-level tenant outside its own scope entirely.
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	var req tenant.TenantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if !s.authorizeTenantCreationParent(w, r, principal, req.ParentID) {
 		return
 	}
 
@@ -470,6 +534,10 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 	if err := s.tenantManager.SuspendTenant(r.Context(), tenantID); err != nil {
 		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		if errors.Is(err, tenant.ErrCannotSuspendDefault) {
+			s.writeErrorResponse(w, http.StatusBadRequest, "cannot suspend default tenant", "PROTECTED_TENANT")
 			return
 		}
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to suspend tenant", "SUSPEND_FAILED")

@@ -121,6 +121,232 @@ func TestHandleCreateTenant_MissingPermission(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
+// TestHandleCreateTenant_ScopedStrongSession_ForeignParentDenied is a REQUIRED test
+// (Issue #3195): now that tenant:create is grantable to tenant-scoped principals, a
+// caller scoped to "create-scope-client-a" must not be able to POST /api/v1/tenants
+// with parent_id naming a tenant outside its subtree. The route has no {id} path
+// variable, so requirePermission's isolation block sees no target tenant and lets the
+// request through to the handler — this drives the full router with a real elevated
+// Bearer session so the assertion covers the actual reachable path, not the guard alone.
+func TestHandleCreateTenant_ScopedStrongSession_ForeignParentDenied(t *testing.T) {
+	server, sessionMgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "create-scope-client-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "create-scope-msp-b"})
+	require.NoError(t, err)
+
+	sess, _, err := sessionMgr.Issue(ctx, "client-a-operator", "cfg-cli", "create-scope-client-a")
+	require.NoError(t, err)
+	// httptest requests carry RemoteAddr 192.0.2.1:1234; binding the elevation to that
+	// IP keeps the session at AssuranceStrong through the device-continuity check.
+	elevated, token, err := sessionMgr.Elevate(ctx, sess.ID, []byte("test-credential-id"), "192.0.2.1")
+	require.NoError(t, err)
+	require.Equal(t, session.AssuranceStrong, elevated.Assurance,
+		"precondition: the caller must clear the AssuranceStrong gate on tenant:create")
+
+	body, _ := json.Marshal(map[string]string{"id": "create-scope-grafted", "parent_id": "create-scope-msp-b"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"a tenant-scoped caller must not create a tenant under a foreign parent")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CROSS_TENANT_ACCESS_DENIED", errResp.Error.Code)
+
+	_, err = server.tenantManager.GetTenant(ctx, "create-scope-grafted")
+	require.Error(t, err, "the refused create must not have written a tenant")
+	assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+}
+
+// TestHandleCreateTenant_ScopeGuard pins handleCreateTenant's own boundary check
+// (Issue #3195) across the shapes the middleware cannot see: a foreign parent_id, an
+// omitted parent_id (which would create a new root-level tenant), and the two positive
+// cases that must keep working — the caller's own tenant and a genuine descendant of it.
+func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
+	createAs := func(t *testing.T, server *Server, principal *Principal, body map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants", "", principal, raw)
+		rec := httptest.NewRecorder()
+		server.handleCreateTenant(rec, req)
+		return rec
+	}
+
+	t.Run("foreign parent_id is refused and nothing is written", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-client-a"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-msp-b"})
+		require.NoError(t, err)
+
+		rec := createAs(t, server, &Principal{ID: "client-a-admin", TenantID: "guard-client-a"},
+			map[string]string{"id": "guard-graft", "parent_id": "guard-msp-b"})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+		_, err = server.tenantManager.GetTenant(ctx, "guard-graft")
+		assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+	})
+
+	t.Run("unknown parent_id is refused with the same response as a foreign one", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-oracle-client"})
+		require.NoError(t, err)
+
+		foreign, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-oracle-msp"})
+		require.NoError(t, err)
+		require.Equal(t, "guard-oracle-msp", foreign.ID)
+
+		caller := &Principal{ID: "oracle-admin", TenantID: "guard-oracle-client"}
+		existingParent := createAs(t, server, caller,
+			map[string]string{"id": "guard-oracle-a", "parent_id": "guard-oracle-msp"})
+		missingParent := createAs(t, server, caller,
+			map[string]string{"id": "guard-oracle-b", "parent_id": "guard-oracle-nonexistent"})
+
+		assert.Equal(t, http.StatusForbidden, existingParent.Code)
+		assert.Equal(t, existingParent.Code, missingParent.Code,
+			"an existing out-of-subtree parent and a nonexistent one must be indistinguishable")
+
+		// Compare the error payloads (not the raw bodies, which carry a per-response
+		// timestamp): neither code nor message may reveal which case was hit.
+		decodeErr := func(rec *httptest.ResponseRecorder) APIError {
+			t.Helper()
+			var resp ErrorResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			require.NotNil(t, resp.Error)
+			return *resp.Error
+		}
+		assert.Equal(t, decodeErr(existingParent), decodeErr(missingParent),
+			"denial payloads must not disclose whether the foreign parent exists")
+	})
+
+	t.Run("omitted parent_id is refused for a scoped caller", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-noparent-client"})
+		require.NoError(t, err)
+
+		rec := createAs(t, server, &Principal{ID: "client-admin", TenantID: "guard-noparent-client"},
+			map[string]string{"id": "guard-new-root"})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+		_, err = server.tenantManager.GetTenant(ctx, "guard-new-root")
+		assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+	})
+
+	t.Run("own tenant as parent still succeeds", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-own-client"})
+		require.NoError(t, err)
+
+		rec := createAs(t, server, &Principal{ID: "own-admin", TenantID: "guard-own-client"},
+			map[string]string{"id": "guard-own-child", "parent_id": "guard-own-client"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "guard-own-child")
+		require.NoError(t, err)
+		assert.Equal(t, "guard-own-client", td.ParentID)
+	})
+
+	t.Run("own descendant as parent still succeeds", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-desc-msp"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+			ID:       "guard-desc-child",
+			ParentID: "guard-desc-msp",
+		})
+		require.NoError(t, err)
+
+		rec := createAs(t, server, &Principal{ID: "msp-admin", TenantID: "guard-desc-msp"},
+			map[string]string{"id": "guard-desc-grandchild", "parent_id": "guard-desc-child"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "guard-desc-grandchild")
+		require.NoError(t, err)
+		assert.Equal(t, "guard-desc-child", td.ParentID)
+	})
+
+	t.Run("unscoped admin keeps creating root-level tenants", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+
+		rec := createAs(t, server, &Principal{ID: "superadmin"},
+			map[string]string{"id": "guard-unscoped-root"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "guard-unscoped-root")
+		require.NoError(t, err)
+		assert.Empty(t, td.ParentID)
+	})
+}
+
+// TestHandleCreateTenant_RootScopedCaller covers ADR-025 Amendment 1 A1.3 on the create
+// route: a root-scoped SaaS operator may create a tenant directly under "root", but
+// placing one inside an MSP subtree needs an active crossing, and an omitted parent_id
+// (a sibling of "root", outside its boundary entirely) is refused.
+func TestHandleCreateTenant_RootScopedCaller(t *testing.T) {
+	setup := func(t *testing.T) (*Server, context.Context) {
+		t.Helper()
+		server := setupCrossingTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+		require.NoError(t, err)
+		return server, ctx
+	}
+
+	createAsRoot := func(t *testing.T, server *Server, body map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants", "", rootScopedPrincipal("root-operator-1"), raw)
+		rec := httptest.NewRecorder()
+		server.handleCreateTenant(rec, req)
+		return rec
+	}
+
+	t.Run("parent root succeeds", func(t *testing.T) {
+		server, ctx := setup(t)
+		rec := createAsRoot(t, server, map[string]string{"id": "msp-new", "parent_id": "root"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "msp-new")
+		require.NoError(t, err)
+		assert.Equal(t, "root", td.ParentID)
+	})
+
+	t.Run("parent inside an MSP subtree without a crossing is challenged", func(t *testing.T) {
+		server, ctx := setup(t)
+		rec := createAsRoot(t, server, map[string]string{"id": "msp-a-child", "parent_id": "msp-a"})
+		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+
+		_, err := server.tenantManager.GetTenant(ctx, "msp-a-child")
+		assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+	})
+
+	t.Run("omitted parent_id is refused", func(t *testing.T) {
+		server, ctx := setup(t)
+		rec := createAsRoot(t, server, map[string]string{"id": "root-sibling"})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+		_, err := server.tenantManager.GetTenant(ctx, "root-sibling")
+		assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+	})
+}
+
 func TestHandleGetTenant_Exists(t *testing.T) {
 	server := setupTestServer(t)
 
@@ -171,14 +397,14 @@ func TestHandleGetTenant_MissingPermission(t *testing.T) {
 
 func TestHandleSuspendTenant_Success(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "suspendable-tenant", 5*time.Minute)
 
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspendable-tenant"})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspendable-tenant/suspend", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert (AssuranceStrong,
+	// unscoped) rather than an API key (AssuranceMachine, which is below the floor).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/suspendable-tenant/suspend", nil)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -200,15 +426,46 @@ func TestHandleSuspendTenant_Success(t *testing.T) {
 
 func TestHandleSuspendTenant_NotFound(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"tenant:manage"}, "nonexistent-tenant", 5*time.Minute)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert (AssuranceStrong,
+	// unscoped) rather than an API key (AssuranceMachine, which is below the floor).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/nonexistent-tenant/suspend", nil)
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestHandleSuspendTenant_DefaultGuard_HTTP verifies that POST /api/v1/tenants/default/suspend
+// returns an error response (not 200) end-to-end through the HTTP handler (Issue #3181 AC).
+// A real "default" tenant is created so the default-tenant guard in SuspendTenant (not a
+// missing-tenant 404 from GetTenant) is what produces the error.
+func TestHandleSuspendTenant_DefaultGuard_HTTP(t *testing.T) {
+	server := setupTestServer(t)
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "default"})
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/default/suspend", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	assert.NotEqual(t, http.StatusOK, w.Code,
+		"suspending the default tenant must return an error, not 200")
+	assert.Equal(t, http.StatusBadRequest, w.Code,
+		"the default-tenant guard must produce 400 PROTECTED_TENANT, not a 500 server fault")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp))
+	assert.Equal(t, "PROTECTED_TENANT", errResp.Error.Code)
+
+	// Status must not have changed.
+	td, err := server.tenantManager.GetTenant(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status,
+		"default tenant must remain Active after a rejected suspend attempt")
 }
 
 // TestHandleSuspendTenant_ScopeGuard pins handleSuspendTenant's own scope guard, called
@@ -274,6 +531,86 @@ func TestHandleSuspendTenant_ScopeGuard(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, business.TenantStatusSuspended, td.Status)
 	})
+}
+
+// TestHandleSuspendTenant_ScopedStrongSession_SiblingReturns404 is a REQUIRED test
+// (Issue #3181 AC): a caller scoped to tenant "suspend-sib-client-a" calling
+// POST /tenants/suspend-sib-client-b/suspend — a sibling tenant, not an
+// ancestor/descendant of client-a — must get 404 TENANT_NOT_FOUND. Unlike
+// TestHandleSuspendTenant_ScopeGuard (which calls the handler directly), this drives
+// the request through server.router with a real Bearer session, so it exercises
+// requirePermission's tenant:manage AssuranceStrong floor and route wiring together
+// with the handler's own scope guard — the actual route, not the guard in isolation.
+func TestHandleSuspendTenant_ScopedStrongSession_SiblingReturns404(t *testing.T) {
+	server, sessionMgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-b"})
+	require.NoError(t, err)
+
+	sess, _, err := sessionMgr.Issue(ctx, "msp-operator", "cfg-cli", "suspend-sib-client-a")
+	require.NoError(t, err)
+	// httptest requests carry RemoteAddr 192.0.2.1:1234; binding the elevation to that
+	// IP keeps the session at AssuranceStrong through the device-continuity check.
+	elevated, token, err := sessionMgr.Elevate(ctx, sess.ID, []byte("test-credential-id"), "192.0.2.1")
+	require.NoError(t, err)
+	require.Equal(t, session.AssuranceStrong, elevated.Assurance,
+		"precondition: the caller must clear the AssuranceStrong gate on tenant:manage")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspend-sib-client-b/suspend", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a tenant-scoped caller must get 404 for a sibling tenant outside its subtree")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code)
+
+	unchanged, err := server.tenantManager.GetTenant(ctx, "suspend-sib-client-b")
+	require.NoError(t, err)
+	assert.NotEqual(t, business.TenantStatusSuspended, unchanged.Status,
+		"a refused sibling-tenant suspend must not change the target's status")
+}
+
+// TestHandleSuspendTenant_ScopedStrongSession_DescendantSucceeds is the positive half
+// of the scope guard (Issue #3181 AC): a caller scoped to "suspend-desc-client-a"
+// calling POST /tenants/suspend-desc-child-1/suspend — a real descendant (ParentID
+// chain, not string prefix) — must still succeed. Without this, a guard that refused
+// every non-exact-match tenant would pass the sibling test above for the wrong reason.
+func TestHandleSuspendTenant_ScopedStrongSession_DescendantSucceeds(t *testing.T) {
+	server, sessionMgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-desc-client-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ID:       "suspend-desc-child-1",
+		ParentID: "suspend-desc-client-a",
+	})
+	require.NoError(t, err)
+
+	sess, _, err := sessionMgr.Issue(ctx, "msp-operator", "cfg-cli", "suspend-desc-client-a")
+	require.NoError(t, err)
+	elevated, token, err := sessionMgr.Elevate(ctx, sess.ID, []byte("test-credential-id"), "192.0.2.1")
+	require.NoError(t, err)
+	require.Equal(t, session.AssuranceStrong, elevated.Assurance,
+		"precondition: the caller must clear the AssuranceStrong gate on tenant:manage")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/suspend-desc-child-1/suspend", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a tenant-scoped caller must still be able to suspend its own real descendant")
+
+	td, err := server.tenantManager.GetTenant(ctx, "suspend-desc-child-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, td.Status)
 }
 
 func TestHandleSuspendTenant_MissingPermission(t *testing.T) {

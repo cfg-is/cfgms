@@ -462,6 +462,24 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	return &copied, true
 }
 
+// TenantForDevice returns the tenant that owns deviceID, where a device ID is a
+// steward ID. known is false when the steward is not in the registry, so callers
+// enforcing a tenant boundary treat unknown devices as out of scope rather than
+// unowned. This satisfies the reports API's DeviceTenantResolver, making the
+// steward registry the single authority for device→tenant ownership.
+func (s *ControllerService) TenantForDevice(deviceID string) (tenantID string, known bool) {
+	if s == nil {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	info, exists := s.stewards[deviceID]
+	if !exists {
+		return "", false
+	}
+	return info.TenantID, true
+}
+
 // RecordHeartbeat advances the live heartbeat state for a registered steward in
 // the in-memory registry that the steward API serves (handlers_stewards.go ->
 // GetStewardInfo). It is the bridge from the control-plane heartbeat dispatch

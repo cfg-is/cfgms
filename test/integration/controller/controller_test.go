@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -105,13 +106,15 @@ func (s *ControllerTestSuite) TestStewardContainer() {
 	assert.True(s.T(), s.docker.IsContainerRunning("steward-standalone"),
 		"Steward container should be running")
 
-	// Steward should have produced log output and registered storage/logging
-	// providers (proves initialization). When infrastructure is managed
-	// externally (e.g. started concurrently by the ha suite's shared
-	// containers), the container can be Running before its startup logging
-	// has completed, so poll instead of checking once.
-	logs, err := s.docker.WaitForLogContent(ctx, "steward-standalone", "Registered", "provider")
-	require.NoError(s.T(), err, "Steward logs should show provider registration (proves initialization)")
+	// The steward must have completed its connect sequence against the
+	// controller. This replaces a poll for provider-registration chatter, which
+	// pkg/logging routes to a no-op sink by default and which proved nothing
+	// about the steward's actual state even when it did exist. Registration is
+	// the real evidence of initialization: it requires a device identity, a
+	// trusted CA, an accepted token and a live gRPC transport.
+	logs, err := s.docker.WaitForLogContent(ctx, "steward-standalone",
+		"Steward registered and connected successfully")
+	require.NoError(s.T(), err, "Steward should register and connect to the controller")
 	assert.NotEmpty(s.T(), logs, "Steward should have produced log output")
 
 	s.T().Log("Steward container validated")
@@ -130,12 +133,36 @@ func (s *ControllerTestSuite) TestStorageInitialization() {
 	require.NoError(s.T(), err, "Health endpoint should be reachable")
 	assert.NotEmpty(s.T(), output, "Health endpoint should return status")
 
-	// Check controller logs for storage initialization evidence. When
-	// infrastructure is managed externally (e.g. started concurrently by the
-	// ha suite's shared containers), the health endpoint can respond before
-	// startup logging has finished, so poll instead of checking once.
-	_, logErr := s.docker.WaitForLogContent(ctx, "controller-standalone", "storage", "Registered storage provider")
-	require.NoError(s.T(), logErr, "Controller logs should show storage initialization")
+	// The health endpoint is the assertion. A controller cannot bind its public
+	// API before storage initialisation completes, so a response here is proof.
+	//
+	// There is deliberately no log-based check: the controller emits no records
+	// to CFGMS_LOG_DIR, so the previous poll for "Registered storage provider"
+	// could only ever spend its 30s budget and fail — one of the two subtests
+	// that kept this suite red.
+	//
+	// The payload is decoded rather than substring-matched. Asserting that the
+	// body contains "status" passes on any JSON carrying that key anywhere, and
+	// Server.writeResponse wraps every payload in an APIResponse envelope, so
+	// the old check could not distinguish a healthy controller from a degraded
+	// one — or from an error response.
+	var body struct {
+		Data struct {
+			Status   string            `json:"status"`
+			Services map[string]string `json:"services"`
+		} `json:"data"`
+	}
+	require.NoError(s.T(), json.Unmarshal([]byte(output), &body),
+		"Health endpoint should return a JSON APIResponse envelope, got: %s", output)
+	assert.Equal(s.T(), "healthy", body.Data.Status,
+		"Controller should report healthy once storage is initialised, got: %s", output)
+
+	// These two services are constructed from the storage manager, so their
+	// state is the closest the health payload comes to reporting on storage.
+	assert.Equal(s.T(), "healthy", body.Data.Services["controller"],
+		"Controller service should be healthy")
+	assert.Equal(s.T(), "healthy", body.Data.Services["configuration"],
+		"Configuration service should be healthy")
 
 	s.T().Log("Controller storage initialized (controller is serving requests)")
 }

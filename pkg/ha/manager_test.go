@@ -64,7 +64,7 @@ func TestNewManager_ClusterMode_NilCertManager_Fails(t *testing.T) {
 		},
 	}
 
-	_, err = NewManager(cfg, logging.GetLogger(), storageManager, nil)
+	_, err = NewManager(cfg, logging.GetLogger(), storageManager, nil, "")
 	require.Error(t, err, "cluster mode without cert manager must fail at construction")
 	assert.Contains(t, err.Error(), "cert manager",
 		"error must mention cert manager so operators know what is missing")
@@ -80,7 +80,7 @@ func TestNewManager_SingleServerMode_NilCertManager_OK(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Mode = SingleServerMode
 
-	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, nil)
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, nil, "")
 	require.NoError(t, err, "single-server mode with nil cert manager must succeed")
 	require.NotNil(t, manager)
 }
@@ -97,7 +97,7 @@ func TestManager_ConcreteCollaboratorTypes(t *testing.T) {
 	cfg.Node.ID = "test-node-concrete-types"
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -120,7 +120,7 @@ func TestManager_initRaft_logsInitStart(t *testing.T) {
 	cfg.Mode = ClusterMode
 	cfg.Node.ID = "test-node-init-raft"
 
-	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -148,7 +148,7 @@ func TestManager_SingleServerMode(t *testing.T) {
 	cfg.Mode = SingleServerMode
 	cfg.HealthCheck.Interval = 100 * time.Millisecond
 
-	manager, err := NewManager(cfg, logger, storageManager, nil)
+	manager, err := NewManager(cfg, logger, storageManager, nil, "")
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -206,7 +206,7 @@ func TestManager_BlueGreenMode(t *testing.T) {
 	cfg.Node.ID = "test-node-bluegreen"
 
 	// Create HA manager
-	manager, err := NewManager(cfg, logger, storageManager, nil)
+	manager, err := NewManager(cfg, logger, storageManager, nil, "")
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -258,7 +258,7 @@ func TestManager_ClusterMode(t *testing.T) {
 	}
 
 	// Create HA manager
-	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -344,7 +344,7 @@ func TestManager_GetLeader_SurvivesUint64PrecisionThroughRaftLog(t *testing.T) {
 		},
 	}
 
-	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, manager.raftConsensus.Stop()) })
 
@@ -403,7 +403,7 @@ func TestManager_Start_SurvivesCallerContextCancelledAfterReturn(t *testing.T) {
 		},
 	}
 
-	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -457,7 +457,7 @@ func TestManager_IsLeader_UsesRaftConsensus(t *testing.T) {
 	}
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager.raftConsensus, "raftConsensus must be initialized in cluster mode")
 
@@ -480,7 +480,7 @@ func TestManager_HealthChecks(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.HealthCheck.Interval = 100 * time.Millisecond
-	manager, err := NewManager(cfg, logger, storageManager, nil)
+	manager, err := NewManager(cfg, logger, storageManager, nil, "")
 	require.NoError(t, err)
 
 	var passingCheckCalled, failingCheckCalled int32
@@ -540,7 +540,7 @@ func TestManager_HealthChecks_ConcurrentRegistration(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.HealthCheck.Interval = 5 * time.Millisecond
-	manager, err := NewManager(cfg, logger, storageManager, nil)
+	manager, err := NewManager(cfg, logger, storageManager, nil, "")
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -594,7 +594,7 @@ func TestManager_ConfigValidation(t *testing.T) {
 		Node: NodeConfig{}, // Invalid - node ID is empty
 	}
 
-	_, err = NewManager(cfg, logger, storageManager, nil)
+	_, err = NewManager(cfg, logger, storageManager, nil, "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "node ID is required")
 
@@ -605,7 +605,7 @@ func TestManager_ConfigValidation(t *testing.T) {
 	cfg.Cluster.MinQuorum = 10
 	cfg.Cluster.ExpectedSize = 3 // Invalid - quorum > expected size
 
-	_, err = NewManager(cfg, logger, storageManager, nil)
+	_, err = NewManager(cfg, logger, storageManager, nil, "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "min quorum must be between 1 and expected size")
 }
@@ -623,7 +623,7 @@ func TestConfig_LoadFromEnvironment_InvalidQuorum(t *testing.T) {
 	cfg := DefaultConfig()
 	require.NoError(t, cfg.LoadFromEnvironment())
 
-	_, err = NewManager(cfg, logger, storageManager, nil)
+	_, err = NewManager(cfg, logger, storageManager, nil, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "quorum")
 }
@@ -691,7 +691,7 @@ func TestManager_InitRaftConsensus_DuplicateNodeIDReturnsError(t *testing.T) {
 	logger := logging.GetLogger()
 	// nil certManager is acceptable here: the collision error is detected in the peer
 	// dedup loop, which runs before the cert-manager check just before newRaftTransport.
-	_, err = NewManager(cfg, logger, storageManager, nil)
+	_, err = NewManager(cfg, logger, storageManager, nil, "")
 	require.Error(t, err, "NewManager must return an error when two peer IDs produce the same hash")
 	assert.Contains(t, err.Error(), "collision",
 		"error message must mention collision so operators understand the misconfiguration")
@@ -711,7 +711,7 @@ func TestDeploymentModeProgression(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.Mode = SingleServerMode
 
-		manager, err := NewManager(cfg, logger, storageManager, nil)
+		manager, err := NewManager(cfg, logger, storageManager, nil, "")
 		require.NoError(t, err)
 
 		err = manager.Start(ctx)
@@ -731,7 +731,7 @@ func TestDeploymentModeProgression(t *testing.T) {
 		cfg.Mode = BlueGreenMode
 		cfg.Node.ID = "test-progression-bluegreen-node"
 
-		manager, err := NewManager(cfg, logger, storageManager, nil)
+		manager, err := NewManager(cfg, logger, storageManager, nil, "")
 		require.NoError(t, err)
 
 		err = manager.Start(ctx)
@@ -764,7 +764,7 @@ func TestDeploymentModeProgression(t *testing.T) {
 			},
 		}
 
-		manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
+		manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t), "")
 		require.NoError(t, err)
 
 		t.Cleanup(func() {
@@ -801,7 +801,7 @@ func TestManager_GetCACertPEM_EmptyPath(t *testing.T) {
 	cfg.Mode = SingleServerMode
 	// CACertPath intentionally left empty
 
-	manager, err := NewManager(cfg, logger, sm, nil)
+	manager, err := NewManager(cfg, logger, sm, nil, "")
 	require.NoError(t, err)
 
 	got := manager.GetCACertPEM()
@@ -825,7 +825,7 @@ func TestManager_GetCACertPEM_ValidPath(t *testing.T) {
 	cfg.Mode = SingleServerMode
 	cfg.CACertPath = caPath
 
-	manager, err := NewManager(cfg, logger, sm, nil)
+	manager, err := NewManager(cfg, logger, sm, nil, "")
 	require.NoError(t, err)
 
 	got := manager.GetCACertPEM()
@@ -844,7 +844,7 @@ func TestManager_GetCACertPEM_InvalidPath(t *testing.T) {
 	cfg.Mode = SingleServerMode
 	cfg.CACertPath = "/nonexistent/path/ca.pem"
 
-	manager, err := NewManager(cfg, logger, sm, nil)
+	manager, err := NewManager(cfg, logger, sm, nil, "")
 	require.NoError(t, err)
 
 	got := manager.GetCACertPEM()
@@ -866,7 +866,7 @@ func TestManager_GetCACertPEM_Concurrent(t *testing.T) {
 	cfg.Mode = SingleServerMode
 	cfg.CACertPath = caPath
 
-	manager, err := NewManager(cfg, logger, sm, nil)
+	manager, err := NewManager(cfg, logger, sm, nil, "")
 	require.NoError(t, err)
 
 	done := make(chan struct{})
@@ -915,7 +915,7 @@ func TestManager_SessionHooks(t *testing.T) {
 	}
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager.raftConsensus)
 
@@ -981,7 +981,7 @@ func TestManager_SessionDisconnectHook(t *testing.T) {
 	}
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t))
+	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager.raftConsensus)
 
@@ -1096,7 +1096,7 @@ func TestManager_BecomeLeader_OrphanedSessions(t *testing.T) {
 	cfg.Mode = SingleServerMode
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, sm, nil)
+	manager, err := NewManager(cfg, logger, sm, nil, "")
 	require.NoError(t, err)
 
 	// Manually attach a RaftConsensus so GetSessionsForNode is available.
@@ -1120,6 +1120,7 @@ func TestManager_BecomeLeader_OrphanedSessions(t *testing.T) {
 		&NodeInfo{ID: nodeID},
 		nil,
 		&raftCfg.Cluster,
+		"",
 		logger,
 	)
 	require.NoError(t, err)
@@ -1242,6 +1243,7 @@ func TestRaftConsensus_GetSessionsForNode(t *testing.T) {
 		&NodeInfo{ID: nodeA},
 		nil,
 		&cfg.Cluster,
+		"",
 		logger,
 	)
 	require.NoError(t, err)
@@ -1290,7 +1292,7 @@ func TestManager_Start_WiresOnBecomeLeaderCallback(t *testing.T) {
 	}
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, sm, newTestCertManager(t))
+	manager, err := NewManager(cfg, logger, sm, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, manager.raftConsensus)
 	t.Cleanup(func() { _ = manager.raftConsensus.Stop() })
@@ -1423,12 +1425,12 @@ func TestManager_TwoNodeCluster(t *testing.T) {
 		return cfg
 	}
 
-	managerA, err := NewManager(makeCfg(nodeA, nodeB, addrA, addrB), logger, sm1, newTestCertManager(t))
+	managerA, err := NewManager(makeCfg(nodeA, nodeB, addrA, addrB), logger, sm1, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, managerA.raftConsensus)
 	t.Cleanup(func() { assert.NoError(t, managerA.raftConsensus.Stop()) })
 
-	managerB, err := NewManager(makeCfg(nodeB, nodeA, addrB, addrA), logger, sm2, newTestCertManager(t))
+	managerB, err := NewManager(makeCfg(nodeB, nodeA, addrB, addrA), logger, sm2, newTestCertManager(t), "")
 	require.NoError(t, err)
 	require.NotNil(t, managerB.raftConsensus)
 	t.Cleanup(func() { assert.NoError(t, managerB.raftConsensus.Stop()) })

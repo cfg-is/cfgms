@@ -27,6 +27,7 @@ var (
 	moduleAPIKey      string
 	moduleTLSCACert   string
 	moduleTLSInsecure bool
+	moduleServerName  string
 
 	moduleListTenant string
 	moduleListStatus string
@@ -106,6 +107,7 @@ func init() {
 	moduleCmd.PersistentFlags().StringVar(&moduleAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	moduleCmd.PersistentFlags().StringVar(&moduleTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	moduleCmd.PersistentFlags().BoolVar(&moduleTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	moduleCmd.PersistentFlags().StringVar(&moduleServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	moduleListCmd.Flags().StringVar(&moduleListTenant, "tenant", "", "Filter by tenant path (e.g. root/msp-a); default shows all tenants")
 	moduleListCmd.Flags().StringVar(&moduleListStatus, "status", "", "Filter by approval status: pending, approved, or rejected")
@@ -121,7 +123,13 @@ func getModuleAPIClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := moduleTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := moduleServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -136,11 +144,6 @@ func getModuleAPIClient() (*APIClient, error) {
 	apiKey := moduleAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := moduleTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := moduleTLSCACert

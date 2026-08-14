@@ -152,7 +152,7 @@ RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/v3.9
 # built while `npm latest` moved on. The pin makes the layer key change with
 # the version, and dependency-pin-check.yml files a weekly issue when npm's
 # dist-tags.latest moves ahead of it.
-ARG CLAUDE_CODE_VERSION=2.1.222
+ARG CLAUDE_CODE_VERSION=2.1.226
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # Non-root agent user with sudo for iptables only
@@ -280,7 +280,7 @@ RUN go install golang.org/x/tools/gopls@v0.22.0 \
 ENV UV_CACHE_DIR=/home/agent/.cache/uv
 RUN install -d -o agent -g agent /home/agent/.cache/uv /home/agent/.local \
     && su agent -c 'set -e; export UV_CACHE_DIR=/home/agent/.cache/uv; \
-         uv tool install --from git+https://github.com/oraios/serena@v1.6.1 serena-agent' \
+         uv tool install --from git+https://github.com/oraios/serena@v1.7.0 serena-agent' \
     && chown -R agent:agent /home/agent/.cache/uv /home/agent/.local
 # Defense-in-depth: keep any stray uv invocation offline behind the firewall.
 ENV UV_OFFLINE=1

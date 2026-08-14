@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -249,4 +250,12 @@ func TestStewardTagLsCmd_ServerError(t *testing.T) {
 	err := runStewardTagLs(stewardTagLsCmd, []string{"steward-abc"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "list failed")
+}
+
+// TestStewardTagCmds_ServerNameFlagRegistered verifies that --server-name is
+// registered on every steward tag subcommand alongside --tls-insecure (Issue #3174).
+func TestStewardTagCmds_ServerNameFlagRegistered(t *testing.T) {
+	for _, cmd := range []*cobra.Command{stewardTagAddCmd, stewardTagRmCmd, stewardTagLsCmd} {
+		assert.NotNil(t, cmd.Flags().Lookup("server-name"), "--server-name flag must be registered on steward tag %s", cmd.Name())
+	}
 }

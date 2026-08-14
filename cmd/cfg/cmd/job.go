@@ -24,6 +24,7 @@ var (
 	jobAPIKey      string
 	jobTLSCACert   string
 	jobTLSInsecure bool
+	jobServerName  string
 
 	jobSelector  string
 	jobBatchSize int
@@ -68,6 +69,7 @@ func init() {
 	jobSubmitCmd.Flags().StringVar(&jobAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	jobSubmitCmd.Flags().StringVar(&jobTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	jobSubmitCmd.Flags().BoolVar(&jobTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	jobSubmitCmd.Flags().StringVar(&jobServerName, "server-name", "", "Override TLS server name for certificate verification")
 	jobSubmitCmd.Flags().StringVar(&jobSelector, "selector", "", "Fleet selector expression (required)")
 	jobSubmitCmd.Flags().IntVar(&jobBatchSize, "batch-size", 10, "Number of stewards per batch wave")
 	_ = jobSubmitCmd.MarkFlagRequired("selector")
@@ -76,6 +78,7 @@ func init() {
 	jobStatusCmd.Flags().StringVar(&jobAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	jobStatusCmd.Flags().StringVar(&jobTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	jobStatusCmd.Flags().BoolVar(&jobTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	jobStatusCmd.Flags().StringVar(&jobServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	jobCmd.AddCommand(jobSubmitCmd, jobStatusCmd)
 }
@@ -88,7 +91,13 @@ func getJobClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := jobTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := jobServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -99,11 +108,6 @@ func getJobClient() (*APIClient, error) {
 	apiKey := jobAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := jobTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := jobTLSCACert

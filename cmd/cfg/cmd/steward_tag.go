@@ -22,6 +22,7 @@ var (
 	stewardTagAPIKey      string
 	stewardTagTLSCACert   string
 	stewardTagTLSInsecure bool
+	stewardTagServerName  string
 )
 
 // stewardTagCmd is the parent command for cfg steward tag subcommands.
@@ -88,6 +89,7 @@ func init() {
 		cmd.Flags().StringVar(&stewardTagAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&stewardTagTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&stewardTagTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+		cmd.Flags().StringVar(&stewardTagServerName, "server-name", "", "Override TLS server name for certificate verification")
 	}
 
 	stewardTagCmd.AddCommand(stewardTagAddCmd)
@@ -103,7 +105,13 @@ func getStewardTagClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := stewardTagTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := stewardTagServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -114,11 +122,6 @@ func getStewardTagClient() (*APIClient, error) {
 	apiKey := stewardTagAPIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsInsecure := stewardTagTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	tlsCACertPath := stewardTagTLSCACert

@@ -16,4 +16,6 @@ func registerCertificateRoutes(s *Server, api *mux.Router) {
 	certs.Handle("", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleListCertificates))).Methods("GET")
 	certs.Handle("/provision", s.requirePermission("certificate", "provision")(http.HandlerFunc(s.handleProvisionCertificate))).Methods("POST")
 	certs.Handle("/signing/rotate", s.requirePermission("certificate", "rotate")(http.HandlerFunc(s.handleRotateSigningCert))).Methods("POST")
+	certs.Handle("/{serial}", s.requirePermission("certificate", "get")(http.HandlerFunc(s.handleGetCertificate))).Methods("GET")
+	certs.Handle("/{serial}/revoke", s.requirePermission("certificate", "revoke")(http.HandlerFunc(s.handleRevokeCertificate))).Methods("POST")
 }

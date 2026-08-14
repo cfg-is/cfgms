@@ -223,6 +223,9 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 // Used by the agent-dispatch cleanup path (Issue #2124) to deactivate the
 // agent-test/<N> sub-tenant when the agent container exits.
 func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) error {
+	if tenantID == "default" {
+		return ErrCannotSuspendDefault
+	}
 	existing, err := m.store.GetTenant(ctx, tenantID)
 	if err != nil {
 		return err

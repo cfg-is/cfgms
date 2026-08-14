@@ -17,6 +17,7 @@ var (
 	tenantCreateParent string
 	tenantAPIURL       string
 	tenantTLSInsecure  bool
+	tenantServerName   string
 )
 
 // tenantCmd is the parent command for tenant management operations.
@@ -58,6 +59,7 @@ Examples:
 func init() {
 	tenantCmd.PersistentFlags().StringVar(&tenantAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	tenantCmd.PersistentFlags().BoolVar(&tenantTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	tenantCmd.PersistentFlags().StringVar(&tenantServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	tenantCreateCmd.Flags().StringVar(&tenantCreateID, "tenant-id", "", "Tenant ID (Kubernetes-compatible, required)")
 	tenantCreateCmd.Flags().StringVar(&tenantCreateParent, "parent", "", "Parent tenant ID (optional)")
@@ -72,7 +74,13 @@ func getTenantAPIClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveSessionOrBundleClient(apiURL)
+	tlsInsecure := tenantTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := tenantServerName
+
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
@@ -82,11 +90,6 @@ func getTenantAPIClient() (*APIClient, error) {
 
 	if apiURL == "" {
 		apiURL = "http://localhost:9080"
-	}
-
-	tlsInsecure := tenantTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
 	}
 
 	return newClientFromFlags(apiURL, "", "", tlsInsecure)

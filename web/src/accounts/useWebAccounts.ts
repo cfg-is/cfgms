@@ -2,11 +2,12 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Web account fetch hooks (Issue #2733, #3133, #2974, #3134).
+ * Web account fetch hooks (Issue #2733, #3133, #2974, #3134, #3132).
  *
  * Endpoints covered:
  *   GET    /api/v1/web/accounts                                → useWebAccountList
  *   POST   /api/v1/web/accounts                               → createWebAccount (step-up gated; mints enrollment link)
+ *   PUT    /api/v1/web/accounts/{u}                           → updateWebAccount (Issue #3132; permissions/disabled/reset_credentials)
  *   POST   /api/v1/web/accounts/{u}/enrollment-link/revoke    → revokeEnrollmentLink
  *   GET    /api/v1/rbac/roles                                  → useRoleList
  *   GET    /api/v1/rbac/permissions                           → usePermissionList
@@ -55,6 +56,7 @@ export interface WebAccountInfo {
   username: string
   tenant_id: string
   permissions: string[]
+  disabled: boolean // Issue #3132
   created_at: string
   has_outstanding_enrollment_link: boolean // Issue #2974
 }
@@ -101,6 +103,7 @@ export function parseWebAccountInfo(value: unknown): WebAccountInfo | null {
     username: str(r.username),
     tenant_id: str(r.tenant_id),
     permissions: strArr(r.permissions),
+    disabled: r.disabled === true,
     created_at: str(r.created_at),
     has_outstanding_enrollment_link: r.has_outstanding_enrollment_link === true,
   }
@@ -398,6 +401,63 @@ export async function revokeEnrollmentLink(username: string): Promise<void> {
       `Revoke failed — ${response.status}`
     throw new Error(errMsg)
   }
+}
+
+// ── Web account update (Issue #3132) ─────────────────────────────────────────
+
+export interface WebAccountUpdateOptions {
+  permissions?: string[]
+  disabled?: boolean
+  resetCredentials?: boolean
+}
+
+export interface WebAccountUpdateResult {
+  account: WebAccountInfo
+  /** Present only when reset_credentials was true and a new link was minted. */
+  enrollmentMagicLink?: string
+}
+
+/**
+ * Update a web-admin account (PUT /api/v1/web/accounts/{username}).
+ *
+ * All options are optional — omitted fields retain their current server-side
+ * values. Set resetCredentials to true to revoke all passkeys and mint a fresh
+ * enrollment magic link (returned as enrollmentMagicLink in the result when
+ * the server issues one — show it exactly once, same as the create flow).
+ */
+export async function updateWebAccount(
+  username: string,
+  options: WebAccountUpdateOptions,
+): Promise<WebAccountUpdateResult> {
+  const body: Record<string, unknown> = {}
+  if (options.permissions !== undefined) body.permissions = options.permissions
+  if (options.disabled !== undefined) body.disabled = options.disabled
+  if (options.resetCredentials) body.reset_credentials = true
+
+  const response = await apiFetch(
+    `/api/v1/web/accounts/${encodeURIComponent(username)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  if (!response.ok) {
+    const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    const errMsg =
+      (errBody?.error as Record<string, unknown>)?.message as string ||
+      `Update failed — ${response.status}`
+    throw new Error(errMsg)
+  }
+  const respBody = (await response.json()) as Record<string, unknown>
+  const data = (respBody.data ?? respBody) as Record<string, unknown>
+  const account = parseWebAccountInfo(data)
+  if (account === null) throw new Error('Unexpected response shape from account update')
+  const enrollmentMagicLink =
+    typeof data.enrollment_magic_link === 'string' && data.enrollment_magic_link
+      ? data.enrollment_magic_link
+      : undefined
+  return { account, enrollmentMagicLink }
 }
 
 // ── Justification (M-AUTH-2) ──────────────────────────────────────────────────

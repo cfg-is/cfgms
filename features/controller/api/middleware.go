@@ -445,6 +445,26 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// root-scope grant.
 				permissions := []string{}
 				if acct, err := s.getWebAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
+					// Issue #3126: an administratively disabled account loses access
+					// immediately, not at session expiry. The login gate in
+					// handlePasskeyLoginFinish only blocks new sessions; without this
+					// check a session issued before the disable keeps full API access
+					// for up to the absolute session timeout (12h) — including the
+					// implicit-admin grant below for a root-scope account, and the
+					// ability to step up assurance. Revoke the session server-side
+					// (best effort) so the rejection is durable, and answer with the
+					// same 401 a revoked session gets: the response must not
+					// distinguish "disabled" from "revoked".
+					if acct.Disabled {
+						s.csrfTokens.Delete(webSess.ID)
+						if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
+							s.logger.Warn("Failed to revoke session of disabled web account",
+								"session_id", logging.SanitizeLogValue(webSess.ID),
+								"error", logging.SanitizeLogValue(revokeErr.Error()))
+						}
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						return
+					}
 					authCount = len(acct.Credentials)
 					globalScope = acct.RootScope
 					if acct.RootScope {
@@ -662,6 +682,37 @@ type AuthorizationDecision struct {
 var tenantCrossingRemedyPermissions = map[string]bool{
 	"tenant:crossing-break-glass": true,
 	"tenant:crossing-grant":       true,
+}
+
+// enrollmentConfinementMiddleware blocks cookie-authenticated web sessions whose
+// principal has zero enrolled passkeys (AuthenticatorCount == 0) from all api routes.
+//
+// A zero-passkey session can ONLY redeem a first-passkey enrollment link; that redemption
+// path is on the BASE router (/api/v1/web/passkey/enroll/begin|finish), not the api
+// subrouter, so this middleware does not apply to it — by construction.
+//
+// mTLS admin and API-key principals are not cookie-authenticated (cookieAuthContextKey
+// is false), so they pass through regardless of AuthenticatorCount. AuthenticatorCount==-1
+// (account-load failure) is also blocked: fail-closed is safer than fail-open when the
+// session's enrollable state cannot be determined.
+//
+// This middleware MUST run BEFORE requirePermission (added earlier in the chain) so
+// that confinement is enforced even when the principal holds the required permission.
+func (s *Server) enrollmentConfinementMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookieAuth, _ := r.Context().Value(cookieAuthContextKey).(bool)
+		if cookieAuth {
+			principal, _ := r.Context().Value(principalContextKey).(*Principal)
+			if principal != nil && principal.AuthenticatorCount <= 0 {
+				// Zero or unknown authenticator count on a cookie-auth session.
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Account has no passkey enrolled — redeem your enrollment link first",
+					"ENROLLMENT_REQUIRED")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requirePermission creates middleware that enforces specific permission requirements.
@@ -947,13 +998,13 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 						TenantID:     tenantID,
 					}
 					s.auditAuthorizationDecision(r, isoDecision)
-					// tenant:read and tenant:update both resolve a single tenant by ID and
-					// must return an identical 404 for "doesn't exist" and "exists but out
-					// of my subtree" (ADR-025 existence-oracle prevention, Issue #3125) — a
-					// 403 here would let a caller distinguish the two cases via status code
-					// alone, before ever reaching the handler's own isCallerAuthorizedForTenant
-					// check.
-					if resourceType == "tenant" && (action == "read" || action == "update") {
+					// tenant:read, tenant:update and tenant:manage (suspend, config-source/test)
+					// all resolve a single tenant by ID and must return an identical 404 for
+					// "doesn't exist" and "exists but out of my subtree" (ADR-025 existence-oracle
+					// prevention, Issue #3125; extended to tenant:manage by Issue #3181) — a 403
+					// here would let a caller distinguish the two cases via status code alone,
+					// before ever reaching the handler's own isCallerAuthorizedForTenant check.
+					if resourceType == "tenant" && (action == "read" || action == "update" || action == "manage") {
 						s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 						return
 					}

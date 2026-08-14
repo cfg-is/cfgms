@@ -67,7 +67,7 @@ func TestServer_SetReportsHandler_RegistersRoutes_PostConstruction(t *testing.T)
 		"reports route must be 404 before SetReportsHandler")
 
 	// Wire the handler post-construction, exactly as production does.
-	h := reportapi.New(nil, nil, logging.NewNoopLogger())
+	h := reportapi.New(nil, nil, nil, logging.NewNoopLogger())
 	server.SetReportsHandler(h)
 
 	// Unauthenticated request must now return 401, not 404.

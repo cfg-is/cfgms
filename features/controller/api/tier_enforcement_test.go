@@ -50,6 +50,7 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Former TierMTLSOnly set — all migrated to permissionAssurance with Min: AssuranceStrong.
 	{"POST", "/api/v1/certificates/provision", "certificate:provision"},
 	{"POST", "/api/v1/certificates/signing/rotate", "certificate:rotate"},
+	{"POST", "/api/v1/certificates/testserial/revoke", "certificate:revoke"}, // Issue #3129: revoke gated at AssuranceStrong (cross-tenant revoke = sabotage)
 	{"POST", "/api/v1/rbac/roles", "rbac:create-role"},
 	{"PUT", "/api/v1/rbac/roles/test-id", "rbac:update-role"},
 	{"DELETE", "/api/v1/rbac/roles/test-id", "rbac:delete-role"},
@@ -68,6 +69,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"DELETE", "/api/v1/registration/ip-trust/test-tenant/192.168.1.0/24", "registration:manage-ip-trust"},
 	{"POST", "/api/v1/tenants", "tenant:create"},
 	{"PUT", "/api/v1/tenants/test-id", "tenant:update"},                            // Issue #3125: update requires AssuranceStrong (supply-chain-adjacent config transitions)
+	{"POST", "/api/v1/tenants/test-id/suspend", "tenant:manage"},                   // Issue #3181: suspension is denial-of-service; requires AssuranceStrong
+	{"POST", "/api/v1/tenants/test-id/config-source/test", "tenant:manage"},        // Issue #3181: git credential probe; requires AssuranceStrong
 	{"POST", "/api/v1/tenants/test-id/access-grants", "tenant:crossing-grant"},     // ADR-025 Decision 2(a): client-granted support access
 	{"POST", "/api/v1/tenants/test-id/break-glass", "tenant:crossing-break-glass"}, // ADR-025 Decision 2(b): tenant-crossing break-glass elevation
 	{"POST", "/api/v1/stewards/refresh/pending-123/approve", "refresh:approve"},
@@ -76,6 +79,7 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"},
 	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"},
 	{"POST", "/api/v1/web/accounts", "web-account:create"},
+	{"PUT", "/api/v1/web/accounts/test-user", "web-account:update"}, // Issue #3126: update permissions/disabled (Tier-3: can disable accounts)
 	{"DELETE", "/api/v1/web/accounts/test-user", "web-account:delete"},
 	// Enrollment magic-link revocation (Issue #2974) — invalidates an unredeemed
 	// bearer credential that would otherwise enroll a first passkey.

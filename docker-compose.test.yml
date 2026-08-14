@@ -122,6 +122,95 @@ services:
   # Start with: docker compose --profile ha up
   # ============================================================================
 
+  # One-shot bootstrap for the HA cluster's shared certificate authority.
+  #
+  # Raft peer traffic on /raft/message is mutual TLS: each node mints a client
+  # certificate whose CN is its node ID (pkg/ha/manager.go) and the receiving
+  # node verifies it against CFGMS_HA_CA_CERT_PATH. If every node ran --init it
+  # would mint its own CA and no peer would trust any other, so this service
+  # initialises the CA once into the ha_cluster_certs volume that all three
+  # controllers mount. It also mints the server certificate they share, which
+  # keeps three simultaneously-starting nodes from racing to write it.
+  #
+  # The controllers depend on this completing successfully, so they never start
+  # against a half-written CA directory.
+  #
+  # It must run with the same controller.cfg the controllers use.
+  # initialization.TransportCertSANs merges certificate.server.dns_names into the
+  # internal (PurposeTransport) certificate, and EnsureSeparatedCertificates is
+  # idempotent — whichever process mints that certificate first decides its SAN
+  # set for the life of the volume. Initialising without the config file minted it
+  # from the built-in defaults alone (localhost, cfgms-internal,
+  # controller-standalone), so every steward's QUIC handshake failed with
+  # "certificate is valid for ... not controller-east" and the steward fell back
+  # to re-registering an identity the controller had already accepted, reporting
+  # the unrelated "device_id already registered in this tenant".
+  ha-ca-init:
+    container_name: cfgms-ha-ca-init
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+    environment:
+      CFGMS_NODE_ID: "controller-east"
+      CFGMS_STORAGE_PROVIDER: "database"
+      CFGMS_DB_HOST: "timescaledb-test"
+      CFGMS_DB_PORT: "5432"
+      CFGMS_DB_NAME: "cfgms_ha_test"
+      CFGMS_DB_USER: "cfgms_test"
+      CFGMS_DB_PASSWORD: "${TIMESCALEDB_PASSWORD}"
+      CFGMS_DB_SSLMODE: "disable"
+      CFGMS_HA_ENABLED: "true"
+      CFGMS_HA_MODE: "cluster"
+      CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
+      CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
+      CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "minioadmin"
+      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      CFGMS_CERT_PATH: "/app/certs"
+      CFGMS_DATA_DIR: "/app/data"
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
+      CFGMS_EXTERNAL_URL: "https://controller-east:9080"
+      # controller-ha.cfg resolves internal_listen_addr from this. --init never
+      # binds the listener, but config.LoadWithPath fails closed on an
+      # unresolvable reference, so the value has to be present and valid.
+      CFGMS_HA_INTERNAL_IP: "172.20.0.11"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+    user: root
+    # cmd/controller/Dockerfile declares ENTRYPOINT ["/app/controller"] with a
+    # default CMD of --config /etc/cfgms/controller.cfg; clearing the entrypoint
+    # restores shell-form startup. --init is idempotent-by-tolerance: it exits
+    # non-zero when the CA already exists, which `|| true` accepts so a rerun
+    # against a warm volume is a no-op rather than a failure.
+    entrypoint: []
+    # After initialising the CA, publish a readable copy of the certificate for
+    # the stewards. The CA directory itself is deliberately 0700 with 0600
+    # contents because it is private key material, and the stewards run as the
+    # unprivileged `cfgms` user, so mounting it directly gave them "Permission
+    # denied" and then a TLS failure against their own cluster's CA. Only the
+    # public certificate is copied out, and only into its own volume.
+    # Clearing the entrypoint also drops the Dockerfile's default
+    # `--config /etc/cfgms/controller.cfg`, so it is passed explicitly here.
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./controller --config /etc/cfgms/controller.cfg --init || true; mkdir -p /app/ca-public && cp /app/certs/ca/ca.crt /app/ca-public/ca.crt && chmod 0644 /app/ca-public/ca.crt"]
+    volumes:
+      - ha_cluster_certs:/app/certs
+      - ha_ca_public:/app/ca-public
+      - ./test/fixtures/ha/controller-ha.cfg:/etc/cfgms/controller.cfg:ro
+      - ha_ca_init_data:/app/data
+      - ha_cluster_secrets:/app/data/secrets
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
+    depends_on:
+      timescaledb-test:
+        condition: service_healthy
+    networks:
+      - cfgms-test
+    profiles:
+      - ha
+
   # Controller East (us-east region) - gRPC-over-QUIC Transport (Issue #519)
   controller-east:
     container_name: controller-east
@@ -158,26 +247,94 @@ services:
       # HA Configuration
       CFGMS_HA_ENABLED: "true"
       CFGMS_HA_MODE: "cluster"
-      CFGMS_HA_EXTERNAL_ADDRESS: "controller-east:9080"
-      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      # Raft peers dial https://<address>/raft/message, and that route is served
+      # by the internal listener (features/controller/api/server.go), not the
+      # public API. These addresses therefore carry the internal Raft port, not
+      # the 9080-9082 HTTP ports they named before.
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-east:9443"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9443,controller-central:9443,controller-west:9443"
       CFGMS_HA_DISCOVERY_METHOD: "static"
       CFGMS_HA_DISCOVERY_INTERVAL: "10s"
       CFGMS_HA_NODE_TIMEOUT: "15s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
-      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      # Raft requires ElectionTimeout >= 5x HeartbeatInterval; at the previous
+      # 2s the 5s election timeout produced ElectionTick=2 and every node
+      # aborted in NewRaftConsensus. The 5s election timeout is load-bearing:
+      # test/integration/ha/failover_test.go budgets failover as
+      # NODE_TIMEOUT(15s) + DISCOVERY_INTERVAL(10s) + ELECTION_TIMEOUT(5s).
+      CFGMS_HA_HEARTBEAT_INTERVAL: "1s"
+      CFGMS_HA_INTERNAL_IP: "172.20.0.11"
+      CFGMS_HA_CA_CERT_PATH: "/app/certs/ca/ca.crt"
+      # Cluster-mode backends. features/controller/server/server.go's
+      # assertClusterBackendsReady and the cluster storage manager fail closed
+      # on each of these, so a cluster-mode node cannot start without them.
+      CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
+      CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
+      CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "minioadmin"
+      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      CFGMS_CERT_PATH: "/app/certs"
+      CFGMS_DATA_DIR: "/app/data"
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
+      # Adds the service name to the transport certificate's SANs
+      # (features/controller/initialization/transport_sans.go) so stewards can
+      # verify this node, and supplies the external address the transport
+      # requires when the listener binds 0.0.0.0.
+      CFGMS_EXTERNAL_HOSTNAME: "controller-east"
+      CFGMS_EXTERNAL_URL: "https://controller-east:9080"
       CFGMS_API_KEY: "${API_KEY_EAST}"
       CFGMS_SEED_TEST_API_KEYS: "1"
+      # Seeds the registration tokens the HA stewards present; without it
+      # every steward registration is rejected 401 and no steward joins.
+      CFGMS_SEED_TEST_TOKENS: "1"
+      # Same rationale as controller-standalone: the ip-trust default
+      # quarantines these stewards, and quarantine needs a durable pending
+      # store this deployment has none of, so registration answered 503
+      # "Registration admission service unavailable".
+      CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       CFGMS_API_KEY_EAST: "test-api-key-east"
+    user: root
+    # cmd/controller/Dockerfile's ENTRYPOINT runs the binary directly with a
+    # default CMD of --config /etc/cfgms/controller.cfg. Wrapping it in a shell
+    # keeps that config path and creates CFGMS_LOG_DIR first: the file logging
+    # provider does not create its own directory, so these nodes wrote no log
+    # records at all and every cluster failure had to be diagnosed from a bare
+    # container exit code.
+    entrypoint: []
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && exec ./controller --config /etc/cfgms/controller.cfg"]
+    volumes:
+      # Shared CA and server certificate minted by ha-ca-init; peer mTLS only
+      # verifies if all three nodes trust the same root.
+      - ha_cluster_certs:/app/certs
+      - controller_east_data:/app/data
+      - ha_cluster_secrets:/app/data/secrets
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
+      # internal_listen_addr has no environment override and must name an
+      # explicit private IP, so cluster mode requires a config file.
+      - ./test/fixtures/ha/controller-ha.cfg:/etc/cfgms/controller.cfg:ro
     depends_on:
       timescaledb-test:
         condition: service_healthy
+      minio-test:
+        condition: service_healthy
+      ha-ca-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
+      # Both listeners, not just QUIC. The stewards register over the HTTP
+      # API, so a healthcheck that only proves :4433 is bound reports the
+      # node healthy while :9080 is still closed; StartCluster then starts
+      # the stewards, whose first registration attempt is refused and whose
+      # retry backoff doubles past the test's wait window.
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433 && netstat -ln | grep :9080"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks:
-      - cfgms-test
+      cfgms-test:
+        ipv4_address: 172.20.0.11
     profiles:
       - ha
 
@@ -217,26 +374,76 @@ services:
       # HA Configuration
       CFGMS_HA_ENABLED: "true"
       CFGMS_HA_MODE: "cluster"
-      CFGMS_HA_EXTERNAL_ADDRESS: "controller-central:9081"
-      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      # See controller-east for why these carry the internal Raft port.
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-central:9443"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9443,controller-central:9443,controller-west:9443"
       CFGMS_HA_DISCOVERY_METHOD: "static"
       CFGMS_HA_DISCOVERY_INTERVAL: "10s"
       CFGMS_HA_NODE_TIMEOUT: "15s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
-      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      # Raft requires ElectionTimeout >= 5x HeartbeatInterval (see controller-east).
+      CFGMS_HA_HEARTBEAT_INTERVAL: "1s"
+      CFGMS_HA_INTERNAL_IP: "172.20.0.12"
+      CFGMS_HA_CA_CERT_PATH: "/app/certs/ca/ca.crt"
+      CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
+      CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
+      CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "minioadmin"
+      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      CFGMS_CERT_PATH: "/app/certs"
+      CFGMS_DATA_DIR: "/app/data"
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
+      CFGMS_EXTERNAL_HOSTNAME: "controller-central"
+      CFGMS_EXTERNAL_URL: "https://controller-central:9081"
       CFGMS_API_KEY: "${API_KEY_CENTRAL}"
       CFGMS_SEED_TEST_API_KEYS: "1"
+      # Seeds the registration tokens the HA stewards present; without it
+      # every steward registration is rejected 401 and no steward joins.
+      CFGMS_SEED_TEST_TOKENS: "1"
+      # Same rationale as controller-standalone: the ip-trust default
+      # quarantines these stewards, and quarantine needs a durable pending
+      # store this deployment has none of, so registration answered 503
+      # "Registration admission service unavailable".
+      CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       CFGMS_API_KEY_CENTRAL: "test-api-key-central"
+    user: root
+    # cmd/controller/Dockerfile's ENTRYPOINT runs the binary directly with a
+    # default CMD of --config /etc/cfgms/controller.cfg. Wrapping it in a shell
+    # keeps that config path and creates CFGMS_LOG_DIR first: the file logging
+    # provider does not create its own directory, so these nodes wrote no log
+    # records at all and every cluster failure had to be diagnosed from a bare
+    # container exit code.
+    entrypoint: []
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && exec ./controller --config /etc/cfgms/controller.cfg"]
+    volumes:
+      - ha_cluster_certs:/app/certs
+      - controller_central_data:/app/data
+      - ha_cluster_secrets:/app/data/secrets
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
+      - ./test/fixtures/ha/controller-ha.cfg:/etc/cfgms/controller.cfg:ro
     depends_on:
       timescaledb-test:
         condition: service_healthy
+      minio-test:
+        condition: service_healthy
+      ha-ca-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
+      # Both listeners, not just QUIC. The stewards register over the HTTP
+      # API, so a healthcheck that only proves :4433 is bound reports the
+      # node healthy while :9081 is still closed; StartCluster then starts
+      # the stewards, whose first registration attempt is refused and whose
+      # retry backoff doubles past the test's wait window.
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433 && netstat -ln | grep :9081"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks:
-      - cfgms-test
+      cfgms-test:
+        ipv4_address: 172.20.0.12
     profiles:
       - ha
 
@@ -276,26 +483,76 @@ services:
       # HA Configuration
       CFGMS_HA_ENABLED: "true"
       CFGMS_HA_MODE: "cluster"
-      CFGMS_HA_EXTERNAL_ADDRESS: "controller-west:9082"
-      CFGMS_HA_CLUSTER_NODES: "controller-east:9080,controller-central:9081,controller-west:9082"
+      # See controller-east for why these carry the internal Raft port.
+      CFGMS_HA_EXTERNAL_ADDRESS: "controller-west:9443"
+      CFGMS_HA_CLUSTER_NODES: "controller-east:9443,controller-central:9443,controller-west:9443"
       CFGMS_HA_DISCOVERY_METHOD: "static"
       CFGMS_HA_DISCOVERY_INTERVAL: "10s"
       CFGMS_HA_NODE_TIMEOUT: "15s"
       CFGMS_HA_ELECTION_TIMEOUT: "5s"
-      CFGMS_HA_HEARTBEAT_INTERVAL: "2s"
+      # Raft requires ElectionTimeout >= 5x HeartbeatInterval (see controller-east).
+      CFGMS_HA_HEARTBEAT_INTERVAL: "1s"
+      CFGMS_HA_INTERNAL_IP: "172.20.0.13"
+      CFGMS_HA_CA_CERT_PATH: "/app/certs/ca/ca.crt"
+      CFGMS_STORAGE_CLUSTER_POSTGRES_DSN: "postgres://cfgms_test:${TIMESCALEDB_PASSWORD}@timescaledb-test:5432/cfgms_ha_test?sslmode=disable"
+      CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY: "${HA_SESSION_HMAC_KEY}"
+      CFGMS_S3_INSTALLER_BUCKET: "cfgms-installers-test"
+      CFGMS_S3_INSTALLER_ENDPOINT_URL: "http://minio-test:9000"
+      CFGMS_S3_INSTALLER_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "minioadmin"
+      AWS_SECRET_ACCESS_KEY: "minioadmin"
+      CFGMS_CERT_PATH: "/app/certs"
+      CFGMS_DATA_DIR: "/app/data"
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
+      CFGMS_EXTERNAL_HOSTNAME: "controller-west"
+      CFGMS_EXTERNAL_URL: "https://controller-west:9082"
       CFGMS_API_KEY: "${API_KEY_WEST}"
       CFGMS_SEED_TEST_API_KEYS: "1"
+      # Seeds the registration tokens the HA stewards present; without it
+      # every steward registration is rejected 401 and no steward joins.
+      CFGMS_SEED_TEST_TOKENS: "1"
+      # Same rationale as controller-standalone: the ip-trust default
+      # quarantines these stewards, and quarantine needs a durable pending
+      # store this deployment has none of, so registration answered 503
+      # "Registration admission service unavailable".
+      CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
       CFGMS_API_KEY_WEST: "test-api-key-west"
+    user: root
+    # cmd/controller/Dockerfile's ENTRYPOINT runs the binary directly with a
+    # default CMD of --config /etc/cfgms/controller.cfg. Wrapping it in a shell
+    # keeps that config path and creates CFGMS_LOG_DIR first: the file logging
+    # provider does not create its own directory, so these nodes wrote no log
+    # records at all and every cluster failure had to be diagnosed from a bare
+    # container exit code.
+    entrypoint: []
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && exec ./controller --config /etc/cfgms/controller.cfg"]
+    volumes:
+      - ha_cluster_certs:/app/certs
+      - controller_west_data:/app/data
+      - ha_cluster_secrets:/app/data/secrets
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
+      - ./test/fixtures/ha/controller-ha.cfg:/etc/cfgms/controller.cfg:ro
     depends_on:
       timescaledb-test:
         condition: service_healthy
+      minio-test:
+        condition: service_healthy
+      ha-ca-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
+      # Both listeners, not just QUIC. The stewards register over the HTTP
+      # API, so a healthcheck that only proves :4433 is bound reports the
+      # node healthy while :9082 is still closed; StartCluster then starts
+      # the stewards, whose first registration attempt is refused and whose
+      # retry backoff doubles past the test's wait window.
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433 && netstat -ln | grep :9082"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks:
-      - cfgms-test
+      cfgms-test:
+        ipv4_address: 172.20.0.13
     profiles:
       - ha
 
@@ -310,11 +567,29 @@ services:
     environment:
       # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_EAST}"
-      CFGMS_TRANSPORT_ADDRESS: "controller-east:4433"
+      # Trust anchor for the controller's HTTPS API. Without it registration
+      # fails the TLS handshake ("certificate signed by unknown authority")
+      # and the steward stays in degraded mode, never joining the cluster.
+      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+    # The steward takes its registration token as a flag; there is no
+    # CFGMS_REGISTRATION_TOKEN fallback in cmd/steward. Without this the
+    # binary dropped into interactive mode and exited immediately with
+    # "failed to read registration token: EOF", so no steward ever joined the
+    # cluster. Matches the steward-standalone service below.
+    # Root, like the other steward containers here. The steward derives its
+    # device identity from a machine ID and falls back to generating one
+    # under /var/lib/cfgms when /etc/machine-id is absent, as it is in these
+    # images. As the unprivileged `cfgms` user that mkdir fails, the device
+    # identity key store is skipped, and registration is rejected with
+    # "device_id is required and must be a 64-character lowercase hex string".
+    user: root
+    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    volumes:
+      - ha_ca_public:/app/controller-certs/ca:ro
     depends_on:
       controller-east:
         condition: service_healthy
@@ -335,15 +610,38 @@ services:
       context: .
       dockerfile: cmd/steward/Dockerfile
       args:
-        STEWARD_CONTROLLER_URL: "https://controller-central:9080"
+        # controller-central serves its API on 9081, not 9080 (see its
+        # CFGMS_HTTP_LISTEN_ADDR and CFGMS_EXTERNAL_URL). Pointing the steward at
+        # 9080 made every registration attempt fail with "failed to send
+        # registration request" against a port nothing listens on, so only
+        # steward-east ever joined the cluster.
+        STEWARD_CONTROLLER_URL: "https://controller-central:9081"
     environment:
       # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_CENTRAL}"
-      CFGMS_TRANSPORT_ADDRESS: "controller-central:4433"
+      # Trust anchor for the controller's HTTPS API. Without it registration
+      # fails the TLS handshake ("certificate signed by unknown authority")
+      # and the steward stays in degraded mode, never joining the cluster.
+      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+    # The steward takes its registration token as a flag; there is no
+    # CFGMS_REGISTRATION_TOKEN fallback in cmd/steward. Without this the
+    # binary dropped into interactive mode and exited immediately with
+    # "failed to read registration token: EOF", so no steward ever joined the
+    # cluster. Matches the steward-standalone service below.
+    # Root, like the other steward containers here. The steward derives its
+    # device identity from a machine ID and falls back to generating one
+    # under /var/lib/cfgms when /etc/machine-id is absent, as it is in these
+    # images. As the unprivileged `cfgms` user that mkdir fails, the device
+    # identity key store is skipped, and registration is rejected with
+    # "device_id is required and must be a 64-character lowercase hex string".
+    user: root
+    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    volumes:
+      - ha_ca_public:/app/controller-certs/ca:ro
     depends_on:
       controller-central:
         condition: service_healthy
@@ -364,15 +662,34 @@ services:
       context: .
       dockerfile: cmd/steward/Dockerfile
       args:
-        STEWARD_CONTROLLER_URL: "https://controller-west:9080"
+        # controller-west serves its API on 9082; see steward-central above.
+        STEWARD_CONTROLLER_URL: "https://controller-west:9082"
     environment:
       # gRPC-over-QUIC Transport (Issue #519: replaces MQTT+QUIC)
       CFGMS_REGISTRATION_TOKEN: "${REG_TOKEN_WEST}"
-      CFGMS_TRANSPORT_ADDRESS: "controller-west:4433"
+      # Trust anchor for the controller's HTTPS API. Without it registration
+      # fails the TLS handshake ("certificate signed by unknown authority")
+      # and the steward stays in degraded mode, never joining the cluster.
+      CFGMS_HTTP_CA_CERT_PATH: "/app/controller-certs/ca/ca.crt"
       # Logging Configuration
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+    # The steward takes its registration token as a flag; there is no
+    # CFGMS_REGISTRATION_TOKEN fallback in cmd/steward. Without this the
+    # binary dropped into interactive mode and exited immediately with
+    # "failed to read registration token: EOF", so no steward ever joined the
+    # cluster. Matches the steward-standalone service below.
+    # Root, like the other steward containers here. The steward derives its
+    # device identity from a machine ID and falls back to generating one
+    # under /var/lib/cfgms when /etc/machine-id is absent, as it is in these
+    # images. As the unprivileged `cfgms` user that mkdir fails, the device
+    # identity key store is skipped, and registration is rejected with
+    # "device_id is required and must be a 64-character lowercase hex string".
+    user: root
+    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    volumes:
+      - ha_ca_public:/app/controller-certs/ca:ro
     depends_on:
       controller-west:
         condition: service_healthy
@@ -541,6 +858,15 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+    # Root, for the same two reasons as the HA stewards: the controller's CA
+    # directory is 0700 root-owned private key material, and the steward's
+    # device identity falls back to generating a machine ID under /var/lib/cfgms
+    # when /etc/machine-id is absent. As the unprivileged `cfgms` user this
+    # steward logged "CFGMS_HTTP_CA_CERT_PATH set but file not found, falling
+    # through" and "Failed to create device identity key store", then never
+    # registered — which is what the controller suite's steward assertions were
+    # really failing on.
+    user: root
     command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
     volumes:
       - steward_standalone_data:/app/data
@@ -663,12 +989,20 @@ services:
       context: .
       dockerfile: cmd/steward/Dockerfile
     environment:
-      # Disable file logging to avoid permission issues in standalone mode
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_LOG_LEVEL: "info"
     # Run as root to avoid permission issues, create log dir first
     user: root
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward -config /app/config/standalone.yaml -log-level info -log-provider file"]
+    # cmd/steward exposes cobra flags: --config enables standalone mode. The
+    # previous single-dash form made cobra treat the path as a subcommand and
+    # the container exited immediately with `unknown command
+    # "/app/config/standalone.yaml"`, so no resource in standalone.yaml was ever
+    # applied and every file/permission assertion in test/integration/standalone
+    # failed against a workspace that was never written. -log-level and
+    # -log-provider are not steward flags at all; both are environment settings
+    # above.
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && ./steward --config /app/config/standalone.yaml"]
     volumes:
       - ./test/integration/standalone/config:/app/config:ro  # Mount config directory
       - steward_true_standalone_data:/app/data
@@ -863,7 +1197,9 @@ services:
     profiles:
       - openbao
 
-  # MinIO S3-compatible object store for blob migrator integration tests.
+  # MinIO S3-compatible object store for blob migrator integration tests and for
+  # the HA cluster, whose controllers require an S3 installer artifact store in
+  # cluster mode (features/controller/server/server.go assertClusterBackendsReady).
   # Start with: docker compose --profile blob-migrate -f docker-compose.test.yml up -d minio-test
   minio-test:
     image: minio/minio:latest
@@ -885,6 +1221,7 @@ services:
       - cfgms-test
     profiles:
       - blob-migrate
+      - ha
 
 volumes:
   postgres_test_data:
@@ -921,6 +1258,41 @@ volumes:
     driver: local
     # Story #294: CA must persist across container restarts (no tmpfs)
     # This ensures client certificates remain valid when controller restarts
+  # Shared CA and server certificate for the three HA controllers. Not tmpfs for
+  # the same reason as controller_standalone_certs, and shared rather than
+  # per-node because Raft peer mTLS requires one common trust root.
+  ha_cluster_certs:
+    driver: local
+  # The HA data directories are deliberately NOT tmpfs.
+  #
+  # /app/data/secrets holds the envelope key material that the SOPS secret store
+  # uses to decrypt secrets it keeps in the shared cluster database. StartCluster
+  # recreates these containers for every test, and a tmpfs volume is empty again
+  # on each recreate — so the key material vanished while the database kept the
+  # ciphertext, and every node died with "load audit HMAC key: failed to decrypt
+  # secret: secret ciphertext authentication failed" on the second test onward.
+  # Shared secret-store material for the cluster.
+  #
+  # The SOPS secret store keeps its ciphertext in the shared cluster database
+  # but its envelope key material under /app/data/secrets. With a per-node
+  # directory each node could only decrypt secrets it had written itself: a
+  # fresh database let all three nodes generate and store the audit HMAC key
+  # concurrently, and on the next start every node failed with "secret
+  # ciphertext authentication failed" against whichever write landed last.
+  # Cluster-wide secrets in a shared database require cluster-wide key material.
+  ha_cluster_secrets:
+    driver: local
+  # Public CA certificate only, published by ha-ca-init for the stewards.
+  ha_ca_public:
+    driver: local
+  ha_ca_init_data:
+    driver: local
+  controller_east_data:
+    driver: local
+  controller_central_data:
+    driver: local
+  controller_west_data:
+    driver: local
   steward_standalone_data:
     driver: local
     driver_opts:

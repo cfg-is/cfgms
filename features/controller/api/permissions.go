@@ -31,6 +31,8 @@ var knownPermissions = map[string]bool{
 	"config:push": true,
 	// Certificate management
 	"certificate:list":      true,
+	"certificate:get":       true, // Issue #3129: get single certificate by serial
+	"certificate:revoke":    true, // Issue #3129: revoke certificate by serial
 	"certificate:provision": true,
 	"certificate:rotate":    true,
 	// RBAC
@@ -83,6 +85,7 @@ var knownPermissions = map[string]bool{
 	// Compliance
 	"compliance:read-summary": true,
 	// Tenant management
+	"tenant:create": true, // Issue #3195: was in permissionAssurance but missing here
 	"tenant:list":   true,
 	"tenant:read":   true,
 	"tenant:update": true,
@@ -109,12 +112,36 @@ var knownPermissions = map[string]bool{
 	"registration:manage-refresh-policy": true,
 	// Batch job management (Issue #2296)
 	"jobs:write": true,
-	// Cluster registry (Issue #2424)
+	// Cluster registry (Issue #2424, #3303)
 	"cluster:list": true,
 	"cluster:read": true,
-	// Web account management (Issue #2733, #2974)
+	// Issue #3303: cluster:drain-node gates POST /cluster/nodes/{id}/drain and
+	// cluster:decommission-node gates POST /cluster/nodes/{id}/decommission. Both were
+	// already in permissionAssurance (Min: AssuranceStrong) and are now grantable.
+	// Controller HA-cluster nodes are fleet-wide infrastructure with no tenant column, so
+	// neither requirePermission's tenant-isolation block nor its ADR-025 Decision 1 block
+	// can bound them; clusterLifecycleScopeAllowed in handlers_cluster.go confines both
+	// handlers to principals with no tenant confinement (TenantID == "").
+	"cluster:drain-node":        true,
+	"cluster:decommission-node": true,
+	// Registration-refresh approval and policy (Issue #3303). These gate AssuranceStrong-level
+	// routes (see permissionAssurance): refresh:approve for POST /stewards/refresh/{id}/approve,
+	// refresh:set-policy for PUT /tenants/{tenant_path}/refresh-policy. Both were in
+	// permissionAssurance but absent from knownPermissions (same drift pattern as tenant:create,
+	// Issue #3195). refresh:approve adds a root-scoped crossing guard in handleApproveRefresh
+	// (ADR-025 Decision 1); refresh:set-policy is covered by extractBoundaryTenantFromRequest
+	// via tenant_path.
+	"refresh:approve":    true,
+	"refresh:set-policy": true,
+	// Terminal relay (Issue #3303): gates GET /terminal/ws/{steward_id} at AssuranceStrong.
+	// tenantScopedTerminalWrapper covers tenant-scoped callers; the root-scoped ADR-025 gap
+	// ({steward_id} not in extractBoundaryTenantFromRequest) is closed inline there.
+	"terminal:create": true,
+	// Web account management (Issue #2733, #2974, #3126)
 	"web-account:list":                   true,
 	"web-account:create":                 true,
+	"web-account:get":                    true, // Issue #3126: get-one by username
+	"web-account:update":                 true, // Issue #3126: update permissions and/or disabled state
 	"web-account:delete":                 true,
 	"web-account:revoke-enrollment-link": true, // Issue #2974: revoke an outstanding enrollment magic link
 	// WebAuthn passkey / FIDO2 registration and credential management (Issue #2782, #2783)

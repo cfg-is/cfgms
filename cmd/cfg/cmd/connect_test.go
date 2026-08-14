@@ -269,6 +269,54 @@ func generateConnectTestCerts(t *testing.T, serverURL string) *testCerts {
 	}
 }
 
+// generateHostnameOnlyServerCert issues a server certificate signed by ca.caKey that is
+// valid for dnsName only — deliberately no IP SANs — so a client connecting by IP fails
+// hostname verification unless the TLS server name is overridden.
+func generateHostnameOnlyServerCert(t *testing.T, ca *testCerts, dnsName string) tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(4),
+		Subject:      pkix.Name{CommonName: dnsName},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{dnsName},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.caCert, &key.PublicKey, ca.caKey)
+	require.NoError(t, err)
+	keyBytes, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	tlsCert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}),
+	)
+	require.NoError(t, err)
+	return tlsCert
+}
+
+// startTLSTestServer starts an HTTPS test server presenting serverCert.
+// When clientCAs is non-nil the server requires and verifies a client certificate (mTLS).
+func startTLSTestServer(t *testing.T, serverCert tls.Certificate, clientCAs *x509.CertPool, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewUnstartedServer(handler)
+	cfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	if clientCAs != nil {
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+		cfg.ClientCAs = clientCAs
+	}
+	ts.TLS = cfg
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+	return ts
+}
+
 // startSessionServer creates and starts an HTTPS server backed by stub.
 func startSessionServer(t *testing.T, certs *testCerts, stub *sessionStub) *httptest.Server {
 	t.Helper()
@@ -407,7 +455,7 @@ func TestConnectReconnectDisconnect(t *testing.T) {
 
 	const N = 3
 	for i := range N {
-		client, cErr := resolveSessionOrBundleClient("")
+		client, cErr := resolveSessionOrBundleClient("", false, "")
 		require.NoError(t, cErr, "command %d: resolve client", i)
 		require.NotNil(t, client, "command %d: session client must not be nil", i)
 
@@ -509,7 +557,7 @@ func TestBundleOverrideBypassesSession(t *testing.T) {
 	t.Cleanup(func() { bundlePath = origBundlePath })
 	bundlePath = bundleFile
 
-	client, err := resolveSessionOrBundleClient("")
+	client, err := resolveSessionOrBundleClient("", false, "")
 	require.NoError(t, err)
 	require.NotNil(t, client, "bundle client must be returned when --bundle is set")
 
@@ -693,7 +741,7 @@ func TestResolveSessionOrBundleClient_ExpiredTokenFallsThrough(t *testing.T) {
 	bundlePath = ""
 	noBundle = true // force nil return from resolveBundleClient
 
-	client, err := resolveSessionOrBundleClient("")
+	client, err := resolveSessionOrBundleClient("", false, "")
 	require.NoError(t, err)
 	assert.Nil(t, client, "expired session must fall through to bundle client (nil when no bundle)")
 }
@@ -790,4 +838,197 @@ func TestConnectFirstTime_HTTPSGuard(t *testing.T) {
 	err := runConnect(connectCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires HTTPS")
+}
+
+// ── TestSessionTLSInsecureFallbackSkipsVerification ───────────────────────────
+
+// TestSessionTLSInsecureFallbackSkipsVerification covers AC #5: a confirmed
+// session-token --tls-insecure call skips certificate verification, and when that
+// session 401s and falls back through OnUnauthorized to a bundle client the fallback
+// client must also skip verification — gated by the mTLS banner, not by a second
+// confirmation prompt.
+func TestSessionTLSInsecureFallbackSkipsVerification(t *testing.T) {
+	// Two independent CAs. The bundle trusts CA1 (its own CAPEM), while the fallback
+	// server presents a CA2-signed certificate, so a fallback client that reverted to
+	// verifying the server certificate could not complete the handshake at all.
+	sessionCerts := generateConnectTestCerts(t, "")
+	fallbackCerts := generateConnectTestCerts(t, "")
+
+	var primaryHits, fallbackHits int64
+	primary := startTLSTestServer(t, sessionCerts.serverCert, nil,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt64(&primaryHits, 1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"SESSION_REVOKED"}`))
+		}))
+
+	clientCAs := x509.NewCertPool()
+	clientCAs.AddCert(sessionCerts.caCert)
+	var peerCN atomic.Value
+	fallback := startTLSTestServer(t, fallbackCerts.serverCert, clientCAs,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt64(&fallbackHits, 1)
+			if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+				peerCN.Store(r.TLS.PeerCertificates[0].Subject.CommonName)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		}))
+
+	// Bundle: CA1 client credential, CA1 trust anchor, pointing at the fallback server.
+	bundleFile := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	sessionCerts.clientCert.ControllerURL = fallback.URL
+	require.NoError(t, certbundle.Write(bundleFile, sessionCerts.clientCert))
+	t.Setenv("CFGMS_ADMIN_BUNDLE", bundleFile)
+
+	// Session record with no stored CA → system pool, so the CA1-signed session
+	// server is untrusted unless verification is genuinely skipped.
+	store := newTestSessionStore()
+	overrideSessionStore(t, store)
+	require.NoError(t, storeSessionToken(&sessionRecord{
+		Token:          strings.Repeat("G", 43),
+		SessionID:      "insecure-fallback",
+		ControllerURL:  primary.URL,
+		ConnectionName: "insecure",
+		AbsoluteExpiry: time.Now().Add(8 * time.Hour),
+	}))
+
+	origBundlePath, origNoBundle := bundlePath, noBundle
+	t.Cleanup(func() { bundlePath, noBundle = origBundlePath, origNoBundle })
+	bundlePath, noBundle = "", false
+
+	// Confirmation gate: TTY with exactly one line of input available. A second prompt
+	// would read EOF and fail the call, so this input also proves no re-prompt happens.
+	var out strings.Builder
+	origWriter, origReader, origTTY := tlsInsecureWriter, tlsInsecureReader, isTTYFn
+	tlsInsecureWriter = &out
+	tlsInsecureReader = strings.NewReader(tlsInsecureConfirmPhrase + "\n")
+	isTTYFn = func() bool { return true }
+	t.Cleanup(func() {
+		tlsInsecureWriter, tlsInsecureReader, isTTYFn = origWriter, origReader, origTTY
+	})
+
+	client, err := resolveSessionOrBundleClient("", true, "")
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	primaryTLS := client.httpClient.Transport.(*http.Transport).TLSClientConfig
+	require.True(t, primaryTLS.InsecureSkipVerify,
+		"session client must skip verification under confirmed --tls-insecure")
+
+	resp, err := client.doRequestWithContentType(context.Background(), http.MethodGet, "/", nil, "")
+	require.NoError(t, err,
+		"401 fallback to the bundle client must complete the handshake against an untrusted server cert")
+	_ = resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "fallback bundle client response must be returned")
+	assert.Equal(t, int64(1), atomic.LoadInt64(&primaryHits), "session server must be called exactly once")
+	assert.Equal(t, int64(1), atomic.LoadInt64(&fallbackHits), "fallback server must be called exactly once")
+	assert.Equal(t, "test-admin", peerCN.Load(),
+		"fallback must still present the bundle mTLS client certificate")
+
+	// Banner gate, not a second confirmation prompt.
+	assert.Contains(t, out.String(), tlsInsecureMTLSWarning,
+		"fallback bundle client must print the mTLS banner")
+	assert.Equal(t, 1, strings.Count(out.String(), tlsInsecureConfirmPrompt),
+		"fallback must not issue a second confirmation prompt")
+	assert.Equal(t, 1, strings.Count(out.String(), tlsInsecureSessionWarning),
+		"session warning must be printed once, by the session client only")
+
+	// The client produced by the OnUnauthorized closure itself carries InsecureSkipVerify.
+	fallbackClient, err := client.onUnauthorized()
+	require.NoError(t, err)
+	require.NotNil(t, fallbackClient)
+	fallbackTLS := fallbackClient.httpClient.Transport.(*http.Transport).TLSClientConfig
+	assert.True(t, fallbackTLS.InsecureSkipVerify,
+		"fallback bundle client must not silently revert to verifying")
+	assert.Len(t, fallbackTLS.Certificates, 1,
+		"fallback bundle client must keep its mTLS client certificate")
+
+	// Control: with verification enabled the same bundle cannot reach the fallback
+	// server, which is what makes the success above evidence of a skipped check.
+	verifying, err := newClientFromBundle(bundleFile, "", false, "")
+	require.NoError(t, err)
+	_, err = verifying.Get(context.Background(), "/")
+	require.Error(t, err, "fallback server certificate must be untrusted when verification is on")
+	assert.Contains(t, err.Error(), "certificate")
+}
+
+// ── TestServerNameOverrideVerifiesWithoutDisablingVerification ────────────────
+
+// TestServerNameOverrideVerifiesWithoutDisablingVerification covers AC #6:
+// --server-name overrides the hostname used for certificate verification without
+// disabling it. The server certificate is valid for a DNS name only (no IP SANs),
+// so connecting by IP succeeds only when the server name is overridden to a name
+// in the SAN — and still fails for any other name.
+func TestServerNameOverrideVerifiesWithoutDisablingVerification(t *testing.T) {
+	const sanHost = "controller.internal"
+
+	certs := generateConnectTestCerts(t, "")
+	serverCert := generateHostnameOnlyServerCert(t, certs, sanHost)
+
+	srv := startTLSTestServer(t, serverCert, nil,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		}))
+	// httptest listens on loopback, so srv.URL addresses the server by IP —
+	// the same shape as connecting to a controller by its LAN IP.
+	require.Contains(t, srv.URL, "127.0.0.1")
+
+	bundleFile := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	certs.clientCert.ControllerURL = srv.URL
+	require.NoError(t, certbundle.Write(bundleFile, certs.clientCert))
+
+	t.Run("server name in SAN succeeds without tls-insecure", func(t *testing.T) {
+		client, err := newClientFromBundle(bundleFile, "", false, sanHost)
+		require.NoError(t, err)
+
+		tlsCfg := client.httpClient.Transport.(*http.Transport).TLSClientConfig
+		require.False(t, tlsCfg.InsecureSkipVerify, "--server-name must not disable verification")
+		require.Equal(t, sanHost, tlsCfg.ServerName)
+
+		resp, err := client.Get(context.Background(), "/")
+		require.NoError(t, err, "IP connection with --server-name in the SAN must verify successfully")
+		defer func() { _ = resp.Body.Close() }()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("session client with server name in SAN succeeds without tls-insecure", func(t *testing.T) {
+		client, err := NewAPIClient(&APIClientConfig{
+			BaseURL:    srv.URL,
+			APIKey:     strings.Repeat("H", 43),
+			CACertPEM:  certs.caCertPEM,
+			ServerName: sanHost,
+		})
+		require.NoError(t, err)
+
+		tlsCfg := client.httpClient.Transport.(*http.Transport).TLSClientConfig
+		require.False(t, tlsCfg.InsecureSkipVerify)
+
+		resp, err := client.Get(context.Background(), "/")
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("no server name override fails hostname verification", func(t *testing.T) {
+		client, err := newClientFromBundle(bundleFile, "", false, "")
+		require.NoError(t, err)
+
+		_, err = client.Get(context.Background(), "/")
+		require.Error(t, err, "connecting by IP without --server-name must fail verification")
+		// The certificate carries no IP SAN, so verification against the IP fails.
+		assert.Contains(t, err.Error(), "certificate")
+		assert.Contains(t, err.Error(), "127.0.0.1")
+	})
+
+	t.Run("server name outside the SAN still fails", func(t *testing.T) {
+		client, err := newClientFromBundle(bundleFile, "", false, "wrong.example.com")
+		require.NoError(t, err)
+
+		_, err = client.Get(context.Background(), "/")
+		require.Error(t, err, "--server-name must not bypass verification for a name outside the SAN")
+		assert.Contains(t, err.Error(), "certificate is valid for "+sanHost)
+	})
 }

@@ -512,6 +512,36 @@ func TestRegistrationConfig_DarkWindowAndTimeout_YAML(t *testing.T) {
 		"72h must parse to 3 days")
 }
 
+// TestRegistrationConfig_GetEnrollmentLinkTTL verifies the enrollment-link TTL
+// getter covers nil receiver, zero value, and configured value (Issue #2966).
+func TestRegistrationConfig_GetEnrollmentLinkTTL(t *testing.T) {
+	var rc *RegistrationConfig
+	assert.Equal(t, 72*time.Hour, rc.GetEnrollmentLinkTTL(),
+		"nil RegistrationConfig must default to 72 hours")
+
+	zero := &RegistrationConfig{}
+	assert.Equal(t, 72*time.Hour, zero.GetEnrollmentLinkTTL(),
+		"zero EnrollmentLinkTTL must default to 72 hours")
+
+	configured := &RegistrationConfig{EnrollmentLinkTTL: Duration(24 * time.Hour)}
+	assert.Equal(t, 24*time.Hour, configured.GetEnrollmentLinkTTL(),
+		"configured TTL must be returned unchanged")
+}
+
+// TestRegistrationConfig_EnrollmentLinkTTL_YAML verifies that enrollment_link_ttl
+// is parsed from YAML (Issue #2966). Uses a non-default value (24h) so the
+// assertion only passes when YAML unmarshaling actually populated the field.
+func TestRegistrationConfig_EnrollmentLinkTTL_YAML(t *testing.T) {
+	yamlInput := "registration:\n  enrollment_link_ttl: 24h\n"
+
+	cfg := &Config{}
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), cfg))
+	require.NotNil(t, cfg.Registration)
+
+	assert.Equal(t, 24*time.Hour, cfg.Registration.GetEnrollmentLinkTTL(),
+		"enrollment_link_ttl: 24h must parse to 24 hours")
+}
+
 // TestHAMode_YAML verifies that ha.mode: cluster is parsed correctly (Issue #2119).
 func TestHAMode_YAML(t *testing.T) {
 	yamlInput := "ha:\n  mode: cluster\n"

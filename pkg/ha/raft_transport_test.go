@@ -30,10 +30,10 @@ func TestRaftTransport_Start_returnsNoError(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// makeFakePeerCert returns a minimal x509.Certificate with the given CN, suitable
+// testPeerCertWithCN returns a minimal x509.Certificate with the given CN, suitable
 // for populating r.TLS.PeerCertificates in unit tests. No signature validation is
-// performed by verifyPeerCN — only the CN string is inspected.
-func makeFakePeerCert(cn string) *x509.Certificate {
+// performed by verifyPeerCN — only the CN string is checked.
+func testPeerCertWithCN(cn string) *x509.Certificate {
 	return &x509.Certificate{
 		Subject: pkix.Name{CommonName: cn},
 	}
@@ -76,7 +76,7 @@ func TestHandleMessage_UnknownCN_Returns403(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/raft/message", nil)
 	req.TLS = &tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{makeFakePeerCert("evil-node")},
+		PeerCertificates: []*x509.Certificate{testPeerCertWithCN("evil-node")},
 	}
 	w := httptest.NewRecorder()
 	transport.HandleMessage(w, req)
@@ -95,7 +95,7 @@ func TestHandleMessage_ValidPeerCN_Returns200(t *testing.T) {
 	defer cancel()
 
 	nodeInfo := &NodeInfo{ID: "node-1", State: NodeStateHealthy, Role: NodeRoleFollower}
-	consensus, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, clusterCfg, logger)
+	consensus, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, clusterCfg, "", logger)
 	require.NoError(t, err)
 	defer func() {
 		if stopErr := consensus.Stop(); stopErr != nil {
@@ -113,7 +113,7 @@ func TestHandleMessage_ValidPeerCN_Returns200(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/raft/message", bytes.NewReader(data))
 	req.TLS = &tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{makeFakePeerCert("node-1")},
+		PeerCertificates: []*x509.Certificate{testPeerCertWithCN("node-1")},
 	}
 	w := httptest.NewRecorder()
 	transport.HandleMessage(w, req)

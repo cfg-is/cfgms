@@ -57,7 +57,7 @@ func newClusterModeHAManager(t *testing.T, caCertPath string, certMgr *cert.Mana
 	cfg.Node.ID = fmt.Sprintf("test-node-%d", time.Now().UnixNano())
 	cfg.Cluster = ha.FastElectionConfig()
 
-	manager, err := ha.NewManager(cfg, logging.GetLogger(), sm, certMgr)
+	manager, err := ha.NewManager(cfg, logging.GetLogger(), sm, certMgr, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
 	return manager
@@ -402,7 +402,7 @@ func TestTwoNodeRaftPeerMTLS_MessageExchangeSucceeds(t *testing.T) {
 	// allowedCNs (built from discovery config) for verifyPeerCN to pass.
 	managerA, err := ha.NewManager(
 		makeCfg(nodeIDA, nodeIDB, listenAddr),
-		logging.GetLogger(), smA, sharedCertMgr,
+		logging.GetLogger(), smA, sharedCertMgr, "",
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = managerA.Stop(context.Background()) })
@@ -411,7 +411,7 @@ func TestTwoNodeRaftPeerMTLS_MessageExchangeSucceeds(t *testing.T) {
 	// listener. allowedCNs = {nodeIDB, nodeIDA} from the discovery config.
 	managerB, err := ha.NewManager(
 		makeCfg(nodeIDB, nodeIDA, "127.0.0.1:0"),
-		logging.GetLogger(), smB, sharedCertMgr,
+		logging.GetLogger(), smB, sharedCertMgr, "",
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = managerB.Stop(context.Background()) })
