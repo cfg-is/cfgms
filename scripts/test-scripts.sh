@@ -780,6 +780,44 @@ test_check_binary_artifacts() {
     rm -f "$out_file"
 }
 
+# Coverage suite for the refresh-pins discovery script. Delegates to
+# .claude/skills/refresh-pins/scripts/discover_pins_test.py, which builds a
+# synthetic repo carrying one of every pin shape and asserts each is found.
+#
+# This exists because discovery gaps are silent: a pin the script cannot see is
+# simply absent from the sweep report, which reads identically to "up to date".
+# Two such gaps reached production — a repo-root Dockerfile invisible to the Go
+# toolchain pin, and container base images missing from the inventory entirely
+# while the shipped images are built FROM them.
+test_refresh_pins_discovery() {
+    log_test "Testing refresh-pins discover-pins.py coverage..."
+
+    local script=".claude/skills/refresh-pins/scripts/discover-pins.py"
+    local test_script=".claude/skills/refresh-pins/scripts/discover_pins_test.py"
+
+    if [[ ! -f "$script" ]]; then
+        log_fail "discover-pins.py: Not found"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "discover_pins_test.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "discover_pins_test.py: All pin-discovery coverage tests passed"
+    else
+        log_fail "discover_pins_test.py: Coverage tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Tests for scripts/security-trivy.sh — trivy init-error vs real-findings distinction
 
 test_security_trivy_init_error() {
@@ -3577,6 +3615,8 @@ echo ""
 test_check_providers
 echo ""
 test_check_binary_artifacts
+echo ""
+test_refresh_pins_discovery
 echo ""
 test_security_trivy_init_error
 echo ""
