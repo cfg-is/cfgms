@@ -772,8 +772,7 @@ func (d *detector) generateEventDescription(event *DriftEvent) (string, string) 
 				break
 			}
 
-			changeDesc := fmt.Sprintf("- %s: %s → %s",
-				change.Attribute, change.PreviousValue, change.CurrentValue)
+			changeDesc := formatChangeDescription(change)
 			if len(changeDesc) > 100 {
 				changeDesc = changeDesc[:97] + "..."
 			}
@@ -788,6 +787,41 @@ func (d *detector) generateEventDescription(event *DriftEvent) (string, string) 
 	description := strings.Join(descriptionParts, "\n")
 
 	return title, description
+}
+
+// shortHashLen is the number of leading characters of a fragment hash retained
+// in human-facing descriptions — enough to correlate against a manifest or log
+// line, short enough that a "Key changes" list stays scannable next to prose.
+const shortHashLen = 12
+
+// shortHash truncates a fragment hash for display.
+func shortHash(hash string) string {
+	if len(hash) <= shortHashLen {
+		return hash
+	}
+	return hash[:shortHashLen]
+}
+
+// formatChangeDescription renders one AttributeChange as a "Key changes" line.
+//
+// AttributeChange.PreviousValue/CurrentValue carry the fragment's content hash
+// (ADR-017 §5), not a legible attribute value — analyzeDNAChanges diffs whole
+// Fragments, not individual flat keys, so there is no single before/after string
+// to show. The wording below says "hash" explicitly rather than presenting the
+// digest as if it were the changed value, and per-change-type phrasing avoids an
+// added/removed change reading as an empty-string side of a "→" arrow.
+func formatChangeDescription(change *AttributeChange) string {
+	switch change.ChangeType {
+	case ChangeTypeAdded:
+		return fmt.Sprintf("- %s: fragment added (hash %s)",
+			change.Attribute, shortHash(change.CurrentValue))
+	case ChangeTypeRemoved:
+		return fmt.Sprintf("- %s: fragment removed (was hash %s)",
+			change.Attribute, shortHash(change.PreviousValue))
+	default:
+		return fmt.Sprintf("- %s: fragment changed (hash %s → %s)",
+			change.Attribute, shortHash(change.PreviousValue), shortHash(change.CurrentValue))
+	}
 }
 
 func (d *detector) severityWeight(severity DriftSeverity) int {

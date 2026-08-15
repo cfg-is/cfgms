@@ -4,6 +4,7 @@ package drift_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -382,6 +383,96 @@ func TestDetectDrift_DriftEventCarriesFullDNA(t *testing.T) {
 		assert.Equal(t, prev, ev.PreviousDNA, "PreviousDNA must be the original prev DNA")
 		assert.Equal(t, curr, ev.CurrentDNA, "CurrentDNA must be the original curr DNA")
 	}
+}
+
+// ─── Event description hash legibility (PR #3360 review) ──────────────────────
+
+// TestDetectDrift_EventDescription_LabelsFragmentHashChange verifies that a
+// modified-fragment description explicitly labels the before/after values as a
+// fragment hash rather than presenting them as if they were the raw attribute
+// value the pre-#3320 code used. This is what a human reads in a drift report
+// (features/reports/provider/advanced.go formats event.Description into
+// "Critical drift detected: %s"), so an unlabeled hash reads as a broken or
+// meaningless value rather than a legitimate content digest.
+func TestDetectDrift_EventDescription_LabelsFragmentHashChange(t *testing.T) {
+	d, err := drift.NewDetector(nil, nil)
+	require.NoError(t, err)
+
+	prev := makeDNA("device-1", makeFragment("host:cpu", "hash-cpu-v1"))
+	curr := makeDNA("device-1", makeFragment("host:cpu", "hash-cpu-v2"))
+
+	events, err := d.DetectDrift(context.Background(), prev, curr)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+
+	found := false
+	for _, ev := range events {
+		if strings.Contains(ev.Description, "host:cpu") {
+			found = true
+			assert.Contains(t, ev.Description, "hash", "description must label the values as a fragment hash")
+			assert.Contains(t, ev.Description, "hash-cpu-v1", "previous hash must still be present for correlation")
+			assert.Contains(t, ev.Description, "hash-cpu-v2", "current hash must still be present for correlation")
+		}
+	}
+	assert.True(t, found, "expected a description entry for host:cpu")
+}
+
+// TestDetectDrift_EventDescription_AddedRemovedWording verifies added/removed
+// changes get change-type-appropriate wording rather than an empty-string side
+// of a "→" arrow (which reads as a value having gone missing, not as "added").
+func TestDetectDrift_EventDescription_AddedRemovedWording(t *testing.T) {
+	d, err := drift.NewDetector(nil, nil)
+	require.NoError(t, err)
+
+	prev := makeDNA("device-1", makeFragment("host:cpu", "hash-cpu-v1"))
+	curr := makeDNA("device-1",
+		makeFragment("host:cpu", "hash-cpu-v1"),
+		makeFragment("service:sshd", "hash-sshd-v1"),
+	)
+
+	events, err := d.DetectDrift(context.Background(), prev, curr)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+
+	found := false
+	for _, ev := range events {
+		if strings.Contains(ev.Description, "service:sshd") {
+			found = true
+			assert.Contains(t, ev.Description, "added", "an added fragment's description must say so")
+			assert.NotContains(t, ev.Description, "→ hash-sshd-v1",
+				"an added change must not be rendered as an empty-to-value arrow")
+		}
+	}
+	assert.True(t, found, "expected a description entry for service:sshd")
+}
+
+// TestDetectDrift_EventDescription_TruncatesLongHash verifies that real-length
+// SHA-256 fragment hashes (64 hex chars) are shortened in the description so the
+// "Key changes" list stays scannable instead of dominated by two 64-char hex
+// strings per line.
+func TestDetectDrift_EventDescription_TruncatesLongHash(t *testing.T) {
+	d, err := drift.NewDetector(nil, nil)
+	require.NoError(t, err)
+
+	longPrev := strings.Repeat("a", 64)
+	longCurr := strings.Repeat("b", 64)
+
+	prev := makeDNA("device-1", makeFragment("host:cpu", longPrev))
+	curr := makeDNA("device-1", makeFragment("host:cpu", longCurr))
+
+	events, err := d.DetectDrift(context.Background(), prev, curr)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+
+	found := false
+	for _, ev := range events {
+		if strings.Contains(ev.Description, "host:cpu") {
+			found = true
+			assert.NotContains(t, ev.Description, longPrev, "full 64-char hash must not appear unshortened")
+			assert.NotContains(t, ev.Description, longCurr, "full 64-char hash must not appear unshortened")
+		}
+	}
+	assert.True(t, found, "expected a description entry for host:cpu")
 }
 
 // ─── DetectDriftBatch ─────────────────────────────────────────────────────────
