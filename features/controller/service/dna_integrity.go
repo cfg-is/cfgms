@@ -118,14 +118,14 @@ func checkDNAIntegrity(dna *common.DNA, ct configType) dnaIntegrityResult {
 	return checkDNAIntegrityWithTable(dna, ct, dnaRequiredFields)
 }
 
-// flattenDNAFragments decodes every fragment in dna.Fragments and merges their
-// string key-value pairs into a single map. Keys with empty or non-string values
-// are omitted. Fragments with malformed canonical bytes are silently skipped —
+// flattenDNAFragments decodes each fragment in frags and merges their string
+// key-value pairs into a single map. Keys with empty or non-string values are
+// omitted. Fragments with malformed canonical bytes are silently skipped —
 // hostile input from a compromised steward must not prevent checking the
 // well-formed ones.
-func flattenDNAFragments(dna *common.DNA) map[string]string {
+func flattenDNAFragments(frags []*common.Fragment) map[string]string {
 	flat := make(map[string]string)
-	for _, frag := range dna.Fragments {
+	for _, frag := range frags {
 		if len(frag.CanonicalBytes) == 0 {
 			continue
 		}
@@ -159,7 +159,7 @@ func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[config
 		// Conservative default: unknown config types have no declared contract.
 		return dnaIntegrityResult{valid: true}
 	}
-	flat := flattenDNAFragments(dna)
+	flat := flattenDNAFragments(dna.Fragments)
 	var missing []string
 	for _, field := range required {
 		if flat[field] == "" {
