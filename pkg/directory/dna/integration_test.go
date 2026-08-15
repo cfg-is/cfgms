@@ -27,11 +27,8 @@ func TestDirectoryDNAIntegration(t *testing.T) {
 	// Create drift detector
 	driftDetector := NewDirectoryDriftDetector(logger)
 
-	// Create storage using real backend implementations
-	backend := NewMockBackend()
-	compressor := NewMockCompressor()
-	indexer := NewMockIndexer()
-	storage := NewDirectoryDNAStorageAdapter(backend, compressor, indexer, logger)
+	// Create storage using real backend, compressor and indexer implementations
+	storage := newDirectoryStorageAdapter(t)
 
 	// Create monitoring system
 	monitoring := NewDirectoryDNAMonitoringSystem(collector, driftDetector, storage, logger)
@@ -240,10 +237,7 @@ func TestEndToEndDriftScenario(t *testing.T) {
 	collector := NewDirectoryDNACollector(provider, logger)
 	driftDetector := NewDirectoryDriftDetector(logger)
 
-	backend := NewMockBackend()
-	compressor := NewMockCompressor()
-	indexer := NewMockIndexer()
-	storage := NewDirectoryDNAStorageAdapter(backend, compressor, indexer, logger)
+	storage := newDirectoryStorageAdapter(t)
 
 	_ = NewDirectoryDNAMonitoringSystem(collector, driftDetector, storage, logger)
 
@@ -321,10 +315,7 @@ func TestScalabilityScenario(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	collector := NewDirectoryDNACollector(provider, logger)
 
-	backend := NewMockBackend()
-	compressor := NewMockCompressor()
-	indexer := NewMockIndexer()
-	storage := NewDirectoryDNAStorageAdapter(backend, compressor, indexer, logger)
+	storage := newDirectoryStorageAdapter(t)
 
 	ctx := context.Background()
 
@@ -683,10 +674,7 @@ func TestComprehensiveWorkflow(t *testing.T) {
 	collector := NewDirectoryDNACollector(provider, logger)
 	driftDetector := NewDirectoryDriftDetector(logger)
 
-	backend := NewMockBackend()
-	compressor := NewMockCompressor()
-	indexer := NewMockIndexer()
-	storage := NewDirectoryDNAStorageAdapter(backend, compressor, indexer, logger)
+	storage := newDirectoryStorageAdapter(t)
 
 	monitoring := NewDirectoryDNAMonitoringSystem(collector, driftDetector, storage, logger)
 
