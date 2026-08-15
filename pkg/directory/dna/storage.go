@@ -13,8 +13,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +21,77 @@ import (
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// Fragment IDs for the directory DNA adapter's local serialization format.
+// Each constant selects the specific Fragment within a commonpb.DNA envelope
+// that carries the JSON payload, replacing the old Attributes-as-KV-bag pattern.
+const (
+	directoryDNAFragmentID = "directory_dna:v1"
+	directoryRelFragmentID = "directory_rel:v1"
+	directoryAuthority     = "directory"
+)
+
+// marshalToProto marshals a DirectoryDNA into a commonpb.DNA envelope.
+// The full DirectoryDNA is JSON-encoded into a Fragment's canonical_bytes;
+// commonpb.DNA.Attributes is not populated.
+func marshalToProto(dna *DirectoryDNA) (*commonpb.DNA, error) {
+	payload, err := json.Marshal(dna)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal directory DNA: %w", err)
+	}
+	return &commonpb.DNA{
+		Id: dna.ID,
+		Fragments: []*commonpb.Fragment{{
+			FragmentId:     directoryDNAFragmentID,
+			Authority:      directoryAuthority,
+			CanonicalBytes: payload,
+		}},
+	}, nil
+}
+
+// unmarshalFromProto extracts a DirectoryDNA from the Fragment stored by marshalToProto.
+func unmarshalFromProto(proto *commonpb.DNA) (*DirectoryDNA, error) {
+	for _, frag := range proto.Fragments {
+		if frag.FragmentId == directoryDNAFragmentID {
+			var dna DirectoryDNA
+			if err := json.Unmarshal(frag.CanonicalBytes, &dna); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal directory DNA: %w", err)
+			}
+			return &dna, nil
+		}
+	}
+	return nil, fmt.Errorf("directory DNA fragment not found in stored record")
+}
+
+// marshalRelToProto marshals DirectoryRelationships into a commonpb.DNA envelope.
+func marshalRelToProto(rel *DirectoryRelationships) (*commonpb.DNA, error) {
+	payload, err := json.Marshal(rel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal directory relationships: %w", err)
+	}
+	return &commonpb.DNA{
+		Id: fmt.Sprintf("rel_%s", rel.ObjectID),
+		Fragments: []*commonpb.Fragment{{
+			FragmentId:     directoryRelFragmentID,
+			Authority:      directoryAuthority,
+			CanonicalBytes: payload,
+		}},
+	}, nil
+}
+
+// unmarshalRelFromProto extracts DirectoryRelationships from the Fragment stored by marshalRelToProto.
+func unmarshalRelFromProto(proto *commonpb.DNA) (*DirectoryRelationships, error) {
+	for _, frag := range proto.Fragments {
+		if frag.FragmentId == directoryRelFragmentID {
+			var rel DirectoryRelationships
+			if err := json.Unmarshal(frag.CanonicalBytes, &rel); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal directory relationships: %w", err)
+			}
+			return &rel, nil
+		}
+	}
+	return nil, fmt.Errorf("directory relationships fragment not found in stored record")
+}
 
 // DirectoryDNAStorageAdapter adapts DirectoryDNA to work with existing DNA storage infrastructure.
 //
@@ -76,16 +145,28 @@ func (s *DirectoryDNAStorageAdapter) StoreDirectoryDNA(ctx context.Context, dna 
 		"object_type", dna.ObjectType,
 		"dna_id", dna.ID)
 
-	// Convert DirectoryDNA to standard DNA for storage compatibility
-	standardDNA := dna.ToDNA()
+	// Encode DirectoryDNA into a Fragment-based commonpb.DNA envelope.
+	dnaProto, err := marshalToProto(dna)
+	if err != nil {
+		return fmt.Errorf("failed to marshal directory DNA for storage: %w", err)
+	}
 
-	// Create storage record
+	// Assign the next version for this object. Durable backends key records by
+	// (device_id, version); leaving the version unset makes every write collide
+	// with the previous one, so history is silently overwritten instead of appended.
+	version, err := s.nextVersion(ctx, dna.ObjectID)
+	if err != nil {
+		return fmt.Errorf("failed to determine next directory DNA version: %w", err)
+	}
+
 	record := &storage.DNARecord{
-		DeviceID:    dna.ObjectID, // Use ObjectID as DeviceID for compatibility
-		DNA:         standardDNA,
-		ContentHash: s.generateContentHash(standardDNA),
+		DeviceID:    dna.ObjectID,
+		DNA:         dnaProto,
+		ContentHash: s.generateContentHash(dnaProto),
 		ShardID:     s.generateShardID(dna.ObjectID, dna.ObjectType),
 		StoredAt:    time.Now(),
+		Version:     version,
+		TenantID:    dna.TenantID,
 	}
 
 	// Check for deduplication if enabled
@@ -163,21 +244,18 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryDNA(ctx context.Context, object
 		return nil, fmt.Errorf("failed to retrieve DNA record: %w", err)
 	}
 
-	// Use DNA from record (it's already stored as standard DNA)
-	standardDNA := record.DNA
-	if standardDNA == nil {
+	if record.DNA == nil {
 		return nil, fmt.Errorf("no DNA data in record")
 	}
 
-	// Convert back to DirectoryDNA
-	directoryDNA := FromDNA(standardDNA, objectID, objectType)
-
-	// Restore directory-specific metadata from DNA attributes
-	if directoryDNA.Attributes != nil {
-		directoryDNA.Provider = directoryDNA.Attributes["provider"]
-		directoryDNA.TenantID = directoryDNA.Attributes["tenant_id"]
-		directoryDNA.DistinguishedName = directoryDNA.Attributes["distinguished_name"]
+	directoryDNA, err := unmarshalFromProto(record.DNA)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode directory DNA: %w", err)
 	}
+
+	// Caller-provided identity takes precedence for correctness under re-key scenarios.
+	directoryDNA.ObjectID = objectID
+	directoryDNA.ObjectType = objectType
 
 	s.logger.Debug("Directory DNA retrieved successfully",
 		"object_id", objectID,
@@ -222,26 +300,22 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 				continue
 			}
 
-			// Use DNA from record
-			standardDNA := record.DNA
-			if standardDNA == nil {
+			if record.DNA == nil {
 				s.logger.Warn("No DNA data in record", "content_hash", ref.ContentHash)
 				continue
 			}
 
-			// Determine object type from attributes (simplified)
-			objectType := interfaces.DirectoryObjectTypeUser
-			if objTypeAttr, exists := standardDNA.Attributes["object_type"]; exists {
-				objectType = interfaces.DirectoryObjectType(objTypeAttr)
+			directoryDNA, err := unmarshalFromProto(record.DNA)
+			if err != nil {
+				s.logger.Warn("Failed to decode directory DNA", "content_hash", ref.ContentHash, "error", err)
+				continue
 			}
-
-			directoryDNA := FromDNA(standardDNA, objectID, objectType)
 
 			// Apply filtering based on query criteria (simplified)
 			if len(query.ObjectTypes) > 0 {
 				found := false
 				for _, queryType := range query.ObjectTypes {
-					if objectType == queryType {
+					if directoryDNA.ObjectType == queryType {
 						found = true
 						break
 					}
@@ -300,26 +374,15 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryHistory(ctx context.Context, ob
 			continue
 		}
 
-		// Use DNA from record
-		standardDNA := record.DNA
-		if standardDNA == nil {
+		if record.DNA == nil {
 			s.logger.Warn("No DNA data in record", "content_hash", ref.ContentHash)
 			continue
 		}
 
-		// Determine object type from attributes
-		objectType := interfaces.DirectoryObjectTypeUser // Default
-		if objTypeAttr, exists := standardDNA.Attributes["object_type"]; exists {
-			objectType = interfaces.DirectoryObjectType(objTypeAttr)
-		}
-
-		directoryDNA := FromDNA(standardDNA, objectID, objectType)
-
-		// Restore metadata from DNA attributes
-		if directoryDNA.Attributes != nil {
-			directoryDNA.Provider = directoryDNA.Attributes["provider"]
-			directoryDNA.TenantID = directoryDNA.Attributes["tenant_id"]
-			directoryDNA.DistinguishedName = directoryDNA.Attributes["distinguished_name"]
+		directoryDNA, err := unmarshalFromProto(record.DNA)
+		if err != nil {
+			s.logger.Warn("Failed to decode historical DNA record", "content_hash", ref.ContentHash, "error", err)
+			continue
 		}
 
 		history = append(history, directoryDNA)
@@ -333,39 +396,25 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryHistory(ctx context.Context, ob
 func (s *DirectoryDNAStorageAdapter) StoreRelationships(ctx context.Context, relationships *DirectoryRelationships) error {
 	s.logger.Debug("Storing directory relationships", "object_id", relationships.ObjectID)
 
-	// Convert relationships to JSON for storage
-	relationshipData, err := json.Marshal(relationships)
+	// Encode relationships into a Fragment-based commonpb.DNA envelope.
+	relProto, err := marshalRelToProto(relationships)
 	if err != nil {
-		return fmt.Errorf("failed to marshal relationships: %w", err)
+		return fmt.Errorf("failed to marshal relationships for storage: %w", err)
 	}
 
-	// Create a pseudo-DNA record for relationships
-	relationshipDNA := &commonpb.DNA{
-		Id: fmt.Sprintf("rel_%s", relationships.ObjectID),
-		Attributes: map[string]string{
-			"relationships_data": string(relationshipData),
-			"object_id":          relationships.ObjectID,
-			"object_type":        string(relationships.ObjectType),
-			"provider":           relationships.Provider,
-			"tenant_id":          relationships.TenantID,
-			"collected_at":       relationships.CollectedAt.Format(time.RFC3339),
-		},
-		AttributeCount: func() int32 {
-			count := len(relationships.MemberOf) + len(relationships.Members) + len(relationships.ChildOUs)
-			if count > math.MaxInt32 {
-				return math.MaxInt32
-			}
-			// #nosec G115 - Bounds checking above prevents integer overflow
-			return int32(count)
-		}(),
+	version, err := s.nextVersion(ctx, relationships.ObjectID)
+	if err != nil {
+		return fmt.Errorf("failed to determine next relationships version: %w", err)
 	}
 
 	record := &storage.DNARecord{
 		DeviceID:    relationships.ObjectID,
-		DNA:         relationshipDNA,
-		ContentHash: s.generateContentHash(relationshipDNA),
+		DNA:         relProto,
+		ContentHash: s.generateContentHash(relProto),
 		ShardID:     s.generateShardID(relationships.ObjectID, relationships.ObjectType),
 		StoredAt:    time.Now(),
+		Version:     version,
+		TenantID:    relationships.TenantID,
 	}
 
 	// Store the relationships data
@@ -407,24 +456,17 @@ func (s *DirectoryDNAStorageAdapter) GetRelationships(ctx context.Context, objec
 		return nil, fmt.Errorf("failed to retrieve relationships record: %w", err)
 	}
 
-	relationshipDNA := record.DNA
-	if relationshipDNA == nil {
+	if record.DNA == nil {
 		return nil, fmt.Errorf("no DNA data in relationships record")
 	}
 
-	// Extract relationships from attributes
-	relationshipDataStr, exists := relationshipDNA.Attributes["relationships_data"]
-	if !exists {
-		return nil, fmt.Errorf("relationships data not found in record")
-	}
-
-	var relationships DirectoryRelationships
-	if err := json.Unmarshal([]byte(relationshipDataStr), &relationships); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal relationships data: %w", err)
+	relationships, err := unmarshalRelFromProto(record.DNA)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode relationships: %w", err)
 	}
 
 	s.logger.Debug("Directory relationships retrieved successfully", "object_id", objectID)
-	return &relationships, nil
+	return relationships, nil
 }
 
 // GetDirectoryStats returns statistics about directory DNA storage.
@@ -522,6 +564,24 @@ func (s *DirectoryDNAStorageAdapter) GetObjectStats(ctx context.Context, objectT
 
 // Helper methods
 
+// versionedBackend is implemented by durable backends that derive the next
+// version from stored data (SQLite reads MAX(version)+1).
+type versionedBackend interface {
+	GetNextVersion(ctx context.Context, deviceID string) (int64, error)
+}
+
+// nextVersion returns the next version number for an object.
+//
+// The durable backend is preferred over the indexer: the in-memory indexer
+// restarts its counters with the process, which would reuse (device_id, version)
+// pairs already written by a previous controller run.
+func (s *DirectoryDNAStorageAdapter) nextVersion(ctx context.Context, objectID string) (int64, error) {
+	if backend, ok := s.backend.(versionedBackend); ok {
+		return backend.GetNextVersion(ctx, objectID)
+	}
+	return s.indexer.GetNextVersion(ctx, objectID)
+}
+
 // trackObjectType records the objectID and write timestamp for aggregation queries.
 func (s *DirectoryDNAStorageAdapter) trackObjectType(dna *DirectoryDNA) {
 	var writeTime time.Time
@@ -564,22 +624,19 @@ func (s *DirectoryDNAStorageAdapter) storeNewContent(ctx context.Context, record
 	return nil
 }
 
-// generateContentHash generates a content hash for DNA data.
+// generateContentHash generates a deterministic content hash from a commonpb.DNA envelope.
+// It hashes the DNA ID and the canonical_bytes of each Fragment in declaration order,
+// matching the order produced by marshalToProto and marshalRelToProto.
 func (s *DirectoryDNAStorageAdapter) generateContentHash(dna *commonpb.DNA) string {
-	// Create deterministic hash from DNA attributes
-	var hashInput strings.Builder
-	hashInput.WriteString(dna.Id)
-
-	// Sort attributes for consistent hashing
-	for key, value := range dna.Attributes {
-		hashInput.WriteString(key)
-		hashInput.WriteString(":")
-		hashInput.WriteString(value)
-		hashInput.WriteString("|")
+	h := sha256.New()
+	h.Write([]byte(dna.Id))
+	for _, frag := range dna.Fragments {
+		h.Write([]byte(frag.FragmentId))
+		h.Write([]byte(":"))
+		h.Write(frag.CanonicalBytes)
+		h.Write([]byte("|"))
 	}
-
-	hash := sha256.Sum256([]byte(hashInput.String()))
-	return fmt.Sprintf("%x", hash)
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // generateShardID generates an appropriate shard ID for directory objects.
