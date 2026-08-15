@@ -332,8 +332,8 @@ the full-sync path (`features/steward/client/client_transport.go`) and is no
 longer read by the controller's `reassembleDNA`
 (`features/controller/transport/dna_handler.go`). Both ends are now
 Fragments-only. The struct field itself (`pkg/dataplane/types/transfers.go`) is
-retained for now and will be removed in story #15 once the field is confirmed
-unused on both ends.
+retained until story #15 removes it, once the field is confirmed unused on both
+ends.
 
 The delta-sync path was already Fragments-only (it has never populated
 `Attributes`) and is unaffected.
@@ -347,12 +347,13 @@ these consumers have not yet been re-homed onto `DNA.Fragments`:
 
 | Consumer | Effect of a blank map |
 |---|---|
-| role-policy selector matching (`features/controller/service/config_service_v2.go` → `fleet.matchesFilter`) | positive-match only, so `os`/`hostname` selectors stop matching and role config — including security baselines — stops being delivered |
 | fleet inventory, attribute filter, module list (`features/controller/api/handlers_stewards.go`) | hostname/OS/arch blank; attribute filters match nothing |
 | DNA fingerprint, attribute projection, attribute index (`features/controller/fleet/storage/`) | OS/platform-scoped patch and vulnerability targeting resolves to zero hosts |
 | re-registration change detection (`features/controller/service/controller_service.go`) | `AttributeCount` compares permanently 0 against a non-zero incoming count |
 
 Each failure is fail-closed rather than fail-open, but silent and fleet-wide.
+(Role-policy selector matching, `config_service_v2.go` → `roleConfigAdapter.MatchingRoleFragments`,
+was already re-homed onto `DNA.Fragments` by Issue #3325 and is not in this list.)
 
 So `reassembleDNA` **derives** `DNA.Attributes`/`DNA.AttributeCount` from the
 received fragments via `sdna.FlattenFragments` — the same projection the

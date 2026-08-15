@@ -766,11 +766,10 @@ func reassembleDNATransfer(chunks []*transportpb.DNAChunk, stewardID string) (*d
 // canonical steward record. ControllerService.SyncDNA assigns it wholesale
 // (steward.DNA = dna), so any field left unset here is *erased* from the record on
 // the steward's first full sync. Several controller subsystems still read
-// DNA.Attributes and have not yet been re-homed onto DNA.Fragments:
+// DNA.Attributes and have not yet been re-homed onto DNA.Fragments (role-policy
+// selector matching, config_service_v2.go's roleConfigAdapter.MatchingRoleFragments,
+// was already re-homed by Issue #3325 and is not in this list):
 //
-//   - role-policy selector matching (features/controller/service/config_service_v2.go
-//     → fleet.matchesFilter), which is positive-match only, so a blank map silently
-//     stops delivering role config — including security baselines;
 //   - fleet inventory, attribute filters and the module list
 //     (features/controller/api/handlers_stewards.go);
 //   - the DNA fingerprint, attribute projection and attribute index
