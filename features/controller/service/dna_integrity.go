@@ -10,6 +10,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
 
 // configType identifies the configuration type of a managed device.
@@ -117,9 +118,38 @@ func checkDNAIntegrity(dna *common.DNA, ct configType) dnaIntegrityResult {
 	return checkDNAIntegrityWithTable(dna, ct, dnaRequiredFields)
 }
 
+// flattenDNAFragments decodes every fragment in dna.Fragments and merges their
+// string key-value pairs into a single map. Keys with empty or non-string values
+// are omitted. Fragments with malformed canonical bytes are silently skipped —
+// hostile input from a compromised steward must not prevent checking the
+// well-formed ones.
+func flattenDNAFragments(dna *common.DNA) map[string]string {
+	flat := make(map[string]string)
+	for _, frag := range dna.Fragments {
+		if len(frag.CanonicalBytes) == 0 {
+			continue
+		}
+		decoded, err := sdna.DecodeCanonicalFragment(frag.CanonicalBytes)
+		if err != nil {
+			continue
+		}
+		for k, v := range decoded {
+			if s, ok := v.(string); ok && s != "" {
+				flat[k] = s
+			}
+		}
+	}
+	return flat
+}
+
 // checkDNAIntegrityWithTable is the table-parameterised implementation. Tests
 // call this directly with a table built from test-fixture manifests to prove
 // that the required-set drives the guard without any code change to guard logic.
+//
+// Field presence is checked against the flattened fragment set (Issue #3319):
+// all fragment canonical payloads are merged into a single map and each declared
+// required field is looked up there. A field absent from every fragment, or
+// present only with an empty value, is reported as missing.
 func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[configType][]string) dnaIntegrityResult {
 	if dna == nil {
 		return dnaIntegrityResult{missingFields: []string{"(nil DNA)"}}
@@ -129,9 +159,10 @@ func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[config
 		// Conservative default: unknown config types have no declared contract.
 		return dnaIntegrityResult{valid: true}
 	}
+	flat := flattenDNAFragments(dna)
 	var missing []string
 	for _, field := range required {
-		if dna.Attributes[field] == "" {
+		if flat[field] == "" {
 			missing = append(missing, field)
 		}
 	}

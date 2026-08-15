@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -564,6 +565,33 @@ func TestHandleListStewards_FleetQueryError_Returns500(t *testing.T) {
 
 // ---- Integration tests: handleListStewards with fleet filtering ----
 
+// testRegistrationDNA builds the registration snapshot these fixtures hand to
+// AcceptRegistration. Identity is carried in Fragments — the presence check
+// AcceptRegistration applies reads the flattened fragment set (Issue #3319), so a
+// fragment-less snapshot is rejected as degenerate and the steward is stored with
+// a nil DNA, which the list filters below would then have nothing to match on.
+// Attributes stay populated because the list/filter consumers still read them
+// (their re-home is #3326/#3327).
+func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
+	t.Helper()
+	var frags []*common.Fragment
+	if hostname := attrs["hostname"]; hostname != "" {
+		frag, err := sdna.NewFragment("hostname", "test", sdna.MapState(map[string]interface{}{"hostname": hostname}))
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
+	if osName := attrs["os"]; osName != "" {
+		frag, err := sdna.NewFragment("host:os", "test", sdna.MapState(map[string]interface{}{"os": osName}))
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
+	return &common.DNA{
+		Id:         "dna-" + attrs["hostname"],
+		Attributes: attrs,
+		Fragments:  frags,
+	}
+}
+
 // registerTestSteward adds a steward to the controller service via AcceptRegistration.
 // It uses the "test-tenant" tenant ID (same as NewTestKey) so fleet filter scoping works.
 func registerTestSteward(t *testing.T, svc interface {
@@ -571,11 +599,8 @@ func registerTestSteward(t *testing.T, svc interface {
 }, attrs map[string]string) string {
 	t.Helper()
 	req := &controller.RegisterRequest{
-		Version: "v1.0",
-		InitialDna: &common.DNA{
-			Id:         "dna-" + attrs["hostname"],
-			Attributes: attrs,
-		},
+		Version:    "v1.0",
+		InitialDna: testRegistrationDNA(t, attrs),
 	}
 	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	resp, err := svc.AcceptRegistration(ctx, req)
@@ -590,11 +615,8 @@ func registerStewardInTenant(t *testing.T, svc interface {
 }, tenantID string, attrs map[string]string) string {
 	t.Helper()
 	req := &controller.RegisterRequest{
-		Version: "v1.0",
-		InitialDna: &common.DNA{
-			Id:         "dna-" + attrs["hostname"],
-			Attributes: attrs,
-		},
+		Version:    "v1.0",
+		InitialDna: testRegistrationDNA(t, attrs),
 	}
 	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 	resp, err := svc.AcceptRegistration(ctx, req)
@@ -1283,11 +1305,8 @@ func registerTestStewardWithDNA(t *testing.T, server *Server, attrs map[string]s
 		tenantID = "test-tenant"
 	}
 	req := &controller.RegisterRequest{
-		Version: "v1.0",
-		InitialDna: &common.DNA{
-			Id:         "dna-" + attrs["hostname"],
-			Attributes: attrs,
-		},
+		Version:    "v1.0",
+		InitialDna: testRegistrationDNA(t, attrs),
 	}
 	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 	resp, err := server.controllerService.AcceptRegistration(ctx, req)
