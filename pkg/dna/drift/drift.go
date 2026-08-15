@@ -247,8 +247,8 @@ func (d *detector) DetectDrift(ctx context.Context, previous, current *commonpb.
 	if d.logger != nil {
 		d.logger.Debug("Starting drift detection",
 			"device_id", previous.Id,
-			"previous_attributes", len(previous.Attributes),
-			"current_attributes", len(current.Attributes))
+			"previous_fragments", len(previous.Fragments),
+			"current_fragments", len(current.Fragments))
 	}
 
 	changes, err := d.analyzeDNAChanges(ctx, previous, current)
@@ -344,66 +344,89 @@ func (d *detector) Close() error {
 	return nil
 }
 
-// analyzeDNAChanges performs detailed comparison of DNA states.
+// fragmentIDToHash builds a map from fragment ID to fragment hash for efficient
+// diff computation. Nil fragments are skipped defensively.
+func fragmentIDToHash(fragments []*commonpb.Fragment) map[string]string {
+	m := make(map[string]string, len(fragments))
+	for _, f := range fragments {
+		if f != nil {
+			m[f.FragmentId] = f.FragmentHash
+		}
+	}
+	return m
+}
+
+// analyzeDNAChanges performs detailed comparison of DNA states by diffing Fragments.
+//
+// Each fragment is keyed by its fragment_id (e.g. "host:cpu", "service:sshd").
+// The fragment_hash serves as the comparable value — a changed hash means the
+// fragment's canonical state changed, regardless of which individual fields moved.
+// This keeps pkg/dna/drift free of the canonical-bytes decoder (which lives in
+// features/steward/dna) while preserving full drift-event semantics: severity
+// classification patterns match naturally against fragment IDs (e.g. "cert_trust:*"
+// matches ".*cert.*", "firewall:*" matches ".*firewall.*").
 func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *commonpb.DNA) ([]*AttributeChange, error) {
 	var changes []*AttributeChange
 
-	allAttributes := make(map[string]bool)
-	for attr := range previous.Attributes {
-		allAttributes[attr] = true
+	prevMap := fragmentIDToHash(previous.Fragments)
+	currMap := fragmentIDToHash(current.Fragments)
+
+	allIDs := make(map[string]bool, len(prevMap)+len(currMap))
+	for id := range prevMap {
+		allIDs[id] = true
 	}
-	for attr := range current.Attributes {
-		allAttributes[attr] = true
+	for id := range currMap {
+		allIDs[id] = true
 	}
 
-	for attribute := range allAttributes {
+	for fragmentID := range allIDs {
 		select {
 		case <-ctx.Done():
 			return changes, ctx.Err()
 		default:
 		}
 
-		if d.isIgnoredAttribute(attribute) {
+		if d.isIgnoredAttribute(fragmentID) {
 			continue
 		}
 
-		prevValue, prevExists := previous.Attributes[attribute]
-		currValue, currExists := current.Attributes[attribute]
+		prevHash, prevExists := prevMap[fragmentID]
+		currHash, currExists := currMap[fragmentID]
 
 		var change *AttributeChange
 
 		switch {
 		case !prevExists && currExists:
 			change = &AttributeChange{
-				Attribute:     attribute,
+				Attribute:     fragmentID,
 				PreviousValue: "",
-				CurrentValue:  currValue,
+				CurrentValue:  currHash,
 				ChangeType:    ChangeTypeAdded,
-				Severity:      d.categorizeSeverity(attribute, "", currValue),
-				Category:      d.categorizeAttribute(attribute),
-				Impact:        d.assessImpact(attribute, "", currValue, ChangeTypeAdded),
+				Severity:      d.categorizeSeverity(fragmentID, "", currHash),
+				Category:      d.categorizeAttribute(fragmentID),
+				Impact:        d.assessImpact(fragmentID, "", currHash, ChangeTypeAdded),
 			}
 
 		case prevExists && !currExists:
 			change = &AttributeChange{
-				Attribute:     attribute,
-				PreviousValue: prevValue,
+				Attribute:     fragmentID,
+				PreviousValue: prevHash,
 				CurrentValue:  "",
 				ChangeType:    ChangeTypeRemoved,
-				Severity:      d.categorizeSeverity(attribute, prevValue, ""),
-				Category:      d.categorizeAttribute(attribute),
-				Impact:        d.assessImpact(attribute, prevValue, "", ChangeTypeRemoved),
+				Severity:      d.categorizeSeverity(fragmentID, prevHash, ""),
+				Category:      d.categorizeAttribute(fragmentID),
+				Impact:        d.assessImpact(fragmentID, prevHash, "", ChangeTypeRemoved),
 			}
 
-		case prevExists && currExists && prevValue != currValue:
+		case prevExists && currExists && prevHash != currHash:
 			change = &AttributeChange{
-				Attribute:     attribute,
-				PreviousValue: prevValue,
-				CurrentValue:  currValue,
+				Attribute:     fragmentID,
+				PreviousValue: prevHash,
+				CurrentValue:  currHash,
 				ChangeType:    ChangeTypeModified,
-				Severity:      d.categorizeSeverity(attribute, prevValue, currValue),
-				Category:      d.categorizeAttribute(attribute),
-				Impact:        d.assessImpact(attribute, prevValue, currValue, ChangeTypeModified),
+				Severity:      d.categorizeSeverity(fragmentID, prevHash, currHash),
+				Category:      d.categorizeAttribute(fragmentID),
+				Impact:        d.assessImpact(fragmentID, prevHash, currHash, ChangeTypeModified),
 			}
 		}
 
