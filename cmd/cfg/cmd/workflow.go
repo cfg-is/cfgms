@@ -14,11 +14,11 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -373,9 +373,7 @@ func requireSingleSteward(matches []StewardInfo) (StewardInfo, error) {
 }
 
 // deriveHVPromoteCluster resolves the cluster name for a promote-hv-role operation
-// by scanning the resolved steward's DNA attributes for cluster:<name>.* keys —
-// replicating the identical parsing rule used by clusterregistry.BuildRegistry
-// (features/controller/clusterregistry/registry.go:78-92).
+// by calling clusterregistry.ClustersFromFragments on the steward's DNA fragments.
 //
 // Outcomes:
 //
@@ -383,26 +381,10 @@ func requireSingleSteward(matches []StewardInfo) (StewardInfo, error) {
 //	1 candidate  → use it; error if clusterOverride is set but mismatched
 //	2+ candidates → require clusterOverride; error listing candidates when absent or mismatched
 func deriveHVPromoteCluster(steward StewardInfo, clusterOverride string) (string, error) {
-	seen := make(map[string]struct{})
+	var candidates []string
 	if steward.DNA != nil {
-		for key := range steward.DNA.Attributes {
-			if !strings.HasPrefix(key, "cluster:") {
-				continue
-			}
-			rest := key[len("cluster:"):]
-			dotIdx := strings.Index(rest, ".")
-			if dotIdx <= 0 {
-				continue
-			}
-			seen[rest[:dotIdx]] = struct{}{}
-		}
+		candidates = clusterregistry.ClustersFromFragments(steward.DNA.Fragments)
 	}
-
-	candidates := make([]string, 0, len(seen))
-	for name := range seen {
-		candidates = append(candidates, name)
-	}
-	sort.Strings(candidates)
 
 	switch len(candidates) {
 	case 0:
