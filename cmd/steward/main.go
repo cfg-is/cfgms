@@ -1986,6 +1986,7 @@ type moduleDNASource interface {
 // module attribute still triggers a publish.
 type dnaCollectorAdapter struct {
 	collector *dna.Collector
+	logger    logging.Logger
 	mu        sync.RWMutex
 	modules   moduleDNASource
 }
@@ -1994,7 +1995,7 @@ type dnaCollectorAdapter struct {
 // call setModuleDNASource after InitializeConfigExecutor to wire the real producer
 // (Issue #2435).
 func newDNACollectorAdapter(logger logging.Logger, modules moduleDNASource) *dnaCollectorAdapter {
-	return &dnaCollectorAdapter{collector: dna.NewCollector(logger), modules: modules}
+	return &dnaCollectorAdapter{collector: dna.NewCollector(logger), logger: logger, modules: modules}
 }
 
 // setModuleDNASource wires the module DNA producer after construction. Thread-safe:
@@ -2042,7 +2043,11 @@ func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string
 // dna.Collector) and cluster:* fragments (from the wired module DNA source).
 // Returns host:* fragments alone when moduleSrc is nil (hardware-facts-only mode).
 func (a *dnaCollectorAdapter) CollectFragments(ctx context.Context) []*commonpb.Fragment {
-	result, _ := a.collector.Collect(ctx)
+	result, err := a.collector.Collect(ctx)
+	if err != nil {
+		a.logger.Warn("host-fact collection failed; host:* fragments omitted from this sync cycle",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 
 	a.mu.RLock()
 	moduleSrc := a.modules
