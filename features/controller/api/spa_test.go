@@ -61,8 +61,38 @@ func testEmbeddedAssetsWithBuild() fstest.MapFS {
 func withEmbeddedSPA(t *testing.T, assets fs.FS) {
 	t.Helper()
 	prev := spaAssets
+	prevChosen := spaAssetsChosen
 	spaAssets = assets
-	t.Cleanup(func() { spaAssets = prev })
+	spaAssetsChosen = true
+	t.Cleanup(func() { spaAssets = prev; spaAssetsChosen = prevChosen })
+}
+
+// spaAssetsChosen records that a test has deliberately substituted the embedded
+// asset tree, so withDefaultEmbeddedSPA knows to leave it alone.
+var spaAssetsChosen bool
+
+// withDefaultEmbeddedSPA gives a test server a synthetic frontend build unless
+// the test already chose its own tree (Issue #3043).
+//
+// Go tests never run `npm run build`, so web/dist holds only the tracked
+// placeholder and setupRouter refuses to route "/" and logs the refusal. Two
+// things break as a result, and neither looks like an SPA problem:
+//
+//   - TestRouteTableParity is short by exactly "* /", reading as "routes added
+//     or removed during refactor".
+//   - Every test asserting on a logged "error" value reads the SPA refusal
+//     rather than its own fault, because the refusal is logged at construction
+//     and kvValue() returns the FIRST match for a key.
+//
+// The guard matters: tests that exercise the placeholder path call
+// withEmbeddedSPA themselves before constructing a server, and a default that
+// overwrote that choice would silently invert what they assert.
+func withDefaultEmbeddedSPA(t *testing.T) {
+	t.Helper()
+	if spaAssetsChosen {
+		return
+	}
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 }
 
 // Issue #3043 — a binary embedding only the tracked placeholder must fail loudly

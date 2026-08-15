@@ -95,6 +95,8 @@ func setupTestServer(t *testing.T) *Server {
 	// shared os.TempDir() path, which causes file-lock contention on Windows CI.
 	setTestSecretsEnv(t)
 
+	withDefaultEmbeddedSPA(t)
+
 	// Create test configuration
 	cfg := config.DefaultConfig()
 	cfg.ExternalURL = "https://localhost:8080"   // Required; DefaultConfig leaves this empty
@@ -181,6 +183,8 @@ func setupTestServer(t *testing.T) *Server {
 func setupRouteTestServer(t *testing.T) *Server {
 	t.Helper()
 	setTestSecretsEnv(t)
+
+	withDefaultEmbeddedSPA(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -960,6 +964,8 @@ func TestEphemeralAPIKeys(t *testing.T) {
 func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	// Isolate secrets storage per test (same reason as setupTestServer).
 	setTestSecretsEnv(t)
+
+	withDefaultEmbeddedSPA(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
