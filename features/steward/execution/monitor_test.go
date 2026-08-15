@@ -11,6 +11,9 @@ package execution_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,8 +21,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -231,6 +236,24 @@ func TestExecuteConfiguration_PrunesRemovedResourceFromDNA(t *testing.T) {
 func newMonitorExecutor(t *testing.T) *execution.Executor {
 	t.Helper()
 	logger := logging.NewLogger("debug")
+	f := factory.New(nil, stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}, logger)
+	e, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:  logger,
+		Factory: f,
+	})
+	require.NoError(t, err)
+	return e
+}
+
+// newMonitorExecutorWithLogger creates a minimal Executor whose logger is the
+// caller-supplied one, so tests can assert on the Warn records the monitor
+// engine emits (queue shedding, monitor start failure).
+func newMonitorExecutorWithLogger(t *testing.T, logger logging.Logger) *execution.Executor {
+	t.Helper()
 	f := factory.New(nil, stewardconfig.ErrorHandlingConfig{
 		ModuleLoadFailure:  stewardconfig.ActionContinue,
 		ResourceFailure:    stewardconfig.ActionWarn,
@@ -539,4 +562,537 @@ func TestExecutor_CollectModuleDNAAttributes_EvictsOnChannelClose(t *testing.T) 
 		return len(e.CollectModuleDNAAttributes(context.Background())) == 0
 	}, 2*time.Second, 10*time.Millisecond,
 		"eviction must happen when the monitor channel closes")
+}
+
+// ─── Issue #3333: CollectModuleFragments for non-cluster resources ────────────
+
+// TestCollectModuleFragments_EmitsFragmentForSteadyStateOnlyResource is the
+// REQUIRED TEST for Issue #3333 AC3: a resource managed via ordinary convergence
+// only (no monitor/ChangeEvent configured) produces a fragment from
+// CollectModuleFragments after a successful ExecuteResource.
+func TestCollectModuleFragments_EmitsFragmentForSteadyStateOnlyResource(t *testing.T) {
+	e := newMonitorExecutor(t)
+	// observableModule implements Module only (not Monitor) — steady-state path only.
+	execution.ExecutorFactory(e).RegisterModule("file", &observableModule{
+		state: map[string]interface{}{
+			"state": "present",
+			"owner": "root",
+		},
+	})
+
+	// Full convergence — no StartMonitors, no ChangeEvents.
+	report := e.ExecuteConfiguration(context.Background(),
+		stewardconfig.StewardConfig{Resources: singleResourceCfg("res1", "file")})
+	require.Equal(t, 1, report.SuccessfulCount)
+
+	frags := e.CollectModuleFragments(context.Background())
+	require.NotEmpty(t, frags, "a resource converged via steady-state path must produce a fragment")
+
+	var fragForRes1 *commonpb.Fragment
+	for _, f := range frags {
+		if f.FragmentId == "res1" {
+			fragForRes1 = f
+			break
+		}
+	}
+	require.NotNil(t, fragForRes1, "fragment with FragmentId 'res1' must be present")
+	assert.Equal(t, "file", fragForRes1.Authority,
+		"authority must be the module bundle name derived from the resource's module field")
+	assert.NotEmpty(t, fragForRes1.CanonicalBytes, "canonical bytes must be non-nil")
+	assert.NotEmpty(t, fragForRes1.FragmentHash, "fragment hash must be non-nil")
+}
+
+// TestCollectModuleFragments_ClusterFragmentRegressionUnchanged is the REQUIRED
+// TEST for Issue #3333 AC4: existing cluster:* fragment behavior (authority,
+// canonicalization, hash) is unchanged after the two-source union change.
+// Regression coverage against the monitor-sourced path.
+//
+// The resource is named "cluster:cfg-lab" with untyped module "hyperv" so that
+// getResourceIdentifier returns "cluster:cfg-lab", matching the ChangeEvent
+// resourceID and allowing authority to be resolved from the monitorEntry.
+func TestCollectModuleFragments_ClusterFragmentRegressionUnchanged(t *testing.T) {
+	e := newMonitorExecutor(t)
+	e.SetMonitorDebounceWindow(20 * time.Millisecond)
+
+	// monitorTestModule implements both Module and Monitor.
+	mod := newMonitorTestModule()
+	// "hyperv" is the bundle name — mirrors production cluster fragment construction.
+	execution.ExecutorFactory(e).RegisterModule("hyperv", mod)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Use untyped "hyperv" (no ".") so getResourceIdentifier returns the name verbatim.
+	// This makes monitorEntry.resourceID == "cluster:cfg-lab" == ChangeEvent.ResourceID,
+	// so authority resolves to "hyperv" from the monitorEntry map.
+	resources := []stewardconfig.ResourceConfig{{
+		Name:   "cluster:cfg-lab",
+		Module: "hyperv",
+		Config: map[string]interface{}{"state": "drifted"},
+	}}
+	require.NoError(t, e.StartMonitors(ctx, resources))
+	defer e.StopMonitors()
+
+	clusterDetails := map[string]interface{}{
+		"name":           "cfg-lab",
+		"cno_owner_node": "CFG-70-02",
+		"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
+		"found":          true,
+	}
+
+	mod.SendChange(modules.ChangeEvent{
+		ResourceID: "cluster:cfg-lab",
+		ChangeType: modules.ChangeTypeModified,
+		Details:    execution.NewConfigState(clusterDetails),
+	})
+
+	// Wait for the fragment to appear.
+	require.Eventually(t, func() bool {
+		for _, f := range e.CollectModuleFragments(context.Background()) {
+			if f.FragmentId == "cluster:cfg-lab" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond,
+		"cluster:cfg-lab fragment must appear after the ChangeEvent")
+
+	// Verify fragment fields.
+	var clusterFrag *commonpb.Fragment
+	for _, f := range e.CollectModuleFragments(context.Background()) {
+		if f.FragmentId == "cluster:cfg-lab" {
+			clusterFrag = f
+			break
+		}
+	}
+	require.NotNil(t, clusterFrag, "cluster:cfg-lab fragment must be present")
+	assert.Equal(t, "hyperv", clusterFrag.Authority,
+		"cluster fragment authority must be the module bundle name")
+	assert.NotEmpty(t, clusterFrag.CanonicalBytes, "cluster canonical bytes must be non-nil")
+	assert.NotEmpty(t, clusterFrag.FragmentHash, "cluster fragment hash must be non-nil")
+
+	// Verify canonical bytes are deterministic: same state → same hash.
+	// Build an equivalent fragment independently and compare hashes.
+	expected, err := sdna.NewFragment("cluster:cfg-lab", "hyperv", sdna.MapState(clusterDetails))
+	require.NoError(t, err)
+	assert.Equal(t, expected.FragmentHash, clusterFrag.FragmentHash,
+		"fragment hash must match independently-constructed fragment for same state")
+}
+
+// ─── CollectModuleFragments: steward-side emission bounds ────────────────────
+
+// TestCollectModuleFragments_DropsOverSizedFragmentAndKeepsRest covers the
+// error branch of the emission loop: a resource whose canonical state exceeds
+// the per-fragment bound produces no fragment, is reported at Warn with a
+// sanitized resource_id and error, and does not prevent the remaining resources
+// from being emitted.
+//
+// The bound exists because the controller rejects an ENTIRE DNA snapshot that
+// carries an over-sized fragment (dna_handler.go maxDNAFragmentBytes), so
+// dropping one offender is what keeps the rest of the snapshot deliverable.
+//
+// The over-sized resource is deliberately named with an embedded newline: the
+// resourceID reaches the log from module-adjacent cfg data, so the assertion
+// also pins the sanitization of that value.
+func TestCollectModuleFragments_DropsOverSizedFragmentAndKeepsRest(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	e := newMonitorExecutorWithLogger(t, logger)
+
+	oversizedName := "bulky\nres"
+	// One value alone past the per-fragment canonical-bytes bound.
+	blob := strings.Repeat("x", execution.MaxModuleFragmentCanonicalBytes+1024)
+	execution.ExecutorFactory(e).RegisterModule("bulky", &observableModule{
+		state: map[string]interface{}{"state": "present", "blob": blob},
+	})
+	execution.ExecutorFactory(e).RegisterModule("small", &observableModule{
+		state: map[string]interface{}{"state": "present", "owner": "root"},
+	})
+
+	report := e.ExecuteConfiguration(context.Background(), stewardconfig.StewardConfig{
+		Resources: []stewardconfig.ResourceConfig{
+			{Name: oversizedName, Module: "bulky", Config: map[string]interface{}{"state": "present"}},
+			{Name: "small1", Module: "small", Config: map[string]interface{}{"state": "present"}},
+		},
+	})
+	require.Equal(t, 2, report.SuccessfulCount)
+
+	frags := e.CollectModuleFragments(context.Background())
+
+	ids := make([]string, 0, len(frags))
+	for _, f := range frags {
+		ids = append(ids, f.GetFragmentId())
+	}
+	assert.NotContains(t, ids, oversizedName,
+		"a resource whose canonical state exceeds the per-fragment bound must not be emitted")
+	assert.Contains(t, ids, "small1",
+		"the remaining resources must still be emitted after one is dropped")
+
+	entry, ok := logger.FindWarn("CollectModuleFragments: fragment dropped")
+	require.True(t, ok, "dropping a fragment must be reported at Warn, not silent")
+	assert.Equal(t, logging.SanitizeLogValue(oversizedName), entry["resource_id"],
+		"the logged resource_id must be sanitized")
+	assert.NotContains(t, entry["resource_id"], "\n",
+		"the logged resource_id must carry no newline (log-injection sink)")
+	loggedErr, isStr := entry["error"].(string)
+	require.True(t, isStr, "the Warn must carry the error text")
+	assert.Contains(t, loggedErr, "per-fragment bound",
+		"the Warn must say why the fragment was dropped")
+	assert.Equal(t, logging.SanitizeLogValue(loggedErr), loggedErr,
+		"the logged error value must be sanitized")
+}
+
+// TestCollectModuleFragments_BoundsFragmentCount covers the steward-side count
+// bound. The controller rejects an entire DNA snapshot carrying more than
+// maxDNATransferFragments (1024) fragments, so a steward managing more resources
+// than the budget must emit a bounded subset rather than black-holing every full
+// DNA sync.
+//
+// It also pins the two properties of the selection: cluster:* resources — the
+// only fragments with a live controller-side consumer — survive the cut even
+// when they sort last, and the selection is stable across calls so an unchanged
+// host does not churn a new persisted DNA version per sync.
+func TestCollectModuleFragments_BoundsFragmentCount(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	e := newMonitorExecutorWithLogger(t, logger)
+	execution.ExecutorFactory(e).RegisterModule("file", &observableModule{
+		state: map[string]interface{}{"state": "present", "owner": "root"},
+	})
+
+	// One over-budget cfg. The cluster resource sorts after every "res-NNNNNN"
+	// name, so a plain sorted truncation would drop it.
+	total := execution.MaxModuleFragments + 64
+	resources := make([]stewardconfig.ResourceConfig, 0, total)
+	resources = append(resources, stewardconfig.ResourceConfig{
+		Name:   "cluster:zzz-lab",
+		Module: "file",
+		Config: map[string]interface{}{"state": "present"},
+	})
+	for i := 1; i < total; i++ {
+		resources = append(resources, stewardconfig.ResourceConfig{
+			Name:   fmt.Sprintf("res-%06d", i),
+			Module: "file",
+			Config: map[string]interface{}{"state": "present"},
+		})
+	}
+
+	report := e.ExecuteConfiguration(context.Background(), stewardconfig.StewardConfig{Resources: resources})
+	require.Equal(t, total, report.SuccessfulCount)
+
+	frags := e.CollectModuleFragments(context.Background())
+	require.Len(t, frags, execution.MaxModuleFragments,
+		"emission must be capped at the steward-side fragment budget")
+
+	ids := make([]string, 0, len(frags))
+	for _, f := range frags {
+		ids = append(ids, f.GetFragmentId())
+	}
+	assert.Contains(t, ids, "cluster:zzz-lab",
+		"cluster fragments must survive the cap — they are the ones the controller registry parses")
+
+	entry, ok := logger.FindWarn("CollectModuleFragments: resource count exceeds the fragment budget, emitting a bounded subset")
+	require.True(t, ok, "truncating the fragment set must be reported at Warn, not silent")
+	assert.Equal(t, total, entry["resource_count"])
+	assert.Equal(t, total-execution.MaxModuleFragments, entry["dropped"])
+
+	// Stability: a second call over unchanged state selects the same resourceIDs
+	// in the same order, so the manifest and aggregate root do not churn.
+	second := e.CollectModuleFragments(context.Background())
+	require.Len(t, second, len(frags))
+	for i := range frags {
+		assert.Equal(t, frags[i].GetFragmentId(), second[i].GetFragmentId(),
+			"fragment selection and order must be deterministic across calls")
+	}
+}
+
+// TestCollectModuleFragments_UnderBudgetEmitsEveryResource pins the other side of
+// the bound: a cfg within budget is unaffected by it — every managed resource
+// still gets a fragment (Issue #3333 AC1) and nothing is reported as dropped.
+func TestCollectModuleFragments_UnderBudgetEmitsEveryResource(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	e := newMonitorExecutorWithLogger(t, logger)
+	execution.ExecutorFactory(e).RegisterModule("file", &observableModule{
+		state: map[string]interface{}{"state": "present", "owner": "root"},
+	})
+
+	const count = 24
+	resources := make([]stewardconfig.ResourceConfig, 0, count)
+	for i := 0; i < count; i++ {
+		resources = append(resources, stewardconfig.ResourceConfig{
+			Name:   fmt.Sprintf("res-%03d", i),
+			Module: "file",
+			Config: map[string]interface{}{"state": "present"},
+		})
+	}
+
+	report := e.ExecuteConfiguration(context.Background(), stewardconfig.StewardConfig{Resources: resources})
+	require.Equal(t, count, report.SuccessfulCount)
+
+	frags := e.CollectModuleFragments(context.Background())
+	assert.Len(t, frags, count, "a cfg within budget must produce one fragment per managed resource")
+
+	_, truncated := logger.FindWarn("CollectModuleFragments: resource count exceeds the fragment budget, emitting a bounded subset")
+	assert.False(t, truncated, "an under-budget cfg must not report truncation")
+	_, dropped := logger.FindWarn("CollectModuleFragments: fragment dropped")
+	assert.False(t, dropped, "an under-budget cfg with small states must not drop any fragment")
+}
+
+// ─── fan-in queue shedding (SetMonitorFanInCap) ──────────────────────────────
+
+// blockingGetModule is a real modules.Module + modules.Monitor whose Get blocks
+// until Release is called. Parking Get parks the monitor event loop inside
+// runTargetedReconcile, which is what lets a test fill the bounded fan-in queue
+// deterministically instead of racing the dispatch loop.
+//
+// Its Changes channel is UNBUFFERED on purpose: a SendChange returns only once
+// the fan-in goroutine has received the event, so a blocking (rather than
+// shedding) send on a full queue would stall the producer and fail the test.
+type blockingGetModule struct {
+	mu       sync.Mutex
+	getCalls int
+	closed   bool
+
+	changesCh chan modules.ChangeEvent
+	release   chan struct{}
+}
+
+func newBlockingGetModule() *blockingGetModule {
+	return &blockingGetModule{
+		changesCh: make(chan modules.ChangeEvent),
+		release:   make(chan struct{}),
+	}
+}
+
+func (m *blockingGetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	m.mu.Lock()
+	m.getCalls++
+	m.mu.Unlock()
+	<-m.release
+	// Matches the desired cfg state, so no Set is attempted during the reconcile.
+	return execution.NewConfigState(map[string]interface{}{"state": "present"}), nil
+}
+
+func (m *blockingGetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+func (m *blockingGetModule) Monitor(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+func (m *blockingGetModule) Changes() <-chan modules.ChangeEvent { return m.changesCh }
+
+func (m *blockingGetModule) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.closed {
+		m.closed = true
+		close(m.changesCh)
+	}
+	return nil
+}
+
+func (m *blockingGetModule) SendChange(evt modules.ChangeEvent) { m.changesCh <- evt }
+
+func (m *blockingGetModule) GetCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getCalls
+}
+
+// Release unblocks every current and future Get call. Idempotent.
+func (m *blockingGetModule) Release() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	select {
+	case <-m.release:
+	default:
+		close(m.release)
+	}
+}
+
+// TestExecutor_StartMonitors_ShedsEventsWhenFanInQueueFull covers the bounded
+// fan-in queue: with the dispatch loop parked inside a reconcile, a flood of
+// events must (a) never block the producing monitor goroutine, (b) be shed with
+// a Warn to the next scheduled convergence pass, and (c) still refresh the
+// module DNA cache, because cacheMonitorState runs before the non-blocking send.
+//
+// SetMonitorFanInCap(1) is what makes this deterministic: with the production
+// capacity of 64 the flood would fit and nothing would be shed, so the Warn
+// assertion also proves the cap override is honoured by StartMonitors.
+func TestExecutor_StartMonitors_ShedsEventsWhenFanInQueueFull(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	e := newMonitorExecutorWithLogger(t, logger)
+	e.SetMonitorDebounceWindow(10 * time.Millisecond)
+	e.SetMonitorFanInCap(1)
+
+	mod := newBlockingGetModule()
+	execution.ExecutorFactory(e).RegisterModule("blocking", mod)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, e.StartMonitors(ctx, singleResourceCfg("res1", "blocking")))
+	t.Cleanup(func() {
+		mod.Release()
+		e.StopMonitors()
+	})
+
+	// First event drains through the queue and fires a targeted reconcile, whose
+	// Get blocks — from here the dispatch loop consumes nothing from the fan-in.
+	mod.SendChange(modules.ChangeEvent{
+		ResourceID: "res1",
+		ChangeType: modules.ChangeTypeModified,
+		Details:    execution.NewConfigState(map[string]interface{}{"seq": "0"}),
+	})
+	require.Eventually(t, func() bool { return mod.GetCallCount() >= 1 }, 2*time.Second, 5*time.Millisecond,
+		"the first event must reach runTargetedReconcile and park the dispatch loop in Get")
+
+	// Flood: capacity is 1, so at most one of these buffers and the rest must be shed.
+	const flood = 8
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for i := 1; i <= flood; i++ {
+			mod.SendChange(modules.ChangeEvent{
+				ResourceID: "res1",
+				ChangeType: modules.ChangeTypeModified,
+				Details:    execution.NewConfigState(map[string]interface{}{"seq": fmt.Sprintf("%d", i)}),
+			})
+		}
+	}()
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("producer blocked on a full fan-in queue: the send must be non-blocking and shed the event")
+	}
+
+	// (b) shedding is reported, not silent.
+	require.Eventually(t, func() bool {
+		_, ok := logger.FindWarn("Monitor event queue full, event shed to scheduled poll")
+		return ok
+	}, 2*time.Second, 5*time.Millisecond,
+		"a full fan-in queue must Warn that the event was shed to the scheduled poll")
+	entry, ok := logger.FindWarn("Monitor event queue full, event shed to scheduled poll")
+	require.True(t, ok)
+	assert.Equal(t, "res1", entry["resource_id"], "the shed Warn must name the affected resource")
+
+	// (c) a shed event still refreshes module DNA — the cache write happens before the send.
+	require.Eventually(t, func() bool {
+		return e.CollectModuleDNAAttributes(context.Background())["res1.seq"] == fmt.Sprintf("%d", flood)
+	}, 2*time.Second, 5*time.Millisecond,
+		"the last event's details must reach the DNA cache even though the event was shed")
+
+	// Unblock the parked reconcile so the engine tears down cleanly.
+	mod.Release()
+}
+
+// ─── StartMonitors: module Monitor() failure ─────────────────────────────────
+
+// errMonitorStart is the failure a module reports when it cannot start watching.
+var errMonitorStart = errors.New("watcher init failed: no inotify instances left")
+
+// failingMonitorModule is a real modules.Module + modules.Monitor whose Monitor()
+// always fails, exercising the skip-this-resource-and-continue branch of
+// StartMonitors. Get/Set/Close are counted so the test can prove the resource was
+// never retained as a monitor entry.
+type failingMonitorModule struct {
+	mu           sync.Mutex
+	getCalls     int
+	monitorCalls int
+	closeCalls   int
+	changesCh    chan modules.ChangeEvent
+}
+
+func newFailingMonitorModule() *failingMonitorModule {
+	return &failingMonitorModule{changesCh: make(chan modules.ChangeEvent)}
+}
+
+func (m *failingMonitorModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	m.mu.Lock()
+	m.getCalls++
+	m.mu.Unlock()
+	return execution.NewConfigState(map[string]interface{}{"state": "present"}), nil
+}
+
+func (m *failingMonitorModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+func (m *failingMonitorModule) Monitor(_ context.Context, _ string, _ modules.ConfigState) error {
+	m.mu.Lock()
+	m.monitorCalls++
+	m.mu.Unlock()
+	return errMonitorStart
+}
+
+func (m *failingMonitorModule) Changes() <-chan modules.ChangeEvent { return m.changesCh }
+
+func (m *failingMonitorModule) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closeCalls++
+	return nil
+}
+
+func (m *failingMonitorModule) MonitorCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.monitorCalls
+}
+
+func (m *failingMonitorModule) GetCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getCalls
+}
+
+func (m *failingMonitorModule) CloseCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closeCalls
+}
+
+// TestExecutor_StartMonitors_SkipsResourceWhenMonitorFails covers the error
+// branch in StartMonitors: a module whose Monitor() returns an error is logged,
+// skipped, and NOT retained as a monitor entry — while the remaining resources
+// in the same call still start. The failing resource is listed first so the test
+// also proves the loop continues rather than aborting the whole engine.
+func TestExecutor_StartMonitors_SkipsResourceWhenMonitorFails(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	e := newMonitorExecutorWithLogger(t, logger)
+
+	bad := newFailingMonitorModule()
+	good := newMonitorTestModule()
+	execution.ExecutorFactory(e).RegisterModule("badmon", bad)
+	execution.ExecutorFactory(e).RegisterModule("goodmon", good)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resources := []stewardconfig.ResourceConfig{
+		{Name: "bad1", Module: "badmon", Config: map[string]interface{}{"state": "present"}},
+		{Name: "good1", Module: "goodmon", Config: map[string]interface{}{"state": "present"}},
+	}
+	require.NoError(t, e.StartMonitors(ctx, resources),
+		"a single module's Monitor() failure must not fail the whole StartMonitors call")
+
+	assert.Equal(t, 1, bad.MonitorCallCount(), "Monitor() must have been attempted on the failing module")
+	assert.Equal(t, 1, good.MonitorCallCount(), "the loop must continue and start the remaining resource")
+
+	entry, ok := logger.FindWarn("Failed to start module monitor")
+	require.True(t, ok, "the Monitor() failure must be logged at Warn")
+	assert.Equal(t, "bad1", entry["resource"])
+	assert.Equal(t, "bad1", entry["resource_id"])
+	assert.Equal(t, errMonitorStart.Error(), entry["error"],
+		"the module-supplied error text must be logged (sanitized, unchanged for control-char-free text)")
+
+	// The failed resource is not a monitor entry: a targeted reconcile for it takes
+	// the unmanaged-resource path and never touches the module.
+	e.RunTargetedReconcile(context.Background(), "bad1")
+	assert.Equal(t, 0, bad.GetCallCount(), "a resource whose monitor failed must not be dispatched a reconcile")
+
+	// ...and it is not closed on teardown either, since it was never retained.
+	e.StopMonitors()
+	assert.Equal(t, 0, bad.CloseCallCount(), "a module whose Monitor() failed was never retained, so it is not closed")
+	assert.Equal(t, 1, good.CloseCallCount(), "the successfully-started monitor must be closed by StopMonitors")
 }

@@ -5,6 +5,7 @@ package execution
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,43 @@ import (
 // monitorQueueCapacity is the maximum number of ChangeEvents the fan-in channel
 // can buffer. When full, events are shed to the next scheduled convergence pass.
 const monitorQueueCapacity = 64
+
+// clusterFragmentIDPrefix marks the resourceIDs whose fragments have a live
+// controller-side consumer (clusterregistry.BuildRegistry parses cluster:*
+// fragments on every cluster API read). Used to order fragment emission so a
+// steward at the fragment budget never drops a cluster fragment in favour of an
+// arbitrary file/service resource.
+const clusterFragmentIDPrefix = "cluster:"
+
+// Steward-side bounds on what CollectModuleFragments emits.
+//
+// CollectModuleFragments emits one fragment per convergence-touched resource
+// (Issue #3333), and nothing steward-side bounds how many resources a cfg
+// declares. The controller's ingest validation rejects the ENTIRE DNA snapshot —
+// not the offending fragment — once a steward exceeds its bounds
+// (features/controller/transport/dna_handler.go: maxDNATransferFragments = 1024,
+// maxDNAFragmentBytes = 1 MB per marshalled fragment), so an unbounded producer
+// black-holes every full DNA sync from a large steward rather than degrading.
+// These bounds keep the producer inside the ingest envelope by construction.
+//
+// Bounding here loses no state today: every resource is still published in full
+// through the flat CollectModuleDNAAttributes carrier, which these fragments
+// duplicate.
+const (
+	// maxModuleFragments caps how many fragments one CollectModuleFragments call
+	// emits. Half of the controller's 1024-fragment per-snapshot cap: module
+	// fragments share that snapshot budget with the host:* fragments
+	// PartitionHostFacts produces, so the module producer takes half and leaves
+	// half as headroom.
+	maxModuleFragments = 512
+
+	// maxModuleFragmentCanonicalBytes caps a single fragment's canonical payload.
+	// The controller bounds one marshalled Fragment at 1 MB; 512 KB of canonical
+	// bytes leaves room for the proto envelope (fragment ID, authority, 32-byte
+	// hash, field framing) and is an order of magnitude above the largest
+	// realistic module state.
+	maxModuleFragmentCanonicalBytes = 512 * 1024
+)
 
 // monitorEntry pairs a module's Monitor with its resource configuration.
 // Used to fan-in ChangeEvents and dispatch targeted reconciles.
@@ -127,10 +165,11 @@ func (e *Executor) StartMonitors(ctx context.Context, resources []config.Resourc
 		desired := NewConfigState(resource.Config)
 
 		if err := mon.Monitor(ctx, resourceID, desired); err != nil {
+			// err is module-supplied text — sanitize it, not just the ID.
 			e.logger.Warn("Failed to start module monitor",
-				"resource", resource.Name,
+				"resource", logging.SanitizeLogValue(resource.Name),
 				"resource_id", logging.SanitizeLogValue(resourceID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 
@@ -242,7 +281,7 @@ func (e *Executor) stopMonitorEngine() {
 		if err := entry.monitor.Close(); err != nil {
 			e.logger.Warn("Failed to close monitor",
 				"resource_id", logging.SanitizeLogValue(entry.resourceID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 
@@ -350,24 +389,32 @@ func (e *Executor) evictMonitorState(resourceIDs map[string]struct{}) {
 }
 
 // ModuleDNASnapshot is a process-stable store of each managed resource's last
-// observed state (AsMap), keyed by resourceID. It is shared across Executor
-// instances so module DNA survives executor re-initialization on reconnect
-// (#2520): InitializeConfigExecutor replaces the Executor on every connect, and a
-// per-Executor snapshot would be lost each time — the client owns ONE snapshot and
-// passes it into every Executor it builds. Safe for concurrent use.
+// observed state (AsMap) and module bundle authority, keyed by resourceID. It
+// is shared across Executor instances so module DNA survives executor
+// re-initialization on reconnect (#2520): InitializeConfigExecutor replaces the
+// Executor on every connect, and a per-Executor snapshot would be lost each
+// time — the client owns ONE snapshot and passes it into every Executor it
+// builds. Safe for concurrent use.
 type ModuleDNASnapshot struct {
-	mu   sync.Mutex
-	snap map[string]map[string]interface{}
+	mu        sync.Mutex
+	snap      map[string]map[string]interface{}
+	authority map[string]string // resourceID → module bundle name
 }
 
 // NewModuleDNASnapshot returns an empty shared module-DNA store.
 func NewModuleDNASnapshot() *ModuleDNASnapshot {
-	return &ModuleDNASnapshot{snap: make(map[string]map[string]interface{})}
+	return &ModuleDNASnapshot{
+		snap:      make(map[string]map[string]interface{}),
+		authority: make(map[string]string),
+	}
 }
 
-func (s *ModuleDNASnapshot) set(resourceID string, attrs map[string]interface{}) {
+func (s *ModuleDNASnapshot) set(resourceID, bundleName string, attrs map[string]interface{}) {
 	s.mu.Lock()
 	s.snap[resourceID] = attrs
+	if bundleName != "" {
+		s.authority[resourceID] = bundleName
+	}
 	s.mu.Unlock()
 }
 
@@ -376,6 +423,7 @@ func (s *ModuleDNASnapshot) prune(keep map[string]struct{}) {
 	for id := range s.snap {
 		if _, ok := keep[id]; !ok {
 			delete(s.snap, id)
+			delete(s.authority, id)
 		}
 	}
 	s.mu.Unlock()
@@ -393,13 +441,33 @@ func (s *ModuleDNASnapshot) collect(out map[string]string) {
 	s.mu.Unlock()
 }
 
-// cacheModuleDNAState records a managed resource's observed state (AsMap) into the
-// shared module-DNA snapshot, keyed by resourceID. Called after each successful
-// convergence / targeted-reconcile Get (executor.ExecuteResource) so a STABLE
-// resource still contributes module DNA between change-events — the steady-state
-// source for #2520 mechanism 1. No extra module call: it reuses the Get the
-// Get→Compare→Set→Verify cycle already performs.
-func (e *Executor) cacheModuleDNAState(resourceID string, state modules.ConfigState) {
+// collectAll returns copies of all stored snapshots and their recorded
+// authorities under a single lock to prevent races between concurrent set and
+// collect calls. Used by CollectModuleFragments to build the two-source union
+// without holding the lock during fragment canonicalization.
+func (s *ModuleDNASnapshot) collectAll() (snaps map[string]map[string]interface{}, authorities map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snaps = make(map[string]map[string]interface{}, len(s.snap))
+	for id, fields := range s.snap {
+		snaps[id] = fields
+	}
+	authorities = make(map[string]string, len(s.authority))
+	for id, auth := range s.authority {
+		authorities[id] = auth
+	}
+	return snaps, authorities
+}
+
+// cacheModuleDNAState records a managed resource's observed state (AsMap) and
+// module bundle authority into the shared module-DNA snapshot, keyed by
+// resourceID. Called after each successful convergence / targeted-reconcile Get
+// (executor.ExecuteResource) so a STABLE resource still contributes module DNA
+// between change-events — the steady-state source for #2520 mechanism 1. No
+// extra module call: it reuses the Get the Get→Compare→Set→Verify cycle already
+// performs. The bundleName is stored alongside the state so CollectModuleFragments
+// can resolve authority for steady-state-only resources (#3333).
+func (e *Executor) cacheModuleDNAState(resourceID, bundleName string, state modules.ConfigState) {
 	if resourceID == "" || state == nil || e.moduleDNA == nil {
 		return
 	}
@@ -412,7 +480,7 @@ func (e *Executor) cacheModuleDNAState(resourceID string, state modules.ConfigSt
 	for k, v := range snap {
 		copied[k] = v
 	}
-	e.moduleDNA.set(resourceID, copied)
+	e.moduleDNA.set(resourceID, bundleName, copied)
 }
 
 // pruneModuleDNAState drops shared-snapshot entries whose resourceID is not in
@@ -498,7 +566,7 @@ func (e *Executor) runTargetedReconcile(ctx context.Context, stopCh <-chan struc
 	for _, entry := range entries {
 		if entry.resourceID == resourceID {
 			e.logger.Info("Running targeted reconcile for monitored resource",
-				"resource", entry.resource.Name,
+				"resource", logging.SanitizeLogValue(entry.resource.Name),
 				"resource_id", logging.SanitizeLogValue(resourceID))
 			result := e.ExecuteResource(ctx, entry.resource)
 			if result.ChangesApplied && observer != nil {
@@ -512,47 +580,154 @@ func (e *Executor) runTargetedReconcile(ctx context.Context, stopCh <-chan struc
 		"resource_id", logging.SanitizeLogValue(resourceID))
 }
 
-// CollectModuleFragments returns ADR-017 fragments for cluster:* resourceIDs
-// observed in the monitor change-event cache (Issue #2908).
+// CollectModuleFragments returns ADR-017 fragments for every managed module
+// resource observed in either the shared moduleDNA snapshot (steady-state,
+// all convergence-touched resources) or the monitor change-event cache (fresher
+// overlay, Issues #2908 / #3333).
 //
-// Only cluster:* resourceIDs are emitted as fragments; all other resourceIDs
-// continue to publish via the flat CollectModuleDNAAttributes path.
-// The authority for each fragment is resolved from the active monitorEntries by
-// resourceID; entries that left monitoring between the event and this call
-// receive an empty authority (negligible: the fragment is still well-formed).
+// Two sources are unioned, mirroring CollectModuleDNAAttributes:
+//   - moduleDNA: the convergence/targeted-reconcile Get result for every managed
+//     resource — the STEADY-STATE source, present for all resources whether or
+//     not they have an active monitor.
+//   - monitorState: the monitor change-event cache — a fresher per-change
+//     overlay. On field collision the monitor value wins.
+//
+// Authority per fragment is resolved from:
+//  1. active monitorEntries (live, by resourceID match) — fresher source.
+//  2. the bundle name recorded in moduleDNA at cacheModuleDNAState time — covers
+//     steady-state-only resources with no active monitor (#3333).
 //
 // Fragment construction goes through sdna.NewFragment so canonical bytes and
 // fragment hash are produced by the same code path the controller-side registry
-// parses (FragmentId is the resourceID verbatim, e.g. "cluster:cfg-lab";
-// Authority is the module bundle name, e.g. "hyperv").
+// parses (FragmentId is the resourceID verbatim, e.g. "cluster:cfg-lab" or
+// "/etc/hosts"; Authority is the module bundle name, e.g. "hyperv" or "file").
+//
+// Emission is bounded by maxModuleFragments (count) and
+// maxModuleFragmentCanonicalBytes (per fragment), both reconciled with the
+// controller's snapshot-level ingest caps — see the constants for why an
+// unbounded producer would black-hole the steward's whole DNA snapshot. Anything
+// the bounds exclude is still published through CollectModuleDNAAttributes.
 func (e *Executor) CollectModuleFragments(_ context.Context) []*commonpb.Fragment {
-	const clusterPrefix = "cluster:"
-
-	// Resolve resourceID → authority from current monitor entries (best-effort).
+	// Step 1: resolve authority from active monitor entries (best-effort, live source).
 	e.monitorMu.Lock()
-	authority := make(map[string]string, len(e.monitorEntries))
+	monitorAuthority := make(map[string]string, len(e.monitorEntries))
 	for _, entry := range e.monitorEntries {
-		authority[entry.resourceID] = bundleNameFromModuleRef(entry.resource.Module)
+		monitorAuthority[entry.resourceID] = bundleNameFromModuleRef(entry.resource.Module)
 	}
 	e.monitorMu.Unlock()
 
+	// Step 2: collect steady-state snapshots and DNA-recorded authorities.
+	var dnaSnaps map[string]map[string]interface{}
+	var dnaAuthority map[string]string
+	if e.moduleDNA != nil {
+		dnaSnaps, dnaAuthority = e.moduleDNA.collectAll()
+	}
+
+	// Step 3: build merged resourceID → state map, mirroring CollectModuleDNAAttributes:
+	// steady-state first, then monitor overlay (monitor wins on field collision).
+	merged := make(map[string]map[string]interface{}, len(dnaSnaps))
+	for id, snap := range dnaSnaps {
+		merged[id] = snap
+	}
+
 	e.monitorStateMu.Lock()
-	defer e.monitorStateMu.Unlock()
+	for id, monSnap := range e.monitorState {
+		if existing, ok := merged[id]; ok {
+			// Field-level merge: monitor fields overwrite steady-state fields.
+			mergedFields := make(map[string]interface{}, len(existing)+len(monSnap))
+			for k, v := range existing {
+				mergedFields[k] = v
+			}
+			for k, v := range monSnap {
+				mergedFields[k] = v
+			}
+			merged[id] = mergedFields
+		} else {
+			merged[id] = monSnap
+		}
+	}
+	e.monitorStateMu.Unlock()
+
+	// Step 4: curate the merged set down to the steward-side fragment budget, then
+	// emit a fragment per surviving resourceID.
+	ids := boundedFragmentIDs(merged)
+	if dropped := len(merged) - len(ids); dropped > 0 {
+		e.logger.Warn("CollectModuleFragments: resource count exceeds the fragment budget, emitting a bounded subset",
+			"resource_count", len(merged),
+			"fragment_budget", maxModuleFragments,
+			"dropped", dropped)
+	}
 
 	var frags []*commonpb.Fragment
-	for resourceID, snap := range e.monitorState {
-		if !strings.HasPrefix(resourceID, clusterPrefix) {
-			continue
+	for _, resourceID := range ids {
+		// Monitor entry authority takes precedence (live); fall back to DNA-recorded.
+		auth := monitorAuthority[resourceID]
+		if auth == "" {
+			auth = dnaAuthority[resourceID]
 		}
-		frag, err := sdna.NewFragment(resourceID, authority[resourceID], sdna.MapState(snap))
+		frag, err := buildModuleFragment(resourceID, auth, merged[resourceID])
 		if err != nil {
-			e.logger.Warn("CollectModuleFragments: canonicalize failed",
-				"resource_id", logging.SanitizeLogValue(resourceID), "error", err)
+			// The error text carries the resourceID (sdna.NewFragment wraps it)
+			// and can carry module-supplied state keys from canonicalization, so
+			// the error value is sanitized too — a sanitized ID beside a raw err
+			// is still a log-injection sink.
+			e.logger.Warn("CollectModuleFragments: fragment dropped",
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 		frags = append(frags, frag)
 	}
 	return frags
+}
+
+// boundedFragmentIDs returns the resourceIDs CollectModuleFragments emits: every
+// key of merged, in a stable order, truncated to maxModuleFragments.
+//
+// The order is deterministic — cluster:* first, each group sorted — for two
+// reasons. Stability: the emitted set feeds the fragment manifest and the
+// aggregate root the controller persists as append-only version history, so
+// cutting a randomly-ordered map iteration would churn a new DNA version on
+// every sync for an otherwise unchanged host. Curation: cluster:* fragments are
+// the ones with a live controller-side consumer, so the cap drops ordinary
+// host resources (still carried flat by CollectModuleDNAAttributes) first.
+func boundedFragmentIDs(merged map[string]map[string]interface{}) []string {
+	clusterIDs := make([]string, 0, len(merged))
+	otherIDs := make([]string, 0, len(merged))
+	for id := range merged {
+		if strings.HasPrefix(id, clusterFragmentIDPrefix) {
+			clusterIDs = append(clusterIDs, id)
+		} else {
+			otherIDs = append(otherIDs, id)
+		}
+	}
+	sort.Strings(clusterIDs)
+	sort.Strings(otherIDs)
+
+	ids := append(clusterIDs, otherIDs...)
+	if len(ids) > maxModuleFragments {
+		ids = ids[:maxModuleFragments]
+	}
+	return ids
+}
+
+// buildModuleFragment canonicalizes one resource's merged state into an ADR-017
+// fragment and enforces the per-fragment size bound.
+//
+// Rejecting an over-sized fragment here rather than emitting it is deliberate:
+// the controller rejects the whole snapshot that carries an over-sized fragment,
+// so dropping the single offender is what keeps the rest of the steward's DNA
+// deliverable.
+func buildModuleFragment(resourceID, authority string, snap map[string]interface{}) (*commonpb.Fragment, error) {
+	frag, err := sdna.NewFragment(resourceID, authority, sdna.MapState(snap))
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize failed: %w", err)
+	}
+	if n := len(frag.GetCanonicalBytes()); n > maxModuleFragmentCanonicalBytes {
+		return nil, fmt.Errorf("canonical bytes %d exceed the %d-byte per-fragment bound",
+			n, maxModuleFragmentCanonicalBytes)
+	}
+	return frag, nil
 }
 
 // flattenDNAValue flattens one value into out under key, per the convention
