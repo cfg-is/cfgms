@@ -750,88 +750,170 @@ elevation. Both real runs above happened to land on `cfgms-ha-node2`
 
 ## 5. Network partition / split-brain validation (story #3095)
 
-Live-validated against the real cfg-lab 3-node cluster via
-`test/e2e/ha/network_partition_real_test.go` (`//go:build e2e`, gated by
-`CFGMS_E2E_HA_CLUSTER_NODES`, same convention as §4/§6's suites). Unlike
-`test/integration/ha`'s Docker suite (`TestNetworkPartition`), which simulates a
-partition by stopping/restarting a container, this suite drives a genuine
-`iptables` rule on one real Debian VM host, blocking only the internal Raft
-consensus port (`:9443`, both directions) on the isolated node while
-deliberately leaving the admin REST port (`:9080`) open — so the suite's own
-mTLS polling keeps observing both sides of the partition throughout. A single
-node's rule is sufficient (matches the AC's own wording, "a real `iptables` rule
-on ONE cfg-lab host"): the isolated node's own INPUT/OUTPUT chains block
-consensus traffic in both directions, so the majority side's outbound packets
-simply arrive and get dropped by the isolated node.
+Live-validated 2026-08-15 against the real 3-node cluster #3130 established,
+via a new automated suite, `test/e2e/ha/network_partition_real_test.go`
+(`//go:build e2e`, gated by `CFGMS_E2E_HA_CLUSTER_NODES`) — three tests, each
+run against the live cluster.
 
-### Original run (2026-08-15, `TestRealClusterPartition_NoDualLeader` failing)
+### Method
+
+A genuine `iptables` rule on **one** cfg-lab host (the current leader, chosen
+so the test exercises a real `CheckQuorum` step-down rather than a
+never-was-leader no-op) blocks the internal Raft consensus port (`:9443`,
+both `--dport` and `--sport`, both `INPUT` and `OUTPUT`) via a dedicated
+chain (`CFGMS_E2E_PARTITION`). The admin REST port (`:9080`) is deliberately
+left open, so the suite's own mTLS polling (`GET /api/v1/raft/status`) keeps
+observing **both** sides of the partition throughout — this is what makes the
+dual-leader check meaningful. One node's rule is sufficient to create a
+genuine 2-vs-1 split: the isolated node's own `INPUT`/`OUTPUT` chains block
+consensus traffic in both directions, so the majority side's outbound
+packets simply arrive and get dropped on receipt.
+
+`t.Cleanup` removes the rule unconditionally (chain flush + delete), verified
+live to run correctly even when a test assertion fails — the lab cluster was
+confirmed fully healed and `iptables -L` empty after every run below,
+including the failing one.
+
+### Results
 
 | Test | Result | Measured |
 |---|---|---|
-| `TestRealClusterPartition_MinorityStepsDown` | **PASS** | Isolated leader stepped down within 30s, stayed down for the full 45s window; majority-side steward fleet health actively polled throughout. |
-| `TestRealClusterPartition_HealsToSingleLeader` | **PASS** | Reconverged to a single agreed leader in **2.01s** after the firewall rule was removed. |
-| `TestRealClusterPartition_NoDualLeader` | **FAILED reproducibly** (confirmed on 2 separate runs: ~2.0s and ~5.5s overlap windows) | See root cause below. |
+| `TestRealClusterPartition_MinorityStepsDown` | **PASS** | Isolated leader stepped down (`is_leader` → `false`) within the 30s bound and stayed down for the full 45s observation window; majority-side steward-fleet health (`GET /api/v1/stewards`) polled throughout, remained reachable (0 stewards enrolled — see §3/§4, unchanged since the storage migration; nothing present to disrupt). |
+| `TestRealClusterPartition_NoDualLeader` | **FAIL (reproducible, not a flake)** | Both sides observed reporting `is_leader:true` simultaneously — run 1: 4 consecutive 500ms poll rounds (~2.0s); run 2 (re-run to confirm reproducibility, not a one-off): 11 consecutive rounds (~5.5s). See root cause below. |
+| `TestRealClusterPartition_HealsToSingleLeader` | **PASS** | All 3 nodes reconverged on a single agreed leader in **2.01s** after the firewall rule was removed. |
 
-**Root cause (a genuine finding, not a bug in this repo's Raft wiring):** traced
-through the vendored `go.etcd.io/raft/v3 v3.6.0` source. `tickHeartbeat`
-(`raft.go:862-877`) raises `MsgCheckQuorum` on a fixed period of exactly
-`electionTimeout` ticks, but `stepLeader`'s `MsgCheckQuorum` handler
-(`raft.go:1273-1285`) only steps down when quorum hasn't been active *since the
-previous check* — landing the actual step-down anywhere in `(ElectionTimeout,
-2×ElectionTimeout]`. The majority's new election uses
-`pastElectionTimeout` (`raft.go:2045-2051`), `randomizedElectionTimeout =
-electionTimeout + rand(electionTimeout)`, uniformly in `[ElectionTimeout,
-2×ElectionTimeout)`. These are two independent, unordered timers with
-overlapping ranges — the majority can complete its election *before* the
-isolated node's own `CheckQuorum` observes the loss, producing a real,
-reproducible window where both report `is_leader:true`.
+### Root cause of the `NoDualLeader` failure — genuine finding, not a bug in this repo's Raft wiring
 
-`CheckQuorum` guarantees write-safety (the isolated node cannot commit without a
-quorum ack), not status-flag agreement — and the gap was not a reporting
-artifact. Tracing the consumers of the pre-fix `IsLeader()` flag
+Traced through code, not guessed. `pkg/ha.RaftConsensus.IsLeader()`
+(`raft_consensus.go:715-719`) reads a locally-cached `clusterState.Leader`
+field, updated only from the Raft library's own `SoftState` transitions
+(`updateLeadership`, `raft_consensus.go:661-696`) — this is correct: when the
+isolated leader's own `CheckQuorum` step-down fires, its `SoftState.Lead`
+becomes `raft.None` and `RaftState` becomes `StateFollower`, and
+`updateLeadership` correctly sets `clusterState.Leader = 0`, making
+`IsLeader()` false immediately once that Ready-cycle is processed. The
+per-node tick loop (`raft_consensus.go:330-338`) is a plain, correctly-
+implemented `time.Ticker`-driven loop — no processing-delay defect found
+there either.
+
+The actual mechanism is **two independent, unsynchronized timers inside
+`go.etcd.io/raft/v3 v3.6.0`, each landing anywhere in `[ElectionTimeout,
+2×ElectionTimeout]` = `[10s, 20s]` after the partition, with no ordering
+between them.** Read out of the library source rather than inferred, because
+the two timers are late for *different* reasons:
+
+- **Isolated leader's step-down** — `tickHeartbeat` (`raft.go:862-877`) raises
+  `MsgCheckQuorum` on a **fixed**, un-randomized period of exactly
+  `electionTimeout` ticks. It is the *evidence* that is stale, not the timer:
+  `stepLeader`'s `MsgCheckQuorum` case (`raft.go:1273-1285`) steps down only
+  when `!trk.QuorumActive()`, and it clears every peer's `RecentActive` flag
+  as it goes, so each check judges the interval since the *previous* check. A
+  partition beginning just after check N is therefore still seen as "quorum
+  active" at check N+1 and only causes step-down at check N+2 — landing the
+  step-down anywhere in `(ElectionTimeout, 2×ElectionTimeout]`.
+- **Majority's new election** — `pastElectionTimeout` (`raft.go:2045-2051`)
+  uses `randomizedElectionTimeout = electionTimeout + rand(electionTimeout)`,
+  i.e. uniformly in `[ElectionTimeout, 2×ElectionTimeout)`. This is the
+  genuinely randomized one (anti-election-storm). `PreVote: true` adds a
+  pre-vote round on top, which can only push the election later, never
+  earlier.
+
+Because the two windows overlap, the majority can complete its election
+*before* the isolated node's own `CheckQuorum` observes the loss, producing an
+interval in which both report `is_leader:true`. The upper bound on that
+interval is the width of the overlap, ~`ElectionTimeout` (10s here);
+reproduced twice at 2.0s and 5.5s, both inside that bound — the signature of
+two unordered timers, not of a fixed defect.
+
+With `ElectionTimeout: 10s` / `HeartbeatInterval: 2s` (`pkg/ha/config.go:28-29`)
+this yields `ElectionTick=5`, `HeartbeatTick=1`, tick period 2s. Shrinking
+`ElectionTimeout` narrows the worst-case overlap proportionally but never
+closes it, and costs failover sensitivity to transient blips — which is
+precisely why the fix below is a design decision rather than a config tweak.
+
+**`pkg/ha/split_brain.go` was checked for a faster, independent detection
+path that might already exist but not be wired to the status-reporting
+API** — it does not. `performQuorumValidation` (`split_brain.go:339-371`) and
+`applyQuorumBasedResolution` (`split_brain.go:421-438`) both detect quorum
+loss independently of Raft, but their own code comments state the design
+explicitly: *"Raft `CheckQuorum:true` handles leader step-down... no explicit
+demotion is needed here"* / *"Raft will step down the leader via
+CheckQuorum"* — both functions only **log** on quorum loss and deliberately
+take no action, by design. This confirms the dual-leader window is not a
+wiring gap (an existing faster mechanism failing to reach `IsLeader()`) but
+the intended, documented behavior of relying solely on Raft's own
+`CheckQuorum`.
+
+**What Raft's `CheckQuorum` actually guarantees here is write-safety, not
+status-flag agreement**: the isolated node cannot get any new log entry
+committed without acknowledgment from a quorum of peers, so no conflicting
+writes can occur during the overlap window even though both nodes'
+`is_leader` fields briefly agree. Closing the STATUS-reporting gap to match
+the AC's literal "at no point do two nodes simultaneously report themselves
+as leader" would require an additional mechanism beyond vanilla `CheckQuorum`
+— most naturally a leader-lease pattern (the leader treats itself as
+not-currently-leader for status/read purposes unless it has received
+actual quorum acknowledgment within roughly one heartbeat interval,
+distinct from the raft library's own `SoftState`). This is a genuine new
+architectural decision (lease window sizing is a real tradeoff against
+false-demotion on transient network blips shorter than a real partition,
+and touches `IsLeader()`/`GetLeaderInfo()`'s core semantics) — per this
+epic's own Out-of-Scope carve-out ("fix it inline... unless the fix would
+require new architecture, in which case flag it to the PO instead of
+building it"), this is flagged for the PO/epic planning rather than built
+here.
+
+### Decision required before #3095 could be marked satisfied — RESOLVED by epic #3386
+
+`TestRealClusterPartition_NoDualLeader` is a `[REQUIRED TEST]` of #3095 and,
+at the time of the run above, **failed on the exact AC it was written to
+prove**. The analysis above explains *why* it failed; it did not make the AC
+satisfied on its own. This was an open decision for the PO / team lead, not
+something the implementation or the acceptance check could settle — three
+options were on the table (adjust the AC to the bound `CheckQuorum` actually
+guarantees; split the leader-lease work into a follow-up story and close
+#3095 on its other three ACs; or block #3095 until the lease mechanism
+landed).
+
+**The PO's ruling (comment on issue #3095, 2026-08-16) rejected weakening the
+AC:** tracing the consumers of the pre-fix `IsLeader()` flag
 (`features/controller/api/handlers_push.go:57`, `server.go:408`,
-`features/controller/server/server.go:2018` at the time) showed
-`handleConfigPush` resolves the selector, queries the fleet, writes desired
-state to the entity graph, and fans out to stewards via `commandPublisher` —
-with no Raft commit anywhere in that path. During the overlap window, two nodes
-would both admit config pushes and deliver them to real endpoints. Closing this
-needed a leader-lease mechanism, a design decision (epic #3386, ADR-029)
-rather than a test or logic fix — so the AC was left un-weakened and the
-failure recorded as an honest finding, per the epic's own resolution (comment
-on issue #3095, 2026-08-16): *"this story's AC is correct and unchanged, and
-its test is not to be weakened, softened, or skipped. The system does not yet
-satisfy it."*
+`features/controller/server/server.go:2018` at the time) showed the overlap
+was not a reporting artifact — `handleConfigPush` resolves the selector,
+queries the fleet, writes desired state to the entity graph, and fans out to
+stewards via `commandPublisher`, with no Raft commit anywhere in that path.
+During the overlap window two nodes would both admit config pushes and
+deliver them to real endpoints. *"This story's AC is correct and unchanged,
+and its test is not to be weakened, softened, or skipped. The system does not
+yet satisfy it."* Resolution moved to epic **#3386** (Controller leadership
+authority): lease-backed `HasLeadership()` separated from `IsRaftLeader()`
+(#3388), the status surfaces switched to report it (#3435), and story
+**#3389** named as the one that would make this test pass, unmodified.
 
-### Resolved run (2026-08-25/26, story #3389 — `HasLeadership()` re-homing)
-
-Epic #3386 landed the lease-backed authority split (`HasLeadership()` vs.
-`IsRaftLeader()`, ADR-029) via #3388, then #3435 switched `GET
-/api/v1/raft/status`'s `is_leader` field to source from `HasLeadership()`
-instead of the raw Raft flag, and #3389 re-homed the three side-effecting
-config-push call sites the root-cause analysis above named onto the same
-primitive. All three story #3095 tests were re-run **unmodified** against a
-controller binary built from #3389's branch and rolling-deployed to all three
-real cluster nodes (`cfgms-ctrl-01`, `cfgms-ha-node2`, `cfgms-ha-node3` — one
-node at a time, quorum preserved throughout the deployment itself):
+**Resolved run (2026-08-25/26, story #3389).** A controller binary built from
+#3389's branch (re-homing the three side-effecting call sites named above
+onto `HasLeadership()`) was rolling-deployed to all three real cluster nodes
+(`cfgms-ctrl-01`, `cfgms-ha-node2`, `cfgms-ha-node3` — one node at a time,
+quorum preserved throughout the deployment itself), then all three of this
+story's tests were re-run **unmodified**:
 
 | Test | Result | Measured |
 |---|---|---|
-| `TestRealClusterPartition_NoDualLeader` | **PASS** (previously failed reproducibly) | 90 paired poll rounds across 45s (500ms interval), **0 dual-leader instants**. Partitioned node: `cfgms-ctrl-01` (the leader at the time, isolated as the minority side). |
+| `TestRealClusterPartition_NoDualLeader` | **PASS** (previously failed reproducibly at 2.0s/5.5s) | 90 paired poll rounds across 45s (500ms interval), **0 dual-leader instants**. Partitioned node: `cfgms-ctrl-01` (the leader at the time, isolated as the minority side). |
 | `TestRealClusterPartition_MinorityStepsDown` | **PASS** (no regression) | Isolated leader (`cfgms-ha-node3` this run) stepped down and stayed down for the full 45s observation window. |
-| `TestRealClusterPartition_HealsToSingleLeader` | **PASS** (no regression) | Reconverged to a single agreed leader in **2.0073369s** (bound 90s) — consistent with the original run's 2.01s. |
+| `TestRealClusterPartition_HealsToSingleLeader` | **PASS** (no regression) | Reconverged to a single agreed leader in **2.0073369s** (bound 90s) — consistent with this section's original 2.01s measurement. |
 
 Full quorum and cleanup verified after each run: `iptables -L
 CFGMS_E2E_PARTITION` absent on all three hosts, `GET /api/v1/health` returns
-`healthy` on all three, and `GET /api/v1/raft/status` agrees on a single leader
-across all three nodes.
-
-**Rolling deployment itself is additional live evidence for the fix.** Each of
-the three sequential `systemctl stop` / binary swap / `systemctl start` cycles
-is a real, brief leadership loss on whichever node was stopped; the cluster
-reconverged within seconds each time with no operator intervention, and the
-final restart (of the then-current leader, `cfgms-ctrl-01`) produced an
-uneventful term bump (11→12) and instant re-election — the same `CheckQuorum`
-/ election-timeout machinery this section's tests exercise deliberately.
+`healthy` on all three, and `GET /api/v1/raft/status` agrees on a single
+leader across all three nodes. The rolling deployment itself is additional
+live evidence for the fix: each of the three sequential `systemctl stop` /
+binary swap / `systemctl start` cycles is a real, brief leadership loss on
+whichever node was stopped, and the cluster reconverged within seconds each
+time with no operator intervention — the final restart (of the
+then-current leader, `cfgms-ctrl-01`) produced an uneventful term bump
+(11→12) and instant re-election, the same `CheckQuorum` / election-timeout
+machinery this section's tests exercise deliberately.
 
 **Status: RESOLVED.** #3389 is epic #3386's story that made this AC pass; the
 epic's Definition of Done for this half of the leadership-authority work is
@@ -839,6 +921,17 @@ satisfied. Fencing terms on *outbound* commands (#3390, merged) and the
 steward-side term fence (#3436, merged) are the sibling halves of the epic
 covering the command-dispatch path rather than the status/admission path this
 section validates.
+
+### Manual partition recovery (Constraints requirement)
+
+If the automated `t.Cleanup` ever fails to remove the rule, the exact manual
+command (also logged by the suite at the start of every partition test):
+
+```bash
+ssh -i <key> debian@<isolated-node-fqdn> \
+  'sudo iptables -D INPUT -j CFGMS_E2E_PARTITION; sudo iptables -D OUTPUT -j CFGMS_E2E_PARTITION; \
+   sudo iptables -F CFGMS_E2E_PARTITION; sudo iptables -X CFGMS_E2E_PARTITION'
+```
 
 ## 6. Steward fleet continuity through failover (story #3096)
 
