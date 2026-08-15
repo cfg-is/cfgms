@@ -249,8 +249,9 @@ func seedClusterPoliciesConfig(t *testing.T, server *Server, tenantID, clusterNa
 func TestHandleClusterReconciliation_PresentWithLiveOwner(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Steward publishes resource_owner.vm1 = "CFG-70-02" and its own hostname so
-	// the handler's isOwnerLive closure can match hostname → last heartbeat.
+	// Production shape: the owner value is the cluster NODE HOSTNAME (the hyperv
+	// module emits RoleOwners as node names), and the owning steward publishes that
+	// hostname in its DNA. The handler must resolve hostname → steward → heartbeat.
 	seedClusterSteward(t, server, "steward-a", "default",
 		map[string]string{"hostname": "CFG-70-02"},
 		clusterFragment(t, "cfg-lab", map[string]string{"vm1": "CFG-70-02"}))
@@ -274,6 +275,68 @@ func TestHandleClusterReconciliation_PresentWithLiveOwner(t *testing.T) {
 	assert.Equal(t, "CFG-70-02", r.OwnerID)
 	assert.Empty(t, r.AllOwnerClaims)
 	assert.Empty(t, resp.Data.Alerts, "no alerts for a healthy cluster resource")
+}
+
+// TestHandleClusterReconciliation_LiveOwnerByStewardID verifies the second
+// resolution path: an owner value that is already a steward ID resolves directly,
+// without needing a hostname claim.
+func TestHandleClusterReconciliation_LiveOwnerByStewardID(t *testing.T) {
+	server := setupTestServer(t)
+
+	seedClusterSteward(t, server, "steward-a", "default", nil,
+		clusterFragment(t, "cfg-lab", map[string]string{"vm1": "steward-a"}))
+	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "vm1")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Resources, 1)
+	assert.Equal(t, clusterregistry.StatusPresentLiveOwner, resp.Data.Resources[0].Status)
+	assert.Empty(t, resp.Data.Alerts)
+}
+
+// TestHandleClusterReconciliation_HostnameOwnerNotDeadOwner is the regression test
+// for the hostname-liveness path (Issue #3323 review finding): a healthy cluster
+// whose role owners are node hostnames must not raise cluster_role_dead_owner
+// alerts. Without a hostname source, every live clustered role resolves as an
+// orphan-dead-owner and drowns genuine dead-owner signal.
+func TestHandleClusterReconciliation_HostnameOwnerNotDeadOwner(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Two-node cluster, both nodes live, both roles owned by node hostnames.
+	seedClusterSteward(t, server, "steward-a", "default",
+		map[string]string{"hostname": "CFG-70-01"},
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-01", "cno": "CFG-70-01"}))
+	seedClusterSteward(t, server, "steward-b", "default",
+		map[string]string{"hostname": "CFG-70-02"},
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-01", "cno": "CFG-70-01"}))
+	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "csv", "cno")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Resources, 2)
+	for _, r := range resp.Data.Resources {
+		assert.Equal(t, clusterregistry.StatusPresentLiveOwner, r.Status,
+			"role %s owned by a live node hostname must not be orphan-dead-owner", r.RoleName)
+	}
+	assert.Empty(t, resp.Data.Alerts, "a healthy hostname-owned cluster must raise no alerts")
 }
 
 // TestHandleClusterReconciliation_DeclaredButMissing is the required AC test:
@@ -443,6 +506,66 @@ func TestHandleClusterReconciliation_NoDeclaredResources(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.Data.Resources, "no declared resources → nothing to reconcile")
 	assert.Empty(t, resp.Data.Alerts)
+}
+
+// TestStewardsInTenantScope_FragmentsAndHostnameIndex covers the two views the
+// scoping helper returns: fragment-only fleet.StewardData (no DNAAttributes — the
+// cluster registry reads fragments alone, Issue #3323) plus the hostname → steward
+// ID index the reconciliation liveness check needs.
+func TestStewardsInTenantScope_FragmentsAndHostnameIndex(t *testing.T) {
+	server := setupTestServer(t)
+
+	seedClusterSteward(t, server, "steward-a", "tenant-a",
+		map[string]string{"hostname": "CFG-70-01", "os": "windows"},
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-01"}))
+	seedClusterSteward(t, server, "steward-b", "tenant-b",
+		map[string]string{"hostname": "CFG-70-02"},
+		clusterFragment(t, "cfg-prod", nil))
+
+	t.Run("root scope sees every steward with fragments and hostnames", func(t *testing.T) {
+		stewards, hostnames := server.stewardsInTenantScope("")
+		require.Len(t, stewards, 2)
+		for _, sd := range stewards {
+			assert.Nil(t, sd.DNAAttributes,
+				"cluster-registry StewardData must carry fragments only, not flat DNA attributes")
+			assert.NotEmpty(t, sd.DNAFragments, "cluster fragments must survive the conversion")
+		}
+		assert.Equal(t, map[string]string{
+			"CFG-70-01": "steward-a",
+			"CFG-70-02": "steward-b",
+		}, hostnames)
+	})
+
+	t.Run("tenant scope filters both views", func(t *testing.T) {
+		stewards, hostnames := server.stewardsInTenantScope("tenant-a")
+		require.Len(t, stewards, 1)
+		assert.Equal(t, "steward-a", stewards[0].ID)
+		assert.Equal(t, map[string]string{"CFG-70-01": "steward-a"}, hostnames,
+			"a hostname published outside the caller's tenant must not be indexed")
+	})
+}
+
+// TestStewardsInTenantScope_DuplicateHostnameClaim verifies that when two stewards
+// publish the same hostname, the index resolves deterministically to the one with
+// the most recent heartbeat rather than by steward iteration order.
+func TestStewardsInTenantScope_DuplicateHostnameClaim(t *testing.T) {
+	server := setupTestServer(t)
+
+	seedClusterSteward(t, server, "steward-stale", "default",
+		map[string]string{"hostname": "CFG-70-02"},
+		clusterFragment(t, "cfg-lab", nil))
+	seedClusterSteward(t, server, "steward-fresh", "default",
+		map[string]string{"hostname": "CFG-70-02"},
+		clusterFragment(t, "cfg-lab", nil))
+
+	require.True(t, server.controllerService.RecordHeartbeat("steward-stale", "", time.Now().Add(-10*time.Minute)))
+	require.True(t, server.controllerService.RecordHeartbeat("steward-fresh", "", time.Now()))
+
+	for i := 0; i < 5; i++ {
+		_, hostnames := server.stewardsInTenantScope("default")
+		require.Equal(t, "steward-fresh", hostnames["CFG-70-02"],
+			"duplicate hostname claims must resolve to the most recent heartbeat, every call")
+	}
 }
 
 // TestHandleClusters_RoutedViaAPIKey exercises the full router path with API keys

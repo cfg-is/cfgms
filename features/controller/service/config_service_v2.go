@@ -52,14 +52,14 @@ func (e *ValidationFailedError) Error() string {
 // clusterRegistryAdapter adapts *ControllerService to the clusterMembership interface
 // expected by pkg/config.InheritanceResolver. It builds a fresh Registry snapshot on
 // each MemberClusters call from the controller's live in-memory steward state, which
-// reflects DNA attributes last published by each steward's DNARefreshLoop ticker
+// reflects the DNA fragments last published by each steward's DNARefreshLoop ticker
 // (default 30 min — eventually consistent by design; see Issue #2425 Out of Scope).
 type clusterRegistryAdapter struct {
 	controllerSvc *ControllerService
 }
 
 // MemberClusters returns the sorted cluster names that stewardID belongs to,
-// derived from the current in-memory steward DNA attributes. Cluster membership
+// derived from the current in-memory steward DNA fragments. Cluster membership
 // is scoped to the queried steward's own tenant so that same-named clusters in
 // different tenants cannot pollute each other's member lists (BuildRegistry
 // contract: "Tenant scoping must be applied by the caller").
@@ -76,19 +76,14 @@ func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
 		if s.TenantID != tenantID {
 			continue // scope to this steward's tenant only
 		}
-		var attrs map[string]string
-		if s.DNA != nil {
-			attrs = s.DNA.Attributes
-		}
 		var frags []*common.Fragment
 		if s.DNA != nil {
 			frags = s.DNA.Fragments
 		}
 		fleetData = append(fleetData, fleet.StewardData{
-			ID:            s.ID,
-			TenantID:      s.TenantID,
-			DNAAttributes: attrs,
-			DNAFragments:  frags,
+			ID:           s.ID,
+			TenantID:     s.TenantID,
+			DNAFragments: frags,
 		})
 	}
 	reg := clusterregistry.BuildRegistry(fleetData)
