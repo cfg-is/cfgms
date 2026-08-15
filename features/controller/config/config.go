@@ -796,6 +796,13 @@ func LoadWithPath(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
 
+		// Resolve cert_path to absolute relative to the config file directory.
+		// A relative cert_path is CWD-dependent at runtime; anchoring it to the
+		// config file removes that dependency (Issue #3197).
+		if !filepath.IsAbs(cfg.CertPath) {
+			cfg.CertPath = filepath.Join(filepath.Dir(foundPath), cfg.CertPath)
+		}
+
 	}
 
 	// Override with environment variables if set

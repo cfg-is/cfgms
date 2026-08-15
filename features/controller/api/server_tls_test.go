@@ -4,6 +4,8 @@ package api
 
 import (
 	"crypto/tls"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,4 +81,58 @@ func TestSetupManagedTLS_SingleServerMode_VerifyClientCertIfGiven(t *testing.T) 
 		"SingleServerMode manager must set VerifyClientCertIfGiven (certManager drives the policy)")
 	assert.NotNil(t, tlsConfig.ClientCAs,
 		"ClientCAs must be populated from the controller CA")
+}
+
+// writeLegacyCertFiles generates a server cert via a real cert.Manager and writes
+// server.crt / server.key into dir so setupLegacyTLS can load them.
+func writeLegacyCertFiles(t *testing.T, dir string) {
+	t.Helper()
+	mgr := newTLSTestCertManager(t)
+	serverCert, err := mgr.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName: "test-legacy-tls",
+		DNSNames:   []string{"localhost"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server.crt"), serverCert.CertificatePEM, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "server.key"), serverCert.PrivateKeyPEM, 0600))
+}
+
+// TestSetupLegacyTLS_CWDIndependent verifies that setupLegacyTLS resolves server.crt
+// and server.key from an absolute cfg.CertPath even when the process working directory
+// is a completely different location (Issue #3197).
+func TestSetupLegacyTLS_CWDIndependent(t *testing.T) {
+	certDir := t.TempDir()
+	writeLegacyCertFiles(t, certDir)
+
+	// Move CWD to a directory that has no cert files.
+	otherDir := t.TempDir()
+	origWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(otherDir))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(origWD)) })
+
+	cfg := config.DefaultConfig()
+	cfg.CertPath = certDir // absolute path — must win regardless of CWD
+	s := &Server{cfg: cfg, logger: logging.NewNoopLogger()}
+
+	tlsConfig, err := s.setupLegacyTLS()
+	require.NoError(t, err,
+		"setupLegacyTLS must succeed when CertPath is absolute, even when CWD != cert dir")
+	require.NotNil(t, tlsConfig)
+}
+
+// TestSetupLegacyTLS_ExplicitAbsolutePathHonoured verifies that an explicitly
+// configured absolute CertPath is resolved correctly for server.crt/server.key
+// (Issue #3197).
+func TestSetupLegacyTLS_ExplicitAbsolutePathHonoured(t *testing.T) {
+	certDir := t.TempDir()
+	writeLegacyCertFiles(t, certDir)
+
+	cfg := config.DefaultConfig()
+	cfg.CertPath = certDir
+	s := &Server{cfg: cfg, logger: logging.NewNoopLogger()}
+
+	tlsConfig, err := s.setupLegacyTLS()
+	require.NoError(t, err, "explicit absolute CertPath must be honoured by setupLegacyTLS")
+	require.NotNil(t, tlsConfig)
 }
