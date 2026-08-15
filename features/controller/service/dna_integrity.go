@@ -118,28 +118,16 @@ func checkDNAIntegrity(dna *common.DNA, ct configType) dnaIntegrityResult {
 	return checkDNAIntegrityWithTable(dna, ct, dnaRequiredFields)
 }
 
-// flattenDNAFragments decodes each fragment in frags and merges their string
-// key-value pairs into a single map. Keys with empty or non-string values are
-// omitted. Fragments with malformed canonical bytes are silently skipped —
-// hostile input from a compromised steward must not prevent checking the
-// well-formed ones.
-func flattenDNAFragments(frags []*common.Fragment) map[string]string {
-	flat := make(map[string]string)
-	for _, frag := range frags {
-		if len(frag.CanonicalBytes) == 0 {
-			continue
-		}
-		decoded, err := sdna.DecodeCanonicalFragment(frag.CanonicalBytes)
-		if err != nil {
-			continue
-		}
-		for k, v := range decoded {
-			if s, ok := v.(string); ok && s != "" {
-				flat[k] = s
-			}
-		}
-	}
-	return flat
+// flattenDNAFragments decodes dna's fragments and merges their string
+// key-value pairs into a single map.
+//
+// The projection itself lives in sdna.FlattenFragments because the DNA-sync
+// ingest path needs the identical mapping (features/controller/transport
+// /dna_handler.go rebuilds DNA.Attributes from fragments). Two copies of "how a
+// fragment becomes a flat attribute" would let the integrity check and the
+// stored record disagree about what a snapshot contains.
+func flattenDNAFragments(dna *common.DNA) map[string]string {
+	return sdna.FlattenFragments(dna.GetFragments())
 }
 
 // checkDNAIntegrityWithTable is the table-parameterised implementation. Tests
@@ -159,7 +147,7 @@ func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[config
 		// Conservative default: unknown config types have no declared contract.
 		return dnaIntegrityResult{valid: true}
 	}
-	flat := flattenDNAFragments(dna.Fragments)
+	flat := flattenDNAFragments(dna)
 	var missing []string
 	for _, field := range required {
 		if flat[field] == "" {

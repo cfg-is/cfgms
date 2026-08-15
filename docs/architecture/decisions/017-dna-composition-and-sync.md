@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
-**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority
+**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority; 2026-08-15 — [Amendment 4](#amendment-4-2026-08-15--dnatransferattributes-retired-from-the-full-sync-wire-protocol): `DNATransfer.Attributes` retired from the full-sync wire protocol
 **Issue:** #2901
 **Epic:** #2852 — DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph (ADR-017)
 
@@ -315,3 +315,64 @@ module-ownership exclusion filter keeps gatherer output from ever competing with
 module-owned kind (clause 5 atomicity). The flat collector's full retirement and
 the `commonpb.DNA.attributes` removal are deferred to a follow-on clean-break epic
 that also re-homes the Reports Engine off the flat `DNARecord` store.
+
+## Amendment 4 (2026-08-15) — `DNATransfer.Attributes` retired from the full-sync wire protocol
+
+**Status:** Accepted (2026-08-15, Issue #3322)
+
+**Context.** Amendment 3 noted two consumers that were not yet fragment-aware:
+(1) the `sync_dna` attribute payload (`DNATransfer.Attributes`) that Amendment 3
+described as feeding the controller's required-field integrity check, and (2) the
+unmanaged-drift detector. Issue #3319 re-homed the required-field integrity check
+onto `DNA.Fragments`, removing dependency (1). The `DNATransfer.Attributes` blob
+was the only remaining use of the flat map on the full-sync wire path.
+
+**Decision.** `DNATransfer.Attributes` is no longer populated by the steward on
+the full-sync path (`features/steward/client/client_transport.go`) and is no
+longer read by the controller's `reassembleDNA`
+(`features/controller/transport/dna_handler.go`). Both ends are now
+Fragments-only. The struct field itself (`pkg/dataplane/types/transfers.go`) is
+retained for now and will be removed in story #15 once the field is confirmed
+unused on both ends.
+
+The delta-sync path was already Fragments-only (it has never populated
+`Attributes`) and is unaffected.
+
+**`commonpb.DNA.attributes` is not retired by this amendment — the wire field is.**
+The `common.DNA` that `reassembleDNA` returns is not merely a decode of the wire:
+`ControllerService.SyncDNA` assigns it wholesale (`steward.DNA = dna`), making it
+the controller's canonical steward record. Leaving its flat map unset would
+therefore *erase* attributes fleet-wide on each steward's first full sync, and
+these consumers have not yet been re-homed onto `DNA.Fragments`:
+
+| Consumer | Effect of a blank map |
+|---|---|
+| role-policy selector matching (`features/controller/service/config_service_v2.go` → `fleet.matchesFilter`) | positive-match only, so `os`/`hostname` selectors stop matching and role config — including security baselines — stops being delivered |
+| fleet inventory, attribute filter, module list (`features/controller/api/handlers_stewards.go`) | hostname/OS/arch blank; attribute filters match nothing |
+| DNA fingerprint, attribute projection, attribute index (`features/controller/fleet/storage/`) | OS/platform-scoped patch and vulnerability targeting resolves to zero hosts |
+| re-registration change detection (`features/controller/service/controller_service.go`) | `AttributeCount` compares permanently 0 against a non-zero incoming count |
+
+Each failure is fail-closed rather than fail-open, but silent and fleet-wide.
+
+So `reassembleDNA` **derives** `DNA.Attributes`/`DNA.AttributeCount` from the
+received fragments via `sdna.FlattenFragments` — the same projection the
+required-field integrity check uses (`features/controller/service/dna_integrity.go`).
+The wire stays Fragments-only, the fragments stay authoritative, and no wire-supplied
+attribute can enter the record: a transfer that still carries an `Attributes` blob
+has it ignored entirely (`TestReassembleDNA_IgnoresWireAttributes`). The projection
+merges fragments in ascending `fragment_id` order so the DNA fingerprint the
+controller hashes from it is stable across identical snapshots. The projection and
+the two `commonpb.DNA` fields are removed together once the consumers above read
+fragments directly (epic #2911).
+
+**Steward-identity security gate.** The `firstChunk.GetStewardId() != peerID`
+check in `HandleGRPC` gates all DNA ingest regardless of wire format; it precedes
+`reassembleDNA` and is unaffected by the Fragments-only rewrite. No identity or
+tenant check on the full-sync path was removed.
+
+**Note.** Non-cluster module DNA (file, service, package resources) reaches the
+controller through `CollectModuleFragments`, whose fragment coverage beyond
+`cluster:*` is tracked by Issue #3333. Attributes that no fragment carries are
+therefore absent from the full-sync projection above until #3333 lands; they
+continue to reach the controller through `PublishDNAUpdate`'s control-plane
+delta, which is unaffected by this amendment.

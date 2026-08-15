@@ -4,6 +4,7 @@ package dna
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -264,6 +265,54 @@ func NewFragment(fragmentID, authority string, state modules.ConfigState) (*comm
 		CanonicalBytes: canonical,
 		FragmentHash:   FragmentHash(canonical),
 	}, nil
+}
+
+// FlattenFragments decodes every fragment's canonical bytes and merges their
+// string key-value pairs into a single flat map — the projection of ADR-017
+// fragment state onto the flat attribute shape that controller-side consumers
+// (fleet inventory, role-policy selectors, DNA fingerprinting, attribute
+// filters) still read.
+//
+// Keys whose value is not a non-empty string are omitted: the flat projection is
+// a string map by contract, and an empty value is indistinguishable from an
+// absent one to every consumer.
+//
+// Fragments with empty or malformed canonical bytes are skipped rather than
+// failing the whole projection. Canonical bytes arrive from stewards, which per
+// the threat model run on hosts that may be compromised, so one hostile fragment
+// must not blank out the well-formed ones.
+//
+// Merge order is deterministic: fragments are visited in ascending fragment-ID
+// order, so when two fragments declare the same key the highest fragment ID
+// wins, every time. Determinism is load-bearing — the controller hashes this
+// projection into the DNA fingerprint
+// (features/controller/fleet/storage/storage.go), and a map-iteration-order
+// merge would make that fingerprint flap between identical snapshots.
+func FlattenFragments(frags []*commonpb.Fragment) map[string]string {
+	ordered := make([]*commonpb.Fragment, 0, len(frags))
+	for _, frag := range frags {
+		if frag == nil || len(frag.GetCanonicalBytes()) == 0 {
+			continue
+		}
+		ordered = append(ordered, frag)
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].GetFragmentId() < ordered[j].GetFragmentId()
+	})
+
+	flat := make(map[string]string)
+	for _, frag := range ordered {
+		decoded, err := DecodeCanonicalFragment(frag.GetCanonicalBytes())
+		if err != nil {
+			continue
+		}
+		for k, v := range decoded {
+			if s, ok := v.(string); ok && s != "" {
+				flat[k] = s
+			}
+		}
+	}
+	return flat
 }
 
 // PartitionHostFacts reads the already-populated flat attributes map (written by

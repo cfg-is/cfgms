@@ -754,55 +754,81 @@ func reassembleDNATransfer(chunks []*transportpb.DNAChunk, stewardID string) (*d
 }
 
 // reassembleDNA concatenates the chunk payloads (ordered by ChunkIndex) into the
-// JSON-encoded DNATransfer the steward streamed, then decodes its Attributes into
-// a common.DNA. It mirrors dnaTransferToChunks on the send side: the whole
-// DNATransfer is JSON-marshalled and split into ≤64 KB DNAChunk.Data segments,
-// and DNATransfer.Attributes is itself the JSON of the attribute map.
+// JSON-encoded DNATransfer the steward streamed, then decodes its FragmentBytes into
+// a common.DNA. The wire protocol is Fragments-only: the Attributes field of
+// DNATransfer is no longer populated by stewards and is never read here — a
+// transfer that carries an Attributes blob anyway has it ignored entirely
+// (Issue #3322).
+//
+// # Why the returned DNA still carries a flat attribute map
+//
+// The returned common.DNA is not just a decode of the wire: it is the controller's
+// canonical steward record. ControllerService.SyncDNA assigns it wholesale
+// (steward.DNA = dna), so any field left unset here is *erased* from the record on
+// the steward's first full sync. Several controller subsystems still read
+// DNA.Attributes and have not yet been re-homed onto DNA.Fragments:
+//
+//   - role-policy selector matching (features/controller/service/config_service_v2.go
+//     → fleet.matchesFilter), which is positive-match only, so a blank map silently
+//     stops delivering role config — including security baselines;
+//   - fleet inventory, attribute filters and the module list
+//     (features/controller/api/handlers_stewards.go);
+//   - the DNA fingerprint, attribute projection and attribute index
+//     (features/controller/fleet/storage/), which os/platform-scoped patch and
+//     vulnerability targeting resolve through;
+//   - re-registration change detection, which compares AttributeCount
+//     (features/controller/service/controller_service.go).
+//
+// So the flat map is rebuilt here *from the fragments themselves* via
+// sdna.FlattenFragments — the same projection the required-field integrity check
+// uses (features/controller/service/dna_integrity.go). The wire stays
+// Fragments-only, the fragments stay authoritative, and no consumer goes blank
+// mid-migration. When those consumers read fragments directly, this projection and
+// the Attributes/AttributeCount fields go away together.
+//
+// The steward-identity check (firstChunk.GetStewardId() != peerID) is enforced in
+// HandleGRPC before this function is called; reassembleDNA receives an
+// already-verified stewardID.
 func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DNA, error) {
 	transfer, err := reassembleDNATransfer(chunks, stewardID)
 	if err != nil {
 		return nil, err
 	}
 
-	attrs := map[string]string{}
+	// Fragment count and per-fragment size are bounded BEFORE any decode. A
+	// malformed fragment is skipped (rejecting the sync would black-hole an
+	// otherwise valid DNA update), but an out-of-bounds count or size is
+	// rejected outright: that is not the shape a healthy steward produces, and
+	// persisting it would hand the controller a repeatable decode amplifier.
+	if len(transfer.FragmentBytes) > maxDNATransferFragments {
+		return nil, fmt.Errorf("fragment count %d exceeds maximum %d",
+			len(transfer.FragmentBytes), maxDNATransferFragments)
+	}
 	var frags []*common.Fragment
-	if len(transfer.Attributes) > 0 {
-		if err := json.Unmarshal(transfer.Attributes, &attrs); err != nil {
-			return nil, fmt.Errorf("unmarshal DNA attributes: %w", err)
+	for _, fb := range transfer.FragmentBytes {
+		if len(fb) > maxDNAFragmentBytes {
+			return nil, fmt.Errorf("fragment of %d bytes exceeds maximum %d",
+				len(fb), maxDNAFragmentBytes)
 		}
-		// ADR-017 fragments ride alongside the flat attribute map (#2908).
-		//
-		// Fragment count and per-fragment size are bounded BEFORE any decode. A
-		// malformed fragment is skipped (the flat attributes remain authoritative
-		// for steward identity, and rejecting the sync would black-hole an
-		// otherwise valid DNA update), but an out-of-bounds count or size is
-		// rejected outright: that is not the shape a healthy steward produces, and
-		// persisting it would hand the controller a repeatable decode amplifier.
-		if len(transfer.FragmentBytes) > maxDNATransferFragments {
-			return nil, fmt.Errorf("fragment count %d exceeds maximum %d",
-				len(transfer.FragmentBytes), maxDNATransferFragments)
+		frag := &common.Fragment{}
+		if err := proto.Unmarshal(fb, frag); err != nil {
+			continue
 		}
-		for _, fb := range transfer.FragmentBytes {
-			if len(fb) > maxDNAFragmentBytes {
-				return nil, fmt.Errorf("fragment of %d bytes exceeds maximum %d",
-					len(fb), maxDNAFragmentBytes)
-			}
-			frag := &common.Fragment{}
-			if err := proto.Unmarshal(fb, frag); err != nil {
-				continue
-			}
-			frags = append(frags, frag)
-		}
+		frags = append(frags, frag)
 	}
 
+	// Flat projection of the fragments, for the not-yet-re-homed consumers listed
+	// above. Derived from decoded fragment state — never from transfer.Attributes.
+	attrs := sdna.FlattenFragments(frags)
 	if len(attrs) > math.MaxInt32 {
 		return nil, fmt.Errorf("DNA attribute count exceeds int32 limit")
 	}
+
 	// #nosec G115 -- attribute count is explicitly bounded by MaxInt32 above.
 	return &common.DNA{
 		Id:             stewardID,
+		Fragments:      frags,
 		Attributes:     attrs,
 		AttributeCount: int32(len(attrs)),
-		Fragments:      frags,
 	}, nil
 }

@@ -389,7 +389,7 @@ func TestSyncDNAHandler_SendsFullDNAOverDataPlane(t *testing.T) {
 		assert.Equal(t, "steward-1", transfer.StewardID)
 		assert.Equal(t, "tenant-1", transfer.TenantID)
 		assert.False(t, transfer.Delta, "full sync must set Delta=false")
-		assert.NotEmpty(t, transfer.Attributes, "attributes payload must be non-empty")
+		assert.Nil(t, transfer.Attributes, "Attributes must not be populated on the wire (Issue #3322)")
 		assert.Equal(t, "cmd-sync-dna-1", transfer.Metadata["command_id"])
 		assert.Equal(t, "2", transfer.Metadata["attr_count"])
 	case <-time.After(250 * time.Millisecond):
@@ -522,7 +522,7 @@ func TestSyncDNAHandler_NilCollector_NoFragments(t *testing.T) {
 		require.NotNil(t, transfer)
 		assert.Empty(t, transfer.FragmentBytes, "no collector means no fragments")
 		assert.Equal(t, "0", transfer.Metadata["fragment_count"])
-		assert.NotEmpty(t, transfer.Attributes, "flat attributes must still be sent")
+		assert.Nil(t, transfer.Attributes, "Attributes must not be populated on the wire (Issue #3322)")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for sync_dna handler to call SendDNA")
 	}
@@ -572,8 +572,7 @@ func TestSyncDNAHandler_EmptyPublishCache_UsesCurrentAttrs(t *testing.T) {
 	select {
 	case transfer := <-sess.dnaSent:
 		require.NotNil(t, transfer)
-		assert.NotEmpty(t, transfer.Attributes,
-			"handler must stream non-empty snapshot even with empty publish cache")
+		assert.Nil(t, transfer.Attributes, "Attributes must not be populated on the wire (Issue #3322)")
 		assert.Equal(t, expectedHash, transfer.Metadata["dna_hash"],
 			"streamed dna_hash must match the hash of the current snapshot")
 		assert.Equal(t, "3", transfer.Metadata["attr_count"],
@@ -671,8 +670,7 @@ func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorSucceeds(t *testing.T) {
 		require.NotNil(t, transfer)
 		// The handler must have called RefreshCurrentDNA which enriches rawAttrs
 		// with steward.version — so attr_count must be at least 3.
-		require.NotEmpty(t, transfer.Attributes,
-			"handler must send a non-empty snapshot when RefreshCurrentDNA succeeds")
+		assert.Nil(t, transfer.Attributes, "Attributes must not be populated on the wire (Issue #3322)")
 		attrCount := transfer.Metadata["attr_count"]
 		require.NotEqual(t, "0", attrCount,
 			"attr_count must be > 0 after a successful refresh")
@@ -684,9 +682,9 @@ func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorSucceeds(t *testing.T) {
 // TestSyncDNAHandler_EmptyCurrentAttrs_CollectorFails covers the fallback
 // branch of the sync_dna handler (client_transport.go) sub-path B:
 // currentDNAAttrs is empty AND RefreshCurrentDNA fails — no snapshot can be
-// produced. A full DNA sync must never send an empty attribute set (that would
-// tell the controller the steward has no DNA and clobber its record), so the
-// handler must fail the command and MUST NOT call SendDNA.
+// produced. A full DNA sync must never send an empty transfer with no DNA state
+// (that would tell the controller the steward has no DNA and clobber its
+// record), so the handler must fail the command and MUST NOT call SendDNA.
 func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorFails(t *testing.T) {
 	c := newMinimalClient(t)
 	c.stewardID = "steward-refresh-fail"
@@ -730,8 +728,7 @@ func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorFails(t *testing.T) {
 // TestSyncDNAHandler_EmptyCurrentAttrs_CollectorReturnsEmpty covers the fallback
 // branch sub-path where RefreshCurrentDNA returns nil (no error) but the
 // collector yields an empty attribute set, so currentDNAAttrs stays empty. The
-// handler must still refuse to stream an empty full-DNA snapshot and fail the
-// command instead.
+// handler must still refuse to proceed with no DNA state and fail the command instead.
 func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorReturnsEmpty(t *testing.T) {
 	c := newMinimalClient(t)
 	c.stewardID = "steward-refresh-empty"
@@ -1272,7 +1269,7 @@ func TestSyncDNAHandler_NoFragmentIDs_FullSync_Regression(t *testing.T) {
 	case transfer := <-sess.dnaSent:
 		assert.False(t, transfer.Delta, "full sync (no fragment_ids) must set Delta=false")
 		assert.Nil(t, transfer.Fragments, "full sync must not carry fragments")
-		assert.NotEmpty(t, transfer.Attributes, "full sync must carry attributes")
+		assert.Nil(t, transfer.Attributes, "Attributes must not be populated on the wire (Issue #3322)")
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("timed out waiting for full sync_dna to call SendDNA")
 	}
@@ -1318,7 +1315,7 @@ func TestSyncDNAHandler_PartialSync_NoFragmentState_FallsBackToFullSync(t *testi
 	case transfer := <-sess.dnaSent:
 		assert.False(t, transfer.Delta, "fallback must produce a full sync with Delta=false")
 		assert.Nil(t, transfer.Fragments, "fallback must not carry fragments")
-		assert.NotEmpty(t, transfer.Attributes)
+		assert.Nil(t, transfer.Attributes, "Attributes must not be populated on the wire (Issue #3322)")
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("timed out waiting for fallback to full sync")
 	}
