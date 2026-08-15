@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,10 +15,58 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// makeValidDNA returns a DNA snapshot that satisfies the full-os-device required set.
+// realGathererInitialDNA builds a DNA snapshot the way a real steward's
+// PartitionHostFacts (features/steward/dna/fragments.go) actually produces
+// fragments at first registration: no ownership declarations (no module
+// resource configured yet, including hostname), only the gatherer's host:*
+// facts. This is the exact shape flagged in the PR #3358 acceptance review —
+// hand-built `mustFragment("hostname", ...)` fixtures elsewhere in this file
+// mask the fact that production never emits a "hostname"-kind fragment this
+// early, so this helper exercises the real production path instead.
+func realGathererInitialDNA(t *testing.T, id, hostname, osName string) *commonpb.DNA {
+	t.Helper()
+	attrs := map[string]string{
+		"hostname": hostname,
+		"os":       osName,
+	}
+	fragments, envelopes, err := sdna.PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
+	require.NoError(t, err)
+	return &commonpb.DNA{
+		Id:              id,
+		SyncFingerprint: "fp-" + id,
+		Fragments:       fragments,
+		Envelopes:       envelopes,
+	}
+}
+
+// mustFragment builds a fragment from a field map, panicking on error.
+// For test helpers that cannot accept *testing.T (e.g. makeValidDNA).
+func mustFragment(kind string, fields map[string]interface{}) *commonpb.Fragment {
+	frag, err := sdna.NewFragment(kind, "test", sdna.MapState(fields))
+	if err != nil {
+		panic(fmt.Sprintf("mustFragment %q: %v", kind, err))
+	}
+	return frag
+}
+
+// makeTestFragment builds a fragment from a field map with proper test failure
+// reporting. Use in test bodies where *testing.T is available.
+func makeTestFragment(t *testing.T, kind string, fields map[string]interface{}) *commonpb.Fragment {
+	t.Helper()
+	frag, err := sdna.NewFragment(kind, "test", sdna.MapState(fields))
+	require.NoError(t, err)
+	return frag
+}
+
+// makeValidDNA returns a DNA snapshot that satisfies the full-os-device required
+// set. Both Fragments (the authoritative check target per Issue #3319) and
+// Attributes (legacy — kept so integration-test assertions on info.DNA.Attributes
+// continue to hold) are populated.
 func makeValidDNA(id string) *commonpb.DNA {
 	return &commonpb.DNA{
 		Id:              id,
@@ -25,6 +74,10 @@ func makeValidDNA(id string) *commonpb.DNA {
 		Attributes: map[string]string{
 			"hostname": "host-" + id,
 			"os":       "linux",
+		},
+		Fragments: []*commonpb.Fragment{
+			mustFragment("hostname", map[string]interface{}{"hostname": "host-" + id}),
+			mustFragment("host:os", map[string]interface{}{"os": "linux"}),
 		},
 	}
 }
@@ -37,8 +90,8 @@ func TestCheckDNAIntegrity_NilDNA(t *testing.T) {
 	assert.NotEmpty(t, result.missingFields)
 }
 
-func TestCheckDNAIntegrity_EmptyAttributes(t *testing.T) {
-	dna := &commonpb.DNA{Id: "dev-1", Attributes: map[string]string{}}
+func TestCheckDNAIntegrity_NoFragments(t *testing.T) {
+	dna := &commonpb.DNA{Id: "dev-1", Fragments: nil}
 	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
 	assert.False(t, result.valid)
 	assert.Contains(t, result.missingFields, "hostname")
@@ -47,8 +100,10 @@ func TestCheckDNAIntegrity_EmptyAttributes(t *testing.T) {
 
 func TestCheckDNAIntegrity_MissingHostname(t *testing.T) {
 	dna := &commonpb.DNA{
-		Id:         "dev-1",
-		Attributes: map[string]string{"os": "linux"},
+		Id: "dev-1",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
 	}
 	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
 	assert.False(t, result.valid)
@@ -58,8 +113,10 @@ func TestCheckDNAIntegrity_MissingHostname(t *testing.T) {
 
 func TestCheckDNAIntegrity_MissingOS(t *testing.T) {
 	dna := &commonpb.DNA{
-		Id:         "dev-1",
-		Attributes: map[string]string{"hostname": "myhost"},
+		Id: "dev-1",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+		},
 	}
 	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
 	assert.False(t, result.valid)
@@ -68,9 +125,15 @@ func TestCheckDNAIntegrity_MissingOS(t *testing.T) {
 }
 
 func TestCheckDNAIntegrity_EmptyHostnameValue(t *testing.T) {
+	// A fragment carrying hostname with an empty value must be treated as missing.
 	dna := &commonpb.DNA{
-		Id:         "dev-1",
-		Attributes: map[string]string{"hostname": "", "os": "linux"},
+		Id: "dev-1",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "host:os", map[string]interface{}{
+				"hostname": "",
+				"os":       "linux",
+			}),
+		},
 	}
 	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
 	assert.False(t, result.valid)
@@ -78,9 +141,15 @@ func TestCheckDNAIntegrity_EmptyHostnameValue(t *testing.T) {
 }
 
 func TestCheckDNAIntegrity_EmptyOSValue(t *testing.T) {
+	// A fragment carrying os with an empty value must be treated as missing.
 	dna := &commonpb.DNA{
-		Id:         "dev-1",
-		Attributes: map[string]string{"hostname": "myhost", "os": ""},
+		Id: "dev-1",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{
+				"hostname": "myhost",
+				"os":       "",
+			}),
+		},
 	}
 	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
 	assert.False(t, result.valid)
@@ -89,8 +158,11 @@ func TestCheckDNAIntegrity_EmptyOSValue(t *testing.T) {
 
 func TestCheckDNAIntegrity_ValidCoreIdentity(t *testing.T) {
 	dna := &commonpb.DNA{
-		Id:         "dev-1",
-		Attributes: map[string]string{"hostname": "myhost", "os": "linux"},
+		Id: "dev-1",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
 	}
 	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
 	assert.True(t, result.valid)
@@ -101,10 +173,12 @@ func TestCheckDNAIntegrity_ValidCoreIdentity(t *testing.T) {
 func TestCheckDNAIntegrity_ValidWithOptionalFieldsAbsent(t *testing.T) {
 	dna := &commonpb.DNA{
 		Id: "dev-1",
-		Attributes: map[string]string{
-			"hostname": "myhost",
-			"os":       "windows",
-			// vm_count intentionally omitted
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{
+				"os": "windows",
+				// vm_count intentionally omitted
+			}),
 		},
 	}
 	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
@@ -114,16 +188,130 @@ func TestCheckDNAIntegrity_ValidWithOptionalFieldsAbsent(t *testing.T) {
 
 // Unknown config type has no contract; conservative default is valid.
 func TestCheckDNAIntegrity_UnknownConfigType(t *testing.T) {
-	dna := &commonpb.DNA{Id: "dev-1", Attributes: map[string]string{}}
+	dna := &commonpb.DNA{Id: "dev-1", Fragments: nil}
 	result := checkDNAIntegrity(dna, configType("unknown-type"))
 	assert.True(t, result.valid)
 }
 
+// --- Hostile-input branches of flattenDNAFragments ---
+//
+// Every fragment field flattenDNAFragments reads is steward-supplied, and a
+// steward may be compromised (CLAUDE.md threat model). The three skip branches
+// below are the guard's whole tolerance for malformed input: each one must be
+// exercised so a regression that turns a silent skip into a panic, a hard error,
+// or an incorrect field read is caught here rather than fleet-wide.
+
+// TestFlattenDNAFragments_EmptyCanonicalBytesTreatedAsAbsent covers branch 1: a
+// fragment carrying no canonical bytes contributes no keys and does not stop the
+// well-formed fragments beside it from being flattened.
+func TestFlattenDNAFragments_EmptyCanonicalBytesTreatedAsAbsent(t *testing.T) {
+	dna := &commonpb.DNA{
+		Id: "dev-empty-bytes",
+		Fragments: []*commonpb.Fragment{
+			{FragmentId: "hostname", Authority: "test", CanonicalBytes: nil},
+			{FragmentId: "host:os", Authority: "test", CanonicalBytes: []byte{}},
+			makeTestFragment(t, "host:cpu", map[string]interface{}{"cpu_count": "8"}),
+		},
+	}
+
+	flat := flattenDNAFragments(dna)
+	assert.NotContains(t, flat, "hostname", "a nil-canonical-bytes fragment must contribute no keys")
+	assert.NotContains(t, flat, "os", "an empty-canonical-bytes fragment must contribute no keys")
+	assert.Equal(t, "8", flat["cpu_count"], "well-formed fragments beside empty ones must still flatten")
+
+	// The guard sees both required fields as missing, and does not panic.
+	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
+	assert.False(t, result.valid)
+	assert.Contains(t, result.missingFields, "hostname")
+	assert.Contains(t, result.missingFields, "os")
+}
+
+// TestFlattenDNAFragments_MalformedCanonicalBytesTreatedAsAbsent covers branch 2:
+// bytes that DecodeCanonicalFragment rejects (garbage, and a truncation of a real
+// payload) are skipped, and a well-formed fragment in the same snapshot still
+// flattens.
+func TestFlattenDNAFragments_MalformedCanonicalBytesTreatedAsAbsent(t *testing.T) {
+	// A real fragment, truncated mid-payload: the header still declares entries
+	// the buffer no longer contains, so the decoder rejects it.
+	good := makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"})
+	require.Greater(t, len(good.CanonicalBytes), 6, "fixture must be long enough to truncate")
+	truncated := &commonpb.Fragment{
+		FragmentId:     "hostname",
+		Authority:      "test",
+		CanonicalBytes: good.CanonicalBytes[:len(good.CanonicalBytes)-3],
+	}
+	_, decodeErr := sdna.DecodeCanonicalFragment(truncated.CanonicalBytes)
+	require.Error(t, decodeErr, "truncated bytes must be undecodable for this test to exercise branch 2")
+
+	garbage := &commonpb.Fragment{
+		FragmentId:     "host:bios",
+		Authority:      "test",
+		CanonicalBytes: []byte{0xff, 0xff, 0xff, 0xff, 0x00},
+	}
+	_, garbageErr := sdna.DecodeCanonicalFragment(garbage.CanonicalBytes)
+	require.Error(t, garbageErr, "garbage bytes must be undecodable for this test to exercise branch 2")
+
+	dna := &commonpb.DNA{
+		Id: "dev-malformed",
+		Fragments: []*commonpb.Fragment{
+			truncated,
+			garbage,
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
+	}
+
+	flat := flattenDNAFragments(dna)
+	assert.NotContains(t, flat, "hostname", "keys of an undecodable fragment must be treated as absent")
+	assert.Equal(t, "linux", flat["os"], "a malformed fragment must not suppress the well-formed ones")
+
+	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
+	assert.False(t, result.valid)
+	assert.Contains(t, result.missingFields, "hostname")
+	assert.NotContains(t, result.missingFields, "os")
+}
+
+// TestFlattenDNAFragments_NonStringValueNotPromoted covers branch 3: a decoded
+// key whose value is not a string (int64, uint64, bool, float64, nested map,
+// slice, null) is omitted from the flat map rather than being coerced.
+func TestFlattenDNAFragments_NonStringValueNotPromoted(t *testing.T) {
+	frag := makeTestFragment(t, "host:mixed", map[string]interface{}{
+		"hostname":     int64(42),                             // I tag → int64
+		"cpu_count":    uint64(8),                             // U tag → uint64
+		"virtualized":  true,                                  // B tag → bool
+		"load_average": 1.5,                                   // F tag → float64
+		"nested":       map[string]interface{}{"os": "linux"}, // M tag → map
+		"tags":         []string{"a", "b"},                    // L tag → slice
+		"absent":       nil,                                   // N tag → nil
+		"os":           "windows",                             // S tag → string (control)
+	})
+
+	// The decoder must genuinely hand back non-string types, otherwise this test
+	// would pass without exercising the branch.
+	decoded, err := sdna.DecodeCanonicalFragment(frag.CanonicalBytes)
+	require.NoError(t, err)
+	require.IsType(t, int64(0), decoded["hostname"])
+	require.IsType(t, uint64(0), decoded["cpu_count"])
+
+	dna := &commonpb.DNA{Id: "dev-nonstring", Fragments: []*commonpb.Fragment{frag}}
+
+	flat := flattenDNAFragments(dna)
+	for _, key := range []string{"hostname", "cpu_count", "virtualized", "load_average", "nested", "tags", "absent"} {
+		assert.NotContains(t, flat, key, "non-string value for %q must not be promoted to the flat map", key)
+	}
+	assert.Equal(t, "windows", flat["os"], "string values must still be promoted")
+
+	// A required field present only as a non-string value is reported missing.
+	result := checkDNAIntegrity(dna, configTypeFullOSDevice)
+	assert.False(t, result.valid)
+	assert.Contains(t, result.missingFields, "hostname")
+	assert.NotContains(t, result.missingFields, "os")
+}
+
 // --- Integration tests: SyncDNA write guard ---
 
-// TestSyncDNA_RejectsDegenerateDNA verifies that a degenerate snapshot (missing
-// hostname/os) is rejected: in-memory DNA and durable history stay at the prior
-// good snapshot.
+// TestSyncDNA_RejectsDegenerateDNA verifies that a degenerate snapshot (no
+// fragments → hostname and os absent) is rejected: in-memory DNA and durable
+// history stay at the prior good snapshot.
 func TestSyncDNA_RejectsDegenerateDNA_PriorSnapshotUnchanged(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	log := logging.NewCapturingLogger()
@@ -142,7 +330,7 @@ func TestSyncDNA_RejectsDegenerateDNA_PriorSnapshotUnchanged(t *testing.T) {
 	svc.mu.Unlock()
 	require.NoError(t, storage.Store(ctx, "dev-1", goodDNA, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
 
-	// Sync degenerate snapshot (missing hostname and os).
+	// Sync degenerate snapshot (no fragments → missing hostname and os).
 	degenerateDNA := &commonpb.DNA{Id: "dev-1", Attributes: map[string]string{}}
 	_, err := svc.SyncDNA(ctx, degenerateDNA)
 	require.NoError(t, err)
@@ -165,8 +353,8 @@ func TestSyncDNA_RejectsDegenerateDNA_PriorSnapshotUnchanged(t *testing.T) {
 	assert.True(t, found, "expected dna_integrity_rejected WARN log entry")
 }
 
-// TestSyncDNA_RejectsNilAttributesDNA verifies that a nil-attributes DNA
-// snapshot is also rejected by the SyncDNA path.
+// TestSyncDNA_RejectsNilAttributesDNA verifies that a DNA with no fragments is
+// also rejected by the SyncDNA path.
 func TestSyncDNA_RejectsNilAttributesDNA(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
@@ -184,7 +372,7 @@ func TestSyncDNA_RejectsNilAttributesDNA(t *testing.T) {
 	svc.mu.Unlock()
 	require.NoError(t, storage.Store(ctx, "dev-2", goodDNA, &fleetStorage.StoreOptions{TenantID: "tenant-b", Status: "active"}))
 
-	emptyDNA := &commonpb.DNA{Id: "dev-2"} // nil Attributes map
+	emptyDNA := &commonpb.DNA{Id: "dev-2"} // nil Attributes and nil Fragments
 	_, err := svc.SyncDNA(ctx, emptyDNA)
 	require.NoError(t, err)
 
@@ -219,6 +407,10 @@ func TestSyncDNA_AcceptsValidDNA(t *testing.T) {
 	secondDNA := &commonpb.DNA{
 		Id:         "dev-3",
 		Attributes: map[string]string{"hostname": "host-dev-3-renamed", "os": "linux"},
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "host-dev-3-renamed"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
 	}
 	status, err := svc.SyncDNA(ctx, secondDNA)
 	require.NoError(t, err)
@@ -252,7 +444,13 @@ func TestSyncDNA_AcceptsValidDNA_OptionalFieldsAbsent(t *testing.T) {
 		Attributes: map[string]string{
 			"hostname": "myhost",
 			"os":       "macos",
-			// vm_count absent — must not block
+		},
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{
+				"os": "macos",
+				// vm_count absent — must not block
+			}),
 		},
 	}
 	status, err := svc.SyncDNA(ctx, dna)
@@ -307,10 +505,13 @@ func TestSyncDNA_WarnLogContainsStewardIDAndMissingFields(t *testing.T) {
 	}
 	svc.mu.Unlock()
 
-	// DNA missing only "os".
+	// DNA with hostname in a fragment but no os fragment → only "os" is missing.
 	dna := &commonpb.DNA{
-		Id:         "dev-6",
-		Attributes: map[string]string{"hostname": "myhost"},
+		Id: "dev-6",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			// no host:os fragment — os is absent
+		},
 	}
 	_, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err)
@@ -322,7 +523,7 @@ func TestSyncDNA_WarnLogContainsStewardIDAndMissingFields(t *testing.T) {
 	_, hasStewardID := entry["steward_id"]
 	assert.True(t, hasStewardID)
 
-	// missing_fields value is a []string containing "os".
+	// missing_fields value is a []string containing "os" but not "hostname".
 	val, ok := entry["missing_fields"]
 	require.True(t, ok)
 	fields, isSlice := val.([]string)
@@ -397,6 +598,44 @@ func TestAcceptRegistration_AcceptsValidInitialDNA(t *testing.T) {
 	require.NotNil(t, record)
 }
 
+// TestAcceptRegistration_AcceptsRealGathererDNA_NoHostnameModuleConfigured is
+// the REQUIRED regression test for the PR #3358 acceptance review Finding #1:
+// a newly-registering steward with no hostname module resource configured
+// (the ordinary case — hostname is a declare-once identity module, not part
+// of the fixed stdlib baseline) must still be accepted, because the observed
+// hostname is now carried unconditionally in the host:os gatherer fragment
+// (Issue #3319/#3358 fix in features/steward/dna/fragments.go) rather than
+// only ever appearing in a module-owned "hostname" fragment that doesn't
+// exist yet at registration time.
+func TestAcceptRegistration_AcceptsRealGathererDNA_NoHostnameModuleConfigured(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	log := logging.NewCapturingLogger()
+	svc := NewControllerServiceWithStorage(log, storage)
+	ctx := context.Background()
+
+	req := &controllerpb.RegisterRequest{
+		Version:        "1.0.0",
+		InitialDna:     realGathererInitialDNA(t, "dna-real-1", "newly-registered-host", "linux"),
+		IsReconnection: false,
+	}
+	resp, err := svc.AcceptRegistration(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	stewardID := resp.StewardId
+
+	info, ok := svc.GetStewardInfo(stewardID)
+	require.True(t, ok)
+	require.NotNil(t, info.DNA, "DNA must be accepted: hostname is unconditionally present in host:os")
+
+	_, found := log.FindWarn("dna_integrity_rejected")
+	assert.False(t, found, "a healthy steward with no hostname module resource configured must not be rejected")
+
+	record, err := storage.GetLatestByDeviceID(ctx, stewardID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+}
+
 // TestAcceptRegistration_RejectsNilInitialDNA verifies a nil InitialDna is
 // handled without panic; registration succeeds structurally, DNA is left nil.
 func TestAcceptRegistration_RejectsNilInitialDNA(t *testing.T) {
@@ -459,19 +698,24 @@ owns:
 	assert.Contains(t, fields, "hostname")
 	assert.Contains(t, fields, "os")
 
-	// Confirm the guard rejects a DNA missing hostname.
+	// Confirm the guard rejects a DNA missing hostname (only os in fragments).
 	dnaNoHostname := &commonpb.DNA{
-		Id:         "dev-manifest-1",
-		Attributes: map[string]string{"os": "linux"},
+		Id: "dev-manifest-1",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
 	}
 	result := checkDNAIntegrityWithTable(dnaNoHostname, configTypeFullOSDevice, table)
 	assert.False(t, result.valid)
 	assert.Contains(t, result.missingFields, "hostname")
 
-	// Confirm the guard accepts a DNA with both fields.
+	// Confirm the guard accepts a DNA with both fields in fragments.
 	dnaFull := &commonpb.DNA{
-		Id:         "dev-manifest-2",
-		Attributes: map[string]string{"hostname": "myhost", "os": "linux"},
+		Id: "dev-manifest-2",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
 	}
 	result = checkDNAIntegrityWithTable(dnaFull, configTypeFullOSDevice, table)
 	assert.True(t, result.valid)
@@ -572,8 +816,11 @@ owns:
 	require.NoError(t, err)
 
 	dna := &commonpb.DNA{
-		Id:         "dev-ac2",
-		Attributes: map[string]string{"hostname": "myhost", "os": "linux"},
+		Id: "dev-ac2",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
 	}
 	result := checkDNAIntegrityWithTable(dna, configTypeFullOSDevice, table)
 	assert.True(t, result.valid, "DNA with hostname+os must pass before adding new required field")
@@ -604,10 +851,10 @@ owns:
 	// DNA with the new field passes.
 	dnaFull := &commonpb.DNA{
 		Id: "dev-ac2-full",
-		Attributes: map[string]string{
-			"hostname": "myhost",
-			"os":       "linux",
-			"region":   "us-east-1",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+			makeTestFragment(t, "region", map[string]interface{}{"region": "us-east-1"}),
 		},
 	}
 	resultFull := checkDNAIntegrityWithTable(dnaFull, configTypeFullOSDevice, tableAfter)
@@ -627,12 +874,15 @@ func TestBuildRequiredFields_StdlibManifests(t *testing.T) {
 
 	// Guard behaves identically to the pre-manifest hardcoded seed.
 	validDNA := &commonpb.DNA{
-		Id:         "dev-stdlib-valid",
-		Attributes: map[string]string{"hostname": "myhost", "os": "linux"},
+		Id: "dev-stdlib-valid",
+		Fragments: []*commonpb.Fragment{
+			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
+			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
 	}
 	assert.True(t, checkDNAIntegrity(validDNA, configTypeFullOSDevice).valid)
 
-	emptyDNA := &commonpb.DNA{Id: "dev-stdlib-empty", Attributes: map[string]string{}}
+	emptyDNA := &commonpb.DNA{Id: "dev-stdlib-empty", Fragments: nil}
 	result := checkDNAIntegrity(emptyDNA, configTypeFullOSDevice)
 	assert.False(t, result.valid)
 	assert.Contains(t, result.missingFields, "hostname")

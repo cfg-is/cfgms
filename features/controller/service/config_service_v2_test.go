@@ -80,14 +80,8 @@ func TestGetConfiguration_TaggedStewardReceivesRoleResource(t *testing.T) {
 	// Tenant ID is carried via context (set by auth middleware in production).
 	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
 
-	winDNA := &commonpb.DNA{
-		Id:         "steward-win",
-		Attributes: map[string]string{"os": "windows", "hostname": "win-host", "arch": "amd64"},
-	}
-	linuxDNA := &commonpb.DNA{
-		Id:         "steward-linux",
-		Attributes: map[string]string{"os": "linux", "hostname": "linux-host", "arch": "amd64"},
-	}
+	winDNA := makeTestDNA("steward-win", map[string]string{"os": "windows", "hostname": "win-host", "arch": "amd64"})
+	linuxDNA := makeTestDNA("steward-linux", map[string]string{"os": "linux", "hostname": "linux-host", "arch": "amd64"})
 
 	respWin, err := controllerSvc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
 		InitialDna: winDNA,

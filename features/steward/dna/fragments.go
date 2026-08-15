@@ -37,9 +37,13 @@ type fragmentSpec struct {
 //     change with CPU throttling on laptops/VMs.
 //   - host:memory: total physical memory capacity. Excludes current-usage keys
 //     (memory_free_kb, memory_available_kb, etc.) which change every second.
-//   - host:os: OS and kernel identity. Excludes kernel_info/kernel_build_info which
-//     embed a build timestamp, making them ephemeral. Excludes go_version/runtime_*
-//     which are steward-process attributes, not OS attributes.
+//   - host:os: OS and kernel identity, plus the observed hostname (a required
+//     full-os-device field per every stdlib module.yaml; carried here because
+//     it must be unconditionally available even before a hostname module
+//     resource is configured — see Issue #3319/#3358). Excludes
+//     kernel_info/kernel_build_info which embed a build timestamp, making
+//     them ephemeral. Excludes go_version/runtime_* which are
+//     steward-process attributes, not OS attributes.
 //   - host:bios: BIOS, motherboard, and system hardware identity. Includes
 //     virtualization_type/role because they are stable platform identity attributes
 //     (changing only on live migration, not at each collection).
@@ -121,6 +125,17 @@ var hostFactFragmentSpecs = []fragmentSpec{
 		keys: []string{
 			// Cross-platform runtime
 			"os",
+			// Host identity fact (Issue #3319/#3358): every stdlib module's
+			// module.yaml declares "hostname" as a required full-os-device
+			// field alongside "os". The hostname *module* owns the "hostname"
+			// fragment kind for desired-state management, but that fragment
+			// only exists once a hostname resource is explicitly configured —
+			// never at first registration. Carrying the observed hostname here
+			// too (sourced from the same unconditionally-populated
+			// attributes["hostname"] that "os" already reads) keeps the
+			// required-field presence check satisfiable for every steward,
+			// not only ones with a hostname module resource declared.
+			"hostname",
 			// Linux /etc/os-release
 			"os_name",
 			"os_version",
