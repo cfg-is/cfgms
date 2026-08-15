@@ -303,17 +303,19 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if steward.DNA != nil {
-			attrs := make(map[string]string, len(steward.DNA.Attributes)+1)
-			for k, v := range steward.DNA.Attributes {
-				attrs[k] = v
-			}
+			attrs := service.FlattenDNAFragments(steward.DNA.Fragments)
 			if steward.TenantID != "" {
-				attrs["tenant"] = steward.TenantID
+				merged := make(map[string]string, len(attrs)+1)
+				for k, v := range attrs {
+					merged[k] = v
+				}
+				merged["tenant"] = steward.TenantID
+				attrs = merged
 			}
 			info.DNA = &DNAInfo{
-				Hostname:     steward.DNA.Attributes["hostname"],
-				OS:           steward.DNA.Attributes["os"],
-				Architecture: steward.DNA.Attributes["arch"],
+				Hostname:     attrs["hostname"],
+				OS:           attrs["os"],
+				Architecture: attrs["arch"],
 				Attributes:   attrs,
 			}
 		}
@@ -1192,16 +1194,17 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Check DNA for modules.loaded attribute.
-	if stewardInfo.DNA == nil || stewardInfo.DNA.Attributes == nil {
-		s.logger.Info("Modules unavailable: steward DNA has no attributes", "steward_id", stewardIDForLog)
+	// Check DNA fragments for modules.loaded key.
+	if stewardInfo.DNA == nil {
+		s.logger.Info("Modules unavailable: steward has no DNA", "steward_id", stewardIDForLog)
 		s.writeErrorResponse(w, http.StatusNotImplemented,
 			"steward does not report loaded modules in DNA; ensure steward version supports module DNA attributes",
 			"MODULES_UNAVAILABLE")
 		return
 	}
 
-	modulesRaw, ok := stewardInfo.DNA.Attributes["modules.loaded"]
+	dnaAttrs := service.FlattenDNAFragments(stewardInfo.DNA.Fragments)
+	modulesRaw, ok := dnaAttrs["modules.loaded"]
 	if !ok {
 		s.logger.Info("Modules unavailable: modules.loaded attribute absent", "steward_id", stewardIDForLog)
 		s.writeErrorResponse(w, http.StatusNotImplemented,

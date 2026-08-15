@@ -7,6 +7,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/service"
 )
 
 // APIResponse represents a standard API response wrapper
@@ -271,17 +272,14 @@ func DNAFromProto(dna *common.DNA) *DNAInfo {
 		return nil
 	}
 
-	// Extract common attributes from the DNA attributes map
-	hostname := dna.Attributes["hostname"]
-	os := dna.Attributes["os"]
-	architecture := dna.Attributes["architecture"]
+	attrs := service.FlattenDNAFragments(dna.Fragments)
 
 	return &DNAInfo{
-		Hostname:     hostname,
-		OS:           os,
-		Architecture: architecture,
+		Hostname:     attrs["hostname"],
+		OS:           attrs["os"],
+		Architecture: attrs["architecture"],
 		ConfigHash:   dna.ConfigHash,
-		Attributes:   dna.Attributes,
+		Attributes:   attrs,
 		CollectedAt:  dna.LastUpdated.AsTime(),
 	}
 }
