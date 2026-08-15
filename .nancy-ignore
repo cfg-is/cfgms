@@ -1,0 +1,18 @@
+# Nancy CVE suppression file — one entry per line, format: CVE-ID until=YYYY-MM-DD
+# Lines starting with # are comments.  Entries expire automatically on the until= date;
+# once lapsed the scan fails again, forcing a re-review.
+#
+# Policy: only suppress CVEs where no fixed upstream release exists and the finding
+# is therefore unactionable.  Every entry must name the affected package and document
+# why bumping is not possible.  Re-check each entry when the weekly dependency scan
+# runs (dependency-pin-check.yml / refresh-pins skill) or when a new release of the
+# affected package appears.
+
+# CVE-2026-56860 — golang.org/x/net
+# Affected package : golang.org/x/net v0.58.0 (indirect dependency)
+# Reason           : v0.58.0 is the newest release published upstream as of 2026-08-15;
+#                    there is no patched version to upgrade to.  `go list -m -versions
+#                    golang.org/x/net` ends at v0.58.0.  Re-check when a newer release
+#                    appears or when this entry lapses on the expiry date below.
+# Expiry           : 2026-11-15 — after this date the scan re-opens automatically.
+CVE-2026-56860 until=2026-11-15

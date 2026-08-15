@@ -34,6 +34,89 @@ The CFGMS security workflow integrates four complementary security scanning tool
 - **Blocking**: No (informational, but tracked)
 - **SARIF Support**: No (custom integration)
 
+#### CVE suppression file (`.nancy-ignore`)
+
+When a CVE cannot be remediated because no patched upstream release exists, suppress it
+in `.nancy-ignore` at the repository root rather than silencing the entire scan.
+
+**Format** (nancy v2.1.0):
+
+```
+# Comment lines start with #
+CVE-YYYY-NNNNN until=YYYY-MM-DD
+```
+
+The `until=YYYY-MM-DD` field sets an expiry: once the date lapses nancy re-reports
+the CVE as a live finding, which forces a re-review. Every entry must have an expiry
+approximately one quarter out from the suppression date.
+
+**What justifies an entry:**
+
+- No patched upstream release exists at the time of suppression.
+- The affected package cannot be removed or replaced without significant rework.
+- The CVE has been triaged and the risk is accepted for the suppression period.
+
+**What does NOT justify an entry:**
+
+- "We haven't gotten around to it yet." Upgrade the dependency instead.
+- Blanket suppression of multiple unrelated CVEs — one entry per CVE, no wildcards.
+- Suppressing a CVE that a newer release fixes.
+
+**Adding a suppression:**
+
+1. Confirm no fixed release exists: `go list -m -versions <module>` to check upstream.
+2. Add an entry to `.nancy-ignore` with a comment block naming the package, the reason,
+   and the expiry.  Keep the comment immediately above the CVE line.
+3. Run `make security-deps` (requires `GUIDE_TOKEN`) to confirm the scan now passes.
+4. Open a PR — the `nancy-scan` CI job validates it.
+
+**Reviewing suppressions (weekly dependency scan):**
+
+When `dependency-pin-check.yml` fires or the `/refresh-pins` skill runs:
+
+1. Check each entry in `.nancy-ignore` for entries near or past their `until=` date.
+2. Run `go list -m -versions <module>` for each suppressed package to see if a fix landed.
+3. If a fix exists: upgrade via `go get <module>@<version>` and remove the entry.
+4. If no fix: renew the `until=` date and update the comment with today's re-check date.
+
+**Active suppressions:**
+
+| CVE | Package | Reason | Expiry |
+|-----|---------|--------|--------|
+| CVE-2026-56860 | golang.org/x/net v0.58.0 | No patched release upstream as of 2026-08-15; v0.58.0 is newest | 2026-11-15 |
+
+**Scoping verification — a second, unrelated CVE still fails the gate:**
+
+`make security-deps` runs `scripts/verify-nancy-ignore-scope.sh` against `.nancy-ignore`
+before invoking nancy, and fails closed on:
+
+- any entry containing a wildcard character (`*`, `?`, `[`) — nancy has no glob
+  matching, so a wildcard is either a no-op or a mistaken attempt at a blanket
+  ignore, and either way it is rejected;
+- a missing or malformed `until=YYYY-MM-DD` expiry — nancy v2.1.0 aborts parsing
+  the *rest of the file* on the first bad date (the error is swallowed by its
+  caller, `internal/cmd/root.go`), so a broken second entry would silently drop
+  every entry after it, including ones that were previously working;
+- duplicate entries for the same CVE.
+
+This was verified directly against nancy's source (tag `v2.1.0`, commit
+`410f73d14f5cf35300b2695dc1a74fb560b70a85`): `internal/ossindex/types.go`
+`maybeExclude` matches with `v.Cve == ex || v.ID == ex` — plain string equality,
+no prefix or pattern matching. `scripts/verify-nancy-ignore-scope.sh` replicates
+that exact check (and nancy's two parsing regexes, `unixComments` and
+`untilComment`) against a synthetic CVE id that is deliberately absent from the
+file, and fails if that synthetic id is ever reported as excluded — proving, on
+every `make security-deps` run and with no network or `GUIDE_TOKEN` required,
+that only the literal ids listed in `.nancy-ignore` are ever suppressed. See
+`scripts/verify-nancy-ignore-scope_test.sh` for the fixture coverage (run with
+`bash scripts/verify-nancy-ignore-scope_test.sh`).
+
+To additionally confirm end-to-end against a live Sonatype Guide scan: with a
+valid `GUIDE_TOKEN` exported, temporarily add an unrelated, genuinely vulnerable
+module (e.g. `go get github.com/dgrijalva/jwt-go@v3.2.0+incompatible`, which
+carries known, unfixed CVEs) to a scratch `go.mod`, run `make security-deps`, and
+confirm it still exits non-zero — then discard the scratch change.
+
 ### 3. gosec - Go Security Patterns
 
 - **Purpose**: Static analysis for Go security anti-patterns
