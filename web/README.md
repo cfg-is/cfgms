@@ -49,7 +49,15 @@ when the upstream blocker clears; do not force the bump past the peer conflict.
 | Package | Held at | Latest | Blocker |
 |---|---|---|---|
 | `typescript` | 6.x | 7.0.2 | `typescript-eslint` refuses to load against TS 7.0 — it aborts with "typescript-eslint does not support TS 7.0" ([typescript-eslint#10940](https://github.com/typescript-eslint/typescript-eslint/issues/10940), support targeted at TS >= 7.1). TS 7 also ships the native compiler with no in-process JS compiler API. |
-| `eslint` / `@eslint/js` | 9.x | 10.8.1 | `eslint-plugin-react@7.37.5` declares `eslint` peer `<= ^9.7` and crashes on ESLint 10 (`contextOrFilename.getFilename is not a function`). No published release supports ESLint 10; the plugin supplies the `react/no-danger*` bans in the [security lint gate](#security-lint-gate), so it cannot simply be dropped. |
+| `eslint` / `@eslint/js` | 9.x | 10.8.1 | `eslint-plugin-react@7.37.5` declares `eslint` peer `<= ^9.7` and crashes on ESLint 10 (`contextOrFilename.getFilename is not a function`). No published release supports ESLint 10, and the plugin cannot simply be dropped — see below. |
+
+Dropping `eslint-plugin-react` to reach ESLint 10 would lose **`react/jsx-no-target-blank`**
+(reverse-tabnabbing: `target="_blank"` without `rel="noopener noreferrer"`), which the
+plugin's recommended set enables at error severity and which has no equivalent elsewhere
+in `eslint.config.js`. Note that `react/no-danger` and `react/no-danger-with-children`
+are *not* the load-bearing rules here: the same `dangerouslySetInnerHTML` sink is caught
+independently by this repo's own `no-restricted-syntax` and `no-restricted-properties`
+bans, verified by turning both react rules off and confirming the violation still errors.
 
 ## Commands
 
