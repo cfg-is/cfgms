@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -311,6 +312,34 @@ func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
 	assert.WithinDuration(t, now, r.LastHeartbeat, time.Second)
 	assert.Equal(t, "value", r.DNAAttributes["custom"])
 	assert.Equal(t, "v1.5.3", r.RunningVersion, "RunningVersion must be populated from steward.version DNA attribute")
+}
+
+// TestMemoryQuery_StewardResult_Fragments verifies that DNAFragments carried on
+// StewardData flow through to StewardResult.DNAFragments unchanged. This is the
+// only path that gets ADR-017 fragments from the fleet query out to API
+// responses and, from there, to the CLI's deriveHVPromoteCluster (Issue #3317).
+func TestMemoryQuery_StewardResult_Fragments(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		{FragmentId: "cluster:cfg-lab.membership"},
+		{FragmentId: "host:cpu"},
+	}
+	provider := &staticProvider{
+		stewards: []StewardData{
+			{
+				ID:            "abc-123",
+				TenantID:      "tenant-x",
+				Status:        "online",
+				DNAAttributes: map[string]string{"hostname": "my-host"},
+				DNAFragments:  frags,
+			},
+		},
+	}
+	q := NewMemoryQuery(provider)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, frags, results[0].DNAFragments)
 }
 
 func TestMemoryQuery_StewardResult_RunningVersionEmpty_WhenDNAAbsent(t *testing.T) {

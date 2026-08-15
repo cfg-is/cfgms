@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
 
 func TestDefaultWindows11Requirements(t *testing.T) {
@@ -37,34 +38,57 @@ func TestDefaultUpgradePolicy(t *testing.T) {
 	assert.True(t, policy.RollbackOnFailure)
 }
 
-// createCompatibleDNA creates DNA data for a Windows 11 compatible device
-func createCompatibleDNA() *commonpb.DNA {
+// buildFragment constructs a host:* fragment with the given key-value payload.
+// Values in data must be string, as gatherers emit string attributes.
+func buildFragment(t *testing.T, kind string, data map[string]interface{}) *commonpb.Fragment {
+	t.Helper()
+	frag, err := sdna.NewFragment(kind, "gatherer", sdna.MapState(data))
+	require.NoError(t, err, "NewFragment(%q)", kind)
+	return frag
+}
+
+// createCompatibleDNA builds DNA with host:* fragments for a Windows 11 compatible device.
+func createCompatibleDNA(t *testing.T) *commonpb.DNA {
+	t.Helper()
 	return &commonpb.DNA{
 		Id: "test-device-compatible",
-		Attributes: map[string]string{
-			"tpm_version":   "2.0",
-			"bios_mode":     "UEFI",
-			"cpu_cores":     "4",
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "8",
-			"storage_gb":    "256",
-			"secure_boot":   "enabled",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "UEFI",
+				"secure_boot": "enabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "4",
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "256",
+			}),
 		},
 	}
 }
 
-// createIncompatibleDNA creates DNA data for a Windows 11 incompatible device
-func createIncompatibleDNA() *commonpb.DNA {
+// createIncompatibleDNA builds DNA with host:* fragments for a Windows 11 incompatible device.
+func createIncompatibleDNA(t *testing.T) *commonpb.DNA {
+	t.Helper()
 	return &commonpb.DNA{
 		Id: "test-device-incompatible",
-		Attributes: map[string]string{
-			"tpm_version":   "1.2", // TPM 1.2 not supported
-			"bios_mode":     "Legacy",
-			"cpu_cores":     "2",
-			"cpu_speed_ghz": "1.5",
-			"ram_gb":        "4",
-			"storage_gb":    "128",
-			"secure_boot":   "disabled",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "1.2", // TPM 1.2 not supported
+				"bios_mode":   "Legacy",
+				"secure_boot": "disabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "2",
+				"cpu_max_clock_speed": "1500MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "4.00",
+				"storage_gb":      "128",
+			}),
 		},
 	}
 }
@@ -73,7 +97,7 @@ func TestCompatibilityChecker_Compatible(t *testing.T) {
 	requirements := DefaultWindows11Requirements()
 	checker := NewCompatibilityChecker(requirements)
 
-	dna := createCompatibleDNA()
+	dna := createCompatibleDNA(t)
 
 	result, err := checker.CheckCompatibility(dna, "11")
 	require.NoError(t, err)
@@ -91,14 +115,20 @@ func TestCompatibilityChecker_IncompatibleTPM(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
-		Attributes: map[string]string{
-			"tpm_version":   "1.2", // TPM 1.2 not supported
-			"bios_mode":     "UEFI",
-			"cpu_cores":     "4",
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "8",
-			"storage_gb":    "256",
-			"secure_boot":   "enabled",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "1.2", // TPM 1.2 not supported
+				"bios_mode":   "UEFI",
+				"secure_boot": "enabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "4",
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "256",
+			}),
 		},
 	}
 
@@ -117,14 +147,20 @@ func TestCompatibilityChecker_IncompatibleBIOS(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
-		Attributes: map[string]string{
-			"tpm_version":   "2.0",
-			"bios_mode":     "Legacy", // Legacy BIOS not supported
-			"cpu_cores":     "4",
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "8",
-			"storage_gb":    "256",
-			"secure_boot":   "enabled",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "Legacy", // Legacy BIOS not supported
+				"secure_boot": "enabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "4",
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "256",
+			}),
 		},
 	}
 
@@ -141,14 +177,20 @@ func TestCompatibilityChecker_InsufficientRAM(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
-		Attributes: map[string]string{
-			"tpm_version":   "2.0",
-			"bios_mode":     "UEFI",
-			"cpu_cores":     "4",
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "2", // Only 2GB RAM
-			"storage_gb":    "256",
-			"secure_boot":   "enabled",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "UEFI",
+				"secure_boot": "enabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "4",
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "2.00", // Only 2 GB RAM
+				"storage_gb":      "256",
+			}),
 		},
 	}
 
@@ -165,14 +207,20 @@ func TestCompatibilityChecker_InsufficientStorage(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
-		Attributes: map[string]string{
-			"tpm_version":   "2.0",
-			"bios_mode":     "UEFI",
-			"cpu_cores":     "4",
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "8",
-			"storage_gb":    "32", // Only 32GB storage
-			"secure_boot":   "enabled",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "UEFI",
+				"secure_boot": "enabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "4",
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "32", // Only 32 GB storage
+			}),
 		},
 	}
 
@@ -189,14 +237,20 @@ func TestCompatibilityChecker_InsufficientCPUCores(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
-		Attributes: map[string]string{
-			"tpm_version":   "2.0",
-			"bios_mode":     "UEFI",
-			"cpu_cores":     "1", // Only 1 core
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "8",
-			"storage_gb":    "256",
-			"secure_boot":   "enabled",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "UEFI",
+				"secure_boot": "enabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "1", // Only 1 core
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "256",
+			}),
 		},
 	}
 
@@ -213,14 +267,20 @@ func TestCompatibilityChecker_SecureBootDisabled(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id: "test-device",
-		Attributes: map[string]string{
-			"tpm_version":   "2.0",
-			"bios_mode":     "UEFI",
-			"cpu_cores":     "4",
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "8",
-			"storage_gb":    "256",
-			"secure_boot":   "disabled", // Secure Boot disabled
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "UEFI",
+				"secure_boot": "disabled", // Secure Boot disabled
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "4",
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "256",
+			}),
 		},
 	}
 
@@ -235,7 +295,7 @@ func TestCompatibilityChecker_MultipleIssues(t *testing.T) {
 	requirements := DefaultWindows11Requirements()
 	checker := NewCompatibilityChecker(requirements)
 
-	dna := createIncompatibleDNA()
+	dna := createIncompatibleDNA(t)
 
 	result, err := checker.CheckCompatibility(dna, "11")
 	require.NoError(t, err)
@@ -259,13 +319,16 @@ func TestCompatibilityChecker_PartialDNA(t *testing.T) {
 	requirements := DefaultWindows11Requirements()
 	checker := NewCompatibilityChecker(requirements)
 
-	// DNA with some missing attributes
+	// DNA with only host:bios — CPU, RAM, storage fragments absent.
 	dna := &commonpb.DNA{
 		Id: "test-device",
-		Attributes: map[string]string{
-			"tpm_version": "2.0",
-			"bios_mode":   "UEFI",
-			// Missing CPU, RAM, storage info
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "UEFI",
+				"secure_boot": "enabled",
+			}),
+			// host:cpu and host:memory absent
 		},
 	}
 
@@ -273,8 +336,76 @@ func TestCompatibilityChecker_PartialDNA(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// Should have warnings for missing data
+	// Should have warnings for missing CPU, RAM, storage data
 	assert.Greater(t, len(result.Warnings), 0)
+}
+
+// TestCompatibilityChecker_BIOSModeAbsent verifies that a missing bios_mode key
+// in the host:bios fragment produces the expected warning (not a blocking failure).
+func TestCompatibilityChecker_BIOSModeAbsent(t *testing.T) {
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
+
+	dna := &commonpb.DNA{
+		Id: "test-device",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"secure_boot": "enabled",
+				// bios_mode absent
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_cores":           "4",
+				"cpu_max_clock_speed": "2400MHz",
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "256",
+			}),
+		},
+	}
+
+	result, err := checker.CheckCompatibility(dna, "11")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Absent bios_mode produces a warning, not a blocking requirement.
+	assert.True(t, result.Compatible, "absent bios_mode should only warn, not block")
+	require.NotEmpty(t, result.Warnings)
+	assert.Contains(t, result.Warnings[0], "BIOS mode could not be determined")
+}
+
+// TestCompatibilityChecker_CPUCoresAbsent verifies that a missing cpu_cores key
+// in the host:cpu fragment produces the expected warning (not a blocking failure).
+func TestCompatibilityChecker_CPUCoresAbsent(t *testing.T) {
+	requirements := DefaultWindows11Requirements()
+	checker := NewCompatibilityChecker(requirements)
+
+	dna := &commonpb.DNA{
+		Id: "test-device",
+		Fragments: []*commonpb.Fragment{
+			buildFragment(t, "host:bios", map[string]interface{}{
+				"tpm_version": "2.0",
+				"bios_mode":   "UEFI",
+				"secure_boot": "enabled",
+			}),
+			buildFragment(t, "host:cpu", map[string]interface{}{
+				"cpu_max_clock_speed": "2400MHz",
+				// cpu_cores absent
+			}),
+			buildFragment(t, "host:memory", map[string]interface{}{
+				"memory_total_gb": "8.00",
+				"storage_gb":      "256",
+			}),
+		},
+	}
+
+	result, err := checker.CheckCompatibility(dna, "11")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Absent cpu_cores produces a warning, not a blocking requirement.
+	assert.Contains(t, result.Warnings, "CPU core count could not be determined")
 }
 
 func TestUpgradeManager_CheckEligibility_PolicyDisabled(t *testing.T) {
@@ -290,7 +421,7 @@ func TestUpgradeManager_CheckEligibility_PolicyDisabled(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
-	dna := createCompatibleDNA()
+	dna := createCompatibleDNA(t)
 	ctx := context.Background()
 
 	result, err := upgradeManager.CheckUpgradeEligibility(ctx, dna)
@@ -312,7 +443,7 @@ func TestUpgradeManager_CheckEligibility_Compatible(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
-	dna := createCompatibleDNA()
+	dna := createCompatibleDNA(t)
 	ctx := context.Background()
 
 	result, err := upgradeManager.CheckUpgradeEligibility(ctx, dna)
@@ -336,7 +467,7 @@ func TestUpgradeManager_CheckEligibility_Incompatible(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
-	dna := createIncompatibleDNA()
+	dna := createIncompatibleDNA(t)
 	ctx := context.Background()
 
 	result, err := upgradeManager.CheckUpgradeEligibility(ctx, dna)
@@ -361,7 +492,7 @@ func TestUpgradeManager_CheckEligibility_SkipCompatibilityCheck(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
-	dna := createIncompatibleDNA() // Even incompatible device
+	dna := createIncompatibleDNA(t) // Even incompatible device
 	ctx := context.Background()
 
 	result, err := upgradeManager.CheckUpgradeEligibility(ctx, dna)
@@ -387,7 +518,7 @@ func TestUpgradeManager_PerformUpgrade_Incompatible_Blocked(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
-	dna := createIncompatibleDNA()
+	dna := createIncompatibleDNA(t)
 	ctx := context.Background()
 
 	err = upgradeManager.PerformUpgrade(ctx, dna)
@@ -409,7 +540,7 @@ func TestUpgradeManager_PerformUpgrade_TestMode(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
-	dna := createCompatibleDNA()
+	dna := createCompatibleDNA(t)
 	ctx := context.Background()
 
 	// Should succeed without actual upgrade
@@ -450,14 +581,51 @@ func TestUpgradeManager_CanUpgradeNow_OutsideWindow(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 
-	ctx := context.Background()
-	canUpgrade, reason, err := upgradeManager.CanUpgradeNow(ctx)
-
-	assert.NoError(t, err)
-	// Unless running on Sat/Sun between 2-4 AM, should be outside window
-	if !canUpgrade {
-		assert.Contains(t, reason, "outside of upgrade window")
+	// Window membership is evaluated against an injected time, so every boundary
+	// is asserted against fixed clock values rather than the wall clock.
+	// 2026-08-15 is a Saturday, 2026-08-16 a Sunday, 2026-08-19 a Wednesday.
+	tests := []struct {
+		name     string
+		now      time.Time
+		expected bool
+	}{
+		{"saturday at window start", time.Date(2026, 8, 15, 2, 0, 0, 0, time.UTC), true},
+		{"saturday last minute of window", time.Date(2026, 8, 15, 3, 59, 59, 0, time.UTC), true},
+		{"saturday one minute before window", time.Date(2026, 8, 15, 1, 59, 59, 0, time.UTC), false},
+		{"saturday at window end is exclusive", time.Date(2026, 8, 15, 4, 0, 0, 0, time.UTC), false},
+		{"sunday inside window", time.Date(2026, 8, 16, 3, 0, 0, 0, time.UTC), true},
+		{"wednesday inside hours but disallowed day", time.Date(2026, 8, 19, 3, 0, 0, 0, time.UTC), false},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, upgradeManager.isInUpgradeWindow(tc.now))
+		})
+	}
+
+	ctx := context.Background()
+
+	// CanUpgradeNow reads the wall clock, so drive it with a window that provably
+	// cannot contain "now": all days are allowed, but the single open hour is the
+	// one twelve hours away from the current hour. The outcome is the same
+	// regardless of when the suite runs, including across an hour rollover.
+	closedStart := (time.Now().Hour() + 12) % 24
+	policy.UpgradeWindow = &TimeWindow{StartHour: closedStart, EndHour: closedStart + 1}
+	upgradeManager.SetPolicy(policy)
+
+	canUpgrade, reason, err := upgradeManager.CanUpgradeNow(ctx)
+	require.NoError(t, err)
+	assert.False(t, canUpgrade)
+	assert.Contains(t, reason, "outside of upgrade window")
+
+	// A window that spans every hour of every day is always open, so the upgrade
+	// window must not be the thing blocking the upgrade.
+	policy.UpgradeWindow = &TimeWindow{StartHour: 0, EndHour: 24}
+	upgradeManager.SetPolicy(policy)
+
+	canUpgrade, reason, err = upgradeManager.CanUpgradeNow(ctx)
+	require.NoError(t, err)
+	assert.True(t, canUpgrade)
+	assert.Equal(t, "", reason)
 }
 
 func TestUpgradeManager_CanUpgradeNow_MaintenanceWindowBlocked(t *testing.T) {
@@ -581,17 +749,29 @@ func TestTimeWindow_NormalWindow(t *testing.T) {
 	upgradeManager := NewUpgradeManager(patchModule, nil, policy, nil, "test-device")
 	require.NotNil(t, upgradeManager)
 
-	// Test that upgrade manager was created successfully with time window
-	// The actual time window checking is tested through CanUpgradeNow in other tests
-	ctx := context.Background()
-	canUpgrade, reason, err := upgradeManager.CanUpgradeNow(ctx)
-
-	// Result depends on current time, but should not error
-	require.NoError(t, err)
-
-	// If outside window, should have appropriate reason
-	if !canUpgrade {
-		assert.Contains(t, reason, "window")
+	// A normal (non-overnight) window is inclusive of StartHour and exclusive of
+	// EndHour, and only on the listed days. Each case injects a fixed time so the
+	// assertions hold regardless of when the suite runs.
+	// 2026-08-17 is a Monday, 2026-08-21 a Friday, 2026-08-15 a Saturday and
+	// 2026-08-16 a Sunday.
+	tests := []struct {
+		name     string
+		now      time.Time
+		expected bool
+	}{
+		{"monday at window start", time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC), true},
+		{"monday mid window", time.Date(2026, 8, 17, 13, 30, 0, 0, time.UTC), true},
+		{"monday last minute of window", time.Date(2026, 8, 17, 16, 59, 59, 0, time.UTC), true},
+		{"monday at window end is exclusive", time.Date(2026, 8, 17, 17, 0, 0, 0, time.UTC), false},
+		{"monday one minute before window", time.Date(2026, 8, 17, 8, 59, 59, 0, time.UTC), false},
+		{"friday mid window", time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC), true},
+		{"saturday inside hours but disallowed day", time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC), false},
+		{"sunday inside hours but disallowed day", time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, upgradeManager.isInUpgradeWindow(tc.now))
+		})
 	}
 }
 
@@ -618,7 +798,7 @@ func TestUpgradeManager_PerformUpgrade_WithMaintenanceWindow(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, windowMgr, "test-device")
 
-	dna := createCompatibleDNA()
+	dna := createCompatibleDNA(t)
 	ctx := context.Background()
 
 	// Should succeed in test mode
@@ -644,7 +824,7 @@ func TestUpgradeManager_PerformUpgrade_BlockedByMaintenanceWindow(t *testing.T) 
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, windowMgr, "test-device")
 
-	dna := createCompatibleDNA()
+	dna := createCompatibleDNA(t)
 	ctx := context.Background()
 
 	err = upgradeManager.PerformUpgrade(ctx, dna)
@@ -693,7 +873,7 @@ func TestUpgradeManager_PerformUpgrade_NoErrInvalidPatchType(t *testing.T) {
 
 	upgradeManager := NewUpgradeManager(patchModule, checker, policy, nil, "test-device")
 
-	dna := createCompatibleDNA()
+	dna := createCompatibleDNA(t)
 	ctx := context.Background()
 
 	err = upgradeManager.PerformUpgrade(ctx, dna)

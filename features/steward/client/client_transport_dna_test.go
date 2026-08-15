@@ -1578,3 +1578,349 @@ func TestSyncDNAHandler_PartialSync_MalformedFragmentIDs_NoSend(t *testing.T) {
 		// Nothing sent — the command failed as required.
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #3332: gate-fix tests and production-adapter integration
+// ---------------------------------------------------------------------------
+
+// realHostFragmentCollector wraps the real dna.Collector and implements both
+// DNACollector and FragmentCollector, mirroring the production dnaCollectorAdapter
+// surface. It returns empty attrs (no module source) so the tests verify the
+// fragment-only path activated for the first time by Issue #3332.
+type realHostFragmentCollector struct {
+	c *dna.Collector
+}
+
+func (r *realHostFragmentCollector) CollectAttributes(_ context.Context) (map[string]string, error) {
+	return nil, nil
+}
+
+func (r *realHostFragmentCollector) CollectFragments(ctx context.Context) []*commonpb.Fragment {
+	result, err := r.c.Collect(ctx)
+	if err != nil {
+		return nil
+	}
+	return result.Fragments
+}
+
+func (r *realHostFragmentCollector) CollectFragmentsTracked(ctx context.Context) ([]*commonpb.Fragment, error) {
+	return r.CollectFragments(ctx), nil
+}
+
+var _ DNACollector = (*realHostFragmentCollector)(nil)
+var _ FragmentCollector = (*realHostFragmentCollector)(nil)
+
+// TestRefreshCurrentDNA_EmptyAttrsButFragments_SetsFragmentState verifies the
+// gate fix (Issue #3332): RefreshCurrentDNA must proceed and update
+// currentDNAFragments / currentDNAAggregateRoot when attrs is empty but
+// fragments are present — a hardware-facts-only steward no longer silently
+// skips all DNA state updates.
+func TestRefreshCurrentDNA_EmptyAttrsButFragments_SetsFragmentState(t *testing.T) {
+	c := newMinimalClient(t)
+
+	frags, expectedRoot := makeClientFragments(t, 2)
+	collector := &fragmentAndAttrCollector{
+		attrs:     nil, // empty — hardware-facts-only steward
+		fragments: frags,
+	}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+
+	c.dnaMu.RLock()
+	gotFrags := c.currentDNAFragments
+	gotRoot := c.currentDNAAggregateRoot
+	c.dnaMu.RUnlock()
+
+	require.Len(t, gotFrags, len(frags),
+		"RefreshCurrentDNA must store fragments even when attrs is empty")
+	assert.Equal(t, expectedRoot, gotRoot,
+		"RefreshCurrentDNA must set currentDNAAggregateRoot even when attrs is empty")
+}
+
+// TestRefreshCurrentDNA_ProductionCollector_PopulatesFragmentState is the REQUIRED
+// TEST for Issue #3332: the production DNA adapter (wrapping the real dna.Collector)
+// populates currentDNAFragments and currentDNAAggregateRoot through RefreshCurrentDNA
+// for the first time, proving ADR-017 §7 partial sync activates in production.
+func TestRefreshCurrentDNA_ProductionCollector_PopulatesFragmentState(t *testing.T) {
+	c := newMinimalClient(t)
+
+	// Use the real dna.Collector — not a stub. This mirrors the production
+	// dnaCollectorAdapter.CollectFragmentsTracked which calls Collect() and
+	// returns result.Fragments (host:* fragments).
+	realCollector := &realHostFragmentCollector{
+		c: dna.NewCollector(logging.NewLogger("error")),
+	}
+	c.mu.Lock()
+	c.dnaCollector = realCollector
+	c.mu.Unlock()
+
+	require.NoError(t, c.RefreshCurrentDNA(context.Background()))
+
+	c.dnaMu.RLock()
+	gotFrags := c.currentDNAFragments
+	gotRoot := c.currentDNAAggregateRoot
+	c.dnaMu.RUnlock()
+
+	assert.NotEmpty(t, gotFrags,
+		"currentDNAFragments must be non-empty when the real DNA collector provides host:* fragments")
+	assert.NotEmpty(t, gotRoot,
+		"currentDNAAggregateRoot must be computed when fragments are present")
+}
+
+// TestSyncDNAHandler_FullSync_EmptyAttrsFragmentsPresent_Succeeds verifies that
+// the sync_dna full-sync handler (Issue #3332) no longer hard-fails when
+// currentDNAAttrs is empty but fragments are present — a zero-managed-resource
+// steward can complete a full sync via fragments alone.
+func TestSyncDNAHandler_FullSync_EmptyAttrsFragmentsPresent_Succeeds(t *testing.T) {
+	c := newMinimalClient(t)
+	c.stewardID = "steward-fragonly"
+	c.tenantID = "tenant-1"
+
+	// Seed fragment state (no attrs — hardware-facts-only steward).
+	frags, _ := makeClientFragments(t, 2)
+
+	// Wire a collector that returns empty attrs but non-empty fragments.
+	// RefreshCurrentDNA (called by the handler fallback) will populate
+	// currentDNAFragments via the gate-fixed path.
+	collector := &fragmentAndAttrCollector{attrs: nil, fragments: frags}
+	sess := newTestSession()
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.dataPlaneSession = sess
+	c.mu.Unlock()
+
+	// Pre-seed currentDNAFragments so the handler can read them after
+	// RefreshCurrentDNA populates them in the fallback path.
+	c.dnaMu.Lock()
+	c.currentDNAFragments = frags
+	c.dnaMu.Unlock()
+
+	handler, err := c.setupCommandHandler(context.Background(), "steward-fragonly")
+	require.NoError(t, err)
+
+	cmd := &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        "cmd-fragonly",
+		Type:      cpTypes.CommandSyncDNA,
+		StewardID: "steward-fragonly",
+		TenantID:  "tenant-1",
+		Timestamp: time.Now(),
+	}}
+
+	require.NoError(t, handler.HandleCommand(context.Background(), cmd),
+		"sync_dna must not fail when currentDNAAttrs is empty but fragments are present")
+
+	select {
+	case transfer := <-sess.dnaSent:
+		assert.False(t, transfer.Delta, "must be a full sync")
+		assert.NotEmpty(t, transfer.FragmentBytes,
+			"transfer must include fragment bytes from the wired collector")
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for sync_dna handler to call SendDNA")
+	}
+}
+
+// mutableFragmentAttrCollector is a real, thread-safe DNACollector whose
+// attribute map and fragment set can be swapped while the DNA refresh loop is
+// running. It is not a mock: there is no expectation recording and no
+// framework — each Collect* call returns whatever was last configured, exactly
+// as the production dnaCollectorAdapter returns whatever the underlying
+// collector and module source produced on that cycle. The mutex is what makes
+// it safe for the loop goroutine to read while the test body writes.
+type mutableFragmentAttrCollector struct {
+	mu        sync.RWMutex
+	attrs     map[string]string
+	fragments []*commonpb.Fragment
+}
+
+func (c *mutableFragmentAttrCollector) CollectAttributes(_ context.Context) (map[string]string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.attrs == nil {
+		return nil, nil
+	}
+	out := make(map[string]string, len(c.attrs))
+	for k, v := range c.attrs {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (c *mutableFragmentAttrCollector) CollectFragments(_ context.Context) []*commonpb.Fragment {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]*commonpb.Fragment, len(c.fragments))
+	copy(out, c.fragments)
+	return out
+}
+
+func (c *mutableFragmentAttrCollector) setFragments(frags []*commonpb.Fragment) {
+	c.mu.Lock()
+	c.fragments = frags
+	c.mu.Unlock()
+}
+
+var _ DNACollector = (*mutableFragmentAttrCollector)(nil)
+
+// TestPublishCurrentDNA_EmptyAttrsButFragments_SetsFragmentState covers the
+// fragment-only branch of PublishCurrentDNA (Issue #3332): a hardware-facts-only
+// steward has an empty attribute map, so there is nothing to publish, but its
+// host:* fragments must still populate currentDNAFragments /
+// currentDNAAggregateRoot instead of the call returning early with no effect.
+func TestPublishCurrentDNA_EmptyAttrsButFragments_SetsFragmentState(t *testing.T) {
+	c, q := newClientWithOfflineQueue(t)
+
+	frags, expectedRoot := makeClientFragments(t, 3)
+	collector := &mutableFragmentAttrCollector{attrs: nil, fragments: frags}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	require.NoError(t, c.PublishCurrentDNA(context.Background()))
+
+	c.dnaMu.RLock()
+	gotFrags := c.currentDNAFragments
+	gotRoot := c.currentDNAAggregateRoot
+	gotHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+
+	require.Len(t, gotFrags, len(frags),
+		"PublishCurrentDNA must store fragments when attrs is empty")
+	assert.Equal(t, expectedRoot, gotRoot,
+		"PublishCurrentDNA must set currentDNAAggregateRoot from the collected fragments")
+	assert.Empty(t, gotHash,
+		"no attributes were collected, so no attribute hash may be recorded")
+	assert.Equal(t, 0, q.Len(),
+		"a fragment-only collect has nothing attribute-based to publish")
+}
+
+// TestPublishCurrentDNA_AttrsAndFragments_PublishesAndSetsFragmentState covers
+// the both-present case: a steward with managed resources has a non-empty
+// attribute map AND host:* fragments. The attribute delta must be published and
+// the partial-sync fragment state must be updated in the same call — publishing
+// must not leave currentDNAFragments stale.
+func TestPublishCurrentDNA_AttrsAndFragments_PublishesAndSetsFragmentState(t *testing.T) {
+	c, q := newClientWithOfflineQueue(t)
+
+	frags, expectedRoot := makeClientFragments(t, 2)
+	collector := &mutableFragmentAttrCollector{
+		attrs:     map[string]string{"hostname": "host-a", "os": "linux"},
+		fragments: frags,
+	}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	require.NoError(t, c.PublishCurrentDNA(context.Background()))
+
+	c.dnaMu.RLock()
+	gotFrags := c.currentDNAFragments
+	gotRoot := c.currentDNAAggregateRoot
+	gotHash := c.currentDNAHash
+	c.dnaMu.RUnlock()
+
+	require.Len(t, gotFrags, len(frags),
+		"PublishCurrentDNA must store fragments when attrs is also present")
+	assert.Equal(t, expectedRoot, gotRoot,
+		"PublishCurrentDNA must set currentDNAAggregateRoot when attrs is also present")
+	assert.NotEmpty(t, gotHash, "the attribute snapshot hash must be refreshed")
+	assert.Equal(t, 1, q.Len(), "the attribute delta must still be published")
+}
+
+// TestDNARefreshLoop_EmptyAttrsButFragments_UpdatesFragmentState covers the
+// fragment branch of runDNARefreshTick for a hardware-facts-only steward
+// (Issue #3332): attrs is empty, so nothing is published, but each tick must
+// still update currentDNAFragments / currentDNAAggregateRoot.
+func TestDNARefreshLoop_EmptyAttrsButFragments_UpdatesFragmentState(t *testing.T) {
+	c, q := newClientWithOfflineQueue(t)
+
+	frags, expectedRoot := makeClientFragments(t, 2)
+	collector := &mutableFragmentAttrCollector{attrs: nil, fragments: frags}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := c.StartDNARefreshLoop(ctx)
+	<-c.dnaRefreshTick // one fully-processed tick
+	cancel()
+	<-done // the loop goroutine has exited before state is inspected
+
+	c.dnaMu.RLock()
+	gotFrags := c.currentDNAFragments
+	gotRoot := c.currentDNAAggregateRoot
+	c.dnaMu.RUnlock()
+
+	require.Len(t, gotFrags, len(frags),
+		"a refresh tick must store fragments even when the attribute map is empty")
+	assert.Equal(t, expectedRoot, gotRoot,
+		"a refresh tick must set currentDNAAggregateRoot from the collected fragments")
+	assert.Equal(t, 0, q.Len(),
+		"an attribute-less tick has nothing to publish")
+}
+
+// TestDNARefreshLoop_AttrsAndFragments_UpdatesFragmentStatePerTick covers the
+// both-present case in runDNARefreshTick: the attribute snapshot is refreshed
+// AND the fragment state is updated, and a later tick picks up a changed
+// fragment set (proving the fragment branch runs on every tick, not once).
+func TestDNARefreshLoop_AttrsAndFragments_UpdatesFragmentStatePerTick(t *testing.T) {
+	c, q := newClientWithOfflineQueue(t)
+
+	// Seed the publish cache so a stable attribute map produces no delta event;
+	// the assertions below are about DNA state, not publish behaviour.
+	attrs := map[string]string{"hostname": "host-a", "os": "linux"}
+	c.dnaMu.Lock()
+	c.lastPublishedDNA = map[string]string{"hostname": "host-a", "os": "linux", "steward.version": version.Short()}
+	c.dnaMu.Unlock()
+
+	firstFrags, firstRoot := makeClientFragments(t, 2)
+	collector := &mutableFragmentAttrCollector{attrs: attrs, fragments: firstFrags}
+	c.mu.Lock()
+	c.dnaCollector = collector
+	c.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := c.StartDNARefreshLoop(ctx)
+
+	<-c.dnaRefreshTick
+	c.dnaMu.RLock()
+	gotHash := c.currentDNAHash
+	gotRoot := c.currentDNAAggregateRoot
+	gotFrags := len(c.currentDNAFragments)
+	c.dnaMu.RUnlock()
+
+	assert.NotEmpty(t, gotHash, "the attribute branch must refresh the snapshot hash")
+	assert.Equal(t, firstRoot, gotRoot, "the fragment branch must run alongside the attribute branch")
+	assert.Equal(t, len(firstFrags), gotFrags, "all collected fragments must be stored")
+
+	// Swap the fragment set; a subsequent tick must pick it up. Ticks are
+	// counted rather than slept on: the collector swap can land after the next
+	// tick has already read the collector, so up to two further ticks are
+	// drained before the assertion.
+	secondFrags, secondRoot := makeClientFragments(t, 4)
+	collector.setFragments(secondFrags)
+
+	var latestRoot string
+	for i := 0; i < 3; i++ {
+		<-c.dnaRefreshTick
+		c.dnaMu.RLock()
+		latestRoot = c.currentDNAAggregateRoot
+		c.dnaMu.RUnlock()
+		if latestRoot == secondRoot {
+			break
+		}
+	}
+	cancel()
+	<-done
+
+	assert.Equal(t, secondRoot, latestRoot,
+		"each refresh tick must re-record the fragment state, not only the first")
+	assert.Equal(t, 0, q.Len(),
+		"an unchanged attribute map must not publish a delta")
+}

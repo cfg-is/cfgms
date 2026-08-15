@@ -44,7 +44,92 @@ func memberOnlyFragment(t *testing.T, clusterName string, extra ...map[string]in
 	return clusterFragment(t, clusterName, map[string]string{}, extra...)
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────────
+// ─── ClustersFromFragments tests ─────────────────────────────────────────────
+
+// TestClustersFromFragments_NoCandidates covers the 0-candidate case:
+// nil input returns an empty slice.
+func TestClustersFromFragments_NoCandidates(t *testing.T) {
+	names := clusterregistry.ClustersFromFragments(nil)
+	assert.Empty(t, names)
+}
+
+// TestClustersFromFragments_OnlyNonClusterFragments covers the 0-candidate case
+// where fragments exist but none carry a cluster: prefix.
+func TestClustersFromFragments_OnlyNonClusterFragments(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		{FragmentId: "host:cpu"},
+		{FragmentId: "service:sshd"},
+		nil,
+	}
+	names := clusterregistry.ClustersFromFragments(frags)
+	assert.Empty(t, names)
+}
+
+// TestClustersFromFragments_OneCandidate covers the 1-candidate case.
+func TestClustersFromFragments_OneCandidate(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		memberOnlyFragment(t, "cfg-lab"),
+	}
+	names := clusterregistry.ClustersFromFragments(frags)
+	assert.Equal(t, []string{"cfg-lab"}, names)
+}
+
+// TestClustersFromFragments_TwoCandidates covers the 2+-candidate case.
+func TestClustersFromFragments_TwoCandidates(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		memberOnlyFragment(t, "cfg-lab"),
+		memberOnlyFragment(t, "cfg-prod"),
+	}
+	names := clusterregistry.ClustersFromFragments(frags)
+	assert.Equal(t, []string{"cfg-lab", "cfg-prod"}, names)
+}
+
+// TestClustersFromFragments_Deduplicated verifies multiple fragments for the
+// same cluster name are returned as a single entry.
+func TestClustersFromFragments_Deduplicated(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		memberOnlyFragment(t, "cfg-lab"),
+		memberOnlyFragment(t, "cfg-lab"), // duplicate cluster name
+	}
+	names := clusterregistry.ClustersFromFragments(frags)
+	assert.Equal(t, []string{"cfg-lab"}, names)
+}
+
+// TestClustersFromFragments_EmptyClusterNameIgnored verifies that a fragment
+// with ID "cluster:" (empty name after prefix) is silently skipped.
+func TestClustersFromFragments_EmptyClusterNameIgnored(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		{FragmentId: "cluster:"}, // empty name — skipped
+		{FragmentId: "cluster:good"},
+	}
+	names := clusterregistry.ClustersFromFragments(frags)
+	assert.Equal(t, []string{"good"}, names)
+}
+
+// TestClustersFromFragments_MalformedBytesDoNotGateMembership verifies that
+// ClustersFromFragments only inspects fragment IDs, never canonical bytes.
+// A fragment with an undecodable CanonicalBytes still contributes its cluster name.
+func TestClustersFromFragments_MalformedBytesDoNotGateMembership(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		{FragmentId: "cluster:with-bad-bytes", CanonicalBytes: []byte{0xFF, 0xFF}},
+	}
+	names := clusterregistry.ClustersFromFragments(frags)
+	assert.Equal(t, []string{"with-bad-bytes"}, names,
+		"ClustersFromFragments must not decode bytes; the fragment ID alone determines membership")
+}
+
+// TestClustersFromFragments_SortedOutput verifies the returned slice is sorted.
+func TestClustersFromFragments_SortedOutput(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		{FragmentId: "cluster:z-cluster"},
+		{FragmentId: "cluster:a-cluster"},
+		{FragmentId: "cluster:m-cluster"},
+	}
+	names := clusterregistry.ClustersFromFragments(frags)
+	assert.Equal(t, []string{"a-cluster", "m-cluster", "z-cluster"}, names)
+}
+
+// ─── BuildRegistry tests ──────────────────────────────────────────────────────
 
 // TestClusterRegistry_ParsesDNAFragments_MultiSteward is the required AC test.
 // It asserts both the forward view (cluster → members → role owners) and the

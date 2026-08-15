@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	wfpkg "github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/stretchr/testify/assert"
@@ -710,7 +711,7 @@ func TestRequireSingleSteward_MultipleMatches_NoYesEscape(t *testing.T) {
 func TestDeriveHVPromoteCluster_NoClusterMembership_Error(t *testing.T) {
 	s := StewardInfo{
 		ID:  "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{"hostname": "hv01", "os": "windows"}},
+		DNA: &StewardInfoDNA{}, // no cluster: fragments
 	}
 	_, err := deriveHVPromoteCluster(s, "")
 	require.Error(t, err)
@@ -720,10 +721,11 @@ func TestDeriveHVPromoteCluster_NoClusterMembership_Error(t *testing.T) {
 func TestDeriveHVPromoteCluster_OneCluster_ResolvedAutomatically(t *testing.T) {
 	s := StewardInfo{
 		ID: "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:prod-fc.member": "true",
-			"cluster:prod-fc.role":   "node",
-		}},
+		DNA: &StewardInfoDNA{
+			Fragments: []*commonpb.Fragment{
+				{FragmentId: "cluster:prod-fc"},
+			},
+		},
 	}
 	name, err := deriveHVPromoteCluster(s, "")
 	require.NoError(t, err)
@@ -733,9 +735,11 @@ func TestDeriveHVPromoteCluster_OneCluster_ResolvedAutomatically(t *testing.T) {
 func TestDeriveHVPromoteCluster_OneCluster_OverrideMatch_OK(t *testing.T) {
 	s := StewardInfo{
 		ID: "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:prod-fc.member": "true",
-		}},
+		DNA: &StewardInfoDNA{
+			Fragments: []*commonpb.Fragment{
+				{FragmentId: "cluster:prod-fc"},
+			},
+		},
 	}
 	name, err := deriveHVPromoteCluster(s, "prod-fc")
 	require.NoError(t, err)
@@ -745,9 +749,11 @@ func TestDeriveHVPromoteCluster_OneCluster_OverrideMatch_OK(t *testing.T) {
 func TestDeriveHVPromoteCluster_OneCluster_OverrideMismatch_Error(t *testing.T) {
 	s := StewardInfo{
 		ID: "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:prod-fc.member": "true",
-		}},
+		DNA: &StewardInfoDNA{
+			Fragments: []*commonpb.Fragment{
+				{FragmentId: "cluster:prod-fc"},
+			},
+		},
 	}
 	_, err := deriveHVPromoteCluster(s, "other-cluster")
 	require.Error(t, err)
@@ -758,10 +764,12 @@ func TestDeriveHVPromoteCluster_OneCluster_OverrideMismatch_Error(t *testing.T) 
 func TestDeriveHVPromoteCluster_MultipleClusters_RequiresOverride(t *testing.T) {
 	s := StewardInfo{
 		ID: "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:fc-east.member": "true",
-			"cluster:fc-west.member": "true",
-		}},
+		DNA: &StewardInfoDNA{
+			Fragments: []*commonpb.Fragment{
+				{FragmentId: "cluster:fc-east"},
+				{FragmentId: "cluster:fc-west"},
+			},
+		},
 	}
 	_, err := deriveHVPromoteCluster(s, "")
 	require.Error(t, err)
@@ -773,10 +781,12 @@ func TestDeriveHVPromoteCluster_MultipleClusters_RequiresOverride(t *testing.T) 
 func TestDeriveHVPromoteCluster_MultipleClusters_OverrideMatch_OK(t *testing.T) {
 	s := StewardInfo{
 		ID: "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:fc-east.member": "true",
-			"cluster:fc-west.member": "true",
-		}},
+		DNA: &StewardInfoDNA{
+			Fragments: []*commonpb.Fragment{
+				{FragmentId: "cluster:fc-east"},
+				{FragmentId: "cluster:fc-west"},
+			},
+		},
 	}
 	name, err := deriveHVPromoteCluster(s, "fc-east")
 	require.NoError(t, err)
@@ -786,10 +796,12 @@ func TestDeriveHVPromoteCluster_MultipleClusters_OverrideMatch_OK(t *testing.T) 
 func TestDeriveHVPromoteCluster_MultipleClusters_OverrideMismatch_Error(t *testing.T) {
 	s := StewardInfo{
 		ID: "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:fc-east.member": "true",
-			"cluster:fc-west.member": "true",
-		}},
+		DNA: &StewardInfoDNA{
+			Fragments: []*commonpb.Fragment{
+				{FragmentId: "cluster:fc-east"},
+				{FragmentId: "cluster:fc-west"},
+			},
+		},
 	}
 	_, err := deriveHVPromoteCluster(s, "fc-north")
 	require.Error(t, err)
@@ -805,14 +817,19 @@ func TestDeriveHVPromoteCluster_NilDNA_NoClusterError(t *testing.T) {
 	assert.Contains(t, err.Error(), "not a member of any cluster")
 }
 
-func TestDeriveHVPromoteCluster_MalformedClusterKey_Ignored(t *testing.T) {
-	// cluster: keys without a dot separator are silently skipped (matches BuildRegistry rule).
+func TestDeriveHVPromoteCluster_MalformedFragmentID_Ignored(t *testing.T) {
+	// Fragments with empty names, nil pointers, or non-cluster prefixes are silently
+	// skipped; only the valid cluster:good fragment determines the result.
 	s := StewardInfo{
 		ID: "s1",
-		DNA: &StewardInfoDNA{Attributes: map[string]string{
-			"cluster:nodot":       "true", // malformed — no dot after name
-			"cluster:good.member": "true", // valid
-		}},
+		DNA: &StewardInfoDNA{
+			Fragments: []*commonpb.Fragment{
+				nil,                          // nil fragment — skipped
+				{FragmentId: "cluster:"},     // empty name after prefix — skipped
+				{FragmentId: "host:cpu"},     // non-cluster prefix — skipped
+				{FragmentId: "cluster:good"}, // valid
+			},
+		},
 	}
 	name, err := deriveHVPromoteCluster(s, "")
 	require.NoError(t, err)
@@ -874,8 +891,8 @@ func TestRunWorkflowPromoteHVRole_HappyPath_SingleCluster(t *testing.T) {
 		"last_seen": "2026-07-01T00:00:00Z",
 		"dna": map[string]interface{}{
 			"hostname": "hv01",
-			"attributes": map[string]interface{}{
-				"cluster:fc-prod.member": "true",
+			"fragments": []map[string]interface{}{
+				{"fragment_id": "cluster:fc-prod"},
 			},
 		},
 	}
@@ -965,8 +982,8 @@ func TestRunWorkflowPromoteHVRole_ExecuteBodyContainsAllVariables(t *testing.T) 
 		"last_seen": "2026-07-01T00:00:00Z",
 		"dna": map[string]interface{}{
 			"hostname": "hv02",
-			"attributes": map[string]interface{}{
-				"cluster:cluster-a.node": "node1",
+			"fragments": []map[string]interface{}{
+				{"fragment_id": "cluster:cluster-a"},
 			},
 		},
 	}

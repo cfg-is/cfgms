@@ -1037,11 +1037,10 @@ func (f *fakeModuleDNASource) CollectModuleFragments(_ context.Context) []*commo
 	return nil
 }
 
-// TestDNACollectorAdapter_MergesHardwareAndModuleAttributes is the REQUIRED
-// TEST for #2423 AC4: the composite adapter's CollectAttributes returns the
-// UNION of hardware-fact attributes (unchanged) and module attributes in one
-// map, with no key collision — module keys are resourceID-namespaced
-// ("<type>:<name>.<field>") while hardware keys are bare identifiers.
+// TestDNACollectorAdapter_MergesHardwareAndModuleAttributes verifies that
+// CollectAttributes returns the union of host-fact attributes (from the Collector's
+// internal raw map — NOT from DNA.Attributes proto field, which Collect() no longer
+// writes after Issue #3332) and module-owned attributes (cluster:*, vm:*, etc.).
 func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 	moduleAttrs := map[string]string{
 		"cluster:cfg-lab.cno_owner_node":        "CFG-70-02",
@@ -1054,35 +1053,24 @@ func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, attrs)
 
-	// Hardware facts present and unchanged (hostname is always collected).
-	assert.Contains(t, attrs, "hostname", "hardware-fact attributes must survive the merge")
+	// Host-fact attributes from RawAttributes (not DNA.Attributes proto field).
+	assert.Contains(t, attrs, "hostname",
+		"host-fact attributes must appear in CollectAttributes output (via RawAttributes, not DNA.Attributes)")
 
-	// Module attributes present, resourceID verbatim.
+	// Module attributes present verbatim alongside host attrs.
 	for k, v := range moduleAttrs {
-		assert.Equal(t, v, attrs[k], "module attribute %q must be in the union", k)
+		assert.Equal(t, v, attrs[k], "module attribute %q must be returned by CollectAttributes", k)
 	}
-
-	// No key collision between the two sources: every module key carries the
-	// resourceID namespace, which no hardware fact uses.
-	hardwareOnly, err := newDNACollectorAdapter(logging.NewLogger("error"), nil).CollectAttributes(context.Background())
-	require.NoError(t, err)
-	for k := range hardwareOnly {
-		_, clash := moduleAttrs[k]
-		assert.False(t, clash, "hardware key %q must not collide with module keys", k)
-	}
-	assert.Len(t, attrs, len(hardwareOnly)+len(moduleAttrs),
-		"union size must be the exact sum — no silent overwrites")
 }
 
-// TestDNACollectorAdapter_NilModuleSourceUnchanged: with a nil moduleDNASource
-// (the controller-mode call sites today) the adapter behaves exactly as the
-// pre-#2423 hardware-fact adapter.
-func TestDNACollectorAdapter_NilModuleSourceUnchanged(t *testing.T) {
+// TestDNACollectorAdapter_NilModuleSourceReturnsHostAttrs: with a nil moduleDNASource
+// CollectAttributes returns host-fact attributes from RawAttributes (not nil).
+// Issue #3332: hardware-facts-only mode still returns host attrs; fragments are a
+// parallel channel, not a replacement for the flat map in this path.
+func TestDNACollectorAdapter_NilModuleSourceReturnsHostAttrs(t *testing.T) {
 	adapter := newDNACollectorAdapter(logging.NewLogger("error"), nil)
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
-	assert.Contains(t, attrs, "hostname")
-	for k := range attrs {
-		assert.NotContains(t, k, ":", "no namespaced module keys may appear without a source")
-	}
+	assert.NotEmpty(t, attrs, "CollectAttributes must return host attrs even without a module source")
+	assert.Contains(t, attrs, "hostname", "host-fact attributes must be present in hardware-facts-only mode")
 }

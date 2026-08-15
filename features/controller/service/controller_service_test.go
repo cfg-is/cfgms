@@ -48,12 +48,22 @@ func openFleetStorageAt(t *testing.T, dataDir string) *fleetStorage.Manager {
 	return mgr
 }
 
-// makeTestDNA builds a DNA proto for testing.
+// makeTestDNA builds a DNA proto for testing. When attrs contains "hostname"
+// or "os", the equivalent fragment is also populated so DNA passes the
+// fragment-based integrity check (Issue #3319).
 func makeTestDNA(id string, attrs map[string]string) *commonpb.DNA {
+	var frags []*commonpb.Fragment
+	if h := attrs["hostname"]; h != "" {
+		frags = append(frags, mustFragment("hostname", map[string]interface{}{"hostname": h}))
+	}
+	if o := attrs["os"]; o != "" {
+		frags = append(frags, mustFragment("host:os", map[string]interface{}{"os": o}))
+	}
 	return &commonpb.DNA{
 		Id:              id,
 		Attributes:      attrs,
 		SyncFingerprint: "fp-" + id,
+		Fragments:       frags,
 	}
 }
 
@@ -953,10 +963,7 @@ func TestSetPostDNASyncHook_FiresAfterSyncDNA(t *testing.T) {
 		calls = append(calls, hookCall{stewardID: stewardID, dna: dna})
 	})
 
-	dna := &commonpb.DNA{
-		Id:         "steward-hook",
-		Attributes: map[string]string{"os": "linux", "hostname": "hook-host", "arch": "amd64"},
-	}
+	dna := makeTestDNA("steward-hook", map[string]string{"os": "linux", "hostname": "hook-host", "arch": "amd64"})
 	status, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err)
 	require.Equal(t, commonpb.Status_OK, status.Code)
@@ -1008,7 +1015,7 @@ func TestSetPostDNASyncHook_HookReceivesDNACopy(t *testing.T) {
 	svc.SetPostDNASyncHook(func(_ string, dna *commonpb.DNA) { hookDNA = dna })
 
 	attrs := map[string]string{"version": "2.0", "platform": "linux", "hostname": "dnacopy-host", "os": "linux"}
-	dna := &commonpb.DNA{Id: "steward-dnacopy", Attributes: attrs}
+	dna := makeTestDNA("steward-dnacopy", attrs)
 	_, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err)
 

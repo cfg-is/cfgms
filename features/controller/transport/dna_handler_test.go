@@ -52,13 +52,66 @@ func syncedDNA(t *testing.T, svc *service.ControllerService, stewardID string) *
 	return info.DNA
 }
 
-// dnaChunksFor marshals attrs as a full-snapshot DNATransfer and splits the JSON
-// into `parts` contiguous DNAChunks — mirroring the steward send path.
+// identityFragmentBytes returns the proto-marshalled ADR-017 fragments that carry
+// the core-identity fields the controller's required-field contract checks
+// (features/controller/service/dna_integrity.go — the presence check reads
+// DNA.Fragments, not the flat attribute map, since Issue #3319). A snapshot that
+// carries hostname/os only in the flat map is a degenerate snapshot by that
+// contract and is refused before persistence, so a fixture that wants to reach
+// the persister must carry them as fragments too — exactly as the steward send
+// path does (features/steward/client/client_transport.go populates
+// DNATransfer.FragmentBytes alongside Attributes).
+//
+// Fragment kind per field, confirmed against the producers rather than assumed
+// from the field name:
+//   - os → "host:os", the gatherer-sourced fragment that lists "os" in its key
+//     allowlist (features/steward/dna/fragments.go hostFactFragmentSpecs).
+//   - hostname → "hostname", the stdlib hostname module's own kind. It is absent
+//     from every host:* spec because PartitionHostFacts skips module-owned kinds,
+//     and the module's state map keys the value as "hostname"
+//     (features/modules/stdlib/hostname/module.go HostnameConfig.AsMap).
+//
+// Fields absent from attrs produce no fragment, so a caller can still build a
+// snapshot that is deliberately missing a required field.
+func identityFragmentBytes(t *testing.T, attrs map[string]string) [][]byte {
+	t.Helper()
+	specs := []struct {
+		kind      string
+		authority string
+		field     string
+	}{
+		{kind: "hostname", authority: "hostname", field: "hostname"},
+		{kind: "host:os", authority: "gatherer", field: "os"},
+	}
+	var out [][]byte
+	for _, spec := range specs {
+		v, ok := attrs[spec.field]
+		if !ok {
+			continue
+		}
+		frag, err := sdna.NewFragment(spec.kind, spec.authority,
+			sdna.MapState(map[string]interface{}{spec.field: v}))
+		require.NoError(t, err)
+		b, err := proto.Marshal(frag)
+		require.NoError(t, err)
+		out = append(out, b)
+	}
+	return out
+}
+
+// dnaChunksFor marshals attrs as a full-snapshot DNATransfer — flat attributes
+// plus the identity fragments a real steward sends alongside them — and splits
+// the JSON into `parts` contiguous DNAChunks, mirroring the steward send path.
 func dnaChunksFor(t *testing.T, stewardID string, attrs map[string]string, parts int) []*transportpb.DNAChunk {
 	t.Helper()
 	attrJSON, err := json.Marshal(attrs)
 	require.NoError(t, err)
-	payload, err := json.Marshal(&dptypes.DNATransfer{StewardID: stewardID, TenantID: "t1", Attributes: attrJSON})
+	payload, err := json.Marshal(&dptypes.DNATransfer{
+		StewardID:     stewardID,
+		TenantID:      "t1",
+		Attributes:    attrJSON,
+		FragmentBytes: identityFragmentBytes(t, attrs),
+	})
 	require.NoError(t, err)
 	if parts < 1 {
 		parts = 1

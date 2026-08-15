@@ -1986,6 +1986,7 @@ type moduleDNASource interface {
 // module attribute still triggers a publish.
 type dnaCollectorAdapter struct {
 	collector *dna.Collector
+	logger    logging.Logger
 	mu        sync.RWMutex
 	modules   moduleDNASource
 }
@@ -1994,7 +1995,7 @@ type dnaCollectorAdapter struct {
 // call setModuleDNASource after InitializeConfigExecutor to wire the real producer
 // (Issue #2435).
 func newDNACollectorAdapter(logger logging.Logger, modules moduleDNASource) *dnaCollectorAdapter {
-	return &dnaCollectorAdapter{collector: dna.NewCollector(logger), modules: modules}
+	return &dnaCollectorAdapter{collector: dna.NewCollector(logger), logger: logger, modules: modules}
 }
 
 // setModuleDNASource wires the module DNA producer after construction. Thread-safe:
@@ -2007,44 +2008,66 @@ func (a *dnaCollectorAdapter) setModuleDNASource(src moduleDNASource) {
 	a.mu.Unlock()
 }
 
+// CollectAttributes returns the merged DNA attribute map — host-fact attributes
+// from the Collector's internal raw map (not from the legacy flat attributes
+// proto field, which Collect() no longer writes after Issue #3332) plus any
+// module-owned attributes (cluster:*, vm:*, etc.) from the wired module DNA
+// source. Returns host-only attributes when no module source is wired.
 func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string]string, error) {
-	result, err := a.collector.Collect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	a.mu.RLock()
-	moduleSrc := a.modules
-	a.mu.RUnlock()
-	if result == nil && moduleSrc == nil {
-		return nil, nil
-	}
-	// Union of hardware facts and module attributes. The two key spaces cannot
-	// collide: hardware-fact keys are bare identifiers (hostname, os, arch)
-	// while module keys are namespaced by resourceID ("<type>:<name>.<field>").
-	attrs := make(map[string]string)
-	if result != nil {
-		for k, v := range result.Attributes {
-			attrs[k] = v
-		}
-	}
-	if moduleSrc != nil {
-		for k, v := range moduleSrc.CollectModuleDNAAttributes(ctx) {
-			attrs[k] = v
-		}
-	}
-	return attrs, nil
-}
+	// Host-fact attributes from the Collector's internal flat map, not the DNA
+	// result's now-unused legacy field.
+	hostAttrs := a.collector.RawAttributes(ctx)
 
-// CollectFragments returns the ADR-017 fragments produced by the wired module
-// DNA source (cluster:* resources). Fragments ride the sync_dna full-snapshot
-// path so the controller-side cluster registry has real state to parse (#2908).
-// Returns nil when no module source is wired (hardware-facts-only mode).
-func (a *dnaCollectorAdapter) CollectFragments(ctx context.Context) []*commonpb.Fragment {
 	a.mu.RLock()
 	moduleSrc := a.modules
 	a.mu.RUnlock()
 	if moduleSrc == nil {
-		return nil
+		return hostAttrs, nil
 	}
-	return moduleSrc.CollectModuleFragments(ctx)
+
+	moduleAttrs := moduleSrc.CollectModuleDNAAttributes(ctx)
+	if len(moduleAttrs) == 0 {
+		return hostAttrs, nil
+	}
+
+	merged := make(map[string]string, len(hostAttrs)+len(moduleAttrs))
+	for k, v := range hostAttrs {
+		merged[k] = v
+	}
+	for k, v := range moduleAttrs {
+		merged[k] = v
+	}
+	return merged, nil
+}
+
+// CollectFragments returns the union of ADR-017 host:* fragments (from the
+// dna.Collector) and cluster:* fragments (from the wired module DNA source).
+// Returns host:* fragments alone when moduleSrc is nil (hardware-facts-only mode).
+func (a *dnaCollectorAdapter) CollectFragments(ctx context.Context) []*commonpb.Fragment {
+	result, err := a.collector.Collect(ctx)
+	if err != nil {
+		a.logger.Warn("host-fact collection failed; host:* fragments omitted from this sync cycle",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	a.mu.RLock()
+	moduleSrc := a.modules
+	a.mu.RUnlock()
+
+	var frags []*commonpb.Fragment
+	if result != nil {
+		frags = append(frags, result.Fragments...)
+	}
+	if moduleSrc != nil {
+		frags = append(frags, moduleSrc.CollectModuleFragments(ctx)...)
+	}
+	return frags
+}
+
+// CollectFragmentsTracked satisfies client.FragmentCollector so the transport
+// client can update currentDNAFragments and currentDNAAggregateRoot for the
+// ADR-017 §7 partial-sync protocol (Issue #3332). It is a thin wrapper that
+// delegates to CollectFragments and always returns nil error.
+func (a *dnaCollectorAdapter) CollectFragmentsTracked(ctx context.Context) ([]*commonpb.Fragment, error) {
+	return a.CollectFragments(ctx), nil
 }

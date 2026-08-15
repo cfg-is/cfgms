@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 // Issue #2435: dnaCollectorAdapter post-construction wiring and end-to-end test.
+// Issue #3332: fragment-forwarding and CollectFragmentsTracked coverage.
 package main
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -118,6 +120,15 @@ func TestDNACollectorAdapter_SetModuleDNASource_PurityTest(t *testing.T) {
 	wg.Wait()
 
 	// Through the adapter, the wired source's module attribute must be present.
+	// Use Eventually: after Issue #3332 CollectAttributes no longer calls
+	// dna.Collector.Collect() which previously masked a timing window between
+	// the ChangeEvent and the debounce flush. Wait explicitly instead.
+	require.Eventually(t, func() bool {
+		attrs, _ := adapter.CollectAttributes(ctx)
+		return attrs["res-a.state"] == "running"
+	}, 2*time.Second, 10*time.Millisecond,
+		"adapter.CollectAttributes must surface the wired source's module attribute")
+
 	attrs1, err := adapter.CollectAttributes(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "running", attrs1["res-a.state"],
@@ -129,6 +140,12 @@ func TestDNACollectorAdapter_SetModuleDNASource_PurityTest(t *testing.T) {
 
 	// The adapter must now read from src2 — proving setModuleDNASource stored src2
 	// under the RWMutex and CollectAttributes reads the live field.
+	require.Eventually(t, func() bool {
+		attrs, _ := adapter.CollectAttributes(ctx)
+		return attrs["res-b.state"] == "healthy"
+	}, 2*time.Second, 10*time.Millisecond,
+		"setModuleDNASource must swap the live source read by adapter.CollectAttributes")
+
 	attrs2, err := adapter.CollectAttributes(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", attrs2["res-b.state"],
@@ -182,9 +199,10 @@ func TestDNACollectorAdapter_PreWiredVsPostWired(t *testing.T) {
 
 // TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource is the REQUIRED
 // TEST for the #2908 production wiring: dnaCollectorAdapter.CollectFragments must
-// forward to the wired moduleDNASource so cluster:* fragments reach the sync_dna
-// DNATransfer. Without this forwarding the controller-side cluster registry
-// (clusterregistry.BuildRegistry) is always empty in production.
+// forward cluster:* fragments from the wired moduleDNASource so they reach the
+// sync_dna DNATransfer. It also verifies the #3332 extension: CollectFragments now
+// unions host:* fragments (from the real dna.Collector) with cluster:* fragments
+// (from the module source).
 //
 // The source is a real *execution.Executor driven by a real Monitor-capable
 // module and a real ChangeEvent — the same producer main.go wires in production.
@@ -192,10 +210,15 @@ func TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource(t *testing.
 	logger := logging.NewLogger("debug")
 	ctx := context.Background()
 
-	// Nil source: no fragments, no panic (hardware-facts-only mode).
+	// Nil source: only host:* fragments from the real dna.Collector (Issue #3332).
 	bare := newDNACollectorAdapter(logger, nil)
-	assert.Empty(t, bare.CollectFragments(ctx),
-		"an adapter with no module source must yield no fragments")
+	bareFrags := bare.CollectFragments(ctx)
+	assert.NotEmpty(t, bareFrags,
+		"an adapter with no module source must yield host:* fragments from the real dna.Collector")
+	for _, f := range bareFrags {
+		assert.True(t, strings.HasPrefix(f.GetFragmentId(), "host:"),
+			"bare adapter must only produce host:* fragments (got %q)", f.GetFragmentId())
+	}
 
 	// Real executor producing a cluster:* resource snapshot → fragment.
 	src := newModuleDNAExecutor(t, logger, "cluster:cfg-lab", map[string]interface{}{
@@ -211,7 +234,13 @@ func TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource(t *testing.
 	var frags []*commonpb.Fragment
 	require.Eventually(t, func() bool {
 		frags = adapter.CollectFragments(ctx)
-		return len(frags) > 0
+		// After #3332, the union includes both host:* and cluster:* fragments.
+		for _, f := range frags {
+			if f.GetFragmentId() == "cluster:cfg-lab" {
+				return true
+			}
+		}
+		return false
 	}, 2*time.Second, 10*time.Millisecond,
 		"adapter.CollectFragments must surface the wired source's cluster fragment")
 
@@ -226,10 +255,13 @@ func TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource(t *testing.
 	assert.NotEmpty(t, got.GetCanonicalBytes(), "forwarded fragment must carry canonical bytes")
 	assert.NotEmpty(t, got.GetFragmentHash(), "forwarded fragment must carry its hash")
 
-	// The forwarded set must be exactly what the wired producer returns — the
-	// adapter is a pass-through, not a re-derivation.
-	assert.Equal(t, len(src.CollectModuleFragments(ctx)), len(frags),
-		"adapter must forward the producer's fragment set verbatim")
+	// The total set is host:* ∪ cluster:* — must include at least the module
+	// fragment(s) plus the host fragments the bare adapter produces.
+	moduleCount := len(src.CollectModuleFragments(ctx))
+	assert.GreaterOrEqual(t, len(frags), moduleCount,
+		"adapter must include all module fragments in the union")
+	assert.Greater(t, len(frags), moduleCount,
+		"adapter must include host:* fragments on top of module fragments (Issue #3332)")
 
 	// Compile-time proof the adapter satisfies the client-side DNACollector
 	// surface that the sync_dna handler calls.
@@ -368,4 +400,92 @@ resources:
 	moduleAttrs := adapter.modules.CollectModuleDNAAttributes(ctx)
 	assert.Equal(t, "running", moduleAttrs["test-resource.state"],
 		"adapter.modules.CollectModuleDNAAttributes must return the executor's module DNA")
+}
+
+// ─── Issue #3332: CollectFragments unions host:* and cluster:* fragments ──────
+
+// TestDNACollectorAdapter_CollectFragments_HostFragmentsAloneWhenNoModuleSource is
+// the REQUIRED TEST for Issue #3332 AC: CollectFragments returns host:* fragments
+// from the real dna.Collector when moduleSrc is nil (hardware-facts-only mode).
+func TestDNACollectorAdapter_CollectFragments_HostFragmentsAloneWhenNoModuleSource(t *testing.T) {
+	logger := logging.NewLogger("error")
+	ctx := context.Background()
+
+	// Hardware-facts-only mode: no module source wired.
+	adapter := newDNACollectorAdapter(logger, nil)
+
+	frags := adapter.CollectFragments(ctx)
+
+	require.NotEmpty(t, frags,
+		"adapter without module source must return host:* fragments from the real dna.Collector")
+	for _, f := range frags {
+		assert.True(t, strings.HasPrefix(f.GetFragmentId(), "host:"),
+			"bare adapter must only produce host:* fragments (got %q)", f.GetFragmentId())
+		assert.NotEmpty(t, f.GetCanonicalBytes(), "each fragment must carry canonical bytes")
+		assert.NotEmpty(t, f.GetFragmentHash(), "each fragment must carry a hash")
+	}
+}
+
+// TestDNACollectorAdapter_CollectFragments_UnionsHostAndModuleFragments is the
+// REQUIRED TEST for Issue #3332 AC: CollectFragments returns both host:* and
+// cluster:* fragments when both sources are wired.
+func TestDNACollectorAdapter_CollectFragments_UnionsHostAndModuleFragments(t *testing.T) {
+	logger := logging.NewLogger("error")
+	ctx := context.Background()
+
+	src := newModuleDNAExecutor(t, logger, "cluster:cfg-lab", map[string]interface{}{
+		"name":           "cfg-lab",
+		"cno_owner_node": "CFG-70-02",
+		"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
+	})
+
+	adapter := newDNACollectorAdapter(logger, nil)
+	adapter.setModuleDNASource(src)
+
+	var (
+		allFrags   []*commonpb.Fragment
+		hasHost    bool
+		hasCluster bool
+	)
+	require.Eventually(t, func() bool {
+		allFrags = adapter.CollectFragments(ctx)
+		hasHost = false
+		hasCluster = false
+		for _, f := range allFrags {
+			if strings.HasPrefix(f.GetFragmentId(), "host:") {
+				hasHost = true
+			}
+			if strings.HasPrefix(f.GetFragmentId(), "cluster:") {
+				hasCluster = true
+			}
+		}
+		return hasHost && hasCluster
+	}, 3*time.Second, 50*time.Millisecond,
+		"wired adapter must return both host:* and cluster:* fragments")
+
+	assert.True(t, hasHost, "must include host:* fragments")
+	assert.True(t, hasCluster, "must include cluster:* fragments")
+
+	// The total count must be at least 2 (≥1 host + ≥1 cluster).
+	assert.GreaterOrEqual(t, len(allFrags), 2,
+		"union must have at least one host and one cluster fragment")
+}
+
+// TestDNACollectorAdapter_CollectFragmentsTracked_SatisfiesFragmentCollector verifies
+// CollectFragmentsTracked delegates to CollectFragments and returns a nil error,
+// satisfying the client.FragmentCollector interface (Issue #3332).
+func TestDNACollectorAdapter_CollectFragmentsTracked_SatisfiesFragmentCollector(t *testing.T) {
+	logger := logging.NewLogger("error")
+	ctx := context.Background()
+
+	adapter := newDNACollectorAdapter(logger, nil)
+
+	frags, err := adapter.CollectFragmentsTracked(ctx)
+	require.NoError(t, err, "CollectFragmentsTracked must never return an error")
+	assert.NotEmpty(t, frags,
+		"CollectFragmentsTracked must surface host:* fragments when no module source is wired")
+
+	// Compile-time proof the adapter satisfies both interfaces.
+	var _ client.DNACollector = adapter
+	var _ client.FragmentCollector = adapter
 }

@@ -82,6 +82,41 @@ func TestPartitionHostFacts_ProducesRequiredKinds(t *testing.T) {
 	}
 }
 
+// TestPartitionHostFacts_HostnameUnconditionallyPresent is the REQUIRED
+// regression test for Issue #3319/#3358: the observed hostname must appear in
+// the host:os fragment even when no hostname module resource is configured
+// (ownership map nil/empty) — the exact shape of a steward's DNA at first
+// registration, before any Tier-2 observe sweep or explicit hostname resource
+// exists. Without this, the controller's required-field presence check
+// (features/controller/service/dna_integrity.go) rejects every newly
+// registering steward as missing "hostname".
+func TestPartitionHostFacts_HostnameUnconditionallyPresent(t *testing.T) {
+	attrs := map[string]string{
+		"hostname": "newly-registered-steward",
+		"os":       "linux",
+	}
+
+	taxonomy := entitygraphtypes.DefaultTaxonomy()
+	// No ownership declarations at all — mirrors a steward that has not yet
+	// had any module resource (including hostname) configured.
+	fragments, _, err := PartitionHostFacts(attrs, taxonomy, nil)
+	require.NoError(t, err)
+
+	var hostOS *commonpb.Fragment
+	for _, f := range fragments {
+		if f.FragmentId == "host:os" {
+			hostOS = f
+		}
+	}
+	require.NotNil(t, hostOS, "host:os fragment must be emitted")
+
+	decoded, err := DecodeCanonicalFragment(hostOS.CanonicalBytes)
+	require.NoError(t, err)
+	assert.Equal(t, "newly-registered-steward", decoded["hostname"],
+		"host:os fragment must carry the observed hostname unconditionally, "+
+			"independent of whether a hostname module resource is configured")
+}
+
 // TestPartitionHostFacts_FailClosed verifies that a kind with no populated keys
 // is omitted rather than emitted as an empty fragment.
 func TestPartitionHostFacts_FailClosed(t *testing.T) {

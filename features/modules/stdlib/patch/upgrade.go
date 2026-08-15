@@ -10,6 +10,7 @@ import (
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
 
 // Windows11Requirements defines minimum hardware requirements for Windows 11
@@ -196,9 +197,15 @@ func (cc *CompatibilityChecker) CheckCompatibility(dna *commonpb.DNA, targetVers
 	return result, nil
 }
 
-// checkTPM validates TPM version
+// checkTPM validates TPM version from the host:bios fragment.
+//
+// tpm_version is not in the host:bios allowlist (features/steward/dna/fragments.go)
+// and no gatherer on any platform currently produces it, so this lookup always
+// misses and the check always falls into the "not found" MissingRequirements
+// branch — identical to its pre-migration dead state under dna.Attributes.
+// Populating it is TPM-collection work, out of scope for this data-source swap.
 func (cc *CompatibilityChecker) checkTPM(dna *commonpb.DNA, result *CompatibilityResult) error {
-	tpmVersion, exists := dna.Attributes["tpm_version"]
+	tpmVersion, exists := lookupFragmentString(dna, "host:bios", "tpm_version")
 	if !exists || tpmVersion == "" {
 		result.MissingRequirements = append(result.MissingRequirements,
 			fmt.Sprintf("TPM %s not found (no TPM detected)", cc.requirements.TPMVersion))
@@ -214,13 +221,19 @@ func (cc *CompatibilityChecker) checkTPM(dna *commonpb.DNA, result *Compatibilit
 	return nil
 }
 
-// checkUEFI validates UEFI firmware
+// checkUEFI validates UEFI firmware from the host:bios fragment.
+//
+// bios_mode is not in the host:bios allowlist (features/steward/dna/fragments.go)
+// and no gatherer on any platform currently produces it, so this lookup always
+// misses and the check always falls into the "could not be determined" Warnings
+// branch — identical to its pre-migration dead state under dna.Attributes.
+// Populating it is BIOS-mode-collection work, out of scope for this data-source swap.
 func (cc *CompatibilityChecker) checkUEFI(dna *commonpb.DNA, result *CompatibilityResult) error {
 	if !cc.requirements.RequiresUEFI {
 		return nil
 	}
 
-	biosMode, exists := dna.Attributes["bios_mode"]
+	biosMode, exists := lookupFragmentString(dna, "host:bios", "bios_mode")
 	if !exists {
 		result.Warnings = append(result.Warnings, "BIOS mode could not be determined")
 		return nil
@@ -234,10 +247,22 @@ func (cc *CompatibilityChecker) checkUEFI(dna *commonpb.DNA, result *Compatibili
 	return nil
 }
 
-// checkCPU validates CPU requirements
+// checkCPU validates CPU requirements from the host:cpu fragment.
+// cpu_cores is read directly; cpu_max_clock_speed (MHz, e.g. "2400MHz") is
+// converted to GHz for comparison against MinCPUSpeedGHz.
+//
+// Both keys are populated only by the Windows WMI gatherer
+// (features/steward/dna/hardware_windows.go). Linux emits core/frequency data
+// under cpu_cores_per_socket/cpu_max_frequency_mhz and macOS under
+// cpu_physical_cores/cpu_logical_cores — different key names this checker does
+// not read, so on Linux and macOS these checks always fall into their
+// "could not be determined" Warnings branch. This is not a regression: the
+// pre-migration dna.Attributes keys had the identical Windows-only gap.
+// Reading the non-Windows key names is a follow-up, out of scope for this
+// data-source swap.
 func (cc *CompatibilityChecker) checkCPU(dna *commonpb.DNA, result *CompatibilityResult) error {
-	// Check CPU cores
-	coresStr, exists := dna.Attributes["cpu_cores"]
+	// Check CPU cores from host:cpu fragment.
+	coresStr, exists := lookupFragmentString(dna, "host:cpu", "cpu_cores")
 	if exists && coresStr != "" {
 		cores, err := strconv.Atoi(coresStr)
 		if err == nil && cores < cc.requirements.MinCPUCores {
@@ -248,33 +273,41 @@ func (cc *CompatibilityChecker) checkCPU(dna *commonpb.DNA, result *Compatibilit
 		result.Warnings = append(result.Warnings, "CPU core count could not be determined")
 	}
 
-	// Check CPU speed
-	speedStr, exists := dna.Attributes["cpu_speed_ghz"]
-	if exists && speedStr != "" {
-		speed, err := strconv.ParseFloat(speedStr, 64)
-		if err == nil && speed < cc.requirements.MinCPUSpeedGHz {
-			result.MissingRequirements = append(result.MissingRequirements,
-				fmt.Sprintf("CPU with %.1f+ GHz required (found %.1f GHz)", cc.requirements.MinCPUSpeedGHz, speed))
+	// Check CPU speed from host:cpu fragment. The gatherer emits cpu_max_clock_speed
+	// in MHz with an optional "MHz" suffix (e.g. "2400MHz"); convert to GHz.
+	speedRaw, exists := lookupFragmentString(dna, "host:cpu", "cpu_max_clock_speed")
+	if exists && speedRaw != "" {
+		mhzStr := strings.TrimSuffix(speedRaw, "MHz")
+		speedMHz, err := strconv.ParseFloat(mhzStr, 64)
+		if err == nil {
+			speed := speedMHz / 1000.0
+			if speed < cc.requirements.MinCPUSpeedGHz {
+				result.MissingRequirements = append(result.MissingRequirements,
+					fmt.Sprintf("CPU with %.1f+ GHz required (found %.1f GHz)", cc.requirements.MinCPUSpeedGHz, speed))
+			}
 		}
 	}
 
 	return nil
 }
 
-// checkRAM validates memory requirements
+// checkRAM validates memory requirements from the host:memory fragment.
+// memory_total_gb is a float string (e.g. "7.95"); it is truncated to int for
+// threshold comparison and message formatting.
 func (cc *CompatibilityChecker) checkRAM(dna *commonpb.DNA, result *CompatibilityResult) error {
-	ramStr, exists := dna.Attributes["ram_gb"]
-	if !exists || ramStr == "" {
+	gbStr, exists := lookupFragmentString(dna, "host:memory", "memory_total_gb")
+	if !exists || gbStr == "" {
 		result.Warnings = append(result.Warnings, "RAM capacity could not be determined")
 		return nil
 	}
 
-	ram, err := strconv.Atoi(ramStr)
+	ramFloat, err := strconv.ParseFloat(gbStr, 64)
 	if err != nil {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("Invalid RAM value: %s", ramStr))
+		result.Warnings = append(result.Warnings, fmt.Sprintf("Invalid RAM value: %s", gbStr))
 		return nil
 	}
 
+	ram := int(ramFloat)
 	if ram < cc.requirements.MinRAMGB {
 		result.MissingRequirements = append(result.MissingRequirements,
 			fmt.Sprintf("%d+ GB RAM required (found %d GB)", cc.requirements.MinRAMGB, ram))
@@ -283,9 +316,22 @@ func (cc *CompatibilityChecker) checkRAM(dna *commonpb.DNA, result *Compatibilit
 	return nil
 }
 
-// checkStorage validates storage requirements
+// checkStorage validates storage requirements from the host:memory fragment.
+// storage_gb is an integer GB string (e.g. "256"). No storage-specific fragment
+// exists yet; this key is placed in host:memory as a capacity sibling until a
+// dedicated host:storage fragment is introduced.
+//
+// storage_gb is not in the host:memory allowlist (features/steward/dna/fragments.go)
+// and no gatherer computes an aggregate value under this or any other key — disk
+// capacity is only ever emitted per-device as disk_N_size/disk_N_used
+// (features/steward/dna/hardware_linux.go), never rolled up into a single total.
+// This lookup always misses and the check always falls into the "could not be
+// determined" Warnings branch, identical to its pre-migration dead state under
+// dna.Attributes. Adding storage_gb to the allowlist would not fix this — the
+// value itself needs a new aggregating gatherer, out of scope for this
+// data-source swap.
 func (cc *CompatibilityChecker) checkStorage(dna *commonpb.DNA, result *CompatibilityResult) error {
-	storageStr, exists := dna.Attributes["storage_gb"]
+	storageStr, exists := lookupFragmentString(dna, "host:memory", "storage_gb")
 	if !exists || storageStr == "" {
 		result.Warnings = append(result.Warnings, "Storage capacity could not be determined")
 		return nil
@@ -305,13 +351,20 @@ func (cc *CompatibilityChecker) checkStorage(dna *commonpb.DNA, result *Compatib
 	return nil
 }
 
-// checkSecureBoot validates Secure Boot status
+// checkSecureBoot validates Secure Boot status from the host:bios fragment.
+//
+// secure_boot is not in the host:bios allowlist (features/steward/dna/fragments.go)
+// and no gatherer on any platform currently produces it, so this lookup always
+// misses and the check always falls into the "could not be determined" Warnings
+// branch — identical to its pre-migration dead state under dna.Attributes.
+// Populating it is Secure-Boot-collection work, out of scope for this data-source
+// swap.
 func (cc *CompatibilityChecker) checkSecureBoot(dna *commonpb.DNA, result *CompatibilityResult) error {
 	if !cc.requirements.RequiresSecureBoot {
 		return nil
 	}
 
-	secureBoot, exists := dna.Attributes["secure_boot"]
+	secureBoot, exists := lookupFragmentString(dna, "host:bios", "secure_boot")
 	if !exists {
 		result.Warnings = append(result.Warnings, "Secure Boot status could not be determined")
 		return nil
@@ -323,6 +376,29 @@ func (cc *CompatibilityChecker) checkSecureBoot(dna *commonpb.DNA, result *Compa
 	}
 
 	return nil
+}
+
+// lookupFragmentString decodes the canonical bytes for the named fragment and
+// returns the string value stored under key. Returns ("", false) when the
+// fragment is absent, the key is not present in the payload, decoding fails,
+// or the value is not a string.
+func lookupFragmentString(dna *commonpb.DNA, fragmentID, key string) (string, bool) {
+	for _, frag := range dna.GetFragments() {
+		if frag.GetFragmentId() != fragmentID {
+			continue
+		}
+		decoded, err := sdna.DecodeCanonicalFragment(frag.GetCanonicalBytes())
+		if err != nil {
+			return "", false
+		}
+		v, ok := decoded[key]
+		if !ok {
+			return "", false
+		}
+		s, ok := v.(string)
+		return s, ok
+	}
+	return "", false
 }
 
 // UpgradeManager manages major version upgrades

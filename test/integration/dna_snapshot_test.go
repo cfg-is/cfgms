@@ -34,8 +34,11 @@ import (
 //     out auto-tightens once memory_total_gb is collected.
 
 // collectFullSnapshot spawns a real Collector, triggers and waits for background
-// collection, then returns the merged full-snapshot attributes. Real components
-// only (no mocks), per CLAUDE.md testing standards.
+// collection, then returns the merged full-snapshot attributes via RawAttributes.
+// After Issue #3332 the flat Attributes field is no longer written to the DNA
+// proto, but the gatherers still populate an internal attributes map that is
+// available via Collector.RawAttributes(). Real components only (no mocks), per
+// CLAUDE.md testing standards.
 func collectFullSnapshot(t *testing.T) map[string]string {
 	t.Helper()
 	c := dna.NewCollector(logging.NewLogger("error"))
@@ -52,14 +55,11 @@ func collectFullSnapshot(t *testing.T) map[string]string {
 		t.Fatalf("background collection did not complete before ctx cancellation (%v); "+
 			"snapshot is partial — increase the test timeout rather than treating this as a coverage gap", err)
 	}
-	snap, err := c.Collect(ctx)
-	if err != nil {
-		t.Fatalf("second Collect (merged full snapshot): %v", err)
+	attrs := c.RawAttributes(ctx)
+	if len(attrs) == 0 {
+		t.Fatal("nil or empty attributes from RawAttributes")
 	}
-	if snap == nil || snap.Attributes == nil {
-		t.Fatal("nil snapshot or attributes")
-	}
-	return snap.Attributes
+	return attrs
 }
 
 // dumpKeysOnFailure logs the collected attribute KEYS only — never values, which

@@ -107,9 +107,9 @@ func TestDNASyncFeedbackLoop_SuppressesSubsequentMismatch(t *testing.T) {
 		heartbeatSvc.SetExpectedDNAHash(stewardID, stewarddna.ComputeHash(dna.Attributes))
 	})
 
-	// Define the DNA that will be synced.
+	// Define the DNA that will be synced. Fragments are required by Issue #3319.
 	attrs := map[string]string{"os": "linux", "hostname": "fb-host", "version": "1.0"}
-	dna := &commonpb.DNA{Id: "dev-feedback", Attributes: attrs}
+	dna := makeTestDNA("dev-feedback", attrs)
 	syncedHash := stewarddna.ComputeHash(attrs)
 
 	// Set a diverged expected hash to confirm the hook actually updates it.

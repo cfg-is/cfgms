@@ -31,15 +31,8 @@ func TestCollect(t *testing.T) {
 
 	// Test basic structure
 	assert.NotEmpty(t, dna.Id)
-	assert.NotNil(t, dna.Attributes)
+	assert.Nil(t, dna.Attributes, "Collect must not populate the legacy Attributes field (Issue #3332)")
 	assert.NotNil(t, dna.LastUpdated)
-
-	// Test that we have basic attributes (all from fast path)
-	assert.Contains(t, dna.Attributes, "runtime_os")
-	assert.Contains(t, dna.Attributes, "runtime_arch")
-	assert.Contains(t, dna.Attributes, "runtime_version")
-	assert.Contains(t, dna.Attributes, "num_cpu")
-	assert.Contains(t, dna.Attributes, "timestamp")
 
 	// Test timestamp is recent
 	timeDiff := time.Since(dna.LastUpdated.AsTime())
@@ -248,9 +241,11 @@ func TestBackgroundCollectionStartsOnFirstCollect(t *testing.T) {
 		t.Fatal("Background collection goroutine did not complete within 3 minutes — goroutine may not have started")
 	}
 
-	// Second Collect should return at least as many attributes as the first
+	// Second Collect should report at least as many attributes as the first
+	// (background collection may add more; AttributeCount reflects the flat map
+	// used internally for sync fingerprinting — still populated after the change).
 	dna2, err := collector.Collect(t.Context())
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(dna2.Attributes), len(dna.Attributes),
+	assert.GreaterOrEqual(t, int(dna2.AttributeCount), int(dna.AttributeCount),
 		"Second Collect() should have at least as many attributes as first")
 }
