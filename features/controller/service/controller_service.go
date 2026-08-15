@@ -16,7 +16,6 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
-	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"google.golang.org/protobuf/proto"
@@ -54,14 +53,6 @@ type StewardInfo struct {
 	Status        string
 	Metrics       map[string]string
 	Token         string
-
-	// RingResolvedVersion is the desired_version resolved from the steward's
-	// deployment_ring DNA attribute and the controller ring config. Empty when
-	// the resolved ring has no version set. Applied as an override over any
-	// tenant-path desired_version when delivering config to the steward.
-	RingResolvedVersion string
-	// ResolvedRing is the ring name that was matched (or fell back to).
-	ResolvedRing string
 
 	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2944).
 	// Orthogonal to Status: hiding a steward does not change its lifecycle state.
@@ -670,36 +661,6 @@ func (s *ControllerService) GetRingConfig() controllerconfig.DeploymentRingConfi
 	s.ringMu.RLock()
 	defer s.ringMu.RUnlock()
 	return s.ringConfig
-}
-
-// ResolveRingVersion resolves the effective desired_version and ring name for a steward
-// given its DNA attributes and the current ring configuration.
-// Returns (version, resolvedRing, didFallback, originalRingValue).
-func (s *ControllerService) ResolveRingVersion(dnaAttrs map[string]string) (version, ring string, didFallback bool, originalValue string) {
-	s.ringMu.RLock()
-	rings := s.ringConfig
-	s.ringMu.RUnlock()
-	return pkgconfig.ResolveRingVersion(dnaAttrs, rings)
-}
-
-// ApplyRingResolution resolves the deployment ring for a steward, stores the result in
-// the StewardInfo, and logs a WARN when ring fallback occurs (absent or invalid ring).
-// steward must be the live registry entry; caller must hold s.mu (at least read lock
-// for reading DNA, write lock if updating RingResolvedVersion).
-func (s *ControllerService) ApplyRingResolution(stewardID string, steward *StewardInfo) {
-	if steward.DNA == nil {
-		return
-	}
-	version, ring, didFallback, original := s.ResolveRingVersion(steward.DNA.Attributes)
-	steward.RingResolvedVersion = version
-	steward.ResolvedRing = ring
-	if didFallback {
-		s.logger.Warn("deployment_ring_fallback",
-			"steward_id", logging.SanitizeLogValue(stewardID),
-			"ring_value", logging.SanitizeLogValue(original),
-			"fallback_ring", logging.SanitizeLogValue(ring),
-		)
-	}
 }
 
 // logRingSetChange emits a structured audit entry when the ring set changes.

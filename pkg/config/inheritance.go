@@ -11,7 +11,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
@@ -698,50 +697,6 @@ func ResolveRebootWindowTimezone(cfg *maintenanceschedule.Config, tenantDefault 
 		return tenantDefault
 	}
 	return ""
-}
-
-// ResolveRingVersion resolves the effective desired_version for a steward based on its
-// deployment_ring DNA attribute and the controller's ring configuration.
-//
-// The function reads dnaAttrs["deployment_ring"], validates it against the declared ring
-// set, and returns the matching ring's desired_version. When the attribute is absent or
-// names a ring not in the set, the configured fallback ring is used instead.
-//
-// Return values:
-//   - version: the resolved ring's desired_version (empty when the ring has no version set)
-//   - resolvedRing: the ring name that was matched or fell back to
-//   - didFallback: true when the original ring was absent or not found in the ring set
-//   - originalValue: the raw deployment_ring attribute from dnaAttrs (may be empty)
-//
-// This function augments (does not replace) the path-based desired_version from the
-// inheritance resolver: the caller should apply the returned version only when non-empty,
-// overriding any tenant-path desired_version per the precedence rule.
-func ResolveRingVersion(dnaAttrs map[string]string, rings controllerconfig.DeploymentRingConfig) (version, resolvedRing string, didFallback bool, originalValue string) {
-	originalValue = dnaAttrs["deployment_ring"]
-
-	byName := make(map[string]*controllerconfig.RingSpec, len(rings.Rings))
-	for i := range rings.Rings {
-		byName[rings.Rings[i].Name] = &rings.Rings[i]
-	}
-
-	fallbackName := rings.FallbackRing
-	if fallbackName == "" {
-		fallbackName = controllerconfig.DefaultFallbackRing
-	}
-
-	if originalValue != "" {
-		if ring, ok := byName[originalValue]; ok {
-			return ring.DesiredVersion, ring.Name, false, originalValue
-		}
-		didFallback = true
-	} else {
-		didFallback = true
-	}
-
-	if ring, ok := byName[fallbackName]; ok {
-		return ring.DesiredVersion, ring.Name, didFallback, originalValue
-	}
-	return "", fallbackName, didFallback, originalValue
 }
 
 // getPathDescription returns a human-readable description of a configuration path
