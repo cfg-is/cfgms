@@ -136,3 +136,59 @@ func TestSetupLegacyTLS_ExplicitAbsolutePathHonoured(t *testing.T) {
 	require.NoError(t, err, "explicit absolute CertPath must be honoured by setupLegacyTLS")
 	require.NotNil(t, tlsConfig)
 }
+
+// TestSetupLegacyTLS_MissingCertFile verifies the first error branch: when
+// server.crt is absent from CertPath, setupLegacyTLS returns a read error and no
+// TLS config rather than silently serving an unconfigured listener.
+func TestSetupLegacyTLS_MissingCertFile(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.CertPath = t.TempDir() // empty dir — no server.crt
+	s := &Server{cfg: cfg, logger: logging.NewNoopLogger()}
+
+	tlsConfig, err := s.setupLegacyTLS()
+	require.Error(t, err, "missing server.crt must be reported, never ignored")
+	assert.Nil(t, tlsConfig, "no TLS config may be returned when the certificate cannot be read")
+	assert.Contains(t, err.Error(), "failed to read certificate file",
+		"error must identify the certificate file as the failing input")
+	assert.ErrorIs(t, err, os.ErrNotExist,
+		"underlying os error must be wrapped, not flattened into a string")
+}
+
+// TestSetupLegacyTLS_MissingKeyFile verifies the second error branch: server.crt
+// exists but server.key does not, so the key read fails after a successful cert read.
+func TestSetupLegacyTLS_MissingKeyFile(t *testing.T) {
+	certDir := t.TempDir()
+	writeLegacyCertFiles(t, certDir)
+	require.NoError(t, os.Remove(filepath.Join(certDir, "server.key")))
+
+	cfg := config.DefaultConfig()
+	cfg.CertPath = certDir
+	s := &Server{cfg: cfg, logger: logging.NewNoopLogger()}
+
+	tlsConfig, err := s.setupLegacyTLS()
+	require.Error(t, err, "missing server.key must be reported even when server.crt is readable")
+	assert.Nil(t, tlsConfig, "no TLS config may be returned when the key cannot be read")
+	assert.Contains(t, err.Error(), "failed to read key file",
+		"error must identify the key file, not the certificate, as the failing input")
+	assert.ErrorIs(t, err, os.ErrNotExist,
+		"underlying os error must be wrapped, not flattened into a string")
+}
+
+// TestSetupLegacyTLS_InvalidPEM verifies the third error branch: both files are
+// readable but contain data that is not a valid certificate/key pair, so
+// cert.CreateBasicTLSConfig rejects them.
+func TestSetupLegacyTLS_InvalidPEM(t *testing.T) {
+	certDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(certDir, "server.crt"), []byte("not a pem certificate"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(certDir, "server.key"), []byte("not a pem key"), 0600))
+
+	cfg := config.DefaultConfig()
+	cfg.CertPath = certDir
+	s := &Server{cfg: cfg, logger: logging.NewNoopLogger()}
+
+	tlsConfig, err := s.setupLegacyTLS()
+	require.Error(t, err, "unparseable PEM data must fail TLS setup")
+	assert.Nil(t, tlsConfig, "no TLS config may be returned when the key pair is invalid")
+	assert.Contains(t, err.Error(), "failed to create TLS config",
+		"error must attribute the failure to TLS config construction, not to file I/O")
+}
