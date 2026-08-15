@@ -165,6 +165,35 @@ func (m *SQLiteMigrator) getAllMigrations() []Migration {
 			Description: "Initial DNA storage schema with optimized indexes",
 			SQL:         sqliteSchema,
 		},
+		{
+			Version:     2,
+			Description: "Add device_tenant table for minimal durable device-to-tenant mapping (Issue #3324)",
+			SQL: `
+				CREATE TABLE IF NOT EXISTS device_tenant (
+					device_id TEXT NOT NULL PRIMARY KEY,
+					tenant_id TEXT NOT NULL,
+					registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+				);
+				CREATE INDEX IF NOT EXISTS idx_device_tenant_tenant ON device_tenant(tenant_id);
+				-- Seed existing devices from dna_history. dna_history holds one row per DNA
+				-- version, each stamped with the tenant that owned the device at write time,
+				-- so a device that has changed tenants has rows for both. Take the tenant
+				-- from the LATEST version that names one: an unordered DISTINCT would seed a
+				-- former tenant into the now-authoritative mapping and serve that device
+				-- another tenant's configuration. Devices with no tenanted row are left
+				-- unmapped, which resolves as "tenant unknown" (fails closed).
+				INSERT OR IGNORE INTO device_tenant (device_id, tenant_id)
+				SELECT h.device_id, h.tenant_id
+				FROM dna_history h
+				INNER JOIN (
+					SELECT device_id, MAX(version) AS max_version
+					FROM dna_history
+					WHERE tenant_id != ''
+					GROUP BY device_id
+				) latest ON h.device_id = latest.device_id AND h.version = latest.max_version
+				WHERE h.tenant_id != '';
+			`,
+		},
 		// Design decision: future migrations are added here as sequential integer-keyed entries; the migration runner applies them in order.
 	}
 }
@@ -175,6 +204,7 @@ func (m *SQLiteMigrator) ValidateSchema() error {
 		"dna_history",
 		"dna_references",
 		"storage_stats",
+		"device_tenant",
 	}
 
 	requiredViews := []string{

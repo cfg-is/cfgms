@@ -543,6 +543,7 @@ func TestEnsureSteward_AddsAbsentStewardWithDurableTenant(t *testing.T) {
 	// Seed durable storage as if the steward had registered in a previous run.
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
 
 	// Fresh service WITHOUT warm-load: the steward is absent from the registry,
 	// exactly the cert-reuse reconnect gap.
@@ -568,6 +569,7 @@ func TestEnsureSteward_IgnoresCallerTenantWhenDurableExists(t *testing.T) {
 
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-real", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-1", "tenant-real"))
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 
@@ -631,6 +633,7 @@ func TestEnsureSteward_SurvivesControllerRestart(t *testing.T) {
 	mgr1 := openFleetStorageAt(t, dataDir)
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, mgr1.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, mgr1.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
 	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
 	svc1.EnsureSteward("dev-1", "", "active")
 	info1, ok := svc1.GetStewardInfo("dev-1")
@@ -660,6 +663,7 @@ func TestEnsureSteward_ConcurrentCallsNoDuplicate(t *testing.T) {
 	ctx := context.Background()
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 
@@ -690,6 +694,7 @@ func TestRecordHeartbeat_BackstopAddsAbsentStewardWithDurableTenant(t *testing.T
 
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 	_, found := svc.GetStewardInfo("dev-1")
@@ -1133,4 +1138,119 @@ func TestSetStewardHidden_PreservesOtherFields(t *testing.T) {
 	assert.True(t, info.Hidden, "Hidden must be set")
 	assert.Equal(t, "active", info.Status, "Status must not change on SetStewardHidden")
 	assert.Equal(t, "tenant-b", info.TenantID, "TenantID must not change on SetStewardHidden")
+}
+
+// TestLookupDurableTenant_SurvivesControllerRestart is the acceptance test for
+// Issue #3324: (1) RegisterSteward writes the steward→tenant mapping to the
+// independent device_tenant table; (2) after a controller restart,
+// lookupDurableTenant resolves the tenant correctly from device_tenant; (3) a
+// device present only in dna_history (not device_tenant) returns ok=false,
+// proving that tenant resolution no longer falls back to the flat DNA store.
+func TestLookupDurableTenant_SurvivesControllerRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	mgr1 := openFleetStorageAt(t, dataDir)
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
+	require.NoError(t, svc1.RegisterSteward("dev-mapped", "tenant-x", "addr-1", "registered"))
+
+	// Seed a second device ONLY into dna_history to prove lookupDurableTenant
+	// does not fall back to dna_history for tenant resolution.
+	dna := makeTestDNA("dev-dnaonly", map[string]string{"os": "linux"})
+	require.NoError(t, mgr1.Store(ctx, "dev-dnaonly", dna, &fleetStorage.StoreOptions{TenantID: "tenant-y", Status: "registered"}))
+	// Deliberately NOT calling mgr1.SetDeviceTenant for "dev-dnaonly".
+
+	require.NoError(t, mgr1.Close())
+
+	mgr2 := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr2.Close() })
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+
+	// (1)+(2): RegisterSteward wrote device_tenant; survives restart.
+	tid, ok := svc2.lookupDurableTenant("dev-mapped")
+	require.True(t, ok, "lookupDurableTenant must resolve a registered steward after restart")
+	assert.Equal(t, "tenant-x", tid)
+
+	// (3): dna_history-only device must not resolve via lookupDurableTenant.
+	_, ok = svc2.lookupDurableTenant("dev-dnaonly")
+	assert.False(t, ok, "lookupDurableTenant must not fall back to dna_history for tenant resolution")
+}
+
+// TestUpdateStewardTenant_MoveSurvivesRestart is the tenant-move reversion
+// regression test for Issue #3324. device_tenant is authoritative — EnsureSteward
+// lets the durable tenant win unconditionally — so a move that updates only the
+// registry would be undone by the next reconnect or controller restart. The move
+// must rewrite device_tenant, and both warm-load and the connect path must then
+// report the NEW tenant.
+func TestUpdateStewardTenant_MoveSurvivesRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	mgr1 := openFleetStorageAt(t, dataDir)
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
+	require.NoError(t, svc1.RegisterSteward("dev-move", "tenant-a", "addr-1", "registered"))
+	require.NoError(t, svc1.UpdateStewardTenant("dev-move", "tenant-b"))
+	require.NoError(t, mgr1.Close())
+
+	mgr2 := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr2.Close() })
+
+	// The durable mapping itself names the destination tenant.
+	tid, found, err := mgr2.GetDeviceTenant(ctx, "dev-move")
+	require.NoError(t, err)
+	require.True(t, found, "tenant move must write the durable device_tenant mapping")
+	assert.Equal(t, "tenant-b", tid, "durable mapping must name the destination tenant after a move")
+
+	// Warm-load after restart must report the destination tenant.
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+	require.NoError(t, svc2.LoadFromStorage(ctx))
+	info, ok := svc2.GetStewardInfo("dev-move")
+	require.True(t, ok, "warm-load must restore the moved steward")
+	assert.Equal(t, "tenant-b", info.TenantID, "warm-load must not revert the device to its pre-move tenant")
+
+	// The connect path (EnsureSteward) must not revert it either.
+	svc3 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+	svc3.EnsureSteward("dev-move", "", "active")
+	info, ok = svc3.GetStewardInfo("dev-move")
+	require.True(t, ok, "EnsureSteward must add the reconnecting steward")
+	assert.Equal(t, "tenant-b", info.TenantID, "reconnect must not revert the device to its pre-move tenant")
+}
+
+// TestUpdateStewardTenant_OfflineStewardPersistsMapping covers the exact shape the
+// move handler tolerates: the steward is absent from the live registry (moved while
+// disconnected, or after a controller restart with no warm-load). The durable
+// mapping must still be rewritten, and the returned error must be identifiable as
+// ErrStewardNotInRegistry so callers can tell it apart from a failed persist
+// (Issue #3324).
+func TestUpdateStewardTenant_OfflineStewardPersistsMapping(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	mgr1 := openFleetStorageAt(t, dataDir)
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
+	require.NoError(t, svc1.RegisterSteward("dev-offline", "tenant-a", "addr-1", "registered"))
+	require.NoError(t, mgr1.Close())
+
+	mgr2 := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr2.Close() })
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+	_, ok := svc2.GetStewardInfo("dev-offline")
+	require.False(t, ok, "precondition: steward must be absent from the fresh registry")
+
+	err := svc2.UpdateStewardTenant("dev-offline", "tenant-b")
+	require.Error(t, err, "an absent registry entry must be reported to the caller")
+	require.ErrorIs(t, err, ErrStewardNotInRegistry,
+		"registry miss must be distinguishable from a durable-write failure")
+
+	tid, found, err := mgr2.GetDeviceTenant(ctx, "dev-offline")
+	require.NoError(t, err)
+	require.True(t, found, "durable mapping must be written even when the steward is offline")
+	assert.Equal(t, "tenant-b", tid)
+
+	// Reconnect resolves to the destination tenant, not the pre-move one.
+	svc2.EnsureSteward("dev-offline", "", "active")
+	info, ok := svc2.GetStewardInfo("dev-offline")
+	require.True(t, ok)
+	assert.Equal(t, "tenant-b", info.TenantID,
+		"an offline steward moved between tenants must not revert on reconnect")
 }

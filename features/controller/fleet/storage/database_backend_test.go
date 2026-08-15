@@ -66,7 +66,7 @@ func dropDNATables(t *testing.T, dsn string) {
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
-	for _, table := range []string{"dna_references", "storage_stats", "dna_history"} {
+	for _, table := range []string{"dna_references", "storage_stats", "dna_history", "device_tenant"} {
 		_, err := db.Exec("DROP TABLE IF EXISTS " + table + " CASCADE")
 		require.NoError(t, err, "failed to drop %s", table)
 	}
@@ -289,5 +289,88 @@ func TestDatabaseBackend_QueryFleet(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), result.TotalCount)
 		assert.Equal(t, "dev-windows-1", result.Records[0].DeviceID)
+	})
+}
+
+// TestDatabaseBackend_DeviceTenant exercises the PostgreSQL implementations of
+// setDeviceTenant, getDeviceTenant and listDeviceTenants through the Manager
+// (Issue #3324). It also pins the schema requirement: initializeSchema must
+// create device_tenant, otherwise every query here fails with "relation does not
+// exist" and, in production, LoadFromStorage aborts the whole registry warm-load.
+func TestDatabaseBackend_DeviceTenant(t *testing.T) {
+	skipIfDatabaseUnavailable(t)
+
+	dsn := buildDNATestDSN()
+	dropDNATables(t, dsn)
+
+	makeCfg := func() *Config {
+		cfg := DefaultConfig()
+		cfg.Backend = BackendDatabase
+		cfg.DatabaseURL = dsn
+		cfg.EnableDeduplication = false
+		return cfg
+	}
+
+	mgr, err := NewManager(makeCfg(), logging.NewNoopLogger())
+	require.NoError(t, err)
+	defer mgr.Close() //nolint:errcheck
+
+	ctx := context.Background()
+
+	t.Run("UnknownDeviceNotFound", func(t *testing.T) {
+		tid, found, err := mgr.GetDeviceTenant(ctx, "dt-unknown")
+		require.NoError(t, err, "a missing mapping is not an error")
+		assert.False(t, found)
+		assert.Empty(t, tid)
+	})
+
+	t.Run("SetThenGet", func(t *testing.T) {
+		require.NoError(t, mgr.SetDeviceTenant(ctx, "dt-dev-1", "tenant-alpha"))
+
+		tid, found, err := mgr.GetDeviceTenant(ctx, "dt-dev-1")
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, "tenant-alpha", tid)
+	})
+
+	t.Run("UpsertOverwritesTenantOnMove", func(t *testing.T) {
+		require.NoError(t, mgr.SetDeviceTenant(ctx, "dt-dev-move", "tenant-src"))
+		require.NoError(t, mgr.SetDeviceTenant(ctx, "dt-dev-move", "tenant-dst"))
+
+		tid, found, err := mgr.GetDeviceTenant(ctx, "dt-dev-move")
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, "tenant-dst", tid,
+			"ON CONFLICT upsert must replace the tenant; a stale mapping reverts moved devices")
+	})
+
+	t.Run("ListDeviceTenants", func(t *testing.T) {
+		require.NoError(t, mgr.SetDeviceTenant(ctx, "dt-dev-2", "tenant-beta"))
+
+		all, err := mgr.ListDeviceTenants(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "tenant-alpha", all["dt-dev-1"])
+		assert.Equal(t, "tenant-beta", all["dt-dev-2"])
+		assert.Equal(t, "tenant-dst", all["dt-dev-move"])
+		assert.NotContains(t, all, "dt-unknown")
+	})
+
+	t.Run("SharedAcrossManagers", func(t *testing.T) {
+		// Cluster mode: a second controller node reading the same database must
+		// see the mapping written by the first, with no node-local state.
+		mgr2, err := NewManager(makeCfg(), logging.NewNoopLogger())
+		require.NoError(t, err)
+		defer mgr2.Close() //nolint:errcheck
+
+		require.NoError(t, mgr.SetDeviceTenant(ctx, "dt-shared", "tenant-shared"))
+
+		tid, found, err := mgr2.GetDeviceTenant(ctx, "dt-shared")
+		require.NoError(t, err)
+		require.True(t, found, "node B must see the mapping written by node A")
+		assert.Equal(t, "tenant-shared", tid)
+
+		all, err := mgr2.ListDeviceTenants(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "tenant-shared", all["dt-shared"])
 	})
 }

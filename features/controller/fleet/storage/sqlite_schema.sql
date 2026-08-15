@@ -90,6 +90,15 @@ SELECT
 FROM dna_history
 GROUP BY device_id;
 
+-- Minimal device-to-tenant mapping written at registration time (Issue #3324).
+-- Independent of dna_history so tenant resolution survives retiring the flat DNARecord store.
+CREATE TABLE IF NOT EXISTS device_tenant (
+    device_id TEXT NOT NULL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_device_tenant_tenant ON device_tenant(tenant_id);
+
 -- View for storage statistics
 CREATE VIEW IF NOT EXISTS storage_summary AS
 SELECT

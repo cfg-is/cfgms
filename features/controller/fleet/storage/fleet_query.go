@@ -438,3 +438,96 @@ func (b *SQLiteBackend) GetLatestByDeviceID(ctx context.Context, deviceID string
 
 	return &rec, nil
 }
+
+// SetDeviceTenant upserts the durable (stewardID → tenantID) mapping. Written
+// at registration time so tenant resolution is independent of dna_history
+// (Issue #3324).
+func (m *Manager) SetDeviceTenant(ctx context.Context, deviceID, tenantID string) error {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.setDeviceTenant(ctx, deviceID, tenantID)
+	case *DatabaseBackend:
+		return backend.setDeviceTenant(ctx, deviceID, tenantID)
+	default:
+		return fmt.Errorf("SetDeviceTenant requires SQLite or database backend, got %T", m.storage)
+	}
+}
+
+// GetDeviceTenant retrieves the authoritative tenant for a device from the
+// durable mapping. Returns found=false when no mapping exists for the device.
+func (m *Manager) GetDeviceTenant(ctx context.Context, deviceID string) (tenantID string, found bool, err error) {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.getDeviceTenant(ctx, deviceID)
+	case *DatabaseBackend:
+		return backend.getDeviceTenant(ctx, deviceID)
+	default:
+		return "", false, fmt.Errorf("GetDeviceTenant requires SQLite or database backend, got %T", m.storage)
+	}
+}
+
+// ListDeviceTenants returns all (deviceID → tenantID) pairs from the durable
+// mapping. Used by LoadFromStorage to warm the steward registry at startup.
+func (m *Manager) ListDeviceTenants(ctx context.Context) (map[string]string, error) {
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		return backend.listDeviceTenants(ctx)
+	case *DatabaseBackend:
+		return backend.listDeviceTenants(ctx)
+	default:
+		return nil, fmt.Errorf("ListDeviceTenants requires SQLite or database backend, got %T", m.storage)
+	}
+}
+
+// setDeviceTenant upserts (device_id, tenant_id) into the device_tenant table.
+func (b *SQLiteBackend) setDeviceTenant(ctx context.Context, deviceID, tenantID string) error {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	_, err := b.db.ExecContext(ctx,
+		`INSERT INTO device_tenant (device_id, tenant_id) VALUES (?, ?)
+		 ON CONFLICT(device_id) DO UPDATE SET tenant_id = excluded.tenant_id`,
+		deviceID, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to set device tenant for %s: %w", deviceID, err)
+	}
+	return nil
+}
+
+// getDeviceTenant retrieves the tenant for a device from device_tenant.
+func (b *SQLiteBackend) getDeviceTenant(ctx context.Context, deviceID string) (tenantID string, found bool, err error) {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+
+	err = b.db.QueryRowContext(ctx,
+		`SELECT tenant_id FROM device_tenant WHERE device_id = ?`, deviceID).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to get device tenant for %s: %w", deviceID, err)
+	}
+	return tenantID, true, nil
+}
+
+// listDeviceTenants returns all (device_id, tenant_id) pairs from device_tenant.
+func (b *SQLiteBackend) listDeviceTenants(ctx context.Context) (map[string]string, error) {
+	b.mutex.RLock()
+	defer b.mutex.RUnlock()
+
+	rows, err := b.db.QueryContext(ctx, `SELECT device_id, tenant_id FROM device_tenant`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list device tenants: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // rows.Close() error is non-actionable after row iteration completes
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var did, tid string
+		if err := rows.Scan(&did, &tid); err != nil {
+			return nil, fmt.Errorf("failed to scan device tenant: %w", err)
+		}
+		result[did] = tid
+	}
+	return result, rows.Err()
+}
