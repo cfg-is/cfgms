@@ -49,12 +49,13 @@ type StewardInfo struct {
 
 // DNAInfo represents DNA information for API responses
 type DNAInfo struct {
-	Hostname     string            `json:"hostname"`
-	OS           string            `json:"os"`
-	Architecture string            `json:"architecture"`
-	ConfigHash   string            `json:"config_hash,omitempty"`
-	Attributes   map[string]string `json:"attributes,omitempty"`
-	CollectedAt  time.Time         `json:"collected_at"`
+	Hostname     string             `json:"hostname"`
+	OS           string             `json:"os"`
+	Architecture string             `json:"architecture"`
+	ConfigHash   string             `json:"config_hash,omitempty"`
+	Attributes   map[string]string  `json:"attributes,omitempty"`
+	Fragments    []*common.Fragment `json:"fragments,omitempty"` // ADR-017 fragments (cluster:* and host:* fragment-shaped state)
+	CollectedAt  time.Time          `json:"collected_at"`
 }
 
 // ConfigurationInfo represents configuration information

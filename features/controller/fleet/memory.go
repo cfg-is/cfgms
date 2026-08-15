@@ -138,6 +138,7 @@ func toStewardResult(s StewardData) StewardResult {
 		Status:         s.Status,
 		LastHeartbeat:  s.LastHeartbeat,
 		DNAAttributes:  attrs,
+		DNAFragments:   s.DNAFragments,
 		RunningVersion: attrs["steward.version"],
 		Hidden:         s.Hidden,
 	}
