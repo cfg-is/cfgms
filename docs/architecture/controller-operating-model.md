@@ -279,17 +279,11 @@ A steward's ring membership is declared in controller configuration only. There 
 
 ### Ring-Resolved Config Delivery
 
-When the controller delivers config to a steward (`GetConfiguration`), the effective `desired_version` comes from the tenant-path inheritance resolver only. Rings declare their `desired_version` in controller config; the controller applies the ring's version according to the steward's ring membership as declared in config. All ring membership is controller-config-authoritative — the DNA attribute path for ring membership was removed in Issue #3316.
+When the controller delivers config to a steward (`GetConfiguration`), the effective `desired_version` comes from the tenant-path inheritance resolver only. Issue #3316 removed the config-delivery-time override that had read a steward's `deployment_ring` DNA attribute and applied the matching ring's `desired_version` on top of the resolver's result — that attribute has no write path, so the override always took the no-op fallback branch. This did not remove DNA-attribute-based ring reads elsewhere: the rollout health gate (`queryRingHealthCounts`, `failedStewardIDs` in `features/controller/api/handlers_rollout.go`) and the workflow engine's ring-health node (`features/workflow/nodes/ring_health_node.go`) still query the fleet by `deployment_ring` DNA attribute; see [Rollout Workflow](#rollout-workflow) below.
 
 ### Fallback Behavior
 
-When a steward's `deployment_ring` is absent or names a ring not in the declared set, the controller falls back to the `fallback_ring`. The fallback is logged as a structured WARN:
-
-```
-deployment_ring_fallback  steward_id=<id>  ring_value=<original or empty>  fallback_ring=default
-```
-
-This is the v1 anomaly surface; a metric/alert layer is a follow-on story. Operators should assign all fleet stewards to rings to suppress this warning.
+`fallback_ring` names the ring used when a steward's `deployment_ring` is absent or names a ring not in the declared set. Prior to Issue #3316, config delivery resolved this per steward on every `GetConfiguration` call and logged a structured WARN when the fallback was taken; that resolution path has been removed; no code now computes or logs an individual steward's fallback outcome. `fallback_ring` remains a declared config field (defaulted by `DefaultFallbackRing` in `features/controller/config/config.go`), but since no steward has a `deployment_ring` DNA attribute set (no write path exists), rollout health queries for any ring currently match zero stewards.
 
 ### Ring-Set Change Audit
 
