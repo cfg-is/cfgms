@@ -109,7 +109,7 @@ func TestDNASnapshotCapturedAfterConvergence(t *testing.T) {
 
 	assert.NotNil(t, prevDNA, "DNA snapshot should be captured after initial convergence")
 	assert.NotEmpty(t, prevDNA.Id, "DNA snapshot should have a non-empty ID")
-	assert.NotEmpty(t, prevDNA.Attributes, "DNA snapshot should have attributes")
+	assert.NotEmpty(t, prevDNA.Attributes, "DNA snapshot should have attributes for drift detection (Issue #3332: filled via RawAttributes, not Collect().Attributes)")
 
 	require.NoError(t, s.Stop(context.Background()))
 }
@@ -247,6 +247,76 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 	assert.NotNil(t, updatedDNA)
 	assert.NotEqual(t, "different-id-that-will-not-match-real-system", updatedDNA.Id,
 		"snapshot should be updated to the real system DNA after ID mismatch")
+
+	require.NoError(t, s.Stop(context.Background()))
+}
+
+// TestDetectUnmanagedDNADrift_ReportsHostFactChange is the functional regression
+// guard for Issue #3332: the unmanaged-drift path must still SEE host facts.
+//
+// pkg/dna/drift compares the flat DNA.Attributes maps and has no fragment
+// awareness, so once Collect() stopped writing that field the detector silently
+// compared two empty key sets and reported "no drift" forever — a detection
+// control that fails open on a host the threat model assumes may be compromised.
+// Asserting on AttributeCount cannot catch that (it is computed from the
+// collector's internal map, which never went away); only driving a real change
+// through the real detector can.
+//
+// The mutation removes a key the collector always produces from the PREVIOUS
+// snapshot. That is deliberate: the resulting "added" change can only be
+// reported if the CURRENT snapshot carries host-fact attributes, so the test
+// fails if the drift path ever stops populating them again.
+func TestDetectUnmanagedDNADrift_ReportsHostFactChange(t *testing.T) {
+	logger := logging.NewLogger("info")
+	dir := t.TempDir()
+	cfgPath := writeMinimalCfgForDNA(t, dir, "dna-hostfact-drift-steward")
+
+	s, err := steward.NewStandalone(cfgPath, logger)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	ctx := context.Background()
+
+	// First call captures the baseline snapshot (no previous snapshot to compare).
+	events, err := steward.DetectUnmanagedDNADrift(s, ctx)
+	require.NoError(t, err)
+	require.Empty(t, events, "the first run has no previous snapshot to compare against")
+
+	baseline := steward.GetPreviousDNA(s)
+	require.NotNil(t, baseline)
+	require.NotEmpty(t, baseline.Attributes,
+		"the drift path must capture host-fact attributes (Issue #3332)")
+	require.Contains(t, baseline.Attributes, "hostname",
+		"hostname is collected by collectBasicInfo on every platform")
+
+	// Replay the baseline with hostname removed; the fresh snapshot taken by the
+	// next call must report it as an added attribute.
+	mutated := make(map[string]string, len(baseline.Attributes))
+	for k, v := range baseline.Attributes {
+		if k == "hostname" {
+			continue
+		}
+		mutated[k] = v
+	}
+	steward.SetPreviousDNA(s, &commonpb.DNA{Id: baseline.Id, Attributes: mutated})
+
+	events, err = steward.DetectUnmanagedDNADrift(s, ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, events,
+		"a host-fact change must produce at least one drift event")
+
+	var sawHostname bool
+	for _, evt := range events {
+		for _, change := range evt.Changes {
+			if change.Attribute == "hostname" {
+				sawHostname = true
+				assert.Equal(t, baseline.Attributes["hostname"], change.CurrentValue,
+					"the drift event must carry the value from the freshly collected snapshot")
+			}
+		}
+	}
+	assert.True(t, sawHostname,
+		"the hostname change must appear in the reported drift changes")
 
 	require.NoError(t, s.Stop(context.Background()))
 }

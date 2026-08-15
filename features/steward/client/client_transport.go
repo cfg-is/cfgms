@@ -1130,19 +1130,23 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 
 		// If no snapshot exists yet (e.g. first run before any refresh),
 		// collect one now so the handler streams a real snapshot. A full DNA
-		// sync must never send an empty attribute set: doing so would tell the
-		// controller the steward has no DNA and clobber its record. If we cannot
-		// produce a snapshot (refresh error, or collector yields nothing), fail
-		// the command so the controller can retry rather than corrupt its state.
+		// sync must never proceed with neither attributes nor fragments: doing
+		// so would tell the controller the steward has no DNA and clobber its
+		// record. If we cannot produce any snapshot (refresh error, or collector
+		// yields nothing), fail the command so the controller can retry rather
+		// than corrupt its state. A zero-managed-resource steward may have empty
+		// attrs but non-empty fragments — that is a valid sync (Issue #3332).
 		if len(currentDNA) == 0 {
 			if refreshErr := c.RefreshCurrentDNA(ctx); refreshErr != nil {
 				return fmt.Errorf("no DNA snapshot available and refresh failed for full sync: %w", refreshErr)
 			}
 			c.dnaMu.RLock()
 			currentDNA = copyStringMap(c.currentDNAAttrs)
+			fragmentsAfterRefresh := make([]*commonpb.Fragment, len(c.currentDNAFragments))
+			copy(fragmentsAfterRefresh, c.currentDNAFragments)
 			c.dnaMu.RUnlock()
 
-			if len(currentDNA) == 0 {
+			if len(currentDNA) == 0 && len(fragmentsAfterRefresh) == 0 {
 				return fmt.Errorf("no DNA state available for full sync")
 			}
 		}
@@ -1937,19 +1941,28 @@ func (c *TransportClient) RefreshCurrentDNA(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("DNA collection failed: %w", err)
 	}
-	if len(attrs) == 0 {
-		return nil
-	}
-	c.setCurrentDNAFromAttrs(attrs)
 
-	// Optional: if the collector supports fragments, update the partial-sync state.
+	// Collect fragments before the empty-attrs guard so a hardware-facts-only
+	// steward (whose attrs map is empty) still updates its partial-sync state
+	// (ADR-017 §7) when fragments are present (Issue #3332).
+	var frags []*commonpb.Fragment
 	if fc, ok := collector.(FragmentCollector); ok {
-		fragments, fragErr := fc.CollectFragmentsTracked(ctx)
+		collected, fragErr := fc.CollectFragmentsTracked(ctx)
 		if fragErr != nil {
 			c.logger.Warn("fragment collection failed; partial-sync root not updated", "error", fragErr)
-		} else if len(fragments) > 0 {
-			c.setCurrentDNAFragments(fragments)
+		} else {
+			frags = collected
 		}
+	}
+
+	if len(attrs) == 0 && len(frags) == 0 {
+		return nil
+	}
+	if len(attrs) > 0 {
+		c.setCurrentDNAFromAttrs(attrs)
+	}
+	if len(frags) > 0 {
+		c.setCurrentDNAFragments(frags)
 	}
 	return nil
 }
@@ -1992,7 +2005,22 @@ func (c *TransportClient) PublishCurrentDNA(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Collect fragments alongside attrs so a hardware-facts-only steward (empty
+	// attrs) still updates its partial-sync state (Issue #3332).
+	frags := collector.CollectFragments(ctx)
+	if len(attrs) == 0 && len(frags) == 0 {
+		return nil
+	}
+	// Fragments are recorded whenever they are present, not only on the
+	// attrs-empty path: a steward with managed resources has BOTH a non-empty
+	// attribute map and host:* fragments, and returning early after the publish
+	// would leave currentDNAFragments/currentDNAAggregateRoot stale for the
+	// sync_dna partial-sync path. Same ordering as runDNARefreshTick.
+	if len(frags) > 0 {
+		c.setCurrentDNAFragments(frags)
+	}
 	if len(attrs) == 0 {
+		// Nothing attribute-based to publish; the fragment state is updated above.
 		return nil
 	}
 	c.setCurrentDNAFromAttrs(attrs)
@@ -2065,14 +2093,22 @@ func (c *TransportClient) runDNARefreshTick(ctx context.Context, collector DNACo
 		c.logger.Warn("DNA refresh collection failed", "error", err)
 		return
 	}
-	if len(attrs) == 0 {
+	// Collect fragments alongside attrs so a hardware-facts-only steward (empty
+	// attrs) still updates its partial-sync state on each tick (Issue #3332).
+	frags := collector.CollectFragments(ctx)
+	if len(attrs) == 0 && len(frags) == 0 {
 		return
 	}
-	// Always refresh the current snapshot so heartbeats carry a truthful hash
-	// even when no delta is published. (Issue #2521)
-	c.setCurrentDNAFromAttrs(attrs)
-	if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
-		c.logger.Warn("DNA refresh publish failed", "error", err)
+	if len(attrs) > 0 {
+		// Always refresh the current snapshot so heartbeats carry a truthful hash
+		// even when no delta is published. (Issue #2521)
+		c.setCurrentDNAFromAttrs(attrs)
+		if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
+			c.logger.Warn("DNA refresh publish failed", "error", err)
+		}
+	}
+	if len(frags) > 0 {
+		c.setCurrentDNAFragments(frags)
 	}
 }
 

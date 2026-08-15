@@ -355,6 +355,13 @@ func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) ([]*drift.DriftEv
 		s.logger.Warn("Failed to collect DNA for drift detection", "error", err)
 		return nil, nil
 	}
+	// Populate DNA.Attributes for the drift detector: pkg/dna/drift compares the
+	// flat Attributes map and has no fragment awareness. After Issue #3332,
+	// Collect() no longer writes this field, so we fill it here from RawAttributes.
+	// Fragment-aware drift detection is a separate story.
+	if currentDNA != nil {
+		currentDNA.Attributes = s.dnaCollector.RawAttributes(ctx)
+	}
 
 	s.previousDNAMu.Lock()
 	prevDNA := s.previousDNA

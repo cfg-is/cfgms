@@ -29,11 +29,11 @@ func TestDNACollectionBasic(t *testing.T) {
 			t.Error("DNA ID should not be empty")
 		}
 
-		if len(dna.Attributes) < 30 {
-			t.Errorf("Expected at least 30 attributes (fast path), got %d", len(dna.Attributes))
+		if int(dna.AttributeCount) < 30 {
+			t.Errorf("Expected at least 30 attributes (fast path), got %d", dna.AttributeCount)
 		}
 
-		t.Logf("DNA collection basic validation passed (%d attributes)", len(dna.Attributes))
+		t.Logf("DNA collection basic validation passed (%d attributes)", dna.AttributeCount)
 		return
 	}
 
@@ -115,7 +115,8 @@ func TestDNACollectionPerformance(t *testing.T) {
 	// only (hardware + network + environment). Software and security data are
 	// collected asynchronously in the background and merged on subsequent calls.
 	// The fast path typically returns 80-100 attributes; full merged data exceeds 120.
-	attributeCount := len(dna.Attributes)
+	// After Issue #3332 the flat Attributes map is not written; use AttributeCount.
+	attributeCount := int(dna.AttributeCount)
 	if attributeCount < 50 {
 		t.Errorf("DNA collection returned only %d attributes, expected >50", attributeCount)
 	} else {
@@ -130,7 +131,9 @@ func TestDNACollectionPerformance(t *testing.T) {
 	t.Logf("Collection timing breakdown:")
 	t.Logf("  Total duration: %v", duration)
 	t.Logf("  Attributes collected: %d", attributeCount)
-	t.Logf("  Average time per attribute: %v", duration/time.Duration(attributeCount))
+	if attributeCount > 0 {
+		t.Logf("  Average time per attribute: %v", duration/time.Duration(attributeCount))
+	}
 }
 
 // TestDNACollectionComponents tests individual collection components
