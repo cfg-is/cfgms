@@ -95,6 +95,8 @@ func setupTestServer(t *testing.T) *Server {
 	// shared os.TempDir() path, which causes file-lock contention on Windows CI.
 	setTestSecretsEnv(t)
 
+	withDefaultEmbeddedSPA(t)
+
 	// Create test configuration
 	cfg := config.DefaultConfig()
 	cfg.ExternalURL = "https://localhost:8080"   // Required; DefaultConfig leaves this empty
@@ -181,6 +183,8 @@ func setupTestServer(t *testing.T) *Server {
 func setupRouteTestServer(t *testing.T) *Server {
 	t.Helper()
 	setTestSecretsEnv(t)
+
+	withDefaultEmbeddedSPA(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -960,6 +964,8 @@ func TestEphemeralAPIKeys(t *testing.T) {
 func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	// Isolate secrets storage per test (same reason as setupTestServer).
 	setTestSecretsEnv(t)
+
+	withDefaultEmbeddedSPA(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -1863,8 +1869,15 @@ func TestStartupScan_NoWarnForUnprivilegedKey(t *testing.T) {
 }
 
 // ---- SPA handler tests (Issue #2494) ----
+//
+// These exercise routing, headers and caching, which require a servable SPA to
+// be embedded. The tracked web/dist/index.html is a placeholder the controller
+// deliberately refuses to serve (Issue #3043), so each test substitutes a
+// synthetic build via withEmbeddedSPA before constructing the server. The
+// placeholder-refusal path itself is covered in spa_test.go.
 
 func TestSPARootServe(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rr := httptest.NewRecorder()
@@ -1876,6 +1889,7 @@ func TestSPARootServe(t *testing.T) {
 }
 
 func TestSPADeepLinkFallback(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 	// A path that does not exist as a file in the embedded FS should fall back to index.html.
 	req := httptest.NewRequest(http.MethodGet, "/app/dashboard/fleet", nil)
@@ -1889,6 +1903,7 @@ func TestSPADeepLinkFallback(t *testing.T) {
 }
 
 func TestSPAAPIPathNonInterference(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 
 	// Existing API route must continue to work unchanged.
@@ -1908,6 +1923,7 @@ func TestSPAAPIPathNonInterference(t *testing.T) {
 }
 
 func TestSPARaftPathNonInterference(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 
 	// Non-existent /raft/* path must not be masked by SPA fallback.
@@ -1919,6 +1935,7 @@ func TestSPARaftPathNonInterference(t *testing.T) {
 }
 
 func TestSPASecurityHeaders(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 
 	// Security headers must be present on: root (index.html), fallback (unknown path).
@@ -1946,6 +1963,7 @@ func TestSPASecurityHeaders(t *testing.T) {
 }
 
 func TestSPAIndexNoStore(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 
 	// index.html (root and fallback) must be served no-store so browsers always
@@ -1962,6 +1980,7 @@ func TestSPAIndexNoStore(t *testing.T) {
 }
 
 func TestSPAPathTraversal(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 
 	// Path traversal attempts must never leak file content from outside the embedded FS.
@@ -1986,6 +2005,7 @@ func TestSPAPathTraversal(t *testing.T) {
 }
 
 func TestSPAHeadRequest(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
 	server := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodHead, "/", nil)
 	rr := httptest.NewRecorder()

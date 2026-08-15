@@ -28,6 +28,18 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # Runs unconditionally, before change detection: this is the CI half of
+      # the web/dist placeholder rule (Issue #3043), so it must hold even for a
+      # commit that bypassed the pre-commit hook with --no-verify and even if
+      # change detection misfires. Needs no Node toolchain.
+      - name: Enforce web/dist placeholder (no built output committed)
+        run: ./scripts/check-web-dist.sh
+
+      # Guards the guard: a checker that stopped rejecting built output would
+      # leave the review bypass open behind a green check.
+      - name: Test the web/dist placeholder checker
+        run: bash scripts/check-web-dist_test.sh
+
       - name: Detect web/ changes against develop merge base
         id: changes
         run: |

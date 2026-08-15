@@ -8,7 +8,6 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -57,7 +56,6 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
-	"github.com/cfgis/cfgms/web"
 )
 
 // Server represents the REST API server component of the controller
@@ -654,11 +652,16 @@ func (s *Server) setupRouter() {
 	// SPA catch-all: lowest-precedence handler for the embedded web UI (Issue #2494).
 	// All /api/* and /raft/* routes registered above take precedence via gorilla/mux
 	// ordering; unmatched paths in those namespaces are refused by spaHandler itself.
-	distFS, subErr := fs.Sub(web.Assets, "dist")
-	if subErr != nil {
-		s.logger.Error("Failed to initialise embedded SPA assets; web UI will be unavailable", "error", subErr)
+	// A binary built without a frontend build embeds only the tracked
+	// web/dist/index.html placeholder. Serving that would look like a working
+	// (but permanently stale) SPA, so "/" is left unrouted and the reason is
+	// logged loudly instead (Issue #3043).
+	spa, spaErr := newEmbeddedSPAHandler(spaAssets)
+	if spaErr != nil {
+		s.logger.Error("Embedded SPA assets unavailable; refusing to route \"/\" (web UI will be unavailable)",
+			"error", logging.SanitizeLogValue(spaErr.Error()))
 	} else {
-		s.router.PathPrefix("/").Handler(newSPAHandler(distFS))
+		s.router.PathPrefix("/").Handler(spa)
 	}
 }
 

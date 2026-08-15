@@ -19,19 +19,37 @@ The `web/embed.go` file uses `//go:embed all:dist` to embed the entire `dist/`
 directory into the controller binary at build time. Go reads `dist/` from the
 filesystem at `go build` time — it does not care about git status.
 
-- **Go-only build (no Node):** the committed placeholder `dist/index.html` is
-  embedded. The binary serves "Web UI not built" at `/`. This is intentional:
-  `go build ./...` must always succeed on a clean checkout without Node.
-- **Release build:** run `npm run build` inside `web/` first, then `go build`.
-  Vite writes the full SPA into `dist/`, which `go:embed` picks up. The real SPA
-  replaces the placeholder — same binary format, no extra tooling at runtime.
+Two files matter, and they never occupy the same path:
 
-`dist/*` is git-ignored except for the committed placeholder (`dist/index.html`).
-Real Vite output is never committed — committed compiled JS bypasses source review
-(security A6.3) and risks stale-SPA patch-lag bugs. If `dist/` is out of date when
-`go build` runs, the binary silently embeds whatever is on disk; a stale `dist/`
-with an old SPA version is a deployment error, not a build error. Releases should
-validate the `dist/` mtime as part of their packaging pipeline.
+| Path | Tracked? | Written by |
+|---|---|---|
+| `dist/index.html` | yes — the placeholder | nothing; it is edited by hand |
+| `dist/app/**` | no — git-ignored | `npm run build` (`build.outDir` in `vite.config.ts`) |
+
+- **Go-only build (no Node):** only the placeholder is embedded. It carries the
+  `CFGMS_DIST_PLACEHOLDER` sentinel, and the controller refuses to route `/`
+  when that is all it finds, logging why. This is intentional: `go build ./...`
+  must always succeed on a clean checkout without Node, and a binary with no SPA
+  must fail loudly rather than serve a shell that never loads the application.
+- **Release build:** run `npm run build` inside `web/` first, then `go build`.
+  Vite writes the full SPA into `dist/app/`, which `go:embed` picks up and the
+  controller prefers over the placeholder — same binary format, no extra tooling
+  at runtime.
+
+Because the build writes to `dist/app/` and never to the tracked placeholder,
+`npm run build` leaves the working tree clean, and two branches that both build
+no longer conflict on a content-hashed entry point (Issue #3043).
+
+`dist/*` is git-ignored except for the placeholder (`dist/index.html`). Real Vite
+output is never committed — committed compiled JS bypasses source review
+(security A6.3) and risks stale-SPA patch-lag bugs. That rule is enforced, not
+just documented: [`scripts/check-web-dist.sh`](../scripts/check-web-dist.sh) runs
+both in the pre-commit hook (on staged content) and in `frontend-ci.yml` (on
+committed content, so it survives `--no-verify`).
+
+A stale — as opposed to absent — `dist/app/` is still a deployment error rather
+than a build error: `go build` embeds whatever is on disk. Releases should
+validate the `dist/app/` mtime as part of their packaging pipeline.
 
 ## Prerequisites
 
@@ -67,7 +85,7 @@ All commands run from `web/`:
 |---------------------|---------------------------------------------------------------------|
 | `npm ci`            | Clean, reproducible install from `package-lock.json`                |
 | `npm run dev`       | Vite dev server with `/api` proxy to a local controller             |
-| `npm run build`     | Typecheck (`tsc -b`) + production build to `web/dist/`              |
+| `npm run build`     | Typecheck (`tsc -b`) + production build to `web/dist/app/`          |
 | `npm run lint`      | ESLint (flat config) — security rules at error severity             |
 | `npm run typecheck` | TypeScript strict-mode check, no emit                               |
 | `npm run test`      | Vitest run (jsdom + Testing Library)                                |

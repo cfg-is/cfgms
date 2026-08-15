@@ -2,9 +2,15 @@
 node_modules/
 
 # Build output — real Vite output must never be committed (bypasses source review,
-# security A6.3). Only the placeholder dist/index.html is tracked. A release binary
-# requires npm run build before go build; the placeholder fails loudly if dist/ is
-# stale (stale-SPA = patch-lag bug).
+# security A6.3). Vite writes to dist/app/ (vite.config.ts build.outDir), which
+# dist/* excludes, so a build never touches a tracked file and two branches that
+# both build no longer conflict here (Issue #3043).
+#
+# Only dist/index.html is tracked, and only as a static placeholder carrying the
+# CFGMS_DIST_PLACEHOLDER sentinel: //go:embed all:dist needs one file present so a
+# release binary requires npm run build before go build; the placeholder fails
+# loudly if dist/app/ is absent (stale-SPA = patch-lag bug). Enforced by the
+# pre-commit hook and Frontend CI via scripts/check-web-dist.sh.
 dist/*
 !dist/index.html
 

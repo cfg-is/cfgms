@@ -1,14 +1,28 @@
 <!doctype html>
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <!-- Copyright 2026 Jordan Ritz -->
+<!--
+  CFGMS_DIST_PLACEHOLDER
+
+  This file is a tracked placeholder, NOT a frontend build. It exists only so
+  //go:embed all:dist in web/embed.go has a file to match, keeping `go build`
+  self-contained with no Node toolchain installed.
+
+  Real Vite output is written to web/dist/app/ (vite.config.ts build.outDir) and
+  is never committed — web/.gitignore excludes it, and both the pre-commit hook
+  and Frontend CI reject any commit that stages built output here.
+
+  The controller detects the CFGMS_DIST_PLACEHOLDER sentinel above and refuses to
+  route "/" rather than serving this shell as if it were the application, so a
+  binary built without `npm run build` fails loudly instead of shipping a stale
+  SPA. See Issue #3043.
+-->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>CFGMS</title>
-    <script type="module" crossorigin src="/assets/index-DLA4F6vx.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-Csqy_JQl.css">
   </head>
   <body>
     <div id="root"></div>
