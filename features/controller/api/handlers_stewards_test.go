@@ -572,8 +572,8 @@ func TestHandleListStewards_FleetQueryError_Returns500(t *testing.T) {
 // AcceptRegistration applies reads the flattened fragment set (Issue #3319), so a
 // fragment-less snapshot is rejected as degenerate and the steward is stored with
 // a nil DNA, which the list filters below would then have nothing to match on.
-// Attributes stay populated because the list/filter consumers still read them
-// (their re-home is #3326/#3327).
+// All display-DTO consumers read from fragments after Issue #3327, so attrs used
+// by handlers are carried in fragment payloads rather than in Attributes.
 func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
 	t.Helper()
 	var frags []*common.Fragment
@@ -584,6 +584,16 @@ func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
 	}
 	if osName := attrs["os"]; osName != "" {
 		frag, err := sdna.NewFragment("host:os", "test", sdna.MapState(map[string]interface{}{"os": osName}))
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
+	if archName := attrs["arch"]; archName != "" {
+		frag, err := sdna.NewFragment("host:cpu", "test", sdna.MapState(map[string]interface{}{"arch": archName}))
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
+	if modulesLoaded := attrs["modules.loaded"]; modulesLoaded != "" {
+		frag, err := sdna.NewFragment("modules", "test", sdna.MapState(map[string]interface{}{"modules.loaded": modulesLoaded}))
 		require.NoError(t, err)
 		frags = append(frags, frag)
 	}
@@ -624,6 +634,99 @@ func registerStewardInTenant(t *testing.T, svc interface {
 	resp, err := svc.AcceptRegistration(ctx, req)
 	require.NoError(t, err)
 	return resp.StewardId
+}
+
+// ---- Fragment-sourced DTO AC tests (Issue #3327) ----
+
+// TestHandleListStewards_FragmentSourced_HostnameSummary verifies that the list
+// endpoint's hostname/OS/arch summary fields are sourced from DNA fragments, not
+// DNA.Attributes. The steward is registered with fragment-populated DNA and the
+// REST response must reflect the fragment values for Hostname, OS, and Architecture.
+func TestHandleListStewards_FragmentSourced_HostnameSummary(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "frag-host", "os": "linux", "arch": "arm64",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	require.NotNil(t, resp.Data[0].DNA)
+	assert.Equal(t, "frag-host", resp.Data[0].DNA.Hostname, "hostname must come from fragments")
+	assert.Equal(t, "linux", resp.Data[0].DNA.OS, "os must come from fragments")
+	assert.Equal(t, "arm64", resp.Data[0].DNA.Architecture, "arch must come from fragments")
+}
+
+// TestHandleGetSteward_FragmentSourced_AttributesPassthrough verifies that the
+// get-steward endpoint's DNA.attributes JSON key is sourced from flattened
+// fragments. The "tenant" key is injected by the controller; all other keys must
+// come from the registered fragments.
+func TestHandleGetSteward_FragmentSourced_AttributesPassthrough(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "passthrough-host", "os": "linux",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Data.DNA)
+	assert.Equal(t, "passthrough-host", resp.Data.DNA.Attributes["hostname"],
+		"hostname must be present in fragment-sourced attributes map")
+	assert.Equal(t, "linux", resp.Data.DNA.Attributes["os"],
+		"os must be present in fragment-sourced attributes map")
+	assert.Equal(t, "test-tenant", resp.Data.DNA.Attributes["tenant"],
+		"controller-injected tenant key must be present")
+}
+
+// TestHandleGetStewardModules_FragmentSourced verifies that the modules endpoint
+// reads modules.loaded from DNA fragments, not DNA.Attributes, and returns the
+// correct parsed module list.
+func TestHandleGetStewardModules_FragmentSourced(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-modules"})
+
+	stewardID := registerTestSteward(t, server.controllerService, map[string]string{
+		"hostname": "frag-modules-host", "os": "linux",
+		"modules.loaded": "file, patch",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/modules", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			Modules []struct {
+				Name string `json:"name"`
+			} `json:"modules"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Modules, 2)
+	assert.Equal(t, "file", resp.Data.Modules[0].Name)
+	assert.Equal(t, "patch", resp.Data.Modules[1].Name)
 }
 
 func TestHandleListStewards_NoFilter_ReturnsAll(t *testing.T) {
@@ -1317,16 +1420,17 @@ func registerTestStewardWithDNA(t *testing.T, server *Server, attrs map[string]s
 }
 
 // TestHandleGetStewardDNA_Attribute verifies that the handler returns {"value":"<val>"}
-// when ?attribute=<key> is present, the key exists in the DNA, and the key is not denylisted.
+// when ?attribute=<key> is present, the key exists in the DNA fragments, and the key
+// is not denylisted. After Issue #3327, attributes are sourced from fragments only.
 func TestHandleGetStewardDNA_Attribute(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{"steward:read-dna"})
 
 	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
-		"hostname": "attr-host", "os": "linux", "custom.key": "myvalue",
+		"hostname": "attr-host", "os": "linux",
 	}, "test-tenant")
 
-	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna?attribute=custom.key", nil)
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna?attribute=hostname", nil)
 	req.Header.Set("X-API-Key", apiKey)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -1334,7 +1438,7 @@ func TestHandleGetStewardDNA_Attribute(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]string
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, "myvalue", resp["value"])
+	assert.Equal(t, "attr-host", resp["value"])
 }
 
 // TestHandleGetStewardDNA_AttributeNotFound verifies 404 with DNA_ATTRIBUTE_NOT_FOUND
