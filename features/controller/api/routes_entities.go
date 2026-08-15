@@ -22,7 +22,7 @@ func registerEntityRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("entity", "list")(http.HandlerFunc(s.handleQueryEntities)),
 	).Methods("GET")
 
-	// /drifted and /timeline must be registered before {eid:.+} to take priority.
+	// /drifted, /edges (POST), and /timeline must be registered before {eid:.+} to take priority.
 	entities.Handle("/drifted",
 		s.requirePermission("entity", "list")(http.HandlerFunc(s.handleListDrifted)),
 	).Methods("GET")
@@ -30,6 +30,11 @@ func registerEntityRoutes(s *Server, api *mux.Router) {
 	entities.Handle("/timeline",
 		s.requirePermission("entity", "list")(http.HandlerFunc(s.handleGetTimeline)),
 	).Methods("GET")
+
+	// Operator edge assertion — exact path registered before the {eid:.+} catch-all (Issue #3374).
+	entities.Handle("/edges",
+		s.requirePermission("entity", "write")(http.HandlerFunc(s.handleAssertEdge)),
+	).Methods("POST")
 
 	// Sub-resource routes — registered before the bare {eid:.+} catch-all so that
 	// gorilla/mux prefers the more-specific pattern for paths like /entity-id/edges.
