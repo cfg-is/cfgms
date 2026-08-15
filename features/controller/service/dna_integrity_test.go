@@ -214,7 +214,7 @@ func TestFlattenDNAFragments_EmptyCanonicalBytesTreatedAsAbsent(t *testing.T) {
 		},
 	}
 
-	flat := flattenDNAFragments(dna.Fragments)
+	flat := flattenDNAFragments(dna)
 	assert.NotContains(t, flat, "hostname", "a nil-canonical-bytes fragment must contribute no keys")
 	assert.NotContains(t, flat, "os", "an empty-canonical-bytes fragment must contribute no keys")
 	assert.Equal(t, "8", flat["cpu_count"], "well-formed fragments beside empty ones must still flatten")
@@ -260,7 +260,7 @@ func TestFlattenDNAFragments_MalformedCanonicalBytesTreatedAsAbsent(t *testing.T
 		},
 	}
 
-	flat := flattenDNAFragments(dna.Fragments)
+	flat := flattenDNAFragments(dna)
 	assert.NotContains(t, flat, "hostname", "keys of an undecodable fragment must be treated as absent")
 	assert.Equal(t, "linux", flat["os"], "a malformed fragment must not suppress the well-formed ones")
 
@@ -294,7 +294,7 @@ func TestFlattenDNAFragments_NonStringValueNotPromoted(t *testing.T) {
 
 	dna := &commonpb.DNA{Id: "dev-nonstring", Fragments: []*commonpb.Fragment{frag}}
 
-	flat := flattenDNAFragments(dna.Fragments)
+	flat := flattenDNAFragments(dna)
 	for _, key := range []string{"hostname", "cpu_count", "virtualized", "load_average", "nested", "tags", "absent"} {
 		assert.NotContains(t, flat, key, "non-string value for %q must not be promoted to the flat map", key)
 	}

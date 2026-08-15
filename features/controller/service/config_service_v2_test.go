@@ -386,7 +386,7 @@ func TestFlattenDNAFragments_SelectorRelevantKeys(t *testing.T) {
 		}),
 	}
 
-	flat := flattenDNAFragments(frags)
+	flat := flattenDNAFragments(&commonpb.DNA{Fragments: frags})
 
 	assert.Equal(t, "linux", flat["os"], "os key must be flattened from host:os fragment")
 	assert.Equal(t, "linux", flat["runtime_os"], "runtime_os key must be flattened from host:os fragment")
