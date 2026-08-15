@@ -633,7 +633,116 @@ steward fleet pointed at `cfgms-ctrl-01` to affect.
 
 ## 4. Leader election and failover validation (story #3094)
 
-*To be filled in when #3094 lands.*
+Live-validated 2026-08-15 against the real 3-node cluster #3130 established
+(`cfgms-ctrl-01`, `cfgms-ha-node2`, `cfgms-ha-node3`) via a new automated
+suite, `test/e2e/ha/leader_election_real_test.go` (`//go:build e2e`, gated by
+`CFGMS_E2E_HA_CLUSTER_NODES`) — three tests, each run against the live
+cluster, not a one-off manual observation.
+
+### Method
+
+- **Leader agreement**: mTLS `GET /api/v1/raft/status` (admin bundle client
+  cert) against all 3 nodes' REST APIs (`:9080`), polled until all 3 agree on
+  the same nonzero leader.
+- **Process-kill failover**: SSH (`debian@<node>.lab.cfg.is`,
+  `~/.ssh/cfgms_lab_ed25519`) to the current leader, `systemctl kill
+  --kill-who=main -s SIGKILL cfgms-controller.service` — an abrupt kill, not
+  a graceful `systemctl stop`, so the OS/network stack resets in-flight TCP
+  connections immediately (Implementation Notes' distinction from a host
+  kill). The remaining 2 nodes are then polled for agreement on a new,
+  different leader.
+- **Host-kill failover**: `Stop-VM -TurnOff -Force` (hard power-off, not a
+  guest shutdown) against the leader's VM, via remote Hyper-V PowerShell
+  (`-ComputerName CFG-AB-02`/`CFG-C3-02` from `CFG-70-02`, the same
+  `lab\cfg`-domain-identity pattern the hyperv e2e suites use). Same
+  agreement-polling as the process-kill case.
+- **Recovery**: both failover tests bring the cluster back to a healthy
+  3-node quorum before returning. Because `pkg/ha`'s Raft state is entirely
+  `raft.MemoryStorage` (never persisted — see §3's "Raft state is entirely
+  in-memory" note and its reproduced `panic: tocommit(4) is out of range
+  [lastIndex(3)]`), a solo-restarted node re-bootstraps as a fresh
+  self-elected single-node cluster and can diverge from its peers. Recovery
+  therefore never restarts the downed node alone: it stops the two still-
+  running peers first, brings the downed node back (process start, or
+  `Start-VM` + wait-reachable + process start for the host-kill case), then
+  starts all 3 together — the same stop-all/start-all discipline as §3's
+  rollback drill.
+
+### Measured results (real cfg-lab hardware, 2026-08-15)
+
+| Scenario | Leader killed | New leader | Measured re-election time | Docker target threshold (§ below) |
+|---|---|---|---|---|
+| Process killed (SIGKILL) | `cfgms-ha-node2` | `cfgms-ctrl-01` | **14.02s** | `TestLeaderElectionTiming`: < 15s (`test/integration/ha/leader_election_test.go:224-225`) |
+| Host killed (`Stop-VM -TurnOff`) | `cfgms-ha-node2` | `cfgms-ctrl-01` | **16.02s** | `TestFailoverTiming`: < 40s (`test/integration/ha/failover_test.go:131-135`, AC2 — NODE_TIMEOUT 15s + DISCOVERY_INTERVAL 10s + ELECTION_TIMEOUT 5s + buffer) |
+
+**These are target thresholds, not a previously-proven baseline the real
+numbers beat.** No GitHub Actions workflow runs `go test
+./test/integration/ha/...` — only `cross-platform-build.yml` touches the `ha`
+compose profile, and only for a single-container `controller-standalone`
+image smoke test, never the 3-controller leader-election scenario — and
+`docker-compose.test.yml` never sets `CFGMS_HA_CA_CERT_PATH` (see #3092's
+Out of Scope). So the assertions above have likely never executed to
+completion against real cross-container mTLS; this story's real-host figures
+are the first time these thresholds have actually been proven against any
+live cluster, real or Docker. That said, both real-host measurements land
+comfortably inside their respective thresholds using **production defaults**
+(`pkg/ha.DefaultConfig`: `ElectionTimeout: 10s`, `HeartbeatInterval: 2s` —
+this suite deliberately avoids `FastElectionConfig`, which exists only to
+keep CPU-contended unit tests fast and would have invalidated the
+comparison).
+
+Both runs left the cluster fully restored: `GET /api/v1/raft/status` agreed
+across all 3 nodes at `term: 2` afterward, matching §3's own final
+post-cutover state — consistent with a coordinated full-cluster restart
+being, in effect, a fresh Raft bootstrap each time (state is memory-only, so
+term does not carry over across a stop-all/start-all cycle). `GET
+/api/v1/health` reported `"status":"healthy"` on all 3 nodes after both
+tests. `GET /api/v1/stewards` reported 0 enrolled stewards before and after
+each test (the live steward fleet has been empty since the §2 migration —
+see §3's "Steward fleet impact" note; monitored per this story's Constraints,
+nothing was present to disrupt).
+
+### Technique note: `systemctl set-property` cannot disable `Restart=` at runtime
+
+Not a `pkg/ha` production defect — a test-infrastructure gotcha worth
+recording so a future operator doesn't rediscover it live. The unit carries
+`Restart=on-failure` / `RestartSec=5`
+(`scripts/ha-cluster-node-bootstrap.sh`); an unattended kill would let
+systemd auto-respawn the node ~5s into the measurement window, landing it
+back in a running quorum solo — the exact divergence risk described above,
+except self-inflicted by the test rather than a real outage. The obvious
+fix, `sudo systemctl set-property --runtime cfgms-controller.service
+Restart=no` before the kill, fails live: `Failed to set unit properties on
+cfgms-controller.service: Cannot set property Restart, or unknown property`
+(systemd 257, Debian 13) — `Restart=` governs process lifecycle rather than
+resource control and isn't in the D-Bus runtime-settable property set.
+Verified this is not a version issue; it is simply not a settable property.
+Working technique: send the kill and a `systemctl stop` back-to-back over one
+SSH connection. `systemctl stop` cancels any pending auto-restart job
+regardless of the unit's current state, and one round-trip comfortably beats
+the 5s `RestartSec` window.
+
+### Reproduction
+
+```bash
+export CFGMS_E2E_HA_CLUSTER_NODES="https://192.168.234.103:9080,https://192.168.234.104:9080,https://192.168.234.106:9080"
+export CFGMS_E2E_HA_ADMIN_BUNDLE="C:/Users/cfg/admin.bundle.yaml"   # or ~/.cfgms/admin.bundle.yaml on Linux
+go test -tags e2e -run TestRealCluster -v ./test/e2e/ha/...
+```
+
+`CFGMS_E2E_HA_SSH_KEY` (default `<home>/.ssh/cfgms_lab_ed25519`) and
+`CFGMS_E2E_HA_SSH_USER` (default `debian`) override the SSH identity used to
+reach the node VMs. The host-kill test's `Stop-VM`/`Start-VM` calls target
+the leader's Hyper-V host by name (`CFG-70-02`/`CFG-AB-02`/`CFG-C3-02`, a
+fixed cfg-lab topology table in the test file); running against a leader
+hosted on `CFG-70-02` requires a locally-elevated session on that host — this
+session's local PowerShell was deliberately non-admin, confirmed live
+(`Get-VM` on `CFG-70-02` itself: "You do not have the required permission");
+remote `-ComputerName CFG-AB-02`/`CFG-C3-02` calls worked from the same
+non-elevated session without issue, since Hyper-V's remote-management check
+is against the target host's group membership, not the caller's local
+elevation. Both real runs above happened to land on `cfgms-ha-node2`
+(`CFG-AB-02`), so this gap did not block either measurement.
 
 ## 5. Network partition / split-brain validation (story #3095)
 
