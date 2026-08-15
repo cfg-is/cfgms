@@ -132,7 +132,7 @@ func (a *roleConfigAdapter) MatchingRoleFragments(ctx context.Context, stewardID
 	// Build attrs map from DNA fragments; merge in controller-stored tags so tag: selector terms work.
 	var attrs map[string]string
 	if info.DNA != nil {
-		attrs = flattenDNAFragments(info.DNA)
+		attrs = FlattenDNAFragments(info.DNA.GetFragments())
 	} else {
 		attrs = make(map[string]string)
 	}
@@ -192,7 +192,7 @@ func (a *roleConfigAdapter) MatchingRoleFragments(ctx context.Context, stewardID
 
 // mergeTagsIntoAttrs returns a copy of attrs with ctrlTags merged into the "tags" key.
 // DNA-reported tags come first; controller-stored tags follow; duplicates are dropped.
-// Never mutates the input map — attrs may alias flattenDNAFragments output (fresh map per call).
+// Never mutates the input map — attrs may alias FlattenDNAFragments output (fresh map per call).
 func mergeTagsIntoAttrs(attrs map[string]string, ctrlTags []string) map[string]string {
 	if len(ctrlTags) == 0 {
 		return attrs

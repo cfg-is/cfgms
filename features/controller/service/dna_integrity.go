@@ -118,16 +118,21 @@ func checkDNAIntegrity(dna *common.DNA, ct configType) dnaIntegrityResult {
 	return checkDNAIntegrityWithTable(dna, ct, dnaRequiredFields)
 }
 
-// flattenDNAFragments decodes dna's fragments and merges their string
-// key-value pairs into a single map.
+// FlattenDNAFragments decodes each fragment in frags and merges their string
+// key-value pairs into a single map. Keys with empty or non-string values are
+// omitted. Fragments with malformed canonical bytes are silently skipped —
+// hostile input from a compromised steward must not prevent checking the
+// well-formed ones.
 //
 // The projection itself lives in sdna.FlattenFragments because the DNA-sync
 // ingest path needs the identical mapping (features/controller/transport
-// /dna_handler.go rebuilds DNA.Attributes from fragments). Two copies of "how a
-// fragment becomes a flat attribute" would let the integrity check and the
-// stored record disagree about what a snapshot contains.
-func flattenDNAFragments(dna *common.DNA) map[string]string {
-	return sdna.FlattenFragments(dna.GetFragments())
+// /dna_handler.go rebuilds the flat attribute view from fragments). Two copies
+// of "how a fragment becomes a flat attribute" would let the integrity check and
+// the stored record disagree about what a snapshot contains. sdna.FlattenFragments
+// additionally skips nil fragments and merges in ascending fragment-ID order, so
+// a duplicated key resolves the same way on every call.
+func FlattenDNAFragments(frags []*common.Fragment) map[string]string {
+	return sdna.FlattenFragments(frags)
 }
 
 // checkDNAIntegrityWithTable is the table-parameterised implementation. Tests
@@ -147,7 +152,7 @@ func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[config
 		// Conservative default: unknown config types have no declared contract.
 		return dnaIntegrityResult{valid: true}
 	}
-	flat := flattenDNAFragments(dna)
+	flat := FlattenDNAFragments(dna.GetFragments())
 	var missing []string
 	for _, field := range required {
 		if flat[field] == "" {

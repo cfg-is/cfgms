@@ -372,7 +372,7 @@ func TestGetConfiguration_MalformedRoleConfig_IsNonFatal(t *testing.T) {
 
 // TestFlattenDNAFragments_SelectorRelevantKeys verifies that the selector-relevant
 // keys used by MatchingRoleFragments (os, arch, runtime_os) are correctly extracted
-// from DNA fragments. This is the required AC test for the flattenDNAFragments helper
+// from DNA fragments. This is the required AC test for the FlattenDNAFragments helper
 // added by Issue #3325.
 func TestFlattenDNAFragments_SelectorRelevantKeys(t *testing.T) {
 	frags := []*commonpb.Fragment{
@@ -386,7 +386,7 @@ func TestFlattenDNAFragments_SelectorRelevantKeys(t *testing.T) {
 		}),
 	}
 
-	flat := flattenDNAFragments(&commonpb.DNA{Fragments: frags})
+	flat := FlattenDNAFragments(frags)
 
 	assert.Equal(t, "linux", flat["os"], "os key must be flattened from host:os fragment")
 	assert.Equal(t, "linux", flat["runtime_os"], "runtime_os key must be flattened from host:os fragment")
