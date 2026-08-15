@@ -1151,6 +1151,36 @@ func TestClusterStatus_AsMap_ContainsEdges_SingleMember(t *testing.T) {
 	assertEdge(t, edges, "contains", "host:ONLY-NODE")
 }
 
+// TestClusterStatus_AsMap_ContainsEdges_RejectsDelimiterNodes verifies that a
+// member node name carrying an EID delimiter (':' or '/') never becomes an edge
+// target. MemberNodes comes from Get-ClusterNode on a host that may be
+// compromised; an unguarded name would let that host point a contains edge at an
+// entity owned by another host, cluster, or tenant.
+func TestClusterStatus_AsMap_ContainsEdges_RejectsDelimiterNodes(t *testing.T) {
+	status := &ClusterStatus{
+		Name:        "cfg-lab",
+		MemberNodes: []string{"GOOD-NODE", "victim/frag", "cfgms:controller"},
+		Found:       true,
+	}
+	edges, ok := status.AsMap()["__entitygraph_edges"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, edges, 1, "only the well-formed member node may produce an edge")
+	assertEdge(t, edges, "contains", "host:GOOD-NODE")
+}
+
+// TestClusterStatus_AsMap_NoEdgesWhenAllNodesRejected verifies the edges key is
+// omitted entirely when every member node fails the delimiter guard, rather than
+// emitting an empty edge list.
+func TestClusterStatus_AsMap_NoEdgesWhenAllNodesRejected(t *testing.T) {
+	status := &ClusterStatus{
+		Name:        "cfg-lab",
+		MemberNodes: []string{"victim/frag"},
+		Found:       true,
+	}
+	_, hasEdges := status.AsMap()["__entitygraph_edges"]
+	assert.False(t, hasEdges, "no valid member node means no __entitygraph_edges key")
+}
+
 // TestClusterStatus_AsMap_NoEdgesWhenNotFound verifies that a not-found
 // ClusterStatus emits no __entitygraph_edges key (standalone host has no
 // cluster to emit membership for).

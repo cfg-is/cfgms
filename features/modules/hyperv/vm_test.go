@@ -1815,8 +1815,50 @@ func TestVMConfig_AsMap_Edges_ManagedElsewhere(t *testing.T) {
 	m := cfg.AsMap()
 
 	edges := requireEdgesKey(t, m)
-	assertEdge(t, edges, "managed-by", "NODE2")
+	assertEdge(t, edges, "managed-by", "host:NODE2")
 	assertNoEdgeOfType(t, edges, "runs-on")
+}
+
+// TestVMConfig_AsMap_Edges_HostSuppliedTargetsRejected verifies that names
+// carrying an EID delimiter (':' or '/') never reach the edge list. The owner,
+// cluster and switch names all originate in JSON returned by the (potentially
+// compromised) Hyper-V host, and an unguarded value would let that host choose
+// the authority segment of the EID its edge resolves to.
+func TestVMConfig_AsMap_Edges_HostSuppliedTargetsRejected(t *testing.T) {
+	t.Run("owner with path delimiter", func(t *testing.T) {
+		cfg := &VMConfig{Name: "ha-vm", managedElsewhereOwner: "victim-node/frag"}
+		edges := requireEdgesKey(t, cfg.AsMap())
+		assertNoEdgeOfType(t, edges, "managed-by")
+	})
+	t.Run("owner with authority delimiter", func(t *testing.T) {
+		cfg := &VMConfig{Name: "ha-vm", managedElsewhereOwner: "cfgms:controller"}
+		edges := requireEdgesKey(t, cfg.AsMap())
+		assertNoEdgeOfType(t, edges, "managed-by")
+	})
+	t.Run("cluster name with delimiter", func(t *testing.T) {
+		cfg := &VMConfig{Name: "ha-vm", HARole: &HARoleConfig{ClusterName: "prod-hv/evil"}}
+		edges := requireEdgesKey(t, cfg.AsMap())
+		assertNoEdgeOfType(t, edges, "runs-on")
+	})
+	t.Run("switch name with delimiter", func(t *testing.T) {
+		cfg := &VMConfig{Name: "solo", SwitchNames: stringOrStringList{"host:victim", "External"}}
+		edges := requireEdgesKey(t, cfg.AsMap())
+		assertEdge(t, edges, "connects-to", "vswitch:External")
+		require.Len(t, edges, 2, "only the well-formed switch edge plus runs-on:self may be emitted")
+	})
+}
+
+// TestEdgeTarget verifies the namespacing guard directly: well-formed names are
+// kind-prefixed, empty and delimiter-bearing names are rejected outright.
+func TestEdgeTarget(t *testing.T) {
+	to, ok := edgeTarget("host", "NODE2")
+	require.True(t, ok)
+	require.Equal(t, "host:NODE2", to)
+
+	for _, bad := range []string{"", "cluster:prod-hv", "cfgms:controller", "host:victim/frag", "a/b"} {
+		_, ok := edgeTarget("host", bad)
+		require.False(t, ok, "name %q must be rejected", bad)
+	}
 }
 
 // TestVMConfig_AsMap_Edges_ManagedElsewhere_NoSwitches verifies that a
@@ -1829,7 +1871,7 @@ func TestVMConfig_AsMap_Edges_ManagedElsewhere_NoSwitches(t *testing.T) {
 	m := cfg.AsMap()
 
 	edges := requireEdgesKey(t, m)
-	assertEdge(t, edges, "managed-by", "NODE3")
+	assertEdge(t, edges, "managed-by", "host:NODE3")
 	assertNoEdgeOfType(t, edges, "runs-on")
 	assertNoEdgeOfType(t, edges, "connects-to")
 }

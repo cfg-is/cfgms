@@ -214,13 +214,19 @@ func (s *ClusterStatus) AsMap() map[string]interface{} {
 	// Edge type is "contains" (parent→child, per epic convention established in
 	// #3370). Direction is outbound from this cluster fragment (the FROM side),
 	// so each edge is cluster:<name> → host:<node>. Only emitted when the cluster
-	// is found — a not-found ClusterStatus has no members to declare.
+	// is found — a not-found ClusterStatus has no members to declare. Node names
+	// are reported by the cluster host, so each target goes through edgeTarget's
+	// EID-delimiter guard (see vm.go) before it is emitted.
 	if s.Found && len(s.MemberNodes) > 0 {
-		containsEdges := make([]interface{}, len(s.MemberNodes))
-		for i, node := range s.MemberNodes {
-			containsEdges[i] = map[string]interface{}{"type": "contains", "to": "host:" + node}
+		containsEdges := make([]interface{}, 0, len(s.MemberNodes))
+		for _, node := range s.MemberNodes {
+			if to, ok := edgeTarget("host", node); ok {
+				containsEdges = append(containsEdges, map[string]interface{}{"type": "contains", "to": to})
+			}
 		}
-		m["__entitygraph_edges"] = containsEdges
+		if len(containsEdges) > 0 {
+			m["__entitygraph_edges"] = containsEdges
+		}
 	}
 	return m
 }

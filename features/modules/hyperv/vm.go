@@ -707,16 +707,28 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 	// EdgeScopePattern{Direction: TraversalOutbound} contract).
 	edges := make([]interface{}, 0, len(desired)+1)
 	for _, sw := range desired {
-		edges = append(edges, map[string]interface{}{"type": "connects-to", "to": "vswitch:" + sw})
+		if to, ok := edgeTarget("vswitch", sw); ok {
+			edges = append(edges, map[string]interface{}{"type": "connects-to", "to": to})
+		}
 	}
-	if c.managedElsewhereOwner != "" {
+	switch {
+	case c.managedElsewhereOwner != "":
 		// VM is a clustered role hosted on another node. Emit managed-by to the
-		// owning node; no runs-on (this fragment is not the placement authority).
-		edges = append(edges, map[string]interface{}{"type": "managed-by", "to": c.managedElsewhereOwner})
-	} else if c.HARole != nil {
+		// owning node, namespaced under the host: kind for symmetry with the
+		// cluster fragment's contains edges (cluster.go). The owner name is
+		// reported by the cluster host, so it goes through edgeTarget's delimiter
+		// guard: an unnamespaced or delimiter-bearing target would resolve to an
+		// attacker-chosen fleet-global EID. No runs-on here (this fragment is not
+		// the placement authority).
+		if to, ok := edgeTarget("host", c.managedElsewhereOwner); ok {
+			edges = append(edges, map[string]interface{}{"type": "managed-by", "to": to})
+		}
+	case c.HARole != nil:
 		// Clustered VM locally hosted: placement authority is the cluster.
-		edges = append(edges, map[string]interface{}{"type": "runs-on", "to": "cluster:" + c.HARole.ClusterName})
-	} else {
+		if to, ok := edgeTarget("cluster", c.HARole.ClusterName); ok {
+			edges = append(edges, map[string]interface{}{"type": "runs-on", "to": to})
+		}
+	default:
 		// Standalone VM: S2 resolves "self" to this fragment's own host EID.
 		// Coordination point: if S2 requires an explicit target instead of the
 		// "self" sentinel, update S2's decoder to special-case "self" → host EID
@@ -725,6 +737,34 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 	}
 	m["__entitygraph_edges"] = edges
 	return m
+}
+
+// edgeTarget renders a kind-namespaced entity-graph edge target
+// ("host:NODE2", "cluster:lab-hv", "vswitch:External") and reports whether the
+// result is safe to emit.
+//
+// Every name reaching here is host-supplied: switch and cluster names arrive in
+// the JSON Get-VM / Get-Cluster return over WinRM, cluster member nodes come
+// from Get-ClusterNode, and the managed-by owner from Get-ClusterGroup. The
+// CFGMS threat model states stewards run on hosts that may be compromised, so
+// none of these are trusted strings.
+//
+// ':' and '/' are the EID delimiters — pkg/entitygraph/types/eid.go parses
+// authority_type:authority_name[/local_id] by splitting at the first '/' and
+// then the first ':'. A name carrying either lets the reporting host steer the
+// authority segment of the resolved EID and assert relationships against
+// entities belonging to other hosts, clusters, or tenants (e.g. an owner of
+// "victim-node/frag" would yield host:victim-node with a local id the reporting
+// host chose). Cluster and node names are DNS/NetBIOS names that cannot contain
+// either character; a virtual switch name theoretically can, and such an edge is
+// dropped rather than escaped — a missing topology edge is recoverable, a
+// forged one is a relationship-spoofing primitive. The kind prefix is always
+// applied so no target is ever emitted bare.
+func edgeTarget(kind, name string) (string, bool) {
+	if name == "" || strings.ContainsAny(name, ":/") {
+		return "", false
+	}
+	return kind + ":" + name, true
 }
 
 // switchNameField renders the desired switch SET as the value the drift
