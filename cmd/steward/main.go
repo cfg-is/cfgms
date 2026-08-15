@@ -2009,12 +2009,13 @@ func (a *dnaCollectorAdapter) setModuleDNASource(src moduleDNASource) {
 }
 
 // CollectAttributes returns the merged DNA attribute map — host-fact attributes
-// from the Collector's internal raw map (not from the legacy DNA.Attributes proto
-// field, which Collect() no longer writes after Issue #3332) plus any module-owned
-// attributes (cluster:*, vm:*, etc.) from the wired module DNA source.
-// Returns host-only attributes when no module source is wired.
+// from the Collector's internal raw map (not from the legacy flat attributes
+// proto field, which Collect() no longer writes after Issue #3332) plus any
+// module-owned attributes (cluster:*, vm:*, etc.) from the wired module DNA
+// source. Returns host-only attributes when no module source is wired.
 func (a *dnaCollectorAdapter) CollectAttributes(ctx context.Context) (map[string]string, error) {
-	// Host-fact attributes from the Collector's internal flat map (not result.Attributes).
+	// Host-fact attributes from the Collector's internal flat map, not the DNA
+	// result's now-unused legacy field.
 	hostAttrs := a.collector.RawAttributes(ctx)
 
 	a.mu.RLock()
