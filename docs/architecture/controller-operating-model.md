@@ -246,7 +246,7 @@ ConfigKey{TenantID: "<tenant>", Namespace: "role-policies", Name: "<roleName>"}
 
 ## Deployment Rings
 
-Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; each steward subscribes to a ring via its DNA attribute `deployment_ring`; and config delivery resolves the effective `desired_version` from the ring.
+Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; ring membership is declared in controller config only (no write path exists for stewards or operators to self-assign rings); and config delivery applies the ring's `desired_version` to stewards per their controller-config membership.
 
 ### Ring Configuration
 
@@ -275,23 +275,11 @@ When `deployment_rings:` is absent from controller config, the default four-ring
 
 ### Steward Ring Subscription
 
-A steward subscribes to a ring via the `deployment_ring` DNA attribute, set by the operator:
-
-```
-cfg dna set <steward-id> deployment_ring early
-```
-
-The controller validates the attribute value at config-delivery time (not at DNA-write time). The `deployment_ring` attribute is a plain string set by the operator — stewards do not self-assign rings.
+A steward's ring membership is declared in controller configuration only. There is no steward-facing or CLI write path for ring assignment — no `cfg dna set ... deployment_ring` command exists or is planned. Ring assignment is controller-config-only: set `deployment_ring` for a steward by authoring the appropriate controller config document and reloading or restarting the controller.
 
 ### Ring-Resolved Config Delivery
 
-When the controller delivers config to a steward (`GetConfiguration`):
-
-1. The inheritance resolver walks the tenant hierarchy and produces the effective config, including any `desired_version` set at the tenant-config path.
-2. The controller reads the steward's DNA `deployment_ring` attribute.
-3. `ResolveRingVersion` (`pkg/config/inheritance.go`) looks up the ring in the declared ring set.
-4. If the resolved ring has a non-empty `desired_version`, that value **overrides** the tenant-path `desired_version`. This makes rings the authoritative targeting vocabulary for version rollouts.
-5. If `desired_version` is empty for the resolved ring, no override is applied and the tenant-path value is used unchanged.
+When the controller delivers config to a steward (`GetConfiguration`), the effective `desired_version` comes from the tenant-path inheritance resolver only. Rings declare their `desired_version` in controller config; the controller applies the ring's version according to the steward's ring membership as declared in config. All ring membership is controller-config-authoritative — the DNA attribute path for ring membership was removed in Issue #3316.
 
 ### Fallback Behavior
 
