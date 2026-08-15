@@ -47,14 +47,33 @@ type ClusterResourceStatus struct {
 // controllerServiceAdapter.GetAllStewards (server.go:375-397) but returns only
 // the stewards whose TenantID is in scope for callerTenant.
 //
+// Two views of the same scoped snapshot are returned:
+//   - the fragment-only fleet.StewardData slice clusterregistry.BuildRegistry parses.
+//   - hostnameOwners: node hostname → steward ID, which handleClusterReconciliation
+//     needs because cluster role owners are expressed as node hostnames, not steward
+//     IDs (see dnaHostname).
+//
+// Both are built from one GetAllStewards() call so the registry and the liveness
+// index can never disagree about which stewards exist.
+//
 // Access rules:
 //   - callerTenant == "" → admin mTLS principal; all tenants are in scope.
 //   - callerTenant == steward.TenantID → exact match; in scope.
 //   - strings.HasPrefix(steward.TenantID, callerTenant+"/") → caller is a hierarchical
 //     ancestor of the steward's tenant; in scope.
-func (s *Server) stewardsInTenantScope(callerTenant string) []fleet.StewardData {
+func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData, map[string]string) {
 	infos := s.controllerService.GetAllStewards()
 	result := make([]fleet.StewardData, 0, len(infos))
+	hostnameOwners := make(map[string]string, len(infos))
+	// hostnameClaims records which steward currently holds each hostname entry so a
+	// second steward publishing the same hostname resolves deterministically instead
+	// of by GetAllStewards iteration order: the most recent heartbeat wins, ties
+	// broken by the lexicographically smaller steward ID.
+	type hostnameClaim struct {
+		stewardID string
+		heartbeat time.Time
+	}
+	hostnameClaims := make(map[string]hostnameClaim, len(infos))
 	for _, info := range infos {
 		if callerTenant != "" {
 			sameTenant := info.TenantID == callerTenant
@@ -63,10 +82,8 @@ func (s *Server) stewardsInTenantScope(callerTenant string) []fleet.StewardData 
 				continue
 			}
 		}
-		var attrs map[string]string
 		var frags []*commonpb.Fragment
 		if info.DNA != nil {
-			attrs = info.DNA.Attributes
 			// Fragments carry cluster:<name> membership and resource_owner state
 			// (ADR-017); clusterregistry.BuildRegistry parses them, so dropping
 			// them here would make every cluster invisible to the read endpoints.
@@ -77,11 +94,45 @@ func (s *Server) stewardsInTenantScope(callerTenant string) []fleet.StewardData 
 			TenantID:      info.TenantID,
 			Status:        info.Status,
 			LastHeartbeat: info.LastHeartbeat,
-			DNAAttributes: attrs,
 			DNAFragments:  frags,
 		})
+
+		hostname := dnaHostname(info.DNA)
+		if hostname == "" {
+			continue
+		}
+		prev, claimed := hostnameClaims[hostname]
+		wins := !claimed ||
+			info.LastHeartbeat.After(prev.heartbeat) ||
+			(info.LastHeartbeat.Equal(prev.heartbeat) && info.ID < prev.stewardID)
+		if wins {
+			hostnameClaims[hostname] = hostnameClaim{stewardID: info.ID, heartbeat: info.LastHeartbeat}
+			hostnameOwners[hostname] = info.ID
+		}
 	}
-	return result
+	return result, hostnameOwners
+}
+
+// dnaHostname returns the node hostname a steward published in its DNA, or ""
+// when the steward has published none.
+//
+// This is the value cluster role owners are expressed in: the hyperv module emits
+// ClusterStatus.RoleOwners as role → owner *node name*
+// (features/modules/hyperv/cluster.go), and clusterregistry copies that value into
+// ClusterEntry.RoleOwners verbatim — so resolving owner liveness requires a
+// hostname → steward mapping.
+//
+// No ADR-017 fragment carries hostname: features/steward/dna/fragments.go's
+// hostFactFragmentSpecs cover host:cpu, host:memory, host:os and host:bios only,
+// none of which include the hostname key. The flat attribute is therefore the only
+// controller-side source of a steward's hostname, and this function is the single
+// place the cluster read endpoints read it from — the one line to change when epic
+// #2911 gives hostname a fragment home.
+func dnaHostname(dna *commonpb.DNA) string {
+	if dna == nil {
+		return ""
+	}
+	return dna.Attributes["hostname"]
 }
 
 // handleListClusters handles GET /api/v1/clusters.
@@ -97,7 +148,8 @@ func (s *Server) stewardsInTenantScope(callerTenant string) []fleet.StewardData 
 func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
-	reg := clusterregistry.BuildRegistry(s.stewardsInTenantScope(callerTenant))
+	stewards, _ := s.stewardsInTenantScope(callerTenant)
+	reg := clusterregistry.BuildRegistry(stewards)
 
 	clusters := make([]ClusterInfo, 0, len(reg.Clusters()))
 	for name, entry := range reg.Clusters() {
@@ -133,7 +185,8 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
-	reg := clusterregistry.BuildRegistry(s.stewardsInTenantScope(callerTenant))
+	stewards, _ := s.stewardsInTenantScope(callerTenant)
+	reg := clusterregistry.BuildRegistry(stewards)
 
 	entry := reg.Cluster(clusterName)
 	if entry == nil {
@@ -186,7 +239,7 @@ func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Requ
 
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
-	stewards := s.stewardsInTenantScope(callerTenant)
+	stewards, hostnameOwners := s.stewardsInTenantScope(callerTenant)
 	reg := clusterregistry.BuildRegistry(stewards)
 
 	if reg.Cluster(clusterName) == nil {
@@ -198,25 +251,27 @@ func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Requ
 	// (same namespace the InheritanceResolver uses in applyClusterConfiguration).
 	declared := s.clusterDeclaredResources(r.Context(), callerTenant, clusterName)
 
-	// Build a liveness checker from steward DNA hostnames and steward IDs.
-	// The owner value in resource_owner.<role> is typically the cluster node
-	// hostname (e.g. "CFG-70-02"); the matching steward publishes that hostname
-	// in DNA["hostname"]. A fallback by steward ID handles test fixtures.
-	hostnameIdx := make(map[string]fleet.StewardData, len(stewards))
+	// Build a liveness checker over steward IDs and the published node hostnames
+	// that stewardsInTenantScope indexed. The owner value in resource_owner.<role>
+	// is the cluster node hostname (e.g. "CFG-70-02") for every module that reports
+	// clustered roles, so the hostname path is the production path — without it
+	// every live clustered role would resolve as a dead owner.
+	//
+	// The controller-assigned steward ID is matched first: it is authoritative
+	// identity, so a steward-published hostname can never shadow another steward's ID.
 	stewardIDIdx := make(map[string]fleet.StewardData, len(stewards))
 	for _, sd := range stewards {
 		stewardIDIdx[sd.ID] = sd
-		if hostname, ok := sd.DNAAttributes["hostname"]; ok && hostname != "" {
-			hostnameIdx[hostname] = sd
-		}
 	}
 	isOwnerLive := func(ownerID string) bool {
-		var sd fleet.StewardData
-		var found bool
-		if sd, found = hostnameIdx[ownerID]; !found {
-			if sd, found = stewardIDIdx[ownerID]; !found {
-				return false // unknown owner — cannot confirm liveness → treat as dead
+		sd, found := stewardIDIdx[ownerID]
+		if !found {
+			if id, ok := hostnameOwners[ownerID]; ok {
+				sd, found = stewardIDIdx[id]
 			}
+		}
+		if !found {
+			return false // unknown owner — cannot confirm liveness → treat as dead
 		}
 		return time.Since(sd.LastHeartbeat) <= clusterregistry.DeadOwnerStaleThreshold
 	}
