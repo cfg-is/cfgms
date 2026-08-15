@@ -5,15 +5,24 @@
 // (ADR-022 §9, ADR-023 §2). It translates fragment deltas received from
 // stewards into entity-graph observations, scoped per peer authority.
 //
-// Authority-boundary invariant (SE threat #1 — authority confusion): the eid
-// authority segment is built entirely from the mTLS-verified peerHostAuthority
-// argument. No field the steward supplies in fragment data (fragment_id,
-// authority, payload) can reach the eid authority segment — the attack is
-// structurally unrepresentable, not detected-and-rejected.
+// Authority-boundary rule (SE threat #1 — authority confusion): for host-scoped
+// entities the eid authority segment is built entirely from the mTLS-verified
+// peerHostAuthority argument — no field the steward supplies in fragment data
+// (fragment_id, authority, payload) can reach it, so authority confusion there is
+// structurally unrepresentable rather than detected-and-rejected.
+//
+// Cluster-scoped entities are the exception, because a cluster is shared by several
+// reporting peers and so cannot be named after any one of them. The trust basis
+// differs per branch and is stated in full on ResolveSubjectEID (resolve.go): the
+// cluster-scoped VM branch accepts a payload-supplied cluster name only when a
+// caller-supplied ClusterMembership verifier confirms the peer belongs to that
+// cluster (fail closed — a nil verifier denies every claim), while the bare
+// cluster-kind branch takes its name from the fragment_id ungated, because those
+// fragments are the evidence cluster membership is itself derived from.
 //
 // EID construction is handled by ResolveSubjectEID (resolve.go), which covers
-// three branches: cluster-scoped VMs (vm kind with ha_role.cluster_name), bare
-// cluster-kind fragments, and host-scoped fragments.
+// three branches: cluster-scoped VMs (vm kind with a verified ha_role.cluster_name),
+// bare cluster-kind fragments, and host-scoped fragments.
 //
 // Source attribution for host-scoped observations uses peerHostAuthority (not
 // the module authority) so that ClaimScope.Source and Observation.Source remain
@@ -35,15 +44,38 @@ import (
 
 // Writer is the DNA-sync → entity-graph internal writer.
 type Writer struct {
-	provider interfaces.EntityGraphProvider
+	provider   interfaces.EntityGraphProvider
+	membership ClusterMembership
+}
+
+// Option configures a Writer at construction time.
+type Option func(*Writer)
+
+// WithClusterMembership supplies the controller-side verifier that decides whether
+// a steward-asserted ha_role.cluster_name may become an eid authority segment for
+// that peer (see ClusterMembership in resolve.go).
+//
+// A Writer built without it — or with a nil verifier — denies every cluster-scoped
+// VM claim and records those fragments under host:<peerHostAuthority> instead. That
+// is the fail-closed default on purpose: cluster-scoped observations carry no
+// ClaimScope and can never be retracted, so an unverified claim must not be able to
+// create one.
+func WithClusterMembership(m ClusterMembership) Option {
+	return func(w *Writer) { w.membership = m }
 }
 
 // New returns a Writer backed by provider. provider must not be nil.
-func New(provider interfaces.EntityGraphProvider) (*Writer, error) {
+func New(provider interfaces.EntityGraphProvider, opts ...Option) (*Writer, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("dnasync/writer: provider must not be nil")
 	}
-	return &Writer{provider: provider}, nil
+	w := &Writer{provider: provider}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(w)
+		}
+	}
+	return w, nil
 }
 
 // WriteFragmentDelta ingests a set of fragment deltas from a single peer into
@@ -51,8 +83,10 @@ func New(provider interfaces.EntityGraphProvider) (*Writer, error) {
 //
 // EID construction is delegated to ResolveSubjectEID (resolve.go), which handles
 // three branches:
-//   - Cluster-scoped VM (vm kind with ha_role.cluster_name in payload):
-//     eid = cluster:<clusterName>/vm:<vmName>, no ClaimScope.
+//   - Cluster-scoped VM (vm kind whose payload ha_role.cluster_name is confirmed for
+//     this peer by the Writer's ClusterMembership verifier):
+//     eid = cluster:<clusterName>/vm:<vmName>, no ClaimScope. An unverified claim
+//     resolves host-scoped instead.
 //   - Cluster-kind fragments (AuthorityClasses does NOT contain "host"):
 //     eid = cluster:<clusterName> (bare, no local_id), no ClaimScope.
 //   - Host-scoped fragments (AuthorityClasses contains "host", or unknown kind):
@@ -110,8 +144,10 @@ func (w *Writer) WriteFragmentDelta(
 		payload := buildPayload(frag, confidence)
 
 		// Resolve EID, source, and ClaimScope via the shared resolution function.
-		// This is the sole authority for eid construction (authority-boundary invariant).
-		eid, src, cs, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, payload, taxonomy)
+		// This is the sole authority for eid construction (authority-boundary rule),
+		// and w.membership is the only channel by which steward-supplied payload data
+		// can influence an authority segment.
+		eid, src, cs, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, payload, taxonomy, w.membership)
 		if err != nil {
 			return fmt.Errorf("dnasync/writer: %w", err)
 		}

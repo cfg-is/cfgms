@@ -31,9 +31,26 @@ func newTestProvider(t *testing.T) *sqliteprovider.SQLiteEntityGraphProvider {
 	return p
 }
 
+// newTestWriter builds a Writer with no cluster-membership verifier — the
+// fail-closed default, under which every steward-asserted ha_role.cluster_name is
+// denied and the fragment stays host-scoped.
 func newTestWriter(t *testing.T, p *sqliteprovider.SQLiteEntityGraphProvider) *dnasync.Writer {
 	t.Helper()
 	w, err := dnasync.New(p)
+	require.NoError(t, err)
+	return w
+}
+
+// newTestWriterWithMembership builds a Writer whose cluster-membership verifier is
+// the real dnasync.StaticClusterMembership snapshot, populated from cluster name →
+// verified member peer authorities.
+func newTestWriterWithMembership(
+	t *testing.T,
+	p *sqliteprovider.SQLiteEntityGraphProvider,
+	byCluster map[string][]string,
+) *dnasync.Writer {
+	t.Helper()
+	w, err := dnasync.New(p, dnasync.WithClusterMembership(dnasync.NewStaticClusterMembership(byCluster)))
 	require.NoError(t, err)
 	return w
 }
@@ -614,7 +631,11 @@ func TestRetraction_HostScopedFragmentDropped(t *testing.T) {
 // live migration between cluster nodes.
 func TestC1_ClusteredVMEIDFromTwoStewards(t *testing.T) {
 	p := newTestProvider(t)
-	w := newTestWriter(t, p)
+	// Both nodes are verified members of prod-cluster, so their asserted
+	// ha_role.cluster_name is allowed to become the eid authority segment.
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"prod-cluster": {"node-1", "node-2"},
+	})
 	ctx := context.Background()
 
 	makeClusteredVMFrag := func() *commonpb.Fragment {
@@ -698,7 +719,9 @@ func TestC2_StandaloneVMRemainsHostScoped(t *testing.T) {
 // delta omits the now-clustered VM, but that cleanup is not asserted here.
 func TestC3_LiveMigrationOrphan(t *testing.T) {
 	p := newTestProvider(t)
-	w := newTestWriter(t, p)
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"failover-cluster": {"node-alpha"},
+	})
 	ctx := context.Background()
 
 	// Phase 1: VM reported as standalone (no ha_role).
@@ -740,7 +763,9 @@ func TestC3_LiveMigrationOrphan(t *testing.T) {
 // a host-authority ClaimScope — two nodes' observations of the same VM coexist.
 func TestC4_ClusteredVMHasNoClaimScope(t *testing.T) {
 	p := newTestProvider(t)
-	w := newTestWriter(t, p)
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"shared-cluster": {"node-P1", "node-P2"},
+	})
 	ctx := context.Background()
 
 	makeClusteredVMFrag := func() *commonpb.Fragment {
@@ -766,6 +791,110 @@ func TestC4_ClusteredVMHasNoClaimScope(t *testing.T) {
 	records := stateHistory(t, p, clusterEID)
 	require.Len(t, records, 2,
 		"both nodes' cluster-scoped VM observations must survive — no implicit retraction")
+}
+
+// --- AC Group D: cluster-authority trust boundary (SE threat #1) ---
+
+// TestD1_CrossClusterClaimRejected is the authority-confusion regression test for
+// the cluster-scoped VM branch. A compromised steward that is a verified member of
+// its own cluster asserts ha_role.cluster_name = a DIFFERENT cluster it does not
+// belong to. That claim must not reach the eid authority segment: the observation
+// lands under the attacker's own host authority instead, and nothing appears under
+// the victim cluster.
+func TestD1_CrossClusterClaimRejected(t *testing.T) {
+	p := newTestProvider(t)
+	// evil-node is a member of its own cluster only.
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"attacker-cluster": {"evil-node"},
+		"victim-cluster":   {"honest-node-1", "honest-node-2"},
+	})
+	ctx := context.Background()
+
+	forgedFrag := &commonpb.Fragment{
+		FragmentId: "vm:critical-db",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"state":   "running",
+			"ha_role": map[string]interface{}{"cluster_name": "victim-cluster"},
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "evil-node",
+		[]*commonpb.Fragment{forgedFrag}, nil, types.DefaultTaxonomy()))
+
+	// Nothing may exist under the victim cluster's authority.
+	victimEID := mustParseEID(t, "cluster:victim-cluster/vm:critical-db")
+	require.Empty(t, stateHistory(t, p, victimEID),
+		"an unverified cluster claim must never write under cluster:victim-cluster")
+
+	// The observation is recorded under the asserting peer's own authority.
+	hostEID := mustParseEID(t, "host:evil-node/vm:critical-db")
+	records := stateHistory(t, p, hostEID)
+	require.Len(t, records, 1, "denied cluster claim must fall back to the host-scoped eid")
+	require.Equal(t, "evil-node", records[0].Observation.Source)
+}
+
+// TestD2_DeniedClusterClaimRemainsRetractable verifies the security property that
+// makes the host-scoped fallback the safe outcome: unlike a cluster-scoped
+// observation (which carries no ClaimScope and can therefore never be retracted),
+// the fallback observation is covered by the peer's host ClaimScope, so it
+// disappears once the steward stops reporting it.
+func TestD2_DeniedClusterClaimRemainsRetractable(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"real-cluster": {"honest-node"},
+	})
+	ctx := context.Background()
+
+	forgedVM := &commonpb.Fragment{
+		FragmentId: "vm:forged",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"state":   "running",
+			"ha_role": map[string]interface{}{"cluster_name": "not-my-cluster"},
+		}),
+	}
+	keeper := makeHostFrag("service:sshd", "enforcing-module:service")
+
+	require.NoError(t, w.WriteFragmentDelta(ctx, "rogue-node",
+		[]*commonpb.Fragment{forgedVM, keeper}, nil, types.DefaultTaxonomy()))
+
+	forgedEID := mustParseEID(t, "host:rogue-node/vm:forged")
+	require.Len(t, stateHistory(t, p, forgedEID), 1,
+		"denied cluster claim must land host-scoped before retraction")
+
+	// Next delta omits the forged VM: the host ClaimScope retracts it.
+	require.NoError(t, w.WriteFragmentDelta(ctx, "rogue-node",
+		[]*commonpb.Fragment{keeper}, nil, types.DefaultTaxonomy()))
+
+	view, err := p.GetEntity(ctx, forgedEID, interfaces.GetEntityOpts{})
+	retracted := view == nil || errors.Is(err, sqliteprovider.ErrNotFound)
+	require.True(t, retracted,
+		"host-scoped fallback must remain retractable; got view=%v err=%v", view, err)
+}
+
+// TestD3_NoVerifierDeniesClusterClaim verifies the fail-closed default: a Writer
+// constructed without WithClusterMembership treats every ha_role.cluster_name as
+// unverified, so clustered VMs stay host-scoped rather than minting cluster-scoped
+// entities on a steward's unchecked say-so.
+func TestD3_NoVerifierDeniesClusterClaim(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p) // no membership verifier wired
+	ctx := context.Background()
+
+	frag := &commonpb.Fragment{
+		FragmentId: "vm:unverified",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"ha_role": map[string]interface{}{"cluster_name": "some-cluster"},
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-nv",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+
+	require.Empty(t, stateHistory(t, p, mustParseEID(t, "cluster:some-cluster/vm:unverified")),
+		"a Writer with no membership verifier must not create cluster-scoped entities")
+	require.Len(t, stateHistory(t, p, mustParseEID(t, "host:node-nv/vm:unverified")), 1,
+		"the fragment must still be recorded under the peer's own authority")
 }
 
 // TestClusterFragmentHasNoClaimScope verifies that cluster-kind fragments do NOT

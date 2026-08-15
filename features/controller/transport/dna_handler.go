@@ -189,9 +189,16 @@ func (h *DNAHandler) WithPartialSync(store FragmentDeltaStore, publisher Command
 //
 // The entity-graph write is ADDITIVE: it runs after ApplyDelta succeeds and
 // on failure only emits a warning — the steward's stream is not failed and the
-// committed manifest is not rolled back. Authority confusion (SE threat #1) is
-// structurally impossible: the EID authority segment is built entirely from the
-// mTLS-verified peerID, never from steward-supplied fragment data.
+// committed manifest is not rolled back.
+//
+// Authority confusion (SE threat #1) is structurally impossible for host-scoped
+// entities: their EID authority segment is built entirely from the mTLS-verified
+// peerID, never from steward-supplied fragment data. Cluster-scoped entities are
+// necessarily named after the shared cluster rather than the reporting peer; the
+// writer gates which steward-supplied cluster names may become an authority segment
+// (dnasync.ClusterMembership, fail closed when unset). Wire the verifier on the
+// writer passed here — a writer built without one records every clustered VM under
+// host:<peerID> instead.
 func (h *DNAHandler) WithEntityGraph(writer *dnasync.Writer, taxonomy *egtypes.Taxonomy) *DNAHandler {
 	h.egWriter = writer
 	h.egTaxonomy = taxonomy
@@ -558,8 +565,10 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 
 	// Entity-graph write (Story #2907, ADR-022 §9). Additive alongside ApplyDelta
 	// — a write failure emits a warning but does NOT fail the stream or roll back
-	// the committed manifest. peerID is the mTLS-verified identity; no fragment
-	// field can influence the EID authority segment (SE threat #1).
+	// the committed manifest. peerID is the mTLS-verified identity and is the only
+	// input to a host-scoped EID authority segment; cluster-scoped authority names
+	// are gated by the writer's ClusterMembership verifier (SE threat #1, see
+	// WithEntityGraph).
 	if h.egWriter != nil && h.egTaxonomy != nil {
 		if egErr := h.egWriter.WriteFragmentDelta(ctx, peerID, receivedFragments, nil, h.egTaxonomy); egErr != nil {
 			h.logger.Warn("entity-graph write failed for delta; manifest committed, graph may lag",
