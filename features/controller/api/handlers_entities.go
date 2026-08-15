@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -18,6 +19,12 @@ import (
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// egWriteProvider is the narrow write-only subset of interfaces.EntityGraphProvider
+// that the edge-assertion handler requires. *sqlite.SQLiteEntityGraphProvider satisfies it.
+type egWriteProvider interface {
+	ReportObservations(ctx context.Context, batch eginterfaces.ObservationBatch) error
+}
 
 // egReadProvider is the narrow read-only subset of interfaces.EntityGraphProvider
 // that the REST handlers require. *sqlite.SQLiteEntityGraphProvider satisfies it.
@@ -539,6 +546,190 @@ func (s *Server) handleGetDriftState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeEntityJSON(w, drift)
+}
+
+// assertEdgeRequest is the JSON body for POST /api/v1/entities/edges (Issue #3374).
+type assertEdgeRequest struct {
+	EdgeType   string                 `json:"edge_type"`
+	FromEID    string                 `json:"from_eid"`
+	ToEID      string                 `json:"to_eid"`
+	Attributes map[string]interface{} `json:"attributes,omitempty"`
+}
+
+// edgeSubjectDelimiter separates the three fields of an edge observation subject
+// ("edge_type|from_eid|to_eid", ADR-022 §4). The providers recover the fields with
+// a three-way split on this byte, so any component that contains it shifts the
+// field boundaries and lets a caller name endpoint subjects that never passed the
+// tenant check — or make the whole subject parse as an EID and land in the entity
+// projection instead. Every component is rejected if it contains the delimiter.
+const edgeSubjectDelimiter = "|"
+
+// reservedObservationAttrs are the payload keys the entity-graph providers read as
+// trusted ingest metadata rather than as opaque edge attributes: tenant_path is
+// extracted into the observation log and current-state rows (selecting the
+// retention policy and the watch tenant axis), and the remainder are extracted
+// verbatim into the entity index (owning tenant, entity kind, and the identity
+// keys that drive entity collapse). An operator assertion is untrusted input and
+// may not set any of them.
+var reservedObservationAttrs = map[string]struct{}{
+	"tenant_path":     {},
+	"owning_tenant":   {},
+	"entity_kind":     {},
+	"hostname":        {},
+	"mac_addrs":       {},
+	"machine_sid":     {},
+	"dir_object_guid": {},
+	"serial_number":   {},
+	"cloud_object_id": {},
+}
+
+// validateAssertedEdgeType checks that a caller-supplied edge_type is safe to
+// embed in an observation subject: it must carry no subject delimiter and must be
+// a taxonomy edge kind or a related:<discriminator> open subtype (ADR-022 §2).
+func validateAssertedEdgeType(edgeType string) error {
+	if edgeType == "" {
+		return errors.New("edge_type is required")
+	}
+	if strings.Contains(edgeType, edgeSubjectDelimiter) {
+		return errors.New("edge_type must not contain '|'")
+	}
+	tx := egtypes.DefaultTaxonomy()
+	if _, known := tx.LookupEdgeType(edgeType); known {
+		return nil
+	}
+	if tx.IsRelatedEscape(edgeType) {
+		return nil
+	}
+	return errors.New("edge_type must be a known edge type or a related:<discriminator> subtype")
+}
+
+// validateAssertedAttributes rejects operator-supplied attributes that collide
+// with reservedObservationAttrs.
+func validateAssertedAttributes(attrs map[string]interface{}) error {
+	for k := range attrs {
+		if _, reserved := reservedObservationAttrs[k]; reserved {
+			return errors.New("attributes must not contain provider-reserved metadata keys")
+		}
+	}
+	return nil
+}
+
+// handleAssertEdge handles POST /api/v1/entities/edges.
+// Asserts a manual operator edge sourced as "operator-assertion:<caller>" — the
+// operator-assertion source class of ADR-022 §4, which is what makes a manual edge
+// an ordinary provenanced observation rather than a privileged side door
+// (ADR-022 §9). Both endpoint EIDs are resolved against the caller's tenant
+// subtree; cross-tenant or missing endpoint EIDs return 404, matching the
+// read-path convention (ADR-022 §7).
+func (s *Server) handleAssertEdge(w http.ResponseWriter, r *http.Request) {
+	if s.egWriter == nil || s.egProvider == nil {
+		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req assertEdgeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := validateAssertedEdgeType(req.EdgeType); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateAssertedAttributes(req.Attributes); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// ParseEID permits '|' inside an authority name and local ID, so the parsed
+	// endpoints are re-checked against the subject delimiter before they are
+	// joined into the subject.
+	fromEID, err := egtypes.ParseEID(req.FromEID)
+	if err != nil || strings.Contains(fromEID.String(), edgeSubjectDelimiter) {
+		http.Error(w, "invalid from_eid", http.StatusBadRequest)
+		return
+	}
+	toEID, err := egtypes.ParseEID(req.ToEID)
+	if err != nil || strings.Contains(toEID.String(), edgeSubjectDelimiter) {
+		http.Error(w, "invalid to_eid", http.StatusBadRequest)
+		return
+	}
+
+	callerTenant := callerTenantSubtree(r)
+
+	// Verify from_eid is within the caller's tenant subtree (ADR-022 §7).
+	ok, accessErr := s.verifyEntityAccess(r.Context(), fromEID, callerTenant)
+	if accessErr != nil {
+		s.logger.Error("handleAssertEdge: from_eid access check failed",
+			"error", logging.SanitizeLogValue(accessErr.Error()),
+		)
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify to_eid is within the caller's tenant subtree (ADR-022 §7).
+	ok, accessErr = s.verifyEntityAccess(r.Context(), toEID, callerTenant)
+	if accessErr != nil {
+		s.logger.Error("handleAssertEdge: to_eid access check failed",
+			"error", logging.SanitizeLogValue(accessErr.Error()),
+		)
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	callerID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+	if callerID == "" {
+		callerID = "unknown"
+	}
+	// The source class is the segment before the first ':', and it must be a
+	// declared class constant: "operator" is not one, so it resolves to the
+	// observer class and would store untrusted manual input at machine-observation
+	// precedence. ADR-022 §4 ranks operator assertion below observer, so the
+	// canonical class prefix is emitted here.
+	source := string(egtypes.SourceClassOperatorAssertion) + ":" + callerID
+
+	now := time.Now().UTC()
+	payload := make(map[string]interface{}, len(req.Attributes))
+	for k, v := range req.Attributes {
+		payload[k] = v
+	}
+
+	// Edge subject format: "edge_type|from_eid|to_eid" (ADR-022 §4). All three
+	// components are delimiter-free by the validation above.
+	subject := req.EdgeType + edgeSubjectDelimiter + fromEID.String() + edgeSubjectDelimiter + toEID.String()
+
+	batch := eginterfaces.ObservationBatch{
+		Source: source,
+		Observations: []egtypes.Observation{
+			{
+				Source:     source,
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    subject,
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload:    payload,
+			},
+		},
+	}
+
+	if err := s.egWriter.ReportObservations(r.Context(), batch); err != nil {
+		s.logger.Error("handleAssertEdge: report failed",
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		http.Error(w, "assertion failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
 }
 
 // handleListDrifted handles GET /api/v1/entities/drifted.

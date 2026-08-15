@@ -3,11 +3,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -749,4 +751,469 @@ func TestHandleQueryEntities_TenantFiltering(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
 	require.Len(t, page.Entities, 1, "tenant-a must only see its own entity")
 	assert.Equal(t, "tenant-a", page.Entities[0].Entity.OwningTenant)
+}
+
+// ---- /api/v1/entities/edges (POST — handleAssertEdge) ----
+
+// newEntityRWTestServer wires the given provider into a standard test server for
+// both read and write entity graph access (Issue #3374).
+func newEntityRWTestServer(t *testing.T, p *sqlite.SQLiteEntityGraphProvider) *Server {
+	t.Helper()
+	srv := setupTestServer(t)
+	srv.SetEntityGraphProvider(p)
+	srv.SetEntityGraphWriteProvider(p)
+	return srv
+}
+
+// assertEdgeBody builds a JSON body for POST /api/v1/entities/edges.
+func assertEdgeBody(t *testing.T, edgeType, fromEID, toEID string) *bytes.Buffer {
+	t.Helper()
+	body, err := json.Marshal(assertEdgeRequest{
+		EdgeType: edgeType,
+		FromEID:  fromEID,
+		ToEID:    toEID,
+	})
+	require.NoError(t, err)
+	return bytes.NewBuffer(body)
+}
+
+// assertEdgeBodyWithAttrs builds a JSON body for POST /api/v1/entities/edges
+// carrying caller-supplied attributes.
+func assertEdgeBodyWithAttrs(t *testing.T, edgeType, fromEID, toEID string, attrs map[string]interface{}) *bytes.Buffer {
+	t.Helper()
+	body, err := json.Marshal(assertEdgeRequest{
+		EdgeType:   edgeType,
+		FromEID:    fromEID,
+		ToEID:      toEID,
+		Attributes: attrs,
+	})
+	require.NoError(t, err)
+	return bytes.NewBuffer(body)
+}
+
+// postAssertEdge issues an authenticated POST /api/v1/entities/edges and returns
+// the recorder.
+func postAssertEdge(t *testing.T, srv *Server, apiKey string, body *bytes.Buffer) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges", body)
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// requireNoEntityRecord asserts that no entity record exists for subject — used to
+// prove a rejected assertion wrote nothing to the entity projection.
+func requireNoEntityRecord(t *testing.T, p *sqlite.SQLiteEntityGraphProvider, subject string) {
+	t.Helper()
+	eid, err := egtypes.ParseEID(subject)
+	require.NoError(t, err, "test subject must parse as an EID: %s", subject)
+	view, err := p.GetEntity(context.Background(), eid, eginterfaces.GetEntityOpts{})
+	if err == nil {
+		require.Nil(t, view, "no entity record may exist for %s", subject)
+		return
+	}
+	require.ErrorIs(t, err, eginterfaces.ErrNotFound, "unexpected error for %s", subject)
+}
+
+func TestHandleAssertEdge_NoWriteProvider_Returns503(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p) // write provider NOT set
+	apiKey := NewTestKey(t, srv, []string{"entity:write"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges",
+		assertEdgeBody(t, "depends-on", "host:ae-from1", "host:ae-to1"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestHandleAssertEdge_HappyPath verifies that a valid POST asserts the edge and
+// makes it readable via GetEdges (AC-1).
+func TestHandleAssertEdge_HappyPath(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write", "entity:read"})
+
+	reportEntity(t, p, "host:ae-happy-from", "test-tenant", "host")
+	reportEntity(t, p, "host:ae-happy-to", "test-tenant", "host")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges",
+		assertEdgeBody(t, "depends-on", "host:ae-happy-from", "host:ae-happy-to"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "valid assertion must return 201: %s", rec.Body.String())
+
+	// Verify the edge is readable via the existing GET /entities/{eid}/edges path.
+	getReq := httptest.NewRequest(http.MethodGet,
+		"/api/v1/entities/host:ae-happy-from/edges?edge_type=depends-on", nil)
+	getReq.Header.Set("X-API-Key", apiKey)
+	getRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(getRec, getReq)
+
+	require.Equal(t, http.StatusOK, getRec.Code, "GetEdges after assertion: %s", getRec.Body.String())
+	var edges []*eginterfaces.EdgeView
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &edges))
+	require.Len(t, edges, 1, "asserted edge must appear in GetEdges result")
+	assert.Equal(t, "depends-on", edges[0].Edge.Type)
+	// The source class is the segment before the first ':', so the prefix must be
+	// the declared operator-assertion class (ADR-022 §4) — a bare "operator:"
+	// prefix is not a class constant and silently resolves to observer, storing
+	// untrusted manual input at machine-observation precedence.
+	assert.True(t, strings.HasPrefix(edges[0].Edge.Sources[0].Source,
+		string(egtypes.SourceClassOperatorAssertion)+":"),
+		"edge source must carry the operator-assertion class prefix, got %q",
+		edges[0].Edge.Sources[0].Source)
+}
+
+// TestHandleAssertEdge_RejectsDelimiterInEdgeType verifies that an edge_type
+// carrying the subject delimiter is rejected: the providers recover the subject
+// fields with a three-way split on '|', so an unconstrained edge_type shifts the
+// field boundaries and names an endpoint subject that never passed the tenant
+// check.
+func TestHandleAssertEdge_RejectsDelimiterInEdgeType(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write", "entity:read"})
+
+	reportEntity(t, p, "host:ae-inj-from", "test-tenant", "host")
+	reportEntity(t, p, "host:ae-inj-to", "test-tenant", "host")
+
+	rec := postAssertEdge(t, srv, apiKey,
+		assertEdgeBody(t, "contains|host:ae-victim", "host:ae-inj-from", "host:ae-inj-to"))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"edge_type containing '|' must be rejected: %s", rec.Body.String())
+
+	// Nothing was written: no forged endpoint node and no edge on the real one.
+	requireNoEntityRecord(t, p, "host:ae-victim")
+	fromEID, err := egtypes.ParseEID("host:ae-inj-from")
+	require.NoError(t, err)
+	edges, err := p.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &fromEID})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "rejected assertion must write no edge")
+}
+
+// TestHandleAssertEdge_RejectsUnknownEdgeType verifies that an edge_type outside
+// the taxonomy is rejected. An entity-shaped edge_type would make the whole
+// subject parse as an EID, routing the observation to the entity projection where
+// the caller's payload becomes an entity index row.
+func TestHandleAssertEdge_RejectsUnknownEdgeType(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write", "entity:read"})
+
+	reportEntity(t, p, "host:ae-unk-from", "test-tenant", "host")
+	reportEntity(t, p, "host:ae-unk-to", "test-tenant", "host")
+
+	for _, edgeType := range []string{"host:ae-forged", "not-a-real-edge-type"} {
+		rec := postAssertEdge(t, srv, apiKey,
+			assertEdgeBody(t, edgeType, "host:ae-unk-from", "host:ae-unk-to"))
+		require.Equal(t, http.StatusBadRequest, rec.Code,
+			"edge_type %q must be rejected: %s", edgeType, rec.Body.String())
+	}
+
+	fromEID, err := egtypes.ParseEID("host:ae-unk-from")
+	require.NoError(t, err)
+	edges, err := p.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &fromEID})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "rejected assertion must write no edge")
+}
+
+// TestHandleAssertEdge_AcceptsRelatedEscapeEdgeType verifies the open-subtype
+// escape of ADR-022 §2 still works through the taxonomy check.
+func TestHandleAssertEdge_AcceptsRelatedEscapeEdgeType(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write", "entity:read"})
+
+	reportEntity(t, p, "host:ae-rel-from", "test-tenant", "host")
+	reportEntity(t, p, "host:ae-rel-to", "test-tenant", "host")
+
+	rec := postAssertEdge(t, srv, apiKey,
+		assertEdgeBody(t, "related:backup-target", "host:ae-rel-from", "host:ae-rel-to"))
+
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"related: escape edge type must be accepted: %s", rec.Body.String())
+}
+
+// TestHandleAssertEdge_RejectsDelimiterInEID verifies that an endpoint EID
+// carrying the subject delimiter is rejected. ParseEID permits '|' inside an
+// authority name, so parsing alone does not make an EID safe to join into a
+// pipe-delimited subject.
+func TestHandleAssertEdge_RejectsDelimiterInEID(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write", "entity:read"})
+
+	reportEntity(t, p, "host:ae-pipe-ok", "test-tenant", "host")
+
+	rec := postAssertEdge(t, srv, apiKey,
+		assertEdgeBody(t, "depends-on", "host:ae-pipe|host:ae-other", "host:ae-pipe-ok"))
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"from_eid containing '|' must be rejected: %s", rec.Body.String())
+
+	rec = postAssertEdge(t, srv, apiKey,
+		assertEdgeBody(t, "depends-on", "host:ae-pipe-ok", "host:ae-pipe2|host:ae-other"))
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"to_eid containing '|' must be rejected: %s", rec.Body.String())
+
+	okEID, err := egtypes.ParseEID("host:ae-pipe-ok")
+	require.NoError(t, err)
+	edges, err := p.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &okEID})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "rejected assertion must write no edge")
+}
+
+// TestHandleAssertEdge_RejectsReservedAttributes verifies that operator-supplied
+// attributes cannot carry the provider's trusted ingest metadata keys — tenant
+// provenance and the identity keys that drive entity collapse.
+func TestHandleAssertEdge_RejectsReservedAttributes(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewEphemeralTestKey(t, srv, []string{"entity:write", "entity:read"}, "tenant-a", 5*time.Minute)
+
+	reportEntity(t, p, "host:ae-attr-from", "tenant-a", "host")
+	reportEntity(t, p, "host:ae-attr-to", "tenant-a", "host")
+
+	reserved := []string{
+		"tenant_path", "owning_tenant", "entity_kind", "hostname", "mac_addrs",
+		"machine_sid", "dir_object_guid", "serial_number", "cloud_object_id",
+	}
+	for _, key := range reserved {
+		rec := postAssertEdge(t, srv, apiKey, assertEdgeBodyWithAttrs(t,
+			"depends-on", "host:ae-attr-from", "host:ae-attr-to",
+			map[string]interface{}{key: "tenant-b"}))
+		require.Equal(t, http.StatusBadRequest, rec.Code,
+			"reserved attribute %q must be rejected: %s", key, rec.Body.String())
+	}
+
+	fromEID, err := egtypes.ParseEID("host:ae-attr-from")
+	require.NoError(t, err)
+	edges, err := p.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &fromEID})
+	require.NoError(t, err)
+	assert.Empty(t, edges, "rejected assertion must write no edge")
+}
+
+// TestHandleAssertEdge_AcceptsNonReservedAttributes verifies that ordinary edge
+// attributes still round-trip through the assertion path.
+func TestHandleAssertEdge_AcceptsNonReservedAttributes(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write", "entity:read"})
+
+	reportEntity(t, p, "host:ae-attr2-from", "test-tenant", "host")
+	reportEntity(t, p, "host:ae-attr2-to", "test-tenant", "host")
+
+	rec := postAssertEdge(t, srv, apiKey, assertEdgeBodyWithAttrs(t,
+		"depends-on", "host:ae-attr2-from", "host:ae-attr2-to",
+		map[string]interface{}{"note": "manual failover dependency"}))
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"non-reserved attributes must be accepted: %s", rec.Body.String())
+
+	fromEID, err := egtypes.ParseEID("host:ae-attr2-from")
+	require.NoError(t, err)
+	edges, err := p.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &fromEID})
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.Equal(t, "manual failover dependency", edges[0].Edge.Attributes["note"])
+}
+
+// TestHandleAssertEdge_InvalidFromEID returns 400 with no partial write (AC-2).
+func TestHandleAssertEdge_InvalidFromEID_Returns400(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write"})
+
+	body, _ := json.Marshal(map[string]string{
+		"edge_type": "depends-on",
+		"from_eid":  "not-a-valid-eid",
+		"to_eid":    "host:ae-to-inv",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges", bytes.NewBuffer(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "invalid from_eid must return 400")
+}
+
+// TestHandleAssertEdge_InvalidToEID returns 400 with no partial write (AC-2).
+func TestHandleAssertEdge_InvalidToEID_Returns400(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:write"})
+
+	reportEntity(t, p, "host:ae-from-inv2", "test-tenant", "host")
+
+	body, _ := json.Marshal(map[string]string{
+		"edge_type": "depends-on",
+		"from_eid":  "host:ae-from-inv2",
+		"to_eid":    "not-a-valid-eid",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges", bytes.NewBuffer(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "invalid to_eid must return 400")
+}
+
+// TestHandleAssertEdge_FromEIDCrossTenantReturns404 verifies AC-3: cross-tenant
+// from_eid returns 404, not 403 (ADR-022 §7 non-disclosure requirement).
+func TestHandleAssertEdge_FromEIDCrossTenantReturns404(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+
+	// from_eid owned by tenant-b; to_eid owned by tenant-a.
+	reportEntity(t, p, "host:ae-xt-from", "tenant-b", "host")
+	reportEntity(t, p, "host:ae-xt-to1", "tenant-a", "host")
+
+	apiKey := NewEphemeralTestKey(t, srv, []string{"entity:write"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges",
+		assertEdgeBody(t, "depends-on", "host:ae-xt-from", "host:ae-xt-to1"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"cross-tenant from_eid must return 404, not 403 (ADR-022 §7): got %d", rec.Code)
+}
+
+// TestHandleAssertEdge_ToEIDCrossTenantReturns404 verifies AC-3: cross-tenant
+// to_eid returns 404, not 403 (ADR-022 §7 non-disclosure requirement).
+func TestHandleAssertEdge_ToEIDCrossTenantReturns404(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+
+	// from_eid owned by tenant-a; to_eid owned by tenant-b.
+	reportEntity(t, p, "host:ae-xt-from2", "tenant-a", "host")
+	reportEntity(t, p, "host:ae-xt-to2", "tenant-b", "host")
+
+	apiKey := NewEphemeralTestKey(t, srv, []string{"entity:write"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges",
+		assertEdgeBody(t, "depends-on", "host:ae-xt-from2", "host:ae-xt-to2"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"cross-tenant to_eid must return 404, not 403 (ADR-022 §7): got %d", rec.Code)
+}
+
+// TestHandleAssertEdge_RequiresPermission verifies AC-4: a key without entity:write
+// is rejected (AC-4).
+func TestHandleAssertEdge_RequiresPermission(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+
+	reportEntity(t, p, "host:ae-perm-from", "test-tenant", "host")
+	reportEntity(t, p, "host:ae-perm-to", "test-tenant", "host")
+
+	// entity:read does not include write permission.
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges",
+		assertEdgeBody(t, "depends-on", "host:ae-perm-from", "host:ae-perm-to"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"insufficient permission must return 403: got %d", rec.Code)
+}
+
+// TestHandleAssertEdge_RequiresAuth verifies that an unauthenticated request is rejected.
+func TestHandleAssertEdge_RequiresAuth(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges",
+		assertEdgeBody(t, "depends-on", "host:ae-noauth-from", "host:ae-noauth-to"))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleCreateAPIKey_AcceptsEntityWrite verifies that entity:write — the
+// permission gating POST /api/v1/entities/edges — is grantable through the real
+// key-minting path and that the resulting least-privilege key reaches the route.
+//
+// The other tests in this file mint keys via NewTestKey/NewEphemeralTestKey, which
+// call generateEphemeralKey directly and bypass isKnownPermission. That path cannot
+// detect a permission that is enforced on a route but missing from the
+// knownPermissions allow-list. With such a gap handleCreateAPIKey (and the web-account
+// handlers) reject the permission with 400 INVALID_PERMISSION, leaving an unscoped
+// principal (Permissions == nil, which hasPermission blanket-allows) as the only one
+// able to reach the mutating route — the privilege inflation fixed for tenant:create
+// (Issue #3195) and cluster:drain-node et al. (Issue #3303). This test goes through
+// handleCreateAPIKey so that gap fails the suite.
+func TestHandleCreateAPIKey_AcceptsEntityWrite(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityRWTestServer(t, p)
+
+	const tenantID = "test-tenant"
+	reportEntity(t, p, "host:ae-grant-from", tenantID, "host")
+	reportEntity(t, p, "host:ae-grant-to", tenantID, "host")
+
+	createBody := []byte(`{"name":"entity-write-key","tenant_id":"` + tenantID +
+		`","permissions":["entity:write","entity:read"]}`)
+	createRec := callHandleCreateAPIKey(srv, createBody, tenantID)
+	require.Equal(t, http.StatusCreated, createRec.Code,
+		"entity:write must be a known permission and grantable to a scoped API key: %s",
+		createRec.Body.String())
+
+	var created struct {
+		Data struct {
+			Key         string   `json:"key"`
+			Permissions []string `json:"permissions"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.Data.Key, "plaintext key must be returned on creation")
+	assert.ElementsMatch(t, []string{"entity:write", "entity:read"}, created.Data.Permissions,
+		"created key must carry exactly the requested entity permissions")
+
+	// The scoped key really is scoped: it must not inherit blanket authority.
+	srv.mu.RLock()
+	stored := srv.apiKeys[created.Data.Key]
+	srv.mu.RUnlock()
+	require.NotNil(t, stored, "created key must be registered for authentication")
+	require.NotNil(t, stored.Permissions,
+		"created key must carry an explicit permission set, not the blanket-allow nil set")
+
+	// And it reaches the route it was minted for.
+	rec := postAssertEdge(t, srv, created.Data.Key,
+		assertEdgeBody(t, "depends-on", "host:ae-grant-from", "host:ae-grant-to"))
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"scoped entity:write key must be authorised for POST /entities/edges: %s", rec.Body.String())
+}
+
+// TestEntityPermissions_EnforcedOnRoutesAreGrantable verifies that every permission
+// enforced by requirePermission on an /api/v1/entities route is present in the
+// knownPermissions allow-list. A permission enforced on a route but absent from the
+// allow-list is unusable: enforced but ungrantable, so only unscoped principals reach
+// the route.
+func TestEntityPermissions_EnforcedOnRoutesAreGrantable(t *testing.T) {
+	for _, permID := range []string{"entity:list", "entity:read", "entity:write"} {
+		assert.True(t, isKnownPermission(permID),
+			"%s is enforced by requirePermission on an /entities route but absent from "+
+				"knownPermissions, so no scoped API key or web account can ever hold it", permID)
+	}
 }

@@ -160,6 +160,7 @@ type Server struct {
 	telemetryHandler               http.Handler                          // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter            egConfigstoreIngestor                 // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                     egReadProvider                        // Issue #2880: entity graph read API
+	egWriter                       egWriteProvider                       // Issue #3374: operator edge assertion write path
 	terminalHandler                http.Handler                          // Issue #2761: terminal WebSocket relay handler
 	tenantStore                    business.TenantStore                  // Issue #2839: tenant hierarchy for per-tenant assurance resolution
 	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
@@ -1515,6 +1516,14 @@ func (s *Server) SetEntityGraphProvider(p egReadProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.egProvider = p
+}
+
+// SetEntityGraphWriteProvider wires the entity graph write provider into the REST
+// API, enabling the POST /api/v1/entities/edges endpoint (Issue #3374).
+func (s *Server) SetEntityGraphWriteProvider(p egWriteProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egWriter = p
 }
 
 // getHTTPListenAddr determines the HTTP listen address with the

@@ -166,6 +166,14 @@ var knownPermissions = map[string]bool{
 	// Entity graph read API (Issue #2880)
 	"entity:list": true,
 	"entity:read": true,
+	// Entity graph operator edge assertion (Issue #3374): gates POST /entities/edges,
+	// the only mutating entity-graph route. It must be listed here so a least-privilege
+	// API key or web account can actually hold it — otherwise handleCreateAPIKey and the
+	// web-account handlers reject it with 400 INVALID_PERMISSION and the only principal
+	// able to reach the route is an unscoped one (Permissions == nil, which hasPermission
+	// blanket-allows). That is the same cross-registry drift fixed for tenant:create
+	// (Issue #3195) and cluster:drain-node et al. (Issue #3303).
+	"entity:write": true,
 	// Reboot-window authoring (Issue #2979). Enforced on the tenant and steward
 	// reboot-window routes and registered in the RBAC catalog as reboot_window.read /
 	// reboot_window.override. Both must be listed here so a least-privilege API key or

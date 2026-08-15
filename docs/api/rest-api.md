@@ -2196,6 +2196,48 @@ This endpoint does not pre-check entity existence — an unknown or cross-tenant
 `{eid}` returns an empty list (`[]`), not 404, because `GetEdges` filters by the
 EID's `owning_tenant` at the storage layer.
 
+#### POST /api/v1/entities/edges
+
+Assert a manual operator edge (e.g. a `depends-on` relationship) through the
+standard observation path — no privileged side door (ADR-022 §9). The edge is
+recorded as an ordinary provenanced observation sourced
+`operator-assertion:<caller>` and is readable through `GET /api/v1/entities/{eid}/edges`
+like any other source's edges.
+
+**Required permission:** `entity:write`
+
+**Request body:**
+
+```json
+{
+  "edge_type": "depends-on",
+  "from_eid": "host:CFG-70-02",
+  "to_eid": "host:CFG-70-03",
+  "attributes": {}
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `edge_type` | string | A known taxonomy edge kind, or an open `related:<discriminator>` subtype (ADR-022 §2). Must not contain `\|`. |
+| `from_eid` | string | Source endpoint EID. Must parse and resolve within the caller's tenant subtree. |
+| `to_eid` | string | Target endpoint EID. Must parse and resolve within the caller's tenant subtree. |
+| `attributes` | object | Optional opaque edge attributes. Provider-reserved metadata keys (`tenant_path`, `owning_tenant`, `entity_kind`, `hostname`, `mac_addrs`, `machine_sid`, `dir_object_guid`, `serial_number`, `cloud_object_id`) are rejected. |
+
+**Response (201):** empty body.
+
+**Error responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Malformed request body, invalid `edge_type` (unknown kind, not a `related:*` subtype, or contains `\|`), reserved attribute key present, or either EID fails to parse |
+| 404 | `from_eid` or `to_eid` does not exist, or is outside the caller's tenant subtree (ADR-022 §7 — not 403, to avoid disclosing cross-tenant existence) |
+| 503 | Entity graph provider unavailable |
+
+Tenant scoping: both endpoint EIDs are resolved against the caller's tenant
+subtree before the edge is written; a cross-tenant `from_eid` or `to_eid`
+returns 404 with no partial write, matching the read-path convention above.
+
 #### GET /api/v1/entities/{eid}/neighborhood
 
 Depth-bounded connected subgraph starting at `{eid}`.
