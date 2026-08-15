@@ -381,7 +381,9 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// The periodic convergence loop AND monitor-triggered targeted reconciles both
 	// land here, so caching the Get result keeps module DNA live at steady state —
 	// not only when a change-event fires — with no extra module call.
-	e.cacheModuleDNAState(resourceID, currentState)
+	// bundle is passed as authority so CollectModuleFragments can emit fragments for
+	// steady-state-only resources that have no active monitor (#3333).
+	e.cacheModuleDNAState(resourceID, bundle, currentState)
 
 	// Managed-elsewhere short-circuit (Story #2577): a module may report from Get
 	// that the resource is real and in its desired terminal state but managed by a

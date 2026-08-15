@@ -19,3 +19,11 @@ var HandleResourceError = (*Executor).handleResourceError
 
 // ExecutorDriftMode exposes the driftMode field of Executor for package execution_test inspection.
 var ExecutorDriftMode = func(e *Executor) config.DriftMode { return e.driftMode }
+
+// MaxModuleFragments exposes the CollectModuleFragments count bound so package
+// execution_test asserts against the real constant rather than a copy of it.
+const MaxModuleFragments = maxModuleFragments
+
+// MaxModuleFragmentCanonicalBytes exposes the CollectModuleFragments per-fragment
+// size bound for package execution_test.
+const MaxModuleFragmentCanonicalBytes = maxModuleFragmentCanonicalBytes
