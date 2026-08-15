@@ -112,7 +112,8 @@ func (w *Writer) WriteFragmentDelta(
 	now := time.Now().UTC()
 
 	var allObs []types.Observation
-	var hostClaimScope *types.ClaimScope // non-nil when any host-scoped observation is produced
+	var hostClaimScope *types.ClaimScope   // non-nil when any host-scoped observation is produced
+	var edgeClaimScopes []types.ClaimScope // per-(source,edgeType) scopes from edge declarations
 
 	for _, frag := range fragments {
 		fragID := frag.GetFragmentId()
@@ -152,6 +153,12 @@ func (w *Writer) WriteFragmentDelta(
 			return fmt.Errorf("dnasync/writer: %w", err)
 		}
 
+		// Decode edge declarations. This strips __entitygraph_edges from payload
+		// so the key is absent when the entity observation below is stored.
+		eObs, eCS := decodeEdgeDeclarations(peerHostAuthority, eid, observedAt, now, payload, taxonomy, w.membership)
+		allObs = append(allObs, eObs...)
+		edgeClaimScopes = append(edgeClaimScopes, eCS...)
+
 		allObs = append(allObs, types.Observation{
 			Source:     src,
 			ObservedAt: observedAt,
@@ -190,6 +197,10 @@ func (w *Writer) WriteFragmentDelta(
 	if hostClaimScope != nil {
 		hostClaimScope.AsOf = now
 		batch.ClaimScopes = []types.ClaimScope{*hostClaimScope}
+	}
+	for i := range edgeClaimScopes {
+		edgeClaimScopes[i].AsOf = now
+		batch.ClaimScopes = append(batch.ClaimScopes, edgeClaimScopes[i])
 	}
 
 	return w.provider.ReportObservations(ctx, batch)

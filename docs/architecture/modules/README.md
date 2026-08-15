@@ -244,6 +244,56 @@ See `features/modules/conformance/fragment_test_helper.go` for godoc and
 `features/modules/conformance/fragment_test_helper_test.go` for a worked
 example using `stdlib/file`.
 
+### Fragment edge declarations
+
+Modules may declare topology relationships — edges in the entity graph — by including a reserved key `__entitygraph_edges` in their `AsMap()` output alongside entity state fields.
+
+**Shape:**
+
+```go
+map[string]interface{}{
+    "state":               "running",
+    "module_authority":    "observer:hyperv",
+    "__entitygraph_edges": []interface{}{
+        map[string]interface{}{"type": "runs-on",    "to": "self"},
+        map[string]interface{}{"type": "connects-to", "to": "vswitch:External"},
+    },
+}
+```
+
+Each entry in the list is a map with exactly two required string keys:
+
+| Key | Value | Notes |
+|-----|-------|-------|
+| `type` | An edge type from `DefaultTaxonomy()` (e.g. `"contains"`, `"runs-on"`) | Unknown types are emitted as `related:<type>` — never dropped |
+| `to` | A `kind:name` entity reference or the sentinel `"self"` | `"self"` resolves to the bare host-authority EID (`host:<steward>`) of the reporting steward |
+
+**Accepted characters.** An edge observation is stored under the subject
+`<type>|<from_eid>|<to_eid>`, and the store parses that back on three fields. Both
+declared fields are therefore constrained, and an entry violating any rule is
+skipped (the fragment's entity observation is unaffected):
+
+| Rule | Applies to | Rejected because |
+|------|-----------|------------------|
+| No `\|` (U+007C) | `type`, `to`, and the resolved anchor EID | It is the subject delimiter; a value containing it re-parses into different fields, rebinding the edge to an entity the module does not own |
+| No control characters (`U+0000`–`U+001F`, `U+007F`) | `type`, `to` | The store joins edge-projection and claim-scope key components with `0x1F` |
+| Valid UTF-8 | `type`, `to` | Both reach storage keys and log records |
+| Non-empty, ≤ 253 bytes | `type`, `to` | Same bound as a cluster authority name; the wire format is otherwise unbounded |
+
+A `\|` in the fragment's own EID (for example a cluster fragment whose
+`fragment_id` local part contains one) disqualifies the entire declaration list,
+since that EID is the anchor for every edge and for the retraction `ClaimScope`.
+
+**When to use:** topology that is authoritatively observed by this module and changes when this fragment's state changes (ADR-022 §2). Examples: a cluster module reporting its member nodes (`contains`), a VM reporting which vswitch it is connected to (`connects-to`), a standalone VM reporting the host it runs on (`runs-on self`).
+
+**What this is not:** a general-purpose graph-write API. Edges declared here are scoped to the fragment's EID as anchor (always outbound). Cross-entity relationships that are not directly observed by this module belong in a separate workflow.
+
+**Retraction:** the writer builds one `ClaimScope` per `(source, edgeType)` pair present in the batch. On re-enumeration, if a previously-declared edge of that type is absent from the new declaration list, the store retracts it automatically. Dropping the `__entitygraph_edges` key entirely does not retract previously-declared edges for that edge type — the ClaimScope must be present with an updated (possibly smaller) set.
+
+**Stripping:** the writer strips `__entitygraph_edges` from the entity attribute payload before storage. The key never appears in entity attribute queries.
+
+**Content-hash dedup:** `__entitygraph_edges` is included in `canonical_bytes`, so any change to the declared edge list changes `fragment_hash` and triggers a new entity observation.
+
 ## Available Modules
 
 ### What belongs in stdlib
