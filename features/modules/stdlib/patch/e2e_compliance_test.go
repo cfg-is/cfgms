@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
 
 // TestE2E_ComplianceWorkflow_CompliantSystem tests the full compliance workflow
@@ -246,17 +247,25 @@ func TestE2E_UpgradeWorkflow_CompatibleDevice(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: Create Windows 11 compatible DNA
+	biosFrag, err := sdna.NewFragment("host:bios", "gatherer", sdna.MapState(map[string]interface{}{
+		"tpm_version": "2.0",
+		"bios_mode":   "UEFI",
+		"secure_boot": "enabled",
+	}))
+	require.NoError(t, err)
+	cpuFrag, err := sdna.NewFragment("host:cpu", "gatherer", sdna.MapState(map[string]interface{}{
+		"cpu_cores":           "4",
+		"cpu_max_clock_speed": "2400MHz",
+	}))
+	require.NoError(t, err)
+	memFrag, err := sdna.NewFragment("host:memory", "gatherer", sdna.MapState(map[string]interface{}{
+		"memory_total_gb": "8.00",
+		"storage_gb":      "256",
+	}))
+	require.NoError(t, err)
 	dna := &commonpb.DNA{
-		Id: "test-device-5",
-		Attributes: map[string]string{
-			"tpm_version":   "2.0",
-			"bios_mode":     "UEFI",
-			"cpu_cores":     "4",
-			"cpu_speed_ghz": "2.4",
-			"ram_gb":        "8",
-			"storage_gb":    "256",
-			"secure_boot":   "enabled",
-		},
+		Id:        "test-device-5",
+		Fragments: []*commonpb.Fragment{biosFrag, cpuFrag, memFrag},
 	}
 
 	// Step 2: Create compatibility checker
@@ -305,17 +314,25 @@ func TestE2E_UpgradeWorkflow_IncompatibleDevice(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: Create Windows 11 incompatible DNA (TPM 1.2, Legacy BIOS)
+	biosFrag2, err := sdna.NewFragment("host:bios", "gatherer", sdna.MapState(map[string]interface{}{
+		"tpm_version": "1.2", // TPM 1.2 not supported
+		"bios_mode":   "Legacy",
+		"secure_boot": "disabled",
+	}))
+	require.NoError(t, err)
+	cpuFrag2, err := sdna.NewFragment("host:cpu", "gatherer", sdna.MapState(map[string]interface{}{
+		"cpu_cores":           "2",
+		"cpu_max_clock_speed": "1500MHz",
+	}))
+	require.NoError(t, err)
+	memFrag2, err := sdna.NewFragment("host:memory", "gatherer", sdna.MapState(map[string]interface{}{
+		"memory_total_gb": "4.00",
+		"storage_gb":      "128",
+	}))
+	require.NoError(t, err)
 	dna := &commonpb.DNA{
-		Id: "test-device-6",
-		Attributes: map[string]string{
-			"tpm_version":   "1.2", // TPM 1.2 not supported
-			"bios_mode":     "Legacy",
-			"cpu_cores":     "2",
-			"cpu_speed_ghz": "1.5",
-			"ram_gb":        "4",
-			"storage_gb":    "128",
-			"secure_boot":   "disabled",
-		},
+		Id:        "test-device-6",
+		Fragments: []*commonpb.Fragment{biosFrag2, cpuFrag2, memFrag2},
 	}
 
 	// Step 2: Create compatibility checker
