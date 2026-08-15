@@ -5,15 +5,24 @@
 // (ADR-022 §9, ADR-023 §2). It translates fragment deltas received from
 // stewards into entity-graph observations, scoped per peer authority.
 //
-// Authority-boundary invariant (SE threat #1 — authority confusion): the eid
-// authority segment is built entirely from the mTLS-verified peerHostAuthority
-// argument. No field the steward supplies in fragment data (fragment_id,
-// authority, payload) can reach the eid authority segment — the attack is
-// structurally unrepresentable, not detected-and-rejected.
+// Authority-boundary rule (SE threat #1 — authority confusion): for host-scoped
+// entities the eid authority segment is built entirely from the mTLS-verified
+// peerHostAuthority argument — no field the steward supplies in fragment data
+// (fragment_id, authority, payload) can reach it, so authority confusion there is
+// structurally unrepresentable rather than detected-and-rejected.
 //
-// EID construction branches on taxonomy AuthorityClasses (Finding 1 fix):
-//   - Host-scoped kinds (AuthorityClasses contains "host"): eid = host:<peerHostAuthority>/<fragment_id>
-//   - Cluster-kind fragments (AuthorityClasses does NOT contain "host"): eid = cluster:<clusterName> (bare)
+// Cluster-scoped entities are the exception, because a cluster is shared by several
+// reporting peers and so cannot be named after any one of them. The trust basis
+// differs per branch and is stated in full on ResolveSubjectEID (resolve.go): the
+// cluster-scoped VM branch accepts a payload-supplied cluster name only when a
+// caller-supplied ClusterMembership verifier confirms the peer belongs to that
+// cluster (fail closed — a nil verifier denies every claim), while the bare
+// cluster-kind branch takes its name from the fragment_id ungated, because those
+// fragments are the evidence cluster membership is itself derived from.
+//
+// EID construction is handled by ResolveSubjectEID (resolve.go), which covers
+// three branches: cluster-scoped VMs (vm kind with a verified ha_role.cluster_name),
+// bare cluster-kind fragments, and host-scoped fragments.
 //
 // Source attribution for host-scoped observations uses peerHostAuthority (not
 // the module authority) so that ClaimScope.Source and Observation.Source remain
@@ -35,32 +44,56 @@ import (
 
 // Writer is the DNA-sync → entity-graph internal writer.
 type Writer struct {
-	provider interfaces.EntityGraphProvider
+	provider   interfaces.EntityGraphProvider
+	membership ClusterMembership
+}
+
+// Option configures a Writer at construction time.
+type Option func(*Writer)
+
+// WithClusterMembership supplies the controller-side verifier that decides whether
+// a steward-asserted ha_role.cluster_name may become an eid authority segment for
+// that peer (see ClusterMembership in resolve.go).
+//
+// A Writer built without it — or with a nil verifier — denies every cluster-scoped
+// VM claim and records those fragments under host:<peerHostAuthority> instead. That
+// is the fail-closed default on purpose: cluster-scoped observations carry no
+// ClaimScope and can never be retracted, so an unverified claim must not be able to
+// create one.
+func WithClusterMembership(m ClusterMembership) Option {
+	return func(w *Writer) { w.membership = m }
 }
 
 // New returns a Writer backed by provider. provider must not be nil.
-func New(provider interfaces.EntityGraphProvider) (*Writer, error) {
+func New(provider interfaces.EntityGraphProvider, opts ...Option) (*Writer, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("dnasync/writer: provider must not be nil")
 	}
-	return &Writer{provider: provider}, nil
+	w := &Writer{provider: provider}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(w)
+		}
+	}
+	return w, nil
 }
 
 // WriteFragmentDelta ingests a set of fragment deltas from a single peer into
 // the entity graph as ObservationKindState observations.
 //
-// Host-scoped fragments (taxonomy AuthorityClasses contains "host") produce
-// eid = host:<peerHostAuthority>/<fragment_id>, Observation.Source = peerHostAuthority,
-// and a ClaimScope covering host:<peerHostAuthority> for retraction semantics (#2874).
+// EID construction is delegated to ResolveSubjectEID (resolve.go), which handles
+// three branches:
+//   - Cluster-scoped VM (vm kind whose payload ha_role.cluster_name is confirmed for
+//     this peer by the Writer's ClusterMembership verifier):
+//     eid = cluster:<clusterName>/vm:<vmName>, no ClaimScope. An unverified claim
+//     resolves host-scoped instead.
+//   - Cluster-kind fragments (AuthorityClasses does NOT contain "host"):
+//     eid = cluster:<clusterName> (bare, no local_id), no ClaimScope.
+//   - Host-scoped fragments (AuthorityClasses contains "host", or unknown kind):
+//     eid = host:<peerHostAuthority>/<fragment_id>, ClaimScope covering host:<peerHostAuthority>.
+//
 // Module identity is preserved in Payload["module_authority"] rather than in
 // Observation.Source so that ClaimScope source matching works correctly.
-//
-// Cluster-kind fragments (AuthorityClasses does NOT contain "host") produce
-// eid = cluster:<clusterName> (bare, no local_id, no ClaimScope). Multiple
-// stewards reporting the same cluster fragment converge on the same eid —
-// the intended behaviour for shared multi-observer entities. The Observation.Source
-// for cluster-kind observations is peerHostAuthority + "/" + fragment.Authority
-// so clusterregistry's split-brain/dead-owner detection can attribute each claim.
 //
 // The envelopes map is keyed by fragment_id and carries per-fragment provenance
 // metadata (confidence, observed_at). It may be nil when the caller has no
@@ -78,8 +111,8 @@ func (w *Writer) WriteFragmentDelta(
 
 	now := time.Now().UTC()
 
-	var hostObs []types.Observation
-	var clusterObs []types.Observation
+	var allObs []types.Observation
+	var hostClaimScope *types.ClaimScope // non-nil when any host-scoped observation is produced
 
 	for _, frag := range fragments {
 		fragID := frag.GetFragmentId()
@@ -110,69 +143,32 @@ func (w *Writer) WriteFragmentDelta(
 		// fragment metadata. confidence is always persisted (PO ruling, AC A2).
 		payload := buildPayload(frag, confidence)
 
-		// Branch on taxonomy AuthorityClasses (Finding 1 fix).
-		desc, ok := taxonomy.LookupEntityType(kind)
-		isHostScoped := !ok || containsString(desc.AuthorityClasses, "host")
+		// Resolve EID, source, and ClaimScope via the shared resolution function.
+		// This is the sole authority for eid construction (authority-boundary rule),
+		// and w.membership is the only channel by which steward-supplied payload data
+		// can influence an authority segment.
+		eid, src, cs, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, payload, taxonomy, w.membership)
+		if err != nil {
+			return fmt.Errorf("dnasync/writer: %w", err)
+		}
 
-		if isHostScoped {
-			// Host-scoped: eid = host:<peerHostAuthority>/<fragment_id>.
-			//
-			// Source MUST be peerHostAuthority (not frag.GetAuthority()) for the
-			// ClaimScope retraction to fire. collectScopeSubjects matches
-			// obs.Source against ClaimScope.Source with string equality, and
-			// retractEntityProjection DELETEs rows by (subject, source). If the
-			// observation source were the module identity (e.g. "enforcing-module:file")
-			// and the claim scope source were peerHostAuthority (e.g. "steward-A"),
-			// the match would always fail and nothing would ever be retracted.
-			// Module identity is preserved in Payload["module_authority"] instead.
-			eid, err := types.NewEID("host", peerHostAuthority, fragID)
-			if err != nil {
-				return fmt.Errorf("dnasync/writer: eid for %q: %w", fragID, err)
-			}
-			hostObs = append(hostObs, types.Observation{
-				Source:     peerHostAuthority,
-				ObservedAt: observedAt,
-				RecordedAt: now,
-				Subject:    eid.String(),
-				Kind:       types.ObservationKindState,
-				Confidence: confidence,
-				Payload:    payload,
-			})
-		} else {
-			// Cluster-scoped: eid = cluster:<clusterName> (bare authority, no local_id).
-			// No ClaimScope: a single steward's view is not the complete picture for a
-			// shared multi-observer entity. Staleness is handled by clusterregistry's
-			// existing dead-owner/orphan detection (flagged open item).
-			clusterName := fragID
-			if idx := strings.Index(fragID, ":"); idx >= 0 {
-				clusterName = fragID[idx+1:]
-			}
-			eid, err := types.NewEID("cluster", clusterName, "")
-			if err != nil {
-				return fmt.Errorf("dnasync/writer: cluster eid for %q: %w", fragID, err)
-			}
-			// Observation.Source for cluster-kind MUST carry the reporting steward's
-			// identity so clusterregistry can attribute each claim after the move to
-			// entitygraph (split-brain/dead-owner detection needs per-steward attribution).
-			clusterSrc := peerHostAuthority
-			if auth := frag.GetAuthority(); auth != "" {
-				clusterSrc = peerHostAuthority + "/" + auth
-			}
-			clusterObs = append(clusterObs, types.Observation{
-				Source:     clusterSrc,
-				ObservedAt: observedAt,
-				RecordedAt: now,
-				Subject:    eid.String(),
-				Kind:       types.ObservationKindState,
-				Confidence: confidence,
-				Payload:    payload,
-			})
+		allObs = append(allObs, types.Observation{
+			Source:     src,
+			ObservedAt: observedAt,
+			RecordedAt: now,
+			Subject:    eid.String(),
+			Kind:       types.ObservationKindState,
+			Confidence: confidence,
+			Payload:    payload,
+		})
+
+		// Track the ClaimScope template for host-scoped fragments.
+		// All host-scoped observations from the same peer share one ClaimScope,
+		// so we only need the first non-nil result.
+		if cs != nil && hostClaimScope == nil {
+			hostClaimScope = cs
 		}
 	}
-
-	allObs := make([]types.Observation, 0, len(hostObs)+len(clusterObs))
-	allObs = append(allObs, hostObs...)
-	allObs = append(allObs, clusterObs...)
 
 	if len(allObs) == 0 {
 		return nil
@@ -188,17 +184,12 @@ func (w *Writer) WriteFragmentDelta(
 	// Host-scoped fragments get a ClaimScope: "peerHostAuthority has reported
 	// its complete current fragment set under host:<peerHostAuthority>". This
 	// lets #2874's retraction logic drop fragments this steward no longer reports.
-	// Cluster-scoped fragments deliberately omit a ClaimScope (see above).
-	if len(hostObs) > 0 {
-		batch.ClaimScopes = []types.ClaimScope{{
-			Source: peerHostAuthority,
-			Pattern: types.ClaimScopePattern{
-				Entity: &types.EntityScopePattern{
-					AuthorityPrefix: "host:" + peerHostAuthority,
-				},
-			},
-			AsOf: now,
-		}}
+	// Cluster-scoped fragments (bare cluster-kind and cluster-scoped VMs) deliberately
+	// omit a ClaimScope: a single node's view is not the complete picture for a
+	// shared multi-observer entity.
+	if hostClaimScope != nil {
+		hostClaimScope.AsOf = now
+		batch.ClaimScopes = []types.ClaimScope{*hostClaimScope}
 	}
 
 	return w.provider.ReportObservations(ctx, batch)
@@ -247,14 +238,4 @@ func resolveConfidence(s string) types.Confidence {
 	default:
 		return types.ConfidenceHigh
 	}
-}
-
-// containsString reports whether ss contains s.
-func containsString(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }

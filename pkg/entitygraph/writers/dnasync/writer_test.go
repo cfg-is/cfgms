@@ -31,9 +31,26 @@ func newTestProvider(t *testing.T) *sqliteprovider.SQLiteEntityGraphProvider {
 	return p
 }
 
+// newTestWriter builds a Writer with no cluster-membership verifier — the
+// fail-closed default, under which every steward-asserted ha_role.cluster_name is
+// denied and the fragment stays host-scoped.
 func newTestWriter(t *testing.T, p *sqliteprovider.SQLiteEntityGraphProvider) *dnasync.Writer {
 	t.Helper()
 	w, err := dnasync.New(p)
+	require.NoError(t, err)
+	return w
+}
+
+// newTestWriterWithMembership builds a Writer whose cluster-membership verifier is
+// the real dnasync.StaticClusterMembership snapshot, populated from cluster name →
+// verified member peer authorities.
+func newTestWriterWithMembership(
+	t *testing.T,
+	p *sqliteprovider.SQLiteEntityGraphProvider,
+	byCluster map[string][]string,
+) *dnasync.Writer {
+	t.Helper()
+	w, err := dnasync.New(p, dnasync.WithClusterMembership(dnasync.NewStaticClusterMembership(byCluster)))
 	require.NoError(t, err)
 	return w
 }
@@ -81,6 +98,52 @@ func makeTestCanonBytes(fields map[string]string) []byte {
 		buf = append(buf, p.v...)
 	}
 	return buf
+}
+
+// makeTestCanonBytesNested builds a valid canonical byte encoding for a
+// map[string]interface{} where values may be strings or nested map[string]interface{}.
+// This is needed to encode payload fields such as ha_role.cluster_name that
+// decodeCanonicalFragment will recover as a nested map.
+func makeTestCanonBytesNested(fields map[string]interface{}) []byte {
+	return encodeTestCanonMap(fields)
+}
+
+func encodeTestCanonMap(m map[string]interface{}) []byte {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	hdr := make([]byte, 4)
+	binary.BigEndian.PutUint32(hdr, uint32(len(keys)))
+	buf := append([]byte(nil), hdr...)
+	for _, k := range keys {
+		klen := make([]byte, 4)
+		binary.BigEndian.PutUint32(klen, uint32(len(k)))
+		buf = append(buf, klen...)
+		buf = append(buf, k...)
+		buf = append(buf, encodeTestCanonValue(m[k])...)
+	}
+	return buf
+}
+
+func encodeTestCanonValue(v interface{}) []byte {
+	switch val := v.(type) {
+	case string:
+		vlen := make([]byte, 4)
+		binary.BigEndian.PutUint32(vlen, uint32(len(val)))
+		b := []byte{'S'}
+		b = append(b, vlen...)
+		b = append(b, val...)
+		return b
+	case map[string]interface{}:
+		b := []byte{'M'}
+		b = append(b, encodeTestCanonMap(val)...)
+		return b
+	default:
+		panic("encodeTestCanonValue: unsupported type")
+	}
 }
 
 // makeHostFrag creates a Fragment with a host-scoped fragment_id, an authority,
@@ -555,6 +618,283 @@ func TestRetraction_HostScopedFragmentDropped(t *testing.T) {
 	require.True(t, retracted,
 		"file:/etc/hosts entity must be retracted (nil view or ErrNotFound) after it is dropped from the delta set; got view=%v err=%v",
 		fileView, fileErr)
+}
+
+// --- AC Group C: cluster-scoped VM (Issue #3367) ---
+
+// TestC1_ClusteredVMEIDFromTwoStewards is the identity-stability test for Issue #3367.
+// Two WriteFragmentDelta calls from two different peerHostAuthority values, each
+// reporting the same clustered VM fragment, must converge on the identical
+// cluster:<name>/vm:<vmname> EID — not mint two separate host-scoped EIDs.
+//
+// This is the core property this story exists to deliver: VM EID stability across
+// live migration between cluster nodes.
+func TestC1_ClusteredVMEIDFromTwoStewards(t *testing.T) {
+	p := newTestProvider(t)
+	// Both nodes are verified members of prod-cluster, so their asserted
+	// ha_role.cluster_name is allowed to become the eid authority segment.
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"prod-cluster": {"node-1", "node-2"},
+	})
+	ctx := context.Background()
+
+	makeClusteredVMFrag := func() *commonpb.Fragment {
+		return &commonpb.Fragment{
+			FragmentId: "vm:prod-vm1",
+			Authority:  "observer:hyperv",
+			CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+				"state":   "running",
+				"ha_role": map[string]interface{}{"cluster_name": "prod-cluster"},
+			}),
+		}
+	}
+
+	// Two distinct cluster nodes each report the same clustered VM.
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-1",
+		[]*commonpb.Fragment{makeClusteredVMFrag()}, nil, types.DefaultTaxonomy()))
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-2",
+		[]*commonpb.Fragment{makeClusteredVMFrag()}, nil, types.DefaultTaxonomy()))
+
+	// Both calls must converge on the same cluster-scoped EID.
+	clusterVMEID := mustParseEID(t, "cluster:prod-cluster/vm:prod-vm1")
+	records := stateHistory(t, p, clusterVMEID)
+	require.Len(t, records, 2, "both cluster nodes must contribute one observation to the shared cluster-scoped VM EID")
+
+	sources := map[string]struct{}{}
+	for _, r := range records {
+		sources[r.Observation.Source] = struct{}{}
+	}
+	_, hasNode1 := sources["node-1/observer:hyperv"]
+	_, hasNode2 := sources["node-2/observer:hyperv"]
+	require.True(t, hasNode1, "node-1 attribution must appear in source")
+	require.True(t, hasNode2, "node-2 attribution must appear in source")
+
+	// Verify neither node minted a host-scoped VM EID.
+	for _, peer := range []string{"node-1", "node-2"} {
+		hostEID := mustParseEID(t, "host:"+peer+"/vm:prod-vm1")
+		require.Empty(t, stateHistory(t, p, hostEID),
+			"clustered VM must never land under host:%s authority", peer)
+	}
+}
+
+// TestC2_StandaloneVMRemainsHostScoped verifies that a VM fragment with no ha_role
+// still ingests under host:<peer>/vm:<name>, exactly as today — no regression.
+func TestC2_StandaloneVMRemainsHostScoped(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	standaloneFrag := &commonpb.Fragment{
+		FragmentId: "vm:standalone-vm",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"state": "running",
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-solo",
+		[]*commonpb.Fragment{standaloneFrag}, nil, types.DefaultTaxonomy()))
+
+	hostEID := mustParseEID(t, "host:node-solo/vm:standalone-vm")
+	records := stateHistory(t, p, hostEID)
+	require.Len(t, records, 1, "standalone VM must land on host-scoped EID")
+	require.Equal(t, "host:node-solo/vm:standalone-vm", records[0].Observation.Subject)
+
+	// Confirm no cluster-scoped EID was minted.
+	// (There is no cluster name to even try to look up, but we can confirm the
+	// host EID received the observation and is the sole result.)
+	require.Equal(t, "node-solo", records[0].Observation.Source,
+		"standalone VM source must be peerHostAuthority for ClaimScope retraction")
+}
+
+// TestC3_LiveMigrationOrphan is the live-migration regression test for Issue #3367.
+//
+// Scenario: a VM is first reported standalone (host:<peer>/vm:<name>), then — after
+// joining a failover cluster — subsequent reports carry ha_role.cluster_name and land
+// on cluster:<name>/vm:<name>.
+//
+// This test verifies that post-join the cluster-scoped EID is queryable (the primary
+// correctness property). The old host-scoped EID is orphaned rather than migrated:
+// retroactive EID migration is out of scope for this story. The existing ClaimScope
+// retraction will eventually clean up the orphan when the steward's next host-scoped
+// delta omits the now-clustered VM, but that cleanup is not asserted here.
+func TestC3_LiveMigrationOrphan(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"failover-cluster": {"node-alpha"},
+	})
+	ctx := context.Background()
+
+	// Phase 1: VM reported as standalone (no ha_role).
+	standaloneFrag := &commonpb.Fragment{
+		FragmentId: "vm:migrate-me",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"state": "running",
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-alpha",
+		[]*commonpb.Fragment{standaloneFrag}, nil, types.DefaultTaxonomy()))
+
+	hostEID := mustParseEID(t, "host:node-alpha/vm:migrate-me")
+	require.Len(t, stateHistory(t, p, hostEID), 1,
+		"standalone VM must land on host-scoped EID before cluster join")
+
+	// Phase 2: VM now carries ha_role.cluster_name (post cluster-join).
+	clusteredFrag := &commonpb.Fragment{
+		FragmentId: "vm:migrate-me",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"state":   "running",
+			"ha_role": map[string]interface{}{"cluster_name": "failover-cluster"},
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-alpha",
+		[]*commonpb.Fragment{clusteredFrag}, nil, types.DefaultTaxonomy()))
+
+	// Post-join: cluster-scoped EID must be readable.
+	clusterEID := mustParseEID(t, "cluster:failover-cluster/vm:migrate-me")
+	clusterRecords := stateHistory(t, p, clusterEID)
+	require.Len(t, clusterRecords, 1,
+		"clustered VM must land on cluster-scoped EID after joining the cluster")
+	require.Equal(t, "cluster:failover-cluster/vm:migrate-me", clusterRecords[0].Observation.Subject)
+}
+
+// TestC4_ClusteredVMHasNoClaimScope verifies that cluster-scoped VMs do NOT produce
+// a host-authority ClaimScope — two nodes' observations of the same VM coexist.
+func TestC4_ClusteredVMHasNoClaimScope(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"shared-cluster": {"node-P1", "node-P2"},
+	})
+	ctx := context.Background()
+
+	makeClusteredVMFrag := func() *commonpb.Fragment {
+		return &commonpb.Fragment{
+			FragmentId: "vm:shared-vm",
+			Authority:  "observer:hyperv",
+			CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+				"state":   "running",
+				"ha_role": map[string]interface{}{"cluster_name": "shared-cluster"},
+			}),
+		}
+	}
+
+	// Node-P1 writes first.
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-P1",
+		[]*commonpb.Fragment{makeClusteredVMFrag()}, nil, types.DefaultTaxonomy()))
+
+	// Node-P2 writes second — must NOT retract node-P1's observation.
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-P2",
+		[]*commonpb.Fragment{makeClusteredVMFrag()}, nil, types.DefaultTaxonomy()))
+
+	clusterEID := mustParseEID(t, "cluster:shared-cluster/vm:shared-vm")
+	records := stateHistory(t, p, clusterEID)
+	require.Len(t, records, 2,
+		"both nodes' cluster-scoped VM observations must survive — no implicit retraction")
+}
+
+// --- AC Group D: cluster-authority trust boundary (SE threat #1) ---
+
+// TestD1_CrossClusterClaimRejected is the authority-confusion regression test for
+// the cluster-scoped VM branch. A compromised steward that is a verified member of
+// its own cluster asserts ha_role.cluster_name = a DIFFERENT cluster it does not
+// belong to. That claim must not reach the eid authority segment: the observation
+// lands under the attacker's own host authority instead, and nothing appears under
+// the victim cluster.
+func TestD1_CrossClusterClaimRejected(t *testing.T) {
+	p := newTestProvider(t)
+	// evil-node is a member of its own cluster only.
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"attacker-cluster": {"evil-node"},
+		"victim-cluster":   {"honest-node-1", "honest-node-2"},
+	})
+	ctx := context.Background()
+
+	forgedFrag := &commonpb.Fragment{
+		FragmentId: "vm:critical-db",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"state":   "running",
+			"ha_role": map[string]interface{}{"cluster_name": "victim-cluster"},
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "evil-node",
+		[]*commonpb.Fragment{forgedFrag}, nil, types.DefaultTaxonomy()))
+
+	// Nothing may exist under the victim cluster's authority.
+	victimEID := mustParseEID(t, "cluster:victim-cluster/vm:critical-db")
+	require.Empty(t, stateHistory(t, p, victimEID),
+		"an unverified cluster claim must never write under cluster:victim-cluster")
+
+	// The observation is recorded under the asserting peer's own authority.
+	hostEID := mustParseEID(t, "host:evil-node/vm:critical-db")
+	records := stateHistory(t, p, hostEID)
+	require.Len(t, records, 1, "denied cluster claim must fall back to the host-scoped eid")
+	require.Equal(t, "evil-node", records[0].Observation.Source)
+}
+
+// TestD2_DeniedClusterClaimRemainsRetractable verifies the security property that
+// makes the host-scoped fallback the safe outcome: unlike a cluster-scoped
+// observation (which carries no ClaimScope and can therefore never be retracted),
+// the fallback observation is covered by the peer's host ClaimScope, so it
+// disappears once the steward stops reporting it.
+func TestD2_DeniedClusterClaimRemainsRetractable(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriterWithMembership(t, p, map[string][]string{
+		"real-cluster": {"honest-node"},
+	})
+	ctx := context.Background()
+
+	forgedVM := &commonpb.Fragment{
+		FragmentId: "vm:forged",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"state":   "running",
+			"ha_role": map[string]interface{}{"cluster_name": "not-my-cluster"},
+		}),
+	}
+	keeper := makeHostFrag("service:sshd", "enforcing-module:service")
+
+	require.NoError(t, w.WriteFragmentDelta(ctx, "rogue-node",
+		[]*commonpb.Fragment{forgedVM, keeper}, nil, types.DefaultTaxonomy()))
+
+	forgedEID := mustParseEID(t, "host:rogue-node/vm:forged")
+	require.Len(t, stateHistory(t, p, forgedEID), 1,
+		"denied cluster claim must land host-scoped before retraction")
+
+	// Next delta omits the forged VM: the host ClaimScope retracts it.
+	require.NoError(t, w.WriteFragmentDelta(ctx, "rogue-node",
+		[]*commonpb.Fragment{keeper}, nil, types.DefaultTaxonomy()))
+
+	view, err := p.GetEntity(ctx, forgedEID, interfaces.GetEntityOpts{})
+	retracted := view == nil || errors.Is(err, sqliteprovider.ErrNotFound)
+	require.True(t, retracted,
+		"host-scoped fallback must remain retractable; got view=%v err=%v", view, err)
+}
+
+// TestD3_NoVerifierDeniesClusterClaim verifies the fail-closed default: a Writer
+// constructed without WithClusterMembership treats every ha_role.cluster_name as
+// unverified, so clustered VMs stay host-scoped rather than minting cluster-scoped
+// entities on a steward's unchecked say-so.
+func TestD3_NoVerifierDeniesClusterClaim(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p) // no membership verifier wired
+	ctx := context.Background()
+
+	frag := &commonpb.Fragment{
+		FragmentId: "vm:unverified",
+		Authority:  "observer:hyperv",
+		CanonicalBytes: makeTestCanonBytesNested(map[string]interface{}{
+			"ha_role": map[string]interface{}{"cluster_name": "some-cluster"},
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "node-nv",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+
+	require.Empty(t, stateHistory(t, p, mustParseEID(t, "cluster:some-cluster/vm:unverified")),
+		"a Writer with no membership verifier must not create cluster-scoped entities")
+	require.Len(t, stateHistory(t, p, mustParseEID(t, "host:node-nv/vm:unverified")), 1,
+		"the fragment must still be recorded under the peer's own authority")
 }
 
 // TestClusterFragmentHasNoClaimScope verifies that cluster-kind fragments do NOT
