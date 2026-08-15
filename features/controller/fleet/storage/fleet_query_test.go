@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 
@@ -392,4 +393,104 @@ func TestGetHistoryByDeviceID(t *testing.T) {
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, records)
 	})
+}
+
+// TestDeviceTenant_SetGetList exercises the Manager-level SetDeviceTenant,
+// GetDeviceTenant, and ListDeviceTenants operations end-to-end through the
+// SQLite backend. These methods are the authoritative device→tenant mapping
+// path introduced in Issue #3324.
+func TestDeviceTenant_SetGetList(t *testing.T) {
+	mgr := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	// Initially no mapping exists for an unknown device.
+	tid, found, err := mgr.GetDeviceTenant(ctx, "dev-unknown")
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, tid)
+
+	// Write mappings for two devices.
+	require.NoError(t, mgr.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
+	require.NoError(t, mgr.SetDeviceTenant(ctx, "dev-2", "tenant-b"))
+
+	// GetDeviceTenant returns the correct tenant for each.
+	tid1, found1, err1 := mgr.GetDeviceTenant(ctx, "dev-1")
+	require.NoError(t, err1)
+	require.True(t, found1)
+	assert.Equal(t, "tenant-a", tid1)
+
+	tid2, found2, err2 := mgr.GetDeviceTenant(ctx, "dev-2")
+	require.NoError(t, err2)
+	require.True(t, found2)
+	assert.Equal(t, "tenant-b", tid2)
+
+	// ListDeviceTenants returns all pairs.
+	all, err := mgr.ListDeviceTenants(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"dev-1": "tenant-a", "dev-2": "tenant-b"}, all)
+
+	// SetDeviceTenant is idempotent (upsert on conflict).
+	require.NoError(t, mgr.SetDeviceTenant(ctx, "dev-1", "tenant-a-moved"))
+	tidUpdated, foundUpdated, errUpdated := mgr.GetDeviceTenant(ctx, "dev-1")
+	require.NoError(t, errUpdated)
+	require.True(t, foundUpdated)
+	assert.Equal(t, "tenant-a-moved", tidUpdated)
+}
+
+// TestMigrationV2_SeedsDeviceTenantFromDNAHistory proves that the v2 migration
+// correctly seeds device_tenant from dna_history, selecting the LATEST version's
+// tenant for each device (not an arbitrary one from SELECT DISTINCT).
+//
+// Uses SQLiteMigrator directly to exercise the migration SQL against a real
+// SQLite database, independently of the Manager lifecycle.
+func TestMigrationV2_SeedsDeviceTenantFromDNAHistory(t *testing.T) {
+	dbPath := t.TempDir() + "/migration_test.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	migrator := NewSQLiteMigrator(db, logging.NewNoopLogger())
+
+	// InitializeSchema runs the base schema (including PRAGMA journal_mode=WAL,
+	// which must be outside a transaction). This is the v1 equivalent.
+	require.NoError(t, migrator.InitializeSchema())
+
+	// Create migrations tracking table and record v1 as applied, so ApplyMigrations
+	// skips v1 and only applies v2.
+	require.NoError(t, migrator.createMigrationsTable())
+	_, err = db.Exec(`INSERT INTO migrations (version, description) VALUES (1, 'v1 already applied')`)
+	require.NoError(t, err)
+
+	// Seed dna_history with two versions of the same device across different tenants,
+	// simulating a tenant move. Version 1 → old-tenant; version 2 (latest) → new-tenant.
+	_, err = db.Exec(`
+		INSERT INTO dna_history (device_id, tenant_id, version, content_hash,
+		                         original_size, compressed_size, compression_ratio,
+		                         shard_id, dna_json)
+		VALUES
+		  ('moved-device', 'old-tenant', 1, 'hash1', 10, 10, 1.0, 'default', '{}'),
+		  ('moved-device', 'new-tenant', 2, 'hash2', 10, 10, 1.0, 'default', '{}'),
+		  ('stable-device','tenant-x',   1, 'hash3', 10, 10, 1.0, 'default', '{}')
+	`)
+	require.NoError(t, err)
+
+	// Apply migration v2 (creates device_tenant, seeds from latest dna_history rows).
+	require.NoError(t, migrator.ApplyMigrations())
+
+	// moved-device must resolve to the LATEST tenant (version 2 → new-tenant).
+	var tid string
+	require.NoError(t, db.QueryRow(
+		`SELECT tenant_id FROM device_tenant WHERE device_id = 'moved-device'`).Scan(&tid))
+	assert.Equal(t, "new-tenant", tid, "migration must select the latest tenant, not the oldest")
+
+	// stable-device must resolve normally.
+	var tid2 string
+	require.NoError(t, db.QueryRow(
+		`SELECT tenant_id FROM device_tenant WHERE device_id = 'stable-device'`).Scan(&tid2))
+	assert.Equal(t, "tenant-x", tid2)
+
+	// No rows with an empty tenant must appear in device_tenant.
+	var rowCount int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM device_tenant WHERE tenant_id = ''`).Scan(&rowCount))
+	assert.Zero(t, rowCount, "migration must not seed rows with empty tenant")
 }

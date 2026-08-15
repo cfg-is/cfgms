@@ -24,6 +24,8 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"github.com/cfgis/cfgms/features/controller/service"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -2610,6 +2612,86 @@ func TestHandleMoveSteward_DurableStoreWriteFails(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(stewardDir, 0o750) })
 
 	rec := postMoveSteward(server, "s-writefail", "dest-tenant")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+}
+
+// wireFleetStorageBackedService swaps in a controller service backed by a real
+// SQLite fleet-storage manager, returning the manager so tests can inspect the
+// durable device_tenant mapping. handleMoveSteward reads s.controllerService at
+// call time, so post-construction replacement is sufficient.
+func wireFleetStorageBackedService(t *testing.T, server *Server) *fleetStorage.Manager {
+	t.Helper()
+	cfg := fleetStorage.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.EnableDeduplication = false
+	mgr, err := fleetStorage.NewManager(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Close() })
+	server.controllerService = service.NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr)
+	return mgr
+}
+
+// TestHandleMoveSteward_PersistsDeviceTenantMapping verifies that a move rewrites
+// the durable device_tenant mapping, which tenant resolution treats as
+// authoritative. Without this write the steward reverts to its pre-move tenant on
+// the next reconnect or controller restart (Issue #3324).
+func TestHandleMoveSteward_PersistsDeviceTenantMapping(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+	mgr := wireFleetStorageBackedService(t, server)
+
+	seedSteward(t, st, &business.StewardRecord{ID: "s-mapping", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+	require.NoError(t, server.controllerService.RegisterSteward("s-mapping", "source-tenant", "addr", "registered"))
+
+	rec := postMoveSteward(server, "s-mapping", "dest-tenant")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	tenantID, found, err := mgr.GetDeviceTenant(context.Background(), "s-mapping")
+	require.NoError(t, err)
+	require.True(t, found, "move must write the durable device_tenant mapping")
+	assert.Equal(t, "dest-tenant", tenantID, "durable mapping must name the destination tenant")
+}
+
+// TestHandleMoveSteward_OfflineStewardPersistsMapping verifies that moving a
+// steward that is absent from the live registry (not connected since the last
+// controller start) still succeeds and still rewrites the durable mapping — the
+// case the handler explicitly tolerates, and the one that reverted (Issue #3324).
+func TestHandleMoveSteward_OfflineStewardPersistsMapping(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+	mgr := wireFleetStorageBackedService(t, server)
+
+	// Durable steward record only: never registered into the in-memory registry.
+	seedSteward(t, st, &business.StewardRecord{ID: "s-offline", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+	_, inRegistry := server.controllerService.GetStewardInfo("s-offline")
+	require.False(t, inRegistry, "precondition: steward must be absent from the live registry")
+
+	rec := postMoveSteward(server, "s-offline", "dest-tenant")
+	require.Equal(t, http.StatusOK, rec.Code, "an offline steward move must still succeed")
+
+	tenantID, found, err := mgr.GetDeviceTenant(context.Background(), "s-offline")
+	require.NoError(t, err)
+	require.True(t, found, "durable mapping must be written even when the steward is offline")
+	assert.Equal(t, "dest-tenant", tenantID)
+}
+
+// TestHandleMoveSteward_DeviceTenantWriteFails verifies that a failure to persist
+// the device_tenant mapping fails the request with 500 rather than reporting a
+// move that would silently revert. The failure is induced with real components by
+// closing the fleet-storage manager before the move.
+func TestHandleMoveSteward_DeviceTenantWriteFails(t *testing.T) {
+	server, st, _ := setupMoveStewardServer(t)
+	mgr := wireFleetStorageBackedService(t, server)
+
+	seedSteward(t, st, &business.StewardRecord{ID: "s-mapfail", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+	require.NoError(t, server.controllerService.RegisterSteward("s-mapfail", "source-tenant", "addr", "registered"))
+
+	// Close the durable fleet store so the device_tenant write fails.
+	require.NoError(t, mgr.Close())
+
+	rec := postMoveSteward(server, "s-mapfail", "dest-tenant")
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	var errResp ErrorResponse

@@ -371,6 +371,14 @@ The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/st
 
 **After a restart**: On startup, the controller can call `ListStewards()` or `ListStewardsByStatus()` to enumerate the fleet without waiting for stewards to check in. The stored `last_seen` and `last_heartbeat_at` timestamps allow the controller to identify stewards that went silent before or during the restart.
 
+### Durable Device-Tenant Mapping (Issue #3324)
+
+Tenant resolution for a steward is backed by a dedicated `device_tenant` table (SQLite migration v2 / PostgreSQL schema), not by DNA. This is deliberate: the flat `DNARecord`/`dna_history` store is steward-writable data (`SyncDNA` replaces a steward's DNA wholesale on every refresh cycle), and deriving tenant from it would let a compromised steward influence its own tenant scoping — the invariant Issue #2008 forbids. `device_tenant` is written only by the controller at registration time (`RegisterSteward`, `AcceptRegistration`) and on an authenticated admin move (`UpdateStewardTenant`); the connect-hook reconnect path always passes an empty tenant so the durable value wins.
+
+`lookupDurableTenant` (`features/controller/service/controller_service.go`) reads exclusively from `device_tenant` via `GetDeviceTenant` — `ok=false` means "tenant unknown," and callers must decline to fabricate a tenant-scoped registry entry rather than fall back to DNA.
+
+**Controller-startup registry recovery** (`LoadFromStorage`) sources tenant from `ListDeviceTenants()` as the primary source; `GetLatestByDeviceID`'s `record.DNA` is loaded for the DNA payload only, never for tenant. The single fallback to `record.TenantID` covers the narrow window between a `dna_history` write and a controller restart where the corresponding `device_tenant` write did not complete (crash or a failed `SetDeviceTenant`) — migration v2 backfills `device_tenant` from `dna_history` (latest version per device) on upgrade, so this fallback is a transient gap, not a steady-state path. A device with no resolvable tenant from either source is skipped rather than warm-loaded with a fabricated tenant, per the Issue #2008 no-fabrication contract.
+
 ### Controller-Side Tag Store (Issue #2542)
 
 The tag store (`features/controller/tagstore`) provides a durable store of operator-assigned tags keyed by steward ID.
@@ -758,7 +766,7 @@ The controller is the certificate authority and identity provider for stewards. 
    - **`manual-review`** (production): quarantines the steward pending operator action. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. Operators use `cfg registration pending` to list quarantined stewards, `cfg registration approve <id>` to promote, and `cfg registration deny <id> [--reason ...]` to reject.
    - **`auto-approve`** (deprecated): approves every valid registration unconditionally. Dev/test environments only — a startup warning is logged. Replaces the legacy `DefaultApprovalHook`.
    - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
-5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity (HTTP 200 with full cert bundle).
+5. On approval (`approve`): controller generates the steward ID and issues an mTLS client certificate scoped to the steward's tenant/group identity (HTTP 200 with full cert bundle). The controller also persists this tenant assignment to the durable `device_tenant` mapping — see [Durable Device-Tenant Mapping](#durable-device-tenant-mapping-issue-3324).
    On quarantine (`quarantine`): controller returns HTTP 202 with a `pending_id` and no certificates. The pending entry is written to the durable `PendingRegistrationStore` (SQLite by default, PostgreSQL at production scale). The steward polls `GET /api/v1/registration/status/{pending_id}` with its registration token as a Bearer credential until the operator acts. Operators use `cfg registration approve <pending-id>` or `cfg registration deny <pending-id>`.
    On rejection (`reject`): HTTP 403 is returned; registration is denied.
 6. **Generate-on-claim (quarantine path):** When the operator approves an entry and the steward polls again, the controller generates the mTLS certificate in memory for that single response, marks the entry as `claimed`, and returns the full cert bundle in HTTP 200. A subsequent poll on an already-claimed entry returns HTTP 410 Gone — the cert is never re-issued. Private keys are never stored in the database.

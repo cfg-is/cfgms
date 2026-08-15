@@ -24,6 +24,7 @@ func TestStewardRegistryConnectHook_UpsertsAbsentStewardOnConnect(t *testing.T) 
 
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 	hook := NewStewardRegistryConnectHook(svc, logging.NewNoopLogger())
@@ -47,6 +48,7 @@ func TestStewardRegistryConnectHook_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 	hook := NewStewardRegistryConnectHook(svc, logging.NewNoopLogger())
@@ -127,6 +129,7 @@ func TestCompositeOnConnectHook_RealRegistryHookFiresAfterEarlierError(t *testin
 
 	dna := makeTestDNA("dev-1", map[string]string{"os": "linux"})
 	require.NoError(t, storage.Store(ctx, "dev-1", dna, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-1", "tenant-a"))
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 	realRegistryHook := NewStewardRegistryConnectHook(svc, logging.NewNoopLogger())

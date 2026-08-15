@@ -1618,11 +1618,22 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update the live in-memory registry. The steward may not be connected yet
-	// (e.g. the controller just restarted); a miss here is not an error — the
-	// durable store update is authoritative and the registry will be warm on
-	// next reconnect.
+	// Update the live in-memory registry and the durable device_tenant mapping that
+	// tenant resolution reads on reconnect and restart (Issue #3324). A missing
+	// registry entry is not an error — the steward may not be connected yet (e.g.
+	// the controller just restarted) and the durable writes are authoritative. Any
+	// other error means the device_tenant mapping still names the OLD tenant, so the
+	// move would silently revert on the steward's next reconnect: fail the request.
 	if regErr := s.controllerService.UpdateStewardTenant(stewardID, newTenantID); regErr != nil {
+		if !errors.Is(regErr, service.ErrStewardNotInRegistry) {
+			s.logger.Error("steward move: failed to persist device tenant mapping",
+				"steward_id", stewardIDForLog,
+				"new_tenant_id", newTenantIDForLog,
+				"error", logging.SanitizeLogValue(regErr.Error()),
+			)
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update steward tenant", "INTERNAL_ERROR")
+			return
+		}
 		s.logger.Info("steward move: registry entry not present (steward not yet connected)",
 			"steward_id", stewardIDForLog,
 		)

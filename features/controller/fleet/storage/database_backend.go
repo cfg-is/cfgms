@@ -84,6 +84,50 @@ func (b *DatabaseBackend) GetLatestByDeviceID(ctx context.Context, deviceID stri
 	return &rec, nil
 }
 
+// setDeviceTenant upserts (device_id, tenant_id) into the device_tenant table.
+func (b *DatabaseBackend) setDeviceTenant(ctx context.Context, deviceID, tenantID string) error {
+	_, err := b.db.ExecContext(ctx,
+		`INSERT INTO device_tenant (device_id, tenant_id) VALUES ($1, $2)
+		 ON CONFLICT(device_id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id`,
+		deviceID, tenantID)
+	if err != nil {
+		return fmt.Errorf("database: failed to set device tenant for %s: %w", deviceID, err)
+	}
+	return nil
+}
+
+// getDeviceTenant retrieves the tenant for a device from device_tenant.
+func (b *DatabaseBackend) getDeviceTenant(ctx context.Context, deviceID string) (tenantID string, found bool, err error) {
+	err = b.db.QueryRowContext(ctx,
+		`SELECT tenant_id FROM device_tenant WHERE device_id = $1`, deviceID).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("database: failed to get device tenant for %s: %w", deviceID, err)
+	}
+	return tenantID, true, nil
+}
+
+// listDeviceTenants returns all (device_id, tenant_id) pairs from device_tenant.
+func (b *DatabaseBackend) listDeviceTenants(ctx context.Context) (map[string]string, error) {
+	rows, err := b.db.QueryContext(ctx, `SELECT device_id, tenant_id FROM device_tenant`)
+	if err != nil {
+		return nil, fmt.Errorf("database: failed to list device tenants: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // rows.Close() error is non-actionable after row iteration completes
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var did, tid string
+		if err := rows.Scan(&did, &tid); err != nil {
+			return nil, fmt.Errorf("database: failed to scan device tenant: %w", err)
+		}
+		result[did] = tid
+	}
+	return result, rows.Err()
+}
+
 // ping issues a trivial SELECT to confirm the PostgreSQL connection is live.
 func (b *DatabaseBackend) ping(ctx context.Context) error {
 	var one int
