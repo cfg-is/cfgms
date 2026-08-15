@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -211,20 +212,26 @@ func (t *raftTransport) sendMessage(msg *raftpb.Message) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.logger.Warn("Peer returned error", "peer_id", msg.GetTo(), "status", resp.StatusCode, "body", string(body))
+		// The response body is remote-controlled: sanitize (also truncates) before logging.
+		t.logger.Warn("Peer returned error", "peer_id", msg.GetTo(), "status", resp.StatusCode,
+			"body", logging.SanitizeLogValue(string(body)))
 	}
 }
 
 // HandleMessage processes incoming Raft messages (HTTP handler)
 func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
 	if err := verifyPeerCN(r, t.allowedCNs); err != nil {
+		// The error text embeds the presented peer certificate CN, which is
+		// peer-controlled; sanitize it along with the remote address.
 		t.logger.Warn("Rejected message from unauthorized peer",
-			"remote_addr", r.RemoteAddr, "error", err)
+			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Forbidden: peer certificate verification failed", http.StatusForbidden)
 		return
 	}
 
-	t.logger.Debug("Received message HTTP request", "node_id", t.nodeID, "remote_addr", r.RemoteAddr)
+	t.logger.Debug("Received message HTTP request",
+		"node_id", t.nodeID, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 
 	// Read message body
 	data, err := io.ReadAll(r.Body)
@@ -250,16 +257,22 @@ func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t.logger.Debug("Received Raft message",
-		"node_id", t.nodeID, "from", msg.GetFrom(), "to", msg.GetTo(), "type", msg.GetType())
+		"node_id", t.nodeID,
+		"from", logging.SanitizeLogValue(strconv.FormatUint(msg.GetFrom(), 10)),
+		"to", logging.SanitizeLogValue(strconv.FormatUint(msg.GetTo(), 10)),
+		"type", logging.SanitizeLogValue(msg.GetType().String()))
 
 	// Process message through Raft (pointer: raftpb.Message must never be copied)
 	if err := t.consensus.Process(r.Context(), msg); err != nil {
-		t.logger.Error("Failed to process message from peer", "peer_id", msg.GetFrom(), "error", err)
+		t.logger.Error("Failed to process message from peer",
+			"peer_id", logging.SanitizeLogValue(strconv.FormatUint(msg.GetFrom(), 10)),
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to process message", http.StatusInternalServerError)
 		return
 	}
 
-	t.logger.Debug("Successfully processed message from peer", "peer_id", msg.GetFrom())
+	t.logger.Debug("Successfully processed message from peer",
+		"peer_id", logging.SanitizeLogValue(strconv.FormatUint(msg.GetFrom(), 10)))
 	w.WriteHeader(http.StatusOK)
 }
 
