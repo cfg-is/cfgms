@@ -682,6 +682,102 @@ func TestGetDomain_VSwitchError(t *testing.T) {
 	assert.Contains(t, err.Error(), "domain observe (vswitches)")
 }
 
+// ─── __entitygraph_edges tests for GetDomain (Issue #3368) ───────────────────
+
+// TestGetDomain_Edges_ClusteredVM is the end-to-end AC test for a clustered VM.
+// It verifies that GetDomain emits a runs-on edge targeting the cluster (not
+// "self") for a VM whose name appears in the cluster's RoleOwners map, and
+// connects-to edges for each switch in SwitchNames.
+func TestGetDomain_Edges_ClusteredVM(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			// observeLocalCluster: NODE1 is CNO owner, web-01 is a cluster role
+			`{"found":true,"Name":"cfg-lab","MemberNodes":["NODE1","NODE2"],"CsvPaths":[]}`,
+			`{"owner":"NODE1"}`,
+			`{"owners":{"web-01":"NODE1"}}`,
+			`{"account":"LAB\\NODE1$","access_ok":true,"remediation":""}`,
+			// enumerateVMNames
+			`{"vms":["web-01"]}`,
+			// readVMState(web-01) with an External switch
+			`{"found":true,"Name":"web-01","MemoryStartupBytes":4294967296,` +
+				`"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\web-01.vhdx",` +
+				`"SwitchName":"External","SwitchNames":["External"],"State":"Running",` +
+				`"Id":"11111111-2222-3333-4444-555555555555","Adapters":[]}`,
+			// observeVSwitchDomain
+			`{"switches":[{"Name":"External","SwitchType":"External"}]}`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+	m.nodeHostname = "NODE1"
+
+	result, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+
+	vm, ok := result["vm:web-01"].(*VMConfig)
+	require.True(t, ok, "vm:web-01 must be a *VMConfig")
+
+	edges := requireEdgesKey(t, vm.AsMap())
+	assertEdge(t, edges, "connects-to", "vswitch:External")
+	assertEdge(t, edges, "runs-on", "cluster:cfg-lab")
+	assertNoEdgeOfType(t, edges, "managed-by")
+}
+
+// TestGetDomain_Edges_StandaloneVM is the end-to-end AC test for a standalone VM.
+// It verifies that GetDomain emits a runs-on: self edge for a VM on a host that
+// is not a cluster member.
+func TestGetDomain_Edges_StandaloneVM(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{
+			// standalone host — no cluster
+			`{"found":false}`,
+			// enumerateVMNames
+			`{"vms":["solo-01"]}`,
+			// readVMState(solo-01) with an Internal switch
+			`{"found":true,"Name":"solo-01","MemoryStartupBytes":2147483648,` +
+				`"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\solo-01.vhdx",` +
+				`"SwitchName":"Internal","SwitchNames":["Internal"],"State":"Running",` +
+				`"Id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","Adapters":[]}`,
+			// observeVSwitchDomain
+			`{"switches":[{"Name":"Internal","SwitchType":"Internal"}]}`,
+		},
+	}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+	m.nodeHostname = "STANDALONE"
+
+	result, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+
+	vm, ok := result["vm:solo-01"].(*VMConfig)
+	require.True(t, ok, "vm:solo-01 must be a *VMConfig")
+
+	edges := requireEdgesKey(t, vm.AsMap())
+	assertEdge(t, edges, "connects-to", "vswitch:Internal")
+	assertEdge(t, edges, "runs-on", "self")
+	assertNoEdgeOfType(t, edges, "managed-by")
+}
+
+// TestGetDomain_Edges_ClusterContains verifies that the cluster entry in GetDomain
+// carries contains edges for each cluster member node, directed cluster→host.
+func TestGetDomain_Edges_ClusterContains(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: clusterMemberVMDomainOutputs()}
+	m := newModuleWithDetector(nil, &fakeDetector{result: true})
+	m.transport = transport
+	m.nodeHostname = "NODE2"
+
+	result, err := m.GetDomain(context.Background())
+	require.NoError(t, err)
+
+	cluster, ok := result["cluster:cfg-lab"].(*ClusterStatus)
+	require.True(t, ok, "cluster:cfg-lab must be a *ClusterStatus")
+
+	edges, ok := cluster.AsMap()["__entitygraph_edges"].([]interface{})
+	require.True(t, ok, "__entitygraph_edges must be present on the cluster entry")
+	assertEdge(t, edges, "contains", "host:NODE1")
+	assertEdge(t, edges, "contains", "host:NODE2")
+}
+
 // TestGetDomain_ReadOnly extends the AC3 read-only guarantee to the full
 // GetDomain per-resource path (the summary variant is covered by
 // TestObserveDomain_ReadOnly). Every PS script issued must be an allowed Get-*

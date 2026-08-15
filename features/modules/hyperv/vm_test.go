@@ -16,6 +16,51 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 )
 
+// ─── Edge declaration helpers (shared with observe_test.go and cluster_test.go) ─
+
+// assertEdge asserts that at least one edge in edges has the given type and to
+// fields. It is used by entity-graph edge tests (Issue #3368) across vm_test.go,
+// cluster_test.go, and observe_test.go.
+func assertEdge(t *testing.T, edges []interface{}, edgeType, to string) {
+	t.Helper()
+	for _, e := range edges {
+		m, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] == edgeType && m["to"] == to {
+			return
+		}
+	}
+	t.Errorf("expected edge {type:%q, to:%q} not found; edges: %v", edgeType, to, edges)
+}
+
+// assertNoEdgeOfType asserts that no edge in edges has the given type field.
+func assertNoEdgeOfType(t *testing.T, edges []interface{}, edgeType string) {
+	t.Helper()
+	for _, e := range edges {
+		m, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] == edgeType {
+			t.Errorf("unexpected edge of type %q found: %v", edgeType, m)
+		}
+	}
+}
+
+// requireEdgesKey extracts and returns the __entitygraph_edges slice from a
+// VMConfig.AsMap() result. Fails the test if the key is missing or has the
+// wrong type.
+func requireEdgesKey(t *testing.T, m map[string]interface{}) []interface{} {
+	t.Helper()
+	raw, ok := m["__entitygraph_edges"]
+	require.True(t, ok, "__entitygraph_edges key must be present in AsMap()")
+	edges, ok := raw.([]interface{})
+	require.True(t, ok, "__entitygraph_edges must be []interface{}, got %T", raw)
+	return edges
+}
+
 // vmModuleWithTransport creates a hypervModule wired with the given transport
 // and tenantID for VM operation tests. vms cache is initialised empty.
 func vmModuleWithTransport(transport winrmTransport, tenantID string) *hypervModule {
@@ -1706,4 +1751,85 @@ func TestSetVM_AbsentNoProvisionRecord(t *testing.T) {
 		"name":  "plain-vm",
 		"state": "absent",
 	}))
+}
+
+// ─── __entitygraph_edges tests (Issue #3368) ──────────────────────────────────
+
+// TestVMConfig_AsMap_Edges_Standalone verifies that a standalone VM (no HARole,
+// no managedElsewhereOwner) carries a runs-on: self edge and connects-to edges
+// for each entry in SwitchNames.
+func TestVMConfig_AsMap_Edges_Standalone(t *testing.T) {
+	cfg := &VMConfig{
+		Name:        "solo-01",
+		SwitchNames: stringOrStringList{"External", "Mgmt"},
+	}
+	m := cfg.AsMap()
+
+	edges := requireEdgesKey(t, m)
+	assertEdge(t, edges, "connects-to", "vswitch:External")
+	assertEdge(t, edges, "connects-to", "vswitch:Mgmt")
+	assertEdge(t, edges, "runs-on", "self")
+	assertNoEdgeOfType(t, edges, "managed-by")
+}
+
+// TestVMConfig_AsMap_Edges_StandaloneNoSwitch verifies that a standalone VM with
+// no connected switches carries only a runs-on: self edge (no connects-to edges).
+func TestVMConfig_AsMap_Edges_StandaloneNoSwitch(t *testing.T) {
+	cfg := &VMConfig{Name: "bare-vm"}
+	m := cfg.AsMap()
+
+	edges := requireEdgesKey(t, m)
+	assertEdge(t, edges, "runs-on", "self")
+	assertNoEdgeOfType(t, edges, "connects-to")
+	assertNoEdgeOfType(t, edges, "managed-by")
+}
+
+// TestVMConfig_AsMap_Edges_Clustered verifies that a clustered VM (HARole set,
+// not managed elsewhere) carries a runs-on edge targeting the cluster and
+// connects-to edges for its switches.
+func TestVMConfig_AsMap_Edges_Clustered(t *testing.T) {
+	cfg := &VMConfig{
+		Name:        "web-01",
+		SwitchNames: stringOrStringList{"External"},
+		HARole:      &HARoleConfig{ClusterName: "lab-hv"},
+	}
+	m := cfg.AsMap()
+
+	edges := requireEdgesKey(t, m)
+	assertEdge(t, edges, "connects-to", "vswitch:External")
+	assertEdge(t, edges, "runs-on", "cluster:lab-hv")
+	assertNoEdgeOfType(t, edges, "managed-by")
+}
+
+// TestVMConfig_AsMap_Edges_ManagedElsewhere verifies that a VM whose
+// managedElsewhereOwner is set emits a managed-by edge to the reported owner
+// and no runs-on edge. This is the ManagedElsewhere fixture case (AC from
+// Issue #3368); these VMs are absent on the local host and therefore do not
+// appear in GetDomain's output, so this test exercises VMConfig.AsMap() directly.
+func TestVMConfig_AsMap_Edges_ManagedElsewhere(t *testing.T) {
+	cfg := &VMConfig{
+		Name:                  "ha-vm-01",
+		HARole:                &HARoleConfig{ClusterName: "lab-hv"},
+		managedElsewhereOwner: "NODE2",
+	}
+	m := cfg.AsMap()
+
+	edges := requireEdgesKey(t, m)
+	assertEdge(t, edges, "managed-by", "NODE2")
+	assertNoEdgeOfType(t, edges, "runs-on")
+}
+
+// TestVMConfig_AsMap_Edges_ManagedElsewhere_NoSwitches verifies that a
+// ManagedElsewhere VM with no switch connections emits only a managed-by edge.
+func TestVMConfig_AsMap_Edges_ManagedElsewhere_NoSwitches(t *testing.T) {
+	cfg := &VMConfig{
+		Name:                  "ha-vm-02",
+		managedElsewhereOwner: "NODE3",
+	}
+	m := cfg.AsMap()
+
+	edges := requireEdgesKey(t, m)
+	assertEdge(t, edges, "managed-by", "NODE3")
+	assertNoEdgeOfType(t, edges, "runs-on")
+	assertNoEdgeOfType(t, edges, "connects-to")
 }

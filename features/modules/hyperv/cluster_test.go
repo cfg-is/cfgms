@@ -5,6 +5,7 @@ package hyperv
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -1105,4 +1106,82 @@ func TestClusterSet_NilTransport(t *testing.T) {
 		"a nil transport is a misconfiguration, not an out-of-scope cluster")
 	assert.NotErrorIs(t, err, ErrClusterNotDeclared,
 		"the nil-transport path must not masquerade as the scope-cap sentinel")
+}
+
+// ─── __entitygraph_edges tests for ClusterStatus (Issue #3368) ────────────────
+
+// TestClusterStatus_AsMap_ContainsEdges verifies that ClusterStatus.AsMap()
+// emits exactly one contains edge per MemberNodes entry when the cluster is
+// found. The edge type MUST be "contains" (not "member-of") and the to MUST be
+// "host:<node>" — the FROM side is the cluster fragment itself, directed
+// cluster:<name> → host:<node> per Issue #3368 / the epic PO's cross-story note.
+func TestClusterStatus_AsMap_ContainsEdges(t *testing.T) {
+	status := &ClusterStatus{
+		Name:        "lab-hv",
+		MemberNodes: []string{"NODE1", "NODE2"},
+		RoleOwners:  map[string]string{},
+		Found:       true,
+	}
+	m := status.AsMap()
+
+	raw, ok := m["__entitygraph_edges"]
+	require.True(t, ok, "__entitygraph_edges must be present for a found cluster")
+	edges, ok := raw.([]interface{})
+	require.True(t, ok, "__entitygraph_edges must be []interface{}")
+
+	assert.Len(t, edges, 2, "exactly one contains edge per MemberNodes entry")
+	assertEdge(t, edges, "contains", "host:NODE1")
+	assertEdge(t, edges, "contains", "host:NODE2")
+}
+
+// TestClusterStatus_AsMap_ContainsEdges_SingleMember verifies a single-member
+// cluster emits exactly one contains edge.
+func TestClusterStatus_AsMap_ContainsEdges_SingleMember(t *testing.T) {
+	status := &ClusterStatus{
+		Name:        "solo-cluster",
+		MemberNodes: []string{"ONLY-NODE"},
+		RoleOwners:  map[string]string{},
+		Found:       true,
+	}
+	m := status.AsMap()
+
+	edges, ok := m["__entitygraph_edges"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, edges, 1)
+	assertEdge(t, edges, "contains", "host:ONLY-NODE")
+}
+
+// TestClusterStatus_AsMap_NoEdgesWhenNotFound verifies that a not-found
+// ClusterStatus emits no __entitygraph_edges key (standalone host has no
+// cluster to emit membership for).
+func TestClusterStatus_AsMap_NoEdgesWhenNotFound(t *testing.T) {
+	status := &ClusterStatus{Found: false}
+	m := status.AsMap()
+	_, hasEdges := m["__entitygraph_edges"]
+	assert.False(t, hasEdges, "a not-found cluster must not emit __entitygraph_edges")
+}
+
+// TestClusterStatus_AsMap_ContainsEdgesDirectionExplicit asserts the edge type
+// and direction: type MUST be "contains", to MUST be "host:<node>". A test that
+// only asserts "an edge exists" does not satisfy the AC.
+func TestClusterStatus_AsMap_ContainsEdgesDirectionExplicit(t *testing.T) {
+	status := &ClusterStatus{
+		Name:        "cfg-lab",
+		MemberNodes: []string{"NODE-A", "NODE-B"},
+		Found:       true,
+	}
+	m := status.AsMap()
+	edges, ok := m["__entitygraph_edges"].([]interface{})
+	require.True(t, ok)
+
+	for _, e := range edges {
+		edge, ok := e.(map[string]interface{})
+		require.True(t, ok, "each edge must be map[string]interface{}")
+		assert.Equal(t, "contains", edge["type"],
+			"edge type must be 'contains' (not 'member-of'); direction is cluster→host")
+		to, ok := edge["to"].(string)
+		require.True(t, ok, "edge 'to' must be a string")
+		assert.True(t, strings.HasPrefix(to, "host:"),
+			"edge 'to' must be host:<node> (got %q); cluster is the FROM side", to)
+	}
 }

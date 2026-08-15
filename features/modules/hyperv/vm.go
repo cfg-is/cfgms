@@ -700,6 +700,30 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 		}
 		m["ha_role"] = haRole
 	}
+	// Entity graph edge declarations (#3368): typed topology edges emitted
+	// alongside this VM's DNA fragment. S2's decode contract resolves local
+	// resource ids (cluster:<name>, vswitch:<name>, "self") to full EIDs.
+	// All edges are outbound from this fragment's own EID (per S2's
+	// EdgeScopePattern{Direction: TraversalOutbound} contract).
+	edges := make([]interface{}, 0, len(desired)+1)
+	for _, sw := range desired {
+		edges = append(edges, map[string]interface{}{"type": "connects-to", "to": "vswitch:" + sw})
+	}
+	if c.managedElsewhereOwner != "" {
+		// VM is a clustered role hosted on another node. Emit managed-by to the
+		// owning node; no runs-on (this fragment is not the placement authority).
+		edges = append(edges, map[string]interface{}{"type": "managed-by", "to": c.managedElsewhereOwner})
+	} else if c.HARole != nil {
+		// Clustered VM locally hosted: placement authority is the cluster.
+		edges = append(edges, map[string]interface{}{"type": "runs-on", "to": "cluster:" + c.HARole.ClusterName})
+	} else {
+		// Standalone VM: S2 resolves "self" to this fragment's own host EID.
+		// Coordination point: if S2 requires an explicit target instead of the
+		// "self" sentinel, update S2's decoder to special-case "self" → host EID
+		// (flagged in PR description per Implementation Notes, Issue #3368).
+		edges = append(edges, map[string]interface{}{"type": "runs-on", "to": "self"})
+	}
+	m["__entitygraph_edges"] = edges
 	return m
 }
 
