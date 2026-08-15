@@ -27,13 +27,15 @@ func TestRaftLogStore_RecoversAfterUncleanShutdown(t *testing.T) {
 	store, err := OpenRaftLogStore(path)
 	require.NoError(t, err)
 
-	hs := raftpb.HardState{Term: 3, Vote: 1, Commit: 5}
-	entries := []raftpb.Entry{
-		{Index: 1, Term: 1, Type: raftpb.EntryNormal, Data: []byte("entry-1")},
-		{Index: 2, Term: 1, Type: raftpb.EntryNormal, Data: []byte("entry-2")},
-		{Index: 3, Term: 2, Type: raftpb.EntryNormal, Data: []byte("entry-3")},
+	// v3.7.0: HardState fields are *uint64; Entry fields (Index, Term, Type) are
+	// also pointers — use new(value) and .Enum() to initialise them.
+	hs := &raftpb.HardState{Term: new(uint64(3)), Vote: new(uint64(1)), Commit: new(uint64(5))}
+	entries := []*raftpb.Entry{
+		{Index: new(uint64(1)), Term: new(uint64(1)), Type: raftpb.EntryNormal.Enum(), Data: []byte("entry-1")},
+		{Index: new(uint64(2)), Term: new(uint64(1)), Type: raftpb.EntryNormal.Enum(), Data: []byte("entry-2")},
+		{Index: new(uint64(3)), Term: new(uint64(2)), Type: raftpb.EntryNormal.Enum(), Data: []byte("entry-3")},
 	}
-	require.NoError(t, store.SaveBatch(hs, entries, raftpb.Snapshot{}, 2))
+	require.NoError(t, store.SaveBatch(hs, entries, nil, 2))
 
 	// Simulate unclean shutdown: bypass store.Close() and close the underlying
 	// bbolt.DB directly. This releases the OS file lock (flock) without running
@@ -49,13 +51,13 @@ func TestRaftLogStore_RecoversAfterUncleanShutdown(t *testing.T) {
 	gotHS, gotEntries, _, gotApplied, err := store2.LoadState()
 	require.NoError(t, err)
 
-	assert.Equal(t, hs.Term, gotHS.Term, "HardState.Term must survive unclean shutdown")
-	assert.Equal(t, hs.Vote, gotHS.Vote, "HardState.Vote must survive unclean shutdown")
-	assert.Equal(t, hs.Commit, gotHS.Commit, "HardState.Commit must survive unclean shutdown")
+	assert.Equal(t, hs.GetTerm(), gotHS.GetTerm(), "HardState.Term must survive unclean shutdown")
+	assert.Equal(t, hs.GetVote(), gotHS.GetVote(), "HardState.Vote must survive unclean shutdown")
+	assert.Equal(t, hs.GetCommit(), gotHS.GetCommit(), "HardState.Commit must survive unclean shutdown")
 	require.Len(t, gotEntries, len(entries), "all committed entries must be present after unclean shutdown")
 	for i, e := range entries {
-		assert.Equal(t, e.Index, gotEntries[i].Index, "entry %d index must match", i)
-		assert.Equal(t, e.Term, gotEntries[i].Term, "entry %d term must match", i)
+		assert.Equal(t, e.GetIndex(), gotEntries[i].GetIndex(), "entry %d index must match", i)
+		assert.Equal(t, e.GetTerm(), gotEntries[i].GetTerm(), "entry %d term must match", i)
 		assert.Equal(t, e.Data, gotEntries[i].Data, "entry %d data must match", i)
 	}
 	assert.Equal(t, uint64(2), gotApplied, "applied index must survive unclean shutdown")
@@ -92,8 +94,9 @@ func TestRaftLogStore_HasData_FreshStore(t *testing.T) {
 	assert.False(t, store.HasData(), "fresh store must report HasData == false")
 }
 
-// TestRaftLogStore_LoadState_FreshStore verifies that LoadState returns zero
-// values for all fields on a store that has never had data written to it.
+// TestRaftLogStore_LoadState_FreshStore verifies that LoadState returns nil
+// values for all pointer fields on a store that has never had data written to
+// it (v3.7.0: HardState, Snapshot, and Entries are nil for a fresh store).
 func TestRaftLogStore_LoadState_FreshStore(t *testing.T) {
 	store, err := OpenRaftLogStore(filepath.Join(t.TempDir(), "raft.db"))
 	require.NoError(t, err)
@@ -101,9 +104,9 @@ func TestRaftLogStore_LoadState_FreshStore(t *testing.T) {
 
 	hs, entries, snap, applied, err := store.LoadState()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(0), hs.Term)
+	assert.Nil(t, hs)
 	assert.Nil(t, entries)
-	assert.Equal(t, uint64(0), snap.Metadata.Index)
+	assert.Nil(t, snap)
 	assert.Equal(t, uint64(0), applied)
 }
 
@@ -115,22 +118,22 @@ func TestRaftLogStore_EntriesInIndexOrder(t *testing.T) {
 	defer store.Close() //nolint:errcheck // Close always returns nil for bbolt; error is non-actionable in test cleanup
 
 	// Write entries in reverse order across two batches to exercise ordering.
-	batch1 := []raftpb.Entry{
-		{Index: 3, Term: 1, Data: []byte("c")},
-		{Index: 4, Term: 1, Data: []byte("d")},
+	batch1 := []*raftpb.Entry{
+		{Index: new(uint64(3)), Term: new(uint64(1)), Data: []byte("c")},
+		{Index: new(uint64(4)), Term: new(uint64(1)), Data: []byte("d")},
 	}
-	batch2 := []raftpb.Entry{
-		{Index: 1, Term: 1, Data: []byte("a")},
-		{Index: 2, Term: 1, Data: []byte("b")},
+	batch2 := []*raftpb.Entry{
+		{Index: new(uint64(1)), Term: new(uint64(1)), Data: []byte("a")},
+		{Index: new(uint64(2)), Term: new(uint64(1)), Data: []byte("b")},
 	}
-	require.NoError(t, store.SaveBatch(raftpb.HardState{}, batch1, raftpb.Snapshot{}, 0))
-	require.NoError(t, store.SaveBatch(raftpb.HardState{}, batch2, raftpb.Snapshot{}, 0))
+	require.NoError(t, store.SaveBatch(nil, batch1, nil, 0))
+	require.NoError(t, store.SaveBatch(nil, batch2, nil, 0))
 
 	_, entries, _, _, err := store.LoadState()
 	require.NoError(t, err)
 	require.Len(t, entries, 4)
 	for i, want := range []uint64{1, 2, 3, 4} {
-		assert.Equal(t, want, entries[i].Index, "entry %d must have index %d", i, want)
+		assert.Equal(t, want, entries[i].GetIndex(), "entry %d must have index %d", i, want)
 	}
 }
 
@@ -141,18 +144,19 @@ func TestRaftLogStore_SnapshotRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close() //nolint:errcheck // Close always returns nil for bbolt; error is non-actionable in test cleanup
 
-	snap := raftpb.Snapshot{
+	// v3.7.0: Snapshot.Metadata is *SnapshotMetadata; its Index and Term are *uint64.
+	snap := &raftpb.Snapshot{
 		Data: []byte(`{"leader":1}`),
-		Metadata: raftpb.SnapshotMetadata{
-			Index: 10,
-			Term:  2,
+		Metadata: &raftpb.SnapshotMetadata{
+			Index: new(uint64(10)),
+			Term:  new(uint64(2)),
 		},
 	}
-	require.NoError(t, store.SaveBatch(raftpb.HardState{}, nil, snap, 10))
+	require.NoError(t, store.SaveBatch(nil, nil, snap, 10))
 
 	_, _, gotSnap, gotApplied, err := store.LoadState()
 	require.NoError(t, err)
-	assert.Equal(t, snap.Metadata.Index, gotSnap.Metadata.Index)
+	assert.Equal(t, snap.GetMetadata().GetIndex(), gotSnap.GetMetadata().GetIndex())
 	assert.Equal(t, snap.Data, gotSnap.Data)
 	assert.Equal(t, uint64(10), gotApplied)
 }
@@ -164,9 +168,9 @@ func TestRaftLogStore_AppliedIndexMonotonicallyIncreases(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close() //nolint:errcheck // Close always returns nil for bbolt; error is non-actionable in test cleanup
 
-	require.NoError(t, store.SaveBatch(raftpb.HardState{}, nil, raftpb.Snapshot{}, 10))
+	require.NoError(t, store.SaveBatch(nil, nil, nil, 10))
 	// Write a smaller applied — must not overwrite the stored value.
-	require.NoError(t, store.SaveBatch(raftpb.HardState{}, nil, raftpb.Snapshot{}, 5))
+	require.NoError(t, store.SaveBatch(nil, nil, nil, 5))
 
 	_, _, _, applied, err := store.LoadState()
 	require.NoError(t, err)

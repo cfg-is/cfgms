@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -107,8 +108,9 @@ func TestHandleMessage_ValidPeerCN_Returns200(t *testing.T) {
 
 	// Marshal a minimal raftpb.Message (empty message, Type=MsgHup).
 	// node.Step is non-blocking: it enqueues to the raft goroutine and returns nil.
-	var msg raftpb.Message
-	data, err := msg.Marshal()
+	// v3.7.0: use proto.Marshal on a pointer; raftpb.Message no longer has Marshal().
+	msg := &raftpb.Message{}
+	data, err := proto.Marshal(msg)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/raft/message", bytes.NewReader(data))

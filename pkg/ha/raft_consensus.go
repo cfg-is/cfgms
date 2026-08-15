@@ -13,6 +13,7 @@ import (
 
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -39,8 +40,10 @@ type RaftConsensus struct {
 	appliedIndex uint64 // Last applied log index
 
 	// Channels for coordination
-	proposeC    chan []byte
-	confChangeC chan raftpb.ConfChange
+	proposeC chan []byte
+	// confChangeC carries pointers: raftpb.ConfChange embeds protoimpl.MessageState
+	// (sync.Mutex via pragma.DoNotCopy), so the value must never be copied.
+	confChangeC chan *raftpb.ConfChange
 	errorC      chan error
 	stopC       chan struct{}
 
@@ -147,9 +150,9 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 
 	// Open the durable WAL when a log directory is provided.
 	var logStore *RaftLogStore
-	var recoveredHS raftpb.HardState
-	var recoveredEntries []raftpb.Entry
-	var recoveredSnap raftpb.Snapshot
+	var recoveredHS *raftpb.HardState
+	var recoveredEntries []*raftpb.Entry
+	var recoveredSnap *raftpb.Snapshot
 	var recoveredApplied uint64
 
 	if logDir != "" {
@@ -169,7 +172,9 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 
 	// Replay persisted state into MemoryStorage before constructing the node.
 	// The order matches raft.Storage's contract: snapshot first, then entries.
-	if !raft.IsEmptySnap(recoveredSnap) {
+	// Nil checks are explicit because v3.7.0 changed these from value to pointer
+	// types; a nil pointer means "absent" and must not be passed to the helpers.
+	if recoveredSnap != nil && !raft.IsEmptySnap(recoveredSnap) {
 		if err := storage.ApplySnapshot(recoveredSnap); err != nil {
 			_ = logStore.Close()
 			return nil, fmt.Errorf("replay snapshot into memory storage: %w", err)
@@ -181,7 +186,7 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 			return nil, fmt.Errorf("replay log entries into memory storage: %w", err)
 		}
 	}
-	if !raft.IsEmptyHardState(recoveredHS) {
+	if recoveredHS != nil && !raft.IsEmptyHardState(recoveredHS) {
 		if err := storage.SetHardState(recoveredHS); err != nil {
 			_ = logStore.Close()
 			return nil, fmt.Errorf("replay hard state into memory storage: %w", err)
@@ -214,7 +219,7 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 			Sessions: make(map[string]SessionUpdateCommand),
 		},
 		proposeC:       make(chan []byte, 16),
-		confChangeC:    make(chan raftpb.ConfChange, 16),
+		confChangeC:    make(chan *raftpb.ConfChange, 16),
 		errorC:         make(chan error),
 		stopC:          make(chan struct{}),
 		leaderElectedC: make(chan struct{}),
@@ -240,10 +245,15 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 	if useRestart {
 		rc.node = raft.RestartNode(config)
 		if hasPersistedState {
+			var recoveredTerm, recoveredCommit uint64
+			if recoveredHS != nil {
+				recoveredTerm = recoveredHS.GetTerm()
+				recoveredCommit = recoveredHS.GetCommit()
+			}
 			logger.Info("Restarted Raft node from persisted log",
 				"node_id", nodeID,
-				"recovered_term", recoveredHS.Term,
-				"recovered_commit", recoveredHS.Commit,
+				"recovered_term", recoveredTerm,
+				"recovered_commit", recoveredCommit,
 				"recovered_applied", recoveredApplied,
 				"recovered_entries", len(recoveredEntries))
 		} else {
@@ -340,7 +350,7 @@ func (rc *RaftConsensus) runRaft() {
 		case rd := <-rc.node.Ready():
 			// Process Ready updates from Raft
 			rc.logger.Debug("Processing Ready",
-				"node_id", rc.nodeID, "entries", len(rd.Entries), "messages", len(rd.Messages), "has_snapshot", !raft.IsEmptySnap(rd.Snapshot))
+				"node_id", rc.nodeID, "entries", len(rd.Entries), "messages", len(rd.Messages), "has_snapshot", rd.Snapshot != nil && !raft.IsEmptySnap(rd.Snapshot))
 			rc.processReady(rd)
 
 		case prop := <-rc.proposeC:
@@ -366,8 +376,9 @@ func (rc *RaftConsensus) runRaft() {
 			// raft loop so ticks continue to fire.
 			// Track in rc.wg so Stop() does not return until the goroutine exits.
 			rc.wg.Add(1)
-			go func(c raftpb.ConfChange) {
+			go func(c *raftpb.ConfChange) {
 				defer rc.wg.Done()
+				// c satisfies raftpb.ConfChangeI: AsV1 has a pointer receiver in v3.7.0.
 				if err := rc.node.ProposeConfChange(rc.ctx, c); err != nil {
 					rc.logger.Error("Failed to propose conf change", "error", err)
 				}
@@ -392,7 +403,9 @@ func (rc *RaftConsensus) runRaft() {
 // correct log position from the persisted state (Raft's safety requirement).
 func (rc *RaftConsensus) processReady(rd raft.Ready) {
 	// 1. Update in-memory storage.
-	if !raft.IsEmptySnap(rd.Snapshot) {
+	// Nil checks are explicit: v3.7.0 changed Snapshot and HardState from value
+	// types to pointer types in raft.Ready; nil means "absent" for this batch.
+	if rd.Snapshot != nil && !raft.IsEmptySnap(rd.Snapshot) {
 		rc.logger.Debug("Applying snapshot", "node_id", rc.nodeID)
 		if err := rc.storage.ApplySnapshot(rd.Snapshot); err != nil {
 			rc.logger.Error("Failed to apply snapshot to memory storage", "node_id", rc.nodeID, "error", err)
@@ -407,11 +420,12 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 		}
 	}
 
-	if !raft.IsEmptyHardState(rd.HardState) {
-		hardState := rd.HardState
+	// hs is bound locally: raft.Ready embeds *pb.HardState in v3.7.0, so reading
+	// through rd.HardState.X would select through the embedded field.
+	if hs := rd.HardState; hs != nil && !raft.IsEmptyHardState(hs) {
 		rc.logger.Debug("Setting HardState",
-			"node_id", rc.nodeID, "term", hardState.Term, "vote", hardState.Vote, "commit", hardState.Commit)
-		if err := rc.storage.SetHardState(hardState); err != nil {
+			"node_id", rc.nodeID, "term", hs.GetTerm(), "vote", hs.GetVote(), "commit", hs.GetCommit())
+		if err := rc.storage.SetHardState(hs); err != nil {
 			rc.logger.Error("Failed to set hard state in memory storage", "node_id", rc.nodeID, "error", err)
 		}
 	}
@@ -458,7 +472,7 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 			rc.mu.RLock()
 			applied := rc.appliedIndex
 			rc.mu.RUnlock()
-			if err := rc.logStore.SaveBatch(raftpb.HardState{}, nil, raftpb.Snapshot{}, applied); err != nil {
+			if err := rc.logStore.SaveBatch(nil, nil, nil, applied); err != nil {
 				panic(fmt.Sprintf("raft log store applied-index write failed (node %d): %v — "+
 					"continuing would violate Raft's durability contract", rc.nodeID, err))
 			}
@@ -478,7 +492,7 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 }
 
 // entriesToApply filters out entries that have already been applied
-func (rc *RaftConsensus) entriesToApply(entries []raftpb.Entry) []raftpb.Entry {
+func (rc *RaftConsensus) entriesToApply(entries []*raftpb.Entry) []*raftpb.Entry {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -487,8 +501,8 @@ func (rc *RaftConsensus) entriesToApply(entries []raftpb.Entry) []raftpb.Entry {
 	defer rc.mu.Unlock()
 
 	// Get the index of the last applied entry from our tracking
-	firstIdx := entries[0].Index
-	lastIdx := entries[len(entries)-1].Index
+	firstIdx := entries[0].GetIndex()
+	lastIdx := entries[len(entries)-1].GetIndex()
 
 	rc.logger.Debug("entriesToApply check",
 		"node_id", rc.nodeID, "firstIdx", firstIdx, "lastIdx", lastIdx, "appliedIndex", rc.appliedIndex)
@@ -516,9 +530,9 @@ func (rc *RaftConsensus) entriesToApply(entries []raftpb.Entry) []raftpb.Entry {
 }
 
 // publishEntries applies committed entries to the state machine
-func (rc *RaftConsensus) publishEntries(entries []raftpb.Entry) {
+func (rc *RaftConsensus) publishEntries(entries []*raftpb.Entry) {
 	for _, entry := range entries {
-		switch entry.Type {
+		switch entry.GetType() {
 		case raftpb.EntryNormal:
 			if len(entry.Data) == 0 {
 				// Ignore empty entries (leader election)
@@ -532,28 +546,29 @@ func (rc *RaftConsensus) publishEntries(entries []raftpb.Entry) {
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
-			if err := cc.Unmarshal(entry.Data); err != nil {
+			if err := proto.Unmarshal(entry.GetData(), &cc); err != nil {
 				rc.logger.Error("Failed to unmarshal conf change", "error", err)
 				continue
 			}
 
-			rc.node.ApplyConfChange(cc)
+			// &cc satisfies raftpb.ConfChangeI: AsV1 has a pointer receiver in v3.7.0.
+			rc.node.ApplyConfChange(&cc)
 
-			switch cc.Type {
+			switch cc.GetType() {
 			case raftpb.ConfChangeAddNode:
-				rc.logger.Info("Added node to cluster", "node_id", cc.NodeID)
+				rc.logger.Info("Added node to cluster", "node_id", cc.GetNodeId())
 			case raftpb.ConfChangeRemoveNode:
-				rc.logger.Info("Removed node from cluster", "node_id", cc.NodeID)
+				rc.logger.Info("Removed node from cluster", "node_id", cc.GetNodeId())
 				rc.clusterState.mu.Lock()
-				delete(rc.clusterState.Nodes, cc.NodeID)
+				delete(rc.clusterState.Nodes, cc.GetNodeId())
 				rc.clusterState.mu.Unlock()
 			}
 		}
 
 		// Update applied index after processing each entry
 		rc.mu.Lock()
-		if entry.Index > rc.appliedIndex {
-			rc.appliedIndex = entry.Index
+		if entry.GetIndex() > rc.appliedIndex {
+			rc.appliedIndex = entry.GetIndex()
 			rc.logger.Debug("Updated appliedIndex", "applied_index", rc.appliedIndex, "node_id", rc.nodeID)
 		}
 		rc.mu.Unlock()
@@ -639,8 +654,8 @@ func (rc *RaftConsensus) ProposeSessionUpdate(stewardID, nodeID string, connecte
 }
 
 // publishSnapshot applies a snapshot to the state machine
-func (rc *RaftConsensus) publishSnapshot(snapshot raftpb.Snapshot) {
-	if raft.IsEmptySnap(snapshot) {
+func (rc *RaftConsensus) publishSnapshot(snapshot *raftpb.Snapshot) {
+	if snapshot == nil || raft.IsEmptySnap(snapshot) {
 		return
 	}
 
@@ -794,9 +809,10 @@ func (rc *RaftConsensus) ProposeAddNode(nodeID uint64, nodeInfo *NodeInfo) error
 	if err != nil {
 		return fmt.Errorf("failed to marshal node info for add-node conf change: %w", err)
 	}
-	cc := raftpb.ConfChange{
-		Type:    raftpb.ConfChangeAddNode,
-		NodeID:  nodeID,
+	// v3.7.0: Type is *ConfChangeType (use .Enum()), NodeId is *uint64 (use new()).
+	cc := &raftpb.ConfChange{
+		Type:    raftpb.ConfChangeAddNode.Enum(),
+		NodeId:  new(nodeID),
 		Context: contextData,
 	}
 	select {
@@ -810,9 +826,10 @@ func (rc *RaftConsensus) ProposeAddNode(nodeID uint64, nodeInfo *NodeInfo) error
 // ProposeRemoveNode proposes a ConfChangeRemoveNode for the given node.
 // It is non-blocking: if confChangeC is at capacity it returns an error immediately.
 func (rc *RaftConsensus) ProposeRemoveNode(nodeID uint64) error {
-	cc := raftpb.ConfChange{
-		Type:   raftpb.ConfChangeRemoveNode,
-		NodeID: nodeID,
+	// v3.7.0: Type is *ConfChangeType (use .Enum()), NodeId is *uint64 (use new()).
+	cc := &raftpb.ConfChange{
+		Type:   raftpb.ConfChangeRemoveNode.Enum(),
+		NodeId: new(nodeID),
 	}
 	select {
 	case rc.confChangeC <- cc:
@@ -822,8 +839,14 @@ func (rc *RaftConsensus) ProposeRemoveNode(nodeID uint64) error {
 	}
 }
 
-// Process receives and processes Raft messages from peers
-func (rc *RaftConsensus) Process(ctx context.Context, m raftpb.Message) error {
+// Process receives and processes Raft messages from peers.
+// m is a pointer: raftpb.Message embeds protoimpl.MessageState (sync.Mutex via
+// pragma.DoNotCopy) in v3.7.0, so copying the value is unsound, and node.Step
+// takes *raftpb.Message anyway.
+func (rc *RaftConsensus) Process(ctx context.Context, m *raftpb.Message) error {
+	if m == nil {
+		return fmt.Errorf("cannot process nil raft message")
+	}
 	return rc.node.Step(ctx, m)
 }
 
