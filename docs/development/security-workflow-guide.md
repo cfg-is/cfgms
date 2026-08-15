@@ -85,6 +85,38 @@ When `dependency-pin-check.yml` fires or the `/refresh-pins` skill runs:
 |-----|---------|--------|--------|
 | CVE-2026-56860 | golang.org/x/net v0.58.0 | No patched release upstream as of 2026-08-15; v0.58.0 is newest | 2026-11-15 |
 
+**Scoping verification — a second, unrelated CVE still fails the gate:**
+
+`make security-deps` runs `scripts/verify-nancy-ignore-scope.sh` against `.nancy-ignore`
+before invoking nancy, and fails closed on:
+
+- any entry containing a wildcard character (`*`, `?`, `[`) — nancy has no glob
+  matching, so a wildcard is either a no-op or a mistaken attempt at a blanket
+  ignore, and either way it is rejected;
+- a missing or malformed `until=YYYY-MM-DD` expiry — nancy v2.1.0 aborts parsing
+  the *rest of the file* on the first bad date (the error is swallowed by its
+  caller, `internal/cmd/root.go`), so a broken second entry would silently drop
+  every entry after it, including ones that were previously working;
+- duplicate entries for the same CVE.
+
+This was verified directly against nancy's source (tag `v2.1.0`, commit
+`410f73d14f5cf35300b2695dc1a74fb560b70a85`): `internal/ossindex/types.go`
+`maybeExclude` matches with `v.Cve == ex || v.ID == ex` — plain string equality,
+no prefix or pattern matching. `scripts/verify-nancy-ignore-scope.sh` replicates
+that exact check (and nancy's two parsing regexes, `unixComments` and
+`untilComment`) against a synthetic CVE id that is deliberately absent from the
+file, and fails if that synthetic id is ever reported as excluded — proving, on
+every `make security-deps` run and with no network or `GUIDE_TOKEN` required,
+that only the literal ids listed in `.nancy-ignore` are ever suppressed. See
+`scripts/verify-nancy-ignore-scope_test.sh` for the fixture coverage (run with
+`bash scripts/verify-nancy-ignore-scope_test.sh`).
+
+To additionally confirm end-to-end against a live Sonatype Guide scan: with a
+valid `GUIDE_TOKEN` exported, temporarily add an unrelated, genuinely vulnerable
+module (e.g. `go get github.com/dgrijalva/jwt-go@v3.2.0+incompatible`, which
+carries known, unfixed CVEs) to a scratch `go.mod`, run `make security-deps`, and
+confirm it still exits non-zero — then discard the scratch change.
+
 ### 3. gosec - Go Security Patterns
 
 - **Purpose**: Static analysis for Go security anti-patterns

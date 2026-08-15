@@ -1096,6 +1096,7 @@ security-deps:
 		exit 0; \
 	fi; \
 	if [ -f .nancy-ignore ]; then \
+		bash scripts/verify-nancy-ignore-scope.sh .nancy-ignore || exit 1; \
 		suppressed=$$(grep -v '^[[:space:]]*#' .nancy-ignore | grep -v '^[[:space:]]*$$' | wc -l | tr -d ' '); \
 		if [ "$${suppressed:-0}" -gt 0 ]; then \
 			echo ""; \

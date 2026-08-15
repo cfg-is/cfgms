@@ -324,6 +324,8 @@ test_executable_permissions() {
         "scripts/tier1-bootstrap_test.sh"
         "scripts/check-binary-artifacts.sh"
         "scripts/check-binary-artifacts_test.sh"
+        "scripts/verify-nancy-ignore-scope.sh"
+        "scripts/verify-nancy-ignore-scope_test.sh"
         "scripts/lab-datasvc-bootstrap.sh"
         "scripts/lab-datasvc-bootstrap_test.sh"
         "scripts/cfgms-bundle-load"
@@ -775,6 +777,54 @@ test_check_binary_artifacts() {
         log_pass "check-binary-artifacts_test.sh: All fixture tests passed"
     else
         log_fail "check-binary-artifacts_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/verify-nancy-ignore-scope.sh — the gate that proves
+# .nancy-ignore can only ever suppress the exact CVE/OSS-Index IDs it lists
+# (Issue #3366). Delegates to scripts/verify-nancy-ignore-scope_test.sh, which
+# runs the gate against the repo's real suppression file plus synthetic fixtures
+# for every way an entry could widen scope or silently drop coverage.
+#
+# Wired here because the gate itself only runs inside `make security-deps`,
+# which skips without a GUIDE_TOKEN — without this delegation a regression in
+# the scope-verification logic would never be caught locally or in CI.
+test_verify_nancy_ignore_scope() {
+    log_test "Testing verify-nancy-ignore-scope.sh..."
+
+    local gate_script="scripts/verify-nancy-ignore-scope.sh"
+    local test_script="scripts/verify-nancy-ignore-scope_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "verify-nancy-ignore-scope.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "verify-nancy-ignore-scope.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "verify-nancy-ignore-scope_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "verify-nancy-ignore-scope_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "verify-nancy-ignore-scope_test.sh: All fixture tests passed"
+    else
+        log_fail "verify-nancy-ignore-scope_test.sh: Fixture tests failed (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -3615,6 +3665,8 @@ echo ""
 test_check_providers
 echo ""
 test_check_binary_artifacts
+echo ""
+test_verify_nancy_ignore_scope
 echo ""
 test_refresh_pins_discovery
 echo ""
