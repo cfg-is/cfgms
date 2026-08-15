@@ -104,6 +104,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 				OS:           res.OS,
 				Architecture: res.Architecture,
 				Attributes:   res.DNAAttributes,
+				Fragments:    res.DNAFragments,
 			}
 		}
 		stewardList = append(stewardList, info)

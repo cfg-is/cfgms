@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -317,6 +318,38 @@ func TestHandleResolveSelector_OS_Filter(t *testing.T) {
 	item := list[0].(map[string]interface{})
 	dna := item["dna"].(map[string]interface{})
 	assert.Equal(t, "linux", dna["os"])
+}
+
+// TestHandleResolveSelector_Fragments_PresentInResponse verifies that
+// steward.DNA.Fragments (ADR-017) round-trip through the /api/v1/fleet/resolve
+// response. This is the wire path the CLI's deriveHVPromoteCluster relies on
+// to derive cluster candidates via clusterregistry.ClustersFromFragments
+// (Issue #3317) — without it, steward.DNA.Fragments deserializes to nil on
+// every CLI invocation regardless of what fragments the steward actually has.
+func TestHandleResolveSelector_Fragments_PresentInResponse(t *testing.T) {
+	server := setupTestServer(t)
+	seed := makeSeedSteward("s1", "es-hv01", "linux", "amd64", "prod")
+	seed.DNAFragments = []*commonpb.Fragment{
+		{FragmentId: "cluster:cfg-lab.membership"},
+	}
+	server.fleetQuery = seededFleetQuery(seed)
+
+	rec := postResolveSelector(server, `{"selector":"all"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp.Data.([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 1)
+
+	item := list[0].(map[string]interface{})
+	dna := item["dna"].(map[string]interface{})
+	fragments, ok := dna["fragments"].([]interface{})
+	require.True(t, ok, "dna.fragments must be present in the resolve response")
+	require.Len(t, fragments, 1)
+	frag := fragments[0].(map[string]interface{})
+	assert.Equal(t, "cluster:cfg-lab.membership", frag["fragment_id"])
 }
 
 func TestHandleResolveSelector_Combined_NarrowsToOne(t *testing.T) {

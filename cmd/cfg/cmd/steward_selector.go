@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/mattn/go-isatty"
 )
 
@@ -24,10 +25,11 @@ const fanOutConcurrencyBound = 10
 // Defined as a named type so callers and tests can reference it without
 // repeating the anonymous-struct literal.
 type StewardInfoDNA struct {
-	Hostname     string            `json:"hostname"`
-	OS           string            `json:"os"`
-	Architecture string            `json:"architecture"`
-	Attributes   map[string]string `json:"attributes,omitempty"`
+	Hostname     string               `json:"hostname"`
+	OS           string               `json:"os"`
+	Architecture string               `json:"architecture"`
+	Attributes   map[string]string    `json:"attributes,omitempty"`
+	Fragments    []*commonpb.Fragment `json:"fragments,omitempty"`
 }
 
 // StewardInfo is the CLI's view of a steward entry returned by

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
@@ -53,6 +54,33 @@ func (r *Registry) MemberClusters(stewardID string) []string {
 	return r.memberIndex[stewardID]
 }
 
+// ClustersFromFragments returns the sorted, deduplicated cluster names present in
+// frags. It is the canonical parser for cluster:<name> fragment IDs: only the
+// fragment ID is inspected; canonical bytes are not decoded. Both BuildRegistry
+// (server-side registry construction) and the CLI's promote-hv-role command
+// (client-side cluster derivation) use this function so the extraction logic
+// lives in exactly one place.
+//
+// Tenant scoping must be applied by the caller before passing the fragment slice.
+func ClustersFromFragments(frags []*commonpb.Fragment) []string {
+	seen := make(map[string]struct{})
+	for _, frag := range frags {
+		if frag == nil || !strings.HasPrefix(frag.FragmentId, clusterFragmentPrefix) {
+			continue
+		}
+		name := frag.FragmentId[len(clusterFragmentPrefix):]
+		if name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // BuildRegistry parses cluster:<name> DNA fragments from the given stewards
 // into an immutable Registry.
 //
@@ -71,19 +99,19 @@ func BuildRegistry(stewards []fleet.StewardData) *Registry {
 	}
 
 	// seen tracks which stewards have already been recorded as members of each
-	// cluster so that multiple cluster:<name>.* fragments for the same steward
+	// cluster so that multiple cluster:<name> fragments for the same steward
 	// do not produce duplicate member entries.
 	seen := make(map[string]map[string]bool) // clusterName → set of steward IDs
 
 	for _, steward := range stewards {
 		for _, frag := range steward.DNAFragments {
-			if frag == nil || !strings.HasPrefix(frag.FragmentId, clusterFragmentPrefix) {
+			// ClustersFromFragments is the canonical cluster-name extractor; use it
+			// on each fragment so the parsing logic is not duplicated here.
+			names := ClustersFromFragments([]*commonpb.Fragment{frag})
+			if len(names) == 0 {
 				continue
 			}
-			clusterName := frag.FragmentId[len(clusterFragmentPrefix):]
-			if clusterName == "" {
-				continue
-			}
+			clusterName := names[0]
 
 			// Decode canonical bytes to extract cluster state.
 			data, err := sdna.DecodeCanonicalFragment(frag.CanonicalBytes)
