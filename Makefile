@@ -1095,6 +1095,13 @@ security-deps:
 		echo "   CI runs this scan with the repository GUIDE_TOKEN secret and fails closed."; \
 		exit 0; \
 	fi; \
+	if [ -f .nancy-ignore ]; then \
+		suppressed=$$(grep -v '^[[:space:]]*#' .nancy-ignore | grep -v '^[[:space:]]*$$' | wc -l | tr -d ' '); \
+		if [ "$${suppressed:-0}" -gt 0 ]; then \
+			echo ""; \
+			echo "ℹ️  Note: $${suppressed} CVE suppression(s) active — see .nancy-ignore for justification and expiry dates"; \
+		fi; \
+	fi; \
 	echo "Scanning Go dependencies for known vulnerabilities..."; \
 	if go list -json -deps ./... | nancy sleuth --skip-update-check; then \
 		echo "✅ Nancy dependency scan completed - no critical vulnerabilities found"; \

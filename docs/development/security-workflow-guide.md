@@ -34,6 +34,57 @@ The CFGMS security workflow integrates four complementary security scanning tool
 - **Blocking**: No (informational, but tracked)
 - **SARIF Support**: No (custom integration)
 
+#### CVE suppression file (`.nancy-ignore`)
+
+When a CVE cannot be remediated because no patched upstream release exists, suppress it
+in `.nancy-ignore` at the repository root rather than silencing the entire scan.
+
+**Format** (nancy v2.1.0):
+
+```
+# Comment lines start with #
+CVE-YYYY-NNNNN until=YYYY-MM-DD
+```
+
+The `until=YYYY-MM-DD` field sets an expiry: once the date lapses nancy re-reports
+the CVE as a live finding, which forces a re-review. Every entry must have an expiry
+approximately one quarter out from the suppression date.
+
+**What justifies an entry:**
+
+- No patched upstream release exists at the time of suppression.
+- The affected package cannot be removed or replaced without significant rework.
+- The CVE has been triaged and the risk is accepted for the suppression period.
+
+**What does NOT justify an entry:**
+
+- "We haven't gotten around to it yet." Upgrade the dependency instead.
+- Blanket suppression of multiple unrelated CVEs — one entry per CVE, no wildcards.
+- Suppressing a CVE that a newer release fixes.
+
+**Adding a suppression:**
+
+1. Confirm no fixed release exists: `go list -m -versions <module>` to check upstream.
+2. Add an entry to `.nancy-ignore` with a comment block naming the package, the reason,
+   and the expiry.  Keep the comment immediately above the CVE line.
+3. Run `make security-deps` (requires `GUIDE_TOKEN`) to confirm the scan now passes.
+4. Open a PR — the `nancy-scan` CI job validates it.
+
+**Reviewing suppressions (weekly dependency scan):**
+
+When `dependency-pin-check.yml` fires or the `/refresh-pins` skill runs:
+
+1. Check each entry in `.nancy-ignore` for entries near or past their `until=` date.
+2. Run `go list -m -versions <module>` for each suppressed package to see if a fix landed.
+3. If a fix exists: upgrade via `go get <module>@<version>` and remove the entry.
+4. If no fix: renew the `until=` date and update the comment with today's re-check date.
+
+**Active suppressions:**
+
+| CVE | Package | Reason | Expiry |
+|-----|---------|--------|--------|
+| CVE-2026-56860 | golang.org/x/net v0.58.0 | No patched release upstream as of 2026-08-15; v0.58.0 is newest | 2026-11-15 |
+
 ### 3. gosec - Go Security Patterns
 
 - **Purpose**: Static analysis for Go security anti-patterns
