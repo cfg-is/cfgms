@@ -200,7 +200,7 @@ func (s *ClusterStatus) AsMap() map[string]interface{} {
 	for k, v := range s.RoleOwners {
 		owners[k] = v
 	}
-	return map[string]interface{}{
+	m := map[string]interface{}{
 		"name":                       s.Name,
 		"cno_owner_node":             s.CNOOwnerNode,
 		"member_nodes":               members,
@@ -210,6 +210,25 @@ func (s *ClusterStatus) AsMap() map[string]interface{} {
 		"cluster_access_ok":          s.ClusterAccessOK,
 		"cluster_access_remediation": s.ClusterAccessRemediation,
 	}
+	// Entity graph edge declarations (#3368): cluster→host membership edges.
+	// Edge type is "contains" (parent→child, per epic convention established in
+	// #3370). Direction is outbound from this cluster fragment (the FROM side),
+	// so each edge is cluster:<name> → host:<node>. Only emitted when the cluster
+	// is found — a not-found ClusterStatus has no members to declare. Node names
+	// are reported by the cluster host, so each target goes through edgeTarget's
+	// EID-delimiter guard (see vm.go) before it is emitted.
+	if s.Found && len(s.MemberNodes) > 0 {
+		containsEdges := make([]interface{}, 0, len(s.MemberNodes))
+		for _, node := range s.MemberNodes {
+			if to, ok := edgeTarget("host", node); ok {
+				containsEdges = append(containsEdges, map[string]interface{}{"type": "contains", "to": to})
+			}
+		}
+		if len(containsEdges) > 0 {
+			m["__entitygraph_edges"] = containsEdges
+		}
+	}
+	return m
 }
 
 // ToYAML implements modules.ConfigState.

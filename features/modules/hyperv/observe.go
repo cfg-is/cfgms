@@ -102,6 +102,16 @@ func (m *hypervModule) GetDomain(ctx context.Context) (map[string]modules.Config
 		if rErr != nil || !found {
 			continue
 		}
+		// Populate HARole from cluster observation so edge emission is accurate
+		// (#3368). readVMState does not probe cluster membership (that is the
+		// getVMLocal path); using the cluster.RoleOwners map already read avoids
+		// additional PS calls. A VM whose name appears in RoleOwners is a
+		// registered clustered role — set HARole so AsMap emits runs-on:cluster.
+		if cluster.Found {
+			if _, isRole := cluster.RoleOwners[name]; isRole {
+				cfg.HARole = &HARoleConfig{ClusterName: cluster.Name}
+			}
+		}
 		result["vm:"+name] = cfg
 	}
 
