@@ -164,10 +164,7 @@ func TestGetConfiguration_UntaggingRemovesRoleResource(t *testing.T) {
 
 	tenantCtxB := context.WithValue(ctx, ctxkeys.TenantID, "tenant-b")
 	regResp, err := controllerSvc.AcceptRegistration(tenantCtxB, &controllerpb.RegisterRequest{
-		InitialDna: &commonpb.DNA{
-			Id:         "steward-tag-test",
-			Attributes: map[string]string{"os": "linux"},
-		},
+		InitialDna: makeTestDNA("steward-tag-test", map[string]string{"os": "linux", "hostname": "tag-test-host"}),
 	})
 	require.NoError(t, err)
 	stewardID := regResp.StewardId
@@ -246,22 +243,15 @@ func TestGetConfiguration_RolePrecedence_DeviceBeatsRoleBeatsCluster(t *testing.
 
 	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-c")
 
-	// Both stewards are members of cluster "my-cluster" (via a cluster:my-cluster.* DNA key)
-	// and tagged "shared-role" so the role selector matches.
+	// Both stewards are tagged "shared-role" so the role selector matches.
 	regDev, err := controllerSvc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
-		InitialDna: &commonpb.DNA{
-			Id:         "steward-dev",
-			Attributes: map[string]string{"os": "linux", "cluster:my-cluster.member": "1"},
-		},
+		InitialDna: makeTestDNA("steward-dev", map[string]string{"os": "linux", "hostname": "dev-host"}),
 	})
 	require.NoError(t, err)
 	devID := regDev.StewardId
 
 	regNoDev, err := controllerSvc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
-		InitialDna: &commonpb.DNA{
-			Id:         "steward-nodev",
-			Attributes: map[string]string{"os": "linux", "cluster:my-cluster.member": "1"},
-		},
+		InitialDna: makeTestDNA("steward-nodev", map[string]string{"os": "linux", "hostname": "nodev-host"}),
 	})
 	require.NoError(t, err)
 	noDevID := regNoDev.StewardId
@@ -335,7 +325,7 @@ func TestGetConfiguration_MalformedRoleConfig_IsNonFatal(t *testing.T) {
 
 	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-d")
 	reg, err := controllerSvc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
-		InitialDna: &commonpb.DNA{Id: "steward-d", Attributes: map[string]string{"os": "linux"}},
+		InitialDna: makeTestDNA("steward-d", map[string]string{"os": "linux", "hostname": "steward-d-host"}),
 	})
 	require.NoError(t, err)
 	stewardID := reg.StewardId
@@ -378,4 +368,28 @@ func TestGetConfiguration_MalformedRoleConfig_IsNonFatal(t *testing.T) {
 		"device-level resource must appear despite malformed role config")
 	assert.True(t, names["good-resource"],
 		"valid sibling role resource must still apply despite the malformed sibling")
+}
+
+// TestFlattenDNAFragments_SelectorRelevantKeys verifies that the selector-relevant
+// keys used by MatchingRoleFragments (os, arch, runtime_os) are correctly extracted
+// from DNA fragments. This is the required AC test for the flattenDNAFragments helper
+// added by Issue #3325.
+func TestFlattenDNAFragments_SelectorRelevantKeys(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		mustFragment("host:os", map[string]interface{}{
+			"os":         "linux",
+			"runtime_os": "linux",
+		}),
+		mustFragment("host:cpu", map[string]interface{}{
+			"arch":     "amd64",
+			"cpu_arch": "x86_64",
+		}),
+	}
+
+	flat := flattenDNAFragments(frags)
+
+	assert.Equal(t, "linux", flat["os"], "os key must be flattened from host:os fragment")
+	assert.Equal(t, "linux", flat["runtime_os"], "runtime_os key must be flattened from host:os fragment")
+	assert.Equal(t, "amd64", flat["arch"], "arch key must be flattened from host:cpu fragment")
+	assert.Equal(t, "x86_64", flat["cpu_arch"], "cpu_arch key must be flattened from host:cpu fragment")
 }
