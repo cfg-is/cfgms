@@ -65,15 +65,18 @@ func TestDriftDetectorInitializedInStandaloneMode(t *testing.T) {
 	realDNA := steward.GetPreviousDNA(s)
 	require.NotNil(t, realDNA, "first convergence must capture DNA")
 
-	// Inject a previousDNA with the same stable ID but an extra sentinel attribute.
-	// The drift detector compares prev vs current; the sentinel attribute is present
-	// in prev but absent in current → generates a ChangeTypeRemoved drift event.
+	// Inject a previousDNA with the same stable ID but an extra sentinel fragment.
+	// The drift detector compares prev vs current Fragments; the sentinel fragment is
+	// present in prev but absent in current → generates a ChangeTypeRemoved drift event.
 	// If driftDetector is nil, detectUnmanagedDNADrift returns (nil, nil) immediately
 	// after the ID comparison, so events would be empty.
 	sentinelDNA := &commonpb.DNA{
 		Id: realDNA.Id, // same ID — avoids the ID-mismatch early-return path
-		Attributes: map[string]string{
-			"__drift_detector_init_sentinel__": "present_in_prev_only",
+		Fragments: []*commonpb.Fragment{
+			{
+				FragmentId:   "__drift_detector_init_sentinel__",
+				FragmentHash: "present_in_prev_only",
+			},
 		},
 	}
 	steward.SetPreviousDNA(s, sentinelDNA)
@@ -109,7 +112,7 @@ func TestDNASnapshotCapturedAfterConvergence(t *testing.T) {
 
 	assert.NotNil(t, prevDNA, "DNA snapshot should be captured after initial convergence")
 	assert.NotEmpty(t, prevDNA.Id, "DNA snapshot should have a non-empty ID")
-	assert.NotEmpty(t, prevDNA.Attributes, "DNA snapshot should have attributes for drift detection (Issue #3332: filled via RawAttributes, not Collect().Attributes)")
+	assert.NotEmpty(t, prevDNA.Fragments, "DNA snapshot should have fragments for drift detection (Issue #3332: Collect() writes host:* fragments)")
 
 	require.NoError(t, s.Stop(context.Background()))
 }
@@ -252,20 +255,23 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 }
 
 // TestDetectUnmanagedDNADrift_ReportsHostFactChange is the functional regression
-// guard for Issue #3332: the unmanaged-drift path must still SEE host facts.
+// guard for Issue #3332 (host-fact fragments) and Issue #3320 (Fragment-aware
+// drift detection): the unmanaged-drift path must still SEE host facts, now
+// diffed via DNA.Fragments rather than the deprecated DNA.Attributes map.
 //
-// pkg/dna/drift compares the flat DNA.Attributes maps and has no fragment
-// awareness, so once Collect() stopped writing that field the detector silently
-// compared two empty key sets and reported "no drift" forever — a detection
-// control that fails open on a host the threat model assumes may be compromised.
-// Asserting on AttributeCount cannot catch that (it is computed from the
-// collector's internal map, which never went away); only driving a real change
-// through the real detector can.
+// pkg/dna/drift compares Fragments by FragmentId/FragmentHash and has no
+// awareness of the flat attribute map, so if Collect() ever stopped writing
+// host:* fragments the detector would silently compare two empty fragment
+// sets and report "no drift" forever — a detection control that fails open
+// on a host the threat model assumes may be compromised. Asserting on
+// FragmentCount cannot catch that; only driving a real change through the
+// real detector can.
 //
-// The mutation removes a key the collector always produces from the PREVIOUS
-// snapshot. That is deliberate: the resulting "added" change can only be
-// reported if the CURRENT snapshot carries host-fact attributes, so the test
-// fails if the drift path ever stops populating them again.
+// The mutation removes the host:os fragment (which carries the observed
+// hostname, Issue #3319/#3358) from the PREVIOUS snapshot. That is
+// deliberate: the resulting "added" change can only be reported if the
+// CURRENT snapshot carries host-fact fragments, so the test fails if the
+// drift path ever stops populating them again.
 func TestDetectUnmanagedDNADrift_ReportsHostFactChange(t *testing.T) {
 	logger := logging.NewLogger("info")
 	dir := t.TempDir()
@@ -284,39 +290,45 @@ func TestDetectUnmanagedDNADrift_ReportsHostFactChange(t *testing.T) {
 
 	baseline := steward.GetPreviousDNA(s)
 	require.NotNil(t, baseline)
-	require.NotEmpty(t, baseline.Attributes,
-		"the drift path must capture host-fact attributes (Issue #3332)")
-	require.Contains(t, baseline.Attributes, "hostname",
-		"hostname is collected by collectBasicInfo on every platform")
+	require.NotEmpty(t, baseline.Fragments,
+		"the drift path must capture host-fact fragments (Issue #3332)")
 
-	// Replay the baseline with hostname removed; the fresh snapshot taken by the
-	// next call must report it as an added attribute.
-	mutated := make(map[string]string, len(baseline.Attributes))
-	for k, v := range baseline.Attributes {
-		if k == "hostname" {
+	var hostOS *commonpb.Fragment
+	for _, f := range baseline.Fragments {
+		if f.FragmentId == "host:os" {
+			hostOS = f
+		}
+	}
+	require.NotNil(t, hostOS, "host:os fragment (carries the observed hostname) must be present")
+
+	// Replay the baseline with the host:os fragment removed; the fresh snapshot
+	// taken by the next call must report it as an added fragment.
+	mutated := make([]*commonpb.Fragment, 0, len(baseline.Fragments))
+	for _, f := range baseline.Fragments {
+		if f.FragmentId == "host:os" {
 			continue
 		}
-		mutated[k] = v
+		mutated = append(mutated, f)
 	}
-	steward.SetPreviousDNA(s, &commonpb.DNA{Id: baseline.Id, Attributes: mutated})
+	steward.SetPreviousDNA(s, &commonpb.DNA{Id: baseline.Id, Fragments: mutated})
 
 	events, err = steward.DetectUnmanagedDNADrift(s, ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, events,
 		"a host-fact change must produce at least one drift event")
 
-	var sawHostname bool
+	var sawHostOS bool
 	for _, evt := range events {
 		for _, change := range evt.Changes {
-			if change.Attribute == "hostname" {
-				sawHostname = true
-				assert.Equal(t, baseline.Attributes["hostname"], change.CurrentValue,
-					"the drift event must carry the value from the freshly collected snapshot")
+			if change.Attribute == "host:os" {
+				sawHostOS = true
+				assert.Equal(t, hostOS.FragmentHash, change.CurrentValue,
+					"the drift event must carry the fragment hash from the freshly collected snapshot")
 			}
 		}
 	}
-	assert.True(t, sawHostname,
-		"the hostname change must appear in the reported drift changes")
+	assert.True(t, sawHostOS,
+		"the host:os fragment change must appear in the reported drift changes")
 
 	require.NoError(t, s.Stop(context.Background()))
 }

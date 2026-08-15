@@ -4,6 +4,9 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -133,13 +136,36 @@ func newTestDriftDetector(t *testing.T) drift.Detector {
 	return detector
 }
 
-// newTestDNA builds a minimal commonpb.DNA for the given device ID and attribute set.
-func newTestDNA(deviceID string, attributes map[string]string) *commonpb.DNA {
+// newTestDNA builds a minimal commonpb.DNA for the given device ID from a
+// fragment-id → state map. Each entry becomes a commonpb.Fragment whose
+// canonical_bytes is the state text and whose fragment_hash is the SHA-256 of
+// those bytes, matching the ADR-017 fragment contract the drift detector diffs:
+// two snapshots differing in one entry's state differ in exactly that
+// fragment's hash. Fragments are emitted in sorted fragment-id order so the
+// stored record is deterministic.
+func newTestDNA(deviceID string, state map[string]string) *commonpb.DNA {
+	ids := make([]string, 0, len(state))
+	for id := range state {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	fragments := make([]*commonpb.Fragment, 0, len(ids))
+	for _, id := range ids {
+		canonical := []byte(state[id])
+		sum := sha256.Sum256(canonical)
+		fragments = append(fragments, &commonpb.Fragment{
+			FragmentId:     id,
+			Authority:      "osquery",
+			CanonicalBytes: canonical,
+			FragmentHash:   hex.EncodeToString(sum[:]),
+		})
+	}
+
 	return &commonpb.DNA{
-		Id:             deviceID,
-		Attributes:     attributes,
-		LastUpdated:    timestamppb.Now(),
-		AttributeCount: int32(len(attributes)),
+		Id:          deviceID,
+		Fragments:   fragments,
+		LastUpdated: timestamppb.Now(),
 	}
 }
 
@@ -193,7 +219,7 @@ func TestGetDriftEvents_WithDeviceIDs_NoStoredSnapshots_ReturnsEmpty(t *testing.
 }
 
 // TestGetDriftEvents_TwoSnapshots_ProducesRealEvents is the required AC test verifying
-// that two fixture DNA snapshots with a real attribute difference produce a non-empty
+// that two fixture DNA snapshots with a real fragment-state difference produce a non-empty
 // DriftEvent slice with Severity set from the actual change.
 //
 // Uses real storage.Manager (SQLite, t.TempDir()) and real drift.Detector — no mocks.
@@ -206,17 +232,17 @@ func TestGetDriftEvents_TwoSnapshots_ProducesRealEvents(t *testing.T) {
 
 	// Store first DNA snapshot.
 	dna1 := newTestDNA(deviceID, map[string]string{
-		"os":       "linux",
-		"hostname": "host-before",
-		"arch":     "amd64",
+		"host:os":       "linux",
+		"host:hostname": "host-before",
+		"host:arch":     "amd64",
 	})
 	require.NoError(t, manager.Store(ctx, deviceID, dna1, nil))
 
-	// Store second DNA snapshot with a different hostname (network attribute → SeverityWarning).
+	// Store second DNA snapshot with a different hostname (network fragment → SeverityWarning).
 	dna2 := newTestDNA(deviceID, map[string]string{
-		"os":       "linux",
-		"hostname": "host-after",
-		"arch":     "amd64",
+		"host:os":       "linux",
+		"host:hostname": "host-after",
+		"host:arch":     "amd64",
 	})
 	require.NoError(t, manager.Store(ctx, deviceID, dna2, nil))
 
@@ -235,7 +261,7 @@ func TestGetDriftEvents_TwoSnapshots_ProducesRealEvents(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.NotEmpty(t, events, "two DNA snapshots with a real attribute difference must produce drift events")
+	assert.NotEmpty(t, events, "two DNA snapshots with a real fragment-state difference must produce drift events")
 	for _, event := range events {
 		assert.NotEmpty(t, event.Severity, "each DriftEvent must have Severity set from the actual change")
 	}
@@ -255,8 +281,8 @@ func TestGetDriftEvents_SingleSnapshot_NoEvents(t *testing.T) {
 
 	// Store exactly one DNA snapshot — no consecutive pair to diff.
 	require.NoError(t, manager.Store(ctx, deviceID, newTestDNA(deviceID, map[string]string{
-		"os":       "linux",
-		"hostname": "host-only",
+		"host:os":       "linux",
+		"host:hostname": "host-only",
 	}), nil))
 
 	p := &DataProvider{
@@ -384,12 +410,12 @@ func TestGetDriftEvents_DetectDriftError_SkipsPairAndLogsSanitized(t *testing.T)
 	storeMismatchedPair := func(t *testing.T, manager *storage.Manager, deviceID string) {
 		t.Helper()
 		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA("dna-id-before", map[string]string{
-			"os":       "linux",
-			"hostname": "host-before",
+			"host:os":       "linux",
+			"host:hostname": "host-before",
 		}), nil))
 		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA("dna-id-after", map[string]string{
-			"os":       "linux",
-			"hostname": "host-after",
+			"host:os":       "linux",
+			"host:hostname": "host-after",
 		}), nil))
 	}
 
@@ -400,12 +426,12 @@ func TestGetDriftEvents_DetectDriftError_SkipsPairAndLogsSanitized(t *testing.T)
 		manager := newTestStorageManager(t)
 		deviceID := "device-matching-ids"
 		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA(deviceID, map[string]string{
-			"os":       "linux",
-			"hostname": "host-before",
+			"host:os":       "linux",
+			"host:hostname": "host-before",
 		}), nil))
 		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA(deviceID, map[string]string{
-			"os":       "linux",
-			"hostname": "host-after",
+			"host:os":       "linux",
+			"host:hostname": "host-after",
 		}), nil))
 
 		capLog := &warnCapturingLogger{}
@@ -529,16 +555,16 @@ func newTrendFixture(t *testing.T) (*DataProvider, interfaces.DataQuery) {
 	ctx := context.Background()
 
 	require.NoError(t, manager.Store(ctx, "device-a", newTestDNA("device-a", map[string]string{
-		"os":       "linux",
-		"hostname": "host-before",
+		"host:os":       "linux",
+		"host:hostname": "host-before",
 	}), nil))
 	require.NoError(t, manager.Store(ctx, "device-a", newTestDNA("device-a", map[string]string{
-		"os":       "linux",
-		"hostname": "host-after",
+		"host:os":       "linux",
+		"host:hostname": "host-after",
 	}), nil))
 	require.NoError(t, manager.Store(ctx, "device-b", newTestDNA("device-b", map[string]string{
-		"os":       "windows",
-		"hostname": "host-b",
+		"host:os":       "windows",
+		"host:hostname": "host-b",
 	}), nil))
 
 	p := &DataProvider{
