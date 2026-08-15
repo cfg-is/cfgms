@@ -16,8 +16,33 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// realGathererInitialDNA builds a DNA snapshot the way a real steward's
+// PartitionHostFacts (features/steward/dna/fragments.go) actually produces
+// fragments at first registration: no ownership declarations (no module
+// resource configured yet, including hostname), only the gatherer's host:*
+// facts. This is the exact shape flagged in the PR #3358 acceptance review —
+// hand-built `mustFragment("hostname", ...)` fixtures elsewhere in this file
+// mask the fact that production never emits a "hostname"-kind fragment this
+// early, so this helper exercises the real production path instead.
+func realGathererInitialDNA(t *testing.T, id, hostname, osName string) *commonpb.DNA {
+	t.Helper()
+	attrs := map[string]string{
+		"hostname": hostname,
+		"os":       osName,
+	}
+	fragments, envelopes, err := sdna.PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
+	require.NoError(t, err)
+	return &commonpb.DNA{
+		Id:              id,
+		SyncFingerprint: "fp-" + id,
+		Fragments:       fragments,
+		Envelopes:       envelopes,
+	}
+}
 
 // mustFragment builds a fragment from a field map, panicking on error.
 // For test helpers that cannot accept *testing.T (e.g. makeValidDNA).
@@ -567,6 +592,44 @@ func TestAcceptRegistration_AcceptsValidInitialDNA(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, info.DNA)
 	assert.Equal(t, "linux", info.DNA.Attributes["os"])
+
+	record, err := storage.GetLatestByDeviceID(ctx, stewardID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+}
+
+// TestAcceptRegistration_AcceptsRealGathererDNA_NoHostnameModuleConfigured is
+// the REQUIRED regression test for the PR #3358 acceptance review Finding #1:
+// a newly-registering steward with no hostname module resource configured
+// (the ordinary case — hostname is a declare-once identity module, not part
+// of the fixed stdlib baseline) must still be accepted, because the observed
+// hostname is now carried unconditionally in the host:os gatherer fragment
+// (Issue #3319/#3358 fix in features/steward/dna/fragments.go) rather than
+// only ever appearing in a module-owned "hostname" fragment that doesn't
+// exist yet at registration time.
+func TestAcceptRegistration_AcceptsRealGathererDNA_NoHostnameModuleConfigured(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	log := logging.NewCapturingLogger()
+	svc := NewControllerServiceWithStorage(log, storage)
+	ctx := context.Background()
+
+	req := &controllerpb.RegisterRequest{
+		Version:        "1.0.0",
+		InitialDna:     realGathererInitialDNA(t, "dna-real-1", "newly-registered-host", "linux"),
+		IsReconnection: false,
+	}
+	resp, err := svc.AcceptRegistration(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	stewardID := resp.StewardId
+
+	info, ok := svc.GetStewardInfo(stewardID)
+	require.True(t, ok)
+	require.NotNil(t, info.DNA, "DNA must be accepted: hostname is unconditionally present in host:os")
+
+	_, found := log.FindWarn("dna_integrity_rejected")
+	assert.False(t, found, "a healthy steward with no hostname module resource configured must not be rejected")
 
 	record, err := storage.GetLatestByDeviceID(ctx, stewardID)
 	require.NoError(t, err)
