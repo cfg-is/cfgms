@@ -295,8 +295,15 @@ the interim authority** for the curated `host:*` observe-only fragment allowlist
 (clause 8). A partition step shapes a curated, stable, non-ephemeral,
 non-module-owned subset of the already-gathered attribute map into `host:*`
 fragments (canonical serialization + hash, clauses 5–6); the gatherers are
-**reused unmodified** and continue to populate the legacy flat `attributes`
-surface unchanged. The osquery epic later **swaps the source** of the same
+**reused unmodified** and the DNA proto `Collect` returns now carries **only the
+`host:*` fragments**: the legacy flat `commonpb.DNA.attributes` field is no longer
+written (Issue #3332). The gathered attribute map itself still exists behind
+`Collector.RawAttributes`, because two consumers are not fragment-aware yet — the
+`sync_dna` attribute payload the controller's required-field integrity check reads
+(`hostname`, `os`), and the unmanaged-drift detector (`pkg/dna/drift`), which
+compares flat maps and would report "no drift" unconditionally if fed empty ones.
+Re-homing those two onto fragments, and deleting the flat map, belong to the
+clean-break epic. The osquery epic later **swaps the source** of the same
 `host:*` fragment ids from gatherers to osquery — a source change, observe-only
 either way, invisible to fragment consumers.
 

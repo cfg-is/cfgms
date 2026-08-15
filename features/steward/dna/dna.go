@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package dna provides system DNA (system attributes) collection for stewards.
+// Package dna provides system DNA (host-fact fragment) collection for stewards.
 //
-// DNA represents the digital fingerprint of a system, containing hardware,
-// software, and configuration attributes that uniquely identify and describe
-// the system. This information is used by the controller for configuration
-// targeting and system management.
+// DNA represents the digital fingerprint of a system, expressed as a set of
+// ADR-017 fragments. Each fragment covers one host-fact domain (host:cpu,
+// host:os, host:network, etc.) and carries a canonical-bytes payload and hash
+// for partial-sync validation.
 //
 // Basic usage:
 //
@@ -16,7 +16,7 @@
 //	}
 //
 //	fmt.Printf("System ID: %s\n", dna.Id)
-//	fmt.Printf("OS: %s\n", dna.Attributes["os"])
+//	fmt.Printf("Fragments: %d\n", len(dna.Fragments))
 package dna
 
 import (
@@ -176,7 +176,6 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 
 	dna := &commonpb.DNA{
 		Id:          systemID,
-		Attributes:  attributes,
 		LastUpdated: timestamppb.New(now),
 
 		// Sync metadata (will be updated by steward with config info)
@@ -232,6 +231,44 @@ func (c *Collector) WaitForBackground(ctx context.Context) {
 	case <-c.bgDone:
 	case <-ctx.Done():
 	}
+}
+
+// RawAttributes rebuilds and returns the full flat attributes map — the same
+// intermediate map that Collect() assembles before partitioning it into
+// host:* fragments. Unlike Collect(), it does not create or return a DNA proto,
+// and does not trigger background collection (call Collect + WaitForBackground
+// first to include slow software/security attributes).
+//
+// After Issue #3332 the DNA proto no longer carries the flat Attributes field,
+// so this is the access path for the consumers that are not fragment-aware yet:
+//
+//   - the steward's DNA attribute payload (cmd/steward's dnaCollectorAdapter),
+//     which the controller's required-field integrity check reads for the
+//     device-identity fields (hostname, os) before it will persist a snapshot;
+//   - unmanaged-drift detection (features/steward.detectUnmanagedDNADrift), whose
+//     detector compares flat attribute maps and would report "no drift"
+//     unconditionally — a detection control failing open — if fed empty ones;
+//   - the must-collect integration test, which verifies every must-collect
+//     attribute is gathered even where no fragment spec covers its domain.
+//
+// Re-homing the first two onto fragments retires this method.
+func (c *Collector) RawAttributes(ctx context.Context) map[string]string {
+	attributes := make(map[string]string)
+	c.collectBasicInfo(attributes)
+	c.collectHardwareInfo(ctx, attributes)
+	c.collectNetworkInfo(ctx, attributes)
+	c.collectEnvironmentInfo(attributes)
+	// Merge slow background data if already completed.
+	select {
+	case <-c.bgDone:
+		c.slowMu.RLock()
+		for k, v := range c.slowAttrs {
+			attributes[k] = v
+		}
+		c.slowMu.RUnlock()
+	default:
+	}
+	return attributes
 }
 
 // runBackgroundCollection collects slow software and security data asynchronously.
