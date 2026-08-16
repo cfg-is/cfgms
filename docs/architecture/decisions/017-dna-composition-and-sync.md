@@ -370,8 +370,8 @@ check in `HandleGRPC` gates all DNA ingest regardless of wire format; it precede
 tenant check on the full-sync path was removed.
 
 **Note.** Non-cluster module DNA (file, service, package resources) reaches the
-controller through `CollectModuleFragments`, whose fragment coverage beyond
-`cluster:*` is tracked by Issue #3333. Attributes that no fragment carries are
-therefore absent from the full-sync projection above until #3333 lands; they
-continue to reach the controller through `PublishDNAUpdate`'s control-plane
-delta, which is unaffected by this amendment.
+controller through `CollectModuleFragments`, which emits fragments for every
+monitored resourceID — not only `cluster:*` — since Issue #3333. The full-sync
+projection above therefore covers the same resource set the flat attribute map
+did. `PublishDNAUpdate`'s control-plane delta carries the same data between full
+syncs and is unaffected by this amendment.
