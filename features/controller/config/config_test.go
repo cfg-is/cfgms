@@ -980,3 +980,37 @@ certificate:
 	require.NoError(t, err)
 	assert.Equal(t, "/var/lib/cfgms/certs/ca", cfg.Certificate.CAPath)
 }
+
+// TestLoadWithPath_CertPath_RelativeResolvesToConfigFileDir verifies that a relative
+// cert_path in the config file is resolved to an absolute path rooted at the config
+// file's directory, removing CWD-dependence (Issue #3197).
+func TestLoadWithPath_CertPath_RelativeResolvesToConfigFileDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	require.NoError(t, os.WriteFile(configPath, []byte("cert_path: certs/\n"), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+
+	want := filepath.Join(dir, "certs")
+	assert.Equal(t, want, cfg.CertPath,
+		"relative cert_path must resolve to <configDir>/certs, not CWD-relative")
+	assert.True(t, filepath.IsAbs(cfg.CertPath),
+		"cert_path must be absolute after loading from config file")
+}
+
+// TestLoadWithPath_CertPath_AbsoluteHonoured verifies that an absolute cert_path
+// in the config file is used unchanged (Issue #3197).
+func TestLoadWithPath_CertPath_AbsoluteHonoured(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	absoluteCertPath := filepath.Join(t.TempDir(), "mycerts")
+	require.NoError(t, os.WriteFile(configPath,
+		[]byte("cert_path: "+absoluteCertPath+"\n"), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, absoluteCertPath, cfg.CertPath,
+		"absolute cert_path must be used unchanged")
+}
