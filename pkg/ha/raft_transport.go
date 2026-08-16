@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -62,15 +64,21 @@ func newRaftTransport(nodeID uint64, address string, consensus *RaftConsensus, c
 		// Full mTLS: validate server CA cert and present client cert for CN verification.
 		tlsConfig, err = cert.CreateClientTLSConfig(clientCertPEM, clientKeyPEM, caCertPEM, "", tls.VersionTLS12)
 		if err != nil {
-			logger.Error("Failed to create TLS config with CA cert, using basic TLS", "error", err)
-			tlsConfig, _ = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+			logger.Error("Failed to create TLS config with CA cert, falling back to basic TLS", "error", err)
+			tlsConfig, err = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+			if err != nil {
+				logger.Error("Failed to create basic TLS config fallback; outbound Raft messages will be rejected by peers", "error", err)
+			}
 		}
 	} else {
 		// No CA cert available — use basic TLS without InsecureSkipVerify.
 		// Connections to peers will fail TLS validation (correct: don't run HA without proper certs).
 		logger.Warn("No CA certificate configured for HA transport",
 			"hint", "Set CFGMS_HA_CA_CERT_PATH for proper TLS validation between cluster nodes")
-		tlsConfig, _ = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+		tlsConfig, err = cert.CreateBasicTLSConfig(nil, nil, tls.VersionTLS12)
+		if err != nil {
+			logger.Error("Failed to create basic TLS config; outbound Raft messages will be rejected by peers", "error", err)
+		}
 	}
 
 	transport := &http.Transport{
@@ -143,10 +151,11 @@ func (t *raftTransport) RemovePeer(nodeID uint64) {
 	t.logger.Debug("Removed peer", "node_id", nodeID)
 }
 
-// Send sends messages to peer nodes
-func (t *raftTransport) Send(messages []raftpb.Message) {
+// Send sends messages to peer nodes.
+// v3.7.0: rd.Messages is []*raftpb.Message.
+func (t *raftTransport) Send(messages []*raftpb.Message) {
 	for _, msg := range messages {
-		if msg.To == 0 {
+		if msg.GetTo() == 0 {
 			continue // Skip messages with no destination
 		}
 
@@ -156,18 +165,18 @@ func (t *raftTransport) Send(messages []raftpb.Message) {
 }
 
 // sendMessage sends a single message to a peer
-func (t *raftTransport) sendMessage(msg raftpb.Message) {
+func (t *raftTransport) sendMessage(msg *raftpb.Message) {
 	t.mu.RLock()
-	peerAddr, ok := t.peers[msg.To]
+	peerAddr, ok := t.peers[msg.GetTo()]
 	t.mu.RUnlock()
 
 	if !ok {
-		t.logger.Warn("No address for peer", "peer_id", msg.To)
+		t.logger.Warn("No address for peer", "peer_id", msg.GetTo())
 		return
 	}
 
 	// Serialize message
-	data, err := msg.Marshal()
+	data, err := proto.Marshal(msg)
 	if err != nil {
 		t.logger.Error("Failed to marshal message", "error", err)
 		return
@@ -192,31 +201,37 @@ func (t *raftTransport) sendMessage(msg raftpb.Message) {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		t.logger.Error("Failed to send message to peer", "peer_id", msg.To, "address", peerAddr, "error", err)
+		t.logger.Error("Failed to send message to peer", "peer_id", msg.GetTo(), "address", peerAddr, "error", err)
 		return
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			t.logger.Error("Failed to close response body", "peer_id", msg.To, "error", err)
+			t.logger.Error("Failed to close response body", "peer_id", msg.GetTo(), "error", err)
 		}
 	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.logger.Warn("Peer returned error", "peer_id", msg.To, "status", resp.StatusCode, "body", string(body))
+		// The response body is remote-controlled: sanitize (also truncates) before logging.
+		t.logger.Warn("Peer returned error", "peer_id", msg.GetTo(), "status", resp.StatusCode,
+			"body", logging.SanitizeLogValue(string(body)))
 	}
 }
 
 // HandleMessage processes incoming Raft messages (HTTP handler)
 func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
 	if err := verifyPeerCN(r, t.allowedCNs); err != nil {
+		// The error text embeds the presented peer certificate CN, which is
+		// peer-controlled; sanitize it along with the remote address.
 		t.logger.Warn("Rejected message from unauthorized peer",
-			"remote_addr", r.RemoteAddr, "error", err)
+			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Forbidden: peer certificate verification failed", http.StatusForbidden)
 		return
 	}
 
-	t.logger.Debug("Received message HTTP request", "node_id", t.nodeID, "remote_addr", r.RemoteAddr)
+	t.logger.Debug("Received message HTTP request",
+		"node_id", t.nodeID, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 
 	// Read message body
 	data, err := io.ReadAll(r.Body)
@@ -233,25 +248,31 @@ func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
 
 	t.logger.Debug("Read bytes from request body", "bytes", len(data))
 
-	// Deserialize message
-	var msg raftpb.Message
-	if err := msg.Unmarshal(data); err != nil {
+	// Deserialize message (v3.7.0: use proto.Unmarshal into a pointer)
+	msg := &raftpb.Message{}
+	if err := proto.Unmarshal(data, msg); err != nil {
 		t.logger.Error("Failed to unmarshal message", "error", err)
 		http.Error(w, "Failed to unmarshal message", http.StatusBadRequest)
 		return
 	}
 
 	t.logger.Debug("Received Raft message",
-		"node_id", t.nodeID, "from", msg.From, "to", msg.To, "type", msg.Type)
+		"node_id", t.nodeID,
+		"from", logging.SanitizeLogValue(strconv.FormatUint(msg.GetFrom(), 10)),
+		"to", logging.SanitizeLogValue(strconv.FormatUint(msg.GetTo(), 10)),
+		"type", logging.SanitizeLogValue(msg.GetType().String()))
 
-	// Process message through Raft
+	// Process message through Raft (pointer: raftpb.Message must never be copied)
 	if err := t.consensus.Process(r.Context(), msg); err != nil {
-		t.logger.Error("Failed to process message from peer", "peer_id", msg.From, "error", err)
+		t.logger.Error("Failed to process message from peer",
+			"peer_id", logging.SanitizeLogValue(strconv.FormatUint(msg.GetFrom(), 10)),
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to process message", http.StatusInternalServerError)
 		return
 	}
 
-	t.logger.Debug("Successfully processed message from peer", "peer_id", msg.From)
+	t.logger.Debug("Successfully processed message from peer",
+		"peer_id", logging.SanitizeLogValue(strconv.FormatUint(msg.GetFrom(), 10)))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -270,7 +291,7 @@ func (t *raftTransport) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		NodeID:   t.nodeID,
 		IsLeader: t.consensus.IsLeader(),
 		Leader:   t.consensus.GetLeader(),
-		Term:     t.consensus.node.Status().Term,
+		Term:     t.consensus.node.Status().GetTerm(),
 		Nodes:    len(t.consensus.GetClusterNodes()),
 	}
 

@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/goleak"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -384,11 +385,11 @@ func TestTwoNodeRaftPeerMTLS_MessageExchangeSucceeds(t *testing.T) {
 
 	smA, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = smA.Close() })
+	t.Cleanup(func() { assert.NoError(t, smA.Close()) })
 
 	smB, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = smB.Close() })
+	t.Cleanup(func() { assert.NoError(t, smB.Close()) })
 
 	// Node IDs must be ≥8 chars: manager.go truncates to [:8] when forming the
 	// default node name. "mtls-node-a" / "mtls-node-b" are 11 chars.
@@ -405,7 +406,7 @@ func TestTwoNodeRaftPeerMTLS_MessageExchangeSucceeds(t *testing.T) {
 		logging.GetLogger(), smA, sharedCertMgr, "",
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = managerA.Stop(context.Background()) })
+	t.Cleanup(func() { assert.NoError(t, managerA.Stop(context.Background())) })
 
 	// managerB: nodeIDB. Its production RaftTransport.HandleMessage serves the
 	// listener. allowedCNs = {nodeIDB, nodeIDA} from the discovery config.
@@ -414,7 +415,7 @@ func TestTwoNodeRaftPeerMTLS_MessageExchangeSucceeds(t *testing.T) {
 		logging.GetLogger(), smB, sharedCertMgr, "",
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = managerB.Stop(context.Background()) })
+	t.Cleanup(func() { assert.NoError(t, managerB.Stop(context.Background())) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/raft/message", managerB.GetRaftTransport().HandleMessage)
@@ -444,8 +445,9 @@ func TestTwoNodeRaftPeerMTLS_MessageExchangeSucceeds(t *testing.T) {
 
 	// A zero-value raftpb.Message (type=MsgHup) is a local message: node.Step
 	// ignores it and returns nil, so HandleMessage writes 200 after the CN check.
-	var msg raftpb.Message
-	data, err := msg.Marshal()
+	// v3.7.0: use proto.Marshal on a pointer; raftpb.Message no longer has Marshal().
+	msg := &raftpb.Message{}
+	data, err := proto.Marshal(msg)
 	require.NoError(t, err)
 
 	resp, err := client.Post(

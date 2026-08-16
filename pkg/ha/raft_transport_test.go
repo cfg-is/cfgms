@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -84,6 +85,40 @@ func TestHandleMessage_UnknownCN_Returns403(t *testing.T) {
 	assert.Equal(t, 403, w.Code, "unknown peer CN must be rejected with 403")
 }
 
+// TestHandleMessage_RejectedPeer_SanitizesLoggedRemoteAddr verifies that the
+// rejection path passes attacker-controlled values through logging.SanitizeLogValue
+// before they reach the log record. r.RemoteAddr is the injectable field here: unlike
+// the numeric raftpb.Message accessors it is a free-form string that can carry CR/LF
+// and forge additional log lines (CWE-117).
+func TestHandleMessage_RejectedPeer_SanitizesLoggedRemoteAddr(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	transport := newRaftTransport(1, "localhost:8080", nil, nil, nil, nil, []string{"node-1"}, logger)
+
+	req := httptest.NewRequest("POST", "/raft/message", nil)
+	req.RemoteAddr = "10.0.0.9:7000\r\nlevel=INFO msg=\"forged cluster join\""
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{testPeerCertWithCN("evil-node")},
+	}
+	w := httptest.NewRecorder()
+	transport.HandleMessage(w, req)
+
+	require.Equal(t, 403, w.Code, "unknown peer CN must be rejected with 403")
+
+	entry, ok := logger.FindWarn("Rejected message from unauthorized peer")
+	require.True(t, ok, "rejection must emit the unauthorized-peer warning")
+
+	remoteAddr, ok := entry["remote_addr"].(string)
+	require.True(t, ok, "remote_addr must be logged as a sanitized string, got %T", entry["remote_addr"])
+	assert.NotContains(t, remoteAddr, "\n", "logged remote_addr must not carry a raw newline")
+	assert.NotContains(t, remoteAddr, "\r", "logged remote_addr must not carry a raw carriage return")
+
+	// The verifyPeerCN error embeds the presented peer CN and must be sanitized too.
+	loggedErr, ok := entry["error"].(string)
+	require.True(t, ok, "error must be logged as a sanitized string, got %T", entry["error"])
+	assert.NotContains(t, loggedErr, "\n", "logged error must not carry a raw newline")
+	assert.NotContains(t, loggedErr, "\r", "logged error must not carry a raw carriage return")
+}
+
 // TestHandleMessage_ValidPeerCN_Returns200 verifies that HandleMessage accepts requests
 // whose peer certificate CN matches a known cluster node. A real RaftConsensus is used
 // so that consensus.Process() (node.Step) succeeds and the handler returns 200.
@@ -107,8 +142,9 @@ func TestHandleMessage_ValidPeerCN_Returns200(t *testing.T) {
 
 	// Marshal a minimal raftpb.Message (empty message, Type=MsgHup).
 	// node.Step is non-blocking: it enqueues to the raft goroutine and returns nil.
-	var msg raftpb.Message
-	data, err := msg.Marshal()
+	// v3.7.0: use proto.Marshal on a pointer; raftpb.Message no longer has Marshal().
+	msg := &raftpb.Message{}
+	data, err := proto.Marshal(msg)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/raft/message", bytes.NewReader(data))

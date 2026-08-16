@@ -12,6 +12,7 @@ import (
 	"go.etcd.io/bbolt"
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -98,13 +99,13 @@ func (s *RaftLogStore) HasData() bool {
 // state machine's last applied index at the point the batch is built; it is
 // stored so the next boot can set raft.Config.Applied correctly.
 //
-// Zero-value HardState and empty entries slices are skipped. A snapshot
-// is skipped when raft.IsEmptySnap returns true. A zero applied value is
-// stored only when the previous value would be overwritten by a larger one.
-func (s *RaftLogStore) SaveBatch(hs raftpb.HardState, entries []raftpb.Entry, snap raftpb.Snapshot, applied uint64) error {
+// Nil HardState and nil snapshot are skipped. A snapshot is also skipped
+// when raft.IsEmptySnap returns true. A zero applied value is stored only
+// when the previous value would be overwritten by a larger one.
+func (s *RaftLogStore) SaveBatch(hs *raftpb.HardState, entries []*raftpb.Entry, snap *raftpb.Snapshot, applied uint64) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		if !raft.IsEmptyHardState(hs) {
-			data, err := hs.Marshal()
+		if hs != nil && !raft.IsEmptyHardState(hs) {
+			data, err := proto.Marshal(hs)
 			if err != nil {
 				return fmt.Errorf("marshal HardState: %w", err)
 			}
@@ -116,18 +117,18 @@ func (s *RaftLogStore) SaveBatch(hs raftpb.HardState, entries []raftpb.Entry, sn
 		if len(entries) > 0 {
 			b := tx.Bucket(bucketEntries)
 			for i := range entries {
-				data, err := entries[i].Marshal()
+				data, err := proto.Marshal(entries[i])
 				if err != nil {
-					return fmt.Errorf("marshal entry index %d: %w", entries[i].Index, err)
+					return fmt.Errorf("marshal entry index %d: %w", entries[i].GetIndex(), err)
 				}
-				if err := b.Put(encodeIndex(entries[i].Index), data); err != nil {
-					return fmt.Errorf("put entry index %d: %w", entries[i].Index, err)
+				if err := b.Put(encodeIndex(entries[i].GetIndex()), data); err != nil {
+					return fmt.Errorf("put entry index %d: %w", entries[i].GetIndex(), err)
 				}
 			}
 		}
 
-		if !raft.IsEmptySnap(snap) {
-			data, err := snap.Marshal()
+		if snap != nil && !raft.IsEmptySnap(snap) {
+			data, err := proto.Marshal(snap)
 			if err != nil {
 				return fmt.Errorf("marshal snapshot: %w", err)
 			}
@@ -152,20 +153,21 @@ func (s *RaftLogStore) SaveBatch(hs raftpb.HardState, entries []raftpb.Entry, sn
 
 // LoadState reads all persisted state from the database and returns the
 // HardState, log entries (in ascending index order), latest snapshot, and the
-// last saved applied index. Returns zero-value outputs (not an error) when no
-// state has been saved yet; that is the normal first-boot condition.
-func (s *RaftLogStore) LoadState() (raftpb.HardState, []raftpb.Entry, raftpb.Snapshot, uint64, error) {
+// last saved applied index. Returns nil outputs (not an error) when no state
+// has been saved yet; that is the normal first-boot condition.
+func (s *RaftLogStore) LoadState() (*raftpb.HardState, []*raftpb.Entry, *raftpb.Snapshot, uint64, error) {
 	var (
-		hs      raftpb.HardState
-		entries []raftpb.Entry
-		snap    raftpb.Snapshot
+		hs      *raftpb.HardState
+		entries []*raftpb.Entry
+		snap    *raftpb.Snapshot
 		applied uint64
 	)
 
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		if b := tx.Bucket(bucketHardState); b != nil {
 			if data := b.Get(keyHardState); data != nil {
-				if err := hs.Unmarshal(data); err != nil {
+				hs = &raftpb.HardState{}
+				if err := proto.Unmarshal(data, hs); err != nil {
 					return fmt.Errorf("unmarshal HardState: %w", err)
 				}
 			}
@@ -173,8 +175,8 @@ func (s *RaftLogStore) LoadState() (raftpb.HardState, []raftpb.Entry, raftpb.Sna
 
 		if b := tx.Bucket(bucketEntries); b != nil {
 			if err := b.ForEach(func(_, v []byte) error {
-				var e raftpb.Entry
-				if err := e.Unmarshal(v); err != nil {
+				e := &raftpb.Entry{}
+				if err := proto.Unmarshal(v, e); err != nil {
 					return fmt.Errorf("unmarshal log entry: %w", err)
 				}
 				entries = append(entries, e)
@@ -186,7 +188,8 @@ func (s *RaftLogStore) LoadState() (raftpb.HardState, []raftpb.Entry, raftpb.Sna
 
 		if b := tx.Bucket(bucketSnapshot); b != nil {
 			if data := b.Get(keySnapshot); data != nil {
-				if err := snap.Unmarshal(data); err != nil {
+				snap = &raftpb.Snapshot{}
+				if err := proto.Unmarshal(data, snap); err != nil {
 					return fmt.Errorf("unmarshal snapshot: %w", err)
 				}
 			}
@@ -200,7 +203,7 @@ func (s *RaftLogStore) LoadState() (raftpb.HardState, []raftpb.Entry, raftpb.Sna
 
 		return nil
 	}); err != nil {
-		return raftpb.HardState{}, nil, raftpb.Snapshot{}, 0, err
+		return nil, nil, nil, 0, err
 	}
 
 	return hs, entries, snap, applied, nil

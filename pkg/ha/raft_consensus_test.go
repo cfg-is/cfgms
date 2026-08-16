@@ -203,8 +203,11 @@ func TestRaftConsensus_ProposeAddNode_SubmitsToChannel(t *testing.T) {
 	// Drain the channel to confirm the correct ConfChange was enqueued.
 	select {
 	case cc := <-rc.confChangeC:
-		assert.Equal(t, raftpb.ConfChangeAddNode, cc.Type)
-		assert.Equal(t, uint64(2), cc.NodeID)
+		// confChangeC carries pointers (raftpb.ConfChange must not be copied).
+		require.NotNil(t, cc, "enqueued ConfChange must not be nil")
+		// v3.7.0: Type is *ConfChangeType and NodeId is *uint64; use getters.
+		assert.Equal(t, raftpb.ConfChangeAddNode, cc.GetType())
+		assert.Equal(t, uint64(2), cc.GetNodeId())
 	default:
 		t.Fatal("confChangeC should contain the enqueued ConfChange")
 	}
@@ -227,8 +230,11 @@ func TestRaftConsensus_ProposeRemoveNode_SubmitsToChannel(t *testing.T) {
 
 	select {
 	case cc := <-rc.confChangeC:
-		assert.Equal(t, raftpb.ConfChangeRemoveNode, cc.Type)
-		assert.Equal(t, uint64(2), cc.NodeID)
+		// confChangeC carries pointers (raftpb.ConfChange must not be copied).
+		require.NotNil(t, cc, "enqueued ConfChange must not be nil")
+		// v3.7.0: Type is *ConfChangeType and NodeId is *uint64; use getters.
+		assert.Equal(t, raftpb.ConfChangeRemoveNode, cc.GetType())
+		assert.Equal(t, uint64(2), cc.GetNodeId())
 	default:
 		t.Fatal("confChangeC should contain the enqueued ConfChange")
 	}
@@ -272,7 +278,9 @@ func TestRaftConsensus_ProposeAddNode_ChannelFull_ReturnsError(t *testing.T) {
 
 	const bufSize = 16
 	for i := 0; i < bufSize; i++ {
-		rc.confChangeC <- raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: uint64(i + 10)}
+		// v3.7.0: Type is *ConfChangeType (.Enum()), NodeId is *uint64 (new(value)).
+		nodeIDVal := uint64(i + 10)
+		rc.confChangeC <- &raftpb.ConfChange{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: new(nodeIDVal)}
 	}
 
 	// With confChangeC at capacity, ProposeAddNode must return an error immediately.
@@ -295,7 +303,9 @@ func TestRaftConsensus_ProposeRemoveNode_ChannelFull_ReturnsError(t *testing.T) 
 
 	const bufSize = 16
 	for i := 0; i < bufSize; i++ {
-		rc.confChangeC <- raftpb.ConfChange{Type: raftpb.ConfChangeRemoveNode, NodeID: uint64(i + 10)}
+		// v3.7.0: Type is *ConfChangeType (.Enum()), NodeId is *uint64 (new(value)).
+		nodeIDVal := uint64(i + 10)
+		rc.confChangeC <- &raftpb.ConfChange{Type: raftpb.ConfChangeRemoveNode.Enum(), NodeId: new(nodeIDVal)}
 	}
 
 	// With confChangeC at capacity, ProposeRemoveNode must return an error immediately.
@@ -432,9 +442,11 @@ func TestRaftConsensus_RestartRecoversLogAndRejoinsAtCorrectIndex(t *testing.T) 
 	}, 5*time.Second, 25*time.Millisecond, "node update must be applied via the Raft log")
 
 	// Capture the term and commit index before stopping.
+	// v3.7.0: Status.Term and Status.Commit are *uint64 (via embedded *pb.HardState);
+	// use GetTerm()/GetCommit() to obtain uint64 values for comparison.
 	status1 := rc1.node.Status()
-	preStopTerm := status1.Term
-	preStopCommit := status1.Commit
+	preStopTerm := status1.GetTerm()
+	preStopCommit := status1.GetCommit()
 
 	require.Greater(t, preStopTerm, uint64(0), "term must be > 0 after election")
 	require.Greater(t, preStopCommit, uint64(0), "commit index must be > 0 after entry apply")
@@ -450,9 +462,9 @@ func TestRaftConsensus_RestartRecoversLogAndRejoinsAtCorrectIndex(t *testing.T) 
 
 	// The recovered node must restart at the persisted term and commit index.
 	status2 := rc2.node.Status()
-	assert.GreaterOrEqual(t, status2.Term, preStopTerm,
+	assert.GreaterOrEqual(t, status2.GetTerm(), preStopTerm,
 		"recovered term must be >= pre-stop term")
-	assert.GreaterOrEqual(t, status2.Commit, preStopCommit,
+	assert.GreaterOrEqual(t, status2.GetCommit(), preStopCommit,
 		"recovered commit index must be >= pre-stop commit index")
 	assert.Equal(t, preStopCommit, rc2.appliedIndex,
 		"recovered appliedIndex must match pre-stop commit index so entries are not re-delivered")

@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
@@ -1186,7 +1187,7 @@ func TestManager_BecomeLeader_OrphanedSessions(t *testing.T) {
 			}
 			return nil
 		}))
-		t.Cleanup(func() { _ = client.Stop(context.Background()) })
+		t.Cleanup(func() { assert.NoError(t, client.Stop(context.Background())) })
 	}
 
 	// Wait for both stewards to appear in the registry.
@@ -1342,7 +1343,9 @@ func TestManager_Start_WiresOnBecomeLeaderCallback(t *testing.T) {
 		}
 		return nil
 	}))
-	t.Cleanup(func() { _ = client.Stop(ctx) })
+	// Cleanup uses a fresh context: ctx is cancelled by the deferred cancel above,
+	// which runs before t.Cleanup callbacks.
+	t.Cleanup(func() { assert.NoError(t, client.Stop(context.Background())) })
 
 	require.Eventually(t, func() bool { return reg.Count() == 1 },
 		5*time.Second, 25*time.Millisecond, "steward must connect before invoking callback")
@@ -1450,8 +1453,10 @@ func TestManager_TwoNodeCluster(t *testing.T) {
 				http.Error(w, readErr.Error(), http.StatusBadRequest)
 				return
 			}
-			var msg raftpb.Message
-			if unmarshalErr := msg.Unmarshal(data); unmarshalErr != nil {
+			// v3.7.0: use proto.Unmarshal into a pointer; Process takes the pointer
+			// (raftpb.Message embeds a mutex and must not be copied).
+			msg := &raftpb.Message{}
+			if unmarshalErr := proto.Unmarshal(data, msg); unmarshalErr != nil {
 				http.Error(w, unmarshalErr.Error(), http.StatusBadRequest)
 				return
 			}
