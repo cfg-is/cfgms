@@ -1130,12 +1130,13 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 
 		// If no snapshot exists yet (e.g. first run before any refresh),
 		// collect one now so the handler streams a real snapshot. A full DNA
-		// sync must never proceed with neither attributes nor fragments: doing
-		// so would tell the controller the steward has no DNA and clobber its
-		// record. If we cannot produce any snapshot (refresh error, or collector
-		// yields nothing), fail the command so the controller can retry rather
-		// than corrupt its state. A zero-managed-resource steward may have empty
-		// attrs but non-empty fragments — that is a valid sync (Issue #3332).
+		// sync must never proceed with no internal DNA state (empty attrs AND
+		// no fragments): doing so would tell the controller the steward has no
+		// DNA and clobber its record. If we cannot produce any snapshot (refresh
+		// error, or collector yields nothing), fail the command so the controller
+		// can retry rather than corrupt its state. A zero-managed-resource
+		// steward may have empty attrs but non-empty fragments — that is a valid
+		// sync (Issue #3332).
 		if len(currentDNA) == 0 {
 			if refreshErr := c.RefreshCurrentDNA(ctx); refreshErr != nil {
 				return fmt.Errorf("no DNA snapshot available and refresh failed for full sync: %w", refreshErr)
@@ -1149,12 +1150,6 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			if len(currentDNA) == 0 && len(fragmentsAfterRefresh) == 0 {
 				return fmt.Errorf("no DNA state available for full sync")
 			}
-		}
-
-		// Serialize attributes as JSON for the DNATransfer payload.
-		attrJSON, err := json.Marshal(currentDNA)
-		if err != nil {
-			return fmt.Errorf("failed to serialize DNA attributes: %w", err)
 		}
 
 		// Collect module fragments (cluster:* resources) for the full DNA sync.
@@ -1181,7 +1176,6 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			StewardID:     sid,
 			TenantID:      tid,
 			Timestamp:     time.Now(),
-			Attributes:    attrJSON,
 			FragmentBytes: fragBytes,
 			Delta:         false, // full snapshot
 			Metadata: map[string]string{

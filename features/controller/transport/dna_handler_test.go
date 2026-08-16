@@ -56,11 +56,11 @@ func syncedDNA(t *testing.T, svc *service.ControllerService, stewardID string) *
 // the core-identity fields the controller's required-field contract checks
 // (features/controller/service/dna_integrity.go — the presence check reads
 // DNA.Fragments, not the flat attribute map, since Issue #3319). A snapshot that
-// carries hostname/os only in the flat map is a degenerate snapshot by that
+// carries hostname/os only as Attributes is a degenerate snapshot by that
 // contract and is refused before persistence, so a fixture that wants to reach
-// the persister must carry them as fragments too — exactly as the steward send
+// the persister must carry them as fragments — exactly as the steward send
 // path does (features/steward/client/client_transport.go populates
-// DNATransfer.FragmentBytes alongside Attributes).
+// DNATransfer.FragmentBytes; Attributes is no longer populated, Issue #3322).
 //
 // Fragment kind per field, confirmed against the producers rather than assumed
 // from the field name:
@@ -99,17 +99,14 @@ func identityFragmentBytes(t *testing.T, attrs map[string]string) [][]byte {
 	return out
 }
 
-// dnaChunksFor marshals attrs as a full-snapshot DNATransfer — flat attributes
-// plus the identity fragments a real steward sends alongside them — and splits
-// the JSON into `parts` contiguous DNAChunks, mirroring the steward send path.
+// dnaChunksFor marshals attrs as a full-snapshot DNATransfer — identity fragments
+// only (Attributes is no longer populated, Issue #3322) — and splits the JSON
+// into `parts` contiguous DNAChunks, mirroring the steward send path.
 func dnaChunksFor(t *testing.T, stewardID string, attrs map[string]string, parts int) []*transportpb.DNAChunk {
 	t.Helper()
-	attrJSON, err := json.Marshal(attrs)
-	require.NoError(t, err)
 	payload, err := json.Marshal(&dptypes.DNATransfer{
 		StewardID:     stewardID,
 		TenantID:      "t1",
-		Attributes:    attrJSON,
 		FragmentBytes: identityFragmentBytes(t, attrs),
 	})
 	require.NoError(t, err)
@@ -155,13 +152,21 @@ func TestDNAHandler_PersistsReassembledDNA(t *testing.T) {
 	stored := syncedDNA(t, svc, "steward-persist")
 	require.NotNil(t, stored, "the reassembled DNA must reach the controller service, not be discarded")
 	assert.Equal(t, "steward-persist", stored.GetId())
-	assert.Equal(t, attrs, stored.GetAttributes())
-	assert.Equal(t, int32(len(attrs)), stored.GetAttributeCount())
+	// Fragments are the authoritative DNA representation (Issue #3322).
+	assert.NotEmpty(t, stored.GetFragments(), "identity fragments from dnaChunksFor must survive reassembly")
+	// The stored record keeps a flat projection of those fragments so the
+	// not-yet-re-homed consumers (role-policy selectors, fleet inventory,
+	// attribute index) do not go blank on first full sync. cpu_count is absent
+	// because identityFragmentBytes emits no fragment for it — the projection
+	// reflects the fragments, not the caller's attrs map.
+	assert.Equal(t, map[string]string{"hostname": "cfg-70-02", "os": "windows"}, stored.GetAttributes(),
+		"Attributes must be the flat projection of the received fragments")
+	assert.Equal(t, int32(2), stored.GetAttributeCount())
 }
 
 // dnaChunksForTransfer marshals an arbitrary DNATransfer and splits the JSON into
 // `parts` contiguous DNAChunks — the same send-side shape as dnaChunksFor, but
-// letting a test set fields beyond Attributes (e.g. Fragments).
+// letting a test set specific fields (e.g. Fragments, FragmentBytes).
 func dnaChunksForTransfer(t *testing.T, transfer *dptypes.DNATransfer, parts int) []*transportpb.DNAChunk {
 	t.Helper()
 	payload, err := json.Marshal(transfer)
@@ -202,13 +207,10 @@ func TestDNAHandler_PersistsFragmentsFromTransfer(t *testing.T) {
 	fragBytes, err := proto.Marshal(frag)
 	require.NoError(t, err)
 
-	attrJSON, err := json.Marshal(map[string]string{"hostname": "cfg-70-02", "os": "windows"})
-	require.NoError(t, err)
-
+	// Wire protocol is Fragments-only: no Attributes field (Issue #3322).
 	transfer := &dptypes.DNATransfer{
 		StewardID:     "steward-frag",
 		TenantID:      "t1",
-		Attributes:    attrJSON,
 		FragmentBytes: [][]byte{fragBytes},
 	}
 
@@ -221,26 +223,20 @@ func TestDNAHandler_PersistsFragmentsFromTransfer(t *testing.T) {
 	assert.Equal(t, "hyperv", got.GetAuthority())
 	assert.Equal(t, frag.GetCanonicalBytes(), got.GetCanonicalBytes())
 	assert.Equal(t, "sha256:deadbeef", got.GetFragmentHash())
-
-	// Flat attributes are unaffected by the fragment path.
-	assert.Equal(t, "cfg-70-02", dna.GetAttributes()["hostname"])
 }
 
 // TestDNAHandler_MalformedFragmentSkipped (#2908): an undecodable fragment is
-// dropped rather than failing the whole snapshot — the flat attributes (steward
-// identity) must still reach the persister.
+// dropped rather than failing the whole snapshot — the well-formed fragments
+// must still reach the persister.
 func TestDNAHandler_MalformedFragmentSkipped(t *testing.T) {
 	good := &common.Fragment{FragmentId: "cluster:ok", CanonicalBytes: []byte(`{"a":"b"}`)}
 	goodBytes, err := proto.Marshal(good)
 	require.NoError(t, err)
 
-	attrJSON, err := json.Marshal(map[string]string{"hostname": "h", "os": "linux"})
-	require.NoError(t, err)
-
+	// Wire protocol is Fragments-only: no Attributes field (Issue #3322).
 	transfer := &dptypes.DNATransfer{
-		StewardID:  "steward-badfrag",
-		TenantID:   "t1",
-		Attributes: attrJSON,
+		StewardID: "steward-badfrag",
+		TenantID:  "t1",
 		// 0x08 starts field 1 as a varint but the value bytes are truncated.
 		FragmentBytes: [][]byte{{0x08}, goodBytes},
 	}
@@ -249,7 +245,6 @@ func TestDNAHandler_MalformedFragmentSkipped(t *testing.T) {
 	require.NoError(t, err, "a malformed fragment must not fail the snapshot")
 	require.Len(t, dna.GetFragments(), 1, "only the well-formed fragment is kept")
 	assert.Equal(t, "cluster:ok", dna.GetFragments()[0].GetFragmentId())
-	assert.Equal(t, "h", dna.GetAttributes()["hostname"])
 }
 
 // ─── Ingest-side DoS bounds on the sync_dna snapshot ─────────────────────────
@@ -273,18 +268,17 @@ func TestReassembleDNA_RejectsExcessiveFragmentCount(t *testing.T) {
 	for i := range frags {
 		frags[i] = fragBytes
 	}
-	attrJSON, err := json.Marshal(map[string]string{"hostname": "h"})
-	require.NoError(t, err)
 
+	// Wire protocol is Fragments-only: no Attributes field (Issue #3322).
 	_, err = reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
-		StewardID: "steward-fragflood", TenantID: "t1", Attributes: attrJSON, FragmentBytes: frags,
+		StewardID: "steward-fragflood", TenantID: "t1", FragmentBytes: frags,
 	}, 1), "steward-fragflood")
 	require.Error(t, err, "an unbounded fragment count must be rejected, not persisted")
 	assert.Contains(t, err.Error(), "exceeds maximum")
 
 	// The boundary itself is still accepted — the cap must not reject legitimate load.
 	dna, err := reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
-		StewardID: "steward-fragmax", TenantID: "t1", Attributes: attrJSON,
+		StewardID: "steward-fragmax", TenantID: "t1",
 		FragmentBytes: frags[:maxDNATransferFragments],
 	}, 1), "steward-fragmax")
 	require.NoError(t, err)
@@ -300,12 +294,10 @@ func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
 	require.LessOrEqual(t, maxDNAFragmentBytes, sdna.MaxCanonicalFragmentSize,
 		"the ingest bound must never be looser than the decoder backstop")
 
-	attrJSON, err := json.Marshal(map[string]string{"hostname": "h"})
-	require.NoError(t, err)
-
+	// Wire protocol is Fragments-only: no Attributes field (Issue #3322).
 	oversized := make([]byte, maxDNAFragmentBytes+1)
-	_, err = reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
-		StewardID: "s", TenantID: "t1", Attributes: attrJSON, FragmentBytes: [][]byte{oversized},
+	_, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
+		StewardID: "s", TenantID: "t1", FragmentBytes: [][]byte{oversized},
 	}), "s"), "s")
 	require.Error(t, err, "an over-cap fragment must never reach the decoder")
 	assert.Contains(t, err.Error(), "exceeds maximum")
@@ -320,7 +312,7 @@ func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
 	require.LessOrEqual(t, len(atLimit), maxDNAFragmentBytes)
 
 	dna, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
-		StewardID: "s", TenantID: "t1", Attributes: attrJSON, FragmentBytes: [][]byte{atLimit},
+		StewardID: "s", TenantID: "t1", FragmentBytes: [][]byte{atLimit},
 	}), "s"), "s")
 	require.NoError(t, err, "a fragment at the boundary must be accepted")
 	require.Len(t, dna.GetFragments(), 1)
@@ -421,7 +413,15 @@ func TestDNAHandler_MultiChunkReassembly(t *testing.T) {
 
 	ctx := peerContextWithCA(t, ca, "steward-multi")
 	require.NoError(t, h.HandleGRPC(newTestDNAStream(ctx, chunks...)))
-	assert.Equal(t, attrs, syncedDNA(t, svc, "steward-multi").GetAttributes())
+
+	stored := syncedDNA(t, svc, "steward-multi")
+	require.NotNil(t, stored, "reassembled DNA must reach the controller service")
+	// Wire protocol is Fragments-only (Issue #3322): verify the identity fragments
+	// produced by dnaChunksFor survive multi-chunk out-of-order reassembly, and
+	// that their flat projection reaches the record intact.
+	assert.NotEmpty(t, stored.GetFragments(), "identity fragments must survive multi-chunk reassembly")
+	assert.Equal(t, map[string]string{"hostname": "cfg-ab-02", "os": "windows"}, stored.GetAttributes(),
+		"fragment-derived attributes must survive multi-chunk out-of-order reassembly")
 }
 
 // TestDNAHandler_PersistStatusNotFound_FailsRPC (#2616, #2641): a persist failure
@@ -787,6 +787,84 @@ func TestSyncDNA_RoundTrip_StewardIDMismatch(t *testing.T) {
 	_, err = stream.CloseAndRecv()
 	require.Error(t, err)
 	assert.Equal(t, codes.PermissionDenied, status.Code(err))
+}
+
+// TestSyncDNA_FragmentsOnly_NoAttributesOnWire is the required integration test
+// (Issue #3322 AC): a full steward→controller DNA sync succeeds with no
+// Attributes bytes on the wire. The transfer carries only FragmentBytes; the
+// controller must accept it and persist the fragments.
+//
+// The stored record still carries a flat attribute map, but it is derived from
+// the received fragments — TestReassembleDNA_IgnoresWireAttributes proves the
+// wire field itself is never read.
+//
+// This test also covers the steward-identity check: the mTLS peer must match the
+// StewardId in the first chunk; HandleGRPC enforces this before calling
+// reassembleDNA (see TestSyncDNA_RoundTrip_StewardIDMismatch).
+func TestSyncDNA_FragmentsOnly_NoAttributesOnWire(t *testing.T) {
+	ca := newTestCA(t)
+	svc := registeredService(t, "steward-frags-only")
+	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+
+	// Build a transfer with identity fragments (hostname + host:os) but no Attributes.
+	// The identity fragments are required by the DNA integrity check in SyncDNA;
+	// they are already what the steward sends via dnaChunksFor (Fragments-only, Issue #3322).
+	attrs := map[string]string{"hostname": "cfg-frags-test", "os": "linux"}
+	transfer := &dptypes.DNATransfer{
+		StewardID:     "steward-frags-only",
+		TenantID:      "t1",
+		FragmentBytes: identityFragmentBytes(t, attrs),
+		// Attributes intentionally nil — wire protocol is Fragments-only (Issue #3322).
+	}
+	require.Nil(t, transfer.Attributes, "test pre-condition: Attributes must be absent from the wire transfer")
+
+	ctx := peerContextWithCA(t, ca, "steward-frags-only")
+	stream := newTestDNAStream(ctx, dnaChunksForTransfer(t, transfer, 1)...)
+
+	require.NoError(t, h.HandleGRPC(stream))
+	require.NotNil(t, stream.resp)
+	assert.True(t, stream.resp.GetAccepted(), "fragment-only transfer must be accepted")
+
+	stored := syncedDNA(t, svc, "steward-frags-only")
+	require.NotNil(t, stored)
+	assert.Equal(t, "steward-frags-only", stored.GetId())
+	// Fragments are the authoritative DNA representation (Issue #3322).
+	assert.NotEmpty(t, stored.GetFragments(), "identity fragments must survive the full sync path")
+	// A fragments-only wire transfer must still leave the flat consumers fed:
+	// role-policy selectors, fleet inventory and the attribute index all read
+	// DNA.Attributes, and SyncDNA replaces the record wholesale.
+	assert.Equal(t, attrs, stored.GetAttributes(),
+		"a fragments-only sync must not blank the record's attribute map")
+	assert.Equal(t, int32(len(attrs)), stored.GetAttributeCount())
+}
+
+// TestReassembleDNA_IgnoresWireAttributes pins the Issue #3322 wire contract from
+// the hostile direction: DNATransfer.Attributes is never read, so a steward that
+// keeps sending one (an old build, or a compromised host trying to assert
+// attributes no fragment backs) cannot influence the reassembled record. The
+// resulting flat map must be exactly the fragment projection.
+func TestReassembleDNA_IgnoresWireAttributes(t *testing.T) {
+	attrJSON, err := json.Marshal(map[string]string{
+		"hostname": "attacker-claimed-host",
+		"os":       "attacker-claimed-os",
+		"role":     "domain-controller",
+	})
+	require.NoError(t, err)
+
+	transfer := &dptypes.DNATransfer{
+		StewardID:     "steward-wire-attrs",
+		TenantID:      "t1",
+		Attributes:    attrJSON,
+		FragmentBytes: identityFragmentBytes(t, map[string]string{"hostname": "real-host", "os": "linux"}),
+	}
+
+	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-wire-attrs")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"hostname": "real-host", "os": "linux"}, dna.GetAttributes(),
+		"attributes must come from fragments only; the wire blob must be ignored entirely")
+	assert.NotContains(t, dna.GetAttributes(), "role",
+		"a key present only in the wire blob must never enter the record")
+	assert.Equal(t, int32(2), dna.GetAttributeCount())
 }
 
 // TestSyncDNA_OversizedMessageRejected verifies that the gRPC server enforces

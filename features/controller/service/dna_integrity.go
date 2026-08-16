@@ -123,23 +123,16 @@ func checkDNAIntegrity(dna *common.DNA, ct configType) dnaIntegrityResult {
 // omitted. Fragments with malformed canonical bytes are silently skipped —
 // hostile input from a compromised steward must not prevent checking the
 // well-formed ones.
+//
+// The projection itself lives in sdna.FlattenFragments because the DNA-sync
+// ingest path needs the identical mapping (features/controller/transport
+// /dna_handler.go rebuilds the flat attribute view from fragments). Two copies
+// of "how a fragment becomes a flat attribute" would let the integrity check and
+// the stored record disagree about what a snapshot contains. sdna.FlattenFragments
+// additionally skips nil fragments and merges in ascending fragment-ID order, so
+// a duplicated key resolves the same way on every call.
 func FlattenDNAFragments(frags []*common.Fragment) map[string]string {
-	flat := make(map[string]string)
-	for _, frag := range frags {
-		if len(frag.CanonicalBytes) == 0 {
-			continue
-		}
-		decoded, err := sdna.DecodeCanonicalFragment(frag.CanonicalBytes)
-		if err != nil {
-			continue
-		}
-		for k, v := range decoded {
-			if s, ok := v.(string); ok && s != "" {
-				flat[k] = s
-			}
-		}
-	}
-	return flat
+	return sdna.FlattenFragments(frags)
 }
 
 // checkDNAIntegrityWithTable is the table-parameterised implementation. Tests
@@ -159,7 +152,7 @@ func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[config
 		// Conservative default: unknown config types have no declared contract.
 		return dnaIntegrityResult{valid: true}
 	}
-	flat := FlattenDNAFragments(dna.Fragments)
+	flat := FlattenDNAFragments(dna.GetFragments())
 	var missing []string
 	for _, field := range required {
 		if flat[field] == "" {
