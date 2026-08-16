@@ -29,7 +29,7 @@ If no file is found, built-in defaults are used and environment variable overrid
 |---|---|---|---|---|---|
 | `listen_addr` | string | `"127.0.0.1:8080"` | optional | REST API (HTTPS) listen address | config.go:72 |
 | `external_url` | string | — | **required** | Externally-reachable HTTPS address used in admin bundles and upgrade URLs (e.g. `https://controller.example.com:8080`); admin bundle issuance fails if unset | config.go:75 |
-| `cert_path` | string | `"certs/"` | optional | Legacy TLS certificate directory (superseded by `certificate` block) | config.go:78 |
+| `cert_path` | string | `"certs/"` | optional | Legacy TLS certificate directory holding `server.crt` / `server.key` (superseded by the `certificate` block). **A relative value is resolved against the directory containing the config file, not the process working directory** — so the default `certs/` means `<config-file-dir>/certs`. An absolute value is used unchanged. See the note below for the `CFGMS_CERT_PATH` exception. | config.go:78 |
 | `data_dir` | string | `"data/"` | optional | Data storage root directory | config.go:81 |
 | `log_level` | string | `"info"` | optional | Log verbosity shorthand; overridden by `logging.level` if both set | config.go:84 |
 | `security_profile` | string | `"development"` | optional | Deployment security profile: `development`, `test`, or fail-closed `public-beta` | config.go |
@@ -49,9 +49,22 @@ If no file is found, built-in defaults are used and environment variable overrid
 | `CFGMS_LISTEN_ADDR` | `listen_addr` |
 | `CFGMS_HTTP_LISTEN_ADDR` | `listen_addr` (same field, last one wins) |
 | `CFGMS_EXTERNAL_URL` | `external_url` |
-| `CFGMS_CERT_PATH` | `cert_path` |
+| `CFGMS_CERT_PATH` | `cert_path` — **must be absolute** (see note below) |
 | `CFGMS_DATA_DIR` | `data_dir` |
 | `CFGMS_LOG_LEVEL` | `log_level` and `logging.level` |
+
+> **`cert_path` resolution (Issue #3197).** A relative `cert_path` read *from a config
+> file* is anchored to that file's directory as the file is loaded, which is what makes it
+> independent of the working directory the controller is started from.
+>
+> `CFGMS_CERT_PATH` does **not** get this treatment. The environment override is applied
+> after the config file has been resolved, so its value is used exactly as given — a
+> relative value stays relative and is interpreted against the process working directory.
+> Always set `CFGMS_CERT_PATH` to an absolute path.
+>
+> The same caveat applies when the config file itself is located via a relative
+> `--config` / `CFGMS_CONTROLLER_CONFIG` value: the anchor is then relative too, so
+> `cert_path` remains working-directory dependent. Prefer an absolute `--config` path.
 
 ---
 
