@@ -352,8 +352,6 @@ these consumers have not yet been re-homed onto `DNA.Fragments`:
 | re-registration change detection (`features/controller/service/controller_service.go`) | `AttributeCount` compares permanently 0 against a non-zero incoming count |
 
 Each failure is fail-closed rather than fail-open, but silent and fleet-wide.
-(Role-policy selector matching, `config_service_v2.go` → `roleConfigAdapter.MatchingRoleFragments`,
-was already re-homed onto `DNA.Fragments` by Issue #3325 and is not in this list.)
 
 So `reassembleDNA` **derives** `DNA.Attributes`/`DNA.AttributeCount` from the
 received fragments via `sdna.FlattenFragments` — the same projection the
