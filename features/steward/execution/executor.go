@@ -431,6 +431,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		stateDiff.EventType = "drift.detected"
 	}
 
+	// Stamp the module-internal resource identifier so drift-diff accumulation can
+	// build the fragment_id for entity-graph EID resolution without re-deriving it.
+	stateDiff.ResourceID = resourceID
+
 	// Emit drift event. Handler fires in both modes — ordering is always preserved.
 	if driftHandler != nil {
 		driftHandler(resource.Name, resource.Module, &stateDiff)

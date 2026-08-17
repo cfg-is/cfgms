@@ -113,7 +113,12 @@ type DNA struct {
 	AggregateRoot string `protobuf:"bytes,10,opt,name=aggregate_root,json=aggregateRoot,proto3" json:"aggregate_root,omitempty"`
 	// manifest is the sorted (fragment_id, fragment_hash) pair list whose hash
 	// equals aggregate_root.  Used for partial-sync diff (ADR-017 §6, §7).
-	Manifest      []*ManifestEntry `protobuf:"bytes,11,rep,name=manifest,proto3" json:"manifest,omitempty"`
+	Manifest []*ManifestEntry `protobuf:"bytes,11,rep,name=manifest,proto3" json:"manifest,omitempty"`
+	// DriftDiffs carries per-resource managed-resource drift records accumulated
+	// since the last sync (ADR-022 §6, field 12 in common.proto). Not proto-serialized
+	// in this build; used as an in-memory carrier from reassembleDNA to the
+	// entity-graph write step. JSON-encoded in DNATransfer.DriftDiffBytes on the wire.
+	DriftDiffs    []*DriftDiffRecord `json:"drift_diffs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -221,6 +226,13 @@ func (x *DNA) GetAggregateRoot() string {
 func (x *DNA) GetManifest() []*ManifestEntry {
 	if x != nil {
 		return x.Manifest
+	}
+	return nil
+}
+
+func (x *DNA) GetDriftDiffs() []*DriftDiffRecord {
+	if x != nil {
+		return x.DriftDiffs
 	}
 	return nil
 }

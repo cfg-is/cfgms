@@ -27,6 +27,20 @@
 // Source attribution for host-scoped observations uses peerHostAuthority (not
 // the module authority) so that ClaimScope.Source and Observation.Source remain
 // equal, enabling the retraction machinery to fire correctly.
+//
+// # Entry points
+//
+// The package has two write entry points, and the difference between them is what
+// each one claims about completeness:
+//
+//   - WriteFragmentDelta (writer.go) ingests a steward's fragment set as
+//     ObservationKindState. A fragment set is a COMPLETE statement of what the peer
+//     currently reports, so the batch carries a host-scoped ClaimScope and any prior
+//     subject missing from it is retracted.
+//   - WriteDriftDiffs (driftdiff.go) ingests managed-resource drift-diff records as
+//     ObservationKindDriftDiff (ADR-022 §6). A drift-diff batch is a PARTIAL statement
+//     covering only the resources that drifted this cycle, so it carries NO ClaimScope
+//     and is additive only. Entity absence remains decided solely by the fragment set.
 package dnasync
 
 import (

@@ -52,6 +52,6 @@ func FuzzReassembleDNA(f *testing.F) {
 			},
 		}
 		// Any panic inside reassembleDNA is a bug. Errors are expected and safe.
-		_, _ = reassembleDNA(chunks, "fuzz-steward")
+		_, _, _ = reassembleDNA(chunks, "fuzz-steward")
 	})
 }

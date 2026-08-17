@@ -99,6 +99,12 @@ type DNATransfer struct {
 	// BaseVersion is the DNA version this delta is based on (if Delta=true)
 	BaseVersion string `json:"base_version,omitempty"`
 
+	// DriftDiffBytes carries per-resource drift-diff records accumulated since the
+	// last sync (ADR-022 §6, Issue #3373). Each element is a JSON-encoded
+	// commonpb.DriftDiffRecord. Populated on both full and delta syncs when the
+	// steward has accumulated drift records since the previous sync.
+	DriftDiffBytes [][]byte `json:"drift_diff_bytes,omitempty"`
+
 	// Metadata contains transfer-specific metadata
 	//
 	// Examples: compression algorithm, attribute count, collection duration

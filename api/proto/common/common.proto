@@ -6,6 +6,7 @@ package cfgms.api.common;
 
 option go_package = "github.com/cfgis/cfgms/api/proto/common";
 
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 // Common message types used across multiple services
@@ -48,6 +49,12 @@ message DNA {
   // manifest is the sorted (fragment_id, fragment_hash) pair list whose hash
   // equals aggregate_root.  Used for partial-sync diff (ADR-017 §6, §7).
   repeated ManifestEntry manifest = 11;
+
+  // drift_diffs carries per-resource managed-resource drift records accumulated
+  // by the steward convergence loop since the last sync (ADR-022 §6, Issue #3373).
+  // Field 12 follows the additive-field convention of fields 8-11; existing
+  // consumers of fields 1-11 are unaffected.
+  repeated DriftDiffRecord drift_diffs = 12;
 }
 
 // Fragment is one addressable unit of DNA state.  Its hash (fragment_hash)
@@ -131,6 +138,49 @@ message Version {
   string version = 1;
   string commit = 2;
   string build_date = 3;
+}
+
+// DriftDiffRecord is a managed-resource drift-diff record accumulated by the
+// steward convergence loop and shipped in DNA.drift_diffs (field 12, ADR-022 §6).
+// One record is produced per managed resource per convergence cycle where drift
+// was detected.
+message DriftDiffRecord {
+  // fragment_id is the module-internal resource identifier, e.g. "vm:m2-test-vm"
+  // or "service:sshd". It is the fragID passed to resolveSubjectEID on the
+  // controller side to construct the entity-graph EID.
+  string fragment_id = 1;
+
+  // fields is the full compared field set: every managed field including matching
+  // ones, not just deltas. Each field carries its desired and actual values plus a
+  // matching flag.
+  repeated DriftDiffField fields = 2;
+
+  // config_revision is the config version applied on the steward at the time of
+  // drift detection.
+  string config_revision = 3;
+
+  // detected_at is when drift was detected on the steward.
+  google.protobuf.Timestamp detected_at = 4;
+}
+
+// DriftDiffField is one attribute in a DriftDiffRecord comparison.
+message DriftDiffField {
+  // attribute is the field name.
+  string attribute = 1;
+
+  // desired is the desired value for this attribute. Module state values are
+  // arbitrary JSON scalars and structures (bool, number, string, list, map), so the
+  // field is Value rather than string — matching the Go carrier type, which holds
+  // the decoded value and not a re-encoded string. Null when the attribute is absent
+  // from the desired config but present in the actual state.
+  google.protobuf.Value desired = 2;
+
+  // actual is the actual value for this attribute, same typing as desired. Null when
+  // the attribute is absent from the actual state but present in the desired config.
+  google.protobuf.Value actual = 3;
+
+  // matching is true when desired == actual.
+  bool matching = 4;
 }
 
 message SyncStatus {

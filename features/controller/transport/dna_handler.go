@@ -421,9 +421,13 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		return stream.SendAndClose(&transportpb.DNASyncResponse{Accepted: true, Message: "accepted"})
 	}
 
-	dna, rErr := reassembleDNA(chunks, peerID)
+	dna, driftRejected, rErr := reassembleDNA(chunks, peerID)
 	if rErr != nil {
 		return status.Errorf(codes.InvalidArgument, "failed to reassemble DNA: %v", rErr)
+	}
+	if driftRejected > 0 {
+		h.logger.Warn("drift-diff records rejected at the input bounds on full sync",
+			"peer_id", logging.SanitizeLogValue(peerID), "rejected", driftRejected)
 	}
 
 	persistStatus, pErr := h.persister.SyncDNA(ctx, dna)
@@ -436,6 +440,17 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 
 	h.logger.Info("DNA sync persisted", "peer_id", peerID,
 		"attributes", dna.GetAttributeCount(), "fragments", len(dna.GetFragments()))
+
+	// Drift-diff write (Issue #3373, ADR-022 §6). Write any drift-diff records
+	// carried on the full sync. Failure is non-fatal — the DNA snapshot was already
+	// committed and the steward's stream must not be failed for a graph-write issue.
+	if h.egWriter != nil && h.egTaxonomy != nil && len(dna.GetDriftDiffs()) > 0 {
+		safePeerID := logging.SanitizeLogValue(peerID)
+		if ddErr := h.egWriter.WriteDriftDiffs(ctx, peerID, dna.GetDriftDiffs(), h.egTaxonomy); ddErr != nil {
+			h.logger.Warn("drift-diff write failed on full sync; DNA committed, drift graph may lag",
+				"peer_id", safePeerID, "error", logging.SanitizeLogValue(ddErr.Error()))
+		}
+	}
 
 	return stream.SendAndClose(&transportpb.DNASyncResponse{
 		Accepted: true,
@@ -525,6 +540,17 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 		return status.Errorf(codes.InvalidArgument, "delta rejected: %v", vErr)
 	}
 
+	// Bound and validate the drift-diff records riding along on this delta BEFORE the
+	// commit, on the same trust boundary and for the same reason as the fragments
+	// above: their fragment IDs become entity-graph EIDs and their field names become
+	// persisted payload keys (Issue #3373). Rejections are filtered, not fatal — see
+	// acceptDriftDiffs.
+	driftRecs, driftRejected := acceptDriftDiffs(transfer.DriftDiffBytes)
+	if driftRejected > 0 {
+		h.logger.Warn("drift-diff records rejected at the input bounds on delta",
+			"peer_id", safePeerID, "rejected", driftRejected)
+	}
+
 	// Bind every leaf to its content BEFORE the merge. Skipping this would reduce
 	// the root check to "the steward is consistent with its own claims".
 	if leafErr := verifyFragmentLeaves(receivedFragments); leafErr != nil {
@@ -573,6 +599,17 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 		if egErr := h.egWriter.WriteFragmentDelta(ctx, peerID, receivedFragments, nil, h.egTaxonomy); egErr != nil {
 			h.logger.Warn("entity-graph write failed for delta; manifest committed, graph may lag",
 				"peer_id", safePeerID, "error", logging.SanitizeLogValue(egErr.Error()))
+		}
+
+		// Drift-diff write (Issue #3373, ADR-022 §6). The records piggy-backed on this
+		// delta transfer were bounded and validated by acceptDriftDiffs above, before
+		// anything about them could reach the entity graph. The write itself is
+		// non-fatal — same policy as the fragment write above.
+		if len(driftRecs) > 0 {
+			if ddErr := h.egWriter.WriteDriftDiffs(ctx, peerID, driftRecs, h.egTaxonomy); ddErr != nil {
+				h.logger.Warn("drift-diff write failed; delta committed, drift graph may lag",
+					"peer_id", safePeerID, "error", logging.SanitizeLogValue(ddErr.Error()))
+			}
 		}
 	}
 
@@ -647,6 +684,123 @@ func validateDeltaFragments(received []*common.Fragment, requestedIDs map[string
 		}
 	}
 	return nil
+}
+
+// Drift-diff input bounds (Issue #3373), enforced at the same trust boundary as the
+// delta bounds above and for the same reason: a drift-diff record produces a
+// permanent observation row plus a drift-projection upsert in the tenant-shared
+// entity graph, and nothing about the record is controller-derived. Without these,
+// DriftDiffBytes inherits only the 8 MiB reassembly ceiling — roughly 100k records
+// per sync, each with an unbounded field list.
+const (
+	// maxDriftDiffRecords bounds the records one sync may carry. It matches the
+	// steward-side driftdiff.DefaultCapacity accumulator bound, which is the largest
+	// batch an honest steward can produce between two syncs.
+	maxDriftDiffRecords = 1024
+
+	// maxDriftDiffRecordBytes bounds one JSON-encoded record before it is decoded.
+	// A record is a fragment_id plus a bounded field list of scalar desired/actual
+	// values; 64 KiB is far above any real resource and keeps both the decode cost
+	// and the persisted payload bounded, including the nesting depth of the
+	// interface{} values inside it.
+	maxDriftDiffRecordBytes = 64 << 10
+
+	// maxDriftDiffFields bounds the compared field set of one record. Modules declare
+	// managed fields in their manifest; a resource with more than 256 of them is not a
+	// shape any shipped module produces.
+	maxDriftDiffFields = 256
+)
+
+// acceptDriftDiffs enforces the drift-diff input bounds and returns the records that
+// may be written, plus the number rejected.
+//
+// Policy: drift-diffs are FILTERED, never fatal. They ride along on a sync whose
+// primary payload is the DNA snapshot or fragment delta, and that payload has already
+// passed its own validation; failing the stream over a secondary field would let one
+// malformed drift record black-hole a steward's entire DNA reporting. Every rejection
+// is counted so the caller can log it — nothing is dropped silently.
+//
+// What is rejected, and why each check exists:
+//   - Records beyond maxDriftDiffRecords, and records over maxDriftDiffRecordBytes:
+//     unbounded volume is unbounded permanent storage growth.
+//   - Records that fail validateFragmentID: the fragment_id becomes the local_id of an
+//     EID (types.NewEID does not validate it) and thereby a storage key and a log
+//     record. This is the same check every other steward-supplied fragment_id on this
+//     handler passes; without it the drift-diff path is a hole straight through it.
+//   - Records repeating a fragment_id already seen in the batch: a duplicate only
+//     rewrites the same projection row, so it is pure amplification.
+//   - Records with more than maxDriftDiffFields fields, or with an attribute name that
+//     fails the same storable-string check: attribute names become payload map keys.
+func acceptDriftDiffs(raw [][]byte) ([]*common.DriftDiffRecord, int) {
+	if len(raw) == 0 {
+		return nil, 0
+	}
+
+	rejected := 0
+	if len(raw) > maxDriftDiffRecords {
+		rejected += len(raw) - maxDriftDiffRecords
+		raw = raw[:maxDriftDiffRecords]
+	}
+
+	sized := make([][]byte, 0, len(raw))
+	for _, b := range raw {
+		if len(b) > maxDriftDiffRecordBytes {
+			rejected++
+			continue
+		}
+		sized = append(sized, b)
+	}
+
+	decoded := dnasync.DecodeDriftDiffBytes(sized)
+	// DecodeDriftDiffBytes skips empty and malformed entries; count them as rejected.
+	rejected += len(sized) - len(decoded)
+
+	kept := make([]*common.DriftDiffRecord, 0, len(decoded))
+	seen := make(map[string]struct{}, len(decoded))
+	for _, rec := range decoded {
+		if rec == nil {
+			rejected++
+			continue
+		}
+		if err := validateFragmentID(rec.FragmentID); err != nil {
+			rejected++
+			continue
+		}
+		if _, dup := seen[rec.FragmentID]; dup {
+			rejected++
+			continue
+		}
+		if len(rec.Fields) > maxDriftDiffFields {
+			rejected++
+			continue
+		}
+		if !driftDiffFieldsStorable(rec.Fields) {
+			rejected++
+			continue
+		}
+		seen[rec.FragmentID] = struct{}{}
+		kept = append(kept, rec)
+	}
+
+	if len(kept) == 0 {
+		return nil, rejected
+	}
+	return kept, rejected
+}
+
+// driftDiffFieldsStorable reports whether every attribute name in the field set is
+// safe to use as a persisted payload key, applying the same rule validateFragmentID
+// applies to fragment IDs (non-empty, bounded, valid UTF-8, no control characters).
+func driftDiffFieldsStorable(fields []*common.DriftDiffField) bool {
+	for _, f := range fields {
+		if f == nil {
+			return false
+		}
+		if err := validateFragmentID(f.Attribute); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // validateFragmentID reports whether a steward-supplied fragment_id is storable:
@@ -795,10 +949,14 @@ func reassembleDNATransfer(chunks []*transportpb.DNAChunk, stewardID string) (*d
 // The steward-identity check (firstChunk.GetStewardId() != peerID) is enforced in
 // HandleGRPC before this function is called; reassembleDNA receives an
 // already-verified stewardID.
-func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DNA, error) {
+//
+// The second return value is the number of drift-diff records rejected at the input
+// bounds (see acceptDriftDiffs). It is returned rather than logged here so the caller
+// can attribute the rejection to the peer that sent it.
+func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DNA, int, error) {
 	transfer, err := reassembleDNATransfer(chunks, stewardID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Fragment count and per-fragment size are bounded BEFORE any decode. A
@@ -807,13 +965,13 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 	// rejected outright: that is not the shape a healthy steward produces, and
 	// persisting it would hand the controller a repeatable decode amplifier.
 	if len(transfer.FragmentBytes) > maxDNATransferFragments {
-		return nil, fmt.Errorf("fragment count %d exceeds maximum %d",
+		return nil, 0, fmt.Errorf("fragment count %d exceeds maximum %d",
 			len(transfer.FragmentBytes), maxDNATransferFragments)
 	}
 	var frags []*common.Fragment
 	for _, fb := range transfer.FragmentBytes {
 		if len(fb) > maxDNAFragmentBytes {
-			return nil, fmt.Errorf("fragment of %d bytes exceeds maximum %d",
+			return nil, 0, fmt.Errorf("fragment of %d bytes exceeds maximum %d",
 				len(fb), maxDNAFragmentBytes)
 		}
 		frag := &common.Fragment{}
@@ -827,8 +985,16 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 	// above. Derived from decoded fragment state — never from transfer.Attributes.
 	attrs := sdna.FlattenFragments(frags)
 	if len(attrs) > math.MaxInt32 {
-		return nil, fmt.Errorf("DNA attribute count exceeds int32 limit")
+		return nil, 0, fmt.Errorf("DNA attribute count exceeds int32 limit")
 	}
+
+	// Decode and bound the drift-diff records carried on the transfer (ADR-022 §6,
+	// Issue #3373). acceptDriftDiffs applies the same storable-string rule to
+	// fragment IDs that validateDeltaFragments applies on the delta path, and bounds
+	// record count, record size and field count. Rejections are counted, not fatal:
+	// the DNA snapshot is the primary payload here and must not be black-holed by a
+	// malformed secondary field.
+	driftDiffs, driftRejected := acceptDriftDiffs(transfer.DriftDiffBytes)
 
 	// #nosec G115 -- attribute count is explicitly bounded by MaxInt32 above.
 	return &common.DNA{
@@ -836,5 +1002,6 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 		Fragments:      frags,
 		Attributes:     attrs,
 		AttributeCount: int32(len(attrs)),
-	}, nil
+		DriftDiffs:     driftDiffs,
+	}, driftRejected, nil
 }

@@ -26,6 +26,9 @@ package steward
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -38,6 +41,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/features/steward/driftdiff"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
@@ -80,6 +84,18 @@ type Steward struct {
 	// Comparing it against a fresh snapshot detects unmanaged attribute changes.
 	previousDNA   *commonpb.DNA
 	previousDNAMu sync.Mutex
+
+	// driftDiffs buffers the DriftDiffRecord that onManagedResourceDrift builds for
+	// every managed-resource drift event (Issue #3373). Bounded and drop-oldest; see
+	// driftdiff.Accumulator. Drained at the end of each convergence pass by
+	// drainDriftDiffs. Held by value so a zero Steward still has a bounded buffer.
+	driftDiffs driftdiff.Accumulator
+
+	// configRevision identifies the desired-state revision the standalone engine is
+	// converging against, and is stamped on every drift-diff record so a record can be
+	// attributed to the cfg that produced it. Standalone mode receives no
+	// controller-assigned config version, so it is the content hash of the loaded cfg.
+	configRevision string
 
 	// Secret store for steward-side secret management
 	secretStore secretsif.SecretStore
@@ -207,7 +223,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		logger.Warn("Failed to load script module for signing config wiring", "error", loadErr)
 	}
 
-	return &Steward{
+	s := &Steward{
 		standaloneConfig: cfg,
 		logger:           logger,
 		healthCheck:      healthMonitor,
@@ -218,8 +234,35 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		executor:         executor,
 		dnaCollector:     dnaCollector,
 		driftDetector:    driftDetector,
+		configRevision:   configContentRevision(cfg),
 		shutdown:         make(chan struct{}),
-	}, nil
+	}
+
+	// Register the managed-resource drift handler at construction, not at Start, so
+	// every path that drives the executor records drift-diff records: the convergence
+	// loop, monitor-driven targeted reconciles, and a direct ExecuteConfiguration call.
+	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
+
+	return s, nil
+}
+
+// configContentRevision derives the revision identifier stamped on every drift-diff
+// record produced in standalone mode.
+//
+// A standalone steward is driven by a local cfg file and receives no
+// controller-assigned config version, but a drift record still has to say which
+// desired state it was measured against — otherwise a record read later cannot be
+// attributed to the cfg that produced it. The revision is therefore the SHA-256 of
+// the effective (post-defaults, post-validation) configuration. encoding/json emits
+// map keys in sorted order, so the same cfg always produces the same revision, and
+// any edit to the cfg produces a different one.
+func configContentRevision(cfg config.StewardConfig) string {
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // Start initializes and starts the steward's convergence loop.
@@ -268,9 +311,8 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 		s.healthCheck.Start(healthCtx)
 	}()
 
-	// Register managed resource drift handler on the execution engine.
-	// When the Compare step detects drift, this logs the event before Set corrects it.
-	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
+	// The managed-resource drift handler is registered in NewStandalone, before any
+	// executor path can run.
 
 	// Start monitors for modules that implement the Monitor interface.
 	// Monitor events feed a targeted reconcile of the changed resource.
@@ -317,6 +359,10 @@ func (s *Steward) runConvergence(ctx context.Context) {
 	for _, err := range report.Errors {
 		s.logger.Error("Convergence error", "error", err)
 	}
+
+	// Empty the drift-diff accumulator this pass filled. Standalone mode has no
+	// controller to sync the records to, so this is their terminus (Issue #3373).
+	s.drainDriftDiffs()
 
 	// Collect a fresh DNA snapshot and compare against the previous one to detect
 	// changes to unmanaged attributes. This is a natural post-convergence activity:
@@ -424,7 +470,28 @@ func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) ([]*drift.DriftEv
 
 // onManagedResourceDrift is the DriftEventHandler registered on the execution engine.
 // It is called by the convergence Compare step when a managed resource has drifted,
-// before Set corrects it. This gives visibility into what was out of compliance.
+// before Set corrects it.
+//
+// It does two things (Issue #3373, ADR-022 §6). It logs the event, as it always has,
+// and it builds a DriftDiffRecord from the StateDiff and records it in the steward's
+// drift-diff accumulator instead of discarding the diff. The record carries the full
+// compared field set — matching fields included — so a consumer can render how much of
+// the resource was in compliance, not only what drifted.
+//
+// Where the accumulated record goes depends on the engine that produced it, and the
+// two engines are separate by construction:
+//
+//   - Standalone (this type): there is no controller and therefore no DNA sync, so
+//     drainDriftDiffs() empties the accumulator at the end of every convergence pass
+//     and reports each record locally. Nothing is left to grow unbounded.
+//   - Controller-connected (features/steward/client.TransportClient): its own
+//     executor carries an equivalent handler wired in InitializeConfigExecutor, and
+//     its accumulator is drained onto DNATransfer.DriftDiffBytes on each SYNC_DNA
+//     cycle — that is the path that carries the record to the entity graph.
+//
+// Both engines build the record through driftdiff.BuildRecord and buffer it in a
+// driftdiff.Accumulator, so the two paths cannot diverge on record shape or on the
+// memory bound.
 func (s *Steward) onManagedResourceDrift(resourceName string, moduleName string, diff *stewardtesting.StateDiff) {
 	changedCount := len(diff.ChangedFields)
 	addedCount := len(diff.AddedFields)
@@ -437,6 +504,46 @@ func (s *Steward) onManagedResourceDrift(resourceName string, moduleName string,
 		"added_fields", addedCount,
 		"removed_fields", removedCount,
 		"summary", diff.GetDriftSummary())
+
+	rec := driftdiff.BuildRecord(diff, s.configRevision)
+	if rec == nil {
+		// No resource identifier on the diff: the record could not be addressed to an
+		// entity-graph EID, so buffering it would only waste the bounded buffer.
+		s.logger.Warn("Managed resource drift carried no resource identifier; drift-diff record not produced",
+			"resource", logging.SanitizeLogValue(resourceName),
+			"module", logging.SanitizeLogValue(moduleName))
+		return
+	}
+	s.driftDiffs.Append(rec)
+}
+
+// drainDriftDiffs empties the drift-diff accumulator and reports each record.
+//
+// Standalone mode has no controller to sync to, so this is where the accumulated
+// records terminate: each is reported to the local log with its full compared field
+// counts, and the buffer returns to empty every convergence pass. Records dropped
+// because the buffer filled between drains are reported as a count, never silently.
+func (s *Steward) drainDriftDiffs() {
+	records, dropped := s.driftDiffs.Drain()
+	if dropped > 0 {
+		s.logger.Warn("Drift-diff records were dropped: accumulator reached capacity between drains",
+			"dropped", dropped,
+			"capacity", s.driftDiffs.Capacity())
+	}
+	for _, rec := range records {
+		matching := 0
+		for _, f := range rec.Fields {
+			if f.Matching {
+				matching++
+			}
+		}
+		s.logger.Info("Managed resource drift-diff record",
+			"fragment_id", logging.SanitizeLogValue(rec.FragmentID),
+			"config_revision", logging.SanitizeLogValue(rec.ConfigRevision),
+			"detected_at", rec.DetectedAt.Format(time.RFC3339),
+			"total_fields", len(rec.Fields),
+			"matching_fields", matching)
+	}
 }
 
 // convergenceLoop runs scheduled convergence at the given interval until the

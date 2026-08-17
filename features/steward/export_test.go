@@ -92,3 +92,29 @@ var SetDriftModeForTest = func(s *Steward, mode config.DriftMode) {
 var SetDriftEventHandlerForTest = func(s *Steward, handler execution.DriftEventHandler) {
 	s.executor.SetDriftEventHandler(handler)
 }
+
+// OnManagedResourceDrift exposes the unexported managed-resource drift handler for
+// black-box tests (Issue #3373).
+var OnManagedResourceDrift = (*Steward).onManagedResourceDrift
+
+// PendingDriftDiffs drains and returns the buffered drift-diff records so a test can
+// assert what onManagedResourceDrift produced.
+var PendingDriftDiffs = func(s *Steward) []*commonpb.DriftDiffRecord {
+	records, _ := s.driftDiffs.Drain()
+	return records
+}
+
+// PendingDriftDiffCount reports how many drift-diff records are buffered without
+// draining them.
+var PendingDriftDiffCount = func(s *Steward) int {
+	return s.driftDiffs.Len()
+}
+
+// AppendDriftDiff buffers a record directly, for tests that need to fill the
+// accumulator without driving a convergence pass.
+var AppendDriftDiff = func(s *Steward, rec *commonpb.DriftDiffRecord) {
+	s.driftDiffs.Append(rec)
+}
+
+// ConfigRevision exposes the standalone config revision stamped on drift-diff records.
+var ConfigRevision = func(s *Steward) string { return s.configRevision }

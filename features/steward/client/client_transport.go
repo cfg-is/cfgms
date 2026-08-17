@@ -41,7 +41,9 @@ import (
 	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	dna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/features/steward/driftdiff"
 	"github.com/cfgis/cfgms/features/steward/execution"
+	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
@@ -264,6 +266,15 @@ type TransportClient struct {
 	lastPublishedDNA        map[string]string    // full DNA from the last PublishDNAUpdate call
 	currentDNAFragments     []*commonpb.Fragment // fragments from last fragment-collection (Issue #2906)
 	currentDNAAggregateRoot string               // AggregateRoot of currentDNAFragments (Issue #2906)
+
+	// driftDiffs buffers drift-diff records accumulated since the last DNA sync
+	// (Issue #3373). The drift handler registered in InitializeConfigExecutor appends;
+	// the DNA send path drains on each SYNC_DNA cycle. The buffer is bounded and
+	// drop-oldest because only the controller triggers a drain: a partitioned steward
+	// must not grow this without limit while waiting for SYNC_DNA. See
+	// driftdiff.Accumulator. Held by value so a directly-constructed TransportClient
+	// still gets a bounded, working buffer rather than a nil one that discards.
+	driftDiffs driftdiff.Accumulator
 
 	// DNA refresh loop control (Issue #1915).
 	dnaRefreshInterval time.Duration
@@ -723,13 +734,44 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 		Logger:            c.logger,
 		SecretStore:       c.secretStore,
 		StewardID:         stewardID,
-		EventEmitter:      emitter,
 		ModuleDNASnapshot: moduleDNAStore,
+	}
+	// Assign the emitter only when one was built. ExecutorConfig.EventEmitter is an
+	// interface, so assigning a nil *EventEmitter unconditionally would store a
+	// typed-nil: the executor's `if e.eventEmitter != nil` guard passes and the first
+	// drift detection calls Enqueue on a nil receiver, panicking the steward. That
+	// happens whenever the control plane is not a *grpcCP.Provider or has no
+	// transport client yet.
+	if emitter != nil {
+		execCfg.EventEmitter = emitter
 	}
 	executor, err := execution.NewExecutor(execCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create config executor: %w", err)
 	}
+
+	// Wire the drift-diff accumulator (ADR-022 §6, Issue #3373). The handler
+	// builds a DriftDiffRecord from the StateDiff and appends it to the pending
+	// accumulator; the DNA send path drains the accumulator on each sync cycle.
+	executor.SetDriftEventHandler(func(resourceName string, _ string, diff *stewardtesting.StateDiff) {
+		c.lastConfigMu.RLock()
+		configRevision := c.lastConfigVersion
+		c.lastConfigMu.RUnlock()
+
+		rec := driftdiff.BuildRecord(diff, configRevision)
+		if rec == nil {
+			// No resource identifier on the diff: the record could not be addressed
+			// to an entity-graph EID on the controller side, so it is not buffered.
+			c.logger.Warn("managed resource drift carried no resource identifier; drift-diff record not produced",
+				"resource", logging.SanitizeLogValue(resourceName))
+			return
+		}
+		c.driftDiffs.Append(rec)
+		c.logger.Debug("drift-diff record accumulated for next DNA sync",
+			"resource", logging.SanitizeLogValue(resourceName),
+			"fragment_id", logging.SanitizeLogValue(rec.FragmentID),
+			"field_count", len(rec.Fields))
+	})
 
 	c.mu.Lock()
 	c.configExecutor = executor
@@ -1089,16 +1131,20 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 						c.logger.Info("Received partial sync_dna command, sending fragment delta",
 							"command_id", logging.SanitizeLogValue(cmd.ID),
 							"fragment_count", len(selected))
+						// Drain and encode accumulated drift-diff records for this sync.
+						driftBytes := c.encodeDriftDiffs()
 						deltaTransfer := &dpTypes.DNATransfer{
-							ID:        fmt.Sprintf("dna_delta_%d", time.Now().UnixNano()),
-							StewardID: sid,
-							TenantID:  tid,
-							Timestamp: time.Now(),
-							Delta:     true,
-							Fragments: selected,
+							ID:             fmt.Sprintf("dna_delta_%d", time.Now().UnixNano()),
+							StewardID:      sid,
+							TenantID:       tid,
+							Timestamp:      time.Now(),
+							Delta:          true,
+							Fragments:      selected,
+							DriftDiffBytes: driftBytes,
 							Metadata: map[string]string{
-								"command_id":     cmd.ID,
-								"fragment_count": fmt.Sprintf("%d", len(selected)),
+								"command_id":       cmd.ID,
+								"fragment_count":   fmt.Sprintf("%d", len(selected)),
+								"drift_diff_count": fmt.Sprintf("%d", len(driftBytes)),
 							},
 						}
 						if err := session.SendDNA(ctx, deltaTransfer); err != nil {
@@ -1171,18 +1217,22 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			}
 		}
 
+		// Drain and encode accumulated drift-diff records for this sync.
+		driftBytes := c.encodeDriftDiffs()
 		transfer := &dpTypes.DNATransfer{
-			ID:            fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
-			StewardID:     sid,
-			TenantID:      tid,
-			Timestamp:     time.Now(),
-			FragmentBytes: fragBytes,
-			Delta:         false, // full snapshot
+			ID:             fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
+			StewardID:      sid,
+			TenantID:       tid,
+			Timestamp:      time.Now(),
+			FragmentBytes:  fragBytes,
+			Delta:          false, // full snapshot
+			DriftDiffBytes: driftBytes,
 			Metadata: map[string]string{
-				"command_id":     cmd.ID,
-				"dna_hash":       dna.ComputeHash(currentDNA),
-				"attr_count":     fmt.Sprintf("%d", len(currentDNA)),
-				"fragment_count": fmt.Sprintf("%d", len(fragBytes)),
+				"command_id":       cmd.ID,
+				"dna_hash":         dna.ComputeHash(currentDNA),
+				"attr_count":       fmt.Sprintf("%d", len(currentDNA)),
+				"fragment_count":   fmt.Sprintf("%d", len(fragBytes)),
+				"drift_diff_count": fmt.Sprintf("%d", len(driftBytes)),
 			},
 		}
 
@@ -3050,4 +3100,34 @@ func parseObserveModuleSpecs(raw interface{}) ([]cpTypes.ObserveModuleSpec, erro
 	}
 
 	return specs, nil
+}
+
+// encodeDriftDiffs drains the bounded drift-diff accumulator and encodes each record
+// as JSON bytes for DNATransfer.DriftDiffBytes. The returned slice is nil when no
+// records are pending.
+//
+// Records dropped because the accumulator filled between syncs are reported here
+// rather than in the drift handler: the drop is only meaningful relative to a sync
+// cycle, and reporting at append time would let a drifting fleet spam the log.
+func (c *TransportClient) encodeDriftDiffs() [][]byte {
+	pending, dropped := c.driftDiffs.Drain()
+	if dropped > 0 {
+		c.logger.Warn("drift-diff records dropped: accumulator reached capacity between DNA syncs",
+			"dropped", dropped, "capacity", c.driftDiffs.Capacity())
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	out := make([][]byte, 0, len(pending))
+	for _, rec := range pending {
+		b, err := json.Marshal(rec)
+		if err != nil {
+			c.logger.Warn("failed to encode drift-diff record; skipping",
+				"fragment_id", logging.SanitizeLogValue(rec.FragmentID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }
