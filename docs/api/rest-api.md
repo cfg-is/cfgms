@@ -1341,13 +1341,22 @@ Test connectivity to a tenant's config source (e.g., validate git repository acc
 
 #### POST /api/v1/webhooks/git-push
 
-Receive a git push event from an upstream SCM and trigger a config sync. Registered lazily when a git-sync handler is configured via `SetGitSyncWebhookHandler()`.
+Receive a git push event from an upstream SCM and trigger a config sync. The route is always registered at server startup and returns `503 Service Unavailable` until a git-sync handler is configured via `SetGitSyncWebhookHandler()`.
 
-**Authentication:** HMAC-SHA256 signature validation (no API key). The signature is checked by the webhook handler, not the standard auth middleware.
+**Authentication:** HMAC-SHA256 signature validation (no API key). The signature is checked by the webhook handler, not the standard auth middleware. Validation is mandatory and fails closed: a push event that matches a scope binding is synced only when `X-Hub-Signature-256` validates against that binding's configured webhook secret. A matched binding with no `webhook_secret_ref` has no credential to authenticate the caller and is rejected with the same `401` as an invalid signature — it is not webhook-triggerable and syncs on its polling interval only.
 
 **Headers:**
 
 - `X-Hub-Signature-256`: HMAC-SHA256 of the request body using the configured webhook secret.
+
+**Responses:**
+
+- `202 Accepted`: signature validated; sync triggered for one or more bindings.
+- `204 No Content`: no binding matches the pushed repository and branch.
+- `400 Bad Request`: unreadable or unparseable payload.
+- `401 Unauthorized`: signature invalid, missing, or the matched binding has no webhook secret configured.
+- `405 Method Not Allowed`: non-POST request.
+- `503 Service Unavailable`: no git-sync handler wired.
 
 ### Rollback Management
 

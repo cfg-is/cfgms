@@ -73,12 +73,12 @@ The git-sync component lives in `pkg/gitsync/` and is wired into the controller 
 | `OriginURL` | External git repository URL |
 | `Branch` | Branch to track (default: `main`) |
 | `CredentialsRef` | Credential reference: `""` = anonymous, `"env:<VAR>"` = env var, path = file |
-| `WebhookSecretRef` | Webhook HMAC-SHA256 secret reference (same format as CredentialsRef) |
+| `WebhookSecretRef` | Webhook HMAC-SHA256 secret reference (same format as CredentialsRef); required for the binding to be webhook-triggerable |
 | `PollingInterval` | Polling frequency; minimum 60 s; zero disables polling |
 
 **Credentials (v1):** `CredentialsRef` and `WebhookSecretRef` accept an environment-variable name (prefix `env:`) or a filesystem path to a file containing the credential. TODO: migrate to `pkg/secrets` `SecretStore` once sub-story H lands.
 
-**Webhook endpoint:** `POST /api/v1/webhooks/git-push`. Accepts GitHub and GitLab push-event payloads. Validates `X-Hub-Signature-256` when `WebhookSecretRef` is configured. Requests with an invalid or missing signature are rejected with HTTP 401.
+**Webhook endpoint:** `POST /api/v1/webhooks/git-push`. Accepts GitHub and GitLab push-event payloads. The HMAC-SHA256 signature is the endpoint's only credential, so validation is mandatory and fails closed: every binding matched by a push event must carry a `WebhookSecretRef`, and `X-Hub-Signature-256` must validate against it. Requests with an invalid or missing signature — and requests matching a binding that has no `WebhookSecretRef` — are rejected with HTTP 401. A binding without a webhook secret is not webhook-triggerable; it still syncs on its `PollingInterval`.
 
 **Polling:** Minimum interval is 60 seconds. Polling goroutines are per-scope; a failure in one scope does not block others.
 

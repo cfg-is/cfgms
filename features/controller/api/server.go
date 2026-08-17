@@ -633,9 +633,21 @@ func (s *Server) setupRouter() {
 		s.publicDownloadGuard.middleware(s.trustedProxies, http.HandlerFunc(s.handleGetStewardBinaryPublic)),
 	).Methods("GET")
 
-	// Git-sync webhook is registered lazily by SetGitSyncWebhookHandler (Issue #666).
-	// No route is pre-registered here; the endpoint only exists when a git-sync
-	// handler is explicitly wired in after server creation.
+	// Git-sync webhook (Issue #666, #3263): pre-registered here so gorilla/mux can
+	// match it before the SPA PathPrefix("/") catch-all below (routes are matched in
+	// registration order).  The handler is resolved lazily at request time so it can
+	// be wired via SetGitSyncWebhookHandler after New() returns.  Returns 503 until
+	// the handler is wired; delegates via h.ServeHTTP once it is.
+	s.router.HandleFunc("/api/v1/webhooks/git-push", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		h := s.gitSyncWebhookHandler
+		s.mu.RUnlock()
+		if h == nil {
+			http.Error(w, "git-sync webhook service not available", http.StatusServiceUnavailable)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}).Methods("POST")
 
 	// Raft messages are deliberately absent from the public product router.
 	// Cluster mode serves this handler on the separately configured private
@@ -1187,18 +1199,15 @@ func (s *Server) Registry() registry.Registry {
 	return s.registry
 }
 
-// SetGitSyncWebhookHandler registers the git-sync push-event webhook handler.
-// The handler is mounted at POST /api/v1/webhooks/git-push and uses its own
-// HMAC-SHA256 signature validation (no API-key auth). Call this after New()
-// returns but before Start() is called (Issue #666).
+// SetGitSyncWebhookHandler wires the git-sync push-event webhook handler.
+// The route POST /api/v1/webhooks/git-push is pre-registered in setupRouter()
+// and resolves this handler lazily at request time; it returns 503 until this
+// method is called.  Call this after New() returns but before Start() is called
+// (Issue #666, #3263).
 func (s *Server) SetGitSyncWebhookHandler(h http.Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gitSyncWebhookHandler = h
-	if h != nil {
-		s.router.Handle("/api/v1/webhooks/git-push", h).Methods("POST")
-		s.logger.Info("git-sync webhook endpoint registered at /api/v1/webhooks/git-push")
-	}
 }
 
 // SetRunManager wires the run manager and execution queue for ad-hoc run endpoints

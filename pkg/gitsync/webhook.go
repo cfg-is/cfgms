@@ -21,10 +21,15 @@ import (
 // WebhookHandler handles incoming push-event webhooks (GitHub or GitLab) and
 // triggers git-sync for matching scope bindings.
 //
-// Signature validation: when a binding has a WebhookSecretRef configured, the
-// handler validates the X-Hub-Signature-256 header against an HMAC-SHA256 of
-// the request body. Requests with an invalid or missing signature are rejected
-// with HTTP 401.
+// Signature validation is mandatory and fails closed: the endpoint is
+// unauthenticated at the transport layer, so the HMAC-SHA256 signature is the
+// only credential. Every binding matched by a push event must have a
+// WebhookSecretRef, and the X-Hub-Signature-256 header must validate against an
+// HMAC-SHA256 of the request body computed with the resolved secret. A matched
+// binding without a WebhookSecretRef has no credential to verify against and can
+// therefore never be triggered by a webhook; such a request is rejected with the
+// same HTTP 401 as an invalid signature. Polling-only bindings (no webhook
+// secret) continue to sync on their PollingInterval.
 type WebhookHandler struct {
 	syncer   *Syncer
 	bindings *BindingStore
@@ -58,7 +63,8 @@ type pushPayload struct {
 //   - 202 Accepted — one or more matching bindings found and sync triggered
 //   - 204 No Content — no matching bindings
 //   - 400 Bad Request — unreadable or unparseable body
-//   - 401 Unauthorized — HMAC validation failed
+//   - 401 Unauthorized — HMAC validation failed, or a matched binding has no
+//     webhook secret configured and therefore cannot authenticate the caller
 //   - 405 Method Not Allowed — non-POST request
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -102,30 +108,41 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Validate HMAC-SHA256 if a webhook secret is configured.
-		if b.WebhookSecretRef != "" {
-			secret, secretErr := h.resolveWebhookSecret(r.Context(), b.WebhookSecretRef)
-			if secretErr != nil {
-				h.logger.Error("gitsync: failed to resolve webhook secret",
-					"tenant_path", logging.SanitizeLogValue(b.TenantPath),
-					"namespace", logging.SanitizeLogValue(b.Namespace),
-					"error", secretErr.Error())
-				http.Error(w, "internal error resolving webhook secret", http.StatusInternalServerError)
-				return
-			}
-			sig := r.Header.Get("X-Hub-Signature-256")
-			if !validateHMAC(body, sig, secret) {
-				h.logger.Warn("gitsync: webhook HMAC validation failed",
-					"tenant_path", logging.SanitizeLogValue(b.TenantPath),
-					"namespace", logging.SanitizeLogValue(b.Namespace))
-				// Intentional early return: reject the entire request (HTTP 401)
-				// when any matched binding's HMAC check fails, halting further
-				// iteration. We do not fall through to remaining bindings — a
-				// single HMAC failure poisons the whole response so the caller
-				// always sees rejection, not a partial 202.
-				http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
-				return
-			}
+		// HMAC-SHA256 validation is mandatory for every matched binding. The
+		// route carries no transport-layer authentication, so a binding with no
+		// WebhookSecretRef offers nothing to verify the caller against: treating
+		// that as "skip validation" would hand an unauthenticated caller a
+		// state-changing sync. Fail closed instead — the binding is simply not
+		// webhook-triggerable (polling still applies), and the caller sees the
+		// same 401 as an invalid signature so the two cases are indistinguishable.
+		if b.WebhookSecretRef == "" {
+			h.logger.Warn("gitsync: webhook rejected — matched binding has no webhook secret configured",
+				"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+				"namespace", logging.SanitizeLogValue(b.Namespace))
+			http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+			return
+		}
+		secret, secretErr := h.resolveWebhookSecret(r.Context(), b.WebhookSecretRef)
+		if secretErr != nil {
+			h.logger.Error("gitsync: failed to resolve webhook secret",
+				"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+				"namespace", logging.SanitizeLogValue(b.Namespace),
+				"error", logging.SanitizeLogValue(secretErr.Error()))
+			http.Error(w, "internal error resolving webhook secret", http.StatusInternalServerError)
+			return
+		}
+		sig := r.Header.Get("X-Hub-Signature-256")
+		if !validateHMAC(body, sig, secret) {
+			h.logger.Warn("gitsync: webhook HMAC validation failed",
+				"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+				"namespace", logging.SanitizeLogValue(b.Namespace))
+			// Intentional early return: reject the entire request (HTTP 401)
+			// when any matched binding's HMAC check fails, halting further
+			// iteration. We do not fall through to remaining bindings — a
+			// single HMAC failure poisons the whole response so the caller
+			// always sees rejection, not a partial 202.
+			http.Error(w, "invalid or missing signature", http.StatusUnauthorized)
+			return
 		}
 
 		// Fire sync in the background so the webhook returns quickly.

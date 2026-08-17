@@ -44,6 +44,10 @@ var publicRouteSecurityPolicies = map[string]routeSecurityPolicy{
 	"POST /api/v1/web/logout":                                         publicWritePolicy("web session plus session CSRF", "web.logout"),
 	"GET /api/v1/installer/download/{platform}/{arch}":                publicReadPolicy("none", "signed installer download"),
 	"GET /api/v1/public/steward-binaries/{version}/{platform}/{arch}": publicReadPolicy("none", "signed binary download"),
+	// The webhook handler enforces the signature for every matched binding and
+	// fails closed: a binding without a webhook secret is rejected with 401 rather
+	// than synced unauthenticated (pkg/gitsync/webhook.go).
+	"POST /api/v1/webhooks/git-push": publicWritePolicy("mandatory HMAC-SHA256 request signature per matched binding", "webhook.git-push"),
 }
 
 func publicReadPolicy(authentication, event string) routeSecurityPolicy {

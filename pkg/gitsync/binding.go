@@ -47,7 +47,10 @@ type ScopeBinding struct {
 
 	// WebhookSecretRef is the credential reference for the HMAC-SHA256 webhook
 	// secret. Same resolution rules as CredentialsRef (env:, secret:, or file
-	// path). When empty, HMAC validation is skipped for this binding.
+	// path). It is the only credential the webhook endpoint has, so when empty
+	// this binding is not webhook-triggerable: a push event matching it is
+	// rejected with HTTP 401 rather than synced unauthenticated. Such a binding
+	// still syncs on its PollingInterval.
 	WebhookSecretRef string `json:"webhook_secret_ref,omitempty"`
 
 	// PollingInterval is how often to poll the origin for changes. Must be
