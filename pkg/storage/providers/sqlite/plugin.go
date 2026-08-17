@@ -485,6 +485,12 @@ func (p *SQLiteProvider) CreateIPTrustStore(_ map[string]interface{}) (business.
 	return nil, business.ErrNotSupported
 }
 
+// CreateAlertStore is not supported by the SQLite provider.
+// Alert storage is implemented by the database (PostgreSQL) and flatfile providers (Issue #3266).
+func (p *SQLiteProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // OpenBusinessStores implements interfaces.BusinessStoreOpener.
 // It opens the SQLite database at path exactly once, runs schema initialisation,
 // and returns all seven business stores sharing the same *sql.DB connection pool.

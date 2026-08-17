@@ -2688,6 +2688,63 @@ Delete a web admin account. Removes both the in-memory cache entry and the durab
 
 Returns `404 WEB_ACCOUNT_NOT_FOUND` if the account does not exist.
 
+## Alerts
+
+Server-side durable state for alert acknowledgement and silencing. Alert records are created on first write (upsert semantics) — a pre-existing alert-manager record is not required.
+
+**Required permission:** `alert:acknowledge` (acknowledge) or `alert:silence` (silence)  
+**Assurance:** Any for acknowledge; Strong for silence.
+
+#### POST /api/v1/alerts/{id}/acknowledge
+
+Record that an alert has been acknowledged by the calling principal.
+
+**Authentication:** Required  
+**Required permission:** `alert:acknowledge`  
+**Assurance:** Any (Machine-level API key accepted)
+
+**Parameters:**
+
+- `id` (path): Alert identifier (opaque string; typically the alerting system's alert ID)
+
+**Request body (optional):**
+
+```json
+{
+  "reason": "investigating spike in error rate"
+}
+```
+
+**Response (204 No Content):** Alert state recorded. Body is empty.
+
+Returns `503 Service Unavailable` when the alert store is not configured.
+
+#### POST /api/v1/alerts/{id}/silence
+
+Silence an alert until a specified time. The calling principal and expiry are recorded.
+
+**Authentication:** Required  
+**Required permission:** `alert:silence`  
+**Assurance:** Strong session required (silencing can suppress alerts fleet-wide)
+
+**Parameters:**
+
+- `id` (path): Alert identifier
+
+**Request body:**
+
+```json
+{
+  "until": "2026-08-18T00:00:00Z"
+}
+```
+
+- `until` (required): RFC3339 timestamp when the silence expires.
+
+**Response (204 No Content):** Alert state recorded. Body is empty.
+
+Returns `400 Bad Request` when `until` is missing or zero. Returns `503 Service Unavailable` when the alert store is not configured.
+
 ## Configuration
 
 The REST API server can be configured via environment variables:

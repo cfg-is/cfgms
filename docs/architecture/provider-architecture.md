@@ -358,6 +358,7 @@ Current implementations following this pattern:
 
 - **Business data**: `pkg/storage/providers/sqlite` (TenantStore, ClientTenantStore, AuditStore, RBACStore, SessionStore, CommandStore, StewardStore, RegistrationTokenStore, TriggerStore, PushStore)
 - **Config storage**: `pkg/storage/providers/flatfile` (ConfigStore, AuditStore, StewardStore)
+- **Alert state**: `pkg/storage/providers/flatfile` and `pkg/storage/providers/database` (AlertStore, Issue #3266)
 - **Blob storage**: `pkg/storage/providers/blobstore/filesystem` and `blobstore/s3`
 - **PostgreSQL**: `pkg/storage/providers/database` (business + config stores, production scale / SaaS)
 - **Git sync**: `pkg/gitsync` — optional read-only import from external git repos into ConfigStore

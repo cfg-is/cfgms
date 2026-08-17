@@ -182,6 +182,12 @@ var knownPermissions = map[string]bool{
 	// inflation ADR-026 decision 3 exists to avoid.
 	"reboot_window:read":     true,
 	"reboot_window:override": true,
+	// Alert state management (Issue #3266): acknowledge and silence endpoints.
+	// Both must be listed here so a least-privilege principal can hold them.
+	// alert:silence carries AssuranceStrong (see permissionAssurance); alert:acknowledge
+	// does not and is intentionally absent from that map.
+	"alert:acknowledge": true,
+	"alert:silence":     true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

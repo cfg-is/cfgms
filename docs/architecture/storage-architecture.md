@@ -200,6 +200,8 @@ The `cfg migrate --provider storage` pathway covers the following store kinds. E
 
 Kinds marked `—` are silently skipped when the destination backend does not support that store. The integrity check at the end of a `Run` only compares kinds that both source and destination support, so a cross-backend migration (OSS → Postgres) will not fail on `trigger` or `push` records.
 
+**Not yet covered:** `AlertStore` (tenant-scoped alert acknowledgement and silence records, Issue #3266) has no entry in this table because `pkg/migrate/storage/migrate.go` does not define a kind constant or export/import case for it yet — a `cfg migrate --provider storage` run does not transfer alert acknowledge/silence state in either direction. Wire it into the migrator (kind constant, export/import case, kind-availability map entry) before relying on migration to carry this state.
+
 **Config update required after migration.** Replace the old single-provider block with OSS composite:
 
 ```yaml

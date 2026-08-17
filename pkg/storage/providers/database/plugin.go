@@ -286,6 +286,19 @@ func (p *DatabaseProvider) CreateIPTrustStore(config map[string]interface{}) (bu
 	return store, nil
 }
 
+// CreateAlertStore creates a PostgreSQL-backed AlertStore.
+func (p *DatabaseProvider) CreateAlertStore(config map[string]interface{}) (business.AlertStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseAlertStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database alert store: %w", err)
+	}
+	return store, nil
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get database connection string from config
 	dsn, err := p.getDSN(config)

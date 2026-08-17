@@ -35,6 +35,7 @@ type HybridStorageManager struct {
 	auditStore               business.AuditStore
 	configStore              cfgconfig.ConfigStore
 	ipTrustStore             business.IPTrustStore
+	alertStore               business.AlertStore
 	pendingRegistrationStore business.PendingRegistrationStore
 
 	config HybridStorageConfig
@@ -83,6 +84,13 @@ func NewHybridStorageManager(config HybridStorageConfig) (*HybridStorageManager,
 	}
 	manager.ipTrustStore = ipTrustStore
 
+	// Alert storage follows the same pattern as IP trust storage.
+	alertStore, err := opProvider.CreateAlertStore(config.Operational.Config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create alert store: %w", err)
+	}
+	manager.alertStore = alertStore
+
 	// Pending registration storage is operational-tier; providers that do not
 	// implement it leave the accessor nil rather than failing.
 	pendingRegistrationStore, err := opProvider.CreatePendingRegistrationStore(config.Operational.Config)
@@ -120,6 +128,12 @@ func (h *HybridStorageManager) GetConfigStore() cfgconfig.ConfigStore {
 // nil if the operational provider does not support IP trust storage).
 func (h *HybridStorageManager) GetIPTrustStore() business.IPTrustStore {
 	return h.ipTrustStore
+}
+
+// GetAlertStore returns the alert-state storage interface (operational backend,
+// nil if the operational provider does not support alert storage).
+func (h *HybridStorageManager) GetAlertStore() business.AlertStore {
+	return h.alertStore
 }
 
 // GetPendingRegistrationStore returns the pending registration storage interface

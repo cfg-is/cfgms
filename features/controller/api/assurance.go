@@ -120,4 +120,9 @@ var permissionAssurance = map[string]Requirement{
 	// Approve-by-CIDR requires AssuranceStrong + a fresh user-presence proof.
 	// (Single-entry approve and approve-all use registration:approve — AssuranceStrong only.)
 	"registration:approve-by-cidr": {Min: session.AssuranceStrong, RequireUserPresence: true},
+
+	// Alert silence (Issue #3266): silencing hides a real alert until it expires —
+	// treat it like other consequential write actions already in this map.
+	// alert:acknowledge is intentionally absent: low-risk read-adjacent action.
+	"alert:silence": {Min: session.AssuranceStrong},
 }

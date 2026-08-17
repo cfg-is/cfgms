@@ -99,6 +99,9 @@ func (p *testNonClusterProvider) CreatePendingRegistrationStore(_ map[string]int
 func (p *testNonClusterProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
 	return nil, business.ErrNotSupported
 }
+func (p *testNonClusterProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
+	return nil, business.ErrNotSupported
+}
 
 // testClusterProvider implements interfaces.StorageProvider with ClusterCapable() == true.
 // All store factory methods return business.ErrNotSupported. Used to isolate the S3 gate
@@ -152,6 +155,9 @@ func (p *testClusterProvider) CreatePendingRegistrationStore(_ map[string]interf
 	return nil, business.ErrNotSupported
 }
 func (p *testClusterProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testClusterProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
 	return nil, business.ErrNotSupported
 }
 

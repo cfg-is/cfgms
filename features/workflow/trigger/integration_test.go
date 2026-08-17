@@ -167,6 +167,10 @@ func (t *TestStorageProvider) CreateIPTrustStore(_ map[string]interface{}) (busi
 	return nil, business.ErrNotSupported
 }
 
+func (t *TestStorageProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 func (t *TestStorageProvider) GetCapabilities() interfaces.ProviderCapabilities {
 	return interfaces.ProviderCapabilities{
 		MaxBatchSize:          100,

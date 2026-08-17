@@ -111,6 +111,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Steward visibility toggle (Issue #2918) — Min=AssuranceBasic: API keys get 403,
 	// web sessions pass, Strong passes. Part (d) uses assertBasicPassesFromRequirePermission.
 	{"PATCH", "/api/v1/stewards/test-steward-id/visibility", "steward:visibility"},
+	// Alert silence (Issue #3266) — silencing requires AssuranceStrong so a compromised
+	// API key cannot suppress alerts fleet-wide. Acknowledge is Machine-level and absent here.
+	{"POST", "/api/v1/alerts/test-alert-id/silence", "alert:silence"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

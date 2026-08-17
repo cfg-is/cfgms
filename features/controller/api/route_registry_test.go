@@ -59,6 +59,7 @@ func walkRoutes(t *testing.T, router *mux.Router) []routeEntry {
 var goldenRouteTable = []string{
 	"* /",
 	"* /api/v1",
+	"* /api/v1/alerts",
 	"* /api/v1/api-keys",
 	"* /api/v1/certificates",
 	"* /api/v1/cluster",
@@ -195,6 +196,8 @@ var goldenRouteTable = []string{
 	"OPTIONS /api/v1/stewards/{device_id}/refresh/challenge",
 	"OPTIONS /api/v1/stewards/{device_id}/refresh/complete",
 	"PATCH /api/v1/stewards/{id}/visibility",
+	"POST /api/v1/alerts/{id}/acknowledge",
+	"POST /api/v1/alerts/{id}/silence",
 	"POST /api/v1/api-keys",
 	"POST /api/v1/certificates/provision",
 	"POST /api/v1/certificates/signing/rotate",

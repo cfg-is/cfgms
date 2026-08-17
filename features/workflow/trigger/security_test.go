@@ -406,23 +406,10 @@ func TestSecurityEdgeCases_SIEMLogInjection(t *testing.T) {
 }
 
 func TestSecurityEdgeCases_TenantIsolation(t *testing.T) {
-	mockStorage := &MockStorageProvider{}
-	mockScheduler := &MockScheduler{}
-	mockWebhookHandler := &MockWebhookHandler{}
-	mockSIEMIntegration := &MockSIEMIntegration{}
-	mockWorkflowTrigger := &MockWorkflowTrigger{}
-
-	manager := NewTriggerManager(
-		mockStorage,
-		mockScheduler,
-		mockWebhookHandler,
-		mockSIEMIntegration,
-		mockWorkflowTrigger,
-		nil,
-	)
-
-	// Setup storage mock expectations
-	mockStorage.On("Available").Return(true, nil)
+	// Real components: in-memory storage provider, cron scheduler, webhook handler,
+	// SIEM processor and workflow trigger — no mocks.
+	h := newTriggerHarness(t)
+	manager := h.manager
 
 	// Create triggers for different tenants
 	tenant1Trigger := &Trigger{
@@ -441,17 +428,6 @@ func TestSecurityEdgeCases_TenantIsolation(t *testing.T) {
 		WorkflowName: "tenant2-workflow",
 	}
 
-	// Mock storage operations
-	mockStorage.On("Store", mock.Anything, mock.MatchedBy(func(key string) bool {
-		return strings.Contains(key, "tenant1-trigger")
-	}), mock.Anything).Return(nil)
-
-	mockStorage.On("Store", mock.Anything, mock.MatchedBy(func(key string) bool {
-		return strings.Contains(key, "tenant2-trigger")
-	}), mock.Anything).Return(nil)
-
-	mockWorkflowTrigger.On("ValidateTrigger", mock.Anything, mock.Anything).Return(nil)
-
 	ctx := context.Background()
 
 	// Create triggers
@@ -460,6 +436,13 @@ func TestSecurityEdgeCases_TenantIsolation(t *testing.T) {
 
 	err = manager.CreateTrigger(ctx, tenant2Trigger)
 	require.NoError(t, err)
+
+	// Both triggers must be persisted under their own tenant.
+	for _, trig := range []*Trigger{tenant1Trigger, tenant2Trigger} {
+		record, storeErr := h.triggerStore.GetTrigger(ctx, trig.ID)
+		require.NoError(t, storeErr)
+		assert.Equal(t, trig.TenantID, record.TenantID, "persisted record must keep its tenant")
+	}
 
 	tests := []struct {
 		name        string
