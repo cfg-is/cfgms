@@ -166,9 +166,18 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 			return fmt.Errorf("entitygraph/database: append observation log: %w", err)
 		}
 
-		// Skip entity_current upsert for observation kinds that project to
-		// eg_drift_projection instead of entity_current (ADR-022 §6).
-		if obs.Kind != types.ObservationKindDriftDiff && obs.Kind != types.ObservationKindLifecycle {
+		// Skip the entity_current upsert for observation kinds that do not state
+		// the entity's current state: drift-diff and lifecycle project to
+		// eg_drift_projection (ADR-022 §6), and apply-outcome projects nowhere.
+		// A steward writes apply-outcome under the same (subject, source) pair as
+		// its own state observations, so folding one in would overwrite that state
+		// row and make rebuildEntityIndex recompute entity_kind and owning_tenant
+		// from the apply payload — emptying owning_tenant, the sole access-control
+		// axis. Apply-outcome is read from the observation log by GetHistory and
+		// GetTimeline, which is appended above.
+		if obs.Kind != types.ObservationKindDriftDiff &&
+			obs.Kind != types.ObservationKindLifecycle &&
+			obs.Kind != types.ObservationKindApplyOutcome {
 			// Fold into per-source current state. The latest observation for the
 			// same (subject, source) supersedes the prior one.
 			if _, err := tx.ExecContext(ctx,
@@ -211,7 +220,8 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 // subject from the merged current state. Registered for the "entity" subject
 // kind. Drift-diff and lifecycle observations route to eg_drift_projection.
 // Desired-state observations project to eg_entity_current for dedup but must
-// not contribute to the entity index.
+// not contribute to the entity index. Apply-outcome observations enter neither
+// projection — they are log-only event records.
 func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, _ int64) error {
 	if obs.Kind == types.ObservationKindDriftDiff {
 		return updateDriftProjectionFromObservation(ctx, tx, obs)
@@ -219,7 +229,7 @@ func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observati
 	if obs.Kind == types.ObservationKindLifecycle {
 		return applyLifecycleTransitionFromObs(ctx, tx, obs)
 	}
-	if obs.Kind == types.ObservationKindDesiredState {
+	if obs.Kind == types.ObservationKindDesiredState || obs.Kind == types.ObservationKindApplyOutcome {
 		return nil
 	}
 	return rebuildEntityIndex(ctx, tx, obs.Subject)

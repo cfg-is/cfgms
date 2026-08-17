@@ -278,6 +278,33 @@ type Response struct {
 	Details map[string]interface{} `json:"details,omitempty"`
 }
 
+// ApplyOutcomeRecord captures the result of applying a single resource during
+// a configuration push (ADR-022 §6, Issue #3375).
+//
+// One record is emitted per resource in the execution report. The record rides
+// Event.Details["apply_outcomes"] alongside the existing "modules" key; it is
+// never a replacement for the per-module ModuleStatus aggregation.
+type ApplyOutcomeRecord struct {
+	// ResourceID is the steward-local resource identifier (e.g. "vm:myvm").
+	// Controller-side EID resolution prefixes host:<peerHostAuthority>/ to produce
+	// the fleet-global address — the steward never performs that step.
+	ResourceID string `json:"resource_id"`
+
+	// ModuleName is the module that managed this resource.
+	ModuleName string `json:"module_name"`
+
+	// Status is the outcome classification: "applied", "partial", or "failed".
+	// Derived from the executor's ResourceStatus at the controller side.
+	Status string `json:"status"`
+
+	// Error contains the per-resource error detail when Status is "failed".
+	// Empty on success.
+	Error string `json:"error,omitempty"`
+
+	// Timestamp is when this resource's execution completed.
+	Timestamp time.Time `json:"timestamp"`
+}
+
 // ModuleStatus represents the execution status of a single module.
 //
 // Used in ConfigStatusReport to provide per-module execution details
@@ -318,6 +345,10 @@ type ConfigStatusReport struct {
 
 	// Modules contains per-module execution status
 	Modules map[string]ModuleStatus `json:"modules"`
+
+	// ApplyOutcomes contains per-resource apply-outcome records (ADR-022 §6, Issue #3375).
+	// One entry per executed resource; rides Event.Details["apply_outcomes"] on the wire.
+	ApplyOutcomes []ApplyOutcomeRecord `json:"apply_outcomes,omitempty"`
 
 	// Timestamp when the report was created
 	Timestamp time.Time `json:"timestamp"`

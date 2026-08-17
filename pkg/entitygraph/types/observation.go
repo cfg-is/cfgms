@@ -31,6 +31,16 @@ const (
 	// excluded from entity-state views and the entity index so they do not
 	// contaminate the merged attribute set.
 	ObservationKindDesiredState ObservationKind = "desired-state"
+
+	// ObservationKindApplyOutcome is written by handleConfigAppliedEvent when a
+	// steward ships its per-resource apply results via the event bus (ADR-022 §6,
+	// Issue #3375). The observation payload carries status, error, module_name,
+	// config_version, and the timestamp of the resource execution. Apply-outcome
+	// observations are host-scoped only; the controller resolves
+	// host:<peerHostAuthority>/<resourceID> from the mTLS-verified peer identity
+	// and the bare resource ID the steward ships. GetTimeline surfaces these as
+	// "apply-outcome" events alongside state-change events.
+	ObservationKindApplyOutcome ObservationKind = "apply-outcome"
 )
 
 // Confidence is the producer-declared confidence level for an observation.

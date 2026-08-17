@@ -73,6 +73,7 @@ import (
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egdatabase "github.com/cfgis/cfgms/pkg/entitygraph/providers/database"
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	egconfigstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
 	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/gitsync"
@@ -2670,6 +2671,7 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 
 // handleConfigAppliedEvent processes configuration applied events from stewards.
 // Story #363: Replaces handleConfigStatusReport which used direct topic subscription.
+// Issue #3375: adds entity-graph ingestion of apply-outcome records via ReportObservations.
 func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlplaneTypes.Event) error {
 	s.logger.Info("Received config applied event",
 		"steward_id", event.StewardID,
@@ -2682,10 +2684,10 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 
 		s.logger.Info("Configuration status report",
 			"steward_id", event.StewardID,
-			"config_version", configVersion,
-			"overall_status", overallStatus)
+			"config_version", logging.SanitizeLogValue(configVersion),
+			"overall_status", logging.SanitizeLogValue(overallStatus))
 
-		// Log module details if present
+		// Log module details if present (existing behaviour — unchanged).
 		if modules, ok := details["modules"].(map[string]interface{}); ok {
 			for moduleName, moduleData := range modules {
 				if moduleMap, ok := moduleData.(map[string]interface{}); ok {
@@ -2693,10 +2695,24 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 					moduleMessage, _ := moduleMap["message"].(string)
 					s.logger.Info("Module status",
 						"steward_id", event.StewardID,
-						"module", moduleName,
-						"status", moduleStatus,
-						"message", moduleMessage)
+						"module", logging.SanitizeLogValue(moduleName),
+						"status", logging.SanitizeLogValue(moduleStatus),
+						"message", logging.SanitizeLogValue(moduleMessage))
 				}
+			}
+		}
+
+		// Ingest per-resource apply-outcome records into the entity graph (Issue #3375).
+		// apply_outcomes arrives as []interface{} of map[string]interface{} after the
+		// Event.Details JSON round-trip through interfaceMapToStringMap/stringMapToInterfaceMap.
+		// Decode defensively — same approach as the "modules" branch above.
+		if s.egProvider != nil {
+			if err := s.ingestApplyOutcomes(ctx, event.StewardID, configVersion, details); err != nil {
+				// Log and continue: a write failure here must not prevent the event from
+				// being acknowledged. The next apply cycle will produce fresh records.
+				s.logger.Error("Failed to ingest apply-outcome records",
+					"steward_id", event.StewardID,
+					"error", logging.SanitizeLogValue(err.Error()))
 			}
 		}
 	}
@@ -2704,6 +2720,87 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 	// TODO: Store status report in database/audit log for MSP admin visibility
 
 	return nil
+}
+
+// ingestApplyOutcomes decodes apply_outcomes from event details and writes one
+// ObservationKindApplyOutcome observation per record into the entity graph.
+//
+// EID resolution is always host-scoped: the steward ships a bare resourceID (its
+// local identifier, e.g. "vm:myvm"), and the controller prefixes
+// host:<peerHostAuthority>/ using the mTLS-verified event.StewardID. No
+// cluster-membership lookup is performed here — per Issue #3375 §"Out of Scope",
+// joining a clustered VM's apply-outcome to its cluster-scoped EID is deferred to
+// a future story that can handle the ordering question correctly.
+func (s *Server) ingestApplyOutcomes(ctx context.Context, peerHostAuthority, configVersion string, details map[string]interface{}) error {
+	rawOutcomes, ok := details["apply_outcomes"].([]interface{})
+	if !ok || len(rawOutcomes) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	var observations []egtypes.Observation
+
+	for _, rawRec := range rawOutcomes {
+		rec, ok := rawRec.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		resourceID, _ := rec["resource_id"].(string)
+		if resourceID == "" {
+			continue
+		}
+		moduleName, _ := rec["module_name"].(string)
+		status, _ := rec["status"].(string)
+		errDetail, _ := rec["error"].(string)
+
+		// Resolve observed timestamp; fall back to now when absent or unparseable.
+		observedAt := now
+		if tsStr, _ := rec["timestamp"].(string); tsStr != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, tsStr); err == nil {
+				observedAt = parsed.UTC()
+			}
+		}
+
+		// EID = host:<peerHostAuthority>/<resourceID>. Authority always comes from
+		// the mTLS-verified stewardID; no steward-supplied value can reach it.
+		eid, err := egtypes.NewEID("host", peerHostAuthority, resourceID)
+		if err != nil {
+			s.logger.Warn("ingestApplyOutcomes: skipping record with invalid resource_id",
+				"steward_id", peerHostAuthority,
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+
+		payload := map[string]interface{}{
+			"status":         status,
+			"module_name":    moduleName,
+			"config_version": configVersion,
+		}
+		if errDetail != "" {
+			payload["error"] = errDetail
+		}
+
+		observations = append(observations, egtypes.Observation{
+			Source:     peerHostAuthority,
+			ObservedAt: observedAt,
+			RecordedAt: now,
+			Subject:    eid.String(),
+			Kind:       egtypes.ObservationKindApplyOutcome,
+			Confidence: egtypes.ConfidenceHigh,
+			Payload:    payload,
+		})
+	}
+
+	if len(observations) == 0 {
+		return nil
+	}
+
+	batch := eginterfaces.ObservationBatch{
+		Source:       peerHostAuthority,
+		Observations: observations,
+	}
+	return s.egProvider.ReportObservations(ctx, batch)
 }
 
 // handleObserveSweepRequest processes EventObserveSweepRequest from a steward.

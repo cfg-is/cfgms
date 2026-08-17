@@ -72,6 +72,8 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("DriftLifecycleTransition", func(t *testing.T) { testEGDriftLifecycle(t, factory) })             // AC 4
 	t.Run("DriftProjectionRebuildRecovery", func(t *testing.T) { testEGDriftRebuildRecovery(t, factory) }) // AC 4 + AC 7
 	t.Run("DesiredStateIsolation", func(t *testing.T) { testEGDesiredStateIsolation(t, factory) })         // AC 5 (isolation)
+	// Issue #3375: apply-outcome observations are log-only event records.
+	t.Run("ApplyOutcomeIsolation", func(t *testing.T) { testEGApplyOutcomeIsolation(t, factory) })
 	// Story-6: temporal reads + same-as collapse-group (Issue #2876)
 	t.Run("HistoryDiffCorrectness", func(t *testing.T) { testEGHistoryDiffCorrectness(t, factory) })         // AC 1
 	t.Run("TimelineMultiSubject", func(t *testing.T) { testEGTimelineMultiSubject(t, factory) })             // AC 2
@@ -549,6 +551,127 @@ func testEGDesiredStateIsolation(t *testing.T, factory EntityGraphProviderFactor
 		require.NoError(t, c.CorruptProjectionsForTesting(ctx))
 		_, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/ds-iso"})
 		require.Error(t, err, "entity must be unreachable after projection corruption")
+	}
+	require.NoError(t, p.RebuildProjections(ctx))
+
+	assertIsolated(t, "post-rebuild")
+}
+
+// testEGApplyOutcomeIsolation verifies that an apply-outcome observation written
+// under the SAME (subject, source) pair as the steward's own state observation
+// never enters the entity-state projection (Issue #3375).
+//
+// This is the tenant-isolation contract: eg_entity_current is keyed on
+// (subject, source), and the entity index derives entity_kind and owning_tenant —
+// the sole access-control axis — from the winning source's payload. An
+// apply-outcome payload carries none of those attributes, so folding it in would
+// blank owning_tenant and make the entity vanish from its own tenant while
+// unscoping any traversal rooted on it.
+func testEGApplyOutcomeIsolation(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	eid := egEID(t, "host:ao-iso-auth/vm:myvm")
+	const source = "ao-iso-auth" // steward identity: same source for state and outcome
+	const tenant = "root/ao-iso"
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// 1. The steward's state observation establishes entity_kind and owning_tenant.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: source,
+		Observations: []types.Observation{{
+			Source:     source,
+			ObservedAt: now,
+			RecordedAt: now,
+			Subject:    eid.String(),
+			Kind:       types.ObservationKindState,
+			Confidence: types.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"entity_kind":   "vm",
+				"hostname":      "myvm",
+				"owning_tenant": tenant,
+			},
+		}},
+	}))
+
+	// 2. The same steward reports an apply outcome for the same entity — the
+	//    ordinary apply cycle, no compromise required.
+	applyAt := now.Add(time.Second)
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: source,
+		Observations: []types.Observation{{
+			Source:     source,
+			ObservedAt: applyAt,
+			RecordedAt: applyAt,
+			Subject:    eid.String(),
+			Kind:       types.ObservationKindApplyOutcome,
+			Confidence: types.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"status":         "failed",
+				"module_name":    "hyperv",
+				"config_version": "v1",
+				"error":          "apply failed",
+			},
+		}},
+	}))
+
+	asOf := applyAt.Add(time.Second)
+	assertIsolated := func(t *testing.T, phase string) {
+		t.Helper()
+
+		// The entity must remain visible to its own tenant with its real state.
+		view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: tenant})
+		require.NoError(t, err,
+			"%s: entity must stay visible to its own tenant after an apply outcome", phase)
+		require.NotNil(t, view)
+		assert.Equal(t, "vm", view.Entity.Kind, "%s: entity_kind must survive", phase)
+		assert.Equal(t, tenant, view.Entity.OwningTenant,
+			"%s: owning_tenant must survive — it is the sole access-control axis", phase)
+		assert.Equal(t, "myvm", view.Entity.Attributes["hostname"],
+			"%s: state attributes must survive", phase)
+		for _, key := range []string{"status", "module_name", "config_version", "error"} {
+			_, present := view.Entity.Attributes[key]
+			assert.False(t, present,
+				"%s: apply-outcome payload key %q must not contaminate entity attributes", phase, key)
+		}
+		for _, src := range view.Sources {
+			assert.NotEqual(t, types.ObservationKindApplyOutcome, src.Kind,
+				"%s: apply-outcome observation must not appear in entity Sources", phase)
+		}
+
+		// The as-of read reconstructs state from the log; a later apply-outcome row
+		// must not shadow the source's state row there either.
+		asOfView, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: tenant, AsOf: &asOf})
+		require.NoError(t, err, "%s: as-of GetEntity after the apply outcome", phase)
+		require.NotNil(t, asOfView)
+		assert.Equal(t, tenant, asOfView.Entity.OwningTenant,
+			"%s: as-of owning_tenant must come from the state observation", phase)
+		assert.Equal(t, "myvm", asOfView.Entity.Attributes["hostname"],
+			"%s: as-of attributes must come from the state observation", phase)
+
+		// The apply outcome itself stays readable from the immutable log.
+		history, err := p.GetHistory(ctx, eid, interfaces.TimeRange{
+			From: now.Add(-time.Minute), To: applyAt.Add(time.Minute),
+		})
+		require.NoError(t, err, "%s: GetHistory", phase)
+		applyCount := 0
+		for _, rec := range history {
+			if rec.Observation.Kind == types.ObservationKindApplyOutcome {
+				applyCount++
+				assert.Equal(t, "failed", rec.Observation.Payload["status"],
+					"%s: apply-outcome payload must be readable from the log", phase)
+			}
+		}
+		assert.Equal(t, 1, applyCount,
+			"%s: exactly one apply-outcome observation must be present in GetHistory", phase)
+	}
+
+	assertIsolated(t, "pre-rebuild")
+
+	// 3. Replaying the log must reach the same state: the apply-outcome row must be
+	//    skipped by the rebuild exactly as it is by ingest.
+	if c, ok := p.(corruptibleProvider); ok {
+		require.NoError(t, c.CorruptProjectionsForTesting(ctx))
 	}
 	require.NoError(t, p.RebuildProjections(ctx))
 

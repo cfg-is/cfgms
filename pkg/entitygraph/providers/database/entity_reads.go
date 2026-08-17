@@ -128,6 +128,12 @@ func (p *DatabaseEntityGraphProvider) GetEntity(ctx context.Context, eid interfa
 // it reconstructs the latest observation per source at or before asOf from the
 // immutable log. The tenant filter, when non-empty, restricts rows to the
 // tenant path or its subtree.
+//
+// Both branches exclude the kinds that never state the entity's current state —
+// desired-state, drift-diff, lifecycle and apply-outcome. eg_entity_current
+// never holds those kinds except desired-state (kept there for dedup), and the
+// as-of log reconstruction must apply the same rule or a later apply-outcome or
+// drift-diff row would be read back as the source's current state.
 func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subject, tenantFilter string, asOf *time.Time) ([]currentRow, error) {
 	var query string
 	args := []interface{}{subject}
@@ -146,7 +152,8 @@ func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subj
 		query = `SELECT DISTINCT ON (l.source) l.source, l.source_class, l.kind, l.confidence, l.observed_at, l.recorded_at, l.payload_hash, p.payload_json
 			 FROM eg_observation_log l
 			 JOIN eg_payload_content p ON p.content_hash = l.payload_hash
-			 WHERE l.subject = $1 AND l.observed_at <= $2 AND l.kind != 'desired-state'`
+			 WHERE l.subject = $1 AND l.observed_at <= $2
+			   AND l.kind NOT IN ('desired-state', 'drift-diff', 'lifecycle', 'apply-outcome')`
 		args = append(args, asOf.UTC().Format(time.RFC3339Nano))
 		if tenantFilter != "" {
 			query += ` AND (l.tenant_path = $3 OR l.tenant_path LIKE $4)`
@@ -434,6 +441,13 @@ func (p *DatabaseEntityGraphProvider) RebuildProjections(ctx context.Context) er
 					return fmt.Errorf("entitygraph/database: replay lifecycle seq %d: %w", lr.id, err)
 				}
 			}
+			continue
+		}
+		if lr.kind == string(types.ObservationKindApplyOutcome) {
+			// Apply-outcome rows are log-only event records about a config apply.
+			// Folding one into eg_entity_current would overwrite the steward's own
+			// state row for the same (subject, source) and destroy the entity's
+			// index attributes, so replay skips them exactly as ingest does.
 			continue
 		}
 		if lr.kind == string(types.ObservationKindAbsence) {
