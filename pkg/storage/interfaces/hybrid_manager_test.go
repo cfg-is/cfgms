@@ -129,6 +129,10 @@ func TestHybridStorageManager_Creation(t *testing.T) {
 	// GetPendingRegistrationStore must be wired in the constructor when the operational
 	// provider supports pending registration storage (Issue #1696).
 	assert.NotNil(t, manager.GetPendingRegistrationStore())
+	// The operational provider reports ErrNotSupported for alert storage: construction
+	// must succeed and leave the accessor nil rather than failing (Issue #3266).
+	assert.Nil(t, manager.GetAlertStore(),
+		"GetAlertStore must be nil when the operational provider does not support alert storage")
 
 	// Round-trip: store a client tenant and verify retrieval returns the same value.
 	wantTenant := &business.ClientTenant{ID: "hybrid-rt-1", TenantName: "Hybrid Round Trip"}
@@ -390,6 +394,15 @@ func (p *mockProvider) CreatePendingRegistrationStore(_ map[string]interface{}) 
 
 func (p *mockProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
 	return &mockIPTrustStore{}, nil
+}
+
+// CreateAlertStore reports that this provider has no alert-state backend, exercising
+// the ErrNotSupported tolerance branch in NewHybridStorageManager. Real AlertStore
+// wiring is covered against the flat-file and PostgreSQL providers in
+// hybrid_manager_alert_test.go (package interfaces_test), which can import the
+// provider packages without an import cycle.
+func (p *mockProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
+	return nil, business.ErrNotSupported
 }
 
 func (p *mockProvider) GetCapabilities() ProviderCapabilities {

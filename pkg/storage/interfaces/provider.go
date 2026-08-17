@@ -107,6 +107,7 @@ type StorageProvider interface {
 	CreatePushStore(config map[string]interface{}) (business.PushStore, error)
 	CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error)
 	CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error)
+	CreateAlertStore(config map[string]interface{}) (business.AlertStore, error)
 
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
@@ -561,6 +562,11 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create IP trust store: %w", err)
 	}
 
+	alertStore, err := provider.CreateAlertStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create alert store: %w", err)
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -576,6 +582,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		triggerStore:           triggerStore,
 		pushStore:              pushStore,
 		ipTrustStore:           ipTrustStore,
+		alertStore:             alertStore,
 	}, nil
 }
 
@@ -596,6 +603,7 @@ type StorageManager struct {
 	pushStore                business.PushStore
 	pendingRegistrationStore business.PendingRegistrationStore
 	ipTrustStore             business.IPTrustStore
+	alertStore               business.AlertStore           // Issue #3266: alert acknowledge and silence
 	pendingRefreshStore      business.PendingRefreshStore  // Issue #2098: registration-refresh approval queue
 	refreshPolicyStore       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
 	assurancePolicyStore     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
@@ -692,6 +700,17 @@ func (sm *StorageManager) SetIPTrustStore(s business.IPTrustStore) {
 	sm.ipTrustStore = s
 }
 
+// GetAlertStore returns the alert-state storage interface (Issue #3266).
+// Returns nil when the current storage provider does not support alert storage.
+func (sm *StorageManager) GetAlertStore() business.AlertStore {
+	return sm.alertStore
+}
+
+// SetAlertStore wires the alert store after construction.
+func (sm *StorageManager) SetAlertStore(s business.AlertStore) {
+	sm.alertStore = s
+}
+
 // GetPendingRefreshStore returns the pending-refresh approval queue (Issue #2098).
 // Returns nil when not yet wired; callers must nil-check before use.
 func (sm *StorageManager) GetPendingRefreshStore() business.PendingRefreshStore {
@@ -780,6 +799,7 @@ func (sm *StorageManager) Close() error {
 		sm.pushStore,
 		sm.pendingRegistrationStore,
 		sm.ipTrustStore,
+		sm.alertStore,
 		sm.refreshPolicyStore,
 		sm.pendingRefreshStore,
 		sm.assurancePolicyStore,
@@ -951,6 +971,10 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create IP trust store: %w", err)
 	}
+	alertStore, err := provider.CreateAlertStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create alert store: %w", err)
+	}
 	pendingRegStore, err := provider.CreatePendingRegistrationStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create pending registration store: %w", err)
@@ -971,6 +995,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		triggerStore:           triggerStore,
 		pushStore:              pushStore,
 		ipTrustStore:           ipTrustStore,
+		alertStore:             alertStore,
 	}
 	if pendingRegStore != nil {
 		sm.SetPendingRegistrationStore(pendingRegStore)
@@ -1056,6 +1081,10 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ip trust store (flatfile): %w", err)
 	}
+	alertStore, err := ffProvider.CreateAlertStore(flatfileCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create alert store (flatfile): %w", err)
+	}
 
 	// Prefer single-connection bundle when the provider supports it.
 	// This opens the SQLite database exactly once and shares the *sql.DB across
@@ -1074,6 +1103,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		)
 		sm.SetPendingRegistrationStore(bundle.PendingRegistration)
 		sm.SetIPTrustStore(ipTrustStore)
+		sm.SetAlertStore(alertStore)
 		sm.SetPendingRefreshStore(bundle.PendingRefresh)
 		sm.SetRefreshPolicyStore(bundle.RefreshPolicy)
 		sm.SetAssurancePolicyStore(bundle.AssurancePolicy)
@@ -1125,6 +1155,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	)
 	sm.SetPendingRegistrationStore(pendingRegStore)
 	sm.SetIPTrustStore(ipTrustStore)
+	sm.SetAlertStore(alertStore)
 	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle
 	// (OpenBusinessStores). The non-bundle fallback path leaves them nil — acceptable since
 	// this path is only taken when the provider does not implement BusinessStoreOpener,

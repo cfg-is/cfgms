@@ -110,6 +110,7 @@ type Server struct {
 	configSourceRateLimits         sync.Map                              // Issue #1396: per-tenant rate-limit counters
 	pendingStore                   business.PendingRegistrationStore     // Issue #1696: durable pending-registration queue
 	ipTrustStore                   business.IPTrustStore                 // Issue #1698: operator IP-trust management
+	alertStore                     business.AlertStore                   // Issue #3266: alert acknowledge and silence
 	runManager                     *controllerrun.Manager                // Issue #1673: run/job/execution model
 	runExecutionQueue              *script.ExecutionQueue                // Issue #1673: queue for ad-hoc run synthesis
 	trustedProxies                 []net.IPNet                           // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
@@ -1233,6 +1234,14 @@ func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ipTrustStore = store
+}
+
+// SetAlertStore wires the alert store for alert acknowledge and silence (Issue #3266).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetAlertStore(store business.AlertStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alertStore = store
 }
 
 // SetUpgradeStore wires the durable UpgradeStore used by the steward upgrade

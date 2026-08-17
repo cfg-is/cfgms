@@ -263,6 +263,21 @@ func (p *FlatFileProvider) CreateIPTrustStore(config map[string]interface{}) (bu
 	return store, nil
 }
 
+// CreateAlertStore creates a flat-file-backed AlertStore.
+// Config map must contain "root" (string): the root directory.
+// States are stored at <root>/alerts/alert_states.json with atomic writes.
+func (p *FlatFileProvider) CreateAlertStore(config map[string]interface{}) (business.AlertStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileAlertStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create alert store: %w", err)
+	}
+	return store, nil
+}
+
 // init auto-registers the flat-file provider so that a blank import is sufficient.
 func init() {
 	interfaces.RegisterStorageProvider(&FlatFileProvider{})

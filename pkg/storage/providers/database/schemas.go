@@ -860,6 +860,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateAlertStatesTable(ctx, db); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1287,6 +1291,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS steward_records;",
 		"DROP TABLE IF EXISTS sessions;",
 		"DROP TABLE IF EXISTS session_token_store;",
+		"DROP TABLE IF EXISTS cfgms_alert_states;",
 	}
 
 	for _, query := range dropQueries {
@@ -1295,5 +1300,36 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	return nil
+}
+
+// CreateAlertStatesTable creates the cfgms_alert_states table for tenant-scoped alert state.
+func (s DatabaseSchemas) CreateAlertStatesTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS cfgms_alert_states (
+			id              TEXT PRIMARY KEY,
+			tenant_id       TEXT NOT NULL,
+			alert_id        TEXT NOT NULL,
+			acknowledged    BOOLEAN NOT NULL DEFAULT FALSE,
+			acknowledged_by TEXT NOT NULL DEFAULT '',
+			acknowledged_at TIMESTAMPTZ,
+			silenced        BOOLEAN NOT NULL DEFAULT FALSE,
+			silenced_by     TEXT NOT NULL DEFAULT '',
+			silenced_until  TIMESTAMPTZ,
+			UNIQUE(tenant_id, alert_id)
+		);
+	`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create cfgms_alert_states table: %w", err)
+	}
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_alert_states_tenant_id ON cfgms_alert_states(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_alert_states_tenant_alert ON cfgms_alert_states(tenant_id, alert_id);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create cfgms_alert_states index: %w", err)
+		}
+	}
 	return nil
 }
