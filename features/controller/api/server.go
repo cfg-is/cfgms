@@ -1526,6 +1526,34 @@ func (s *Server) SetEntityGraphWriteProvider(p egWriteProvider) {
 	s.egWriter = p
 }
 
+// EntityGraphProvider returns the wired entity graph read provider, or nil when
+// unwired. Exposed so controller startup wiring can be regression-tested (the
+// entity REST endpoints 503 when this is nil — Issue #2880/#3253).
+func (s *Server) EntityGraphProvider() egReadProvider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egProvider
+}
+
+// ConfigStoreWriter returns the wired ConfigStore desired-state entity-graph
+// writer, or nil when unwired. Exposed so controller startup wiring can be
+// regression-tested (Issue #2879/#3253).
+func (s *Server) ConfigStoreWriter() egConfigstoreIngestor {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egConfigstoreWriter
+}
+
+// EntityGraphWriteProvider returns the wired entity graph write provider, or
+// nil when unwired. Exposed so controller startup wiring can be
+// regression-tested (the POST /api/v1/entities/edges endpoint 503s when this
+// is nil — Issue #3374/#3253).
+func (s *Server) EntityGraphWriteProvider() egWriteProvider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egWriter
+}
+
 // getHTTPListenAddr determines the HTTP listen address with the
 // precedence established by Story #1919:
 //

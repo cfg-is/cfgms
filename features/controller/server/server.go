@@ -70,6 +70,10 @@ import (
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
 	dnadrift "github.com/cfgis/cfgms/pkg/dna/drift"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	egdatabase "github.com/cfgis/cfgms/pkg/entitygraph/providers/database"
+	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egconfigstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
 	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -180,6 +184,18 @@ type Server struct {
 	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
 	observeManifestProvider ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
 	terminalSessionMgr      terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
+	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
+}
+
+// egServerProvider is the combined interface the controller server needs for
+// the entity graph provider: the full EntityGraphProvider contract (so the
+// provider can be passed directly to SetEntityGraphProvider and
+// SetEntityGraphWriteProvider without an intermediate assertion) plus Close()
+// for lifecycle management. Both SQLiteEntityGraphProvider and
+// DatabaseEntityGraphProvider satisfy this interface (Issue #3253).
+type egServerProvider interface {
+	eginterfaces.EntityGraphProvider
+	Close() error
 }
 
 // resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
@@ -488,6 +504,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		openedStores = append(openedStores, tagStoreInstance.Close)
 		controllerService.SetTagStore(tagStoreInstance)
 	}
+
+	// Issue #3253: Construct the entity graph provider, tracking the same
+	// storage backend as the rest of the controller. The provider is registered
+	// in openedStores immediately so a mid-New failure releases its handle.
+	egProvider, egErr := initializeEntityGraphProvider(cfg, logger)
+	if egErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph provider: %w", egErr)
+	}
+	openedStores = append(openedStores, egProvider.Close)
 
 	// Create the configuration service (V2: durable storage via StorageManager)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -1213,6 +1238,20 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetRoleConfigStore(cs)
 	}
 
+	// Issue #3253: Wire entity graph provider and its ConfigStore desired-state
+	// writer into the HTTP API server. egProvider was constructed above and
+	// registered in openedStores; both Set* calls are unconditional because
+	// initializeEntityGraphProvider always returns a non-nil provider or an error.
+	httpServer.SetEntityGraphProvider(egProvider)
+	egWriter, egWriterErr := egconfigstorewriter.New(egProvider)
+	if egWriterErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph configstore writer: %w", egWriterErr)
+	}
+	httpServer.SetConfigStoreWriter(egWriter)
+	// Also wire the same provider as the write path so operator-asserted edge
+	// assertions share the same store (Issue #3374).
+	httpServer.SetEntityGraphWriteProvider(egProvider)
+
 	// Issue #2098: Wire registration-refresh stores into the HTTP API server so the
 	// challenge/complete endpoints and the admin approve/reject/policy endpoints are
 	// operational. GetStewardStore is always non-nil for the OSS composite (flatfile
@@ -1349,6 +1388,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		jobDispatcher:           jobDispatcher,    // Issue #1672
 		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
 		pendingExpiryJob:        pendingExpiryJob, // Issue #1697
+		egProvider:              egProvider,       // Issue #3253: closed in Stop() to release DB handle
 	}
 
 	// Issue #1673: Wire run/job/execution model into API server.
@@ -2191,6 +2231,14 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Close entity graph provider — releases the SQLite or Postgres connection
+	// so temp-directory cleanup succeeds on Windows (Issue #3253).
+	if s.egProvider != nil {
+		if err := s.egProvider.Close(); err != nil {
+			s.logger.Warn("Failed to close entity graph provider", "error", err)
+		}
+	}
+
 	// Close session store — releases the connection so temp-directory cleanup
 	// succeeds on Windows (Issue #2774). MemStore.Close() has no error return while
 	// SQLiteSessionTokenStore and DatabaseSessionTokenStore do — use a type switch
@@ -2884,6 +2932,116 @@ func initializeTagStore(
 
 	logger.Info("Tag store initialized with SQLite backend (Issue #2542)", "sqlite_path", cfg.Storage.SQLitePath)
 	return store
+}
+
+// initializeEntityGraphProvider constructs the entity graph provider that
+// matches the controller's active storage backend (Issue #3253 / ADR-022):
+//
+//   - Cluster mode: PostgreSQL-backed DatabaseEntityGraphProvider using the
+//     cluster Postgres DSN. SQLite would give each node its own isolated graph,
+//     so the database provider is required — not optional.
+//   - Legacy single-provider "database" mode: DatabaseEntityGraphProvider using
+//     cfg.Storage.Config["dsn"].
+//   - OSS composite mode (FlatfileRoot set): SQLiteEntityGraphProvider at a
+//     dedicated file alongside cfg.Storage.SQLitePath so the two stores never
+//     share the same *sql.DB handle.
+func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger) (egServerProvider, error) {
+	if cfg.Storage == nil {
+		return nil, fmt.Errorf("storage configuration required for entity graph provider")
+	}
+
+	if cfg.HA.IsClusterMode() {
+		pgDSN := ""
+		if cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+		}
+		p, err := egdatabase.NewDatabaseEntityGraphProvider(pgDSN)
+		if err != nil {
+			return nil, fmt.Errorf("entity graph (cluster/postgres): %w", err)
+		}
+		logger.Info("Entity graph provider initialized with Postgres backend (cluster mode, Issue #3253)")
+		return p, nil
+	}
+
+	if cfg.Storage.Provider == "database" {
+		dsn, dsnErr := entityGraphDatabaseDSN(cfg.Storage.Config)
+		if dsnErr != nil {
+			return nil, fmt.Errorf("entity graph (database single-provider): %w", dsnErr)
+		}
+		p, err := egdatabase.NewDatabaseEntityGraphProvider(dsn)
+		if err != nil {
+			return nil, fmt.Errorf("entity graph (database single-provider): %w", err)
+		}
+		logger.Info("Entity graph provider initialized with Postgres backend (database mode, Issue #3253)")
+		return p, nil
+	}
+
+	// OSS composite mode — use a dedicated SQLite file next to the main store.
+	if cfg.Storage.SQLitePath == "" {
+		return nil, fmt.Errorf("storage.sqlite_path is required for the entity graph provider in OSS composite mode")
+	}
+	egPath := filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "entitygraph.db")
+	p, err := egsqlite.NewSQLiteEntityGraphProvider(egPath)
+	if err != nil {
+		return nil, fmt.Errorf("entity graph (sqlite): %w", err)
+	}
+	logger.Info("Entity graph provider initialized with SQLite backend (OSS composite mode, Issue #3253)",
+		"path", egPath)
+	return p, nil
+}
+
+// entityGraphDatabaseDSN extracts a Postgres DSN for the entity graph provider
+// in legacy "database" single-provider mode. It mirrors
+// pkg/storage/providers/database/plugin.go's unexported getDSN exactly —
+// preferring a complete "dsn" string, otherwise building one from discrete
+// host/port/database/username/password/sslmode keys — so the entity graph
+// always tracks the same connection the storage provider itself opens.
+// Duplicated locally rather than imported: features/ business logic must not
+// import pkg/storage/providers directly (see CLAUDE.md central provider
+// rules), and the entity graph provider takes a raw DSN string, not a config
+// map, so this extraction has to live on this side of that boundary.
+//
+// Deployments that configure discrete fields instead of a single "dsn" string
+// (e.g. docker-compose.test.yml's CFGMS_DB_HOST/PORT/... fixtures, and
+// server_security_test.go's createDockerTestStorageConfig) previously made
+// this branch silently pass an empty DSN to lib/pq, which defaults to dialing
+// localhost:5432 instead of the configured host (Issue #3253 merge-queue
+// regression).
+func entityGraphDatabaseDSN(storageConfig map[string]interface{}) (string, error) {
+	if dsn, ok := storageConfig["dsn"].(string); ok && dsn != "" {
+		return dsn, nil
+	}
+
+	host := entityGraphConfigString(storageConfig, "host", "localhost")
+	port := entityGraphConfigInt(storageConfig, "port", 5432)
+	database := entityGraphConfigString(storageConfig, "database", "cfgms")
+	username := entityGraphConfigString(storageConfig, "username", "cfgms")
+	password := entityGraphConfigString(storageConfig, "password", "")
+	sslmode := entityGraphConfigString(storageConfig, "sslmode", "require")
+
+	if password == "" {
+		return "", fmt.Errorf("database password is required")
+	}
+
+	return fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
+		host, port, database, username, password, sslmode), nil
+}
+
+func entityGraphConfigString(config map[string]interface{}, key, defaultValue string) string {
+	if val, ok := config[key].(string); ok {
+		return val
+	}
+	return defaultValue
+}
+
+func entityGraphConfigInt(config map[string]interface{}, key string, defaultValue int) int {
+	if val, ok := config[key].(int); ok {
+		return val
+	}
+	if val, ok := config[key].(float64); ok {
+		return int(val)
+	}
+	return defaultValue
 }
 
 // initializeSessionStore selects and opens a session.Store.
