@@ -58,11 +58,15 @@ func TestExecuteResource_DriftHandlerCalledOnDrift(t *testing.T) {
 	var mu sync.Mutex
 	var capturedResource string
 	var capturedModule string
+	var capturedResourceID string
+	var capturedDesiredMap map[string]interface{}
 	executor.SetDriftEventHandler(func(resourceName, moduleName string, diff *stewardtesting.StateDiff) {
 		atomic.AddInt32(&driftCallCount, 1)
 		mu.Lock()
 		capturedResource = resourceName
 		capturedModule = moduleName
+		capturedResourceID = diff.ResourceID
+		capturedDesiredMap = diff.DesiredMap
 		mu.Unlock()
 	})
 
@@ -85,9 +89,23 @@ func TestExecuteResource_DriftHandlerCalledOnDrift(t *testing.T) {
 	mu.Lock()
 	resource_ := capturedResource
 	module_ := capturedModule
+	resourceID_ := capturedResourceID
+	desiredMap_ := capturedDesiredMap
 	mu.Unlock()
 	assert.Equal(t, "test-file", resource_)
 	assert.Equal(t, "file", module_)
+
+	// The StateDiff handed to the handler must carry the module-internal resource
+	// identifier (Issue #3373). The drift-diff accumulator uses it as the record's
+	// fragment_id and skips any diff without one, so an unset ResourceID here means
+	// drift records are silently dropped before they ever reach the controller.
+	assert.Equal(t, filePath, resourceID_,
+		"drift handler must receive the resource identifier the executor resolved")
+
+	// The diff must also carry the managed desired field map, which is what lets the
+	// record report matching fields and not only the drifted ones.
+	require.NotEmpty(t, desiredMap_, "StateDiff.DesiredMap must be populated for the drift handler")
+	assert.Contains(t, desiredMap_, "content", "the managed 'content' field must appear in DesiredMap")
 }
 
 func TestExecuteResource_DriftHandlerNotCalledWhenNoDrift(t *testing.T) {

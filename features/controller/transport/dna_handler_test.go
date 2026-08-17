@@ -214,7 +214,7 @@ func TestDNAHandler_PersistsFragmentsFromTransfer(t *testing.T) {
 		FragmentBytes: [][]byte{fragBytes},
 	}
 
-	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 2), "steward-frag")
+	dna, _, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 2), "steward-frag")
 	require.NoError(t, err)
 
 	require.Len(t, dna.GetFragments(), 1, "the transfer's fragment must survive reassembly")
@@ -241,7 +241,7 @@ func TestDNAHandler_MalformedFragmentSkipped(t *testing.T) {
 		FragmentBytes: [][]byte{{0x08}, goodBytes},
 	}
 
-	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-badfrag")
+	dna, _, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-badfrag")
 	require.NoError(t, err, "a malformed fragment must not fail the snapshot")
 	require.Len(t, dna.GetFragments(), 1, "only the well-formed fragment is kept")
 	assert.Equal(t, "cluster:ok", dna.GetFragments()[0].GetFragmentId())
@@ -270,14 +270,14 @@ func TestReassembleDNA_RejectsExcessiveFragmentCount(t *testing.T) {
 	}
 
 	// Wire protocol is Fragments-only: no Attributes field (Issue #3322).
-	_, err = reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
+	_, _, err = reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
 		StewardID: "steward-fragflood", TenantID: "t1", FragmentBytes: frags,
 	}, 1), "steward-fragflood")
 	require.Error(t, err, "an unbounded fragment count must be rejected, not persisted")
 	assert.Contains(t, err.Error(), "exceeds maximum")
 
 	// The boundary itself is still accepted — the cap must not reject legitimate load.
-	dna, err := reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
+	dna, _, err := reassembleDNA(dnaChunksForTransfer(t, &dptypes.DNATransfer{
 		StewardID: "steward-fragmax", TenantID: "t1",
 		FragmentBytes: frags[:maxDNATransferFragments],
 	}, 1), "steward-fragmax")
@@ -296,7 +296,7 @@ func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
 
 	// Wire protocol is Fragments-only: no Attributes field (Issue #3322).
 	oversized := make([]byte, maxDNAFragmentBytes+1)
-	_, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
+	_, _, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
 		StewardID: "s", TenantID: "t1", FragmentBytes: [][]byte{oversized},
 	}), "s"), "s")
 	require.Error(t, err, "an over-cap fragment must never reach the decoder")
@@ -311,7 +311,7 @@ func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(atLimit), maxDNAFragmentBytes)
 
-	dna, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
+	dna, _, err := reassembleDNA(chunksFromPayload(mustJSON(t, &dptypes.DNATransfer{
 		StewardID: "s", TenantID: "t1", FragmentBytes: [][]byte{atLimit},
 	}), "s"), "s")
 	require.NoError(t, err, "a fragment at the boundary must be accepted")
@@ -858,7 +858,7 @@ func TestReassembleDNA_IgnoresWireAttributes(t *testing.T) {
 		FragmentBytes: identityFragmentBytes(t, map[string]string{"hostname": "real-host", "os": "linux"}),
 	}
 
-	dna, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-wire-attrs")
+	dna, _, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-wire-attrs")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"hostname": "real-host", "os": "linux"}, dna.GetAttributes(),
 		"attributes must come from fragments only; the wire blob must be ignored entirely")

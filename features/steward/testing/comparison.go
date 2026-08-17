@@ -67,6 +67,16 @@ type StateDiff struct {
 	// "drift.detected" in apply mode; "drift.detected.monitor" in monitor mode.
 	// Set by the executor before invoking DriftEventHandler.
 	EventType string
+
+	// ResourceID is the module-internal typed resource identifier
+	// (e.g. "vm:m2-test-vm", "service:sshd", "/etc/hosts").
+	// Set by the executor before invoking DriftEventHandler.
+	ResourceID string
+
+	// DesiredMap is the full managed desired-state field map for this resource.
+	// Populated by CompareStates so drift-diff accumulation can compute matching fields
+	// without re-accessing the desired state separately.
+	DesiredMap map[string]interface{}
 }
 
 // FieldDiff represents a difference in a specific configuration field.
@@ -134,6 +144,11 @@ func (c *StateComparator) CompareStates(current, desired modules.ConfigState) (b
 	// Only compare managed fields
 	managedFieldValues := c.GetManagedFieldValues(current, managedFields)
 	desiredFieldValues := c.GetManagedFieldValues(desired, managedFields)
+
+	// Expose desired field values for drift-diff accumulation (ADR-022 §6).
+	// Callers use DesiredMap to recover matching fields without re-accessing the
+	// desired state.
+	diff.DesiredMap = desiredFieldValues
 
 	// Calculate differences
 	c.calculateDifferences(managedFieldValues, desiredFieldValues, &diff)
