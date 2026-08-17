@@ -95,6 +95,7 @@ loads them from disk on restart. No vault dependency.
 
 ## See also
 
-The OpenBao unseal key and root token this mechanism depends on are tracked
-in [`lab-secrets-inventory.md`](lab-secrets-inventory.md) alongside every
-other cfg-lab credential — capture them there the moment they're minted.
+The OpenBao unseal key and root token this mechanism depends on are not
+stored in this repository. Capture them into your deployment's own credential
+store the moment they are minted — the unseal key cannot be recovered if lost,
+and it protects the cluster CA.
