@@ -151,8 +151,8 @@ necessary to copy it to the keychain.
 
 **Windows operators:** the steps below only cover Linux (`secret-tool`) and
 macOS (`security`) — there is no Windows keychain path yet. This is a known,
-tracked gap; see [`lab-secrets-inventory.md`](lab-secrets-inventory.md) §2 for
-the current workaround and status.
+tracked gap; until it is closed, store the bundle in your platform's own
+credential manager rather than leaving it on disk.
 
 **Step 1 — Copy bundle to workstation (operator machine):**
 
