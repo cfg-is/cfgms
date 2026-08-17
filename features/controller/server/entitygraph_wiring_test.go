@@ -18,7 +18,10 @@ import (
 // constructed as library code (Issues #2871–#2880) but never instantiated in a
 // running controller — every /api/v1/entities* request returned 503 "entity
 // graph unavailable" unconditionally because s.egProvider was always nil.
-// This asserts New() wires BOTH into the API server the REST handlers read from.
+// This asserts New() wires all three into the API server the REST handlers
+// read from: the read provider and ConfigStore writer (Issue #3253) plus the
+// write provider for operator-asserted edge assertions (Issue #3374), which
+// New() wires from the same egProvider instance.
 func TestServer_New_WiresEntityGraphProviderIntoAPIServer(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
@@ -65,11 +68,13 @@ func TestServer_New_WiresEntityGraphProviderIntoAPIServer(t *testing.T) {
 
 	require.NotNil(t, srv.httpServer, "API server must be initialized")
 
-	// Both must be wired into the API server the REST handlers read.
+	// All three must be wired into the API server the REST handlers read.
 	assert.NotNil(t, srv.httpServer.EntityGraphProvider(),
 		"entity graph provider must be wired into the API server (else /api/v1/entities* 503s)")
 	assert.NotNil(t, srv.httpServer.ConfigStoreWriter(),
 		"entity graph configstore writer must be wired into the API server (else GetDesiredState has no writer)")
+	assert.NotNil(t, srv.httpServer.EntityGraphWriteProvider(),
+		"entity graph write provider must be wired into the API server (else POST /api/v1/entities/edges 503s)")
 }
 
 // TestInitializeEntityGraphProvider covers the error paths of

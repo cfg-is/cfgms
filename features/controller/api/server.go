@@ -1544,6 +1544,16 @@ func (s *Server) ConfigStoreWriter() egConfigstoreIngestor {
 	return s.egConfigstoreWriter
 }
 
+// EntityGraphWriteProvider returns the wired entity graph write provider, or
+// nil when unwired. Exposed so controller startup wiring can be
+// regression-tested (the POST /api/v1/entities/edges endpoint 503s when this
+// is nil — Issue #3374/#3253).
+func (s *Server) EntityGraphWriteProvider() egWriteProvider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egWriter
+}
+
 // getHTTPListenAddr determines the HTTP listen address with the
 // precedence established by Story #1919:
 //
