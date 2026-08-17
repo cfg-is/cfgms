@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/dispatcher"
@@ -75,6 +77,7 @@ import (
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	egconfigstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -186,6 +189,7 @@ type Server struct {
 	observeManifestProvider ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
 	terminalSessionMgr      terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
 	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
+	egClusterMembership     dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
 }
 
 // egServerProvider is the combined interface the controller server needs for
@@ -2722,23 +2726,49 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 	return nil
 }
 
+// maxApplyOutcomeRecordsPerEvent bounds how many apply-outcome records a single
+// config_applied event may contribute. details["apply_outcomes"] carries no length
+// limit on the wire and every record costs an entity-graph read plus an observation
+// write, so one peer must not be able to size the controller's work per event
+// (CLAUDE.md threat model: stewards run on hosts that may be compromised). A steward
+// that legitimately applies more resources than this in one cycle reports the
+// remainder on its next cycle; the records are additive, so nothing is lost
+// permanently.
+const maxApplyOutcomeRecordsPerEvent = 1000
+
 // ingestApplyOutcomes decodes apply_outcomes from event details and writes one
 // ObservationKindApplyOutcome observation per record into the entity graph.
 //
-// EID resolution is always host-scoped: the steward ships a bare resourceID (its
-// local identifier, e.g. "vm:myvm"), and the controller prefixes
-// host:<peerHostAuthority>/ using the mTLS-verified event.StewardID. No
-// cluster-membership lookup is performed here — per Issue #3375 §"Out of Scope",
-// joining a clustered VM's apply-outcome to its cluster-scoped EID is deferred to
-// a future story that can handle the ordering question correctly.
+// EID resolution is cluster-aware (Issue #3376): a record lands under
+// cluster:<clusterName>/<resourceID> — the EID form used by entity-state (#3367) — when
+// a cluster-membership verifier corroborates the peer's cluster independently of the
+// peer's own claim AND the graph already holds cluster-scoped entity state for that
+// exact resource. Otherwise the record falls back to
+// host:<peerHostAuthority>/<resourceID>. Resolution is delegated to
+// dnasync.ResolveSubjectEID so both record types share one gate; the gates and their
+// rationale are documented on applyOutcomeEIDResolver.
+//
+// The record list is steward-supplied and unbounded on the wire, so it is capped at
+// maxApplyOutcomeRecordsPerEvent before any per-record work is done.
 func (s *Server) ingestApplyOutcomes(ctx context.Context, peerHostAuthority, configVersion string, details map[string]interface{}) error {
 	rawOutcomes, ok := details["apply_outcomes"].([]interface{})
 	if !ok || len(rawOutcomes) == 0 {
 		return nil
 	}
+	if len(rawOutcomes) > maxApplyOutcomeRecordsPerEvent {
+		s.logger.Warn("ingestApplyOutcomes: apply_outcomes exceeds per-event cap; truncating",
+			"steward_id", logging.SanitizeLogValue(peerHostAuthority),
+			"received", len(rawOutcomes),
+			"cap", maxApplyOutcomeRecordsPerEvent)
+		rawOutcomes = rawOutcomes[:maxApplyOutcomeRecordsPerEvent]
+	}
 
 	now := time.Now().UTC()
 	var observations []egtypes.Observation
+
+	// One resolver per event: cluster membership is a property of the peer, so the
+	// membership query is performed at most once no matter how many records arrive.
+	resolver := s.newApplyOutcomeEIDResolver(peerHostAuthority)
 
 	for _, rawRec := range rawOutcomes {
 		rec, ok := rawRec.(map[string]interface{})
@@ -2761,9 +2791,7 @@ func (s *Server) ingestApplyOutcomes(ctx context.Context, peerHostAuthority, con
 			}
 		}
 
-		// EID = host:<peerHostAuthority>/<resourceID>. Authority always comes from
-		// the mTLS-verified stewardID; no steward-supplied value can reach it.
-		eid, err := egtypes.NewEID("host", peerHostAuthority, resourceID)
+		eid, err := resolver.resolveApplyOutcomeEID(ctx, resourceID)
 		if err != nil {
 			s.logger.Warn("ingestApplyOutcomes: skipping record with invalid resource_id",
 				"steward_id", peerHostAuthority,
@@ -2801,6 +2829,237 @@ func (s *Server) ingestApplyOutcomes(ctx context.Context, peerHostAuthority, con
 		Observations: observations,
 	}
 	return s.egProvider.ReportObservations(ctx, batch)
+}
+
+// SetEntityGraphClusterMembership wires the controller-side verifier that decides
+// which cluster names may become an EID authority segment for a given steward
+// (dnasync.ClusterMembership).
+//
+// The same verifier instance MUST be given to the DNA-sync entity-graph writer
+// (dnasync.WithClusterMembership). Both record types for one resource are then gated
+// by one answer, so an apply-outcome can never be filed under a cluster authority that
+// entity-state does not also use.
+//
+// Leaving it unset denies every cluster claim. That is the safe state and it keeps the
+// two paths in agreement: both resolve host-scoped.
+// Deferred: tracked in #2853 — supply this verifier, and the DNA-sync writer that
+// shares it, from controller start-up.
+func (s *Server) SetEntityGraphClusterMembership(m dnasync.ClusterMembership) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egClusterMembership = m
+}
+
+// entityGraphClusterMembership returns the wired cluster-membership verifier, or nil
+// when none is configured (in which case every cluster claim is denied).
+func (s *Server) entityGraphClusterMembership() dnasync.ClusterMembership {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egClusterMembership
+}
+
+// applyOutcomeEIDResolver resolves the entity-graph EID for the apply-outcome
+// records of ONE config_applied event from ONE mTLS-verified peer (Issue #3376).
+//
+// The EID is minted by dnasync.ResolveSubjectEID — the same function that mints
+// entity-state EIDs — so the two record types for one resource cannot disagree about
+// where the record belongs. A private copy of the cluster-redirect rule would drift and
+// file outcomes at an EID entity-state never uses.
+//
+// Three gates must all pass before a record leaves the host namespace:
+//
+//  1. Taxonomy. Only kinds a host authority may name (AuthorityClasses contains "host")
+//     are handed to the resolver. A resourceID such as "cluster:<name>" would otherwise
+//     take ResolveSubjectEID's bare cluster-kind branch, where the authority segment is
+//     the identifier itself — a value carried in the event being ingested. Those kinds
+//     are filed under the mTLS-verified peer instead, so nothing from the event can
+//     reach an authority segment (SE threat #1 — authority confusion).
+//
+//  2. Peer membership, corroborated independently of the asserting peer. The
+//     controller's tenant-scoped DNA registry supplies a CANDIDATE cluster name; its
+//     Members are built from cluster:<name> fragments carried in each steward's own DNA
+//     (features/controller/clusterregistry), and a steward can equally declare a
+//     cluster:<name> --contains--> host:<self> edge, so neither signal is more than the
+//     peer's own claim. The candidate becomes an authority segment only when the wired
+//     dnasync.ClusterMembership verifier — contractually required to answer from state
+//     the controller holds independently of the asserting peer — confirms it, and
+//     ResolveSubjectEID re-checks that verifier before minting the EID. With no verifier
+//     wired every candidate is denied, so a compromised steward that publishes a
+//     cluster:<victim> fragment cannot move its records into another cluster's (or,
+//     since cluster EIDs are not tenant-qualified, another tenant's) namespace — where
+//     they could never be retracted, apply-outcome observations carrying no ClaimScope.
+//     Membership is a property of the peer, so this is resolved at most once per event:
+//     the ingest loop must not scale controller-side lookups with a steward-supplied
+//     record count.
+//
+//  3. Per-resource cluster evidence. The entity graph must already hold a
+//     cluster:<name>/<resourceID> ENTITY for that exact resource, which only the dnasync
+//     writer's membership-gated cluster branch can have created (it requires that
+//     resource's OWN ha_role.cluster_name). Peer membership alone does not make a
+//     resource cluster-scoped: a cluster node also runs node-local VMs, and redirecting
+//     those would collapse same-named local VMs on two nodes onto one EID and leave the
+//     outcome pointing at an entity whose state lives elsewhere. Apply-outcome
+//     observations project into no entity table (sqlite/observations.go
+//     updateEntityProjection), so this evidence can never be manufactured by the
+//     apply-outcome path itself.
+//
+// Falling back to host:<peerHostAuthority>/<resourceID> is NOT an error. It is the
+// expected state for a standalone host, for a node-local resource on a cluster member,
+// and for a clustered resource whose entity state has not synced yet — the self-heal
+// ordering choice recorded in #3376.
+type applyOutcomeEIDResolver struct {
+	server            *Server
+	peerHostAuthority string
+	taxonomy          *egtypes.Taxonomy
+	membership        dnasync.ClusterMembership
+
+	// clusterName caches the verified cluster authority for this peer for the lifetime
+	// of one event; clusterLoaded distinguishes "not resolved yet" from "resolved, none
+	// verified", so a peer costs at most one registry pass per event and a record whose
+	// kind is not cluster-eligible costs none at all.
+	clusterName   string
+	clusterLoaded bool
+}
+
+// newApplyOutcomeEIDResolver returns a resolver scoped to one event from one peer.
+func (s *Server) newApplyOutcomeEIDResolver(peerHostAuthority string) *applyOutcomeEIDResolver {
+	return &applyOutcomeEIDResolver{
+		server:            s,
+		peerHostAuthority: peerHostAuthority,
+		taxonomy:          egtypes.DefaultTaxonomy(),
+		membership:        s.entityGraphClusterMembership(),
+	}
+}
+
+// resolveApplyOutcomeEID resolves the EID for a single apply-outcome record, applying
+// the three gates documented on applyOutcomeEIDResolver.
+func (r *applyOutcomeEIDResolver) resolveApplyOutcomeEID(ctx context.Context, resourceID string) (egtypes.EID, error) {
+	kind := resourceID
+	if idx := strings.Index(resourceID, ":"); idx >= 0 {
+		kind = resourceID[:idx]
+	}
+
+	// Gate 1: taxonomy. Kinds a host authority may not name never reach the resolver.
+	if desc, ok := r.taxonomy.LookupEntityType(kind); ok && !applyOutcomeAuthorityHasHost(desc.AuthorityClasses) {
+		return egtypes.NewEID("host", r.peerHostAuthority, resourceID)
+	}
+
+	// Gate 2: the verified cluster name travels to the resolver in the same payload
+	// field a steward's own fragment uses for entity-state, so both go through the
+	// identical membership check inside ResolveSubjectEID.
+	var payload map[string]interface{}
+	if clusterName := r.verifiedClusterName(); clusterName != "" {
+		payload = map[string]interface{}{
+			"ha_role": map[string]interface{}{"cluster_name": clusterName},
+		}
+	}
+
+	eid, _, _, err := dnasync.ResolveSubjectEID(kind, r.peerHostAuthority, resourceID, payload, r.taxonomy, r.membership)
+	if err != nil {
+		return egtypes.EID{}, err
+	}
+
+	// Gate 3: a cluster-scoped result needs entity state at that exact EID.
+	if eid.AuthorityType() == "cluster" && !r.hasClusterScopedEntity(ctx, eid) {
+		return egtypes.NewEID("host", r.peerHostAuthority, resourceID)
+	}
+	return eid, nil
+}
+
+// verifiedClusterName returns the cluster name that BOTH the controller's tenant-scoped
+// DNA registry and the wired membership verifier attribute to this peer, or "" when no
+// such name exists. The result is computed at most once per event.
+//
+// Tenant scoping stops identically-named clusters in sibling tenants from vouching for
+// each other; the verifier is what turns a self-attested candidate into a name that may
+// become an authority segment. A nil verifier short-circuits to "" — no registry work is
+// done and no candidate can be accepted.
+func (r *applyOutcomeEIDResolver) verifiedClusterName() string {
+	if r.clusterLoaded {
+		return r.clusterName
+	}
+	r.clusterLoaded = true
+
+	if r.membership == nil {
+		return ""
+	}
+
+	s := r.server
+	s.mu.RLock()
+	controllerSvc := s.controllerService
+	s.mu.RUnlock()
+
+	if controllerSvc == nil {
+		return ""
+	}
+	info, exists := controllerSvc.GetStewardInfo(r.peerHostAuthority)
+	if !exists || info == nil {
+		return ""
+	}
+	tenantID := info.TenantID
+
+	allStewards := controllerSvc.GetAllStewards()
+	fleetData := make([]controllerFleet.StewardData, 0, len(allStewards))
+	for _, si := range allStewards {
+		if si == nil || si.TenantID != tenantID {
+			continue
+		}
+		var frags []*common.Fragment
+		if si.DNA != nil {
+			frags = si.DNA.Fragments
+		}
+		fleetData = append(fleetData, controllerFleet.StewardData{
+			ID:           si.ID,
+			TenantID:     si.TenantID,
+			DNAFragments: frags,
+		})
+	}
+
+	candidates := clusterregistry.BuildRegistry(fleetData).MemberClusters(r.peerHostAuthority)
+	for _, name := range candidates {
+		if r.membership.IsClusterMember(r.peerHostAuthority, name) {
+			r.clusterName = name
+			return r.clusterName
+		}
+	}
+	if len(candidates) > 0 {
+		s.logger.Debug("resolveApplyOutcomeEID: cluster claim not corroborated; resolving host-scoped",
+			"steward_id", logging.SanitizeLogValue(r.peerHostAuthority),
+			"candidate_count", len(candidates))
+	}
+	return ""
+}
+
+// hasClusterScopedEntity reports whether the entity graph already holds entity state for
+// eid — the per-resource cluster evidence required by gate 3. A missing entity
+// (ErrNotFound) is the ordinary answer for a node-local resource and is not logged.
+func (r *applyOutcomeEIDResolver) hasClusterScopedEntity(ctx context.Context, eid egtypes.EID) bool {
+	// TenantFilter is deliberately empty: this is controller-internal resolution, not an
+	// API read, and the entity-graph tenant cut is applied by the read APIs that serve
+	// these records. The cluster name reaching this point was already confirmed for the
+	// mTLS-verified peer within its own tenant by gate 2.
+	view, err := r.server.egProvider.GetEntity(ctx, eid, eginterfaces.GetEntityOpts{})
+	if err != nil {
+		if !errors.Is(err, eginterfaces.ErrNotFound) {
+			r.server.logger.Warn("resolveApplyOutcomeEID: cluster evidence lookup failed; resolving host-scoped",
+				"steward_id", logging.SanitizeLogValue(r.peerHostAuthority),
+				"eid", logging.SanitizeLogValue(eid.String()),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return false
+	}
+	return view != nil && view.Entity != nil
+}
+
+// applyOutcomeAuthorityHasHost reports whether "host" is among a kind's authority
+// classes, i.e. whether the mTLS-verified peer may name that entity itself.
+func applyOutcomeAuthorityHasHost(classes []string) bool {
+	for _, c := range classes {
+		if c == "host" {
+			return true
+		}
+	}
+	return false
 }
 
 // handleObserveSweepRequest processes EventObserveSweepRequest from a steward.
