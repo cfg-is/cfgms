@@ -219,19 +219,196 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	return existing, nil
 }
 
-// SuspendTenant sets the status of an existing tenant to TenantStatusSuspended.
-// Used by the agent-dispatch cleanup path (Issue #2124) to deactivate the
-// agent-test/<N> sub-tenant when the agent container exits.
-func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) error {
+// CascadeSuspendResult describes the outcome of a cascading suspend operation.
+type CascadeSuspendResult struct {
+	// Target is the tenant ID that was directly suspended.
+	Target string `json:"target"`
+	// NewlyCascadeSuspended lists descendant IDs that were not already independently
+	// suspended and are now cascade-suspended as a side effect.
+	NewlyCascadeSuspended []string `json:"newly_cascade_suspended"`
+	// AlreadySuspended lists descendant IDs that were already independently
+	// (DirectlySuspended) suspended; they now also carry CascadeSuspendedFrom.
+	AlreadySuspended []string `json:"already_suspended"`
+}
+
+// CascadeRestoreResult describes the outcome of a cascading restore operation.
+type CascadeRestoreResult struct {
+	// Target is the tenant ID whose direct suspension was cleared.
+	Target string `json:"target"`
+	// Restored lists descendant IDs whose only suspension reason was the ancestor
+	// cascade; they are now fully active.
+	Restored []string `json:"restored"`
+	// StillSuspended lists descendant IDs that were also independently
+	// (DirectlySuspended) suspended; their cascade flag was cleared but they remain
+	// suspended until explicitly restored.
+	StillSuspended []string `json:"still_suspended"`
+}
+
+// SuspendTenant suspends the target tenant and its entire subtree (ADR-027 Decision 1).
+// The target gains DirectlySuspended=true; each descendant gains CascadeSuspendedFrom
+// set to tenantID, keeping any pre-existing DirectlySuspended flag (ADR-027 Decision 2).
+// A cycle in the tenant hierarchy (data corruption) causes an error rather than an
+// infinite loop. An audit event is recorded on success (fire-and-forget).
+func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) (*CascadeSuspendResult, error) {
 	if tenantID == "default" {
-		return ErrCannotSuspendDefault
+		return nil, ErrCannotSuspendDefault
 	}
+
+	result := &CascadeSuspendResult{
+		Target:                tenantID,
+		NewlyCascadeSuspended: []string{},
+		AlreadySuspended:      []string{},
+	}
+
+	// BFS walk of the subtree. visited tracks IDs to detect data-corruption cycles.
+	visited := map[string]bool{tenantID: true}
+	queue := []string{tenantID}
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		current, err := m.store.GetTenant(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+
+		if currentID == tenantID {
+			current.DirectlySuspended = true
+			current.Status = business.TenantStatusSuspended
+		} else {
+			// Descendant: record cascade provenance. Keep DirectlySuspended if already set.
+			current.CascadeSuspendedFrom = &tenantID
+			if current.DirectlySuspended {
+				result.AlreadySuspended = append(result.AlreadySuspended, currentID)
+			} else {
+				current.Status = business.TenantStatusSuspended
+				result.NewlyCascadeSuspended = append(result.NewlyCascadeSuspended, currentID)
+			}
+		}
+
+		if err := m.store.UpdateTenant(ctx, current); err != nil {
+			return nil, err
+		}
+
+		children, err := m.store.GetChildTenants(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+			queue = append(queue, child.ID)
+		}
+	}
+
+	// Retrieve tenant name for the audit event (the GetTenant above fetched it, but
+	// we only have it within the loop; re-fetch is fine — audit is best-effort).
+	if t, err := m.store.GetTenant(ctx, tenantID); err == nil {
+		m.recordTenantLifecycleEvent(ctx, tenantID, t.Name, "tenant_suspended")
+	}
+
+	return result, nil
+}
+
+// RestoreTenant clears the target tenant's own suspension and lifts only the cascade
+// component on descendants (ADR-027 Decision 2). Descendants that carry their own
+// DirectlySuspended flag remain suspended — the cascade effect is removed but the
+// independent suspension is not. An audit event is recorded on success (fire-and-forget).
+func (m *Manager) RestoreTenant(ctx context.Context, tenantID string) (*CascadeRestoreResult, error) {
+	result := &CascadeRestoreResult{
+		Target:         tenantID,
+		Restored:       []string{},
+		StillSuspended: []string{},
+	}
+
+	// Clear the target's own direct suspension.
 	existing, err := m.store.GetTenant(ctx, tenantID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	existing.Status = business.TenantStatusSuspended
-	return m.store.UpdateTenant(ctx, existing)
+	existing.DirectlySuspended = false
+	// Keep cascade flag if it exists (target may be cascade-suspended by its own ancestor).
+	if existing.CascadeSuspendedFrom == nil {
+		existing.Status = business.TenantStatusActive
+	}
+	if err := m.store.UpdateTenant(ctx, existing); err != nil {
+		return nil, err
+	}
+
+	// BFS walk: clear CascadeSuspendedFrom == tenantID on all descendants.
+	visited := map[string]bool{tenantID: true}
+	queue := []string{tenantID}
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		children, err := m.store.GetChildTenants(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+			queue = append(queue, child.ID)
+
+			if child.CascadeSuspendedFrom == nil || *child.CascadeSuspendedFrom != tenantID {
+				continue
+			}
+			child.CascadeSuspendedFrom = nil
+			if child.DirectlySuspended {
+				// Stays suspended due to its own independent flag; only cascade cleared.
+				result.StillSuspended = append(result.StillSuspended, child.ID)
+			} else {
+				child.Status = business.TenantStatusActive
+				result.Restored = append(result.Restored, child.ID)
+			}
+			if err := m.store.UpdateTenant(ctx, child); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, existing.Name, "tenant_restored")
+
+	return result, nil
+}
+
+// recordTenantLifecycleEvent emits a tenant lifecycle audit event. It is
+// fire-and-forget: audit failures are logged but do not surface to the caller.
+func (m *Manager) recordTenantLifecycleEvent(ctx context.Context, tenantID, tenantName, action string) {
+	if m.auditManager == nil {
+		return
+	}
+
+	actor := audit.SystemUserID
+	if uid, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok && uid != "" {
+		actor = uid
+	}
+
+	event := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventConfiguration).
+		Action(action).
+		User(actor, business.AuditUserTypeHuman).
+		Resource("tenant", tenantID, tenantName).
+		Detail("tenant_id", tenantID).
+		Detail("actor", actor)
+
+	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		sanitized := strings.ReplaceAll(tenantID, "\n", "_")
+		sanitized = strings.ReplaceAll(sanitized, "\r", "_")
+		slog.Warn("tenant: failed to record tenant lifecycle audit event",
+			"action", action,
+			"tenant_id", sanitized,
+			"error", err,
+		)
+	}
 }
 
 // DeleteTenant deletes a tenant

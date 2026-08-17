@@ -240,6 +240,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/tenants/{id}/access-grants",
 	"POST /api/v1/tenants/{id}/break-glass",
 	"POST /api/v1/tenants/{id}/config-source/test",
+	"POST /api/v1/tenants/{id}/restore",
 	"POST /api/v1/tenants/{id}/suspend",
 	"POST /api/v1/web/accounts",
 	"POST /api/v1/web/accounts/{username}/enrollment-link/revoke",

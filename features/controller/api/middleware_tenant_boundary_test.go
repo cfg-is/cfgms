@@ -49,6 +49,7 @@ var tenantBoundaryRouteTable = []tenantBoundaryRoute{
 	{http.MethodGet, "/api/v1/tenants/{id}", "id", "tenant:read", false},
 	{http.MethodPut, "/api/v1/tenants/{id}", "id", "tenant:update", false},
 	{http.MethodPost, "/api/v1/tenants/{id}/suspend", "id", "tenant:manage", false},
+	{http.MethodPost, "/api/v1/tenants/{id}/restore", "id", "tenant:manage", false},
 	{http.MethodPost, "/api/v1/tenants/{id}/config-source/test", "id", "tenant:manage", false},
 	{http.MethodGet, "/api/v1/tenants/{id}/access-grants", "id", "tenant:crossing-list", false},
 	{http.MethodGet, "/api/v1/tenants/{tenant_id}/reboot-window", "tenant_id", "reboot_window:read", false},

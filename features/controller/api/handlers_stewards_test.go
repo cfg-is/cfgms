@@ -2680,7 +2680,8 @@ func TestHandleMoveSteward_DestinationNotActive(t *testing.T) {
 	// dest-tenant was created active by setupMoveStewardServer; suspend it so the
 	// handler sees a non-active destination.
 	ctx := context.Background()
-	require.NoError(t, server.tenantManager.SuspendTenant(ctx, "dest-tenant"))
+	_, err := server.tenantManager.SuspendTenant(ctx, "dest-tenant")
+	require.NoError(t, err)
 
 	rec := postMoveSteward(server, "s-inactive-dest", "dest-tenant")
 

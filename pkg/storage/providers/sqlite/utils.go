@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// stringPtrVal dereferences a string pointer, returning "" when nil.
+func stringPtrVal(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 // nullString returns a sql.NullString that is NULL when the input is empty.
 func nullString(s string) sql.NullString {
 	if s == "" {

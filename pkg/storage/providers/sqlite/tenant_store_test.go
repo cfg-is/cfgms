@@ -68,6 +68,13 @@ func TestTenantStore_MissingTenantContract(t *testing.T) {
 	business.TenantStoreMissingTenantContract(t, newTenantStore(t))
 }
 
+// TestTenantStore_LifecycleContract holds this provider to the shared suspension
+// provenance persistence contract (ADR-027 Decision 2, Issue #3158). Both
+// DirectlySuspended and CascadeSuspendedFrom must survive a store round-trip.
+func TestTenantStore_LifecycleContract(t *testing.T) {
+	business.TenantStoreLifecycleContract(t, newTenantStore(t))
+}
+
 func TestTenantStore_Update(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()

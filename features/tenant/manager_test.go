@@ -719,7 +719,8 @@ func TestManager_SuspendTenant(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.TenantStatusActive, td.Status)
 
-	require.NoError(t, manager.SuspendTenant(ctx, "suspend-test"))
+	_, err = manager.SuspendTenant(ctx, "suspend-test")
+	require.NoError(t, err)
 
 	suspended, err := manager.GetTenant(ctx, "suspend-test")
 	require.NoError(t, err)
@@ -730,7 +731,7 @@ func TestManager_SuspendTenant_NotFound(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	err := manager.SuspendTenant(ctx, "nonexistent-tenant")
+	_, err := manager.SuspendTenant(ctx, "nonexistent-tenant")
 	require.Error(t, err)
 }
 
@@ -745,7 +746,7 @@ func TestManager_SuspendTenant_DefaultGuard(t *testing.T) {
 	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "default"})
 	require.NoError(t, err)
 
-	suspendErr := manager.SuspendTenant(ctx, "default")
+	_, suspendErr := manager.SuspendTenant(ctx, "default")
 	require.Error(t, suspendErr, "SuspendTenant must return an error for the default tenant")
 	require.ErrorIs(t, suspendErr, ErrCannotSuspendDefault)
 
@@ -1113,4 +1114,285 @@ func TestManager_CreateTenant_AcceptsOwnCredentialRef(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "own-cred-tenant/git-token", td.Metadata[cfgpkg.MetaKeyConfigSourceCredential])
+}
+
+// --- Cascade suspend/restore tests (ADR-027 Decisions 1-2, Issue #3158) ---
+
+// buildSubtree creates a three-tier hierarchy: root → child → grandchild.
+// Returns IDs as (rootID, childID, grandchildID).
+func buildSubtree(t *testing.T, manager *Manager) (string, string, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	root, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-root", Name: "cs-root"})
+	require.NoError(t, err)
+	child, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-child", Name: "cs-child", ParentID: root.ID})
+	require.NoError(t, err)
+	grand, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-grand", Name: "cs-grand", ParentID: child.ID})
+	require.NoError(t, err)
+	return root.ID, child.ID, grand.ID
+}
+
+// TestManager_SuspendTenant_DefaultProtected verifies the default-tenant guard is
+// preserved after the cascade rewrite.
+func TestManager_SuspendTenant_DefaultProtected(t *testing.T) {
+	manager := newTestTenantManager(t)
+	_, err := manager.SuspendTenant(context.Background(), "default")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCannotSuspendDefault)
+}
+
+// TestManager_SuspendTenant_CascadesSubtree verifies Decision 1: suspending the root
+// suspends the root (DirectlySuspended) and every descendant (CascadeSuspended).
+func TestManager_SuspendTenant_CascadesSubtree(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	result, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, rootID, result.Target)
+
+	// Target: DirectlySuspended, not cascade.
+	root, err := manager.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, root.Status)
+	assert.True(t, root.DirectlySuspended)
+	assert.Nil(t, root.CascadeSuspendedFrom)
+
+	// Child: cascade-suspended from root.
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status)
+	assert.False(t, child.DirectlySuspended)
+	require.NotNil(t, child.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+
+	// Grandchild: cascade-suspended from root (the direct target, not its parent).
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, grand.Status)
+	assert.False(t, grand.DirectlySuspended)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom)
+
+	assert.ElementsMatch(t, []string{childID, grandID}, result.NewlyCascadeSuspended)
+	assert.Empty(t, result.AlreadySuspended)
+}
+
+// TestManager_SuspendTenant_DualProvenance is a REQUIRED TEST (Issue #3158 AC):
+// a tenant that was already DirectlySuspended before an ancestor's cascade suspend
+// keeps both flags simultaneously.
+func TestManager_SuspendTenant_DualProvenance(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, _ := buildSubtree(t, manager)
+
+	// Independently suspend the child first.
+	_, err := manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.True(t, child.DirectlySuspended, "child must be directly suspended")
+	assert.Nil(t, child.CascadeSuspendedFrom, "no cascade yet")
+
+	// Now cascade-suspend from the root.
+	result, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// Child must now carry BOTH flags.
+	child, err = manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.True(t, child.DirectlySuspended, "DirectlySuspended must be preserved")
+	require.NotNil(t, child.CascadeSuspendedFrom, "CascadeSuspendedFrom must be set")
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status)
+
+	// Result must report child as already-suspended, not newly-cascade-suspended.
+	assert.Contains(t, result.AlreadySuspended, childID)
+	assert.NotContains(t, result.NewlyCascadeSuspended, childID)
+}
+
+// TestManager_SuspendTenant_ProvenancePersistsAcrossRead is a REQUIRED TEST (Issue #3158 AC):
+// provenance fields must survive a store round-trip (not just be set on the in-memory struct).
+func TestManager_SuspendTenant_ProvenancePersistsAcrossRead(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, _ := buildSubtree(t, manager)
+
+	_, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// Re-read from storage — not from any in-memory cache.
+	root, err := manager.store.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.True(t, root.DirectlySuspended, "DirectlySuspended must persist in storage")
+
+	child, err := manager.store.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	require.NotNil(t, child.CascadeSuspendedFrom, "CascadeSuspendedFrom must persist in storage")
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+}
+
+// TestManager_RestoreTenant_LiftsCascadeOnly is a REQUIRED TEST (Issue #3158 AC):
+// restoring an ancestor must not restore a descendant that is independently suspended.
+func TestManager_RestoreTenant_LiftsCascadeOnly(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	// Independently suspend child, then cascade from root.
+	_, err := manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+	_, err = manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// Restore root only.
+	restoreResult, err := manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// Root must be active again.
+	root, err := manager.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, root.Status)
+	assert.False(t, root.DirectlySuspended)
+
+	// Child was independently suspended — must remain suspended.
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status, "child independently suspended must stay suspended")
+	assert.True(t, child.DirectlySuspended, "DirectlySuspended must remain")
+	assert.Nil(t, child.CascadeSuspendedFrom, "cascade flag from root must be cleared")
+
+	// Grandchild: cascade-suspended from root was cleared; it's now restored since
+	// the only reason it was suspended was the root cascade.
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Nil(t, grand.CascadeSuspendedFrom, "grandchild cascade from root must be cleared")
+
+	// Restore result must distinguish: child stays suspended, grandchild restored.
+	assert.Contains(t, restoreResult.StillSuspended, childID)
+	assert.Contains(t, restoreResult.Restored, grandID)
+}
+
+// TestManager_RestoreTenant_ClearsAllDescendants verifies basic restore: after
+// a cascade suspend, restoring the root brings all descendants back to active.
+func TestManager_RestoreTenant_ClearsAllDescendants(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	_, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	restoreResult, err := manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	for _, id := range []string{rootID, childID, grandID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status, "tenant %s must be active after restore", id)
+		assert.False(t, td.DirectlySuspended)
+		assert.Nil(t, td.CascadeSuspendedFrom)
+	}
+
+	assert.ElementsMatch(t, []string{childID, grandID}, restoreResult.Restored)
+	assert.Empty(t, restoreResult.StillSuspended)
+}
+
+// TestManager_SuspendTenant_CycleDetected is a REQUIRED TEST (Issue #3158 AC):
+// the cascade walk must return an error rather than looping forever if it encounters
+// a cycle (data corruption or a future code change relaxing the parent_id invariant).
+func TestManager_SuspendTenant_CycleDetected(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	// Create A → B hierarchy.
+	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cycle-a", Name: "cycle-a"})
+	require.NoError(t, err)
+	b, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cycle-b", Name: "cycle-b", ParentID: a.ID})
+	require.NoError(t, err)
+
+	// Corrupt the hierarchy by setting A's parent to B (A→B, B→A via parent_id).
+	// The SQLite schema has no FK enforcement by default, so this is possible
+	// through the raw store interface.
+	a.ParentID = b.ID
+	require.NoError(t, manager.store.UpdateTenant(ctx, a))
+
+	// SuspendTenant must return an error, not loop forever.
+	_, err = manager.SuspendTenant(ctx, a.ID)
+	require.Error(t, err, "cycle in tenant hierarchy must cause an error, not an infinite loop")
+	assert.Contains(t, err.Error(), "cycle")
+}
+
+// TestManager_RestoreTenant_CycleDetected is a REQUIRED TEST (Issue #3158 AC):
+// the restore walk must also terminate with an error on a cycle.
+func TestManager_RestoreTenant_CycleDetected(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "rcycle-a", Name: "rcycle-a"})
+	require.NoError(t, err)
+	b, err := manager.CreateTenant(ctx, &TenantRequest{ID: "rcycle-b", Name: "rcycle-b", ParentID: a.ID})
+	require.NoError(t, err)
+
+	// Corrupt: A.ParentID = B
+	a.ParentID = b.ID
+	require.NoError(t, manager.store.UpdateTenant(ctx, a))
+
+	_, err = manager.RestoreTenant(ctx, a.ID)
+	require.Error(t, err, "cycle in tenant hierarchy must cause an error in RestoreTenant")
+	assert.Contains(t, err.Error(), "cycle")
+}
+
+// TestManager_SuspendRestore_AuditEvents verifies that both operations emit audit
+// events when an audit manager is wired, and that no panic occurs when it is not.
+func TestManager_SuspendRestore_AuditEvents(t *testing.T) {
+	manager := newTestTenantManager(t)
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	manager.WithAuditManager(auditMgr)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "audit-tenant", Name: "audit-tenant"})
+	require.NoError(t, err)
+
+	_, err = manager.SuspendTenant(ctx, td.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, auditMgr.Flush(ctx))
+
+	suspended, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: td.ID,
+		Actions:  []string{"tenant_suspended"},
+	})
+	require.NoError(t, err)
+	assert.Len(t, suspended, 1, "suspend must record a tenant_suspended audit event")
+
+	_, err = manager.RestoreTenant(ctx, td.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, auditMgr.Flush(ctx))
+
+	restored, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: td.ID,
+		Actions:  []string{"tenant_restored"},
+	})
+	require.NoError(t, err)
+	assert.Len(t, restored, 1, "restore must record a tenant_restored audit event")
+}
+
+// TestManager_SuspendTenant_NoAuditManager_NoPanic verifies that SuspendTenant and
+// RestoreTenant are safe no-ops at the audit layer when no audit manager is wired.
+func TestManager_SuspendTenant_NoAuditManager_NoPanic(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoAuditTenant"})
+	require.NoError(t, err)
+
+	assert.NotPanics(t, func() {
+		_, _ = manager.SuspendTenant(ctx, td.ID)
+		_, _ = manager.RestoreTenant(ctx, td.ID)
+	})
 }

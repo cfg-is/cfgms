@@ -56,6 +56,12 @@ func TestDatabaseTenantStore_MissingTenantContract(t *testing.T) {
 	business.TenantStoreMissingTenantContract(t, newTestTenantStore(t))
 }
 
+// TestDatabaseTenantStore_LifecycleContract holds the Postgres provider to the
+// shared suspension provenance persistence contract (ADR-027 Decision 2, Issue #3158).
+func TestDatabaseTenantStore_LifecycleContract(t *testing.T) {
+	business.TenantStoreLifecycleContract(t, newTestTenantStore(t))
+}
+
 // TestDatabaseRBACStore_StoreRole_NoParent guards against a regression where
 // an empty ParentRoleId was inserted as a literal empty string instead of
 // NULL. parent_role_id has a self-referential foreign key, so every
