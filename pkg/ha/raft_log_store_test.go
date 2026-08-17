@@ -176,3 +176,58 @@ func TestRaftLogStore_AppliedIndexMonotonicallyIncreases(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(10), applied, "applied index must not decrease")
 }
+
+// TestRaftLogStore_ClusterNodesRoundTrip verifies that cluster membership
+// survives a save/load cycle and that subsequent writes overwrite the previous
+// snapshot (last-write-wins, no accumulation).
+func TestRaftLogStore_ClusterNodesRoundTrip(t *testing.T) {
+	store, err := OpenRaftLogStore(filepath.Join(t.TempDir(), "raft.db"))
+	require.NoError(t, err)
+	defer store.Close() //nolint:errcheck // Close always returns nil for bbolt; error is non-actionable in test cleanup
+
+	// Fresh store must return nil without error.
+	got, err := store.LoadClusterNodes()
+	require.NoError(t, err)
+	assert.Nil(t, got, "fresh store must return nil cluster nodes")
+
+	// Round-trip a JSON membership snapshot.
+	snapshot := []byte(`{"1":{"id":"node-a","state":"healthy"},"2":{"id":"node-b","state":"healthy"}}`)
+	require.NoError(t, store.SaveClusterNodes(snapshot))
+
+	got, err = store.LoadClusterNodes()
+	require.NoError(t, err)
+	assert.Equal(t, snapshot, got, "cluster nodes must survive save/load round-trip")
+
+	// A subsequent write overwrites the previous snapshot.
+	updated := []byte(`{"1":{"id":"node-a","state":"healthy"}}`)
+	require.NoError(t, store.SaveClusterNodes(updated))
+
+	got, err = store.LoadClusterNodes()
+	require.NoError(t, err)
+	assert.Equal(t, updated, got, "subsequent SaveClusterNodes must overwrite the previous snapshot")
+}
+
+// TestRaftLogStore_ClusterNodesSurvivesUncleanShutdown verifies that the
+// cluster membership snapshot is durable across an unclean process exit
+// (the same fsync-on-commit guarantee as HardState and log entries).
+func TestRaftLogStore_ClusterNodesSurvivesUncleanShutdown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raft.db")
+
+	store, err := OpenRaftLogStore(path)
+	require.NoError(t, err)
+
+	snapshot := []byte(`{"42":{"id":"survivor","state":"healthy"}}`)
+	require.NoError(t, store.SaveClusterNodes(snapshot))
+
+	// Simulate unclean shutdown by bypassing store.Close().
+	require.NoError(t, store.db.Close())
+
+	// Re-open as the next boot would.
+	store2, err := OpenRaftLogStore(path)
+	require.NoError(t, err)
+	defer store2.Close() //nolint:errcheck // Close always returns nil for bbolt; error is non-actionable in test cleanup
+
+	got, err := store2.LoadClusterNodes()
+	require.NoError(t, err)
+	assert.Equal(t, snapshot, got, "cluster nodes must survive unclean shutdown")
+}

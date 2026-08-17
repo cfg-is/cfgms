@@ -16,14 +16,16 @@ import (
 )
 
 var (
-	bucketHardState = []byte("hardstate")
-	bucketEntries   = []byte("entries")
-	bucketSnapshot  = []byte("snapshot")
-	bucketApplied   = []byte("applied")
+	bucketHardState    = []byte("hardstate")
+	bucketEntries      = []byte("entries")
+	bucketSnapshot     = []byte("snapshot")
+	bucketApplied      = []byte("applied")
+	bucketClusterState = []byte("clusterstate")
 
-	keyHardState = []byte("hs")
-	keySnapshot  = []byte("snap")
-	keyApplied   = []byte("idx")
+	keyHardState    = []byte("hs")
+	keySnapshot     = []byte("snap")
+	keyApplied      = []byte("idx")
+	keyClusterNodes = []byte("nodes")
 )
 
 // RaftLogStore persists Raft log entries, HardState, and snapshots to a bbolt
@@ -55,7 +57,7 @@ func OpenRaftLogStore(path string) (*RaftLogStore, error) {
 		return nil, fmt.Errorf("open raft log store at %s: %w", path, err)
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{bucketHardState, bucketEntries, bucketSnapshot, bucketApplied} {
+		for _, name := range [][]byte{bucketHardState, bucketEntries, bucketSnapshot, bucketApplied, bucketClusterState} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -207,6 +209,34 @@ func (s *RaftLogStore) LoadState() (*raftpb.HardState, []*raftpb.Entry, *raftpb.
 	}
 
 	return hs, entries, snap, applied, nil
+}
+
+// SaveClusterNodes persists JSON-encoded cluster membership so a restarting
+// node can restore peer NodeInfo without replaying log entries that
+// config.Applied deliberately blocks from redelivery.
+func (s *RaftLogStore) SaveClusterNodes(data []byte) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketClusterState).Put(keyClusterNodes, data)
+	})
+}
+
+// LoadClusterNodes returns the last persisted cluster membership snapshot,
+// or nil if no snapshot has been saved yet (normal first-boot condition).
+func (s *RaftLogStore) LoadClusterNodes() ([]byte, error) {
+	var data []byte
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		if b := tx.Bucket(bucketClusterState); b != nil {
+			v := b.Get(keyClusterNodes)
+			if v != nil {
+				data = make([]byte, len(v))
+				copy(data, v)
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // encodeIndex returns idx as a big-endian 8-byte slice so bbolt cursor
