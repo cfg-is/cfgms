@@ -613,6 +613,349 @@ func TestHandleSuspendTenant_ScopedStrongSession_DescendantSucceeds(t *testing.T
 	assert.Equal(t, business.TenantStatusSuspended, td.Status)
 }
 
+// restoreArrayField pulls a string array out of the restore response body. The handler
+// writes []string values that arrive back as []interface{} after JSON round-trip.
+func restoreArrayField(t *testing.T, data map[string]interface{}, field string) []string {
+	t.Helper()
+	raw, ok := data[field]
+	require.True(t, ok, "response must carry the %q field", field)
+	items, ok := raw.([]interface{})
+	require.True(t, ok, "%q must be a JSON array", field)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, ok := item.(string)
+		require.True(t, ok, "%q must contain strings", field)
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestHandleRestoreTenant_Success drives POST /api/v1/tenants/{id}/restore through the
+// router and verifies the 200 response body (including the restored array) and that the
+// cascade lift actually persisted for the target and its descendant.
+func TestHandleRestoreTenant_Success(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restorable-tenant"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ID:       "restorable-child",
+		ParentID: "restorable-tenant",
+	})
+	require.NoError(t, err)
+
+	_, err = server.tenantManager.SuspendTenant(ctx, "restorable-tenant")
+	require.NoError(t, err)
+
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor).
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/restorable-tenant/restore", nil)
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "restore must return 200: %s", w.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "restorable-tenant", data["id"])
+	assert.Equal(t, string(business.TenantStatusActive), data["status"])
+	assert.Equal(t, []string{"restorable-child"}, restoreArrayField(t, data, "restored"))
+	assert.Empty(t, restoreArrayField(t, data, "still_suspended"))
+
+	// Verify the lift persisted for both the target and the cascade-suspended descendant.
+	for _, id := range []string{"restorable-tenant", "restorable-child"} {
+		td, err := server.tenantManager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status, "tenant %s must be active after restore", id)
+		assert.False(t, td.DirectlySuspended)
+		assert.Nil(t, td.CascadeSuspendedFrom)
+	}
+}
+
+// TestHandleRestoreTenant_StillSuspendedReported verifies the other half of the response
+// contract: a descendant that keeps its own suspension is reported under still_suspended
+// (not restored) and stays suspended in storage (ADR-027 Decision 2).
+func TestHandleRestoreTenant_StillSuspendedReported(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "ss-root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "ss-child", ParentID: "ss-root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "ss-grand", ParentID: "ss-child"})
+	require.NoError(t, err)
+
+	// Child independently suspended first, then the root cascade over the whole subtree.
+	_, err = server.tenantManager.SuspendTenant(ctx, "ss-child")
+	require.NoError(t, err)
+	_, err = server.tenantManager.SuspendTenant(ctx, "ss-root")
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/ss-root/restore", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+
+	stillSuspended := restoreArrayField(t, data, "still_suspended")
+	assert.Contains(t, stillSuspended, "ss-child", "an independently suspended child must stay suspended")
+	assert.Contains(t, stillSuspended, "ss-grand",
+		"a tenant under a still-suspended ancestor must stay suspended, not be reported restored")
+	assert.Empty(t, restoreArrayField(t, data, "restored"))
+
+	for _, id := range []string{"ss-child", "ss-grand"} {
+		td, err := server.tenantManager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusSuspended, td.Status, "tenant %s must remain suspended", id)
+	}
+}
+
+func TestHandleRestoreTenant_NotFound(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/nonexistent-tenant/restore", nil)
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp))
+	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleRestoreTenant_MissingTenantID pins the empty-ID guard. The route pattern
+// cannot produce an empty {id}, so the handler is called directly — the guard exists for
+// call paths that do not go through the router.
+func TestHandleRestoreTenant_MissingTenantID(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants//restore", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": ""})
+	rec := httptest.NewRecorder()
+
+	server.handleRestoreTenant(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "MISSING_TENANT_ID", errResp.Error.Code)
+}
+
+// TestHandleRestoreTenant_RestoreFailure_Returns500 covers the non-not-found error path
+// out of RestoreTenant. A cycle in the parent chain (created through the public API,
+// which does not require a parent to exist yet) makes the cascade walk fail after the
+// handler's GetTenant has already succeeded, so the 500 is attributable to the
+// RestoreTenant call rather than to the lookup above it.
+func TestHandleRestoreTenant_RestoreFailure_Returns500(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "cyc-a", ParentID: "cyc-b"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "cyc-b", ParentID: "cyc-a"})
+	require.NoError(t, err)
+
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/cyc-a/restore", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp))
+	assert.Equal(t, "RESTORE_FAILED", errResp.Error.Code)
+	assert.NotContains(t, errResp.Error.Message, "cycle",
+		"the internal failure reason must not be echoed to the caller")
+}
+
+// TestHandleRestoreTenant_ScopeGuard pins handleRestoreTenant's own scope guard, called
+// directly so the result is attributable to the handler rather than to requirePermission's
+// boundary check. Restoring a tenant lifts a containment, so — like suspend — it must
+// refuse a caller outside the target's subtree even on a path that skips the middleware.
+func TestHandleRestoreTenant_ScopeGuard(t *testing.T) {
+	restoreAs := func(t *testing.T, server *Server, principal *Principal, targetID string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/"+targetID+"/restore", nil)
+		req = mux.SetURLVars(req, map[string]string{"id": targetID})
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, principal.TenantID)
+		ctx = context.WithValue(ctx, principalContextKey, principal)
+		rec := httptest.NewRecorder()
+		server.handleRestoreTenant(rec, req.WithContext(ctx))
+		return rec
+	}
+
+	t.Run("cross-tenant caller gets 404 and the tenant stays suspended", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-victim"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.SuspendTenant(ctx, "restore-victim")
+		require.NoError(t, err)
+
+		rec := restoreAs(t, server, &Principal{ID: "other-admin", TenantID: "restore-other"}, "restore-victim")
+		require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "restore-victim")
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusSuspended, td.Status,
+			"a refused cross-tenant restore must not reactivate the target")
+	})
+
+	t.Run("root-scoped caller without a crossing gets a challenge", func(t *testing.T) {
+		server := setupCrossingTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.SuspendTenant(ctx, "msp-a")
+		require.NoError(t, err)
+
+		rec := restoreAs(t, server, rootScopedPrincipal("root-operator-1"), "msp-a")
+		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+
+		td, err := server.tenantManager.GetTenant(ctx, "msp-a")
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusSuspended, td.Status,
+			"a challenged restore must not reactivate the target")
+	})
+
+	t.Run("own tenant is still restorable", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-self"})
+		require.NoError(t, err)
+		_, err = server.tenantManager.SuspendTenant(ctx, "restore-self")
+		require.NoError(t, err)
+
+		rec := restoreAs(t, server, &Principal{ID: "self-admin", TenantID: "restore-self"}, "restore-self")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		td, err := server.tenantManager.GetTenant(ctx, "restore-self")
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status)
+	})
+}
+
+// TestHandleRestoreTenant_ScopedStrongSession_SiblingReturns404 drives the real route with
+// a real Bearer session: a caller scoped to one tenant must get 404 for a sibling, so
+// requirePermission's tenant:manage AssuranceStrong floor, the route wiring and the
+// handler's own scope guard are exercised together rather than in isolation.
+func TestHandleRestoreTenant_ScopedStrongSession_SiblingReturns404(t *testing.T) {
+	server, sessionMgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-sib-client-a"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-sib-client-b"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.SuspendTenant(ctx, "restore-sib-client-b")
+	require.NoError(t, err)
+
+	sess, _, err := sessionMgr.Issue(ctx, "msp-operator", "cfg-cli", "restore-sib-client-a")
+	require.NoError(t, err)
+	// httptest requests carry RemoteAddr 192.0.2.1:1234; binding the elevation to that
+	// IP keeps the session at AssuranceStrong through the device-continuity check.
+	elevated, token, err := sessionMgr.Elevate(ctx, sess.ID, []byte("test-credential-id"), "192.0.2.1")
+	require.NoError(t, err)
+	require.Equal(t, session.AssuranceStrong, elevated.Assurance,
+		"precondition: the caller must clear the AssuranceStrong gate on tenant:manage")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/restore-sib-client-b/restore", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a tenant-scoped caller must get 404 for a sibling tenant outside its subtree")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code)
+
+	unchanged, err := server.tenantManager.GetTenant(ctx, "restore-sib-client-b")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, unchanged.Status,
+		"a refused sibling-tenant restore must not reactivate the target")
+}
+
+// TestHandleRestoreTenant_SubTenantCannotEscapeAncestorSuspension is the end-to-end
+// security case behind the cascade rules: an operator holding tenant:manage on their own
+// sub-tenant restores it while an MSP-level suspension is still in force above them. The
+// route must return 200 for their own tenant (the direct suspension is theirs to lift)
+// while leaving both that tenant and its subtree suspended.
+func TestHandleRestoreTenant_SubTenantCannotEscapeAncestorSuspension(t *testing.T) {
+	server, sessionMgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "esc-msp"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "esc-client", ParentID: "esc-msp"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "esc-site", ParentID: "esc-client"})
+	require.NoError(t, err)
+
+	// MSP-level containment, then a nested suspension the sub-tenant admin owns.
+	_, err = server.tenantManager.SuspendTenant(ctx, "esc-msp")
+	require.NoError(t, err)
+	_, err = server.tenantManager.SuspendTenant(ctx, "esc-client")
+	require.NoError(t, err)
+
+	sess, _, err := sessionMgr.Issue(ctx, "client-admin", "cfg-cli", "esc-client")
+	require.NoError(t, err)
+	elevated, token, err := sessionMgr.Elevate(ctx, sess.ID, []byte("test-credential-id"), "192.0.2.1")
+	require.NoError(t, err)
+	require.Equal(t, session.AssuranceStrong, elevated.Assurance)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/esc-client/restore", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	assert.Empty(t, restoreArrayField(t, data, "restored"),
+		"nothing may be reactivated beneath a suspension imposed above the caller")
+
+	for _, id := range []string{"esc-msp", "esc-client", "esc-site"} {
+		td, err := server.tenantManager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusSuspended, td.Status,
+			"tenant %s must remain suspended under the MSP-level containment", id)
+	}
+}
+
+func TestHandleRestoreTenant_MissingPermission(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"tenant:read"})
+
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-perm-tenant"})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/restore-perm-tenant/restore", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
 func TestHandleSuspendTenant_MissingPermission(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{"tenant:read"})

@@ -1202,6 +1202,15 @@ func TestManager_SuspendTenant_DualProvenance(t *testing.T) {
 	result, err := manager.SuspendTenant(ctx, rootID)
 	require.NoError(t, err)
 
+	// The grandchild's provenance was cs-child before the root cascade; the root is the
+	// outermost suspension now, so provenance must be re-pointed at it (a deeper value
+	// would let RestoreTenant(cs-child) reactivate it while the root is still suspended).
+	grand, err := manager.GetTenant(ctx, "cs-grand")
+	require.NoError(t, err)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom,
+		"the outermost suspended ancestor must own the cascade provenance")
+
 	// Child must now carry BOTH flags.
 	child, err = manager.GetTenant(ctx, childID)
 	require.NoError(t, err)
@@ -1266,15 +1275,141 @@ func TestManager_RestoreTenant_LiftsCascadeOnly(t *testing.T) {
 	assert.True(t, child.DirectlySuspended, "DirectlySuspended must remain")
 	assert.Nil(t, child.CascadeSuspendedFrom, "cascade flag from root must be cleared")
 
-	// Grandchild: cascade-suspended from root was cleared; it's now restored since
-	// the only reason it was suspended was the root cascade.
+	// Grandchild: the root cascade is lifted, but its parent (the child) is still
+	// independently suspended, so the grandchild must stay suspended with its provenance
+	// re-pointed at that surviving suspension. Reactivating it here would leave it active
+	// underneath a suspended parent.
 	grand, err := manager.GetTenant(ctx, grandID)
 	require.NoError(t, err)
-	assert.Nil(t, grand.CascadeSuspendedFrom, "grandchild cascade from root must be cleared")
+	assert.Equal(t, business.TenantStatusSuspended, grand.Status,
+		"grandchild must not be reactivated while its parent remains suspended")
+	require.NotNil(t, grand.CascadeSuspendedFrom, "grandchild must carry the surviving suspension's provenance")
+	assert.Equal(t, childID, *grand.CascadeSuspendedFrom)
+	assert.False(t, grand.DirectlySuspended)
 
-	// Restore result must distinguish: child stays suspended, grandchild restored.
+	// Restore result must report both as still suspended, for different reasons.
 	assert.Contains(t, restoreResult.StillSuspended, childID)
-	assert.Contains(t, restoreResult.Restored, grandID)
+	assert.Contains(t, restoreResult.StillSuspended, grandID)
+	assert.NotContains(t, restoreResult.Restored, grandID,
+		"a tenant under a still-suspended ancestor must not be reported as restored")
+
+	// Restoring the child afterwards releases the grandchild — the re-pointed provenance
+	// must not strand it suspended forever.
+	secondRestore, err := manager.RestoreTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Contains(t, secondRestore.Restored, grandID)
+
+	grand, err = manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, grand.Status)
+	assert.Nil(t, grand.CascadeSuspendedFrom)
+}
+
+// TestManager_RestoreTenant_NestedSuspendCannotEscapeOuterSuspension is a REQUIRED
+// security test: on hierarchy A -> B -> C, suspend(A) then suspend(B) then restore(B)
+// must leave C suspended. B is itself still cascade-suspended by A, so an operator
+// holding tenant:manage on B (legitimately, inside their own subtree) must not be able
+// to reactivate anything underneath the MSP-level suspension of A.
+func TestManager_RestoreTenant_NestedSuspendCannotEscapeOuterSuspension(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	_, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+	_, err = manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+
+	// Suspending the child must not steal the grandchild's provenance from the root.
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom,
+		"the root's cascade provenance must survive a nested suspend of the child")
+
+	restoreResult, err := manager.RestoreTenant(ctx, childID)
+	require.NoError(t, err)
+
+	// The child stays suspended: the root's cascade still contains it.
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status)
+	assert.False(t, child.DirectlySuspended, "the child's own suspension is lifted")
+	require.NotNil(t, child.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+
+	// The grandchild must remain suspended and must not be reported as restored.
+	grand, err = manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, grand.Status,
+		"restoring a cascade-suspended tenant must not reactivate its subtree")
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom)
+	assert.NotContains(t, restoreResult.Restored, grandID)
+
+	// Only restoring the root — the tenant that imposed the containment — releases the
+	// whole subtree.
+	rootRestore, err := manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{childID, grandID}, rootRestore.Restored)
+	for _, id := range []string{rootID, childID, grandID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status, "tenant %s must be active", id)
+		assert.Nil(t, td.CascadeSuspendedFrom)
+		assert.False(t, td.DirectlySuspended)
+	}
+}
+
+// TestManager_RestoreTenant_DeepSubtreeHeldByIntermediateSuspension covers the other
+// ordering: suspend(B) then suspend(A) then restore(A). The child B keeps its own
+// DirectlySuspended flag, so the grandchild below it must stay suspended even though the
+// cascade it carried (from A) is genuinely lifted.
+func TestManager_RestoreTenant_DeepSubtreeHeldByIntermediateSuspension(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	// A fourth tier below the grandchild: containment must reach the whole subtree, not
+	// just the first level under the still-suspended ancestor.
+	greatGrand, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-great", Name: "cs-great", ParentID: grandID})
+	require.NoError(t, err)
+
+	_, err = manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+	_, err = manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	_, err = manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	root, err := manager.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	require.Equal(t, business.TenantStatusActive, root.Status)
+
+	for _, id := range []string{childID, grandID, greatGrand.ID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusSuspended, td.Status,
+			"tenant %s must stay suspended under the still-suspended child", id)
+	}
+
+	// Provenance below the surviving suspension points at it, so restoring the child
+	// releases the rest of the subtree.
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, childID, *grand.CascadeSuspendedFrom)
+
+	restoreResult, err := manager.RestoreTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{grandID, greatGrand.ID}, restoreResult.Restored)
+	for _, id := range []string{childID, grandID, greatGrand.ID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status, "tenant %s must be active", id)
+		assert.Nil(t, td.CascadeSuspendedFrom)
+	}
 }
 
 // TestManager_RestoreTenant_ClearsAllDescendants verifies basic restore: after
