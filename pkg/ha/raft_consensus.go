@@ -228,6 +228,42 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 
 	rc.ctx, rc.cancel = context.WithCancel(ctx)
 
+	// Restore persisted cluster membership before starting the Raft loop.
+	//
+	// clusterState.Nodes is built by applyNodeUpdate, which runs only when
+	// Raft delivers a committed node_update entry. On restart, config.Applied is
+	// set to recoveredApplied to prevent already-applied entries from being
+	// redelivered (correct: avoids double-firing side-effecting commands), but
+	// this also means historical NodeUpdateCommands for peer nodes are never
+	// re-applied — clusterState.Nodes stays empty and GetClusterNodes() returns
+	// only the local node until the leader re-replicates every peer's NodeInfo,
+	// which never happens automatically. Loading the persisted snapshot here
+	// populates clusterState.Nodes immediately on restart so the API endpoints
+	// return correct results without waiting for any new log entries.
+	if logStore != nil {
+		nodesData, err := logStore.LoadClusterNodes()
+		if err != nil {
+			_ = logStore.Close()
+			return nil, fmt.Errorf("load persisted cluster nodes: %w", err)
+		}
+		if len(nodesData) > 0 {
+			var nodes map[uint64]*NodeInfo
+			if err := json.Unmarshal(nodesData, &nodes); err != nil {
+				// Non-fatal: log and proceed with empty state; membership will
+				// reconverge as the leader re-proposes each peer's NodeInfo.
+				// The decode error text embeds fragments of the persisted
+				// snapshot, which originates from peer NodeInfo replicated
+				// through the Raft log — sanitize before logging.
+				logger.Warn("Failed to unmarshal persisted cluster nodes; starting with empty membership",
+					"error", logging.SanitizeLogValue(err.Error()))
+			} else {
+				rc.clusterState.Nodes = nodes
+				logger.Info("Restored cluster membership from persisted state",
+					"node_count", len(nodes))
+			}
+		}
+	}
+
 	// Select StartNode vs RestartNode.
 	//
 	// The key invariant: StartNode re-bootstraps the log from index 0 by
@@ -476,6 +512,9 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 				panic(fmt.Sprintf("raft log store applied-index write failed (node %d): %v — "+
 					"continuing would violate Raft's durability contract", rc.nodeID, err))
 			}
+			// Persist cluster membership so a restarted node can read back peer
+			// NodeInfo without replaying entries that config.Applied blocked.
+			rc.persistClusterState()
 		}
 	}
 
@@ -650,6 +689,35 @@ func (rc *RaftConsensus) ProposeSessionUpdate(stewardID, nodeID string, connecte
 		return nil
 	default:
 		return fmt.Errorf("propose channel full, cannot enqueue session update")
+	}
+}
+
+// persistClusterState saves the current cluster membership to the durable store
+// so a restarting node can restore peer NodeInfo without replaying log entries.
+// Errors are logged but not propagated — a failed write means the next restart
+// will have stale state and must re-converge via normal Raft replication.
+func (rc *RaftConsensus) persistClusterState() {
+	if rc.logStore == nil {
+		return
+	}
+	rc.clusterState.mu.RLock()
+	nodes := make(map[uint64]*NodeInfo, len(rc.clusterState.Nodes))
+	for k, v := range rc.clusterState.Nodes {
+		nodes[k] = v
+	}
+	rc.clusterState.mu.RUnlock()
+
+	data, err := json.Marshal(nodes)
+	if err != nil {
+		rc.logger.Error("Failed to marshal cluster nodes for persistence",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	if err := rc.logStore.SaveClusterNodes(data); err != nil {
+		// The store error carries the raft.db filesystem path and any
+		// underlying decode/encode text — sanitize before logging.
+		rc.logger.Error("Failed to persist cluster nodes",
+			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

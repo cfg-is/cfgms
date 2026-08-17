@@ -470,6 +470,72 @@ func TestRaftConsensus_RestartRecoversLogAndRejoinsAtCorrectIndex(t *testing.T) 
 		"recovered appliedIndex must match pre-stop commit index so entries are not re-delivered")
 }
 
+// TestRaftConsensus_RestartRebuildsMembershipFromPersistedStore verifies the
+// fix for Issue #3394: a node that restarts into a live cluster reads its
+// cluster membership from the durable store rather than from log-entry replay,
+// which config.Applied deliberately blocks to avoid double-firing side effects.
+//
+// The test reproduces the minimal failure scenario: a single-node cluster
+// commits a node_update (populating clusterState), a simulated peer entry is
+// injected and persisted, the node stops, restarts — and GetClusterNodes()
+// must immediately return the full membership without waiting for new entries.
+func TestRaftConsensus_RestartRebuildsMembershipFromPersistedStore(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	logDir := t.TempDir()
+	nodeInfo := &NodeInfo{ID: "node-1", Address: "127.0.0.1:0", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	cfg := newTestClusterCfg()
+
+	// Phase 1: start a single-node cluster, commit an entry so clusterState
+	// is populated and persisted, then inject a simulated peer and stop.
+	rc1, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, cfg, logDir, logging.GetLogger())
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return rc1.IsLeader()
+	}, 10*time.Second, 50*time.Millisecond, "single-node cluster must elect itself leader")
+
+	require.NoError(t, rc1.ProposeNodeUpdate(&NodeInfo{
+		ID: "node-1", Address: "127.0.0.1:1111", State: NodeStateHealthy, Role: NodeRoleLeader,
+	}))
+	require.Eventually(t, func() bool {
+		return rc1.HasNode(1)
+	}, 5*time.Second, 25*time.Millisecond, "node update must be applied via the Raft log")
+
+	// Inject a second (simulated peer) node directly into clusterState, as
+	// would happen in a real multi-node cluster where the peer proposes its own
+	// NodeInfo through the log. Then persist so the snapshot includes both nodes.
+	const peerRaftID = uint64(99)
+	peerInfo := &NodeInfo{ID: "peer-node", Address: "127.0.0.1:9999", State: NodeStateHealthy, Role: NodeRoleFollower}
+	rc1.clusterState.mu.Lock()
+	rc1.clusterState.Nodes[peerRaftID] = peerInfo
+	rc1.clusterState.mu.Unlock()
+	rc1.persistClusterState()
+
+	require.NoError(t, rc1.Stop())
+
+	// Phase 2: restart against the same log directory.
+	// The log store has data, so RestartNode is used — config.Applied is set to
+	// recoveredApplied, which means the node_update entries that populated
+	// clusterState.Nodes on the first run are NOT redelivered as CommittedEntries.
+	rc2, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, cfg, logDir, logging.GetLogger())
+	require.NoError(t, err)
+	defer rc2.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	// clusterState.Nodes must be restored from the persisted snapshot immediately
+	// at construction — before any new Raft entries are committed.
+	require.True(t, rc2.HasNode(1),
+		"restarted node must restore its own entry from the persisted cluster membership")
+	require.True(t, rc2.HasNode(peerRaftID),
+		"restarted node must restore peer entry from the persisted cluster membership")
+
+	nodes := rc2.GetClusterNodes()
+	require.Len(t, nodes, 2,
+		"restarted node must report full 2-node membership without waiting for log replay")
+}
+
 // TestRaftConsensus_ProcessReady_DurableWritePrecedesMessageDispatch verifies
 // that processReady persists entries and HardState to the durable log store
 // before the Raft loop advances to apply committed entries. Because entries
