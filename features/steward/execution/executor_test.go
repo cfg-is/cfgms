@@ -1250,3 +1250,97 @@ func TestExecuteConfiguration_DeferredCount(t *testing.T) {
 		"deferred resource must NOT increment FailedCount")
 	assert.Equal(t, 0, report.SkippedCount)
 }
+
+// TestApplyConfiguration_PopulatesApplyOutcomes verifies that ApplyConfiguration
+// writes one ApplyOutcomeRecord per resource to report.ApplyOutcomes, with correct
+// status classification and error detail, without disturbing the Modules aggregation
+// (ADR-022 §6, Issue #3375).
+func TestApplyConfiguration_PopulatesApplyOutcomes(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := logging.ForModule("executor_test")
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		TenantID: "test-tenant",
+		Logger:   logger,
+	})
+	require.NoError(t, err)
+
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "good-dir",
+      "module": "directory",
+      "config": ` + testDirConfig(filepath.Join(tempDir, "outcomedir")) + `
+    },
+    {
+      "name": "bad-file",
+      "module": "file",
+      "config": {
+        "path": "` + filepath.ToSlash(filepath.Join(tempDir, "bad.txt")) + `",
+        "content": "content\n",
+        "permissions": 999999
+      }
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	report, applyErr := executor.ApplyConfiguration(ctx, []byte(configJSON), "v-outcome-1")
+	require.NoError(t, applyErr, "resource failures must not surface as error return")
+	require.NotNil(t, report)
+
+	// The Modules aggregation must be unchanged.
+	require.NotEmpty(t, report.Modules, "Modules aggregation must still be populated")
+
+	// ApplyOutcomes must contain one record per resource.
+	require.Len(t, report.ApplyOutcomes, 2, "one ApplyOutcomeRecord per resource")
+
+	// Find each record by ResourceID — order is execution order.
+	byID := make(map[string]string) // resourceID → status
+	errByID := make(map[string]string)
+	for _, r := range report.ApplyOutcomes {
+		byID[r.ResourceID] = r.Status
+		errByID[r.ResourceID] = r.Error
+	}
+
+	dirStatus, ok := byID["good-dir"]
+	require.True(t, ok, "good-dir must appear in ApplyOutcomes")
+	assert.Equal(t, "applied", dirStatus, "successful resource must be 'applied'")
+
+	fileStatus, ok := byID["bad-file"]
+	require.True(t, ok, "bad-file must appear in ApplyOutcomes")
+	assert.Equal(t, "failed", fileStatus, "file with invalid permissions must be 'failed'")
+	assert.NotEmpty(t, errByID["bad-file"], "failed resource must carry error detail")
+}
+
+// TestApplyConfiguration_ApplyOutcomeRecordHasTimestamp verifies that each
+// ApplyOutcomeRecord carries a non-zero Timestamp.
+func TestApplyConfiguration_ApplyOutcomeRecordHasTimestamp(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := logging.ForModule("executor_test")
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: logger})
+	require.NoError(t, err)
+
+	configJSON := `{
+  "steward": {"id": "ts-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "ts-file",
+      "module": "file",
+      "config": ` + testFileConfig(filepath.Join(tempDir, "ts.txt"), "content\n") + `
+    }
+  ]
+}`
+
+	ctx := context.Background()
+	before := time.Now()
+	report, err := executor.ApplyConfiguration(ctx, []byte(configJSON), "v-ts-1")
+	require.NoError(t, err)
+	require.Len(t, report.ApplyOutcomes, 1)
+	assert.False(t, report.ApplyOutcomes[0].Timestamp.IsZero(),
+		"Timestamp must be set on each ApplyOutcomeRecord")
+	assert.False(t, report.ApplyOutcomes[0].Timestamp.Before(before),
+		"Timestamp must not precede the call to ApplyConfiguration")
+}

@@ -69,6 +69,12 @@ func (p *SQLiteEntityGraphProvider) loadEntityRowsCurrent(ctx context.Context, s
 // scanning the observation log. For each source the highest-id state or presence
 // observation at or before asOf is returned; sources whose latest row is an
 // absence are excluded (the source had retracted its assertion at that time).
+//
+// Kinds that never project into entity state — desired-state, drift-diff,
+// lifecycle and apply-outcome — are excluded from the per-source "latest row"
+// selection as well as from the result. Without that exclusion an apply-outcome
+// or drift-diff row appended after the state row would win MAX(id) and hide the
+// source's state from every as-of read, mirroring the eg_entity_current rule.
 func (p *SQLiteEntityGraphProvider) loadEntityRowsAsOf(ctx context.Context, subject string, asOf time.Time) ([]currentEntityRow, error) {
 	asOfStr := rfc3339(asOf)
 	rows, err := p.db.QueryContext(ctx, `
@@ -80,6 +86,7 @@ func (p *SQLiteEntityGraphProvider) loadEntityRowsAsOf(ctx context.Context, subj
 		  AND l.id = (
 		      SELECT MAX(id) FROM eg_observation_log
 		      WHERE subject = l.subject AND source = l.source AND observed_at <= ?
+		        AND kind NOT IN ('desired-state', 'drift-diff', 'lifecycle', 'apply-outcome')
 		  )
 		  AND l.kind IN ('state', 'presence')`,
 		subject, asOfStr, asOfStr,
@@ -203,9 +210,10 @@ func (p *SQLiteEntityGraphProvider) Diff(ctx context.Context, eid interfaces.EID
 }
 
 // GetTimeline returns a merged, time-ordered change-event stream across the
-// supplied subjects over the time range. This story delivers state-change events
-// (entity state and absence observations) and same-as-change events (same-as edge
-// observations). Drift and apply-outcome events are deferred per ADR-022 §9.
+// supplied subjects over the time range. Delivers state-change events (entity
+// state and absence observations), same-as-change events (same-as edge
+// observations), and apply-outcome events (ObservationKindApplyOutcome records
+// written by handleConfigAppliedEvent, ADR-022 §6, Issue #3375).
 func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []interfaces.EIDRef, r interfaces.TimeRange) ([]*interfaces.TimelineEvent, error) {
 	if len(eids) == 0 {
 		return nil, nil
@@ -216,13 +224,13 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 	for _, eid := range eids {
 		subject := eid.String()
 
-		// State and absence observations for this subject.
+		// State, absence, and apply-outcome observations for this subject.
 		srows, err := p.db.QueryContext(ctx, `
 			SELECT l.id, l.source, l.observed_at, l.kind, pc.payload
 			FROM eg_observation_log l
 			JOIN eg_payload_content pc ON pc.payload_hash = l.payload_hash
 			WHERE l.subject = ?
-			  AND l.kind IN ('state', 'absence')
+			  AND l.kind IN ('state', 'absence', 'apply-outcome')
 			  AND l.observed_at >= ?
 			  AND l.observed_at <= ?
 			ORDER BY l.id ASC`,
@@ -244,10 +252,14 @@ func (p *SQLiteEntityGraphProvider) GetTimeline(ctx context.Context, eids []inte
 				payload = map[string]interface{}{}
 			}
 			oa, _ := time.Parse(time.RFC3339Nano, observedAt)
+			eventKind := "state-change"
+			if kind == "apply-outcome" {
+				eventKind = "apply-outcome"
+			}
 			events = append(events, &interfaces.TimelineEvent{
 				Subject:    eid,
 				OccurredAt: oa,
-				Kind:       "state-change",
+				Kind:       eventKind,
 				Detail: map[string]interface{}{
 					"source":           source,
 					"observation_kind": kind,

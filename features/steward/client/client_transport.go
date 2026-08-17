@@ -1675,7 +1675,7 @@ func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[str
 // publishConfigStatus publishes a config status report as an event (internal helper).
 func (c *TransportClient) publishConfigStatus(report *cpTypes.ConfigStatusReport) error {
 	ctx := context.Background()
-	return c.ReportConfigurationStatus(ctx, report.ConfigVersion, report.Status, report.Message, report.Modules)
+	return c.ReportConfigurationStatus(ctx, report.ConfigVersion, report.Status, report.Message, report.Modules, report.ApplyOutcomes)
 }
 
 // ReportConfigurationStatus reports detailed configuration execution status to the controller.
@@ -1686,6 +1686,7 @@ func (c *TransportClient) ReportConfigurationStatus(
 	overallStatus string,
 	message string,
 	moduleStatuses map[string]cpTypes.ModuleStatus,
+	applyOutcomes []cpTypes.ApplyOutcomeRecord,
 ) error {
 	c.mu.RLock()
 	stewardID := c.stewardID
@@ -1707,6 +1708,7 @@ func (c *TransportClient) ReportConfigurationStatus(
 			"status":         overallStatus,
 			"message":        message,
 			"modules":        moduleStatuses,
+			"apply_outcomes": applyOutcomes,
 		},
 	}
 
@@ -1717,7 +1719,8 @@ func (c *TransportClient) ReportConfigurationStatus(
 	c.logger.Info("Published configuration status report",
 		"config_version", configVersion,
 		"status", overallStatus,
-		"modules", len(moduleStatuses))
+		"modules", len(moduleStatuses),
+		"apply_outcomes", len(applyOutcomes))
 
 	return nil
 }

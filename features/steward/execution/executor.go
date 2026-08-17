@@ -765,6 +765,17 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		}
 
 		report.Modules[moduleName] = moduleStatus
+
+		// Per-resource apply-outcome record (ADR-022 §6, Issue #3375).
+		// Status classification mirrors the per-module aggregation above so the two
+		// views stay consistent. Does not modify the Modules aggregation.
+		report.ApplyOutcomes = append(report.ApplyOutcomes, cpTypes.ApplyOutcomeRecord{
+			ResourceID: result.ResourceName,
+			ModuleName: moduleName,
+			Status:     applyOutcomeStatus(result.Status),
+			Error:      result.Error,
+			Timestamp:  time.Now(),
+		})
 	}
 
 	if len(execReport.Errors) > 0 {
@@ -792,4 +803,18 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		"execution_time_ms", report.ExecutionTimeMs)
 
 	return report, nil
+}
+
+// applyOutcomeStatus maps a ResourceStatus to the apply-outcome status string used
+// in ApplyOutcomeRecord (ADR-022 §6, Issue #3375). The three-value classification
+// mirrors the per-module aggregation in the same loop.
+func applyOutcomeStatus(s ResourceStatus) string {
+	switch s {
+	case StatusSuccess, StatusNoChange:
+		return "applied"
+	case StatusNonCompliant, StatusSkipped, StatusDeferred:
+		return "partial"
+	default: // StatusFailed, StatusTimeout, unknown
+		return "failed"
+	}
 }

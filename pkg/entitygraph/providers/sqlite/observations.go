@@ -153,12 +153,23 @@ func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batc
 // sequence and rebuilds the entity index from all current sources.
 // Absence observations retract the source's assertion instead of upserting.
 // Drift-diff and lifecycle observations route to eg_drift_projection instead.
+// Apply-outcome observations project nowhere — they live in the log only.
 func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observation, logSeq int64) error {
 	if obs.Kind == types.ObservationKindDriftDiff {
 		return updateDriftProjectionFromObservation(ctx, tx, obs)
 	}
 	if obs.Kind == types.ObservationKindLifecycle {
 		return applyLifecycleTransitionFromObs(ctx, tx, obs)
+	}
+	// Apply-outcome records the result of a config apply, not the entity's state.
+	// A steward writes them under the same (subject, source) pair as its own state
+	// observations, so folding them into eg_entity_current would overwrite that
+	// state row and make rebuildEntityIndex recompute entity_kind and
+	// owning_tenant from the apply payload — emptying owning_tenant, which is the
+	// sole access-control axis. GetHistory and GetTimeline read the observation
+	// log directly, which already carries the row appended by ReportObservations.
+	if obs.Kind == types.ObservationKindApplyOutcome {
+		return nil
 	}
 	if obs.Kind == types.ObservationKindAbsence {
 		if _, err := tx.ExecContext(ctx,

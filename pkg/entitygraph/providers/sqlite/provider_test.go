@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
@@ -485,5 +486,59 @@ func TestLIKEWildcardInEID_Timeline(t *testing.T) {
 	for _, ev := range events {
 		require.NotEqual(t, "same-as-change", ev.Kind,
 			"no same-as-change events expected for a subject with no same-as edges")
+	}
+}
+
+// TestGetTimeline_ApplyOutcomeKind verifies that GetTimeline surfaces apply-outcome
+// observations as "apply-outcome" timeline events (Issue #3375, ADR-022 §6).
+// This exercises the provider-side event-kind branch added alongside the existing
+// state/absence handling.
+func TestGetTimeline_ApplyOutcomeKind(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	eid := mustEID(t, "host:peer1/vm:myvm")
+
+	// Write a state observation and an apply-outcome observation for the same subject.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "peer1",
+		Observations: []types.Observation{
+			obs(eid.String(), "peer1", types.ObservationKindState, now.Add(-time.Second), map[string]interface{}{
+				"entity_kind": "vm", "owning_tenant": "root",
+			}),
+			obs(eid.String(), "peer1", types.ObservationKindApplyOutcome, now, map[string]interface{}{
+				"status":         "applied",
+				"module_name":    "hyperv",
+				"config_version": "v1",
+			}),
+		},
+	}))
+
+	events, err := p.GetTimeline(ctx, []interfaces.EIDRef{eid}, interfaces.TimeRange{
+		From: now.Add(-time.Minute),
+		To:   now.Add(time.Minute),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+
+	kinds := make(map[string]int)
+	for _, ev := range events {
+		kinds[ev.Kind]++
+	}
+	assert.Greater(t, kinds["state-change"], 0,
+		"state-change events must still be present")
+	assert.Greater(t, kinds["apply-outcome"], 0,
+		"apply-outcome events must be surfaced by GetTimeline")
+
+	// The apply-outcome event must carry the payload.
+	for _, ev := range events {
+		if ev.Kind != "apply-outcome" {
+			continue
+		}
+		payload, _ := ev.Detail["payload"].(map[string]interface{})
+		require.NotNil(t, payload, "apply-outcome event must carry a payload in Detail")
+		assert.Equal(t, "applied", payload["status"])
+		assert.Equal(t, "hyperv", payload["module_name"])
 	}
 }
