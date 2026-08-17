@@ -240,6 +240,49 @@ func TestServer_SetTerminalHandler_RegistersRBACGatedRoute(t *testing.T) {
 		"wired terminal handler response (101) must be returned, not 503/403/404")
 }
 
+// TestServer_SetGitSyncWebhookHandler_Returns503WhenNotWired verifies that
+// POST /api/v1/webhooks/git-push returns 503 before SetGitSyncWebhookHandler has
+// been called.  The route is pre-registered in setupRouter() so the SPA catch-all
+// never swallows it — 503 proves the route is live, not a 404/SPA fallback.
+func TestServer_SetGitSyncWebhookHandler_Returns503WhenNotWired(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"POST /api/v1/webhooks/git-push must return 503 when no handler is wired (not 404 from SPA catch-all)")
+}
+
+// TestServer_SetGitSyncWebhookHandler_DelegatesToWiredHandler verifies that after
+// SetGitSyncWebhookHandler is called the stub handler is invoked — proving the
+// request is not swallowed by the SPA catch-all.  The assertion targets a sentinel
+// header set by the stub, not the SPA index.html body.
+func TestServer_SetGitSyncWebhookHandler_DelegatesToWiredHandler(t *testing.T) {
+	server := setupTestServer(t)
+
+	const sentinelHeader = "X-Test-Sentinel"
+	const sentinelValue = "git-push-stub-reached"
+	var reached bool
+	stub := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.Header().Set(sentinelHeader, sentinelValue)
+		w.WriteHeader(http.StatusOK)
+	})
+	server.SetGitSyncWebhookHandler(stub)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.True(t, reached,
+		"POST /api/v1/webhooks/git-push must reach the wired handler after SetGitSyncWebhookHandler")
+	assert.Equal(t, sentinelValue, rec.Header().Get(sentinelHeader),
+		"response must carry the stub's sentinel header, not SPA content")
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"wired handler status (200) must be returned, not 503/404")
+}
+
 // TestServer_SetWorkflowHandler_NilHandler_NoopSafe re-verifies (regression guard) that
 // passing nil to SetWorkflowHandler does not panic and leaves workflowHandler nil.
 func TestServer_SetWorkflowHandler_NilAfterSet_NoopSafe(t *testing.T) {

@@ -255,6 +255,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/webauthn/elevate/finish",
 	"POST /api/v1/webauthn/presence/begin",
 	"POST /api/v1/webauthn/presence/finish",
+	"POST /api/v1/webhooks/git-push",
 	"PUT /api/v1/installer/artifacts/{platform}/{arch}",
 	"PUT /api/v1/rbac/roles/{id}",
 	"PUT /api/v1/scripts/{id}/privilege",

@@ -106,26 +106,32 @@ func TestWebhookNoMatchingBinding(t *testing.T) {
 }
 
 // TestWebhookMatchingBinding verifies that a push payload matching a binding
-// (without HMAC validation) returns HTTP 202, and that a background sync is
+// with a valid HMAC signature returns HTTP 202, and that a background sync is
 // dispatched successfully using a local bare repo.
 func TestWebhookMatchingBinding(t *testing.T) {
 	requireGit(t)
 
+	const secret = "matching-binding-secret"
 	bareDir, _, _ := newTestRepo(t, map[string]string{
 		"policy1.yaml": "key: value\n",
 	})
 
+	secretFile := filepath.Join(t.TempDir(), "webhook-secret.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte(secret), 0600))
+
 	setup := newWebhookSetup(t, []gitsync.ScopeBinding{
 		{
-			TenantPath: "root/t1",
-			Namespace:  "policies",
-			OriginURL:  bareDir,
-			Branch:     "main",
+			TenantPath:       "root/t1",
+			Namespace:        "policies",
+			OriginURL:        bareDir,
+			Branch:           "main",
+			WebhookSecretRef: secretFile,
 		},
 	})
 
 	body := buildPushPayload(bareDir, "refs/heads/main")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+	req.Header.Set("X-Hub-Signature-256", hmacSHA256Signature(body, secret))
 	rec := httptest.NewRecorder()
 	setup.handler.ServeHTTP(rec, req)
 
@@ -134,6 +140,102 @@ func TestWebhookMatchingBinding(t *testing.T) {
 
 	// Wait for the background sync goroutine to finish.
 	setup.handler.WaitForPendingSyncs(context.Background())
+}
+
+// TestWebhookMatchedBindingWithoutSecretIsRejected verifies the endpoint fails
+// closed: a binding with no WebhookSecretRef has no credential to authenticate
+// the caller against, so a matching push event is rejected with HTTP 401 and no
+// sync is triggered. This is the regression guard for the fail-open path where
+// the HMAC check was skipped whenever the matched binding lacked a secret,
+// handing an unauthenticated caller a state-changing sync.
+func TestWebhookMatchedBindingWithoutSecretIsRejected(t *testing.T) {
+	requireGit(t)
+
+	bareDir, _, _ := newTestRepo(t, map[string]string{
+		"policy1.yaml": "key: value\n",
+	})
+
+	root := t.TempDir()
+	store := pkgtesting.SetupTestStorage(t).GetConfigStore()
+
+	bindings, err := gitsync.NewBindingStore(root)
+	require.NoError(t, err)
+	require.NoError(t, bindings.Add(gitsync.ScopeBinding{
+		TenantPath: "root/t1",
+		Namespace:  "policies",
+		OriginURL:  bareDir,
+		Branch:     "main",
+		// No WebhookSecretRef: polling-only binding.
+	}))
+
+	logger := logging.ForComponent("webhook-no-secret-test")
+	syncer, err := gitsync.NewSyncer(store, bindings, filepath.Join(root, "repos"), logger)
+	require.NoError(t, err)
+	t.Cleanup(syncer.Stop)
+
+	handler := gitsync.NewWebhookHandler(syncer, bindings, logger)
+	t.Cleanup(func() { handler.WaitForPendingSyncs(context.Background()) })
+
+	body := buildPushPayload(bareDir, "refs/heads/main")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"a matched binding without a webhook secret must be rejected, never synced unauthenticated")
+
+	// Drain any goroutine that should not exist, then prove nothing was written:
+	// the sync must not have run, so the config store holds no imported entry.
+	drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handler.WaitForPendingSyncs(drainCtx)
+
+	_, getErr := store.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+		TenantID:  "root/t1",
+		Namespace: "policies",
+		Name:      "policy1",
+	})
+	assert.Error(t, getErr,
+		"rejected webhook must not have triggered a sync that writes to the config store")
+}
+
+// TestWebhookUnsignedRequestCannotForgeAnySync verifies that an unauthenticated
+// caller who knows the origin URL and branch of every binding cannot trigger a
+// sync: with no signature header, both a secret-bearing binding and a
+// secret-less binding reject the request with HTTP 401.
+func TestWebhookUnsignedRequestCannotForgeAnySync(t *testing.T) {
+	const (
+		originURL = "https://github.com/org/cfgms-configs.git"
+		secret    = "binding-with-secret"
+	)
+
+	secretFile := filepath.Join(t.TempDir(), "webhook-secret.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte(secret), 0600))
+
+	setup := newWebhookSetup(t, []gitsync.ScopeBinding{
+		{
+			TenantPath:       "root/t1",
+			Namespace:        "ns1",
+			OriginURL:        originURL,
+			Branch:           "main",
+			WebhookSecretRef: secretFile,
+		},
+		{
+			TenantPath: "root/t2",
+			Namespace:  "ns2",
+			OriginURL:  originURL,
+			Branch:     "main",
+		},
+	})
+
+	body := buildPushPayload(originURL, "refs/heads/main")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+	// No X-Hub-Signature-256 header at all.
+	rec := httptest.NewRecorder()
+	setup.handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"an unsigned request must never reach TriggerSync for any matched binding")
 }
 
 // TestWebhookBranchMismatch verifies that a push to a different branch than the
@@ -392,11 +494,16 @@ func TestWebhookWaitForPendingSyncsDrainsBeforeDeadline(t *testing.T) {
 	bindings, err := gitsync.NewBindingStore(root)
 	require.NoError(t, err)
 
+	const secret = "drain-test-webhook-secret"
+	secretFile := filepath.Join(t.TempDir(), "webhook-secret.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte(secret), 0600))
+
 	binding := gitsync.ScopeBinding{
-		TenantPath: "root/t1",
-		Namespace:  "policies",
-		OriginURL:  bareDir,
-		Branch:     "main",
+		TenantPath:       "root/t1",
+		Namespace:        "policies",
+		OriginURL:        bareDir,
+		Branch:           "main",
+		WebhookSecretRef: secretFile,
 	}
 	require.NoError(t, bindings.Add(binding))
 
@@ -410,6 +517,7 @@ func TestWebhookWaitForPendingSyncsDrainsBeforeDeadline(t *testing.T) {
 
 	body := buildPushPayload(bareDir, "refs/heads/main")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/git-push", bytes.NewReader(body))
+	req.Header.Set("X-Hub-Signature-256", hmacSHA256Signature(body, secret))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
