@@ -161,4 +161,95 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 		require.NotNil(t, p)
 		assert.NoError(t, p.Close())
 	})
+
+	t.Run("database_mode_individual_fields_no_dsn_key_attempts_configured_host", func(t *testing.T) {
+		// PR #3392 merge-queue regression: createDockerTestStorageConfig (and the
+		// docker-compose.test.yml HA fixtures) configure the "database" provider
+		// with discrete host/port/database/username/password/sslmode keys, never a
+		// "dsn" key — matching pkg/storage/providers/database/plugin.go's getDSN
+		// contract, which falls back to those fields when "dsn" is absent. Before
+		// this fix, initializeEntityGraphProvider read only Config["dsn"], got an
+		// empty string, and lib/pq's sql.Open("postgres", "") silently defaulted to
+		// dialing localhost:5432 instead of the configured host — failing startup
+		// with a misleading "connection refused" against the wrong address. Port 1
+		// here is privileged and unbound, so a connection attempt against the
+		// *configured* host is guaranteed to fail; the failure must reference this
+		// DSN's target, proving the individual fields were actually used.
+		cfg := &config.Config{
+			Storage: &config.StorageConfig{
+				Provider: "database",
+				Config: map[string]interface{}{
+					"host":     "127.0.0.1",
+					"port":     1,
+					"database": "cfgms_test",
+					"username": "cfgms_test",
+					"password": "test-password",
+					"sslmode":  "disable",
+				},
+			},
+		}
+		p, err := initializeEntityGraphProvider(cfg, logger)
+		require.Error(t, err, "unreachable configured host must fail, not silently default to localhost")
+		assert.Nil(t, p)
+	})
+}
+
+// TestEntityGraphDatabaseDSN unit-tests the DSN extraction used by
+// initializeEntityGraphProvider's "database" single-provider branch. It must
+// mirror pkg/storage/providers/database/plugin.go's getDSN fallback exactly —
+// preferring an explicit "dsn" key, otherwise building one from discrete
+// host/port/database/username/password/sslmode keys — so the entity graph
+// provider connects to the same database the rest of the controller uses
+// (Issue #3253 merge-queue fix).
+func TestEntityGraphDatabaseDSN(t *testing.T) {
+	t.Run("prefers_explicit_dsn", func(t *testing.T) {
+		dsn, err := entityGraphDatabaseDSN(map[string]interface{}{
+			"dsn":      "host=explicit-host port=5432 dbname=x user=y password=z sslmode=disable",
+			"host":     "ignored-host",
+			"password": "ignored",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "host=explicit-host port=5432 dbname=x user=y password=z sslmode=disable", dsn)
+	})
+
+	t.Run("builds_dsn_from_individual_fields", func(t *testing.T) {
+		dsn, err := entityGraphDatabaseDSN(map[string]interface{}{
+			"host":     "timescaledb-test",
+			"port":     5433,
+			"database": "cfgms_test",
+			"username": "cfgms_test",
+			"password": "test-password",
+			"sslmode":  "disable",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "host=timescaledb-test port=5433 dbname=cfgms_test user=cfgms_test password=test-password sslmode=disable", dsn)
+	})
+
+	t.Run("accepts_float64_port_from_decoded_config", func(t *testing.T) {
+		// Config maps decoded from JSON/YAML frequently carry numeric values as
+		// float64 rather than int.
+		dsn, err := entityGraphDatabaseDSN(map[string]interface{}{
+			"host":     "db-host",
+			"port":     float64(5433),
+			"password": "test-password",
+		})
+		require.NoError(t, err)
+		assert.Contains(t, dsn, "port=5433")
+	})
+
+	t.Run("applies_defaults_when_fields_missing", func(t *testing.T) {
+		dsn, err := entityGraphDatabaseDSN(map[string]interface{}{
+			"password": "only-password-set",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "host=localhost port=5432 dbname=cfgms user=cfgms password=only-password-set sslmode=require", dsn)
+	})
+
+	t.Run("requires_password_when_no_dsn", func(t *testing.T) {
+		_, err := entityGraphDatabaseDSN(map[string]interface{}{
+			"host": "localhost",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "password")
+	})
 }

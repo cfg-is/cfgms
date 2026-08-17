@@ -2964,7 +2964,10 @@ func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger) (e
 	}
 
 	if cfg.Storage.Provider == "database" {
-		dsn, _ := cfg.Storage.Config["dsn"].(string)
+		dsn, dsnErr := entityGraphDatabaseDSN(cfg.Storage.Config)
+		if dsnErr != nil {
+			return nil, fmt.Errorf("entity graph (database single-provider): %w", dsnErr)
+		}
 		p, err := egdatabase.NewDatabaseEntityGraphProvider(dsn)
 		if err != nil {
 			return nil, fmt.Errorf("entity graph (database single-provider): %w", err)
@@ -2985,6 +2988,60 @@ func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger) (e
 	logger.Info("Entity graph provider initialized with SQLite backend (OSS composite mode, Issue #3253)",
 		"path", egPath)
 	return p, nil
+}
+
+// entityGraphDatabaseDSN extracts a Postgres DSN for the entity graph provider
+// in legacy "database" single-provider mode. It mirrors
+// pkg/storage/providers/database/plugin.go's unexported getDSN exactly —
+// preferring a complete "dsn" string, otherwise building one from discrete
+// host/port/database/username/password/sslmode keys — so the entity graph
+// always tracks the same connection the storage provider itself opens.
+// Duplicated locally rather than imported: features/ business logic must not
+// import pkg/storage/providers directly (see CLAUDE.md central provider
+// rules), and the entity graph provider takes a raw DSN string, not a config
+// map, so this extraction has to live on this side of that boundary.
+//
+// Deployments that configure discrete fields instead of a single "dsn" string
+// (e.g. docker-compose.test.yml's CFGMS_DB_HOST/PORT/... fixtures, and
+// server_security_test.go's createDockerTestStorageConfig) previously made
+// this branch silently pass an empty DSN to lib/pq, which defaults to dialing
+// localhost:5432 instead of the configured host (Issue #3253 merge-queue
+// regression).
+func entityGraphDatabaseDSN(storageConfig map[string]interface{}) (string, error) {
+	if dsn, ok := storageConfig["dsn"].(string); ok && dsn != "" {
+		return dsn, nil
+	}
+
+	host := entityGraphConfigString(storageConfig, "host", "localhost")
+	port := entityGraphConfigInt(storageConfig, "port", 5432)
+	database := entityGraphConfigString(storageConfig, "database", "cfgms")
+	username := entityGraphConfigString(storageConfig, "username", "cfgms")
+	password := entityGraphConfigString(storageConfig, "password", "")
+	sslmode := entityGraphConfigString(storageConfig, "sslmode", "require")
+
+	if password == "" {
+		return "", fmt.Errorf("database password is required")
+	}
+
+	return fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
+		host, port, database, username, password, sslmode), nil
+}
+
+func entityGraphConfigString(config map[string]interface{}, key, defaultValue string) string {
+	if val, ok := config[key].(string); ok {
+		return val
+	}
+	return defaultValue
+}
+
+func entityGraphConfigInt(config map[string]interface{}, key string, defaultValue int) int {
+	if val, ok := config[key].(int); ok {
+		return val
+	}
+	if val, ok := config[key].(float64); ok {
+		return int(val)
+	}
+	return defaultValue
 }
 
 // initializeSessionStore selects and opens a session.Store.
