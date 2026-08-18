@@ -148,6 +148,7 @@ func backfillSessionTokenRecords(ctx context.Context, db *sql.DB) error {
 		{"last_proven_at", `ALTER TABLE session_token_records ADD COLUMN last_proven_at TEXT`},
 		{"credential_id", `ALTER TABLE session_token_records ADD COLUMN credential_id  BLOB`},
 		{"root_scoped", `ALTER TABLE session_token_records ADD COLUMN root_scoped    INTEGER NOT NULL DEFAULT 0`},
+		{"channel", `ALTER TABLE session_token_records ADD COLUMN channel         TEXT    NOT NULL DEFAULT ''`},
 	} {
 		present, err := columnExists(ctx, db, "session_token_records", c.name)
 		if err != nil {
@@ -754,7 +755,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			bound_ip              TEXT    NOT NULL DEFAULT '',
 			last_proven_at        TEXT,
 			credential_id         BLOB,
-			root_scoped           INTEGER NOT NULL DEFAULT 0
+			root_scoped           INTEGER NOT NULL DEFAULT 0,
+			channel               TEXT    NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_token_records_session_id ON session_token_records(session_id)`,
 	}

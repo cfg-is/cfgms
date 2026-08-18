@@ -1394,10 +1394,15 @@ func (s *Server) SetDurableSessionStore(store session.Store) {
 		IdleTimeout:     60 * time.Minute,
 		AbsoluteTimeout: 12 * time.Hour,
 		GraceWindow:     30 * time.Second,
+		Channel:         "web",
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessionManager = session.NewManager(s.sessionCfg, store, time.Now)
+	// Copy the CLI config and assign the "cli" channel so the CLI manager rejects
+	// tokens issued by the web manager, and vice versa (Issue #3310).
+	cliCfg := s.sessionCfg
+	cliCfg.Channel = "cli"
+	s.sessionManager = session.NewManager(cliCfg, store, time.Now)
 	s.webSessionManager = session.NewManager(webCfg, store, time.Now)
 }
 

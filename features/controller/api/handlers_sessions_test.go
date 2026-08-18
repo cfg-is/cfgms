@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -785,4 +786,232 @@ func TestHandleSessionList_NoSessionManager(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503 when sessionManager is nil", rec.Code)
 	}
+}
+
+// setupTwoChannelServer wires a server with separate CLI and web session managers
+// sharing a MemStore. Returns the server, CLI manager, and web manager.
+func setupTwoChannelServer(t *testing.T) (*Server, session.Manager, session.Manager) {
+	t.Helper()
+	srv := setupTestServer(t)
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store := session.NewMemStore(cliCfg, time.Now)
+	t.Cleanup(store.Close)
+	cliMgr := session.NewManager(cliCfg, store, time.Now)
+	webMgr := session.NewManager(webCfg, store, time.Now)
+	srv.SetSessionManager(cliMgr)
+	srv.SetWebSessionManager(webMgr)
+	return srv, cliMgr, webMgr
+}
+
+// TestCrossChannelValidation_InMemoryCachePath verifies that a CLI session token
+// is rejected when presented via the cookie path (web manager), and vice versa —
+// covering the in-memory-cache path where the session was just issued (Issue #3310).
+//
+// This is a REQUIRED TEST per the story acceptance criteria.
+func TestCrossChannelValidation_InMemoryCachePath(t *testing.T) {
+	srv, cliMgr, webMgr := setupTwoChannelServer(t)
+	ctx := context.Background()
+
+	// Issue a CLI session — it is in the CLI manager's memory but not the web manager's.
+	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	require.NoError(t, err)
+
+	// Issue a web session.
+	_, webToken, err := webMgr.Issue(ctx, "alice", "web-ctrl", "")
+	require.NoError(t, err)
+
+	// CLI token as Bearer → uses CLI manager → validates OK (same channel, in-memory).
+	cliReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	cliReq.Header.Set("Authorization", "Bearer "+cliToken)
+	cliRec := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(cliRec, cliReq)
+	assert.Equal(t, http.StatusOK, cliRec.Code, "CLI token on Bearer path must succeed")
+
+	// CLI token as cookie → uses web manager → rejected (cross-channel).
+	crossReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	crossReq.AddCookie(&http.Cookie{Name: "cfgms_session", Value: cliToken})
+	crossRec := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(crossRec, crossReq)
+	assert.Equal(t, http.StatusUnauthorized, crossRec.Code,
+		"CLI token on cookie path must be rejected with 401")
+
+	// Assert the response is byte-for-byte identical to an invalid session token
+	// (no disclosure that the session exists on another channel).
+	var crossBody ErrorResponse
+	require.NoError(t, json.NewDecoder(crossRec.Body).Decode(&crossBody))
+	require.NotNil(t, crossBody.Error)
+	assert.Equal(t, "INVALID_SESSION_TOKEN", crossBody.Error.Code,
+		"cross-channel rejection must be indistinguishable from an invalid token")
+
+	// Web token as cookie → uses web manager → validates OK (same channel).
+	webReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	webReq.AddCookie(&http.Cookie{Name: "cfgms_session", Value: webToken})
+	webRec := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(webRec, webReq)
+	assert.Equal(t, http.StatusOK, webRec.Code, "web token on cookie path must succeed")
+}
+
+// TestCrossChannelValidation_PostRestartStoreRehydrationPath verifies cross-channel
+// rejection on the store-rehydration path: after a simulated restart, a fresh manager
+// loads sessions from the durable store and rejects sessions from the other channel
+// (Issue #3310 REQUIRED TEST).
+func TestCrossChannelValidation_PostRestartStoreRehydrationPath(t *testing.T) {
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store := session.NewMemStore(cliCfg, time.Now)
+	t.Cleanup(store.Close)
+	ctx := context.Background()
+
+	// Issue sessions with both managers.
+	cliMgr := session.NewManager(cliCfg, store, time.Now)
+	webMgr := session.NewManager(webCfg, store, time.Now)
+	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	require.NoError(t, err)
+	_, webToken, err := webMgr.Issue(ctx, "bob", "web-ctrl", "")
+	require.NoError(t, err)
+
+	// Simulate restart: fresh managers with empty in-memory maps over the same store.
+	freshCliMgr := session.NewManager(cliCfg, store, time.Now)
+	freshWebMgr := session.NewManager(webCfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(freshCliMgr)
+	srv.SetWebSessionManager(freshWebMgr)
+
+	// CLI token as Bearer (CLI manager, store-rehydration path) → 200.
+	req1 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req1.Header.Set("Authorization", "Bearer "+cliToken)
+	rec1 := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec1, req1)
+	assert.Equal(t, http.StatusOK, rec1.Code, "CLI token must validate on CLI manager after restart")
+
+	// CLI token as cookie (web manager, store-rehydration path) → 401.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req2.AddCookie(&http.Cookie{Name: "cfgms_session", Value: cliToken})
+	rec2 := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusUnauthorized, rec2.Code,
+		"CLI token must be rejected by web manager on store-rehydration path")
+
+	var body2 ErrorResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&body2))
+	require.NotNil(t, body2.Error)
+	assert.Equal(t, "INVALID_SESSION_TOKEN", body2.Error.Code,
+		"cross-channel rejection must be indistinguishable from an invalid token")
+
+	// Web token as cookie (web manager, store-rehydration path) → 200.
+	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req3.AddCookie(&http.Cookie{Name: "cfgms_session", Value: webToken})
+	rec3 := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec3, req3)
+	assert.Equal(t, http.StatusOK, rec3.Code, "web token must validate on web manager after restart")
+
+	// Web token as Bearer (CLI manager, store-rehydration path) → 401.
+	req4 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req4.Header.Set("Authorization", "Bearer "+webToken)
+	rec4 := httptest.NewRecorder()
+	srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec4, req4)
+	assert.Equal(t, http.StatusUnauthorized, rec4.Code,
+		"web token must be rejected by CLI manager on store-rehydration path")
+}
+
+// TestCrossChannelListAndRevoke_PostRestartPath verifies that List returns only the
+// calling manager's channel sessions on the store fallback path, and that Revoke
+// refuses to revoke a session belonging to another channel (REQUIRED TEST, Issue #3310).
+func TestCrossChannelListAndRevoke_PostRestartPath(t *testing.T) {
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store := session.NewMemStore(cliCfg, time.Now)
+	t.Cleanup(store.Close)
+	ctx := context.Background()
+
+	// Issue one CLI and one web session.
+	cliMgr := session.NewManager(cliCfg, store, time.Now)
+	webMgr := session.NewManager(webCfg, store, time.Now)
+	cliSess, _, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	require.NoError(t, err)
+	_, _, err = webMgr.Issue(ctx, "bob", "web-ctrl", "")
+	require.NoError(t, err)
+
+	// Simulate restart: fresh managers with empty in-memory maps over the same store.
+	freshCliMgr := session.NewManager(cliCfg, store, time.Now)
+	freshWebMgr := session.NewManager(webCfg, store, time.Now)
+
+	// CLI manager List on store fallback → must see only its own channel's session.
+	cliList, err := freshCliMgr.List(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, len(cliList), "CLI List must return exactly one session")
+	if len(cliList) == 1 {
+		assert.Equal(t, cliSess.ID, cliList[0].ID)
+	}
+
+	// Web manager List on store fallback → must see only its own channel's session.
+	webList, err := freshWebMgr.List(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, len(webList), "web List must return exactly one session")
+
+	// Cross-channel Revoke (cache-miss branch): web manager cannot revoke CLI session by ID.
+	// The cache-miss path loads the record via GetByID, checks channel="cli" != "web", returns not-found.
+	err = freshWebMgr.Revoke(ctx, cliSess.ID)
+	assert.True(t, errors.Is(err, session.ErrSessionNotFound),
+		"cross-channel Revoke must return ErrSessionNotFound, got: %v", err)
+
+	// Cross-channel revoke via handleSessionRevoke handler → 404.
+	srv := setupTestServer(t)
+	srv.SetSessionManager(freshCliMgr)
+	srv.SetWebSessionManager(freshWebMgr)
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+cliSess.ID, nil)
+	revokeReq = injectAdminPrincipal(revokeReq, "admin")
+	revokeReq = injectSessionMuxVars(revokeReq, map[string]string{"id": cliSess.ID})
+	// Override the session manager to the web manager (simulating a web-channel revoke attempt on a CLI session).
+	srv.SetSessionManager(freshWebMgr)
+	revokeRec := httptest.NewRecorder()
+	srv.handleSessionRevoke(revokeRec, revokeReq)
+	assert.Equal(t, http.StatusNotFound, revokeRec.Code,
+		"cross-channel revoke must return 404 (session not found on this channel)")
 }

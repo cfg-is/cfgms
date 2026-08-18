@@ -74,6 +74,24 @@ func (s *MemStore) Get(_ context.Context, tokenHash string) (*Session, error) {
 	return entry.session, nil
 }
 
+// GetByID returns any live session record for the given session ID.
+// Returns ErrSessionNotFound when no non-revoked entry exists for id.
+func (s *MemStore) GetByID(_ context.Context, id string) (*Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	hashes, ok := s.byID[id]
+	if !ok || len(hashes) == 0 {
+		return nil, ErrSessionNotFound
+	}
+	for _, h := range hashes {
+		entry, ok := s.records[h]
+		if ok && !entry.revoked && entry.session != nil {
+			return entry.session, nil
+		}
+	}
+	return nil, ErrSessionNotFound
+}
+
 // Delete removes all token-hash entries associated with the given session ID.
 // Returns ErrSessionNotFound when no entries exist for id (mirrors SQLiteSessionTokenStore).
 func (s *MemStore) Delete(_ context.Context, id string) error {

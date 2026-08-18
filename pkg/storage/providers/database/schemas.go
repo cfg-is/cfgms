@@ -1231,7 +1231,8 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 			bound_ip            TEXT    NOT NULL DEFAULT '',
 			last_proven_at      TIMESTAMP WITH TIME ZONE,
 			credential_id       BYTEA,
-			root_scoped         BOOLEAN NOT NULL DEFAULT FALSE
+			root_scoped         BOOLEAN NOT NULL DEFAULT FALSE,
+			channel             TEXT    NOT NULL DEFAULT ''
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create session_token_store table: %w", err)
@@ -1282,6 +1283,7 @@ func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS last_proven_at TIMESTAMP WITH TIME ZONE`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS credential_id  BYTEA`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS root_scoped    BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS channel        TEXT    NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range alters {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
