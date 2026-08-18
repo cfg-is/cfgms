@@ -217,9 +217,10 @@ describe('ready state', () => {
     // Click once for ascending → globex (206), vendor-a (381), acme-corp (612)
     fireEvent.click(screen.getByTestId('sort-total_devices'))
     const rows = screen.getAllByTestId('tenant-row')
-    expect(rows[0].textContent).toContain('globex')
-    expect(rows[1].textContent).toContain('vendor-a')
-    expect(rows[2].textContent).toContain('acme-corp')
+    expect(rows).toHaveLength(3)
+    expect(rows[0]?.textContent).toContain('globex')
+    expect(rows[1]?.textContent).toContain('vendor-a')
+    expect(rows[2]?.textContent).toContain('acme-corp')
   })
 
   it('reverses sort direction on second click of the same column', async () => {
@@ -230,7 +231,8 @@ describe('ready state', () => {
     fireEvent.click(screen.getByTestId('sort-total_devices'))
     fireEvent.click(screen.getByTestId('sort-total_devices'))
     const rows = screen.getAllByTestId('tenant-row')
-    expect(rows[0].textContent).toContain('acme-corp')
+    expect(rows).toHaveLength(3)
+    expect(rows[0]?.textContent).toContain('acme-corp')
   })
 
   it('shows empty table notice when by_tenant is empty but total_devices > 0', async () => {
