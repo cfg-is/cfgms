@@ -71,6 +71,7 @@ What becomes easier or harder by making this decision?
 | [025](025-tenant-access-boundary.md) | SaaS-Operator ↔ MSP Tenant Access Boundary (incl. Amendment 1: ancestry-based boundary check, not path-prefix matching) | 2026-07-30 | Accepted |
 | [027](027-tenant-suspension-archive-and-cascading-deletion.md) | Tenant Suspension, Archive, and Cascading Deletion Lifecycle | 2026-07-31 | Accepted |
 | [028](028-raft-log-persistence.md) | Raft Log Persistence for Controller Cluster Restarts | 2026-08-13 | Accepted |
+| [029](029-controller-leadership-authority.md) | Controller Leadership Authority — Lease-Backed Authority and Fenced Side Effects | 2026-08-18 | Accepted |
 
 ### Superseded/Deprecated
 
