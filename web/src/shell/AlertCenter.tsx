@@ -2,17 +2,33 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Alert / notification center (Story #2496) —
- * mockups/fleet-overview.html `#pop-notif`. There is no alerting backend
- * (story Out of Scope), so this renders its designed EMPTY state rather
- * than fabricated sample alerts; a later epic wires a real feed in.
+ * Alert / notification center (Story #2496, Issue #3275) —
+ * mockups/fleet-overview.html `#pop-notif`. Wired to the dashboard-alerts
+ * feed via useAlerts; each alert can be acknowledged or silenced in-place.
+ *
+ * Silence duration is fixed at 24 hours (a date-picker UI is out of scope for
+ * this story). The Silence action requires alert:silence (AssuranceStrong) —
+ * apiFetch handles the CFGMS-StepUp 401 challenge centrally via the registered
+ * onStepUpRequired listener (ADR-021 Decision 6); no bespoke step-up handling
+ * is needed here.
  */
 import { useEffect, useRef, useState } from 'react'
+import { useAlerts } from './useAlerts.ts'
+
+const SILENCE_HOURS = 24
+
+function severityColor(severity: string): string {
+  switch (severity) {
+    case 'critical': return 'var(--state-crit)'
+    case 'warning': return 'var(--state-warn)'
+    default: return 'var(--text-faint)'
+  }
+}
 
 export default function AlertCenter() {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
-  const alertCount = 0
+  const { alerts, totalAlerts, loading, error, acknowledge, silence } = useAlerts(open)
 
   useEffect(() => {
     if (!open) return
@@ -49,18 +65,66 @@ export default function AlertCenter() {
           />
           <path d="M10 20a2 2 0 004 0" stroke="currentColor" strokeWidth="1.6" />
         </svg>
-        {alertCount > 0 && (
+        {totalAlerts > 0 && (
           <span className="badge" data-testid="alert-badge">
-            {alertCount}
+            {totalAlerts}
           </span>
         )}
       </button>
       {open && (
         <div className="pop right open" role="menu">
           <h4>Notifications</h4>
-          <div className="notice empty">
-            <p>No notifications.</p>
-          </div>
+          {loading && alerts.length === 0 && (
+            <div className="notice empty">
+              <p>Loading…</p>
+            </div>
+          )}
+          {!loading && error !== null && (
+            <div className="notice empty">
+              <p>Failed to load alerts.</p>
+            </div>
+          )}
+          {!loading && error === null && alerts.length === 0 && (
+            <div className="notice empty">
+              <p>No notifications.</p>
+            </div>
+          )}
+          {alerts.map((alert) => (
+            <div key={alert.id} className="row" data-testid="alert-row">
+              <span
+                className="dot"
+                aria-hidden="true"
+                style={{ color: severityColor(alert.severity) }}
+              />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div>{alert.description}</div>
+                <div className="sub">{alert.device_id}</div>
+              </div>
+              <div className="alert-actions">
+                {!alert.acknowledged && (
+                  <button
+                    type="button"
+                    className="alert-action-btn"
+                    aria-label={`Acknowledge: ${alert.description}`}
+                    onClick={() => void acknowledge(alert.id)}
+                  >
+                    Acknowledge
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="alert-action-btn"
+                  aria-label={`Silence: ${alert.description}`}
+                  onClick={() => {
+                    const until = new Date(Date.now() + SILENCE_HOURS * 60 * 60 * 1000)
+                    void silence(alert.id, until)
+                  }}
+                >
+                  Silence
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

@@ -304,6 +304,43 @@ nav a.soon .tag {
   margin: 5px 4px;
 }
 
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+  display: inline-block;
+}
+
+.pop .row .sub {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.alert-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.alert-action-btn {
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.alert-action-btn:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
 .miniseg {
   display: flex;
   gap: 3px;
