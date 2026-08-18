@@ -225,6 +225,206 @@ describe('AlertCenter', () => {
     await waitFor(() => expect(screen.getByText(/no notifications/i)).toBeInTheDocument())
   })
 
+  it('surfaces a 403 from the acknowledge POST and does not refresh the list', async () => {
+    const alertId = 'alert-abc123'
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.resolve(alertsResponse([makeAlert()]))
+      }
+      if (url.includes(`/alerts/${alertId}/acknowledge`)) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ error: { code: 'FORBIDDEN', message: 'insufficient permission' } }),
+            { status: 403, headers: { 'Content-Type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+
+    render(<AlertCenter />)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+    await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
+
+    const getCallsBefore = fetchMock.mock.calls.filter((c) =>
+      (typeof c[0] === 'string' ? c[0] : String(c[0])).includes('/dashboard/alerts'),
+    ).length
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /acknowledge/i }))
+    })
+
+    // The refusal is surfaced, not swallowed.
+    await waitFor(() =>
+      expect(screen.getByTestId('alert-action-error')).toHaveTextContent('insufficient permission'),
+    )
+
+    // A failed action must NOT re-fetch: re-rendering the same unacknowledged
+    // state would read as success.
+    const getCallsAfter = fetchMock.mock.calls.filter((c) =>
+      (typeof c[0] === 'string' ? c[0] : String(c[0])).includes('/dashboard/alerts'),
+    ).length
+    expect(getCallsAfter).toBe(getCallsBefore)
+
+    // The alert is still listed and still actionable.
+    expect(screen.getByTestId('alert-row')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /acknowledge/i })).toBeInTheDocument()
+  })
+
+  it('surfaces a 500 from the silence POST and does not refresh the list', async () => {
+    const alertId = 'alert-abc123'
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.resolve(alertsResponse([makeAlert()]))
+      }
+      if (url.includes(`/alerts/${alertId}/silence`)) {
+        return Promise.resolve(new Response(null, { status: 500 }))
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+
+    render(<AlertCenter />)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+    await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
+
+    const getCallsBefore = fetchMock.mock.calls.filter((c) =>
+      (typeof c[0] === 'string' ? c[0] : String(c[0])).includes('/dashboard/alerts'),
+    ).length
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /silence/i }))
+    })
+
+    // No error envelope in the body: fall back to the status code.
+    await waitFor(() =>
+      expect(screen.getByTestId('alert-action-error')).toHaveTextContent('500'),
+    )
+
+    const getCallsAfter = fetchMock.mock.calls.filter((c) =>
+      (typeof c[0] === 'string' ? c[0] : String(c[0])).includes('/dashboard/alerts'),
+    ).length
+    expect(getCallsAfter).toBe(getCallsBefore)
+    expect(screen.getByTestId('alert-row')).toBeInTheDocument()
+  })
+
+  it('surfaces a network failure from the silence POST without an unhandled rejection', async () => {
+    const alertId = 'alert-abc123'
+    const unhandled = vi.fn()
+    window.addEventListener('unhandledrejection', unhandled)
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.resolve(alertsResponse([makeAlert()]))
+      }
+      if (url.includes(`/alerts/${alertId}/silence`)) {
+        return Promise.reject(new Error('Failed to fetch'))
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+
+    try {
+      render(<AlertCenter />)
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+      await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /silence/i }))
+      })
+
+      await waitFor(() =>
+        expect(screen.getByTestId('alert-action-error')).toHaveTextContent('Failed to fetch'),
+      )
+      expect(unhandled).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('unhandledrejection', unhandled)
+    }
+  })
+
+  it('clears a stale action error when the popover is reopened', async () => {
+    const alertId = 'alert-abc123'
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.resolve(alertsResponse([makeAlert()]))
+      }
+      if (url.includes(`/alerts/${alertId}/acknowledge`)) {
+        return Promise.resolve(new Response(null, { status: 403 }))
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+
+    render(<AlertCenter />)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+    await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /acknowledge/i }))
+    })
+    await waitFor(() => expect(screen.getByTestId('alert-action-error')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i })) // close
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i })) // reopen
+    await waitFor(() => expect(screen.getByTestId('alert-row')).toBeInTheDocument())
+    expect(screen.queryByTestId('alert-action-error')).not.toBeInTheDocument()
+  })
+
+  it('renders the load-failure state when GET /dashboard/alerts returns non-2xx', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.resolve(new Response(null, { status: 500 }))
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+
+    render(<AlertCenter />)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+
+    await waitFor(() => expect(screen.getByText(/failed to load alerts/i)).toBeInTheDocument())
+    // The failure state replaces the empty state — they must not both render.
+    expect(screen.queryByText(/no notifications/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('alert-row')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('alert-badge')).not.toBeInTheDocument()
+  })
+
+  it('renders the load-failure state when GET /dashboard/alerts rejects', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.reject(new Error('Failed to fetch'))
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+
+    render(<AlertCenter />)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+
+    await waitFor(() => expect(screen.getByText(/failed to load alerts/i)).toBeInTheDocument())
+    expect(screen.queryByText(/no notifications/i)).not.toBeInTheDocument()
+  })
+
+  it('renders the load-failure state when GET /dashboard/alerts returns a non-object body', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/dashboard/alerts')) {
+        return Promise.resolve(
+          new Response('"not-an-object"', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      }
+      return Promise.resolve(new Response(null, { status: 204 }))
+    })
+
+    render(<AlertCenter />)
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }))
+
+    await waitFor(() => expect(screen.getByText(/failed to load alerts/i)).toBeInTheDocument())
+  })
+
   it('shows Acknowledge button only when alert is not yet acknowledged', async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : String(input)

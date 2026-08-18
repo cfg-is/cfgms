@@ -601,6 +601,43 @@ func TestDashboardAlerts(t *testing.T) {
 	assert.Equal(t, len(body.Alerts), body.TotalAlerts)
 }
 
+// TestDashboardAlerts_IDField verifies that each alert in the dashboard/alerts
+// response carries an "id" matching deriveAlertID(deviceID, description) — the
+// convention the frontend's Acknowledge/Silence buttons rely on to target their
+// POST calls without re-deriving the hash client-side.
+//
+// [REQUIRED TEST] AC: alert "id" field is present and equals
+// deriveAlertID(device_id, description) for the fixture data.
+func TestDashboardAlerts_IDField(t *testing.T) {
+	stack := newReportsStack(t)
+
+	stack.addDeviceWithDrift(t, "id-device", "tenant-id",
+		map[string]string{"host:hostname": "before"},
+		map[string]string{"host:hostname": "after"},
+	)
+
+	rec := httptest.NewRecorder()
+	stack.handler.getDashboardAlerts(rec,
+		request("GET", "/reports/dashboard/alerts?device_id=id-device", "tenant-id", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Alerts []map[string]interface{} `json:"alerts"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Alerts, "must have at least one alert to verify the id field")
+
+	for _, alert := range body.Alerts {
+		deviceID, _ := alert["device_id"].(string)
+		description, _ := alert["description"].(string)
+		id, _ := alert["id"].(string)
+
+		require.NotEmpty(t, id, "alert must carry a non-empty id field")
+		assert.Equal(t, deriveAlertID(deviceID, description), id,
+			"alert id must match deriveAlertID(device_id, description)")
+	}
+}
+
 // TestComplianceStatus verifies the compliance status handler's response shape.
 func TestComplianceStatus(t *testing.T) {
 	stack := newReportsStack(t)

@@ -15,6 +15,12 @@
  * Loading state is derived (not set synchronously in the effect body) following
  * the same pattern as useReportsDashboard: `loading = open && current === null`,
  * where `current` is the resolved state for the latest fetch key.
+ *
+ * Mutations return an ActionResult rather than throwing, matching the
+ * postAction convention in modules/useModuleQueue.ts. A failed acknowledge or
+ * silence (403 insufficient permission, a cancelled step-up ceremony, 5xx, or a
+ * network-level throw) must reach the caller: refresh() only runs on success, so
+ * the UI never re-renders unchanged state as if the action had taken effect.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
@@ -29,13 +35,16 @@ export interface Alert {
   silenced: boolean
 }
 
+/** Outcome of an alert mutation; mirrors modules/useModuleQueue.ts ActionResult. */
+export type ActionResult = { ok: true } | { ok: false; error: string }
+
 export interface UseAlertsResult {
   alerts: Alert[]
   totalAlerts: number
   loading: boolean
   error: string | null
-  acknowledge: (id: string) => Promise<void>
-  silence: (id: string, until: Date) => Promise<void>
+  acknowledge: (id: string) => Promise<ActionResult>
+  silence: (id: string, until: Date) => Promise<ActionResult>
   refresh: () => void
 }
 
@@ -58,6 +67,31 @@ function parseAlert(value: unknown): Alert | null {
     description: typeof r.description === 'string' ? r.description : '',
     acknowledged: r.acknowledged === true,
     silenced: r.silenced === true,
+  }
+}
+
+/**
+ * POST an alert mutation, converting both a non-2xx response and a network-level
+ * throw into an ActionResult so no failure is swallowed and no caller is handed a
+ * rejected promise. The operator-facing message prefers the server's error
+ * envelope ({ error: { message } }) and falls back to the status code.
+ */
+async function postAlertAction(path: string, init: RequestInit): Promise<ActionResult> {
+  try {
+    const response = await apiFetch(path, init)
+    if (!response.ok) {
+      const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+      const errMsg =
+        ((errBody?.error as Record<string, unknown>)?.message as string) ||
+        `Request failed — ${response.status}`
+      return { ok: false, error: errMsg }
+    }
+    return { ok: true }
+  } catch (cause: unknown) {
+    return {
+      ok: false,
+      error: cause instanceof Error && cause.message ? cause.message : 'Request failed',
+    }
   }
 }
 
@@ -113,21 +147,29 @@ export function useAlerts(open: boolean): UseAlertsResult {
   const loading = open && current === null
 
   const acknowledge = useCallback(
-    async (id: string): Promise<void> => {
-      await apiFetch(`/api/v1/alerts/${id}/acknowledge`, { method: 'POST' })
-      refresh()
+    async (id: string): Promise<ActionResult> => {
+      const result = await postAlertAction(
+        `/api/v1/alerts/${encodeURIComponent(id)}/acknowledge`,
+        { method: 'POST' },
+      )
+      if (result.ok) refresh()
+      return result
     },
     [refresh],
   )
 
   const silence = useCallback(
-    async (id: string, until: Date): Promise<void> => {
-      await apiFetch(`/api/v1/alerts/${id}/silence`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ until: until.toISOString() }),
-      })
-      refresh()
+    async (id: string, until: Date): Promise<ActionResult> => {
+      const result = await postAlertAction(
+        `/api/v1/alerts/${encodeURIComponent(id)}/silence`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ until: until.toISOString() }),
+        },
+      )
+      if (result.ok) refresh()
+      return result
     },
     [refresh],
   )

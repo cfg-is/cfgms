@@ -11,6 +11,10 @@
  * apiFetch handles the CFGMS-StepUp 401 challenge centrally via the registered
  * onStepUpRequired listener (ADR-021 Decision 6); no bespoke step-up handling
  * is needed here.
+ *
+ * A refused action (403, a cancelled step-up ceremony, 5xx, network failure)
+ * renders as an inline message above the list rather than silently re-fetching
+ * unchanged state — same treatment as ModuleReviewQueue's action-error block.
  */
 import { useEffect, useRef, useState } from 'react'
 import { useAlerts } from './useAlerts.ts'
@@ -29,6 +33,20 @@ export default function AlertCenter() {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const { alerts, totalAlerts, loading, error, acknowledge, silence } = useAlerts(open)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  async function handleAcknowledge(id: string) {
+    setActionError(null)
+    const result = await acknowledge(id)
+    if (!result.ok) setActionError(result.error)
+  }
+
+  async function handleSilence(id: string) {
+    setActionError(null)
+    const until = new Date(Date.now() + SILENCE_HOURS * 60 * 60 * 1000)
+    const result = await silence(id, until)
+    if (!result.ok) setActionError(result.error)
+  }
 
   useEffect(() => {
     if (!open) return
@@ -54,7 +72,10 @@ export default function AlertCenter() {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Notifications"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setActionError(null)
+          setOpen((v) => !v)
+        }}
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path
@@ -74,6 +95,11 @@ export default function AlertCenter() {
       {open && (
         <div className="pop right open" role="menu">
           <h4>Notifications</h4>
+          {actionError !== null && (
+            <div className="alert-action-error" role="alert" data-testid="alert-action-error">
+              {actionError}
+            </div>
+          )}
           {loading && alerts.length === 0 && (
             <div className="notice empty">
               <p>Loading…</p>
@@ -106,7 +132,7 @@ export default function AlertCenter() {
                     type="button"
                     className="alert-action-btn"
                     aria-label={`Acknowledge: ${alert.description}`}
-                    onClick={() => void acknowledge(alert.id)}
+                    onClick={() => void handleAcknowledge(alert.id)}
                   >
                     Acknowledge
                   </button>
@@ -115,10 +141,7 @@ export default function AlertCenter() {
                   type="button"
                   className="alert-action-btn"
                   aria-label={`Silence: ${alert.description}`}
-                  onClick={() => {
-                    const until = new Date(Date.now() + SILENCE_HOURS * 60 * 60 * 1000)
-                    void silence(alert.id, until)
-                  }}
+                  onClick={() => void handleSilence(alert.id)}
                 >
                   Silence
                 </button>
