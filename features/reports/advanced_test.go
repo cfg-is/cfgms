@@ -9,13 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"path/filepath"
+
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/reports/cache"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	"github.com/cfgis/cfgms/pkg/dna/drift"
+	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 
@@ -27,34 +28,10 @@ import (
 func TestAdvancedServiceWithConfig(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
-	// Create DNA storage manager
-	dnaStorageConfig := &storage.Config{
-		Backend:                storage.BackendSQLite,
-		DataDir:                t.TempDir(),
-		CompressionLevel:       6,
-		CompressionType:        "gzip",
-		TargetCompressionRatio: 0.7, // More relaxed target for testing
-		EnableDeduplication:    true,
-		BlockSize:              64 * 1024,
-		HashAlgorithm:          "sha256",
-		RetentionPeriod:        24 * time.Hour,
-		ArchivalPeriod:         1 * time.Hour,
-		MaxRecordsPerDevice:    100,
-		EnableSharding:         false, // Disable sharding for simplicity
-		ShardCount:             1,
-		ShardingStrategy:       "device_id",
-		BatchSize:              10,
-		FlushInterval:          1 * time.Minute,
-		CacheSize:              100,
-		MaxStoragePerMonth:     10 * 1024 * 1024, // 10MB
-	}
-	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
+	// Create entity graph provider backed by t.TempDir() (real component, no mocks).
+	egp, err := egsqlite.NewSQLiteEntityGraphProvider(filepath.Join(t.TempDir(), "eg.db"))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = dnaStorageManager.Close() })
-
-	// Create real components
-	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
-	require.NoError(t, err)
+	t.Cleanup(func() { _ = egp.Close() })
 
 	// Create audit components using OSS storage for testing
 	globalStorageManager := pkgtesting.SetupTestStorage(t)
@@ -101,7 +78,7 @@ func TestAdvancedServiceWithConfig(t *testing.T) {
 
 	// Test service creation with config
 	service := NewAdvancedServiceWithConfig(
-		dnaStorageManager, driftDetector, auditManager, auditStore,
+		egp, auditManager, auditStore,
 		rbacManager, reportCache, serviceConfig, logger,
 	)
 
@@ -643,37 +620,13 @@ func TestExportFormats(t *testing.T) {
 
 // createTestAdvancedService creates a test instance of AdvancedService using minimal real components
 func createTestAdvancedService(t *testing.T) *AdvancedService {
+	t.Helper()
 	logger := logging.NewNoopLogger()
 
-	// Create minimal real components needed for the service
-	// Create DNA storage manager (which is what the constructor expects)
-	dnaStorageConfig := &storage.Config{
-		Backend:                storage.BackendSQLite,
-		DataDir:                t.TempDir(),
-		CompressionLevel:       6,
-		CompressionType:        "gzip",
-		TargetCompressionRatio: 0.7, // More relaxed target for testing
-		EnableDeduplication:    true,
-		BlockSize:              64 * 1024,
-		HashAlgorithm:          "sha256",
-		RetentionPeriod:        24 * time.Hour,
-		ArchivalPeriod:         1 * time.Hour,
-		MaxRecordsPerDevice:    100,
-		EnableSharding:         false, // Disable sharding for simplicity
-		ShardCount:             1,
-		ShardingStrategy:       "device_id",
-		BatchSize:              10,
-		FlushInterval:          1 * time.Minute,
-		CacheSize:              100,
-		MaxStoragePerMonth:     10 * 1024 * 1024, // 10MB
-	}
-	dnaStorageManager, err := storage.NewManager(dnaStorageConfig, logger)
-	require.NoError(t, err, "Failed to create DNA storage manager")
-	t.Cleanup(func() { _ = dnaStorageManager.Close() })
-
-	// Create minimal drift detector
-	driftDetector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logger)
-	require.NoError(t, err, "Failed to create drift detector")
+	// Create entity graph provider backed by t.TempDir() (real component, no mocks).
+	egp, err := egsqlite.NewSQLiteEntityGraphProvider(filepath.Join(t.TempDir(), "eg.db"))
+	require.NoError(t, err, "Failed to create entity graph provider")
+	t.Cleanup(func() { _ = egp.Close() })
 
 	// Create audit components using OSS storage for testing
 	globalStorageManager := pkgtesting.SetupTestStorage(t)
@@ -722,7 +675,7 @@ func createTestAdvancedService(t *testing.T) *AdvancedService {
 	}
 
 	service := NewAdvancedServiceWithConfig(
-		dnaStorageManager, driftDetector, auditManager, auditStore,
+		egp, auditManager, auditStore,
 		rbacManager, reportCache, serviceConfig, logger,
 	)
 	require.NotNil(t, service, "Failed to create advanced service")

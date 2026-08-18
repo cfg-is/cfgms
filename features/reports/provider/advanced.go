@@ -15,6 +15,7 @@ import (
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/dna/drift"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -29,14 +30,13 @@ type AdvancedProvider struct {
 
 // NewAdvancedProvider creates a new advanced data provider
 func NewAdvancedProvider(
-	storageManager *storage.Manager,
-	driftDetector drift.Detector,
+	egProvider eginterfaces.EntityGraphProvider,
 	auditManager *audit.Manager,
 	auditStore business.AuditStore,
 	logger logging.Logger,
 ) *AdvancedProvider {
 	// Create base provider
-	baseProvider := New(storageManager, driftDetector, logger)
+	baseProvider := New(egProvider, logger)
 
 	return &AdvancedProvider{
 		DataProvider: baseProvider,

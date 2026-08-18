@@ -72,7 +72,6 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
-	dnadrift "github.com/cfgis/cfgms/pkg/dna/drift"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egdatabase "github.com/cfgis/cfgms/pkg/entitygraph/providers/database"
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
@@ -1420,7 +1419,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).
 	srv.dnaStorageManager = dnaStorageManager
-	reportsHandler, reportsDataProvider := initializeReportsHandler(dnaStorageManager, controllerService, storageManager.GetAlertStore(), logger)
+	reportsHandler, reportsDataProvider := initializeReportsHandler(egProvider, controllerService, storageManager.GetAlertStore(), logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
 		httpServer.SetDataProvider(reportsDataProvider)
@@ -1676,29 +1675,21 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 	return manager
 }
 
-// initializeReportsHandler creates the reports API handler over the shared DNA
-// storage manager. Returns nil, nil when DNA storage is unavailable (reports engine
-// disabled) — the manager's lifecycle is owned by the caller. (Issue #1572)
+// initializeReportsHandler creates the reports API handler backed by the entity
+// graph central provider (Issue #3328). Returns nil, nil when egProvider is nil.
 // controllerService supplies device→tenant ownership so tenant-scoped callers
 // cannot select another tenant's devices.
 // alertStore supplies alert acknowledgement and silence state for the dashboard
 // alerts feed (Issue #3267); nil disables ack/silence annotation gracefully.
 // The DataProvider is returned alongside the Handler so callers can wire it into
 // the compliance endpoints for drift-based compliance derivation (Issue #3265).
-func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerService *service.ControllerService, alertStore business.AlertStore, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
-	if dnaStorageManager == nil {
-		return nil, nil
-	}
-
-	// Initialize drift detector with default configuration
-	driftDetector, err := dnadrift.NewDetector(nil, logger)
-	if err != nil {
-		logger.Warn("Failed to initialize drift detector for reports engine", "error", err)
+func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, controllerService *service.ControllerService, alertStore business.AlertStore, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
+	if egProvider == nil {
 		return nil, nil
 	}
 
 	// Build the reports engine from its components
-	dataProvider := reportsprovider.New(dnaStorageManager, driftDetector, logger)
+	dataProvider := reportsprovider.New(egProvider, logger)
 	templateProcessor := reportstemplates.New(logger)
 	exporter := reportsexporters.New(logger)
 	reportsCache := reportscache.NewMemoryCache()

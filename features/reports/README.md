@@ -74,8 +74,7 @@ features/reports/
 ## 🔗 Integration
 
 ### Existing System Integration
-- **DNA Storage**: Leverages `storage.Manager` for efficient data queries
-- **Drift Detection**: Integrates with `drift.Detector` for event analysis
+- **Entity Graph**: Reads device identity, observation history, and drift state from `pkg/entitygraph/interfaces.EntityGraphProvider` (ADR-022). `GetDNAData`, `GetDeviceStats`, and `GetDriftEvents` all read from the entity graph; the flat `DNARecord` store is no longer used for reports (Issue #3328).
 - **Template System**: Extends existing template processing capabilities
 - **REST API**: Integrates with controller API infrastructure
 - **Multi-tenancy**: Supports tenant isolation and RBAC
@@ -129,8 +128,7 @@ curl -X POST /api/v1/reports/generate \
 
 Comprehensive test suite includes:
 - **Unit tests** for core engine functionality
-- **Integration tests** for data provider and storage
-- **Mock implementations** for isolated testing
+- **Integration tests** for data provider against real `SQLiteEntityGraphProvider` (no mocks, per CLAUDE.md)
 - **Example tests** demonstrating usage patterns
 
 ## 📈 Business Value

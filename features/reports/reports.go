@@ -65,13 +65,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/reports/engine"
 	"github.com/cfgis/cfgms/features/reports/exporters"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/features/reports/templates"
-	"github.com/cfgis/cfgms/pkg/dna/drift"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -106,13 +105,12 @@ func DefaultServiceConfig() ServiceConfig {
 
 // NewService creates a new reports service with the provided dependencies
 func NewService(
-	storageManager *storage.Manager,
-	driftDetector drift.Detector,
+	egProvider eginterfaces.EntityGraphProvider,
 	cache interfaces.ReportCache,
 	logger logging.Logger,
 ) *Service {
 	// Create data provider
-	dataProvider := provider.New(storageManager, driftDetector, logger)
+	dataProvider := provider.New(egProvider, logger)
 
 	// Create template processor
 	templateProcessor := templates.New(logger)
@@ -132,14 +130,13 @@ func NewService(
 
 // NewServiceWithConfig creates a new reports service with custom configuration
 func NewServiceWithConfig(
-	storageManager *storage.Manager,
-	driftDetector drift.Detector,
+	egProvider eginterfaces.EntityGraphProvider,
 	cache interfaces.ReportCache,
 	config ServiceConfig,
 	logger logging.Logger,
 ) *Service {
 	// Create data provider
-	dataProvider := provider.New(storageManager, driftDetector, logger)
+	dataProvider := provider.New(egProvider, logger)
 
 	// Create template processor
 	templateProcessor := templates.New(logger)
