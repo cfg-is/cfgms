@@ -406,6 +406,25 @@ func (s DatabaseSchemas) BackfillTenantLifecycle(ctx context.Context, db *sql.DB
 	return nil
 }
 
+// CreatePendingDeletionsTable creates cfgms_tenant_pending_deletions for ADR-027
+// Decisions 3-4 (Issue #3182). Idempotent via CREATE TABLE IF NOT EXISTS.
+func (s DatabaseSchemas) CreatePendingDeletionsTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_tenant_pending_deletions (
+			subtree_root_id   VARCHAR(255) PRIMARY KEY,
+			requested_by      VARCHAR(255) NOT NULL,
+			requested_at      TIMESTAMP WITH TIME ZONE NOT NULL,
+			eligible_at       TIMESTAMP WITH TIME ZONE NOT NULL,
+			state             VARCHAR(50)  NOT NULL DEFAULT 'hold',
+			pinned_member_ids JSONB        NOT NULL DEFAULT '[]'
+		)
+	`
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_tenant_pending_deletions table: %w", err)
+	}
+	return nil
+}
+
 // CreateTenantTables creates all tenant-related tables with proper indexing.
 // directly_suspended and cascade_suspended_from (ADR-027 Decision 2) are
 // included in the CREATE TABLE; BackfillTenantLifecycle handles pre-existing
@@ -433,6 +452,11 @@ func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) err
 
 	// Migration for deployments created before ADR-027 (Issue #3158).
 	if err := s.BackfillTenantLifecycle(ctx, db); err != nil {
+		return err
+	}
+
+	// Create the pending-deletions table (ADR-027 Decisions 3-4, Issue #3182).
+	if err := s.CreatePendingDeletionsTable(ctx, db); err != nil {
 		return err
 	}
 

@@ -4,6 +4,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -110,6 +111,25 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 	if req.Metadata[cfgpkg.MetaKeyConfigSourceType] == string(cfgpkg.ConfigSourceTypeGit) {
 		if err := m.validateGitMountPoint(ctx, req.Metadata); err != nil {
 			return nil, err
+		}
+	}
+
+	// Reject tenant creation under a suspended parent or a parent with a pending deletion.
+	// Defense-in-depth: prevents subtree membership from growing under an in-flight deletion hold.
+	// If the parent does not yet exist, the storage layer's constraints enforce that;
+	// we only need to check the state of parents that do exist.
+	if req.ParentID != "" {
+		parent, err := m.store.GetTenant(ctx, req.ParentID)
+		if err != nil && !errors.Is(err, business.ErrTenantDoesNotExist) {
+			return nil, fmt.Errorf("failed to look up parent tenant: %w", err)
+		}
+		if err == nil {
+			if parent.Status == business.TenantStatusSuspended {
+				return nil, fmt.Errorf("cannot create tenant under a suspended parent (%s)", req.ParentID)
+			}
+			if _, err := m.store.GetPendingDeletion(ctx, req.ParentID); err == nil {
+				return nil, fmt.Errorf("cannot create tenant under a parent with a pending deletion (%s)", req.ParentID)
+			}
 		}
 	}
 
@@ -510,8 +530,122 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 		}
 	}
 
-	// Delete the tenant (soft delete)
+	// Hard-delete the tenant row from storage.
 	return m.store.DeleteTenant(ctx, tenantID)
+}
+
+// RequestTenantDeletion begins the ADR-027 Decision 3 deletion pipeline for
+// tenantID's subtree. The entire subtree must already be suspended; if any
+// descendant (including the root) is not fully suspended, an error wrapping
+// ErrTenantNotFullySuspended is returned naming the first unsuspended tenant
+// found. On success the hold-period timer starts and a PendingDeletion record
+// is written with the pinned member set.
+func (m *Manager) RequestTenantDeletion(ctx context.Context, tenantID, requesterID string, holdPeriod time.Duration) (*business.PendingDeletion, error) {
+	if tenantID == "default" {
+		return nil, fmt.Errorf("cannot delete default tenant")
+	}
+
+	// BFS walk of the subtree; collect member IDs and reject any unsuspended tenant.
+	visited := map[string]bool{tenantID: true}
+	queue := []string{tenantID}
+	var memberIDs []string
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		current, err := m.store.GetTenant(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+
+		if current.Status != business.TenantStatusSuspended {
+			return nil, fmt.Errorf("%w: first unsuspended tenant: %s", ErrTenantNotFullySuspended, currentID)
+		}
+
+		memberIDs = append(memberIDs, currentID)
+
+		children, err := m.store.GetChildTenants(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+			queue = append(queue, child.ID)
+		}
+	}
+
+	now := time.Now()
+	pending := &business.PendingDeletion{
+		SubtreeRootID:   tenantID,
+		RequestedBy:     requesterID,
+		RequestedAt:     now,
+		EligibleAt:      now.Add(holdPeriod),
+		State:           business.DeletionStateHold,
+		PinnedMemberIDs: memberIDs,
+	}
+
+	if err := m.store.RequestDeletion(ctx, pending); err != nil {
+		return nil, err
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, tenantID, "tenant_deletion_requested")
+	return pending, nil
+}
+
+// CancelTenantDeletion cancels a pending Hold/Eligible deletion, returning the
+// subtree to plain Suspended state (ADR-027 Decision 4). Never partial, never Active.
+func (m *Manager) CancelTenantDeletion(ctx context.Context, tenantID string) error {
+	if err := m.store.CancelDeletion(ctx, tenantID); err != nil {
+		return err
+	}
+	m.recordTenantLifecycleEvent(ctx, tenantID, tenantID, "tenant_deletion_cancelled")
+	return nil
+}
+
+// ApproveTenantDeletion executes the dual-control terminal step (ADR-027 Decision 4).
+// The store atomically verifies hold-period elapsed, dual-control (when required), and
+// membership match, then hard-deletes the entire subtree. RBAC cleanup runs afterward
+// on the returned IDs (best-effort, fire-and-forget on individual tenant failures).
+func (m *Manager) ApproveTenantDeletion(ctx context.Context, tenantID, approverID string, requireDualControl bool) ([]string, error) {
+	if tenantID == "default" {
+		return nil, fmt.Errorf("cannot delete default tenant")
+	}
+
+	deleted, err := m.store.ApproveDeletion(ctx, tenantID, approverID, requireDualControl, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	// RBAC cleanup for each deleted tenant (best-effort).
+	if m.rbacManager != nil {
+		for _, id := range deleted {
+			if err := m.rbacManager.DeleteSubjectsByTenant(ctx, id); err != nil {
+				slog.Warn("tenant: failed to delete subjects for deleted tenant",
+					"tenant_id", logging.SanitizeLogValue(id),
+					"error", logging.SanitizeLogValue(err.Error()),
+				)
+			}
+			if err := m.rbacManager.DeleteRolesByTenant(ctx, id); err != nil {
+				slog.Warn("tenant: failed to delete roles for deleted tenant",
+					"tenant_id", logging.SanitizeLogValue(id),
+					"error", logging.SanitizeLogValue(err.Error()),
+				)
+			}
+		}
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, tenantID, "tenant_deletion_approved")
+	return deleted, nil
+}
+
+// GetPendingDeletion returns the current pending-deletion record for tenantID, if any.
+// Returns ErrPendingDeletionNotFound when none exists.
+func (m *Manager) GetPendingDeletion(ctx context.Context, tenantID string) (*business.PendingDeletion, error) {
+	return m.store.GetPendingDeletion(ctx, tenantID)
 }
 
 // ListTenants lists tenants with optional filtering

@@ -60,6 +60,11 @@ var tenantBoundaryRouteTable = []tenantBoundaryRoute{
 	{http.MethodPut, "/api/v1/tenants/{tenant_path:.+}/refresh-policy", "tenant_path", "refresh:set-policy", false},
 	{http.MethodGet, "/api/v1/tenants/{tenant_path:.+}/assurance-policy", "tenant_path", "assurance-policy:get", false},
 	{http.MethodPut, "/api/v1/tenants/{tenant_path:.+}/assurance-policy", "tenant_path", "assurance-policy:set", false},
+	// Issue #3182: ADR-027 Decisions 3-4 deletion pipeline routes.
+	{http.MethodPost, "/api/v1/tenants/{id}/delete", "id", "tenant:delete", false},
+	{http.MethodDelete, "/api/v1/tenants/{id}/delete", "id", "tenant:delete", false},
+	{http.MethodGet, "/api/v1/tenants/{id}/delete", "id", "tenant:read", false},
+	{http.MethodPost, "/api/v1/tenants/{id}/delete/approve", "id", "tenant:approve-delete", false},
 }
 
 func (e tenantBoundaryRoute) String() string { return e.method + " " + e.template }

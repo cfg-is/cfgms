@@ -5,7 +5,7 @@ package configrouting
 import (
 	"context"
 	"errors"
-	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,138 +21,35 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
-// ---- test-double TenantStore ----
+// ---- real TenantStore for sync-service tests ----
 
-// syncTestTenantStore is a real in-memory TenantStore that walks parent links.
-type syncTestTenantStore struct {
-	mu      sync.RWMutex
-	tenants map[string]*business.TenantData
+// newSyncTenantStore returns a real SQLite-backed TenantStore. CFGMS mandates
+// real component testing, so the sync service resolves tenant hierarchy through
+// the production tenant store rather than a hand-written double.
+func newSyncTenantStore(t *testing.T) business.TenantStore {
+	t.Helper()
+	dir := t.TempDir()
+	p := sqlite.NewSQLiteProvider(dir)
+	store, err := p.CreateTenantStore(map[string]interface{}{"path": filepath.Join(dir, "tenants.db")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
-func newSyncTestTenantStore() *syncTestTenantStore {
-	return &syncTestTenantStore{tenants: make(map[string]*business.TenantData)}
-}
-
-func (s *syncTestTenantStore) add(id, parentID string, metadata map[string]string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.tenants[id] = &business.TenantData{
+// addSyncTenant persists a tenant in the real store.
+func addSyncTenant(t *testing.T, ts business.TenantStore, id, parentID string, metadata map[string]string) {
+	t.Helper()
+	require.NoError(t, ts.CreateTenant(context.Background(), &business.TenantData{
 		ID:       id,
 		Name:     id,
 		ParentID: parentID,
 		Metadata: metadata,
 		Status:   business.TenantStatusActive,
-	}
+	}))
 }
-
-func (s *syncTestTenantStore) Initialize(_ context.Context) error { return nil }
-func (s *syncTestTenantStore) Close() error                       { return nil }
-
-func (s *syncTestTenantStore) CreateTenant(_ context.Context, t *business.TenantData) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.tenants[t.ID] = t
-	return nil
-}
-func (s *syncTestTenantStore) GetTenant(_ context.Context, id string) (*business.TenantData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	t, ok := s.tenants[id]
-	if !ok {
-		return nil, fmt.Errorf("tenant not found: %s", id)
-	}
-	return t, nil
-}
-func (s *syncTestTenantStore) UpdateTenant(_ context.Context, t *business.TenantData) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.tenants[t.ID] = t
-	return nil
-}
-func (s *syncTestTenantStore) DeleteTenant(_ context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.tenants, id)
-	return nil
-}
-func (s *syncTestTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*business.TenantData, 0, len(s.tenants))
-	for _, t := range s.tenants {
-		out = append(out, t)
-	}
-	return out, nil
-}
-func (s *syncTestTenantStore) GetTenantHierarchy(_ context.Context, id string) (*business.TenantHierarchy, error) {
-	path, err := s.GetTenantPath(context.Background(), id)
-	if err != nil {
-		return nil, err
-	}
-	return &business.TenantHierarchy{TenantID: id, Path: path, Depth: len(path) - 1}, nil
-}
-func (s *syncTestTenantStore) GetChildTenants(_ context.Context, parentID string) ([]*business.TenantData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var children []*business.TenantData
-	for _, t := range s.tenants {
-		if t.ParentID == parentID {
-			children = append(children, t)
-		}
-	}
-	return children, nil
-}
-func (s *syncTestTenantStore) GetTenantPath(_ context.Context, tenantID string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var path []string
-	cur := tenantID
-	seen := make(map[string]bool)
-	for {
-		if seen[cur] {
-			return nil, fmt.Errorf("cycle detected in tenant hierarchy for %q", tenantID)
-		}
-		seen[cur] = true
-		path = append([]string{cur}, path...)
-		t, ok := s.tenants[cur]
-		if !ok {
-			return nil, fmt.Errorf("tenant not found: %s", cur)
-		}
-		if t.ParentID == "" {
-			break
-		}
-		cur = t.ParentID
-	}
-	return path, nil
-}
-func (s *syncTestTenantStore) IsTenantAncestor(_ context.Context, ancestorID, descendantID string) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	cur := descendantID
-	seen := make(map[string]bool)
-	for {
-		if seen[cur] {
-			return false, nil
-		}
-		seen[cur] = true
-		t, ok := s.tenants[cur]
-		if !ok {
-			return false, nil
-		}
-		if t.ParentID == ancestorID {
-			return true, nil
-		}
-		if t.ParentID == "" {
-			return false, nil
-		}
-		cur = t.ParentID
-	}
-}
-
-// compile-time check
-var _ business.TenantStore = (*syncTestTenantStore)(nil)
 
 // ---- test-double ConfigSourceRouter + tenantRemoteSyncer ----
 
@@ -374,9 +271,9 @@ func gitSource(pollInterval time.Duration) *pkgconfig.ConfigSourceInfo {
 // ---- tests ----
 
 func TestSyncService_SuccessfulPull(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
-	ts.add("tenant1", "root", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
+	addSyncTenant(t, ts, "tenant1", "root", nil)
 
 	router := newSyncTestRouter()
 	router.setSource("tenant1", gitSource(time.Hour))
@@ -406,9 +303,9 @@ func TestSyncService_SuccessfulPull(t *testing.T) {
 }
 
 func TestSyncService_PullFailurePreservesState(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
-	ts.add("tenant1", "root", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
+	addSyncTenant(t, ts, "tenant1", "root", nil)
 
 	router := newSyncTestRouter()
 	router.setSource("tenant1", gitSource(time.Hour))
@@ -442,10 +339,10 @@ func TestSyncService_PullFailurePreservesState(t *testing.T) {
 }
 
 func TestSyncService_StopDrainsGoroutines(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
-	ts.add("tenant1", "root", nil)
-	ts.add("tenant2", "root", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
+	addSyncTenant(t, ts, "tenant1", "root", nil)
+	addSyncTenant(t, ts, "tenant2", "root", nil)
 
 	router := newSyncTestRouter()
 	// Use long poll intervals so goroutines never actually fire before Stop.
@@ -482,9 +379,9 @@ func TestSyncService_ZeroPollIntervalFloors(t *testing.T) {
 }
 
 func TestSyncService_NewTenantRegisteredAfterStart(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
-	ts.add("tenant1", "root", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
+	addSyncTenant(t, ts, "tenant1", "root", nil)
 
 	router := newSyncTestRouter()
 	// tenant1 has no git source initially — added after start.
@@ -544,9 +441,9 @@ func TestSyncService_FailureCategoryClassification(t *testing.T) {
 }
 
 func TestSyncService_BothSHAsInSuccessEvent(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
-	ts.add("tenant1", "root", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
+	addSyncTenant(t, ts, "tenant1", "root", nil)
 
 	router := newSyncTestRouter()
 	router.setSource("tenant1", gitSource(time.Hour))
@@ -575,10 +472,10 @@ func TestSyncService_BothSHAsInSuccessEvent(t *testing.T) {
 }
 
 func TestSyncService_ApacheBoundary(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root-a", "", nil)
-	ts.add("root-b", "", nil)
-	ts.add("tenant-under-b", "root-b", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root-a", "", nil)
+	addSyncTenant(t, ts, "root-b", "", nil)
+	addSyncTenant(t, ts, "tenant-under-b", "root-b", nil)
 
 	router := newSyncTestRouter()
 	router.setSource("tenant-under-b", gitSource(time.Hour))
@@ -604,8 +501,8 @@ func TestSyncService_ApacheBoundary(t *testing.T) {
 // TestSyncService_NoNewCommitsSkipsCascade verifies that when prevSHA == newSHA,
 // cascade is not triggered (already up-to-date).
 func TestSyncService_NoNewCommitsSkipsCascade(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
 
 	router := newSyncTestRouter()
 	router.setSyncResult("tenant1", syncResult{prevSHA: "samesha", newSHA: "samesha"})
@@ -632,9 +529,9 @@ func TestSyncService_NoNewCommitsSkipsCascade(t *testing.T) {
 // TestSyncService_RegisterBeforeRunReturnsError verifies that Register called before Run
 // returns an explicit error so callers know the service is not yet started.
 func TestSyncService_RegisterBeforeRunReturnsError(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
-	ts.add("tenant1", "root", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
+	addSyncTenant(t, ts, "tenant1", "root", nil)
 
 	router := newSyncTestRouter()
 	router.setSource("tenant1", gitSource(time.Hour))
@@ -651,8 +548,8 @@ func TestSyncService_RegisterBeforeRunReturnsError(t *testing.T) {
 // TestSyncService_SyncOnceWithNonSyncerRouter verifies that syncOnce is a no-op
 // when the router does not implement tenantRemoteSyncer — no audit events, no cascade.
 func TestSyncService_SyncOnceWithNonSyncerRouter(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
 
 	// nonSyncerRouter wraps ConfigSourceRouter by interface embedding so that
 	// SyncTenantWithRemote is NOT promoted and the type assertion in syncOnce returns false.
@@ -683,9 +580,9 @@ func TestSyncService_SyncOnceWithNonSyncerRouter(t *testing.T) {
 
 // TestSyncService_RunIsIdempotent verifies that calling Run twice does not start duplicate goroutines.
 func TestSyncService_RunIsIdempotent(t *testing.T) {
-	ts := newSyncTestTenantStore()
-	ts.add("root", "", nil)
-	ts.add("tenant1", "root", nil)
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "root", "", nil)
+	addSyncTenant(t, ts, "tenant1", "root", nil)
 
 	router := newSyncTestRouter()
 	router.setSource("tenant1", gitSource(time.Hour))

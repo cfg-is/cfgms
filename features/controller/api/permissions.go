@@ -90,6 +90,9 @@ var knownPermissions = map[string]bool{
 	"tenant:read":   true,
 	"tenant:update": true,
 	"tenant:manage": true,
+	// Tenant deletion pipeline (ADR-027 Decisions 3-4, Issue #3182)
+	"tenant:delete":         true,
+	"tenant:approve-delete": true,
 	// Tenant-crossing grant and break-glass (ADR-025 Decision 2, Issue #3125)
 	"tenant:crossing-grant":       true,
 	"tenant:crossing-list":        true,

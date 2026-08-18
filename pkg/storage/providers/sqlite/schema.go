@@ -347,6 +347,16 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_tenants_status      ON tenants(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_name        ON tenants(name)`,
 
+		// Pending-deletion pipeline (ADR-027 Decisions 3-4, Issue #3182).
+		`CREATE TABLE IF NOT EXISTS tenant_pending_deletions (
+			subtree_root_id   TEXT PRIMARY KEY,
+			requested_by      TEXT NOT NULL,
+			requested_at      TEXT NOT NULL,
+			eligible_at       TEXT NOT NULL,
+			state             TEXT NOT NULL DEFAULT 'hold',
+			pinned_member_ids TEXT NOT NULL DEFAULT '[]'
+		)`,
+
 		// Tenant crossings (ADR-025 Decision 2: client-granted support access and
 		// tenant-crossing break-glass elevation, both time-boxed and revocable).
 		`CREATE TABLE IF NOT EXISTS tenant_crossings (

@@ -27,6 +27,18 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 
+	// Tenant deletion pipeline (ADR-027 Decisions 3-4, Issue #3182).
+	// POST requests deletion; DELETE cancels; GET reads the pending state;
+	// POST /approve is the dual-control terminal approval step.
+	tenants.Handle("/{id}/delete",
+		s.requirePermission("tenant", "delete")(http.HandlerFunc(s.handleRequestTenantDeletion))).Methods("POST")
+	tenants.Handle("/{id}/delete",
+		s.requirePermission("tenant", "delete")(http.HandlerFunc(s.handleCancelTenantDeletion))).Methods("DELETE")
+	tenants.Handle("/{id}/delete",
+		s.requirePermission("tenant", "read")(http.HandlerFunc(s.handleGetPendingDeletion))).Methods("GET")
+	tenants.Handle("/{id}/delete/approve",
+		s.requirePermission("tenant", "approve-delete")(http.HandlerFunc(s.handleApproveTenantDeletion))).Methods("POST")
+
 	// Tenant-crossing grant and break-glass endpoints (ADR-025 Decision 2, Issue #3125).
 	tenants.Handle("/{id}/access-grants",
 		s.requirePermission("tenant", "crossing-grant")(http.HandlerFunc(s.handleCreateTenantCrossingGrant))).Methods("POST")

@@ -6,8 +6,11 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -332,6 +335,227 @@ func populateTenant(t *business.TenantData, parentID, cascadeFrom sql.NullString
 // The mattn/go-sqlite3 driver embeds the text "UNIQUE constraint failed" in the error message.
 func isUniqueConstraintError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// RequestDeletion implements TenantStore.RequestDeletion.
+func (s *SQLiteTenantStore) RequestDeletion(ctx context.Context, pending *business.PendingDeletion) error {
+	if pending == nil {
+		return fmt.Errorf("pending deletion cannot be nil")
+	}
+	pinnedJSON, err := json.Marshal(pending.PinnedMemberIDs)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pinned member IDs: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO tenant_pending_deletions
+		  (subtree_root_id, requested_by, requested_at, eligible_at, state, pinned_member_ids)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		pending.SubtreeRootID,
+		pending.RequestedBy,
+		formatTime(pending.RequestedAt),
+		formatTime(pending.EligibleAt),
+		string(pending.State),
+		string(pinnedJSON),
+	)
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			return fmt.Errorf("request deletion %s: %w", pending.SubtreeRootID, business.ErrPendingDeletionExists)
+		}
+		return fmt.Errorf("failed to create pending deletion: %w", err)
+	}
+	return nil
+}
+
+// CancelDeletion implements TenantStore.CancelDeletion.
+func (s *SQLiteTenantStore) CancelDeletion(ctx context.Context, subtreeRootID string) error {
+	if subtreeRootID == "" {
+		return fmt.Errorf("subtree root ID cannot be empty")
+	}
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM tenant_pending_deletions WHERE subtree_root_id = ?`, subtreeRootID)
+	if err != nil {
+		return fmt.Errorf("failed to cancel deletion: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("cancel deletion %s: %w", subtreeRootID, business.ErrPendingDeletionNotFound)
+	}
+	return nil
+}
+
+// ApproveDeletion implements TenantStore.ApproveDeletion.
+// The entire transaction is wrapped in retryOnBusy: when two concurrent callers
+// race, the loser's write is rejected with SQLITE_BUSY, the deferred rollback
+// fires, and retryOnBusy starts a fresh attempt. On the retry the loser reads
+// the post-commit state (pending row gone) and returns ErrPendingDeletionNotFound.
+func (s *SQLiteTenantStore) ApproveDeletion(ctx context.Context, subtreeRootID, approvedBy string, requireDualControl bool, now time.Time) ([]string, error) {
+	if subtreeRootID == "" {
+		return nil, fmt.Errorf("subtree root ID cannot be empty")
+	}
+	var deleted []string
+	err := retryOnBusy(ctx, func() error {
+		var err error
+		deleted, err = s.attemptApproveDeletion(ctx, subtreeRootID, approvedBy, requireDualControl, now)
+		return err
+	})
+	return deleted, err
+}
+
+// attemptApproveDeletion executes a single transactional approval attempt.
+// Called by ApproveDeletion (which retries on SQLITE_BUSY). Each call starts its
+// own transaction; the deferred rollback runs before retryOnBusy retries.
+func (s *SQLiteTenantStore) attemptApproveDeletion(ctx context.Context, subtreeRootID, approvedBy string, requireDualControl bool, now time.Time) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin approval transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var (
+		requestedBy    string
+		eligibleAtStr  string
+		stateStr       string
+		pinnedMembersS string
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT requested_by, eligible_at, state, pinned_member_ids
+		FROM tenant_pending_deletions
+		WHERE subtree_root_id = ?`, subtreeRootID).Scan(
+		&requestedBy, &eligibleAtStr, &stateStr, &pinnedMembersS)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrPendingDeletionNotFound)
+		}
+		return nil, fmt.Errorf("failed to read pending deletion: %w", err)
+	}
+
+	eligibleAt := parseTime(eligibleAtStr)
+
+	// (a) Hold period must have elapsed.
+	if now.Before(eligibleAt) {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrHoldNotElapsed)
+	}
+
+	// (c) Dual-control: approver must differ from requester.
+	if requireDualControl && approvedBy == requestedBy {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrSameApprover)
+	}
+
+	var pinnedMembers []string
+	if err := json.Unmarshal([]byte(pinnedMembersS), &pinnedMembers); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal pinned member IDs: %w", err)
+	}
+
+	// (b) Subtree membership must match the pinned set exactly.
+	// Recursive CTE collects the current subtree within the transaction.
+	rows, err := tx.QueryContext(ctx, `
+		WITH RECURSIVE subtree(id) AS (
+		  SELECT id FROM tenants WHERE id = ?
+		  UNION ALL
+		  SELECT t.id FROM tenants t JOIN subtree s ON t.parent_id = s.id
+		)
+		SELECT id FROM subtree ORDER BY id`, subtreeRootID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query current subtree membership: %w", err)
+	}
+	var currentMembers []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed to scan subtree member: %w", err)
+		}
+		currentMembers = append(currentMembers, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("subtree query iteration error: %w", err)
+	}
+	_ = rows.Close()
+
+	sortedPinned := make([]string, len(pinnedMembers))
+	copy(sortedPinned, pinnedMembers)
+	sort.Strings(sortedPinned)
+
+	if !stringSlicesEqual(currentMembers, sortedPinned) {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
+	}
+
+	// Hard-delete every tenant in the pinned set.
+	for _, tenantID := range pinnedMembers {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tenants WHERE id = ?`, tenantID); err != nil {
+			return nil, fmt.Errorf("failed to delete tenant %s: %w", tenantID, err)
+		}
+	}
+
+	// Remove the pending-deletion record.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM tenant_pending_deletions WHERE subtree_root_id = ?`, subtreeRootID); err != nil {
+		return nil, fmt.Errorf("failed to remove pending deletion record: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit approval transaction: %w", err)
+	}
+	committed = true
+
+	return pinnedMembers, nil
+}
+
+// GetPendingDeletion implements TenantStore.GetPendingDeletion.
+func (s *SQLiteTenantStore) GetPendingDeletion(ctx context.Context, subtreeRootID string) (*business.PendingDeletion, error) {
+	if subtreeRootID == "" {
+		return nil, fmt.Errorf("subtree root ID cannot be empty")
+	}
+	var (
+		pending        business.PendingDeletion
+		requestedAtStr string
+		eligibleAtStr  string
+		stateStr       string
+		pinnedMembersS string
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT subtree_root_id, requested_by, requested_at, eligible_at, state, pinned_member_ids
+		FROM tenant_pending_deletions
+		WHERE subtree_root_id = ?`, subtreeRootID).Scan(
+		&pending.SubtreeRootID,
+		&pending.RequestedBy,
+		&requestedAtStr,
+		&eligibleAtStr,
+		&stateStr,
+		&pinnedMembersS,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("get pending deletion %s: %w", subtreeRootID, business.ErrPendingDeletionNotFound)
+		}
+		return nil, fmt.Errorf("failed to get pending deletion: %w", err)
+	}
+	pending.RequestedAt = parseTime(requestedAtStr)
+	pending.EligibleAt = parseTime(eligibleAtStr)
+	pending.State = business.DeletionState(stateStr)
+	if err := json.Unmarshal([]byte(pinnedMembersS), &pending.PinnedMemberIDs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal pinned member IDs: %w", err)
+	}
+	return &pending, nil
+}
+
+// stringSlicesEqual reports whether two sorted string slices are equal.
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ensure SQLiteTenantStore satisfies the interface at compile time

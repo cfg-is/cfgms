@@ -613,3 +613,253 @@ func (s *Server) handleRestoreTenant(w http.ResponseWriter, r *http.Request) {
 		"still_suspended": cascadeResult.StillSuspended,
 	})
 }
+
+// handleRequestTenantDeletion implements POST /api/v1/tenants/{id}/delete.
+// Begins the ADR-027 Decision 3 deletion pipeline for the target subtree.
+// Returns 409 with a message naming the first unsuspended descendant when the
+// subtree is not fully suspended.
+func (s *Server) handleRequestTenantDeletion(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+	switch s.authorizeTenantAccess(r.Context(), principal, existing.ID) {
+	case tenantAuthAllowed:
+		// proceed
+	case tenantAuthNeedsCrossing:
+		s.writeTenantCrossingChallenge(w, existing.ID)
+		return
+	default:
+		s.logger.Info("Cross-tenant delete request refused",
+			"resource_tenant", logging.SanitizeLogValue(existing.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
+	requesterID := ""
+	if principal != nil {
+		requesterID = principal.ID
+	}
+
+	holdPeriod := s.cfg.TenantAdmin.GetDeleteHoldPeriod()
+
+	pending, err := s.tenantManager.RequestTenantDeletion(r.Context(), tenantID, requesterID, holdPeriod)
+	if err != nil {
+		if errors.Is(err, tenant.ErrTenantNotFullySuspended) {
+			s.writeErrorResponse(w, http.StatusConflict, err.Error(), "SUBTREE_NOT_SUSPENDED")
+			return
+		}
+		if errors.Is(err, business.ErrPendingDeletionExists) {
+			s.writeErrorResponse(w, http.StatusConflict, "pending deletion already exists for this tenant", "PENDING_DELETION_EXISTS")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to request tenant deletion", "REQUEST_FAILED")
+		return
+	}
+
+	s.logger.Info("Tenant deletion requested",
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"requester_id", logging.SanitizeLogValue(requesterID))
+
+	s.writeResponse(w, http.StatusAccepted, pending)
+}
+
+// handleCancelTenantDeletion implements DELETE /api/v1/tenants/{id}/delete.
+// Cancels a pending Hold/Eligible deletion and returns the subtree to plain Suspended state.
+func (s *Server) handleCancelTenantDeletion(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+	switch s.authorizeTenantAccess(r.Context(), principal, existing.ID) {
+	case tenantAuthAllowed:
+		// proceed
+	case tenantAuthNeedsCrossing:
+		s.writeTenantCrossingChallenge(w, existing.ID)
+		return
+	default:
+		s.logger.Info("Cross-tenant delete cancel refused",
+			"resource_tenant", logging.SanitizeLogValue(existing.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
+	if err := s.tenantManager.CancelTenantDeletion(r.Context(), tenantID); err != nil {
+		if errors.Is(err, business.ErrPendingDeletionNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "no pending deletion found for this tenant", "PENDING_DELETION_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to cancel tenant deletion", "CANCEL_FAILED")
+		return
+	}
+
+	s.logger.Info("Tenant deletion cancelled",
+		"tenant_id", logging.SanitizeLogValue(tenantID))
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"id":     tenantID,
+		"status": string(business.TenantStatusSuspended),
+	})
+}
+
+// handleGetPendingDeletion implements GET /api/v1/tenants/{id}/delete.
+// Returns the current pending-deletion state or 404 if none pending.
+func (s *Server) handleGetPendingDeletion(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+	switch s.authorizeTenantAccess(r.Context(), principal, existing.ID) {
+	case tenantAuthAllowed:
+		// proceed
+	case tenantAuthNeedsCrossing:
+		s.writeTenantCrossingChallenge(w, existing.ID)
+		return
+	default:
+		s.logger.Info("Cross-tenant get pending deletion refused",
+			"resource_tenant", logging.SanitizeLogValue(existing.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
+	pending, err := s.tenantManager.GetPendingDeletion(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrPendingDeletionNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "no pending deletion found for this tenant", "PENDING_DELETION_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get pending deletion", "GET_FAILED")
+		return
+	}
+
+	s.writeResponse(w, http.StatusOK, pending)
+}
+
+// handleApproveTenantDeletion implements POST /api/v1/tenants/{id}/delete/approve.
+// The dual-control terminal step. Returns 403 on same-approver violation and 409
+// if the hold has not elapsed or membership has changed since the request.
+func (s *Server) handleApproveTenantDeletion(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+	switch s.authorizeTenantAccess(r.Context(), principal, existing.ID) {
+	case tenantAuthAllowed:
+		// proceed
+	case tenantAuthNeedsCrossing:
+		s.writeTenantCrossingChallenge(w, existing.ID)
+		return
+	default:
+		s.logger.Info("Cross-tenant delete approve refused",
+			"resource_tenant", logging.SanitizeLogValue(existing.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
+	approverID := ""
+	if principal != nil {
+		approverID = principal.ID
+	}
+
+	requireDualControl := s.cfg.TenantAdmin.GetDeleteRequiresDualControl()
+
+	deleted, err := s.tenantManager.ApproveTenantDeletion(r.Context(), tenantID, approverID, requireDualControl)
+	if err != nil {
+		if errors.Is(err, business.ErrSameApprover) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"approver must differ from the principal who requested this deletion",
+				"SAME_APPROVER")
+			return
+		}
+		if errors.Is(err, business.ErrHoldNotElapsed) {
+			s.writeErrorResponse(w, http.StatusConflict, "deletion hold period has not yet elapsed", "HOLD_NOT_ELAPSED")
+			return
+		}
+		if errors.Is(err, business.ErrMembershipChanged) {
+			s.writeErrorResponse(w, http.StatusConflict,
+				"subtree membership has changed since deletion was requested",
+				"MEMBERSHIP_CHANGED")
+			return
+		}
+		if errors.Is(err, business.ErrPendingDeletionNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "no pending deletion found for this tenant", "PENDING_DELETION_NOT_FOUND")
+			return
+		}
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to approve tenant deletion", "APPROVE_FAILED")
+		return
+	}
+
+	s.logger.Info("Tenant subtree deleted via approval pipeline",
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"approver_id", logging.SanitizeLogValue(approverID),
+		"deleted_count", len(deleted))
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"id":      tenantID,
+		"deleted": deleted,
+	})
+}

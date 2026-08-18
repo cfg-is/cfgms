@@ -29,6 +29,34 @@ var ErrTenantAlreadyExists = errors.New("tenant already exists")
 // *ClientTenantValidationError for the M365 client-tenant surface.
 var ErrTenantDoesNotExist = errors.New("tenant does not exist")
 
+// Pending-deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
+var (
+	ErrPendingDeletionExists   = errors.New("pending deletion already exists for this subtree root")
+	ErrPendingDeletionNotFound = errors.New("no pending deletion found for this subtree root")
+	ErrHoldNotElapsed          = errors.New("deletion hold period has not yet elapsed")
+	ErrMembershipChanged       = errors.New("subtree membership has changed since deletion was requested")
+	ErrSameApprover            = errors.New("approver must differ from the principal who requested deletion")
+)
+
+// DeletionState is the phase of a pending-deletion pipeline entry.
+type DeletionState string
+
+const (
+	DeletionStateHold     DeletionState = "hold"
+	DeletionStateEligible DeletionState = "eligible"
+)
+
+// PendingDeletion records an in-progress deletion pipeline entry for a subtree.
+// Created by RequestDeletion; removed atomically by ApproveDeletion or CancelDeletion.
+type PendingDeletion struct {
+	SubtreeRootID   string        `json:"subtree_root_id"`
+	RequestedBy     string        `json:"requested_by"`
+	RequestedAt     time.Time     `json:"requested_at"`
+	EligibleAt      time.Time     `json:"eligible_at"`
+	State           DeletionState `json:"state"`
+	PinnedMemberIDs []string      `json:"pinned_member_ids"`
+}
+
 // TenantStore defines storage interface for CFGMS tenant data persistence
 // All tenant modules use this interface - storage provider is chosen by controller
 type TenantStore interface {
@@ -44,6 +72,23 @@ type TenantStore interface {
 	GetChildTenants(ctx context.Context, parentID string) ([]*TenantData, error)
 	GetTenantPath(ctx context.Context, tenantID string) ([]string, error)
 	IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error)
+
+	// Pending-deletion pipeline (ADR-027 Decisions 3-4, Issue #3182).
+	// RequestDeletion records a new pending-deletion entry. Returns
+	// ErrPendingDeletionExists when a pending record already exists for the root.
+	RequestDeletion(ctx context.Context, pending *PendingDeletion) error
+	// CancelDeletion removes the pending-deletion record regardless of phase.
+	// Returns ErrPendingDeletionNotFound when no record exists.
+	CancelDeletion(ctx context.Context, subtreeRootID string) error
+	// ApproveDeletion atomically verifies eligibility, dual-control, and subtree
+	// membership match, then hard-deletes every tenant in the pinned member set.
+	// The transaction includes a row-lock on the pending-deletion record.
+	// Returns the IDs that were deleted so the caller can perform RBAC cleanup.
+	// Errors: ErrHoldNotElapsed, ErrSameApprover, ErrMembershipChanged, ErrPendingDeletionNotFound.
+	ApproveDeletion(ctx context.Context, subtreeRootID, approvedBy string, requireDualControl bool, now time.Time) ([]string, error)
+	// GetPendingDeletion returns the current pending-deletion record, if any.
+	// Returns ErrPendingDeletionNotFound when none exists.
+	GetPendingDeletion(ctx context.Context, subtreeRootID string) (*PendingDeletion, error)
 
 	// Initialize and cleanup
 	Initialize(ctx context.Context) error

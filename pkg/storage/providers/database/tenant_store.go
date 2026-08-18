@@ -454,6 +454,238 @@ func (s *DatabaseTenantStore) IsTenantAncestor(ctx context.Context, ancestorID, 
 	return false, nil
 }
 
+// RequestDeletion implements TenantStore.RequestDeletion.
+func (s *DatabaseTenantStore) RequestDeletion(ctx context.Context, pending *business.PendingDeletion) error {
+	if pending == nil {
+		return fmt.Errorf("pending deletion cannot be nil")
+	}
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	pinnedJSON, err := json.Marshal(pending.PinnedMemberIDs)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pinned member IDs: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO cfgms_tenant_pending_deletions
+		  (subtree_root_id, requested_by, requested_at, eligible_at, state, pinned_member_ids)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		pending.SubtreeRootID,
+		pending.RequestedBy,
+		pending.RequestedAt,
+		pending.EligibleAt,
+		string(pending.State),
+		pinnedJSON,
+	)
+	if err != nil {
+		if pgErr, ok := err.(*pq.Error); ok && pgErr.Code == "23505" {
+			return fmt.Errorf("request deletion %s: %w", pending.SubtreeRootID, business.ErrPendingDeletionExists)
+		}
+		return fmt.Errorf("failed to create pending deletion: %w", err)
+	}
+	return nil
+}
+
+// CancelDeletion implements TenantStore.CancelDeletion.
+func (s *DatabaseTenantStore) CancelDeletion(ctx context.Context, subtreeRootID string) error {
+	if subtreeRootID == "" {
+		return fmt.Errorf("subtree root ID cannot be empty")
+	}
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM cfgms_tenant_pending_deletions WHERE subtree_root_id = $1`, subtreeRootID)
+	if err != nil {
+		return fmt.Errorf("failed to cancel deletion: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("cancel deletion %s: %w", subtreeRootID, business.ErrPendingDeletionNotFound)
+	}
+	return nil
+}
+
+// ApproveDeletion implements TenantStore.ApproveDeletion.
+// Executes as a single SQL transaction: row-locks the pending-deletion record,
+// checks eligibility + dual-control + subtree membership, then hard-deletes
+// every tenant in the pinned member set and removes the pending record.
+func (s *DatabaseTenantStore) ApproveDeletion(ctx context.Context, subtreeRootID, approvedBy string, requireDualControl bool, now time.Time) ([]string, error) {
+	if subtreeRootID == "" {
+		return nil, fmt.Errorf("subtree root ID cannot be empty")
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin approval transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Row-lock the pending-deletion record so concurrent approval attempts serialise.
+	var (
+		requestedBy    string
+		eligibleAt     time.Time
+		stateStr       string
+		pinnedMembersB []byte
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT requested_by, eligible_at, state, pinned_member_ids
+		FROM cfgms_tenant_pending_deletions
+		WHERE subtree_root_id = $1
+		FOR UPDATE`, subtreeRootID).Scan(&requestedBy, &eligibleAt, &stateStr, &pinnedMembersB)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrPendingDeletionNotFound)
+		}
+		return nil, fmt.Errorf("failed to lock pending deletion: %w", err)
+	}
+
+	// (a) Hold period must have elapsed.
+	if now.Before(eligibleAt) {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrHoldNotElapsed)
+	}
+
+	// (c) Dual-control: approver must differ from requester.
+	if requireDualControl && approvedBy == requestedBy {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrSameApprover)
+	}
+
+	// Deserialise the pinned member set.
+	var pinnedMembers []string
+	if err := json.Unmarshal(pinnedMembersB, &pinnedMembers); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal pinned member IDs: %w", err)
+	}
+
+	// (b) Subtree membership must match exactly.
+	// Use a recursive CTE to collect all current members within the transaction.
+	rows, err := tx.QueryContext(ctx, `
+		WITH RECURSIVE subtree AS (
+		  SELECT id FROM cfgms_tenants WHERE id = $1
+		  UNION ALL
+		  SELECT t.id FROM cfgms_tenants t JOIN subtree s ON t.parent_id = s.id
+		)
+		SELECT id FROM subtree ORDER BY id`, subtreeRootID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query current subtree membership: %w", err)
+	}
+	var currentMembers []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed to scan subtree member: %w", err)
+		}
+		currentMembers = append(currentMembers, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("subtree query iteration error: %w", err)
+	}
+	_ = rows.Close()
+
+	if !stringSlicesEqualSorted(currentMembers, sortedCopy(pinnedMembers)) {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
+	}
+
+	// Hard-delete every tenant in the pinned set (leaves first is not required
+	// because the cascaded path suppresses ErrTenantHasChildren, but we delete
+	// in a single statement so ordering doesn't matter at the SQL level).
+	for _, tenantID := range pinnedMembers {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cfgms_tenants WHERE id = $1`, tenantID); err != nil {
+			return nil, fmt.Errorf("failed to delete tenant %s: %w", tenantID, err)
+		}
+	}
+
+	// Remove the pending-deletion record.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM cfgms_tenant_pending_deletions WHERE subtree_root_id = $1`, subtreeRootID); err != nil {
+		return nil, fmt.Errorf("failed to remove pending deletion record: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit approval transaction: %w", err)
+	}
+	committed = true
+
+	return pinnedMembers, nil
+}
+
+// GetPendingDeletion implements TenantStore.GetPendingDeletion.
+func (s *DatabaseTenantStore) GetPendingDeletion(ctx context.Context, subtreeRootID string) (*business.PendingDeletion, error) {
+	if subtreeRootID == "" {
+		return nil, fmt.Errorf("subtree root ID cannot be empty")
+	}
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	var (
+		pending        business.PendingDeletion
+		stateStr       string
+		pinnedMembersB []byte
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT subtree_root_id, requested_by, requested_at, eligible_at, state, pinned_member_ids
+		FROM cfgms_tenant_pending_deletions
+		WHERE subtree_root_id = $1`, subtreeRootID).Scan(
+		&pending.SubtreeRootID,
+		&pending.RequestedBy,
+		&pending.RequestedAt,
+		&pending.EligibleAt,
+		&stateStr,
+		&pinnedMembersB,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("get pending deletion %s: %w", subtreeRootID, business.ErrPendingDeletionNotFound)
+		}
+		return nil, fmt.Errorf("failed to get pending deletion: %w", err)
+	}
+	pending.State = business.DeletionState(stateStr)
+	if err := json.Unmarshal(pinnedMembersB, &pending.PinnedMemberIDs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal pinned member IDs: %w", err)
+	}
+	return &pending, nil
+}
+
+// sortedCopy returns a sorted copy of ss without modifying the original.
+func sortedCopy(ss []string) []string {
+	out := make([]string, len(ss))
+	copy(out, ss)
+	sortStrings(out)
+	return out
+}
+
+// stringSlicesEqualSorted reports whether two already-sorted string slices are equal.
+func stringSlicesEqualSorted(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sortStrings sorts a string slice in place.
+func sortStrings(ss []string) {
+	for i := 1; i < len(ss); i++ {
+		for j := i; j > 0 && ss[j] < ss[j-1]; j-- {
+			ss[j], ss[j-1] = ss[j-1], ss[j]
+		}
+	}
+}
+
 // nullStringOrEmpty returns a sql.NullString that's NULL if the input is empty
 func nullStringOrEmpty(s string) sql.NullString {
 	if s == "" {
