@@ -1,0 +1,73 @@
+name: golangci-lint
+
+# Advisory linting job — findings are reported but do not fail the PR or block
+# the merge queue. This posture is deliberate: 139 pre-existing findings on
+# develop (#3439–#3442) would make a blocking job red from day one. Story #3442
+# flips the job from advisory to required once the backlog is clear.
+#
+# Cross-GOOS approach: both legs run on ubuntu-latest with GOOS overridden via
+# the environment. golangci-lint drives go/packages, which respects GOOS when
+# resolving build constraints, so `GOOS=windows golangci-lint run` from a Linux
+# runner correctly analyses *_windows.go files. Validated on this codebase:
+# `GOOS=windows golangci-lint run ./features/modules/hyperv/...` reported 6
+# errcheck findings in monitor_windows.go from the Linux dev container (Issue #3385).
+# A real Windows runner is not required.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.claude/**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+  merge_group:
+
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: '1.26.6'
+
+permissions: {}
+
+jobs:
+  golangci-lint:
+    name: golangci-lint (${{ matrix.goos }})
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    # Advisory posture: continue-on-error means findings surface in the check
+    # output and step summary but do not fail the job or block the PR/queue.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [ linux, windows ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # See the cache-poisoning note on security-scan.yml nancy-scan job.
+          cache: false
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+
+      - name: Run golangci-lint
+        env:
+          GOOS: ${{ matrix.goos }}
+        run: |
+          echo "Running golangci-lint for GOOS=$GOOS"
+          golangci-lint run
