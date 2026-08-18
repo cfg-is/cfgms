@@ -1061,6 +1061,8 @@ func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 }
 
 // SetReportsHandler sets the reports handler and registers reports API routes (Story #416).
+// Wires requirePermission into the handler so every reports route is RBAC-gated:
+// report:read for all GET endpoints, report:generate for POST /reports/generate (Issue #3282).
 // Call this after New() returns but before Start() is called.
 func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 	s.mu.Lock()
@@ -1069,6 +1071,7 @@ func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 	if h == nil {
 		return
 	}
+	h.SetRequirePermFn(s.requirePermission)
 	reportsRouter := s.apiRouter.PathPrefix("/reports").Subrouter()
 	h.RegisterRoutes(reportsRouter)
 	s.logger.Info("Reports API routes registered")

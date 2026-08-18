@@ -43,10 +43,11 @@ var (
 
 // Handler implements HTTP handlers for the reports API
 type Handler struct {
-	engine   interfaces.ReportEngine
-	exporter interfaces.Exporter
-	devices  DeviceTenantResolver
-	logger   logging.Logger
+	engine        interfaces.ReportEngine
+	exporter      interfaces.Exporter
+	devices       DeviceTenantResolver
+	logger        logging.Logger
+	requirePermFn func(resourceType, action string) func(http.Handler) http.Handler
 }
 
 // New creates a new reports API handler. devices resolves device ownership for
@@ -61,28 +62,47 @@ func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, devices D
 	}
 }
 
+// SetRequirePermFn wires the server's permission-check factory into Handler so
+// RegisterRoutes can gate each route without importing the concrete Server type (Issue #3282).
+func (h *Handler) SetRequirePermFn(fn func(resourceType, action string) func(http.Handler) http.Handler) {
+	h.requirePermFn = fn
+}
+
 // RegisterRoutes registers the reports API routes on the provided subrouter.
 // The router should already be scoped to the reports path prefix.
+// When SetRequirePermFn has been called, each route is wrapped with the appropriate
+// permission gate: report:read for all GET endpoints, report:generate for POST /generate
+// (Issue #3282). Without a wired permission function (unit-test scenarios) routes are ungated.
 func (h *Handler) RegisterRoutes(router *mux.Router) {
-	// Report generation and management
-	router.HandleFunc("/generate", h.generateReport).Methods("POST")
-	router.HandleFunc("/templates", h.getTemplates).Methods("GET")
-	router.HandleFunc("/templates/{template}", h.getTemplate).Methods("GET")
+	gate := h.requirePermFn
+	wrap := func(action string, fn http.HandlerFunc) http.Handler {
+		if gate == nil {
+			return fn
+		}
+		return gate("report", action)(fn)
+	}
 
-	// Dashboard endpoints
-	router.HandleFunc("/dashboard/overview", h.getDashboardOverview).Methods("GET")
-	router.HandleFunc("/dashboard/trends", h.getDashboardTrends).Methods("GET")
-	router.HandleFunc("/dashboard/alerts", h.getDashboardAlerts).Methods("GET")
-
-	// Specific report types
-	router.HandleFunc("/compliance/status", h.getComplianceStatus).Methods("GET")
-	router.HandleFunc("/drift/summary", h.getDriftSummary).Methods("GET")
+	// POST /generate is write-shaped (produces and may persist a report) and requires
+	// report:generate — a separate, stricter permission than report:read so that
+	// read-only principals cannot trigger generation.
+	router.Handle("/generate", wrap("generate", h.generateReport)).Methods("POST")
+	router.Handle("/templates", wrap("read", h.getTemplates)).Methods("GET")
+	router.Handle("/templates/{template}", wrap("read", h.getTemplate)).Methods("GET")
+	router.Handle("/dashboard/overview", wrap("read", h.getDashboardOverview)).Methods("GET")
+	router.Handle("/dashboard/trends", wrap("read", h.getDashboardTrends)).Methods("GET")
+	router.Handle("/dashboard/alerts", wrap("read", h.getDashboardAlerts)).Methods("GET")
+	router.Handle("/compliance/status", wrap("read", h.getComplianceStatus)).Methods("GET")
+	router.Handle("/drift/summary", wrap("read", h.getDriftSummary)).Methods("GET")
 
 	h.logger.Info("registered reports API routes")
 }
 
 // generateReport handles POST /api/v1/reports/generate
 func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	var req interfaces.ReportRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid request body", err)
@@ -140,6 +160,10 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 
 // getTemplates handles GET /api/v1/reports/templates
 func (h *Handler) getTemplates(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	templates := h.engine.GetAvailableTemplates()
 
 	response := map[string]interface{}{
@@ -152,6 +176,10 @@ func (h *Handler) getTemplates(w http.ResponseWriter, r *http.Request) {
 
 // getTemplate handles GET /api/v1/reports/templates/{template}
 func (h *Handler) getTemplate(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	vars := mux.Vars(r)
 	templateName := vars["template"]
 
@@ -180,6 +208,10 @@ func (h *Handler) getTemplate(w http.ResponseWriter, r *http.Request) {
 
 // getDashboardOverview handles GET /api/v1/reports/dashboard/overview
 func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	// Parse query parameters
 	timeRange, err := h.parseTimeRange(r)
 	if err != nil {
@@ -235,6 +267,10 @@ func (h *Handler) getDashboardOverview(w http.ResponseWriter, r *http.Request) {
 
 // getDashboardTrends handles GET /api/v1/reports/dashboard/trends
 func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	timeRange, err := h.parseTimeRange(r)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid time range", err)
@@ -288,6 +324,10 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 
 // getDashboardAlerts handles GET /api/v1/reports/dashboard/alerts
 func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	timeRange, err := h.parseTimeRange(r)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid time range", err)
@@ -357,6 +397,10 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 
 // getComplianceStatus handles GET /api/v1/reports/compliance/status
 func (h *Handler) getComplianceStatus(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	timeRange, err := h.parseTimeRange(r)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid time range", err)
@@ -420,6 +464,10 @@ func (h *Handler) getComplianceStatus(w http.ResponseWriter, r *http.Request) {
 
 // getDriftSummary handles GET /api/v1/reports/drift/summary
 func (h *Handler) getDriftSummary(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
+		return
+	}
 	timeRange, err := h.parseTimeRange(r)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid time range", err)
