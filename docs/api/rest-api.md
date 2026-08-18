@@ -1499,11 +1499,30 @@ Dashboard trend data.
 
 #### GET /api/v1/reports/dashboard/alerts
 
-Dashboard alert summary.
+Dashboard alert summary. Returns drift-derived alerts with per-alert acknowledgement and silence state from `AlertStore`. Actively silenced alerts (silence window still open) are excluded from the response.
 
 **Authentication:** Required
 
 **Tenant scope:** Non-root callers are forced to their own tenant regardless of any `tenant_id`/`tenant_ids` query parameter, and every `device_id`/`device_ids` value is authorized against the caller's tenant subtree using the steward registry — a device owned by another tenant, or unknown to the registry, returns 404 (not 403, to avoid disclosing device existence across tenants) and the whole request is rejected rather than partially served. Root/unscoped callers may supply `tenant_id` as an optional filter and may select any device.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `severity` | string | `warning,critical` | Comma-separated severity filter. Valid values: `critical`, `warning`, `info`. Defaults to `warning,critical` when absent, returning both warning and critical alerts. |
+
+**Alert identity:** Each alert row is identified by a stable `alertID` derived as `hex(SHA-256(deviceID + "|" + description))`. This ID is stable across report regenerations for the same logical alert and matches the `alertID` used by `POST /api/v1/alerts/{alertID}/acknowledge` and `POST /api/v1/alerts/{alertID}/silence`.
+
+**Response fields per alert:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | string | Event timestamp |
+| `device_id` | string | Steward ID of the affected device |
+| `severity` | string | `critical`, `warning`, or `info` |
+| `description` | string | Human-readable description of the drift event |
+| `acknowledged` | boolean | Whether the alert has been acknowledged |
+| `silenced` | boolean | Always `false` in the response (silenced alerts are excluded) |
 
 #### GET /api/v1/reports/compliance/status
 

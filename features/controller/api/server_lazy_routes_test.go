@@ -67,7 +67,7 @@ func TestServer_SetReportsHandler_RegistersRoutes_PostConstruction(t *testing.T)
 		"reports route must be 404 before SetReportsHandler")
 
 	// Wire the handler post-construction, exactly as production does.
-	h := reportapi.New(nil, nil, nil, logging.NewNoopLogger())
+	h := reportapi.New(nil, nil, nil, nil, logging.NewNoopLogger())
 	server.SetReportsHandler(h)
 
 	// Unauthenticated request must now return 401, not 404.
@@ -296,7 +296,7 @@ func TestServer_SetGitSyncWebhookHandler_DelegatesToWiredHandler(t *testing.T) {
 //   - Authenticated with report:generate → passes POST /generate gate (not 403/401)
 func TestServer_SetReportsHandler_EnforcesPermissionGate(t *testing.T) {
 	server := setupTestServer(t)
-	h := reportapi.New(nil, nil, nil, logging.NewNoopLogger())
+	h := reportapi.New(nil, nil, nil, nil, logging.NewNoopLogger())
 	server.SetReportsHandler(h)
 
 	t.Run("unauthenticated returns 401 not 403 — auth runs before authz", func(t *testing.T) {
