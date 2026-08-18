@@ -391,6 +391,231 @@ func TestBackfillSessionTokenStoreContinuity_UpgradePath(t *testing.T) {
 	assert.Equal(t, 1, count, "legacy row must survive the idempotent second back-fill")
 }
 
+// preChannelSessionTokenSchema is the DDL for session_token_store immediately before
+// Issue #3310 added the channel column. Used to test the backfill upgrade path.
+const preChannelSessionTokenSchema = `
+	CREATE TABLE session_token_store (
+		token_hash          TEXT NOT NULL PRIMARY KEY,
+		session_id          TEXT NOT NULL,
+		principal_id        TEXT NOT NULL,
+		connection_name     TEXT NOT NULL,
+		tenant_id           TEXT NOT NULL,
+		issued_at           TIMESTAMP WITH TIME ZONE NOT NULL,
+		last_activity       TIMESTAMP WITH TIME ZONE NOT NULL,
+		absolute_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+		hash_expires_at     TIMESTAMP WITH TIME ZONE,
+		assurance           INTEGER NOT NULL DEFAULT 1,
+		bound_ip            TEXT    NOT NULL DEFAULT '',
+		last_proven_at      TIMESTAMP WITH TIME ZONE,
+		credential_id       BYTEA,
+		root_scoped         BOOLEAN NOT NULL DEFAULT FALSE
+	);`
+
+// TestDatabaseSessionTokenStore_ChannelRoundTrip verifies that the channel field
+// survives a Set → Get round-trip through Postgres (Issue #3310).
+func TestDatabaseSessionTokenStore_ChannelRoundTrip(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	tok := mustGenerateToken(t)
+	hash := session.HashToken(tok)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	sess := &session.Session{
+		ID:                "ch-rt-id",
+		PrincipalID:       "alice",
+		ConnectionName:    "ctrl",
+		TenantID:          "tenant-1",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(8 * time.Hour),
+		Assurance:         session.AssuranceBasic,
+		Channel:           "cli",
+	}
+
+	require.NoError(t, store.Set(ctx, hash, sess))
+	got, err := store.Get(ctx, hash)
+	require.NoError(t, err)
+	assert.Equal(t, "cli", got.Channel, "channel must survive Set → Get")
+}
+
+// TestDatabaseSessionTokenStore_EmptyChannelRoundTrip verifies that an empty channel
+// (simulating a back-filled legacy record) is stored and retrieved as an empty string,
+// not coerced to any other value.
+func TestDatabaseSessionTokenStore_EmptyChannelRoundTrip(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	tok := mustGenerateToken(t)
+	hash := session.HashToken(tok)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	sess := &session.Session{
+		ID:                "empty-ch-id",
+		PrincipalID:       "bob",
+		ConnectionName:    "ctrl",
+		TenantID:          "tenant-1",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+		Assurance:         session.AssuranceBasic,
+		Channel:           "",
+	}
+
+	require.NoError(t, store.Set(ctx, hash, sess))
+	got, err := store.Get(ctx, hash)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Channel, "empty channel must round-trip as empty string")
+}
+
+// TestDatabaseSessionTokenStore_GetByID verifies that GetByID returns a session record
+// by session ID rather than token hash (Issue #3310).
+func TestDatabaseSessionTokenStore_GetByID(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	tok := mustGenerateToken(t)
+	hash := session.HashToken(tok)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	sess := &session.Session{
+		ID:                "get-by-id-pg",
+		PrincipalID:       "carol",
+		ConnectionName:    "ctrl",
+		TenantID:          "tenant-1",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+		Assurance:         session.AssuranceBasic,
+		Channel:           "web",
+	}
+	require.NoError(t, store.Set(ctx, hash, sess))
+
+	got, err := store.GetByID(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sess.ID, got.ID)
+	assert.Equal(t, "web", got.Channel)
+}
+
+// TestDatabaseSessionTokenStore_GetByIDMissingReturnsNotFound verifies GetByID returns
+// ErrSessionNotFound for an unknown session ID.
+func TestDatabaseSessionTokenStore_GetByIDMissingReturnsNotFound(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	_, err := store.GetByID(ctx, "no-such-session-pg")
+	assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+}
+
+// TestDatabaseSessionTokenStore_GetByIDAfterDeleteReturnsNotFound verifies GetByID
+// returns ErrSessionNotFound after the session has been deleted.
+func TestDatabaseSessionTokenStore_GetByIDAfterDeleteReturnsNotFound(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	tok := mustGenerateToken(t)
+	now := time.Now().UTC()
+	sess := &session.Session{
+		ID:                "del-get-by-id-pg",
+		PrincipalID:       "dave",
+		ConnectionName:    "ctrl",
+		TenantID:          "tenant-1",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+		Channel:           "cli",
+	}
+	require.NoError(t, store.Set(ctx, session.HashToken(tok), sess))
+	require.NoError(t, store.Delete(ctx, sess.ID))
+
+	_, err := store.GetByID(ctx, sess.ID)
+	assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+}
+
+// TestDatabaseSessionTokenStore_ChannelInListAll verifies that the channel field is
+// returned correctly by ListAll, allowing manager.List to filter by channel after restart.
+func TestDatabaseSessionTokenStore_ChannelInListAll(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	mkSess := func(id, channel string) *session.Session {
+		return &session.Session{
+			ID:                id,
+			PrincipalID:       "listuser",
+			ConnectionName:    "ctrl",
+			TenantID:          "tenant-1",
+			IssuedAt:          now,
+			LastActivity:      now,
+			AbsoluteExpiresAt: now.Add(time.Hour),
+			Assurance:         session.AssuranceBasic,
+			Channel:           channel,
+		}
+	}
+
+	cliTok := mustGenerateToken(t)
+	webTok := mustGenerateToken(t)
+	require.NoError(t, store.Set(ctx, session.HashToken(cliTok), mkSess("ch-list-cli", "cli")))
+	require.NoError(t, store.Set(ctx, session.HashToken(webTok), mkSess("ch-list-web", "web")))
+
+	all, err := store.ListAll(ctx)
+	require.NoError(t, err)
+
+	channels := make(map[string]string)
+	for _, s := range all {
+		channels[s.ID] = s.Channel
+	}
+	assert.Equal(t, "cli", channels["ch-list-cli"], "CLI session must have channel=cli in ListAll")
+	assert.Equal(t, "web", channels["ch-list-web"], "web session must have channel=web in ListAll")
+}
+
+// TestBackfillAddsChannelColumn verifies the channel column upgrade path: a live
+// session_token_store table without the channel column is upgraded in place by
+// BackfillSessionTokenStoreContinuity, and the idempotent re-run is safe (Issue #3310).
+func TestBackfillAddsChannelColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database tests in short mode")
+	}
+	db := getTestDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store") })
+
+	// Create the pre-#3310 schema (no channel column).
+	_, err = db.ExecContext(ctx, preChannelSessionTokenSchema)
+	require.NoError(t, err, "create pre-channel session_token_store")
+
+	// Seed a row with the pre-channel schema to verify the existing row survives.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO session_token_store
+			(token_hash, session_id, principal_id, connection_name, tenant_id,
+			 issued_at, last_activity, absolute_expires_at, assurance, bound_ip)
+		VALUES ('pre-ch-hash', 'pre-ch-sess', 'admin', 'ctrl', 'tenant-1',
+			now(), now(), now() + interval '8 hours', 1, '')`)
+	require.NoError(t, err, "seed pre-channel row")
+
+	assert.False(t, pgColumnExists(ctx, t, db, "channel"),
+		"pre-condition: channel absent before back-fill")
+
+	schemas := NewDatabaseSchemas()
+
+	// First back-fill must add the channel column.
+	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "first back-fill")
+	assert.True(t, pgColumnExists(ctx, t, db, "channel"),
+		"channel column must be present after back-fill")
+
+	// Existing row must default to empty string for channel.
+	var channel string
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT channel FROM session_token_store WHERE token_hash='pre-ch-hash'`).Scan(&channel))
+	assert.Equal(t, "", channel, "legacy row must default to empty channel after back-fill")
+
+	// Second back-fill must be idempotent and error-free.
+	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "second back-fill (idempotency)")
+	assert.True(t, pgColumnExists(ctx, t, db, "channel"),
+		"channel still present after second back-fill")
+}
+
 // TestDatabaseProvider_CreateSessionTokenStore verifies the plugin factory constructs
 // a working store from test config.
 func TestDatabaseProvider_CreateSessionTokenStore(t *testing.T) {

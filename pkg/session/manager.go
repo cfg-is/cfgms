@@ -88,6 +88,7 @@ func (m *manager) issue(ctx context.Context, principalID, connectionName, tenant
 		// it is upgraded to Strong by a successful WebAuthn assertion (later story).
 		Assurance:  AssuranceBasic,
 		RootScoped: rootScoped,
+		Channel:    m.cfg.Channel,
 	}
 	ms := &managedSession{
 		session:     sess,
@@ -111,11 +112,18 @@ func (m *manager) issue(ctx context.Context, principalID, connectionName, tenant
 // loadFromStore attempts to load a session from the durable store on in-memory cache miss.
 // This supports sessions that survived a controller restart or were issued by another node.
 // After loading, the session is registered in the in-memory index so subsequent calls are fast.
-// Returns nil when the session is not found in or was deleted from the store.
+// Returns nil when the session is not found, deleted from the store, or belongs to a different
+// channel — foreign-channel records are never registered into this manager's in-memory maps,
+// preventing cross-channel state pollution (Issue #3310).
 func (m *manager) loadFromStore(ctx context.Context, hash string) *managedSession {
 	sess, err := m.store.Get(ctx, hash)
 	if err != nil {
 		return nil // not found, revoked, or store error — treat as absent
+	}
+	// Reject sessions that were not issued by this manager's channel, including
+	// back-filled records with an empty channel. Never register them into memory.
+	if sess.Channel != m.cfg.Channel {
+		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -164,6 +172,12 @@ func (m *manager) Validate(ctx context.Context, token string) (*Session, error) 
 	defer ms.mu.Unlock()
 	if ms.revoked {
 		return nil, ErrSessionRevoked
+	}
+	// Channel guard: reject sessions not issued by this manager's channel, including
+	// back-filled records with an empty Channel. This defense-in-depth check covers the
+	// in-memory path; the primary rejection happens in loadFromStore (Issue #3310).
+	if ms.session.Channel != m.cfg.Channel {
+		return nil, ErrSessionChannelMismatch
 	}
 	// Cross-node revocation: verify the store still holds this token hash.
 	// Another node's Revoke deletes all hashes for the session from the store;
@@ -330,6 +344,7 @@ func (m *manager) List(ctx context.Context) ([]*Session, error) {
 	for _, ms := range snapshot {
 		ms.mu.Lock()
 		live := !ms.revoked &&
+			ms.session.Channel == m.cfg.Channel &&
 			now.Before(ms.session.AbsoluteExpiresAt) &&
 			now.Before(ms.session.LastActivity.Add(m.cfg.IdleTimeout))
 		var copy *Session
@@ -346,11 +361,16 @@ func (m *manager) List(ctx context.Context) ([]*Session, error) {
 
 	// After a restart the in-memory map is empty; fall back to the durable store
 	// so that existing sessions are visible before their owners re-validate.
+	// Filter to this manager's channel — the store holds sessions from all channels,
+	// and back-filled empty-channel records must be excluded (Issue #3310).
 	if !hasInMemory {
 		stored, err := m.store.ListAll(ctx)
 		if err == nil {
 			for _, sess := range stored {
 				if _, dup := seen[sess.ID]; dup {
+					continue
+				}
+				if sess.Channel != m.cfg.Channel {
 					continue
 				}
 				live := now.Before(sess.AbsoluteExpiresAt) &&
@@ -439,11 +459,27 @@ func (m *manager) Revoke(ctx context.Context, id string) error {
 	ms := m.sessions[id]
 	m.mu.RUnlock()
 	if ms == nil {
-		// Cache miss — attempt the durable store delete (post-restart support).
-		// store.Delete returns ErrSessionNotFound when the session has no records.
+		// Cache miss — load the session record to verify its channel before deleting.
+		// Without this check the cache-miss branch would delete any session by ID,
+		// regardless of which manager issued it (Issue #3310).
+		stored, err := m.store.GetByID(ctx, id)
+		if err != nil {
+			// Propagates ErrSessionNotFound when the session has no records.
+			return err
+		}
+		if stored.Channel != m.cfg.Channel {
+			// Return the same sentinel as a genuinely absent session, disclosing
+			// nothing about the session existing on another channel.
+			return ErrSessionNotFound
+		}
 		return m.store.Delete(ctx, id)
 	}
+	// Cache hit: verify channel before revoking to close the cache-hit cross-channel path.
 	ms.mu.Lock()
+	if ms.session.Channel != m.cfg.Channel {
+		ms.mu.Unlock()
+		return ErrSessionNotFound
+	}
 	ms.revoked = true
 	ms.mu.Unlock()
 	// Ignore ErrSessionNotFound: another node may have already deleted the records.

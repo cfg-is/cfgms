@@ -649,3 +649,275 @@ func TestManagerList_EmptyWhenNoSessions(t *testing.T) {
 		t.Errorf("expected 0 sessions, got %d", len(sessions))
 	}
 }
+
+// newTwoChannelManagers creates a CLI manager and a web manager over a shared MemStore.
+func newTwoChannelManagers(t *testing.T, clock *fakeClock) (cliMgr session.Manager, webMgr session.Manager, store *session.MemStore) {
+	t.Helper()
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store = session.NewMemStore(cliCfg, clock.Now)
+	t.Cleanup(store.Close)
+	cliMgr = session.NewManager(cliCfg, store, clock.Now)
+	webMgr = session.NewManager(webCfg, store, clock.Now)
+	return cliMgr, webMgr, store
+}
+
+// TestCrossChannelValidate_InMemoryPath verifies that presenting a CLI session token to
+// the web manager is rejected (in-memory-cache path: session just issued, still in
+// the issuing manager's memory, but not in the other manager's memory).
+func TestCrossChannelValidate_InMemoryPath(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	cliMgr, webMgr, _ := newTwoChannelManagers(t, clock)
+	ctx := context.Background()
+
+	// Issue a CLI session — it is in the CLI manager's memory but not the web manager's.
+	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	if err != nil {
+		t.Fatalf("CLI Issue: %v", err)
+	}
+
+	// CLI token validates on CLI manager (same channel, in-memory).
+	if _, err := cliMgr.Validate(ctx, cliToken); err != nil {
+		t.Errorf("CLI Validate on CLI manager: %v", err)
+	}
+
+	// CLI token must be rejected by the web manager (cross-channel).
+	// loadFromStore finds it in the store but channel="cli" != "web" → returns nil.
+	_, err = webMgr.Validate(ctx, cliToken)
+	if err == nil {
+		t.Error("web manager accepted a CLI token — cross-channel validation must fail")
+	}
+}
+
+// TestCrossChannelValidate_PostRestartPath verifies cross-channel rejection after a
+// simulated restart: a new manager over the same store must reject sessions issued
+// by the other channel (store-rehydration path, Issue #3310).
+func TestCrossChannelValidate_PostRestartPath(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store := session.NewMemStore(cliCfg, clock.Now)
+	t.Cleanup(store.Close)
+
+	// Issue a CLI session.
+	cliMgr := session.NewManager(cliCfg, store, clock.Now)
+	_, cliToken, err := cliMgr.Issue(context.Background(), "bob", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Simulate restart: create a fresh web manager over the same store (empty in-memory map).
+	newWebMgr := session.NewManager(webCfg, store, clock.Now)
+
+	// The web manager must reject the CLI token on the store-rehydration path.
+	_, err = newWebMgr.Validate(context.Background(), cliToken)
+	if err == nil {
+		t.Error("new web manager accepted a CLI token after restart — cross-channel rejection must hold")
+	}
+
+	// The fresh CLI manager must accept the CLI token on the store-rehydration path.
+	newCliMgr := session.NewManager(cliCfg, store, clock.Now)
+	if _, err := newCliMgr.Validate(context.Background(), cliToken); err != nil {
+		t.Errorf("new CLI manager rejected a CLI token after restart: %v", err)
+	}
+}
+
+// TestCrossChannelList_PostRestartPath verifies that List returns only the calling
+// manager's own channel's sessions on the store fallback path (Issue #3310).
+func TestCrossChannelList_PostRestartPath(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store := session.NewMemStore(cliCfg, clock.Now)
+	t.Cleanup(store.Close)
+	ctx := context.Background()
+
+	// Issue one CLI session and one web session into the shared store.
+	cliMgr := session.NewManager(cliCfg, store, clock.Now)
+	webMgr := session.NewManager(webCfg, store, clock.Now)
+	cliSess, _, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	if err != nil {
+		t.Fatalf("CLI Issue: %v", err)
+	}
+	webSess, _, err := webMgr.Issue(ctx, "bob", "web-ctrl", "")
+	if err != nil {
+		t.Fatalf("Web Issue: %v", err)
+	}
+
+	// Simulate restart: fresh managers with empty in-memory maps over the same store.
+	freshCliMgr := session.NewManager(cliCfg, store, clock.Now)
+	freshWebMgr := session.NewManager(webCfg, store, clock.Now)
+
+	cliList, err := freshCliMgr.List(ctx)
+	if err != nil {
+		t.Fatalf("CLI List: %v", err)
+	}
+	if len(cliList) != 1 || cliList[0].ID != cliSess.ID {
+		t.Errorf("CLI List got %d sessions (want 1 with ID %q): %v", len(cliList), cliSess.ID, cliList)
+	}
+
+	webList, err := freshWebMgr.List(ctx)
+	if err != nil {
+		t.Fatalf("Web List: %v", err)
+	}
+	if len(webList) != 1 || webList[0].ID != webSess.ID {
+		t.Errorf("Web List got %d sessions (want 1 with ID %q): %v", len(webList), webSess.ID, webList)
+	}
+}
+
+// TestCrossChannelRevoke_CacheMissBranch verifies that the web manager cannot revoke
+// a CLI session by ID on the cache-miss branch (Issue #3310).
+func TestCrossChannelRevoke_CacheMissBranch(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	cliMgr, webMgr, _ := newTwoChannelManagers(t, clock)
+	ctx := context.Background()
+
+	// Issue a CLI session — it is in the CLI manager's memory and the shared store.
+	cliSess, cliToken, err := cliMgr.Issue(ctx, "carol", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// The web manager has not seen this session (cache miss).
+	// Its Revoke must load the record, see channel="cli" != "web", and return not-found.
+	err = webMgr.Revoke(ctx, cliSess.ID)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("cross-channel Revoke (cache miss): got %v, want ErrSessionNotFound", err)
+	}
+
+	// The CLI session must still be valid after the cross-channel revoke attempt.
+	if _, err := cliMgr.Validate(ctx, cliToken); err != nil {
+		t.Errorf("CLI session should still be valid: %v", err)
+	}
+
+	// Issuing further CLI sessions must also still work after the failed cross-channel revoke.
+	_, cliToken2, err2 := cliMgr.Issue(ctx, "carol", "ctrl2", "")
+	if err2 != nil {
+		t.Fatalf("Issue ctrl2: %v", err2)
+	}
+	if _, err := cliMgr.Validate(ctx, cliToken2); err != nil {
+		t.Errorf("newly issued CLI session should be valid: %v", err)
+	}
+}
+
+// TestNoForeignChannelPollution verifies that presenting a foreign-channel token to a
+// manager does not install that session in the manager's in-memory maps (Issue #3310).
+func TestNoForeignChannelPollution(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	cliMgr, webMgr, _ := newTwoChannelManagers(t, clock)
+	ctx := context.Background()
+
+	// Issue a web session.
+	webSess, webToken, err := webMgr.Issue(ctx, "dave", "web-ctrl", "")
+	if err != nil {
+		t.Fatalf("Web Issue: %v", err)
+	}
+
+	// Present the web token to the CLI manager — must be rejected.
+	if _, err := cliMgr.Validate(ctx, webToken); err == nil {
+		t.Error("CLI manager accepted a web token — cross-channel validation must fail")
+	}
+
+	// The web session must still be revocable by the web manager (not poisoned in CLI).
+	if err := webMgr.Revoke(ctx, webSess.ID); err != nil {
+		t.Errorf("web manager Revoke after cross-channel probe: %v", err)
+	}
+
+	// The CLI manager's List must be empty — no foreign sessions leaked into it.
+	cliList, err := cliMgr.List(ctx)
+	if err != nil {
+		t.Fatalf("CLI List: %v", err)
+	}
+	for _, s := range cliList {
+		if s.ID == webSess.ID {
+			t.Errorf("web session %q leaked into CLI manager's List", webSess.ID)
+		}
+	}
+}
+
+// TestEmptyChannelRejectedByValidateAndList verifies that sessions with an empty
+// channel (back-filled records predating Issue #3310) are rejected by both Validate
+// and List, not grandfathered.
+func TestEmptyChannelRejectedByValidateAndList(t *testing.T) {
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	clock := &fakeClock{t: time.Now()}
+	store := session.NewMemStore(cliCfg, clock.Now)
+	t.Cleanup(store.Close)
+	ctx := context.Background()
+
+	// Seed a session with empty channel directly into the store (simulates a back-filled record).
+	tok, err := session.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	hash := session.HashToken(tok)
+	now := clock.Now()
+	legacySess := &session.Session{
+		ID:                "legacy-no-channel",
+		PrincipalID:       "legacy-user",
+		ConnectionName:    "old-ctrl",
+		TenantID:          "",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(1 * time.Hour),
+		Assurance:         session.AssuranceBasic,
+		Channel:           "", // empty = back-filled
+	}
+	if err := store.Set(ctx, hash, legacySess); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	mgr := session.NewManager(cliCfg, store, clock.Now)
+
+	// Validate must reject the empty-channel session.
+	_, err = mgr.Validate(ctx, tok)
+	if err == nil {
+		t.Error("Validate accepted an empty-channel session — must reject")
+	}
+
+	// List must exclude the empty-channel session (store fallback path, since in-memory is empty).
+	listed, err := mgr.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, s := range listed {
+		if s.ID == "legacy-no-channel" {
+			t.Errorf("empty-channel session appeared in List — must be excluded")
+		}
+	}
+}

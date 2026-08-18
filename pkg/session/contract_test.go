@@ -50,10 +50,11 @@ func (s *stubManager) Elevate(_ context.Context, _ string, _ []byte, _ string) (
 // stubStore satisfies Store for compile-time interface verification.
 type stubStore struct{}
 
-func (s *stubStore) Set(_ context.Context, _ string, _ *session.Session) error { return nil }
-func (s *stubStore) Get(_ context.Context, _ string) (*session.Session, error) { return nil, nil }
-func (s *stubStore) Delete(_ context.Context, _ string) error                  { return nil }
-func (s *stubStore) ListAll(_ context.Context) ([]*session.Session, error)     { return nil, nil }
+func (s *stubStore) Set(_ context.Context, _ string, _ *session.Session) error     { return nil }
+func (s *stubStore) Get(_ context.Context, _ string) (*session.Session, error)     { return nil, nil }
+func (s *stubStore) GetByID(_ context.Context, _ string) (*session.Session, error) { return nil, nil }
+func (s *stubStore) Delete(_ context.Context, _ string) error                      { return nil }
+func (s *stubStore) ListAll(_ context.Context) ([]*session.Session, error)         { return nil, nil }
 
 // TestManagerInterfaceSatisfied verifies Manager can be satisfied by a concrete type.
 func TestManagerInterfaceSatisfied(t *testing.T) {
@@ -68,10 +69,11 @@ func TestStoreInterfaceSatisfied(t *testing.T) {
 // TestSentinelsAreDistinctErrors verifies all error sentinels are distinct non-nil values.
 func TestSentinelsAreDistinctErrors(t *testing.T) {
 	sentinels := map[string]error{
-		"ErrNotAdmin":        session.ErrNotAdmin,
-		"ErrSessionExpired":  session.ErrSessionExpired,
-		"ErrSessionRevoked":  session.ErrSessionRevoked,
-		"ErrSessionNotFound": session.ErrSessionNotFound,
+		"ErrNotAdmin":               session.ErrNotAdmin,
+		"ErrSessionExpired":         session.ErrSessionExpired,
+		"ErrSessionRevoked":         session.ErrSessionRevoked,
+		"ErrSessionNotFound":        session.ErrSessionNotFound,
+		"ErrSessionChannelMismatch": session.ErrSessionChannelMismatch,
 	}
 
 	for name, err := range sentinels {
@@ -81,8 +83,8 @@ func TestSentinelsAreDistinctErrors(t *testing.T) {
 	}
 
 	// Verify each sentinel is distinct from every other.
-	names := []string{"ErrNotAdmin", "ErrSessionExpired", "ErrSessionRevoked", "ErrSessionNotFound"}
-	errs := []error{session.ErrNotAdmin, session.ErrSessionExpired, session.ErrSessionRevoked, session.ErrSessionNotFound}
+	names := []string{"ErrNotAdmin", "ErrSessionExpired", "ErrSessionRevoked", "ErrSessionNotFound", "ErrSessionChannelMismatch"}
+	errs := []error{session.ErrNotAdmin, session.ErrSessionExpired, session.ErrSessionRevoked, session.ErrSessionNotFound, session.ErrSessionChannelMismatch}
 	for i := range errs {
 		for j := range errs {
 			if i == j {
@@ -124,6 +126,19 @@ func makeTestSession(id string, cfg session.Config) *session.Session {
 	}
 }
 
+// mustGenerateToken returns a fresh session token, failing the test if generation
+// fails. GenerateToken draws from crypto/rand; a discarded error would leave an
+// empty token whose SHA-256 is still a well-formed store key, silently corrupting
+// the test state (all empty tokens collide on one hash) instead of failing.
+func mustGenerateToken(t *testing.T) string {
+	t.Helper()
+	tok, err := session.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	return tok
+}
+
 // RunStoreContractSuite executes the shared contract test suite against any session.Store
 // implementation. It covers Set/Get, Get-miss, Delete (revocation), ListAll dedup, and
 // the invariant that the raw token is never a valid store key.
@@ -133,10 +148,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 	ctx := context.Background()
 
 	t.Run("SetAndGetByHash", func(t *testing.T) {
-		tok, err := session.GenerateToken()
-		if err != nil {
-			t.Fatalf("GenerateToken: %v", err)
-		}
+		tok := mustGenerateToken(t)
 		hash := session.HashToken(tok)
 		sess := makeTestSession("sc-set-get", cfg)
 
@@ -156,17 +168,14 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 	})
 
 	t.Run("RawTokenNotAValidKey", func(t *testing.T) {
-		tok, err := session.GenerateToken()
-		if err != nil {
-			t.Fatalf("GenerateToken: %v", err)
-		}
+		tok := mustGenerateToken(t)
 		hash := session.HashToken(tok)
 		sess := makeTestSession("sc-raw-token", cfg)
 		if err := store.Set(ctx, hash, sess); err != nil {
 			t.Fatalf("Set: %v", err)
 		}
 		// Looking up the raw token (not its hash) must miss — the raw token is never persisted.
-		_, err = store.Get(ctx, tok)
+		_, err := store.Get(ctx, tok)
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			t.Errorf("raw-token lookup: got %v, want ErrSessionNotFound", err)
 		}
@@ -184,8 +193,8 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 	})
 
 	t.Run("DeleteBySessionIDRemovesAllHashes", func(t *testing.T) {
-		t1, _ := session.GenerateToken()
-		t2, _ := session.GenerateToken()
+		t1 := mustGenerateToken(t)
+		t2 := mustGenerateToken(t)
 		h1, h2 := session.HashToken(t1), session.HashToken(t2)
 		sess := makeTestSession("sc-delete", cfg)
 
@@ -207,7 +216,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 	})
 
 	t.Run("DeleteIdempotent", func(t *testing.T) {
-		tok, _ := session.GenerateToken()
+		tok := mustGenerateToken(t)
 		sess := makeTestSession("sc-delete-idem", cfg)
 		if err := store.Set(ctx, session.HashToken(tok), sess); err != nil {
 			t.Fatalf("Set: %v", err)
@@ -222,7 +231,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 	})
 
 	t.Run("SetUpdatesExistingEntry", func(t *testing.T) {
-		tok, _ := session.GenerateToken()
+		tok := mustGenerateToken(t)
 		hash := session.HashToken(tok)
 		sess := makeTestSession("sc-update", cfg)
 		if err := store.Set(ctx, hash, sess); err != nil {
@@ -245,14 +254,14 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 
 	t.Run("ListAllDedupsBySessionID", func(t *testing.T) {
 		// s1: single hash entry.
-		t1, _ := session.GenerateToken()
+		t1 := mustGenerateToken(t)
 		s1 := makeTestSession("sc-list-s1", cfg)
 		if err := store.Set(ctx, session.HashToken(t1), s1); err != nil {
 			t.Fatalf("Set s1: %v", err)
 		}
 		// s2: two hash entries (current + prior-token grace), as produced by a Renew.
-		t2a, _ := session.GenerateToken()
-		t2b, _ := session.GenerateToken()
+		t2a := mustGenerateToken(t)
+		t2b := mustGenerateToken(t)
 		s2 := makeTestSession("sc-list-s2", cfg)
 		if err := store.Set(ctx, session.HashToken(t2a), s2); err != nil {
 			t.Fatalf("Set s2a: %v", err)
@@ -277,11 +286,54 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		}
 	})
 
+	t.Run("GetByIDReturnsSessionRecord", func(t *testing.T) {
+		tok := mustGenerateToken(t)
+		hash := session.HashToken(tok)
+		sess := makeTestSession("sc-get-by-id", cfg)
+		sess.Channel = "cli"
+
+		if err := store.Set(ctx, hash, sess); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		got, err := store.GetByID(ctx, sess.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.ID != sess.ID {
+			t.Errorf("GetByID session ID: got %q, want %q", got.ID, sess.ID)
+		}
+		if got.Channel != "cli" {
+			t.Errorf("GetByID channel: got %q, want %q", got.Channel, "cli")
+		}
+	})
+
+	t.Run("GetByIDMissingReturnsNotFound", func(t *testing.T) {
+		_, err := store.GetByID(ctx, "no-such-session-id-00000000000000000000")
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("GetByID missing: got %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("GetByIDAfterDeleteReturnsNotFound", func(t *testing.T) {
+		tok := mustGenerateToken(t)
+		sess := makeTestSession("sc-get-by-id-del", cfg)
+		if err := store.Set(ctx, session.HashToken(tok), sess); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		if err := store.Delete(ctx, sess.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		_, err := store.GetByID(ctx, sess.ID)
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("GetByID after Delete: got %v, want ErrSessionNotFound", err)
+		}
+	})
+
 	t.Run("GraceWindowRenewalRoundTrip", func(t *testing.T) {
 		// Simulate the two-hash state produced by Manager.Renew:
 		// hashOld = prior-token (in grace), hashNew = current.
-		tokOld, _ := session.GenerateToken()
-		tokNew, _ := session.GenerateToken()
+		tokOld := mustGenerateToken(t)
+		tokNew := mustGenerateToken(t)
 		hashOld, hashNew := session.HashToken(tokOld), session.HashToken(tokNew)
 		sess := makeTestSession("sc-grace", cfg)
 
@@ -320,10 +372,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 	// that loses the marker on reload is silently promoted from a boundary-checked
 	// root-scoped operator to an unrestricted unscoped superadmin.
 	t.Run("ContinuityFieldsRoundTrip", func(t *testing.T) {
-		tok, err := session.GenerateToken()
-		if err != nil {
-			t.Fatalf("GenerateToken: %v", err)
-		}
+		tok := mustGenerateToken(t)
 		hash := session.HashToken(tok)
 		now := time.Now().UTC().Truncate(time.Second)
 		credID := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04}
@@ -341,6 +390,7 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 			BoundIP:           "198.51.100.42",
 			LastProvenAt:      now,
 			RootScoped:        true,
+			Channel:           "cli",
 		}
 
 		if err := store.Set(ctx, hash, sess); err != nil {
@@ -361,6 +411,9 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		}
 		if !got.RootScoped {
 			t.Error("RootScoped: got false, want true — the ADR-025 A1.3 marker must survive Set → Get")
+		}
+		if got.Channel != "cli" {
+			t.Errorf("Channel: got %q, want %q — the channel must survive Set → Get", got.Channel, "cli")
 		}
 		if !got.LastProvenAt.Equal(now) {
 			t.Errorf("LastProvenAt: got %v, want %v", got.LastProvenAt, now)
@@ -405,13 +458,13 @@ func RunStoreContractSuite(t *testing.T, store session.Store) {
 		if !found.RootScoped {
 			t.Error("ListAll RootScoped: got false, want true")
 		}
+		if found.Channel != "cli" {
+			t.Errorf("ListAll Channel: got %q, want %q", found.Channel, "cli")
+		}
 
 		// A session that was never root-scoped must come back false from both read
 		// paths — the marker is never inferred, and never leaks across rows.
-		ordinaryTok, err := session.GenerateToken()
-		if err != nil {
-			t.Fatalf("GenerateToken: %v", err)
-		}
+		ordinaryTok := mustGenerateToken(t)
 		ordinaryHash := session.HashToken(ordinaryTok)
 		ordinary := makeTestSession("sc-not-root-scoped", cfg)
 		if err := store.Set(ctx, ordinaryHash, ordinary); err != nil {

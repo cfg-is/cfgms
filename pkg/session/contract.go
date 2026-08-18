@@ -25,6 +25,12 @@ var ErrSessionRevoked = errors.New("session: session has been revoked")
 // ErrSessionNotFound is returned when the requested session does not exist in the store.
 var ErrSessionNotFound = errors.New("session: session not found")
 
+// ErrSessionChannelMismatch is returned when a session's recorded channel does not
+// match the validating manager's own channel (Issue #3310, ADR-014 §2).
+// The middleware maps this to the same generic 401 as an absent or invalid token,
+// disclosing nothing about whether a session exists on another channel.
+var ErrSessionChannelMismatch = errors.New("session: session channel mismatch")
+
 // Session is the runtime record for a cfg admin session (ADR-014 §2).
 // ID holds the opaque session identifier (not the bearer token; that is never stored).
 // AbsoluteExpiresAt is measured from the original connect, capping even continuously-active sessions.
@@ -65,6 +71,12 @@ type Session struct {
 	// only by IssueRootScoped, never inferred from TenantID being empty and never
 	// mutable after issuance.
 	RootScoped bool
+	// Channel is the issuing-channel identity for this session (Issue #3310, ADR-014 §2).
+	// Set by manager.issue from Config.Channel at issuance time; never mutable after
+	// issuance. "cli" for sessions issued by the cfg-CLI session manager, "web" for the
+	// browser-cookie session manager. Sessions predating this field carry an empty channel
+	// and are rejected by Validate and List rather than grandfathered.
+	Channel string
 }
 
 // Config holds the lifecycle tunables for cfg admin sessions (ADR-014 §3).
@@ -82,6 +94,11 @@ type Config struct {
 	// AssuranceBasic unless a valid WebAuthn assertion is provided (ADR-021 Decision 3,
 	// "Remaining tunables"). Zero disables the interval check.
 	SilentReproofInterval time.Duration
+	// Channel is this manager's issuing-channel identity (Issue #3310, ADR-014 §2).
+	// Validate, List, and Revoke scope their operations to sessions whose Channel equals
+	// this value, refusing to act across channels. Assigned by SetDurableSessionStore:
+	// "cli" for the cfg-CLI manager, "web" for the browser-cookie manager.
+	Channel string
 }
 
 // DefaultConfig returns the ratified ADR-014 tunables: idle 15m, absolute 8h, grace 30s.
@@ -178,6 +195,11 @@ type Manager interface {
 type Store interface {
 	Set(ctx context.Context, tokenHash string, session *Session) error
 	Get(ctx context.Context, tokenHash string) (*Session, error)
+	// GetByID returns any live session record for the given session ID.
+	// Used by Revoke's cache-miss branch to verify a session's Channel before
+	// deleting it, without requiring the caller to know the token hash.
+	// Returns ErrSessionNotFound when no non-expired record exists for id.
+	GetByID(ctx context.Context, id string) (*Session, error)
 	Delete(ctx context.Context, id string) error
 	ListAll(ctx context.Context) ([]*Session, error)
 }
