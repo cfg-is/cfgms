@@ -531,7 +531,8 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.tenantManager.SuspendTenant(r.Context(), tenantID); err != nil {
+	cascadeResult, err := s.tenantManager.SuspendTenant(r.Context(), tenantID)
+	if err != nil {
 		if errors.Is(err, business.ErrTenantDoesNotExist) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 			return
@@ -548,7 +549,67 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 		"tenant_id", logging.SanitizeLogValue(tenantID))
 
 	s.writeSuccessResponse(w, map[string]interface{}{
-		"id":     tenantID,
-		"status": string(business.TenantStatusSuspended),
+		"id":                      tenantID,
+		"status":                  string(business.TenantStatusSuspended),
+		"newly_cascade_suspended": cascadeResult.NewlyCascadeSuspended,
+		"already_suspended":       cascadeResult.AlreadySuspended,
+	})
+}
+
+// handleRestoreTenant implements POST /api/v1/tenants/{id}/restore.
+// Clears the target tenant's own suspension and lifts cascade-suspended status from
+// descendants that were suspended purely because of this tenant's cascade (ADR-027 Decision 2).
+// Descendants that carry their own DirectlySuspended flag remain suspended.
+func (s *Server) handleRestoreTenant(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	tenantID := vars["id"]
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
+		return
+	}
+
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to get tenant", "GET_FAILED")
+		return
+	}
+	switch s.authorizeTenantAccess(r.Context(), principal, existing.ID) {
+	case tenantAuthAllowed:
+		// proceed
+	case tenantAuthNeedsCrossing:
+		s.writeTenantCrossingChallenge(w, existing.ID)
+		return
+	default:
+		s.logger.Info("Cross-tenant tenant restore refused",
+			"resource_tenant", logging.SanitizeLogValue(existing.ID),
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
+	cascadeResult, err := s.tenantManager.RestoreTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return
+		}
+		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to restore tenant", "RESTORE_FAILED")
+		return
+	}
+
+	s.logger.Info("Restored tenant",
+		"tenant_id", logging.SanitizeLogValue(tenantID))
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"id":              tenantID,
+		"status":          string(business.TenantStatusActive),
+		"restored":        cascadeResult.Restored,
+		"still_suspended": cascadeResult.StillSuspended,
 	})
 }

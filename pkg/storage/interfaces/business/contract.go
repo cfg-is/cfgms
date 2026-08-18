@@ -13,6 +13,106 @@ import (
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 )
 
+// TenantStoreLifecycleContract verifies that the suspension provenance fields
+// (DirectlySuspended, CascadeSuspendedFrom — ADR-027 Decision 2) survive a
+// round-trip through the store: the values written by UpdateTenant must be
+// readable back from GetTenant on a fresh call. Call from each TenantStore
+// provider's tests:
+//
+//	func TestMyTenantStore_LifecycleContract(t *testing.T) {
+//	    business.TenantStoreLifecycleContract(t, openStore(t))
+//	}
+//
+// The store must be initialized and empty (no pre-existing tenants). Lifecycle
+// (Initialize/Close) stays with the caller.
+func TenantStoreLifecycleContract(t *testing.T, store TenantStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	const ancID = "lc-ancestor"
+	const descID = "lc-descendant"
+	now := time.Now().UTC().Truncate(time.Second)
+
+	anc := &TenantData{
+		ID:        ancID,
+		Name:      "LifecycleAncestor",
+		Status:    TenantStatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	desc := &TenantData{
+		ID:        descID,
+		Name:      "LifecycleDescendant",
+		ParentID:  ancID,
+		Status:    TenantStatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, store.CreateTenant(ctx, anc))
+	require.NoError(t, store.CreateTenant(ctx, desc))
+
+	t.Run("DirectlySuspended persists after UpdateTenant", func(t *testing.T) {
+		anc.DirectlySuspended = true
+		anc.Status = TenantStatusSuspended
+		anc.UpdatedAt = now
+		require.NoError(t, store.UpdateTenant(ctx, anc))
+
+		got, err := store.GetTenant(ctx, ancID)
+		require.NoError(t, err)
+		assert.True(t, got.DirectlySuspended, "DirectlySuspended must survive a store round-trip")
+		assert.Equal(t, TenantStatusSuspended, got.Status)
+	})
+
+	t.Run("CascadeSuspendedFrom persists after UpdateTenant", func(t *testing.T) {
+		from := ancID
+		desc.CascadeSuspendedFrom = &from
+		desc.Status = TenantStatusSuspended
+		desc.UpdatedAt = now
+		require.NoError(t, store.UpdateTenant(ctx, desc))
+
+		got, err := store.GetTenant(ctx, descID)
+		require.NoError(t, err)
+		require.NotNil(t, got.CascadeSuspendedFrom, "CascadeSuspendedFrom must survive a store round-trip")
+		assert.Equal(t, ancID, *got.CascadeSuspendedFrom)
+	})
+
+	t.Run("both provenance flags can be set simultaneously", func(t *testing.T) {
+		from := ancID
+		desc.DirectlySuspended = true
+		desc.CascadeSuspendedFrom = &from
+		desc.UpdatedAt = now
+		require.NoError(t, store.UpdateTenant(ctx, desc))
+
+		got, err := store.GetTenant(ctx, descID)
+		require.NoError(t, err)
+		assert.True(t, got.DirectlySuspended, "DirectlySuspended must be set")
+		require.NotNil(t, got.CascadeSuspendedFrom, "CascadeSuspendedFrom must be set")
+		assert.Equal(t, ancID, *got.CascadeSuspendedFrom)
+	})
+
+	t.Run("clearing CascadeSuspendedFrom to nil persists", func(t *testing.T) {
+		desc.CascadeSuspendedFrom = nil
+		desc.UpdatedAt = now
+		require.NoError(t, store.UpdateTenant(ctx, desc))
+
+		got, err := store.GetTenant(ctx, descID)
+		require.NoError(t, err)
+		assert.Nil(t, got.CascadeSuspendedFrom, "nil CascadeSuspendedFrom must round-trip as nil")
+	})
+
+	t.Run("clearing DirectlySuspended to false persists", func(t *testing.T) {
+		desc.DirectlySuspended = false
+		desc.Status = TenantStatusActive
+		desc.UpdatedAt = now
+		require.NoError(t, store.UpdateTenant(ctx, desc))
+
+		got, err := store.GetTenant(ctx, descID)
+		require.NoError(t, err)
+		assert.False(t, got.DirectlySuspended, "cleared DirectlySuspended must round-trip as false")
+		assert.Equal(t, TenantStatusActive, got.Status)
+	})
+}
+
 // TenantStoreMissingTenantContract asserts that store signals "this tenant has no
 // row" with the ErrTenantDoesNotExist sentinel from every operation that addresses a
 // tenant by ID. Call it from each TenantStore provider's tests:

@@ -22,6 +22,8 @@ func registerTenantRoutes(s *Server, api *mux.Router) {
 	tenants.Handle("/{id}", s.requirePermission("tenant", "update")(http.HandlerFunc(s.handleUpdateTenant))).Methods("PUT")
 	tenants.Handle("/{id}/suspend",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleSuspendTenant))).Methods("POST")
+	tenants.Handle("/{id}/restore",
+		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleRestoreTenant))).Methods("POST")
 	tenants.Handle("/{id}/config-source/test",
 		s.requirePermission("tenant", "manage")(http.HandlerFunc(s.handleConfigSourceTest))).Methods("POST")
 

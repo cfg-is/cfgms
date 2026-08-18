@@ -219,19 +219,261 @@ func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *Tenant
 	return existing, nil
 }
 
-// SuspendTenant sets the status of an existing tenant to TenantStatusSuspended.
-// Used by the agent-dispatch cleanup path (Issue #2124) to deactivate the
-// agent-test/<N> sub-tenant when the agent container exits.
-func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) error {
+// CascadeSuspendResult describes the outcome of a cascading suspend operation.
+type CascadeSuspendResult struct {
+	// Target is the tenant ID that was directly suspended.
+	Target string `json:"target"`
+	// NewlyCascadeSuspended lists descendant IDs that were not already independently
+	// suspended and are now cascade-suspended as a side effect.
+	NewlyCascadeSuspended []string `json:"newly_cascade_suspended"`
+	// AlreadySuspended lists descendant IDs that were already independently
+	// (DirectlySuspended) suspended; they now also carry CascadeSuspendedFrom.
+	AlreadySuspended []string `json:"already_suspended"`
+}
+
+// CascadeRestoreResult describes the outcome of a cascading restore operation.
+type CascadeRestoreResult struct {
+	// Target is the tenant ID whose direct suspension was cleared.
+	Target string `json:"target"`
+	// Restored lists descendant IDs whose only suspension reason was the ancestor
+	// cascade; they are now fully active.
+	Restored []string `json:"restored"`
+	// StillSuspended lists descendant IDs whose cascade from the target was lifted but
+	// that remain suspended for another reason: either their own DirectlySuspended flag,
+	// or an intermediate ancestor between them and the target that is itself still
+	// suspended. Their cascade provenance is re-pointed at that ancestor so a later
+	// restore of it reactivates them.
+	StillSuspended []string `json:"still_suspended"`
+}
+
+// SuspendTenant suspends the target tenant and its entire subtree (ADR-027 Decision 1).
+// The target gains DirectlySuspended=true; each descendant gains CascadeSuspendedFrom
+// set to tenantID, keeping any pre-existing DirectlySuspended flag (ADR-027 Decision 2).
+//
+// CascadeSuspendedFrom holds the OUTERMOST suspended ancestor, so a descendant already
+// cascade-suspended by a tenant above the target keeps that provenance instead of being
+// re-pointed at the (deeper) target. Overwriting it would let a restore of the target lift
+// a containment imposed higher in the hierarchy.
+//
+// A cycle in the tenant hierarchy (data corruption) causes an error rather than an
+// infinite loop. An audit event is recorded on success (fire-and-forget).
+func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) (*CascadeSuspendResult, error) {
 	if tenantID == "default" {
-		return ErrCannotSuspendDefault
+		return nil, ErrCannotSuspendDefault
 	}
+
+	result := &CascadeSuspendResult{
+		Target:                tenantID,
+		NewlyCascadeSuspended: []string{},
+		AlreadySuspended:      []string{},
+	}
+
+	// BFS walk of the subtree. visited tracks IDs to detect data-corruption cycles.
+	visited := map[string]bool{tenantID: true}
+	queue := []string{tenantID}
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		current, err := m.store.GetTenant(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+
+		if currentID == tenantID {
+			current.DirectlySuspended = true
+			current.Status = business.TenantStatusSuspended
+		} else {
+			// Descendant: record cascade provenance. Keep DirectlySuspended if already set.
+			//
+			// Only claim provenance when the existing value names a tenant inside this
+			// subtree (BFS is level-order, so every already-visited ID is the target or a
+			// node above `current` within the target's subtree). Such a value is deeper
+			// than the target and is therefore superseded by it. A value naming a tenant
+			// outside the subtree is a strict ancestor of the target — a broader
+			// suspension — and must survive, otherwise restoring the target would
+			// reactivate a tenant contained by that outer suspension.
+			if current.CascadeSuspendedFrom == nil || visited[*current.CascadeSuspendedFrom] {
+				ancestorID := tenantID
+				current.CascadeSuspendedFrom = &ancestorID
+			}
+			if current.DirectlySuspended {
+				result.AlreadySuspended = append(result.AlreadySuspended, currentID)
+			} else {
+				current.Status = business.TenantStatusSuspended
+				result.NewlyCascadeSuspended = append(result.NewlyCascadeSuspended, currentID)
+			}
+		}
+
+		if err := m.store.UpdateTenant(ctx, current); err != nil {
+			return nil, err
+		}
+
+		children, err := m.store.GetChildTenants(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+			queue = append(queue, child.ID)
+		}
+	}
+
+	// Retrieve tenant name for the audit event (the GetTenant above fetched it, but
+	// we only have it within the loop; re-fetch is fine — audit is best-effort).
+	if t, err := m.store.GetTenant(ctx, tenantID); err == nil {
+		m.recordTenantLifecycleEvent(ctx, tenantID, t.Name, "tenant_suspended")
+	}
+
+	return result, nil
+}
+
+// restoreWalkNode is one work item of RestoreTenant's BFS. suspendedAncestor is the ID
+// of the outermost ancestor of this node's CHILDREN that is still suspended once the
+// restore has been applied to this node, or nil when no such ancestor remains. It is the
+// containment carrier: a child may only become active when it is nil.
+type restoreWalkNode struct {
+	id                string
+	suspendedAncestor *string
+}
+
+// childProvenanceAfterRestore computes the value restoreWalkNode.suspendedAncestor must
+// carry for td's children, given td's post-restore state. If td is still cascade-suspended,
+// its children are contained by the same outer ancestor; if td itself remains suspended for
+// any other reason, td is that ancestor; otherwise the subtree below td is unconstrained.
+func childProvenanceAfterRestore(td *business.TenantData) *string {
+	if td.CascadeSuspendedFrom != nil {
+		ancestorID := *td.CascadeSuspendedFrom
+		return &ancestorID
+	}
+	if td.Status == business.TenantStatusSuspended {
+		ancestorID := td.ID
+		return &ancestorID
+	}
+	return nil
+}
+
+// RestoreTenant clears the target tenant's own suspension and lifts only the cascade
+// component on descendants (ADR-027 Decision 2). Descendants that carry their own
+// DirectlySuspended flag remain suspended — the cascade effect is removed but the
+// independent suspension is not.
+//
+// A descendant is reactivated only when every tenant between it and the restore target —
+// and the target itself — comes out of the restore active. Where an ancestor stays
+// suspended (its own DirectlySuspended flag, or a cascade from above the target), the
+// descendant's cascade provenance is re-pointed at that ancestor and it stays suspended.
+// Reactivating it instead would let an operator holding tenant:manage inside a contained
+// subtree escape a suspension imposed above them (ADR-027 Decision 1 containment).
+//
+// An audit event is recorded on success (fire-and-forget).
+func (m *Manager) RestoreTenant(ctx context.Context, tenantID string) (*CascadeRestoreResult, error) {
+	result := &CascadeRestoreResult{
+		Target:         tenantID,
+		Restored:       []string{},
+		StillSuspended: []string{},
+	}
+
+	// Clear the target's own direct suspension.
 	existing, err := m.store.GetTenant(ctx, tenantID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	existing.Status = business.TenantStatusSuspended
-	return m.store.UpdateTenant(ctx, existing)
+	existing.DirectlySuspended = false
+	// Keep cascade flag if it exists (target may be cascade-suspended by its own ancestor).
+	if existing.CascadeSuspendedFrom == nil {
+		existing.Status = business.TenantStatusActive
+	}
+	if err := m.store.UpdateTenant(ctx, existing); err != nil {
+		return nil, err
+	}
+
+	// BFS walk: lift CascadeSuspendedFrom == tenantID on all descendants, carrying the
+	// containment state of each node down to its children.
+	visited := map[string]bool{tenantID: true}
+	queue := []restoreWalkNode{{id: tenantID, suspendedAncestor: childProvenanceAfterRestore(existing)}}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		children, err := m.store.GetChildTenants(ctx, current.id)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+
+			if child.CascadeSuspendedFrom == nil || *child.CascadeSuspendedFrom != tenantID {
+				// Not part of this cascade: its provenance names a tenant above the
+				// target, which this restore does not touch. Its own state is unchanged,
+				// so it carries its own containment onwards.
+				queue = append(queue, restoreWalkNode{id: child.ID, suspendedAncestor: childProvenanceAfterRestore(child)})
+				continue
+			}
+
+			// The target's cascade is lifted; any suspension still standing between the
+			// target and this child takes its place as the provenance. The pointer is
+			// copied rather than shared so sibling records never alias one string.
+			child.CascadeSuspendedFrom = nil
+			if current.suspendedAncestor != nil {
+				ancestorID := *current.suspendedAncestor
+				child.CascadeSuspendedFrom = &ancestorID
+			}
+			switch {
+			case child.DirectlySuspended || child.CascadeSuspendedFrom != nil:
+				child.Status = business.TenantStatusSuspended
+				result.StillSuspended = append(result.StillSuspended, child.ID)
+			default:
+				child.Status = business.TenantStatusActive
+				result.Restored = append(result.Restored, child.ID)
+			}
+			if err := m.store.UpdateTenant(ctx, child); err != nil {
+				return nil, err
+			}
+			queue = append(queue, restoreWalkNode{id: child.ID, suspendedAncestor: childProvenanceAfterRestore(child)})
+		}
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, existing.Name, "tenant_restored")
+
+	return result, nil
+}
+
+// recordTenantLifecycleEvent emits a tenant lifecycle audit event. It is
+// fire-and-forget: audit failures are logged but do not surface to the caller.
+func (m *Manager) recordTenantLifecycleEvent(ctx context.Context, tenantID, tenantName, action string) {
+	if m.auditManager == nil {
+		return
+	}
+
+	actor := audit.SystemUserID
+	if uid, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok && uid != "" {
+		actor = uid
+	}
+
+	event := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventConfiguration).
+		Action(action).
+		User(actor, business.AuditUserTypeHuman).
+		Resource("tenant", tenantID, tenantName).
+		Detail("tenant_id", tenantID).
+		Detail("actor", actor)
+
+	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		slog.Warn("tenant: failed to record tenant lifecycle audit event",
+			"action", action,
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+	}
 }
 
 // DeleteTenant deletes a tenant
@@ -437,12 +679,10 @@ func (m *Manager) recordConfigSourceEvent(ctx context.Context, tenantID, rawURL,
 		Detail("actor", actor)
 
 	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
-		tenantID = strings.ReplaceAll(tenantID, "\n", "_")
-		tenantID = strings.ReplaceAll(tenantID, "\r", "_")
 		slog.Warn("tenant: failed to record config source audit event",
 			"action", action,
-			"tenant_id", tenantID,
-			"error", err,
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 }

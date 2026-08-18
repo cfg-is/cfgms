@@ -261,6 +261,40 @@ func migrateRegistrationTokenClaimKey(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillTenantLifecycle adds the ADR-027 Decision 2 suspension provenance
+// columns to a pre-existing tenants table that was created without them (migration
+// 008). Fresh databases (table absent) are skipped. Column-existence is checked
+// via PRAGMA before each ALTER TABLE so the pass is fully idempotent.
+func backfillTenantLifecycle(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "tenants")
+	if err != nil {
+		return fmt.Errorf("sqlite: tenant lifecycle back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"directly_suspended", `ALTER TABLE tenants ADD COLUMN directly_suspended INTEGER NOT NULL DEFAULT 0`},
+		{"cascade_suspended_from", `ALTER TABLE tenants ADD COLUMN cascade_suspended_from TEXT`},
+	} {
+		present, err := columnExists(ctx, db, "tenants", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: tenant lifecycle back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: tenant lifecycle back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 // All DDL statements are executed inside a single transaction to reduce WAL
@@ -282,6 +316,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillRegistrationTokenID(ctx, db); err != nil {
 		return err
 	}
+	if err := backfillTenantLifecycle(ctx, db); err != nil {
+		return err
+	}
 
 	statements := []string{
 		// Schema version tracking
@@ -291,16 +328,20 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			applied_at TEXT NOT NULL
 		)`,
 
-		// Tenants
+		// Tenants — directly_suspended and cascade_suspended_from added in migration 008
+		// (ADR-027 Decision 2). Pre-existing deployments receive these columns via
+		// backfillTenantLifecycle() above; fresh deployments get them from CREATE TABLE.
 		`CREATE TABLE IF NOT EXISTS tenants (
-			id          TEXT PRIMARY KEY,
-			name        TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			parent_id   TEXT,
-			metadata    TEXT NOT NULL DEFAULT '{}',
-			status      TEXT NOT NULL DEFAULT 'active',
-			created_at  TEXT NOT NULL,
-			updated_at  TEXT NOT NULL
+			id                    TEXT PRIMARY KEY,
+			name                  TEXT NOT NULL,
+			description           TEXT NOT NULL DEFAULT '',
+			parent_id             TEXT,
+			metadata              TEXT NOT NULL DEFAULT '{}',
+			status                TEXT NOT NULL DEFAULT 'active',
+			directly_suspended    INTEGER NOT NULL DEFAULT 0,
+			cascade_suspended_from TEXT,
+			created_at            TEXT NOT NULL,
+			updated_at            TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_parent_id  ON tenants(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_status      ON tenants(status)`,

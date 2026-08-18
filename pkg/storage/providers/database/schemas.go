@@ -390,7 +390,26 @@ func (s DatabaseSchemas) CreateRBACTables(ctx context.Context, db *sql.DB) error
 	return nil
 }
 
-// CreateTenantTables creates all tenant-related tables with proper indexing
+// BackfillTenantLifecycle adds the ADR-027 Decision 2 suspension provenance
+// columns to a pre-existing cfgms_tenants table (migration 008). Idempotent:
+// ADD COLUMN IF NOT EXISTS is a no-op on an up-to-date table.
+func (s DatabaseSchemas) BackfillTenantLifecycle(ctx context.Context, db *sql.DB) error {
+	alters := []string{
+		`ALTER TABLE cfgms_tenants ADD COLUMN IF NOT EXISTS directly_suspended BOOLEAN DEFAULT false`,
+		`ALTER TABLE cfgms_tenants ADD COLUMN IF NOT EXISTS cascade_suspended_from VARCHAR(255)`,
+	}
+	for _, stmt := range alters {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to backfill cfgms_tenants lifecycle columns: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateTenantTables creates all tenant-related tables with proper indexing.
+// directly_suspended and cascade_suspended_from (ADR-027 Decision 2) are
+// included in the CREATE TABLE; BackfillTenantLifecycle handles pre-existing
+// deployments missing these columns.
 func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_tenants (
@@ -400,6 +419,8 @@ func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) err
 			parent_id VARCHAR(255) DEFAULT NULL,
 			metadata JSONB DEFAULT '{}',
 			status VARCHAR(50) NOT NULL DEFAULT 'active',
+			directly_suspended BOOLEAN DEFAULT false,
+			cascade_suspended_from VARCHAR(255),
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 			FOREIGN KEY (parent_id) REFERENCES cfgms_tenants(id) ON DELETE RESTRICT
@@ -408,6 +429,11 @@ func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) err
 
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create cfgms_tenants table: %w", err)
+	}
+
+	// Migration for deployments created before ADR-027 (Issue #3158).
+	if err := s.BackfillTenantLifecycle(ctx, db); err != nil {
+		return err
 	}
 
 	// Create indexes for performance and hierarchy queries

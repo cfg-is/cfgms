@@ -119,8 +119,8 @@ func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business
 	}
 
 	query := `
-		INSERT INTO cfgms_tenants (id, name, description, parent_id, metadata, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO cfgms_tenants (id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -130,6 +130,8 @@ func (s *DatabaseTenantStore) CreateTenant(ctx context.Context, tenant *business
 		nullStringOrEmpty(tenant.ParentID),
 		metadataJSON,
 		string(tenant.Status),
+		tenant.DirectlySuspended,
+		nullStringOrEmpty(dbStringPtrVal(tenant.CascadeSuspendedFrom)),
 		tenant.CreatedAt,
 		tenant.UpdatedAt,
 	)
@@ -154,13 +156,13 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 	defer s.mutex.RUnlock()
 
 	query := `
-		SELECT id, name, description, parent_id, metadata, status, created_at, updated_at
+		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at
 		FROM cfgms_tenants
 		WHERE id = $1
 	`
 
 	var tenant business.TenantData
-	var parentID sql.NullString
+	var parentID, cascadeFrom sql.NullString
 	var metadataJSON []byte
 
 	err := s.db.QueryRowContext(ctx, query, tenantID).Scan(
@@ -170,6 +172,8 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 		&parentID,
 		&metadataJSON,
 		&tenant.Status,
+		&tenant.DirectlySuspended,
+		&cascadeFrom,
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
 	)
@@ -182,6 +186,10 @@ func (s *DatabaseTenantStore) GetTenant(ctx context.Context, tenantID string) (*
 	}
 
 	tenant.ParentID = parentID.String
+	if cascadeFrom.Valid && cascadeFrom.String != "" {
+		s := cascadeFrom.String
+		tenant.CascadeSuspendedFrom = &s
+	}
 
 	if err := json.Unmarshal(metadataJSON, &tenant.Metadata); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
@@ -210,7 +218,8 @@ func (s *DatabaseTenantStore) UpdateTenant(ctx context.Context, tenant *business
 
 	query := `
 		UPDATE cfgms_tenants
-		SET name = $2, description = $3, parent_id = $4, metadata = $5, status = $6, updated_at = $7
+		SET name = $2, description = $3, parent_id = $4, metadata = $5, status = $6,
+		    directly_suspended = $7, cascade_suspended_from = $8, updated_at = $9
 		WHERE id = $1
 	`
 
@@ -221,6 +230,8 @@ func (s *DatabaseTenantStore) UpdateTenant(ctx context.Context, tenant *business
 		nullStringOrEmpty(tenant.ParentID),
 		metadataJSON,
 		string(tenant.Status),
+		tenant.DirectlySuspended,
+		nullStringOrEmpty(dbStringPtrVal(tenant.CascadeSuspendedFrom)),
 		tenant.UpdatedAt,
 	)
 
@@ -274,7 +285,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 	defer s.mutex.RUnlock()
 
 	query := `
-		SELECT id, name, description, parent_id, metadata, status, created_at, updated_at
+		SELECT id, name, description, parent_id, metadata, status, directly_suspended, cascade_suspended_from, created_at, updated_at
 		FROM cfgms_tenants
 		WHERE 1=1
 	`
@@ -313,7 +324,7 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 	var tenants []*business.TenantData
 	for rows.Next() {
 		var tenant business.TenantData
-		var parentID sql.NullString
+		var parentID, cascadeFrom sql.NullString
 		var metadataJSON []byte
 
 		err := rows.Scan(
@@ -323,6 +334,8 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 			&parentID,
 			&metadataJSON,
 			&tenant.Status,
+			&tenant.DirectlySuspended,
+			&cascadeFrom,
 			&tenant.CreatedAt,
 			&tenant.UpdatedAt,
 		)
@@ -331,6 +344,10 @@ func (s *DatabaseTenantStore) ListTenants(ctx context.Context, filter *business.
 		}
 
 		tenant.ParentID = parentID.String
+		if cascadeFrom.Valid && cascadeFrom.String != "" {
+			s := cascadeFrom.String
+			tenant.CascadeSuspendedFrom = &s
+		}
 
 		if err := json.Unmarshal(metadataJSON, &tenant.Metadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
@@ -443,4 +460,12 @@ func nullStringOrEmpty(s string) sql.NullString {
 		return sql.NullString{Valid: false}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// dbStringPtrVal dereferences a string pointer, returning "" when nil.
+func dbStringPtrVal(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

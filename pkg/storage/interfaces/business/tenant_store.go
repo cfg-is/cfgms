@@ -58,8 +58,15 @@ type TenantData struct {
 	ParentID    string            `json:"parent_id,omitempty" yaml:"parent_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	Status      TenantStatus      `json:"status" yaml:"status"`
-	CreatedAt   time.Time         `json:"created_at" yaml:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at" yaml:"updated_at"`
+
+	// Suspension provenance (ADR-027 Decision 2). Both can be set simultaneously:
+	// a tenant independently suspended that is also cascade-suspended by an ancestor
+	// carries both flags so restoring the ancestor only removes the cascade effect.
+	DirectlySuspended    bool    `json:"directly_suspended,omitempty" yaml:"directly_suspended,omitempty"`
+	CascadeSuspendedFrom *string `json:"cascade_suspended_from,omitempty" yaml:"cascade_suspended_from,omitempty"`
+
+	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
 }
 
 // TenantStatus represents the status of a tenant

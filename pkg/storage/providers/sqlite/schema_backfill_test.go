@@ -591,6 +591,75 @@ func TestBackfillRegistrationTokenID_UpdateFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "back-fill update failed", "error must identify the update stage")
 }
 
+// legacyTenantsSchema is the tenants DDL from before the ADR-027 Decision 2
+// suspension provenance columns were added in migration 008.
+const legacyTenantsSchema = `CREATE TABLE IF NOT EXISTS tenants (
+	id          TEXT PRIMARY KEY,
+	name        TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	parent_id   TEXT,
+	metadata    TEXT NOT NULL DEFAULT '{}',
+	status      TEXT NOT NULL DEFAULT 'active',
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL
+)`
+
+// TestBackfillTenantLifecycle_LegacyTable verifies that initializeSchema adds the
+// ADR-027 provenance columns to a pre-existing tenants table that lacks them.
+func TestBackfillTenantLifecycle_LegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyTenantsSchema)
+	require.NoError(t, err, "seed legacy tenants schema")
+
+	for _, col := range []string{"directly_suspended", "cascade_suspended_from"} {
+		assert.False(t, hasColumn(t, db, "tenants", col), "pre-condition: %s absent before back-fill", col)
+	}
+
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	assert.True(t, hasColumn(t, db, "tenants", "directly_suspended"), "directly_suspended present after back-fill")
+	assert.True(t, hasColumn(t, db, "tenants", "cascade_suspended_from"), "cascade_suspended_from present after back-fill")
+}
+
+// TestBackfillTenantLifecycle_Idempotent verifies that calling initializeSchema a
+// second time on an already-migrated tenants table succeeds and existing rows survive.
+func TestBackfillTenantLifecycle_Idempotent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyTenantsSchema)
+	require.NoError(t, err, "seed legacy tenants schema")
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO tenants (id, name, created_at, updated_at) VALUES ('t-survive', 'Survive', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err, "insert test row")
+
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+
+	for _, col := range []string{"directly_suspended", "cascade_suspended_from"} {
+		assert.True(t, hasColumn(t, db, "tenants", col), "%s still present after second pass", col)
+	}
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tenants WHERE id='t-survive'`).Scan(&count))
+	assert.Equal(t, 1, count, "row must survive second initializeSchema")
+}
+
+// TestBackfillTenantLifecycle_FreshDB verifies that a fresh database carries
+// both provenance columns from the CREATE TABLE statement, so the back-fill is a no-op.
+func TestBackfillTenantLifecycle_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+
+	assert.True(t, hasColumn(t, db, "tenants", "directly_suspended"), "directly_suspended present on fresh DB")
+	assert.True(t, hasColumn(t, db, "tenants", "cascade_suspended_from"), "cascade_suspended_from present on fresh DB")
+}
+
 // legacySingleDeviceClaimSchema is the registration_token_claims DDL as first
 // shipped: one claim row per token, for the token's whole lifetime.
 const legacySingleDeviceClaimSchema = `CREATE TABLE IF NOT EXISTS registration_token_claims (
