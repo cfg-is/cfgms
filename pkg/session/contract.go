@@ -176,6 +176,12 @@ type Manager interface {
 	Revoke(ctx context.Context, id string) error
 	List(ctx context.Context) ([]*Session, error)
 	Elevate(ctx context.Context, sessionID string, credentialID []byte, sourceIP string) (*Session, string, error)
+	// GetByID returns the live session record for the given session ID without requiring
+	// the bearer token. Used by object-level authorization checks (e.g. tenant scoping in
+	// handleSessionRevoke) that must inspect a session's attributes before acting on it.
+	// Returns ErrSessionNotFound when no live session exists for id, including when the
+	// session belongs to a different channel (same non-disclosure posture as Revoke).
+	GetByID(ctx context.Context, id string) (*Session, error)
 }
 
 // Store is the backing store for the session Manager (ADR-014 §2).

@@ -41,8 +41,9 @@ func (s *stubManager) Validate(_ context.Context, _ string) (*session.Session, e
 func (s *stubManager) Renew(_ context.Context, _ string) (*session.Session, string, error) {
 	return nil, "", nil
 }
-func (s *stubManager) Revoke(_ context.Context, _ string) error           { return nil }
-func (s *stubManager) List(_ context.Context) ([]*session.Session, error) { return nil, nil }
+func (s *stubManager) Revoke(_ context.Context, _ string) error                      { return nil }
+func (s *stubManager) List(_ context.Context) ([]*session.Session, error)            { return nil, nil }
+func (s *stubManager) GetByID(_ context.Context, _ string) (*session.Session, error) { return nil, nil }
 func (s *stubManager) Elevate(_ context.Context, _ string, _ []byte, _ string) (*session.Session, string, error) {
 	return nil, "", nil
 }

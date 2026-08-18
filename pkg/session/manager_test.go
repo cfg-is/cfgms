@@ -921,3 +921,146 @@ func TestEmptyChannelRejectedByValidateAndList(t *testing.T) {
 		}
 	}
 }
+
+// TestManagerGetByID_ReturnsLiveSession verifies that GetByID returns a copy of the
+// live session when it exists in the in-memory cache (the happy path).
+func TestManagerGetByID_ReturnsLiveSession(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, _ := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	sess, _, err := mgr.Issue(ctx, "alice", "ctrl", "tenant-a")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	got, err := mgr.GetByID(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.ID != sess.ID {
+		t.Errorf("GetByID: ID = %q, want %q", got.ID, sess.ID)
+	}
+	if got.TenantID != "tenant-a" {
+		t.Errorf("GetByID: TenantID = %q, want %q", got.TenantID, "tenant-a")
+	}
+}
+
+// TestManagerGetByID_NotFound verifies that GetByID returns ErrSessionNotFound
+// when no session exists for the given ID.
+func TestManagerGetByID_NotFound(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, _ := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	_, err := mgr.GetByID(ctx, "no-such-id")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("GetByID missing session: got %v, want ErrSessionNotFound", err)
+	}
+}
+
+// TestManagerGetByID_RevokedReturnsNotFound verifies that GetByID returns
+// ErrSessionNotFound (not ErrSessionRevoked) for a revoked session — the caller
+// should not be able to distinguish a revoked session from an absent one.
+func TestManagerGetByID_RevokedReturnsNotFound(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, _ := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	sess, _, err := mgr.Issue(ctx, "bob", "ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := mgr.Revoke(ctx, sess.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	_, err = mgr.GetByID(ctx, sess.ID)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("GetByID revoked session: got %v, want ErrSessionNotFound", err)
+	}
+}
+
+// TestManagerGetByID_StoreRehydrationPath verifies that GetByID falls back to the
+// durable store (simulating post-restart behaviour where the in-memory cache is empty)
+// and returns the live session.
+func TestManagerGetByID_StoreRehydrationPath(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	store := session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(store.Close)
+	ctx := context.Background()
+
+	// Issue via original manager, then simulate restart with a fresh manager over the same store.
+	origMgr := session.NewManager(cfg, store, clock.Now)
+	sess, _, err := origMgr.Issue(ctx, "carol", "ctrl", "tenant-b")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	freshMgr := session.NewManager(cfg, store, clock.Now)
+	got, err := freshMgr.GetByID(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetByID on store rehydration path: %v", err)
+	}
+	if got.ID != sess.ID {
+		t.Errorf("GetByID: ID = %q, want %q", got.ID, sess.ID)
+	}
+	if got.TenantID != "tenant-b" {
+		t.Errorf("GetByID: TenantID = %q, want %q", got.TenantID, "tenant-b")
+	}
+}
+
+// TestManagerGetByID_CrossChannelReturnsNotFound verifies that GetByID returns
+// ErrSessionNotFound when the session belongs to a different channel — consistent
+// with the non-disclosure posture of Revoke (Issue #3310).
+func TestManagerGetByID_CrossChannelReturnsNotFound(t *testing.T) {
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store := session.NewMemStore(cliCfg, time.Now)
+	t.Cleanup(store.Close)
+	ctx := context.Background()
+
+	cliMgr := session.NewManager(cliCfg, store, time.Now)
+	webMgr := session.NewManager(webCfg, store, time.Now)
+
+	cliSess, _, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	if err != nil {
+		t.Fatalf("Issue CLI session: %v", err)
+	}
+
+	// Web manager must not be able to see the CLI session.
+	_, err = webMgr.GetByID(ctx, cliSess.ID)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("cross-channel GetByID: got %v, want ErrSessionNotFound", err)
+	}
+}

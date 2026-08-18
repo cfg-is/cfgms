@@ -346,16 +346,19 @@ func TestHandleSessionRevoke_NotFound(t *testing.T) {
 // TestHandleSessionRevoke_AnyPrincipalCanReachHandler verifies that the in-handler
 // IsAdmin check has been removed (Issue #2780): authorization is now enforced at
 // the router level via requirePermission("session", "revoke"). A principal with the
-// session:revoke permission that reaches the handler will be able to revoke sessions.
+// session:revoke permission that reaches the handler will be able to revoke sessions
+// in their own tenant.
 func TestHandleSessionRevoke_AnyPrincipalCanReachHandler(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithSession(t)
 
-	sess, _, err := mgr.Issue(context.Background(), "alice", "ctrl", "")
+	// Issue the session in the same tenant as the non-admin principal ("default").
+	sess, _, err := mgr.Issue(context.Background(), "alice", "ctrl", "default")
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	// Non-admin principal can now reach the revoke handler (router enforces permission).
+	// Non-admin principal (TenantID="default") can reach the revoke handler and revoke
+	// a session in their own tenant.
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sess.ID, nil)
 	req = injectNonAdminPrincipal(req)
 	req = injectSessionMuxVars(req, map[string]string{"id": sess.ID})
@@ -365,7 +368,116 @@ func TestHandleSessionRevoke_AnyPrincipalCanReachHandler(t *testing.T) {
 
 	// Handler succeeds — revocation is a safety action, not blocked by IsAdmin.
 	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200 (handler reached, revoke succeeded)", rec.Code)
+		t.Errorf("status = %d, want 200 (handler reached, in-tenant revoke succeeded)", rec.Code)
+	}
+}
+
+// TestHandleSessionRevoke_CrossTenantDenied is a REQUIRED TEST (Issue #3429):
+// a tenant-scoped principal in tenant-a attempts to revoke a live session belonging
+// to tenant-b. The request must return the same not-found response as a genuinely
+// absent session, and the tenant-b session must remain live and usable afterwards.
+func TestHandleSessionRevoke_CrossTenantDenied(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	// Issue a session in tenant-b.
+	_, tokenB, err := mgr.Issue(ctx, "bob", "ctrl-b", "tenant-b")
+	if err != nil {
+		t.Fatalf("Issue tenant-b session: %v", err)
+	}
+	// Validate so we have the session ID.
+	sessB, err := mgr.Validate(ctx, tokenB)
+	if err != nil {
+		t.Fatalf("Validate tenant-b session: %v", err)
+	}
+
+	// Tenant-a scoped admin attempts to revoke the tenant-b session.
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sessB.ID, nil)
+	revokeReq = injectAdminPrincipalWithTenant(revokeReq, "alice-admin", "tenant-a")
+	revokeReq = injectSessionMuxVars(revokeReq, map[string]string{"id": sessB.ID})
+	revokeRec := httptest.NewRecorder()
+	srv.handleSessionRevoke(revokeRec, revokeReq)
+
+	// Must return 404 — identical to a genuinely absent session, disclosing nothing.
+	if revokeRec.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant revoke: status = %d, want 404", revokeRec.Code)
+	}
+	var body struct {
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(revokeRec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Error == nil || body.Error.Code != "SESSION_NOT_FOUND" {
+		t.Errorf("cross-tenant revoke: error code = %v, want SESSION_NOT_FOUND", body.Error)
+	}
+
+	// The tenant-b session must still be valid — the cross-tenant attempt must not
+	// have revoked it.
+	if _, err := mgr.Validate(ctx, tokenB); err != nil {
+		t.Errorf("tenant-b session invalidated by cross-tenant revoke attempt: %v", err)
+	}
+}
+
+// TestHandleSessionRevoke_InTenantSucceeds verifies that a scoped admin can revoke
+// a session in their own tenant (positive path for tenant-scoped revoke).
+func TestHandleSessionRevoke_InTenantSucceeds(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, tokenA, err := mgr.Issue(ctx, "alice", "ctrl-a", "tenant-a")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	sessA, err := mgr.Validate(ctx, tokenA)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sessA.ID, nil)
+	revokeReq = injectAdminPrincipalWithTenant(revokeReq, "alice-admin", "tenant-a")
+	revokeReq = injectSessionMuxVars(revokeReq, map[string]string{"id": sessA.ID})
+	revokeRec := httptest.NewRecorder()
+	srv.handleSessionRevoke(revokeRec, revokeReq)
+
+	if revokeRec.Code != http.StatusOK {
+		t.Errorf("in-tenant revoke: status = %d, want 200; body: %s", revokeRec.Code, revokeRec.Body.String())
+	}
+	// Token must now be invalid.
+	if _, err := mgr.Validate(ctx, tokenA); err == nil {
+		t.Error("in-tenant revoke: token still validates after revoke")
+	}
+}
+
+// TestHandleSessionRevoke_UnscopedCanRevokeCrossTenant verifies that an unscoped
+// (global) admin retains cross-tenant reach — matching the rule handleSessionList applies.
+func TestHandleSessionRevoke_UnscopedCanRevokeCrossTenant(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithSession(t)
+	ctx := context.Background()
+
+	_, tokenB, err := mgr.Issue(ctx, "bob", "ctrl-b", "tenant-b")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	sessB, err := mgr.Validate(ctx, tokenB)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	// Unscoped admin (TenantID == "") — cross-tenant reach allowed.
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/"+sessB.ID, nil)
+	revokeReq = injectAdminPrincipal(revokeReq, "global-admin")
+	revokeReq = injectSessionMuxVars(revokeReq, map[string]string{"id": sessB.ID})
+	revokeRec := httptest.NewRecorder()
+	srv.handleSessionRevoke(revokeRec, revokeReq)
+
+	if revokeRec.Code != http.StatusOK {
+		t.Errorf("unscoped cross-tenant revoke: status = %d, want 200; body: %s", revokeRec.Code, revokeRec.Body.String())
+	}
+	if _, err := mgr.Validate(ctx, tokenB); err == nil {
+		t.Error("unscoped cross-tenant revoke: token still validates after revoke")
 	}
 }
 
