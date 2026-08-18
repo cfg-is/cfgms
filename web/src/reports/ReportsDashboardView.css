@@ -275,6 +275,47 @@
   margin-top: 5px;
 }
 
+/* ── Tab bar (Story #3271) ────────────────────────────────────────────── */
+
+.rdb-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+
+.rdb-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 7px var(--space-3) 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  margin-bottom: -1px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.rdb-tab:hover {
+  color: var(--text-primary);
+}
+
+.rdb-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ── Template table cells ─────────────────────────────────────────────── */
+
+.c-name { width: 220px; }
+.c-type { width: 110px; }
+.c-desc { min-width: 0; }
+
 /* ── Error retry button ───────────────────────────────────────────────── */
 
 .rdb-btn {
