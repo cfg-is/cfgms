@@ -932,6 +932,14 @@ func TestManager_RecordConfigSourceEvent_SanitizesTenantIDInLog(t *testing.T) {
 		assert.NotContains(t, tenantID, "\r", "logged tenant_id must not contain raw carriage-return")
 		assert.Equal(t, "tenant_123_injected", tenantID,
 			"newline and CR must be replaced with underscore before logging")
+
+		// The audit-store error text can carry caller-tainted input back out, so a
+		// bare `"error", err` beside a sanitized ID is still a go/log-injection
+		// finding (CWE-117). It must be sanitized as a string.
+		logErr, ok := rec.attrs["error"].(string)
+		require.True(t, ok, "log record must include the audit-store error as a sanitized string, not a bare error value")
+		assert.Equal(t, logging.SanitizeLogValue("audit manager is stopped"), logErr,
+			"error must be sanitized via logging.SanitizeLogValue before logging")
 	})
 
 	t.Run("clean value passes through unchanged", func(t *testing.T) {
@@ -946,6 +954,44 @@ func TestManager_RecordConfigSourceEvent_SanitizesTenantIDInLog(t *testing.T) {
 		require.True(t, ok, "tenant_id must be a string in the log entry")
 		assert.Equal(t, "clean-tenant-456", tenantID, "clean tenant_id must pass through unchanged")
 	})
+}
+
+// TestManager_RecordTenantLifecycleEvent_SanitizesLogFields covers the log-injection
+// sanitization in recordTenantLifecycleEvent's slog.Warn error path — both the
+// tenantID and the audit-store error must go through logging.SanitizeLogValue
+// before reaching slog (CWE-117), matching the pattern already used at
+// manager.go:148-152. A bare `"error", err` next to a sanitized ID is still a
+// go/log-injection finding because the error text can carry caller-tainted input.
+func TestManager_RecordTenantLifecycleEvent_SanitizesLogFields(t *testing.T) {
+	const warnMsg = "tenant: failed to record tenant lifecycle audit event"
+
+	// A stopped audit manager makes RecordEvent fail synchronously, driving
+	// recordTenantLifecycleEvent into its error path.
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	require.NoError(t, auditMgr.Stop(context.Background()))
+
+	manager := newTestTenantManager(t)
+	manager.WithAuditManager(auditMgr)
+	ctx := context.Background()
+
+	capture := captureSlog(t)
+
+	manager.recordTenantLifecycleEvent(ctx, "tenant\n123\rinjected", "Some Tenant", "tenant_suspended")
+
+	rec := capture.find(warnMsg)
+	require.NotNil(t, rec, "slog.Warn must fire when the audit record cannot be persisted")
+
+	tenantID, ok := rec.attrs["tenant_id"].(string)
+	require.True(t, ok, "tenant_id must be a string in the log entry")
+	assert.NotContains(t, tenantID, "\n", "logged tenant_id must not contain raw newline")
+	assert.NotContains(t, tenantID, "\r", "logged tenant_id must not contain raw carriage-return")
+	assert.Equal(t, "tenant_123_injected", tenantID,
+		"newline and CR must be replaced with underscore before logging")
+
+	logErr, ok := rec.attrs["error"].(string)
+	require.True(t, ok, "log record must include the audit-store error as a sanitized string, not a bare error value")
+	assert.Equal(t, logging.SanitizeLogValue("audit manager is stopped"), logErr,
+		"error must be sanitized via logging.SanitizeLogValue before logging")
 }
 
 // --- config_source_credential tenant-ownership coverage ---

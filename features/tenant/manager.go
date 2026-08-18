@@ -468,12 +468,10 @@ func (m *Manager) recordTenantLifecycleEvent(ctx context.Context, tenantID, tena
 		Detail("actor", actor)
 
 	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
-		sanitized := strings.ReplaceAll(tenantID, "\n", "_")
-		sanitized = strings.ReplaceAll(sanitized, "\r", "_")
 		slog.Warn("tenant: failed to record tenant lifecycle audit event",
 			"action", action,
-			"tenant_id", sanitized,
-			"error", err,
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 }
@@ -681,12 +679,10 @@ func (m *Manager) recordConfigSourceEvent(ctx context.Context, tenantID, rawURL,
 		Detail("actor", actor)
 
 	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
-		tenantID = strings.ReplaceAll(tenantID, "\n", "_")
-		tenantID = strings.ReplaceAll(tenantID, "\r", "_")
 		slog.Warn("tenant: failed to record config source audit event",
 			"action", action,
-			"tenant_id", tenantID,
-			"error", err,
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 }
