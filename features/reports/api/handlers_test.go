@@ -5,9 +5,12 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dnadrift "github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // reportsStack is the reports stack the controller wires in production
@@ -35,11 +39,13 @@ import (
 // real CFGMS components only: DNA fleet storage on a per-test SQLite database,
 // the real drift detector, data provider, template processor, exporter, report
 // cache and report engine, plus the real steward registry that is the
-// device→tenant authority. Nothing is substituted.
+// device→tenant authority. alertStore is a real flatfile-backed AlertStore.
+// Nothing is substituted.
 type reportsStack struct {
-	handler  *Handler
-	registry *service.ControllerService
-	storage  *fleetstorage.Manager
+	handler    *Handler
+	registry   *service.ControllerService
+	storage    *fleetstorage.Manager
+	alertStore business.AlertStore
 }
 
 func newReportsStack(t *testing.T) *reportsStack {
@@ -48,12 +54,60 @@ func newReportsStack(t *testing.T) *reportsStack {
 
 	store := newDNAStorage(t, logger)
 	registry := service.NewControllerService(logger)
+	alertStore := newTestAlertStore(t)
 
 	return &reportsStack{
-		handler:  New(newEngine(t, store, logger), exporters.New(logger), registry, logger),
-		registry: registry,
-		storage:  store,
+		handler:    New(newEngine(t, store, logger), exporters.New(logger), registry, alertStore, logger),
+		registry:   registry,
+		storage:    store,
+		alertStore: alertStore,
 	}
+}
+
+// makeDNAWithFragments builds a commonpb.DNA whose Fragments slice is populated
+// from the given fragment-ID → state map. Each fragment's canonical_bytes is the
+// state text and its fragment_hash is the SHA-256 of those bytes, matching the
+// ADR-017 contract the drift detector diffs. Fragments are emitted in sorted ID
+// order so the stored record is deterministic.
+func makeDNAWithFragments(deviceID string, state map[string]string) *commonpb.DNA {
+	ids := make([]string, 0, len(state))
+	for id := range state {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	fragments := make([]*commonpb.Fragment, 0, len(ids))
+	for _, id := range ids {
+		canonical := []byte(state[id])
+		sum := sha256.Sum256(canonical)
+		fragments = append(fragments, &commonpb.Fragment{
+			FragmentId:     id,
+			CanonicalBytes: canonical,
+			FragmentHash:   hex.EncodeToString(sum[:]),
+		})
+	}
+	return &commonpb.DNA{
+		Id:          deviceID,
+		Fragments:   fragments,
+		LastUpdated: timestamppb.New(time.Now()),
+	}
+}
+
+// addDeviceWithDrift registers a device and stores two DNA snapshots with
+// differing fragment content so the drift detector can produce at least one
+// event. attrs1 and attrs2 are fragment-ID → canonical-state maps; any key
+// whose value differs between the two maps will register as a drift event.
+func (s *reportsStack) addDeviceWithDrift(t *testing.T, deviceID, tenantID string, attrs1, attrs2 map[string]string) {
+	t.Helper()
+	require.NoError(t, s.registry.RegisterSteward(deviceID, tenantID, "127.0.0.1:8443", "online"))
+
+	dna1 := makeDNAWithFragments(deviceID, attrs1)
+	require.NoError(t, s.storage.Store(context.Background(), deviceID, dna1,
+		&fleetstorage.StoreOptions{TenantID: tenantID, Status: "online"}))
+
+	dna2 := makeDNAWithFragments(deviceID, attrs2)
+	require.NoError(t, s.storage.Store(context.Background(), deviceID, dna2,
+		&fleetstorage.StoreOptions{TenantID: tenantID, Status: "online"}))
 }
 
 // newDNAStorage creates the real fleet DNA store on a temp SQLite database.
@@ -460,7 +514,7 @@ func TestDeviceScope_CrossTenantRejected(t *testing.T) {
 func TestDeviceScope_FailsClosedWithoutResolver(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	store := newDNAStorage(t, logger)
-	unresolvable := New(newEngine(t, store, logger), exporters.New(logger), nil, logger)
+	unresolvable := New(newEngine(t, store, logger), exporters.New(logger), nil, nil, logger)
 
 	t.Run("scoped caller with a device selector is refused", func(t *testing.T) {
 		rec := httptest.NewRecorder()
@@ -633,4 +687,338 @@ func TestRegisterRoutes(t *testing.T) {
 		router.ServeHTTP(rec, request("POST", "/api/v1/reports/generate", "tenant-a", body))
 		require.Equal(t, http.StatusOK, rec.Code)
 	})
+}
+
+// TestDashboardAlerts_SeverityFilter verifies that getDashboardAlerts uses the
+// severity query parameter to filter alerts, and that the default (no param) is
+// warning+critical — NOT critical-only.
+//
+// [REQUIRED TEST] AC: default request (no severity param) includes a
+// warning-severity fixture alert, not just critical.
+func TestDashboardAlerts_SeverityFilter(t *testing.T) {
+	stack := newReportsStack(t)
+
+	// Device A: network-attribute change → SeverityWarning (hostname is a network keyword).
+	stack.addDeviceWithDrift(t, "warn-device", "tenant-filter",
+		map[string]string{"host:hostname": "before"},
+		map[string]string{"host:hostname": "after"},
+	)
+
+	// Device B: security-attribute change → SeverityCritical (auth is a security keyword).
+	stack.addDeviceWithDrift(t, "crit-device", "tenant-filter",
+		map[string]string{"auth:enabled": "true"},
+		map[string]string{"auth:enabled": "false"},
+	)
+
+	// Both devices must be registered in the resolver so the tenant-scoped caller
+	// can select them via the device_id query parameter.
+	makeReq := func(path string) *http.Request {
+		// Include explicit device IDs: device discovery via tenant scanning is not
+		// yet supported (GetDNAData with no DeviceIDs returns nothing by design);
+		// the device_id params are the real-world path for a dashboard caller.
+		return request("GET", path+"&device_id=warn-device&device_id=crit-device", "tenant-filter", nil)
+	}
+
+	alertSeverities := func(t *testing.T, rec *httptest.ResponseRecorder) []string {
+		t.Helper()
+		var body struct {
+			Alerts []map[string]interface{} `json:"alerts"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		var severities []string
+		for _, a := range body.Alerts {
+			if s, ok := a["severity"].(string); ok {
+				severities = append(severities, s)
+			}
+		}
+		return severities
+	}
+
+	t.Run("default (no param) returns warning and critical", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, makeReq("/reports/dashboard/alerts?"))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		severities := alertSeverities(t, rec)
+		assert.Contains(t, severities, "warning",
+			"default severity must include warning — not critical-only")
+		assert.Contains(t, severities, "critical",
+			"default severity must include critical")
+	})
+
+	t.Run("severity=critical returns only critical alerts", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, makeReq("/reports/dashboard/alerts?severity=critical"))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		severities := alertSeverities(t, rec)
+		assert.Contains(t, severities, "critical")
+		assert.NotContains(t, severities, "warning")
+	})
+
+	t.Run("severity=warning returns only warning alerts", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, makeReq("/reports/dashboard/alerts?severity=warning"))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		severities := alertSeverities(t, rec)
+		assert.Contains(t, severities, "warning")
+		assert.NotContains(t, severities, "critical")
+	})
+
+	t.Run("severity=warning,critical returns both", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, makeReq("/reports/dashboard/alerts?severity=warning,critical"))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		severities := alertSeverities(t, rec)
+		assert.Contains(t, severities, "warning")
+		assert.Contains(t, severities, "critical")
+	})
+}
+
+// TestDashboardAlerts_AckSilence verifies that the dashboard-alerts handler
+// annotates each alert with its AlertStore state and excludes actively silenced
+// alerts.
+//
+// [REQUIRED TEST] AC: a silenced alert is absent from the response until
+// SilencedUntil passes; an acknowledged-but-not-silenced alert remains present
+// with acknowledged: true.
+func TestDashboardAlerts_AckSilence(t *testing.T) {
+	stack := newReportsStack(t)
+
+	// Use a warning drift event (hostname change) so severity=warning filter works.
+	stack.addDeviceWithDrift(t, "ack-device", "tenant-acks",
+		map[string]string{"host:hostname": "old"},
+		map[string]string{"host:hostname": "new"},
+	)
+
+	// Include the device ID explicitly: device discovery via tenant scanning is not
+	// yet supported (GetDNAData with no DeviceIDs returns nothing by design).
+	makeReq := func(params string) *http.Request {
+		return request("GET", "/reports/dashboard/alerts?device_id=ack-device&"+params, "tenant-acks", nil)
+	}
+
+	// Fetch alerts once to get the stable alertID for our fixture device.
+	rec := httptest.NewRecorder()
+	stack.handler.getDashboardAlerts(rec, makeReq("severity=warning"))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var initial struct {
+		Alerts []map[string]interface{} `json:"alerts"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &initial))
+	require.NotEmpty(t, initial.Alerts, "must have at least one warning alert to test ack/silence")
+
+	// Pick the first alert and derive its stable alertID.
+	firstAlert := initial.Alerts[0]
+	deviceID, _ := firstAlert["device_id"].(string)
+	description, _ := firstAlert["description"].(string)
+	alertID := deriveAlertID(deviceID, description)
+
+	ctx := context.Background()
+	tenantID := "tenant-acks"
+
+	t.Run("acknowledged alert remains present with acknowledged=true", func(t *testing.T) {
+		require.NoError(t, stack.alertStore.AcknowledgeAlert(ctx, tenantID, alertID, "test-principal", time.Now()))
+
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, makeReq("severity=warning"))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var body struct {
+			Alerts []map[string]interface{} `json:"alerts"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.NotEmpty(t, body.Alerts, "acknowledged alert must remain in the response")
+
+		var found bool
+		for _, a := range body.Alerts {
+			if a["device_id"] == deviceID {
+				found = true
+				assert.Equal(t, true, a["acknowledged"],
+					"acknowledged alert must carry acknowledged=true")
+				assert.Equal(t, false, a["silenced"],
+					"non-silenced alert must carry silenced=false")
+			}
+		}
+		assert.True(t, found, "the acknowledged device's alert must appear in the response")
+	})
+
+	t.Run("actively silenced alert is excluded from the response", func(t *testing.T) {
+		// Silence until future time → should be excluded.
+		silenceUntil := time.Now().Add(24 * time.Hour)
+		require.NoError(t, stack.alertStore.SilenceAlert(ctx, tenantID, alertID, "test-principal", silenceUntil))
+
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, makeReq("severity=warning"))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var body struct {
+			Alerts []map[string]interface{} `json:"alerts"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+
+		for _, a := range body.Alerts {
+			assert.NotEqual(t, deviceID, a["device_id"],
+				"actively silenced alert must be excluded from the response")
+		}
+	})
+
+	t.Run("alert with expired silence window is included", func(t *testing.T) {
+		// Use a different device so we're not affected by the previous sub-test's silence.
+		stack.addDeviceWithDrift(t, "expired-device", "tenant-acks",
+			map[string]string{"host:hostname": "exp-old"},
+			map[string]string{"host:hostname": "exp-new"},
+		)
+
+		// Request both devices; expired-device is now registered in the resolver.
+		makeExpiredReq := func(params string) *http.Request {
+			return request("GET",
+				"/reports/dashboard/alerts?device_id=ack-device&device_id=expired-device&"+params,
+				"tenant-acks", nil)
+		}
+
+		// Fetch to get the alertID for expired-device.
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, makeExpiredReq("severity=warning"))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var body1 struct {
+			Alerts []map[string]interface{} `json:"alerts"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body1))
+
+		var expiredDeviceAlertID string
+		for _, a := range body1.Alerts {
+			if a["device_id"] == "expired-device" {
+				d, _ := a["description"].(string)
+				expiredDeviceAlertID = deriveAlertID("expired-device", d)
+				break
+			}
+		}
+		require.NotEmpty(t, expiredDeviceAlertID, "expired-device must appear in the alert list")
+
+		// Set a silence window that has already expired.
+		pastTime := time.Now().Add(-1 * time.Hour)
+		require.NoError(t, stack.alertStore.SilenceAlert(ctx, tenantID, expiredDeviceAlertID, "test-principal", pastTime))
+
+		// The expired-silence alert must be present.
+		rec2 := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec2, makeExpiredReq("severity=warning"))
+		require.Equal(t, http.StatusOK, rec2.Code)
+
+		var body2 struct {
+			Alerts []map[string]interface{} `json:"alerts"`
+		}
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &body2))
+
+		var found bool
+		for _, a := range body2.Alerts {
+			if a["device_id"] == "expired-device" {
+				found = true
+			}
+		}
+		assert.True(t, found, "alert with an expired silence window must appear in the response")
+	})
+}
+
+// TestDashboardAlerts_AlertStateUnavailable verifies the failure path of the
+// AlertStore lookup in getDashboardAlerts: when GetAlertState returns an error
+// the handler must fail closed with 503 rather than serve alerts whose
+// acknowledgement and silence state is unknown (an actively silenced alert would
+// otherwise reappear, and an operator would see it as un-acknowledged).
+//
+// The failure is injected at the filesystem, not by substituting the store: the
+// real flat-file AlertStore is pointed at a corrupt alert_states.json, so the
+// production parser produces the error.
+func TestDashboardAlerts_AlertStateUnavailable(t *testing.T) {
+	logger := logging.NewNoopLogger()
+	store := newDNAStorage(t, logger)
+	registry := service.NewControllerService(logger)
+	alertStore := newUnreadableTestAlertStore(t)
+
+	stack := &reportsStack{
+		handler:    New(newEngine(t, store, logger), exporters.New(logger), registry, alertStore, logger),
+		registry:   registry,
+		storage:    store,
+		alertStore: alertStore,
+	}
+
+	// Seed a real warning-severity drift event so the handler reaches the
+	// AlertStore lookup; with no alert rows the branch is never entered.
+	stack.addDeviceWithDrift(t, "unavailable-device", "tenant-unavailable",
+		map[string]string{"host:hostname": "old"},
+		map[string]string{"host:hostname": "new"},
+	)
+
+	// Confirm the injected fault is real at the store boundary, so a later change
+	// that makes the store tolerate a corrupt file turns this test red instead of
+	// silently leaving the handler branch uncovered.
+	_, storeErr := alertStore.GetAlertState(context.Background(), "tenant-unavailable", "any-alert")
+	require.Error(t, storeErr, "corrupt alert state file must make GetAlertState fail")
+
+	rec := httptest.NewRecorder()
+	stack.handler.getDashboardAlerts(rec,
+		request("GET", "/reports/dashboard/alerts?device_id=unavailable-device", "tenant-unavailable", nil))
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"a failing AlertStore lookup must fail the request closed with 503")
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "Alert state unavailable", body["error"])
+	assert.NotContains(t, body, "details",
+		"the store error must not be echoed to the client")
+	assert.NotContains(t, rec.Body.String(), "alert_states.json",
+		"internal storage paths must not leak in the error response")
+	assert.NotContains(t, body, "alerts",
+		"no alert list may be served when ack/silence state is unknown")
+}
+
+// TestDashboardAlerts_NilAlertStore verifies that getDashboardAlerts degrades
+// gracefully when no AlertStore is wired: alerts are returned without ack/silence
+// data and the handler does not return 503 for the whole response.
+func TestDashboardAlerts_NilAlertStore(t *testing.T) {
+	logger := logging.NewNoopLogger()
+	store := newDNAStorage(t, logger)
+	registry := service.NewControllerService(logger)
+	// Explicitly pass nil alertStore — degrade path.
+	stack := &reportsStack{
+		handler:  New(newEngine(t, store, logger), exporters.New(logger), registry, nil, logger),
+		registry: registry,
+		storage:  store,
+	}
+
+	// Seed a real warning-severity drift event (hostname is a network keyword) so
+	// the degrade path actually has an alert to return; asserting over an empty
+	// list would be vacuous.
+	stack.addDeviceWithDrift(t, "nil-store-device", "tenant-a",
+		map[string]string{"host:hostname": "old"},
+		map[string]string{"host:hostname": "new"},
+	)
+
+	rec := httptest.NewRecorder()
+	stack.handler.getDashboardAlerts(rec,
+		request("GET", "/reports/dashboard/alerts?device_id=nil-store-device", "tenant-a", nil))
+	require.Equal(t, http.StatusOK, rec.Code,
+		"nil alertStore must not cause a 503 for the whole dashboard alerts response")
+
+	var body struct {
+		Alerts      []map[string]interface{} `json:"alerts"`
+		TotalAlerts int                      `json:"total_alerts"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Alerts,
+		"drift for the seeded device must still be reported when no AlertStore is wired")
+	assert.Equal(t, len(body.Alerts), body.TotalAlerts,
+		"total_alerts must match the returned alert list")
+
+	for _, a := range body.Alerts {
+		assert.Equal(t, "nil-store-device", a["device_id"])
+		assert.Equal(t, false, a["acknowledged"],
+			"acknowledged must default to false when no AlertStore is wired")
+		assert.Equal(t, false, a["silenced"],
+			"silenced must default to false when no AlertStore is wired")
+	}
 }

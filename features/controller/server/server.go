@@ -1420,11 +1420,18 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).
 	srv.dnaStorageManager = dnaStorageManager
-	reportsHandler, reportsDataProvider := initializeReportsHandler(dnaStorageManager, controllerService, logger)
+	reportsHandler, reportsDataProvider := initializeReportsHandler(dnaStorageManager, controllerService, storageManager.GetAlertStore(), logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
 		httpServer.SetDataProvider(reportsDataProvider)
 		logger.Info("Reports engine wired to HTTP API server")
+	}
+
+	// Issue #3266: Wire alert store into controller API server for the
+	// acknowledge/silence endpoints added in S5.
+	if as := storageManager.GetAlertStore(); as != nil {
+		httpServer.SetAlertStore(as)
+		logger.Info("Alert store wired to HTTP API server (Issue #3266)")
 	}
 
 	// Issue #414: Wire workflow engine and trigger manager into API server.
@@ -1674,9 +1681,11 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 // disabled) — the manager's lifecycle is owned by the caller. (Issue #1572)
 // controllerService supplies device→tenant ownership so tenant-scoped callers
 // cannot select another tenant's devices.
+// alertStore supplies alert acknowledgement and silence state for the dashboard
+// alerts feed (Issue #3267); nil disables ack/silence annotation gracefully.
 // The DataProvider is returned alongside the Handler so callers can wire it into
 // the compliance endpoints for drift-based compliance derivation (Issue #3265).
-func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerService *service.ControllerService, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
+func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerService *service.ControllerService, alertStore business.AlertStore, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
 	if dnaStorageManager == nil {
 		return nil, nil
 	}
@@ -1698,7 +1707,7 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerS
 	logger.Info("Reports engine initialized")
 	// The steward registry is the device→tenant authority for the reports
 	// endpoints; a report device ID is a steward ID.
-	return reportapi.New(reportEngine, exporter, controllerService, logger), dataProvider
+	return reportapi.New(reportEngine, exporter, controllerService, alertStore, logger), dataProvider
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.

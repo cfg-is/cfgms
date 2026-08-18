@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/reports/interfaces"
@@ -860,26 +861,29 @@ func (p *Processor) generateDriftTimelineChart(events []drift.DriftEvent) *inter
 }
 
 func (p *Processor) filterEventsBySeverity(events []drift.DriftEvent, severityFilter string) []drift.DriftEvent {
-	var filtered []drift.DriftEvent
-	var targetSeverity drift.DriftSeverity
-
-	switch severityFilter {
-	case "critical":
-		targetSeverity = drift.SeverityCritical
-	case "warning":
-		targetSeverity = drift.SeverityWarning
-	case "info":
-		targetSeverity = drift.SeverityInfo
-	default:
-		return events // No filtering
+	// Support comma-separated severity filters, e.g. "warning,critical".
+	parts := strings.Split(severityFilter, ",")
+	allowed := make(map[drift.DriftSeverity]bool, len(parts))
+	for _, part := range parts {
+		switch strings.TrimSpace(part) {
+		case "critical":
+			allowed[drift.SeverityCritical] = true
+		case "warning":
+			allowed[drift.SeverityWarning] = true
+		case "info":
+			allowed[drift.SeverityInfo] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return events // unrecognized filter — return all
 	}
 
+	var filtered []drift.DriftEvent
 	for _, event := range events {
-		if event.Severity == targetSeverity {
+		if allowed[event.Severity] {
 			filtered = append(filtered, event)
 		}
 	}
-
 	return filtered
 }
 

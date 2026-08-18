@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DeviceTenantResolver resolves the tenant that owns a device. A report device
@@ -46,6 +49,7 @@ type Handler struct {
 	engine        interfaces.ReportEngine
 	exporter      interfaces.Exporter
 	devices       DeviceTenantResolver
+	alertStore    business.AlertStore
 	logger        logging.Logger
 	requirePermFn func(resourceType, action string) func(http.Handler) http.Handler
 }
@@ -53,12 +57,16 @@ type Handler struct {
 // New creates a new reports API handler. devices resolves device ownership for
 // the tenant boundary enforced on every device-selecting endpoint; when it is
 // nil, tenant-scoped callers cannot select devices at all (fail closed).
-func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, devices DeviceTenantResolver, logger logging.Logger) *Handler {
+// alertStore supplies alert acknowledgement and silence state for the dashboard
+// alerts feed; when nil, ack/silence annotation is skipped and alerts render
+// without state data.
+func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, devices DeviceTenantResolver, alertStore business.AlertStore, logger logging.Logger) *Handler {
 	return &Handler{
-		engine:   engine,
-		exporter: exporter,
-		devices:  devices,
-		logger:   logger,
+		engine:     engine,
+		exporter:   exporter,
+		devices:    devices,
+		alertStore: alertStore,
+		logger:     logger,
 	}
 }
 
@@ -66,6 +74,15 @@ func New(engine interfaces.ReportEngine, exporter interfaces.Exporter, devices D
 // RegisterRoutes can gate each route without importing the concrete Server type (Issue #3282).
 func (h *Handler) SetRequirePermFn(fn func(resourceType, action string) func(http.Handler) http.Handler) {
 	h.requirePermFn = fn
+}
+
+// deriveAlertID returns a stable opaque identifier for (deviceID, description)
+// so the same logical alert maps to the same key in AlertStore across report
+// generations. It is a full hex-encoded SHA-256, matching the derivation
+// documented in docs/api/rest-api.md for the dashboard/alerts feed.
+func deriveAlertID(deviceID, description string) string {
+	h := sha256.Sum256([]byte(deviceID + "|" + description))
+	return hex.EncodeToString(h[:])
 }
 
 // RegisterRoutes registers the reports API routes on the provided subrouter.
@@ -323,6 +340,15 @@ func (h *Handler) getDashboardTrends(w http.ResponseWriter, r *http.Request) {
 }
 
 // getDashboardAlerts handles GET /api/v1/reports/dashboard/alerts
+//
+// Query parameters:
+//   - severity: comma-separated severity filter (critical, warning, info).
+//     Defaults to "warning,critical" when absent.
+//
+// Each alert row is annotated with acknowledged/silenced booleans sourced from
+// AlertStore. Alerts whose silence window has not yet expired are excluded.
+// When AlertStore is nil, annotation is skipped and all matching alerts are
+// returned without ack/silence data.
 func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 	if h.engine == nil {
 		h.writeError(w, http.StatusServiceUnavailable, "Report engine not available", nil)
@@ -333,6 +359,13 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "Invalid time range", err)
 		return
 	}
+	// Drift events are computed on-demand and stamped with time.Now() at detection
+	// time, which is always slightly after parseTimeRange's end. Add a 1-minute
+	// buffer so the provider's [start,end] filter never excludes events produced
+	// during this request.
+	if r.URL.Query().Get("end") == "" {
+		timeRange.End = timeRange.End.Add(time.Minute)
+	}
 
 	deviceIDs, err := h.scopedDeviceIDs(r)
 	if err != nil {
@@ -341,7 +374,12 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 	tenantIDs := h.parseTenantIDs(r)
 
-	// Generate drift analysis report filtered to critical/warning events
+	// severity query param; default to warning+critical for the alert center.
+	severity := r.URL.Query().Get("severity")
+	if severity == "" {
+		severity = "warning,critical"
+	}
+
 	req := interfaces.ReportRequest{
 		Type:      interfaces.ReportTypeDrift,
 		Template:  "drift-analysis",
@@ -350,7 +388,7 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 		TenantIDs: tenantIDs,
 		Format:    interfaces.FormatJSON,
 		Parameters: map[string]any{
-			"severity_filter": "critical", // Focus on critical events for alerts
+			"severity_filter": severity,
 		},
 	}
 
@@ -361,7 +399,22 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract alert information
+	// resolveAlertTenant returns the tenant ID to use for alert state lookup for
+	// a given deviceID. For a single scoped tenant, tenantIDs[0] is authoritative.
+	// For root/unscoped callers, we derive the tenant from the device resolver.
+	resolveAlertTenant := func(deviceID string) string {
+		if len(tenantIDs) == 1 {
+			return tenantIDs[0]
+		}
+		if h.devices != nil {
+			if t, known := h.devices.TenantForDevice(deviceID); known {
+				return t
+			}
+		}
+		return ""
+	}
+
+	now := time.Now()
 	alerts := make([]map[string]interface{}, 0)
 
 	for _, section := range report.Sections {
@@ -369,15 +422,43 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 			if tableData, ok := section.Content.(map[string]interface{}); ok {
 				if rows, ok := tableData["rows"].([][]interface{}); ok {
 					for _, row := range rows {
-						if len(row) >= 4 {
-							alert := map[string]interface{}{
-								"timestamp":   row[0],
-								"device_id":   row[1],
-								"severity":    row[2],
-								"description": row[3],
-							}
-							alerts = append(alerts, alert)
+						if len(row) < 4 {
+							continue
 						}
+						deviceID, _ := row[1].(string)
+						description, _ := row[3].(string)
+
+						alert := map[string]interface{}{
+							"timestamp":    row[0],
+							"device_id":    row[1],
+							"severity":     row[2],
+							"description":  row[3],
+							"acknowledged": false,
+							"silenced":     false,
+						}
+
+						if h.alertStore != nil {
+							tenantID := resolveAlertTenant(deviceID)
+							alertID := deriveAlertID(deviceID, description)
+							state, stateErr := h.alertStore.GetAlertState(r.Context(), tenantID, alertID)
+							if stateErr != nil {
+								h.logger.Error("failed to get alert state",
+									"error", logging.SanitizeLogValue(stateErr.Error()),
+									"alert_id", logging.SanitizeLogValue(alertID))
+								h.writeError(w, http.StatusServiceUnavailable, "Alert state unavailable", nil)
+								return
+							}
+							if state != nil {
+								activelySilenced := state.Silenced && state.SilencedUntil.After(now)
+								if activelySilenced {
+									continue // exclude actively silenced alerts
+								}
+								alert["acknowledged"] = state.Acknowledged
+								alert["silenced"] = false // silence window expired
+							}
+						}
+
+						alerts = append(alerts, alert)
 					}
 				}
 			}
