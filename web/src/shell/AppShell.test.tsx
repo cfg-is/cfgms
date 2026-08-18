@@ -56,7 +56,7 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
-  it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Audit, and Accounts as links', () => {
+  it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Reports, Audit, and Accounts as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
@@ -65,6 +65,7 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /scripts/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /registration/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /reports/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
@@ -78,6 +79,7 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /scripts/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /registration/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /reports/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /audit/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
