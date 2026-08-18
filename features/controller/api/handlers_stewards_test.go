@@ -597,6 +597,11 @@ func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
 		require.NoError(t, err)
 		frags = append(frags, frag)
 	}
+	if version := attrs["steward.version"]; version != "" {
+		frag, err := sdna.NewFragment("steward:meta", "test", sdna.MapState(map[string]interface{}{"steward.version": version}))
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
 	return &common.DNA{
 		Id:         "dna-" + attrs["hostname"],
 		Attributes: attrs,

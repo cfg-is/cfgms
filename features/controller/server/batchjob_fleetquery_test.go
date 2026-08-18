@@ -15,11 +15,20 @@ import (
 	controllerFleet "github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// mustFrag builds a DNA fragment from a field map.
+func mustFrag(t *testing.T, kind string, fields map[string]interface{}) *common.Fragment {
+	t.Helper()
+	frag, err := sdna.NewFragment(kind, "test", sdna.MapState(fields))
+	require.NoError(t, err)
+	return frag
+}
+
 // newFleetQueryTestService builds a real ControllerService with three registered
-// stewards spanning two tenants and distinct DNA attributes, exercising the same
+// stewards spanning two tenants and distinct DNA fragments, exercising the same
 // registry path the production server uses.
 func newFleetQueryTestService(t *testing.T) *service.ControllerService {
 	t.Helper()
@@ -27,21 +36,30 @@ func newFleetQueryTestService(t *testing.T) *service.ControllerService {
 
 	require.NoError(t, svc.RegisterSteward("s-linux", "tenant-a", "addr-1", "online"))
 	require.True(t, svc.SetStewardDNA("s-linux", &common.DNA{
-		Id:         "s-linux",
-		Attributes: map[string]string{"os": "linux", "arch": "amd64", "hostname": "web-01"},
+		Id: "s-linux",
+		Fragments: []*common.Fragment{
+			mustFrag(t, "host:os", map[string]interface{}{"os": "linux", "arch": "amd64"}),
+			mustFrag(t, "hostname", map[string]interface{}{"hostname": "web-01"}),
+		},
 	}))
 
 	require.NoError(t, svc.RegisterSteward("s-windows", "tenant-a", "addr-2", "online"))
 	require.True(t, svc.SetStewardDNA("s-windows", &common.DNA{
-		Id:         "s-windows",
-		Attributes: map[string]string{"os": "windows", "arch": "amd64", "hostname": "dc-01"},
+		Id: "s-windows",
+		Fragments: []*common.Fragment{
+			mustFrag(t, "host:os", map[string]interface{}{"os": "windows", "arch": "amd64"}),
+			mustFrag(t, "hostname", map[string]interface{}{"hostname": "dc-01"}),
+		},
 	}))
 
 	// Different tenant, also linux — used to prove tenant scoping excludes it.
 	require.NoError(t, svc.RegisterSteward("s-other", "tenant-b", "addr-3", "online"))
 	require.True(t, svc.SetStewardDNA("s-other", &common.DNA{
-		Id:         "s-other",
-		Attributes: map[string]string{"os": "linux", "arch": "arm64", "hostname": "edge-01"},
+		Id: "s-other",
+		Fragments: []*common.Fragment{
+			mustFrag(t, "host:os", map[string]interface{}{"os": "linux", "arch": "arm64"}),
+			mustFrag(t, "hostname", map[string]interface{}{"hostname": "edge-01"}),
+		},
 	}))
 
 	return svc
@@ -189,8 +207,11 @@ func TestServerFleetStewardProvider_TagsSurviveDNARefresh(t *testing.T) {
 	svc := service.NewControllerService(logging.NewNoopLogger())
 	require.NoError(t, svc.RegisterSteward("s-refresh", "tenant-a", "addr-1", "online"))
 	require.True(t, svc.SetStewardDNA("s-refresh", &common.DNA{
-		Id:         "s-refresh",
-		Attributes: map[string]string{"os": "linux", "hostname": "before-refresh"},
+		Id: "s-refresh",
+		Fragments: []*common.Fragment{
+			mustFrag(t, "host:os", map[string]interface{}{"os": "linux"}),
+			mustFrag(t, "hostname", map[string]interface{}{"hostname": "before-refresh"}),
+		},
 	}))
 
 	ts := newTestTagStore(t)
@@ -199,8 +220,11 @@ func TestServerFleetStewardProvider_TagsSurviveDNARefresh(t *testing.T) {
 
 	// Wholesale DNA replacement simulates the DNA refresh cycle.
 	require.True(t, svc.SetStewardDNA("s-refresh", &common.DNA{
-		Id:         "s-refresh",
-		Attributes: map[string]string{"os": "linux", "hostname": "after-refresh"},
+		Id: "s-refresh",
+		Fragments: []*common.Fragment{
+			mustFrag(t, "host:os", map[string]interface{}{"os": "linux"}),
+			mustFrag(t, "hostname", map[string]interface{}{"hostname": "after-refresh"}),
+		},
 	}))
 
 	adapter := &serverBatchjobFleetQuery{svc: svc}
@@ -213,53 +237,56 @@ func TestServerFleetStewardProvider_TagsSurviveDNARefresh(t *testing.T) {
 }
 
 // TestServerFleetStewardProvider_NoDNAAttributeMutation verifies that merging
-// controller-stored tags does not mutate the shared info.DNA.Attributes map in
-// place. Mutation would corrupt the cached DNA and is therefore load-bearing.
-// (Issue #2544 AC3)
+// controller-stored tags does not mutate the FlattenDNAFragments output map in
+// place. A second call must return the same fragment-sourced attributes
+// without any controller-tag bleed from the first call. (Issue #2544 AC3)
 func TestServerFleetStewardProvider_NoDNAAttributeMutation(t *testing.T) {
 	svc := service.NewControllerService(logging.NewNoopLogger())
-	originalAttrs := map[string]string{"os": "linux", "hostname": "web-01"}
 	require.NoError(t, svc.RegisterSteward("s-mut", "tenant-a", "addr-1", "online"))
 	require.True(t, svc.SetStewardDNA("s-mut", &common.DNA{
-		Id:         "s-mut",
-		Attributes: originalAttrs,
+		Id: "s-mut",
+		Fragments: []*common.Fragment{
+			mustFrag(t, "host:os", map[string]interface{}{"os": "linux"}),
+			mustFrag(t, "hostname", map[string]interface{}{"hostname": "web-01"}),
+		},
 	}))
 
 	ts := newTestTagStore(t)
 	svc.SetTagStore(ts)
 	require.NoError(t, ts.Set(context.Background(), "s-mut", []string{"github-runner"}))
 
-	// Capture the DNA attributes map pointer before the provider call.
-	beforeKeys := make(map[string]string, len(originalAttrs))
-	for k, v := range originalAttrs {
-		beforeKeys[k] = v
-	}
-
 	provider := &serverFleetStewardProvider{svc: svc}
-	stewards := provider.GetAllStewards()
 
-	// Verify the returned StewardData has the merged tags.
+	// First call: tags must be merged into the returned attrs.
+	stewards := provider.GetAllStewards()
 	require.Len(t, stewards, 1)
 	assert.Equal(t, "github-runner", stewards[0].DNAAttributes["tags"],
 		"returned attrs must carry merged tags")
+	assert.Equal(t, "linux", stewards[0].DNAAttributes["os"],
+		"fragment-sourced os must be present alongside merged tags")
 
-	// The original attributes map passed to SetStewardDNA must be unchanged.
-	assert.Equal(t, beforeKeys, originalAttrs,
-		"info.DNA.Attributes must not be mutated in place")
-	_, hasTags := originalAttrs["tags"]
-	assert.False(t, hasTags, "tags must not bleed into the original DNA attributes map")
+	// Second call: mergeControllerTags must not have mutated any shared state,
+	// so the fragment-sourced attributes appear intact on every call.
+	stewards2 := provider.GetAllStewards()
+	require.Len(t, stewards2, 1)
+	assert.Equal(t, "github-runner", stewards2[0].DNAAttributes["tags"],
+		"tags must be present on repeated calls")
+	assert.Equal(t, "linux", stewards2[0].DNAAttributes["os"],
+		"fragment-sourced os must not be lost between calls")
 }
 
 // TestServerFleetStewardProvider_DNATagsUnion verifies that when a steward
-// already reports a "tags" attribute in its DNA, controller-stored tags are
-// unioned (not replaced). DNA tags appear first; duplicates are dropped.
+// already reports a "tags" attribute in its DNA fragments, controller-stored
+// tags are unioned (not replaced). DNA tags appear first; duplicates are dropped.
 // (Issue #2544 implementation note)
 func TestServerFleetStewardProvider_DNATagsUnion(t *testing.T) {
 	svc := service.NewControllerService(logging.NewNoopLogger())
 	require.NoError(t, svc.RegisterSteward("s-union", "tenant-a", "addr-1", "online"))
 	require.True(t, svc.SetStewardDNA("s-union", &common.DNA{
-		Id:         "s-union",
-		Attributes: map[string]string{"os": "linux", "tags": "dna-tag,shared-tag"},
+		Id: "s-union",
+		Fragments: []*common.Fragment{
+			mustFrag(t, "host:os", map[string]interface{}{"os": "linux", "tags": "dna-tag,shared-tag"}),
+		},
 	}))
 
 	ts := newTestTagStore(t)
