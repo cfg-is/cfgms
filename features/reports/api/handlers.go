@@ -427,8 +427,10 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 						}
 						deviceID, _ := row[1].(string)
 						description, _ := row[3].(string)
+						alertID := deriveAlertID(deviceID, description)
 
 						alert := map[string]interface{}{
+							"id":           alertID,
 							"timestamp":    row[0],
 							"device_id":    row[1],
 							"severity":     row[2],
@@ -439,7 +441,6 @@ func (h *Handler) getDashboardAlerts(w http.ResponseWriter, r *http.Request) {
 
 						if h.alertStore != nil {
 							tenantID := resolveAlertTenant(deviceID)
-							alertID := deriveAlertID(deviceID, description)
 							state, stateErr := h.alertStore.GetAlertState(r.Context(), tenantID, alertID)
 							if stateErr != nil {
 								h.logger.Error("failed to get alert state",
