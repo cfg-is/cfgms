@@ -49,8 +49,8 @@
 # Generate the value ONCE for the whole cluster's lifetime:
 #   openssl rand -base64 32
 # and reuse it for every node's --init, including the Tier-1 controller's
-# cutover. Capture it in the lab secrets inventory immediately (same
-# discipline as CFGMS_SESSION_HMAC_KEY).
+# cutover. Store it in the operator's OS-native keychain immediately (same
+# discipline as CFGMS_SESSION_HMAC_KEY) — never in a file on disk.
 #
 # Flags:
 #   --hostname HOST          Node hostname for cert SAN and external_address (required)

@@ -102,11 +102,12 @@ cluster controller nodes:
 
 **Credentials:** the PostgreSQL role password and MinIO root access/secret
 key are generated once by `scripts/lab-datasvc-bootstrap.sh` on first run and
-printed to stdout a single time. They are stored in the operator
-workstation's OS-native keychain (Windows Credential Manager on `CFG-70-02`,
-target names `cfgms-lab-datasvc-postgres` / `cfgms-lab-datasvc-minio`) — never
-committed to a file in this repository. See the script's step 7 output for
-the exact storage commands on Linux/macOS.
+printed to stdout a single time. Store them in the operator workstation's
+OS-native keychain — never in a file on disk, and never committed to this
+repository. See the script's step 7 output for the exact storage commands per
+platform. Operator-specific details (host names, keychain target names,
+recovery order) are deployment state, not project documentation, and belong
+in the operator's own notes rather than here.
 
 ### Privileges
 
@@ -282,13 +283,17 @@ path (`storage.provider: database`), not `storage.cluster.*`/cluster mode
 
 The two secrets are never written to `controller.cfg` or any committed
 file — the config's generic `${VAR}` expansion (already supported by the
-config loader) resolves them from `/etc/cfgms/storage-secrets.env`
-(root-owned, mode 600), loaded into the `cfgms-controller` systemd unit via
-`EnvironmentFile=`. Both values were pulled from the operator's OS keychain
-(Windows Credential Manager on `CFG-70-02`, `cfgms-lab-datasvc-postgres`) at
-cutover time; the session HMAC key was generated once (`openssl rand -hex
-32`) and persisted the same way — it must stay stable for the life of the
-deployment since it backs bearer-token hashing.
+config loader) resolves them at load time. The session HMAC key must stay
+stable for the life of the deployment, since it backs bearer-token hashing.
+
+Secret material for a controller is supplied via SOPS-encrypted secrets and
+systemd `LoadCredential=`, which exposes the value on tmpfs under
+`/run/credentials` rather than on disk — see
+`docs/deployment/single-controller/walkthrough.md`. `pkg/secrets/providers/sops`
+accepts `LoadCredential`-backed files at mode `0440` as of #3130. Deployment
+shortcuts that place secret material in a cleartext file on disk are
+prohibited by CLAUDE.md's zero-tolerance rule ("No cleartext secrets on disk.
+Even in development.") and must not be carried into any further cutover.
 
 Post-cutover verification (steward round-trip, since no fleet is yet
 enrolled to this HA-validation controller instance): a throwaway steward was
@@ -457,8 +462,7 @@ Six genuine bugs surfaced getting the two new nodes to a stable 3-node quorum
    `ha-cluster-node-bootstrap.sh` originally self-generated a fresh random
    key per node via `openssl rand`; fixed to require a `CFGMS_SECRETS_KEY_B64`
    env var supplying the same value to every node (mirroring
-   `CFGMS_SESSION_HMAC_KEY`'s existing pattern). Captured into the lab
-   secrets inventory (`cfgms-lab-cluster-secrets-key`).
+   `CFGMS_SESSION_HMAC_KEY`'s existing pattern).
 
 Two further operational fixes, not code bugs: `chmod +x` on this system did
 not reliably grant group/other execute on a binary copied under an active
