@@ -1,0 +1,297 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Reports dashboard layout (Story #3270).
+ * All colour and spacing references use CSS custom properties from
+ * docs/design/web-ui-design-tokens.css — no hardcoded values.
+ * Both light and dark themes are handled by the token layer alone.
+ */
+
+/* ── Page layout ─────────────────────────────────────────────────────── */
+
+.rdb-content {
+  padding: var(--space-5) var(--space-6) 40px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.rdb-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.rdb-header h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.rdb-header p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+}
+
+/* ── Panel ────────────────────────────────────────────────────────────── */
+
+.rdb-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+}
+
+.rdb-panel h2 {
+  margin: 0 0 3px;
+  font-size: var(--text-base);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+
+.rdb-panel-sub {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+/* ── Hero section ─────────────────────────────────────────────────────── */
+
+.rdb-hero-wrap {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.rdb-hero-label {
+  display: block;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-faint);
+  margin-bottom: var(--space-1);
+}
+
+.rdb-hero {
+  font-size: 52px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--text-primary);
+}
+
+.rdb-hero-side {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-bottom: 5px;
+}
+
+.rdb-hero-note {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  max-width: 280px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── Trend direction pill ─────────────────────────────────────────────── */
+
+.rdb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.rdb-pill.ok {
+  color: var(--state-ok);
+  background: var(--state-ok-bg);
+  border-color: var(--state-ok);
+}
+
+.rdb-pill.neutral {
+  color: var(--state-neutral);
+  background: var(--state-neutral-bg);
+  border-color: var(--state-neutral);
+}
+
+.rdb-pill.crit {
+  color: var(--state-crit);
+  background: var(--state-crit-bg);
+  border-color: var(--state-crit);
+}
+
+/* ── KPI tiles grid ───────────────────────────────────────────────────── */
+
+.rdb-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: var(--space-3);
+}
+
+.rdb-tile {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 13px var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rdb-tile-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.rdb-tile-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.rdb-tile-value {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  color: var(--text-primary);
+}
+
+.rdb-tile-sub {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* ── Two-column insight layout ────────────────────────────────────────── */
+
+.rdb-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+@media (max-width: 820px) {
+  .rdb-two {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Insight list ─────────────────────────────────────────────────────── */
+
+.rdb-ilist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.rdb-ilist li {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.rdb-ico {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* ── Skeleton loading state ───────────────────────────────────────────── */
+
+.rdb-skel {
+  display: block;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  animation: rdb-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes rdb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ── Notice states ────────────────────────────────────────────────────── */
+
+.rdb-notice {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.rdb-notice p {
+  margin: 0;
+}
+
+.rdb-notice.err {
+  border-style: solid;
+  border-color: var(--state-crit);
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+  text-align: left;
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.rdb-notice-body {
+  flex: 1;
+}
+
+.rdb-notice-sub {
+  font-size: var(--text-sm);
+  opacity: 0.85;
+  margin: 2px 0 0;
+}
+
+.rdb-notice-np {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  margin-top: 5px;
+}
+
+/* ── Error retry button ───────────────────────────────────────────────── */
+
+.rdb-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 7px var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  margin-top: var(--space-2);
+}
+
+.rdb-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
