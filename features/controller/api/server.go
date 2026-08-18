@@ -455,11 +455,9 @@ func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 	result := make([]fleet.StewardData, 0, len(infos))
 	for _, info := range infos {
 		var attrs map[string]string
-		if info.DNA != nil {
-			attrs = info.DNA.Attributes
-		}
 		var frags []*commonpb.Fragment
 		if info.DNA != nil {
+			attrs = service.FlattenDNAFragments(info.DNA.Fragments)
 			frags = info.DNA.Fragments
 		}
 		result = append(result, fleet.StewardData{
