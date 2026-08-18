@@ -10,24 +10,33 @@ import (
 
 	"github.com/gorilla/mux"
 
+	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// ComplianceStatusResponse represents the compliance status of a steward
+// ComplianceStatusResponse represents the compliance status of a steward.
+// Status derives from real drift/convergence signal (DNA delta detection), not
+// agent liveness. ConnectionStatus carries the liveness/connectivity state
+// separately so operators can distinguish "drifted but online" from "offline."
 type ComplianceStatusResponse struct {
-	DeviceID        string `json:"device_id"`
-	DeviceName      string `json:"device_name"`
-	Status          string `json:"status"` // "compliant", "warning", "critical", "non_compliant"
-	DaysUntilBreach int    `json:"days_until_breach"`
-	LastChecked     string `json:"last_checked"` // ISO 8601 timestamp
-	AlertLevel      string `json:"alert_level"`  // "info", "warning", "critical", "breach"
+	DeviceID         string `json:"device_id"`
+	DeviceName       string `json:"device_name"`
+	Status           string `json:"status"`            // "compliant", "warning", "critical" — from drift signal
+	ConnectionStatus string `json:"connection_status"` // "online", "offline", etc. — liveness only
+	DaysUntilBreach  int    `json:"days_until_breach"`
+	LastChecked      string `json:"last_checked"` // ISO 8601 timestamp
+	AlertLevel       string `json:"alert_level"`  // "info", "warning", "critical"
 }
 
-// ComplianceReportResponse represents detailed compliance information
+// ComplianceReportResponse represents detailed compliance information.
+// Status derives from real drift/convergence signal; ConnectionStatus carries
+// liveness separately.
 type ComplianceReportResponse struct {
 	DeviceID          string                     `json:"device_id"`
 	DeviceName        string                     `json:"device_name"`
-	Status            string                     `json:"status"`
+	Status            string                     `json:"status"`            // from drift signal
+	ConnectionStatus  string                     `json:"connection_status"` // liveness only
 	DaysUntilBreach   int                        `json:"days_until_breach"`
 	MissingPatches    []MissingPatchResponse     `json:"missing_patches"`
 	OSVersion         string                     `json:"os_version"`
@@ -89,21 +98,50 @@ type TenantComplianceStatus struct {
 	BreachedDevices  int    `json:"breached_devices"`
 }
 
-// handleGetStewardCompliance returns the compliance status for a specific steward
+// complianceDashboardWindow is the default look-back window for compliance
+// queries. Matches the reports engine dashboard default.
+const complianceDashboardWindow = 24 * time.Hour
+
+// complianceTimeBuffer is added to the range End so drift events computed
+// immediately after the handler captures "now" still fall within the range.
+// DetectDrift sets event.Timestamp = time.Now() at detection time, which is
+// always after the handler's snapshot of "now"; without this buffer the filter
+// inside GetDriftEvents would drop those events.
+const complianceTimeBuffer = time.Minute
+
+// riskLevelToCompliance maps a DeviceStats.RiskLevel directly to the
+// compliance status and alert-level strings the API returns.
+// Reading RiskLevel directly (rather than re-deriving from ComplianceScore)
+// preserves calculateRiskLevel's critical-event override:
+//
+//	criticalCount > 0 || complianceScore < 0.3  →  Critical
+//
+// A score-only threshold would silently drop that override.
+func riskLevelToCompliance(level reportinterfaces.RiskLevel) (status, alertLevel string) {
+	switch level {
+	case reportinterfaces.RiskLevelLow:
+		return "compliant", "info"
+	case reportinterfaces.RiskLevelMedium:
+		return "warning", "warning"
+	default: // RiskLevelHigh and RiskLevelCritical
+		return "critical", "critical"
+	}
+}
+
+// handleGetStewardCompliance returns the compliance status for a specific steward.
 //
 // GET /api/v1/stewards/{id}/compliance
 //
-// Response:
-//
-//	{
-//	  "device_id": "steward-123",
-//	  "device_name": "DESKTOP-WIN11",
-//	  "status": "warning",
-//	  "days_until_breach": 4,
-//	  "last_checked": "2024-01-15T10:30:00Z",
-//	  "alert_level": "warning"
-//	}
+// Compliance status is derived from the real drift/convergence signal produced
+// by GetDeviceStats, not from the steward's connection status. Connection
+// status is included separately as connection_status.
+// Returns 503 when the data provider is unavailable.
 func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Request) {
+	if s.dataProvider == nil {
+		http.Error(w, "compliance data unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
@@ -111,12 +149,6 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "steward ID is required", http.StatusBadRequest)
 		return
 	}
-
-	// Derive compliance status from steward connection status
-	complianceStatus := "compliant"
-	alertLevel := "info"
-	daysUntilBreach := 0
-	var lastChecked string
 
 	stewardInfo, found := s.controllerService.GetStewardInfo(stewardID)
 	if !found {
@@ -138,23 +170,49 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	lastChecked = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
-	switch stewardInfo.Status {
-	case "offline":
-		complianceStatus = "critical"
-		alertLevel = "critical"
-	case "unknown", "quarantined":
-		complianceStatus = "warning"
-		alertLevel = "warning"
+	now := time.Now().UTC()
+	timeRange := reportinterfaces.TimeRange{
+		Start: now.Add(-complianceDashboardWindow),
+		End:   now.Add(complianceTimeBuffer),
+	}
+
+	statsMap, err := s.dataProvider.GetDeviceStats(r.Context(), []string{stewardID}, timeRange)
+	if err != nil {
+		s.logger.Error("Failed to get device stats for compliance",
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// A DataProvider omits any device whose stats it could not compute: a storage
+	// read failure is logged and the device skipped, so one unreadable device never
+	// fails a fleet-wide query. For a single explicitly-requested steward that
+	// omission IS the failure — indexing the map anyway yields a zero-value
+	// DeviceStats whose empty RiskLevel maps to "critical", turning a storage
+	// outage into a fabricated compliance verdict. Fail loudly instead.
+	stats, ok := statsMap[stewardID]
+	if !ok {
+		s.logger.Error("No compliance stats returned for steward",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	complianceStatus, alertLevel := riskLevelToCompliance(stats.RiskLevel)
+
+	lastChecked := stats.LastSeen.UTC().Format(time.RFC3339)
+	if stats.LastSeen.IsZero() {
+		lastChecked = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
 	}
 
 	response := ComplianceStatusResponse{
-		DeviceID:        stewardID,
-		DeviceName:      stewardID,
-		Status:          complianceStatus,
-		DaysUntilBreach: daysUntilBreach,
-		LastChecked:     lastChecked,
-		AlertLevel:      alertLevel,
+		DeviceID:         stewardID,
+		DeviceName:       stewardID,
+		Status:           complianceStatus,
+		ConnectionStatus: stewardInfo.Status,
+		DaysUntilBreach:  0,
+		LastChecked:      lastChecked,
+		AlertLevel:       alertLevel,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -166,47 +224,19 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// handleGetStewardComplianceReport returns detailed compliance report for a steward
+// handleGetStewardComplianceReport returns detailed compliance report for a steward.
 //
 // GET /api/v1/stewards/{id}/compliance/report
 //
-// Response:
-//
-//	{
-//	  "device_id": "steward-123",
-//	  "device_name": "DESKTOP-WIN11",
-//	  "status": "warning",
-//	  "days_until_breach": 4,
-//	  "missing_patches": [
-//	    {
-//	      "id": "KB8888888",
-//	      "title": "Critical Security Update",
-//	      "severity": "critical",
-//	      "category": "security",
-//	      "release_date": "2024-01-10T00:00:00Z",
-//	      "days_overdue": 0,
-//	      "days_until_due": 4
-//	    }
-//	  ],
-//	  "os_version": "Windows 11 23H2",
-//	  "last_patch_date": "2024-01-01T12:00:00Z",
-//	  "report_generated_at": "2024-01-15T10:30:00Z",
-//	  "policy": {
-//	    "critical_deadline_days": 7,
-//	    "important_deadline_days": 14,
-//	    "moderate_deadline_days": 30,
-//	    "low_deadline_days": 60,
-//	    "warning_threshold_days": 7,
-//	    "critical_threshold_days": 1,
-//	    "maintenance_windows_configured": true
-//	  },
-//	  "compatibility_info": {
-//	    "windows11_compatible": true,
-//	    "missing_requirements": [],
-//	    "last_checked": "2024-01-15T09:00:00Z"
-//	  }
-//	}
+// Compliance status is derived from the real drift/convergence signal; connection
+// status is present as a separate connection_status field.
+// Returns 503 when the data provider is unavailable.
 func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http.Request) {
+	if s.dataProvider == nil {
+		http.Error(w, "compliance data unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
@@ -214,10 +244,6 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 		http.Error(w, "steward ID is required", http.StatusBadRequest)
 		return
 	}
-
-	complianceStatus := "compliant"
-	reportGeneratedAt := time.Now().UTC().Format(time.RFC3339)
-	lastPatchDate := ""
 
 	stewardInfo, found := s.controllerService.GetStewardInfo(stewardID)
 	if !found {
@@ -238,12 +264,36 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 		}
 	}
 
-	lastPatchDate = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
-	switch stewardInfo.Status {
-	case "offline":
-		complianceStatus = "critical"
-	case "unknown", "quarantined":
-		complianceStatus = "warning"
+	now := time.Now().UTC()
+	timeRange := reportinterfaces.TimeRange{
+		Start: now.Add(-complianceDashboardWindow),
+		End:   now.Add(complianceTimeBuffer),
+	}
+
+	statsMap, err := s.dataProvider.GetDeviceStats(r.Context(), []string{stewardID}, timeRange)
+	if err != nil {
+		s.logger.Error("Failed to get device stats for compliance report",
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// See handleGetStewardCompliance: a missing entry for the one requested
+	// steward means its stats could not be computed (storage failure), not that
+	// it is compliant. Reporting the zero-value stats would fabricate a verdict.
+	stats, ok := statsMap[stewardID]
+	if !ok {
+		s.logger.Error("No compliance stats returned for steward report",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	complianceStatus, _ := riskLevelToCompliance(stats.RiskLevel)
+
+	lastPatchDate := stats.LastSeen.UTC().Format(time.RFC3339)
+	if stats.LastSeen.IsZero() {
+		lastPatchDate = stewardInfo.LastHeartbeat.UTC().Format(time.RFC3339)
 	}
 
 	// Return real steward data; patch details require patch module integration
@@ -251,11 +301,12 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 		DeviceID:          stewardID,
 		DeviceName:        stewardID,
 		Status:            complianceStatus,
+		ConnectionStatus:  stewardInfo.Status,
 		DaysUntilBreach:   0,
 		MissingPatches:    []MissingPatchResponse{},
 		OSVersion:         "",
 		LastPatchDate:     lastPatchDate,
-		ReportGeneratedAt: reportGeneratedAt,
+		ReportGeneratedAt: now.Format(time.RFC3339),
 		Policy: PatchPolicyResponse{
 			CriticalDeadlineDays:         7,
 			ImportantDeadlineDays:        14,
@@ -276,70 +327,100 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 	}
 }
 
-// handleGetComplianceSummary returns system-wide compliance summary
+// handleGetComplianceSummary returns system-wide compliance summary.
 //
 // GET /api/v1/compliance/summary
 //
 // Query parameters:
-// - tenant_id: Filter by specific tenant (optional)
+// - tenant_id: Filter by specific tenant (optional, root/unscoped callers only)
 //
-// Response:
-//
-//	{
-//	  "total_devices": 100,
-//	  "compliant_devices": 75,
-//	  "warning_devices": 15,
-//	  "critical_devices": 8,
-//	  "breached_devices": 2,
-//	  "by_tenant": [
-//	    {
-//	      "tenant_id": "tenant-1",
-//	      "tenant_name": "Acme Corp",
-//	      "total_devices": 50,
-//	      "compliant_devices": 40,
-//	      "warning_devices": 7,
-//	      "critical_devices": 2,
-//	      "breached_devices": 1
-//	    }
-//	  ],
-//	  "generated_at": "2024-01-15T10:30:00Z"
-//	}
+// Compliance buckets are derived from DeviceStats.RiskLevel (drift signal),
+// not from steward connection status.
+// Returns 503 when the data provider is unavailable.
 func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Request) {
+	if s.dataProvider == nil {
+		http.Error(w, "compliance data unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	// TenantID is always taken from the authenticated context for scoped callers;
 	// unscoped admins (callerTenant == "") may use the tenant_id query param to filter.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	tenantFilter := r.URL.Query().Get("tenant_id")
 
-	// Build compliance summary from the single authoritative steward registry
-	tenantStats := make(map[string]*TenantComplianceStatus)
+	// Collect steward IDs while applying tenant scoping from the steward registry.
+	stewardsByTenant := make(map[string][]string) // tenantID → steward IDs
 	for _, st := range s.controllerService.GetAllStewards() {
 		if callerTenant != "" {
-			// Scoped caller: restrict to own tenant and its descendant tenants.
 			sameTenant := st.TenantID == callerTenant
 			descendantTenant := strings.HasPrefix(st.TenantID, callerTenant+"/")
 			if !sameTenant && !descendantTenant {
 				continue
 			}
 		} else if tenantFilter != "" && st.TenantID != tenantFilter {
-			// Root/admin caller: honor optional query-param filter.
 			continue
 		}
-		tcs, ok := tenantStats[st.TenantID]
+		stewardsByTenant[st.TenantID] = append(stewardsByTenant[st.TenantID], st.ID)
+	}
+
+	// Gather all steward IDs for a single bulk DeviceStats call.
+	var allIDs []string
+	for _, ids := range stewardsByTenant {
+		allIDs = append(allIDs, ids...)
+	}
+
+	var statsMap map[string]reportinterfaces.DeviceStats
+	if len(allIDs) > 0 {
+		now := time.Now().UTC()
+		timeRange := reportinterfaces.TimeRange{
+			Start: now.Add(-complianceDashboardWindow),
+			End:   now.Add(complianceTimeBuffer),
+		}
+		var err error
+		statsMap, err = s.dataProvider.GetDeviceStats(r.Context(), allIDs, timeRange)
+		if err != nil {
+			s.logger.Error("Failed to get device stats for compliance summary",
+				"error", logging.SanitizeLogValue(err.Error()))
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		// Any requested steward missing from the result had its stats calculation
+		// fail (storage error), which the provider logs and skips. Counting those
+		// zero-value stats would silently bucket them as "critical" and publish
+		// aggregate totals that do not describe the fleet. Fail the summary instead.
+		for _, id := range allIDs {
+			if _, ok := statsMap[id]; !ok {
+				s.logger.Error("Incomplete device stats for compliance summary",
+					"steward_id", logging.SanitizeLogValue(id))
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	// Aggregate per-tenant compliance counts from drift-based RiskLevel.
+	tenantStats := make(map[string]*TenantComplianceStatus)
+	for tenantID, ids := range stewardsByTenant {
+		tcs, ok := tenantStats[tenantID]
 		if !ok {
 			tcs = &TenantComplianceStatus{
-				TenantID:   st.TenantID,
-				TenantName: st.TenantID,
+				TenantID:   tenantID,
+				TenantName: tenantID,
 			}
-			tenantStats[st.TenantID] = tcs
+			tenantStats[tenantID] = tcs
 		}
-		tcs.TotalDevices++
-		switch st.Status {
-		case "online":
-			tcs.CompliantDevices++
-		case "offline":
-			tcs.CriticalDevices++
-		default:
-			tcs.WarningDevices++
+		for _, id := range ids {
+			tcs.TotalDevices++
+			status, _ := riskLevelToCompliance(statsMap[id].RiskLevel)
+			switch status {
+			case "compliant":
+				tcs.CompliantDevices++
+			case "warning":
+				tcs.WarningDevices++
+			default: // "critical"
+				tcs.CriticalDevices++
+			}
 		}
 	}
 

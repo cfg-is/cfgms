@@ -39,6 +39,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
+	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
@@ -91,6 +92,7 @@ type Server struct {
 	publicDownloadCache            *publicDownloadCache                  // PB-015: bounded/coalesced installer and steward-binary response cache
 	rollbackManager                rollback.RollbackManager              // Story #416: Rollback system
 	reportsHandler                 *reportapi.Handler                    // Story #416: Reports engine
+	dataProvider                   reportinterfaces.DataProvider         // Issue #3265: drift-based compliance derivation
 	workflowHandler                *WorkflowHandler                      // Story #414: Workflow engine REST API
 	approvalHook                   RegistrationApprovalHook              // Issue #422: Registration approval hook
 	fleetQuery                     fleet.FleetQuery                      // Issue #603: Single query path for device filtering
@@ -1070,6 +1072,14 @@ func (s *Server) SetReportsHandler(h *reportapi.Handler) {
 	reportsRouter := s.apiRouter.PathPrefix("/reports").Subrouter()
 	h.RegisterRoutes(reportsRouter)
 	s.logger.Info("Reports API routes registered")
+}
+
+// SetDataProvider wires the reports DataProvider for drift-based compliance derivation (Issue #3265).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetDataProvider(dp reportinterfaces.DataProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dataProvider = dp
 }
 
 // SetWorkflowHandler sets the workflow handler and registers workflow and trigger API routes

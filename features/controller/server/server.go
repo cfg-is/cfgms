@@ -55,6 +55,7 @@ import (
 	reportscache "github.com/cfgis/cfgms/features/reports/cache"
 	reportsengine "github.com/cfgis/cfgms/features/reports/engine"
 	reportsexporters "github.com/cfgis/cfgms/features/reports/exporters"
+	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
 	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
@@ -1419,9 +1420,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).
 	srv.dnaStorageManager = dnaStorageManager
-	reportsHandler := initializeReportsHandler(dnaStorageManager, controllerService, logger)
+	reportsHandler, reportsDataProvider := initializeReportsHandler(dnaStorageManager, controllerService, logger)
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
+		httpServer.SetDataProvider(reportsDataProvider)
 		logger.Info("Reports engine wired to HTTP API server")
 	}
 
@@ -1668,20 +1670,22 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 }
 
 // initializeReportsHandler creates the reports API handler over the shared DNA
-// storage manager. Returns nil when DNA storage is unavailable (reports engine
+// storage manager. Returns nil, nil when DNA storage is unavailable (reports engine
 // disabled) — the manager's lifecycle is owned by the caller. (Issue #1572)
 // controllerService supplies device→tenant ownership so tenant-scoped callers
 // cannot select another tenant's devices.
-func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerService *service.ControllerService, logger logging.Logger) *reportapi.Handler {
+// The DataProvider is returned alongside the Handler so callers can wire it into
+// the compliance endpoints for drift-based compliance derivation (Issue #3265).
+func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerService *service.ControllerService, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
 	if dnaStorageManager == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Initialize drift detector with default configuration
 	driftDetector, err := dnadrift.NewDetector(nil, logger)
 	if err != nil {
 		logger.Warn("Failed to initialize drift detector for reports engine", "error", err)
-		return nil
+		return nil, nil
 	}
 
 	// Build the reports engine from its components
@@ -1694,7 +1698,7 @@ func initializeReportsHandler(dnaStorageManager *dnaStorage.Manager, controllerS
 	logger.Info("Reports engine initialized")
 	// The steward registry is the device→tenant authority for the reports
 	// endpoints; a report device ID is a steward ID.
-	return reportapi.New(reportEngine, exporter, controllerService, logger)
+	return reportapi.New(reportEngine, exporter, controllerService, logger), dataProvider
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.

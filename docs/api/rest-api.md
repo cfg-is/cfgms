@@ -1289,6 +1289,18 @@ Raft consensus state for the local node (operational/debugging endpoint).
 
 ### Compliance
 
+Compliance status is derived from real drift/convergence signal (DNA delta
+detection), not from agent liveness. A rendered "94% compliant" means "94% of
+fleet DNA matches desired state," not "94% of agents are currently connected."
+Liveness/connectivity is exposed as a separate `connection_status` field on
+per-steward responses so operators can distinguish "drifted but online" from
+"offline."
+
+Compliance buckets map from `DeviceStats.RiskLevel` (computed by the reports
+engine): `low` → compliant, `medium` → warning, `high`/`critical` → critical.
+`RiskLevel` includes a critical-event override (`criticalCount > 0` forces
+Critical regardless of aggregate score) that score-only thresholds would drop.
+
 #### GET /api/v1/stewards/{id}/compliance
 
 Compliance status for a specific steward.
@@ -1301,6 +1313,18 @@ Compliance status for a specific steward.
 **Parameters:**
 
 - `id` (path): Steward ID
+
+**Response fields:**
+
+- `status`: compliance status derived from drift signal — `"compliant"`, `"warning"`, or `"critical"`.
+- `connection_status`: liveness/connectivity state — `"online"`, `"offline"`, etc. Never used to compute `status`.
+- `alert_level`: mirrors severity of `status` — `"info"`, `"warning"`, or `"critical"`.
+- `last_checked`: ISO 8601 timestamp of the most recent DNA snapshot, or the last heartbeat if no snapshot exists.
+- `days_until_breach`: reserved for future patch-deadline integration; currently always `0`.
+
+**Error responses:**
+
+- `503 Service Unavailable`: DNA data provider not yet wired (controller startup in progress).
 
 #### GET /api/v1/stewards/{id}/compliance/report
 
@@ -1315,6 +1339,16 @@ Full compliance report for a specific steward.
 
 - `id` (path): Steward ID
 
+**Response fields:**
+
+- `status`: compliance status derived from drift signal — same semantics as the `/compliance` endpoint.
+- `connection_status`: liveness/connectivity state — separate from `status`, never used to compute it.
+- `missing_patches`, `days_until_breach`: reserved for future patch module integration; currently empty/zero.
+
+**Error responses:**
+
+- `503 Service Unavailable`: DNA data provider not yet wired.
+
 #### GET /api/v1/compliance/summary
 
 Fleet-wide compliance summary across all stewards.
@@ -1323,6 +1357,15 @@ Fleet-wide compliance summary across all stewards.
 **Required permission:** `compliance:read-summary`
 
 **Tenant scope:** Non-root callers are forced to their own tenant (and its descendant tenants) regardless of any `tenant_id` query parameter value. Root/unscoped callers may use `tenant_id` as an optional filter.
+
+**Response fields:**
+
+- `compliant_devices`, `warning_devices`, `critical_devices`: counts derived from drift signal, not liveness. An offline steward with no detected drift is counted as compliant.
+- `by_tenant`: per-tenant breakdown using the same drift-based buckets.
+
+**Error responses:**
+
+- `503 Service Unavailable`: DNA data provider not yet wired.
 
 ### Tenants
 
