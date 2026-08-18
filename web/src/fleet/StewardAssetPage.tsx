@@ -20,13 +20,14 @@
  */
 import { type ComponentType, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
+import ComplianceTab from './ComplianceTab.tsx'
 import DnaDrawer from './DnaDrawer.tsx'
 import LiveActivityTab from './LiveActivityTab.tsx'
 import LogsPanel from './LogsPanel.tsx'
 import ModulesPanel from './ModulesPanel.tsx'
 import ShellTab from './ShellTab.tsx'
 
-type TabKey = 'dna' | 'config' | 'shell' | 'logs' | 'modules' | 'live'
+type TabKey = 'dna' | 'config' | 'shell' | 'logs' | 'modules' | 'live' | 'compliance'
 
 interface TabSpec {
   key: TabKey
@@ -52,6 +53,7 @@ export const TABS: readonly TabSpec[] = [
   { key: 'logs', label: 'Logs', soon: false, Panel: LogsPanel },
   { key: 'modules', label: 'Modules', soon: false, Panel: ModulesPanel },
   { key: 'live', label: 'Live Activity', soon: false, Panel: LiveActivityPanel },
+  { key: 'compliance', label: 'Compliance', soon: false, Panel: ComplianceTab },
 ]
 
 function SoonPanel({ label }: { label: string }) {

@@ -276,13 +276,13 @@ describe('tab strip', () => {
     )
   })
 
-  it('ArrowLeft wraps from DNA back to Live Activity', () => {
+  it('ArrowLeft wraps from DNA back to Compliance (last tab)', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
     renderAssetPage()
 
     const tablist = screen.getByRole('tablist')
     fireEvent.keyDown(tablist, { key: 'ArrowLeft' })
-    expect(screen.getByRole('tab', { name: /^Live Activity/i })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: /^Compliance/i })).toHaveAttribute(
       'aria-selected',
       'true',
     )
