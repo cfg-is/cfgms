@@ -127,7 +127,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to list sessions",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list sessions", "SESSION_LIST_ERROR")
 		return
 	}
@@ -176,6 +176,37 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the target session before any mutation so tenant-scope can be checked.
+	// Authorise first, then revoke — a cross-tenant attempt must not perform the action.
+	target, err := s.sessionManager.GetByID(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Session not found", "SESSION_NOT_FOUND")
+			return
+		}
+		s.logger.Error("Failed to resolve session for revoke",
+			"session_id", logging.SanitizeLogValue(sessionID),
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke session", "SESSION_REVOKE_ERROR")
+		return
+	}
+
+	// Tenant-scope check: a scoped caller (TenantID != "") may only revoke sessions in
+	// their own tenant. An unscoped caller retains cross-tenant reach, matching the rule
+	// handleSessionList already applies.
+	if principal.TenantID != "" && target.TenantID != principal.TenantID {
+		s.logger.Warn("Cross-tenant session revoke denied",
+			"session_id", logging.SanitizeLogValue(sessionID),
+			"session_tenant", logging.SanitizeLogValue(target.TenantID),
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"principal_tenant", logging.SanitizeLogValue(principal.TenantID))
+		// Return the same response as a genuinely absent session — do not disclose
+		// that the session exists under another tenant (non-disclosure posture).
+		s.writeErrorResponse(w, http.StatusNotFound, "Session not found", "SESSION_NOT_FOUND")
+		return
+	}
+
 	if err := s.sessionManager.Revoke(r.Context(), sessionID); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Session not found", "SESSION_NOT_FOUND")
@@ -183,7 +214,7 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Error("Failed to revoke session",
 			"session_id", logging.SanitizeLogValue(sessionID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke session", "SESSION_REVOKE_ERROR")
 		return
 	}

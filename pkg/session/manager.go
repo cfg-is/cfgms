@@ -444,6 +444,46 @@ func (m *manager) Elevate(ctx context.Context, sessionID string, credentialID []
 	return &out, newToken, nil
 }
 
+// GetByID returns the live session record for the given session ID without requiring the
+// bearer token. It consults the in-memory cache first and falls back to the durable store
+// on a miss (supporting post-restart lookups before Validate re-populates the cache).
+//
+// Returns ErrSessionNotFound when no live session exists for id, including when the
+// session is revoked, idle/absolute-expired, or belongs to a different channel — the same
+// non-disclosure posture as Revoke so a caller cannot distinguish absence from cross-channel
+// or cross-tenant hits.
+func (m *manager) GetByID(ctx context.Context, id string) (*Session, error) {
+	m.mu.RLock()
+	ms := m.sessions[id]
+	m.mu.RUnlock()
+	if ms != nil {
+		ms.mu.Lock()
+		defer ms.mu.Unlock()
+		if ms.revoked {
+			return nil, ErrSessionNotFound
+		}
+		if ms.session.Channel != m.cfg.Channel {
+			return nil, ErrSessionNotFound
+		}
+		now := m.clockFn()
+		if now.After(ms.session.AbsoluteExpiresAt) || now.After(ms.session.LastActivity.Add(m.cfg.IdleTimeout)) {
+			return nil, ErrSessionNotFound
+		}
+		out := *ms.session
+		return &out, nil
+	}
+	// Cache miss — fall back to the durable store.
+	stored, err := m.store.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if stored.Channel != m.cfg.Channel {
+		return nil, ErrSessionNotFound
+	}
+	out := *stored
+	return &out, nil
+}
+
 // Revoke immediately invalidates the session identified by id. Subsequent Validate
 // or Renew calls for any token belonging to this session return ErrSessionRevoked.
 // Revoke deletes all token-hash records from the durable store so revocation is
