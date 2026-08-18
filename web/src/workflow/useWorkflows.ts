@@ -59,6 +59,17 @@ export interface WorkflowStep {
   loop?: boolean                // true for for/while/foreach container steps
   fan_out?: boolean
   fan_in?: boolean
+  /*
+   * Verbatim step JSON as the controller sent it. The typed fields above model
+   * only what the renderers need; features/workflow/types.go Step also carries
+   * timeout, on_failure, semaphore, lock, barrier, try, error_handling,
+   * workflow_call and more. PUT /api/v1/workflows/{id} is a wholesale replace,
+   * so any editor that writes a step back MUST start from `raw` and override
+   * only the fields it owns — otherwise the save deletes everything unmodeled.
+   * Always populated by parseStep; optional only so renderer-side fixtures may
+   * omit it.
+   */
+  raw?: Record<string, unknown>
 }
 
 export interface SemanticVersion {
@@ -81,6 +92,14 @@ export interface VersionedWorkflow {
   version_tags?: string[]
   deprecated?: boolean
   deprecation_note?: string
+  /*
+   * Verbatim workflow JSON as the controller sent it — same contract as
+   * WorkflowStep.raw. Editors consult it to detect stored fields that
+   * CreateWorkflowRequest cannot carry back (on_failure, error_workflows,
+   * version_tags, deprecated, deprecation_note, changelog). Always populated
+   * by parseVersionedWorkflow.
+   */
+  raw?: Record<string, unknown>
 }
 
 export interface WorkflowExecution {
@@ -133,6 +152,7 @@ function parseStep(value: unknown): WorkflowStep | null {
       typeof r.config === 'object' && r.config !== null
         ? (r.config as Record<string, unknown>)
         : {},
+    raw: { ...r },
   }
   if (Array.isArray(r.steps)) {
     step.steps = r.steps.flatMap((s) => { const p = parseStep(s); return p ? [p] : [] })
@@ -189,6 +209,7 @@ export function parseVersionedWorkflow(value: unknown): VersionedWorkflow | null
     deprecated: r.deprecated !== undefined ? bool(r.deprecated) : undefined,
     deprecation_note:
       r.deprecation_note !== undefined ? str(r.deprecation_note) : undefined,
+    raw: { ...r },
   }
 }
 
