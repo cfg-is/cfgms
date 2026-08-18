@@ -116,8 +116,14 @@ type ClusterManager interface {
 	// GetClusterNodes returns information about all nodes in the cluster
 	GetClusterNodes() ([]*NodeInfo, error)
 
-	// IsLeader returns true if this node is the cluster leader
-	IsLeader() bool
+	// HasLeadership returns true when this node holds lease-backed authority to
+	// perform side-effecting operations (ADR-029 Decision 3). In SingleServerMode
+	// this is unconditionally true; in ClusterMode it requires both Raft leadership
+	// and a valid quorum-acknowledged lease (Decision 1). This is the admission
+	// primitive for every side-effecting path. IsRaftLeader() is intentionally not
+	// on this interface — it is reachable only through the concrete type, for
+	// observability and debugging surfaces.
+	HasLeadership() bool
 
 	// GetLeader returns the current cluster leader node
 	GetLeader() (*NodeInfo, error)

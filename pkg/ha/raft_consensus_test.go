@@ -5,6 +5,8 @@ package ha
 
 import (
 	"context"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -583,4 +585,172 @@ func TestRaftConsensus_ProcessReady_DurableWritePrecedesMessageDispatch(t *testi
 	require.NoError(t, err)
 	require.NotEmpty(t, entries,
 		"at least the conf-change bootstrap entries must be persisted before apply completes")
+}
+
+// TestRaftConsensus_IsRaftLeader_MatchesRaftProtocolState verifies that IsRaftLeader
+// reports the raw Raft replication-protocol state, identical to the pre-split
+// IsLeader() behaviour.
+func TestRaftConsensus_IsRaftLeader_MatchesRaftProtocolState(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	nodeInfo := &NodeInfo{ID: "raftleader-test", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), "", logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck
+
+	// Before election: must not report itself as leader.
+	// (Not asserted because the node might win immediately; just start timing.)
+
+	// Single-node cluster elects itself leader.
+	require.Eventually(t, func() bool {
+		return rc.IsRaftLeader()
+	}, 10*time.Second, 20*time.Millisecond, "single-node cluster must elect itself leader via IsRaftLeader")
+
+	// IsRaftLeader and the internal clusterState.Leader must agree.
+	rc.mu.RLock()
+	leaderID := rc.clusterState.Leader
+	nodeID := rc.nodeID
+	rc.mu.RUnlock()
+	assert.Equal(t, nodeID, leaderID, "clusterState.Leader must equal nodeID when IsRaftLeader is true")
+}
+
+// TestRaftConsensus_GetTerm_ReturnsNonZeroAfterElection verifies that GetTerm
+// returns a positive term once a leader has been elected.
+func TestRaftConsensus_GetTerm_ReturnsNonZeroAfterElection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	nodeInfo := &NodeInfo{ID: "getterm-test", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), "", logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck
+
+	require.Eventually(t, func() bool {
+		return rc.IsRaftLeader()
+	}, 10*time.Second, 20*time.Millisecond, "single-node cluster must elect itself leader")
+
+	term := rc.GetTerm()
+	assert.Greater(t, term, uint64(0), "Raft term must be > 0 after election")
+
+	// GetTerm must agree with Status().GetTerm() — it is a pass-through, not
+	// an independently tracked value.
+	statusTerm := rc.node.Status().GetTerm()
+	assert.Equal(t, statusTerm, term, "GetTerm must match rc.node.Status().GetTerm()")
+}
+
+// TestRaftConsensus_HasLeadership_DivergesFromIsRaftLeader_OnLeaseExpiry is the
+// REQUIRED test asserting that the two primitives demonstrably diverge: HasLeadership
+// goes false once the lease has expired while IsRaftLeader remains true.
+//
+// "Stalling quorum acks" is simulated by setting leaseLastAck to a time just past
+// the leaseDuration boundary, which is what would happen in a real partition once
+// the lease window elapsed. FastElectionConfig gives leaseDuration = 0.8 × 200ms
+// = 160ms — real elapsed time in-process, exercising the monotonic comparison.
+func TestRaftConsensus_HasLeadership_DivergesFromIsRaftLeader_OnLeaseExpiry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := FastElectionConfig()
+	nodeInfo := &NodeInfo{ID: "lease-diverge-test", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck
+
+	// leaseDuration = 0.8 × ElectionTimeout (FastElectionConfig: 0.8 × 200ms = 160ms).
+	leaseDuration := time.Duration(float64(cfg.ElectionTimeout) * 0.8)
+
+	// Wait for leadership and lease establishment.
+	require.Eventually(t, func() bool {
+		return rc.IsRaftLeader()
+	}, 5*time.Second, 5*time.Millisecond, "single-node cluster must elect itself leader")
+
+	require.Eventually(t, func() bool {
+		return rc.HasLeadership()
+	}, 5*time.Second, 5*time.Millisecond, "lease must be established after leader election")
+
+	// Stall quorum acks: set leaseLastAck to a point just past the expiry
+	// boundary. This reproduces what happens when heartbeat responses stop
+	// arriving — the lease ages past leaseDuration without a refresh.
+	rc.mu.Lock()
+	rc.leaseLastAck = time.Now().Add(-(leaseDuration + time.Millisecond))
+	rc.mu.Unlock()
+
+	// HasLeadership must go false immediately (lease expired).
+	// IsRaftLeader must remain true — the Raft protocol has not stepped down.
+	assert.False(t, rc.HasLeadership(),
+		"HasLeadership must be false once the lease has expired")
+	assert.True(t, rc.IsRaftLeader(),
+		"IsRaftLeader must remain true while Raft protocol still sees this node as leader")
+}
+
+// TestRaftConsensus_HasLeadership_ConcurrentReads_NoDataRace is the REQUIRED
+// concurrency test. It exercises HasLeadership() reads against an active leader
+// loop under -race to confirm there is no data race on leaseLastAck.
+func TestRaftConsensus_HasLeadership_ConcurrentReads_NoDataRace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cfg := FastElectionConfig()
+	nodeInfo := &NodeInfo{ID: "race-test", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck
+
+	require.Eventually(t, func() bool {
+		return rc.IsRaftLeader()
+	}, 5*time.Second, 5*time.Millisecond, "single-node cluster must elect itself leader")
+
+	// Spin up concurrent readers while the raft loop is actively writing leaseLastAck.
+	var wg sync.WaitGroup
+	const readers = 10
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				_ = rc.HasLeadership()
+				runtime.Gosched()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestRaftConsensus_LeaseRefreshes_WhileActiveLeader verifies that leaseLastAck
+// is updated by the raft loop while the node is an active leader with quorum.
+func TestRaftConsensus_LeaseRefreshes_WhileActiveLeader(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := FastElectionConfig()
+	nodeInfo := &NodeInfo{ID: "lease-refresh-test", State: NodeStateHealthy, Role: NodeRoleFollower}
+	peers := []raft.Peer{{ID: 1}}
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck
+
+	// Wait for leadership and initial lease.
+	require.Eventually(t, func() bool {
+		return rc.HasLeadership()
+	}, 5*time.Second, 5*time.Millisecond, "lease must be established after leader election")
+
+	// Capture the first ack time.
+	rc.mu.RLock()
+	firstAck := rc.leaseLastAck
+	rc.mu.RUnlock()
+
+	// The raft loop should refresh leaseLastAck at least once within
+	// a couple of HeartbeatIntervals.
+	require.Eventually(t, func() bool {
+		rc.mu.RLock()
+		current := rc.leaseLastAck
+		rc.mu.RUnlock()
+		return current.After(firstAck)
+	}, 5*time.Second, 5*time.Millisecond, "leaseLastAck must advance while node is active leader")
 }

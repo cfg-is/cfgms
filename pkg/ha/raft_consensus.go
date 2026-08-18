@@ -31,6 +31,15 @@ type RaftConsensus struct {
 	config       *raft.Config
 	tickInterval time.Duration // derived from ClusterConfig.HeartbeatInterval
 
+	// Lease state — monotonic-clock leader authority (ADR-029 Decision 1 & 2).
+	// leaseLastAck is the last time.Now() instant at which a quorum of followers
+	// acknowledged a heartbeat. It is updated by refreshLeaseIfQuorum() from the
+	// single runRaft goroutine and read by HasLeadership() from any goroutine;
+	// both paths hold rc.mu (write: Lock, read: RLock).
+	// leaseDuration = 0.8 × ClusterConfig.ElectionTimeout (set once at construction).
+	leaseLastAck  time.Time
+	leaseDuration time.Duration
+
 	// Node identity
 	nodeID   uint64
 	nodeInfo *NodeInfo
@@ -207,13 +216,14 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 	}
 
 	rc := &RaftConsensus{
-		nodeID:       nodeID,
-		nodeInfo:     nodeInfo,
-		storage:      storage,
-		logStore:     logStore,
-		config:       config,
-		tickInterval: tickInterval,
-		appliedIndex: recoveredApplied,
+		nodeID:        nodeID,
+		nodeInfo:      nodeInfo,
+		storage:       storage,
+		logStore:      logStore,
+		config:        config,
+		tickInterval:  tickInterval,
+		leaseDuration: clusterCfg.LeaseDuration(),
+		appliedIndex:  recoveredApplied,
 		clusterState: &ClusterState{
 			Nodes:    make(map[uint64]*NodeInfo),
 			Sessions: make(map[string]SessionUpdateCommand),
@@ -382,6 +392,11 @@ func (rc *RaftConsensus) runRaft() {
 		select {
 		case <-ticker.C:
 			rc.node.Tick()
+			// Refresh lease on every tick so single-node clusters (which produce
+			// no peer heartbeat Ready batches) advance leaseLastAck regularly.
+			// Multi-node clusters also benefit: Status().Progress after Tick()
+			// reflects the current peer-activity state without waiting for Ready.
+			rc.refreshLeaseIfQuorum()
 
 		case rd := <-rc.node.Ready():
 			// Process Ready updates from Raft
@@ -528,6 +543,10 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 
 	// 6. Advance the Raft state machine.
 	rc.node.Advance()
+
+	// 7. Refresh leader lease if this node has quorum acks.
+	// Called after Advance() so Status().Progress reflects the latest peer activity.
+	rc.refreshLeaseIfQuorum()
 }
 
 // entriesToApply filters out entries that have already been applied
@@ -794,11 +813,103 @@ func (rc *RaftConsensus) GetSessionsForNode(nodeID string) []string {
 	return stewardIDs
 }
 
-// IsLeader returns true if this node is the leader
+// IsLeader returns true if this node is the leader.
+// Deprecated: use IsRaftLeader() for protocol state or HasLeadership() for authority.
+// Retained for callers not yet migrated to the split API (#3389).
 func (rc *RaftConsensus) IsLeader() bool {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
 	return rc.clusterState.Leader == rc.nodeID
+}
+
+// IsRaftLeader returns the raw Raft replication-protocol leader state: true when
+// this node's clusterState identifies it as leader. This value can briefly lag
+// reality during a network partition (see ADR-029). Use HasLeadership() when
+// deciding whether to act on authority.
+func (rc *RaftConsensus) IsRaftLeader() bool {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	return rc.clusterState.Leader == rc.nodeID
+}
+
+// HasLeadership returns true only when this node is the Raft leader AND its
+// leader lease has not expired. The lease duration is 0.8 × ElectionTimeout
+// (ADR-029 Decision 1), measured on a monotonic clock — no wall-clock arithmetic.
+//
+// A zero leaseLastAck (no quorum ack yet observed) is treated as expired.
+// This is the admission primitive for every side-effecting path.
+func (rc *RaftConsensus) HasLeadership() bool {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	if rc.clusterState.Leader != rc.nodeID {
+		return false
+	}
+	if rc.leaseLastAck.IsZero() {
+		return false
+	}
+	return time.Since(rc.leaseLastAck) < rc.leaseDuration
+}
+
+// GetTerm returns the current Raft term. Mirrors GetLeader() — a thin read of
+// rc.node.Status().GetTerm() under the same locking convention. The term is the
+// fencing-token source required by ADR-029 Decision 5 (#3390 wires it).
+//
+// GetTerm() calls the generated nil-safe accessor (not .Term directly): raft
+// v3.7.0 migrated HardState to protobuf-v2 which made Term a *uint64; calling
+// .Term where uint64 is expected does not compile. See raft_transport.go:294.
+func (rc *RaftConsensus) GetTerm() uint64 {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	return rc.node.Status().GetTerm()
+}
+
+// refreshLeaseIfQuorum updates leaseLastAck when this node is leader and a quorum
+// of voters has been recently active (RecentActive == true in Status().Progress).
+//
+// Status().Progress is populated only on the leader and includes the leader's own
+// entry (whose RecentActive is always true per etcd/raft invariant at raft.go:949).
+// An empty Progress map signals a single-node cluster via RestartNode — the sole
+// node is trivially the quorum.
+//
+// Called from processReady (the single runRaft goroutine) after Advance(), so
+// Progress reflects the latest peer activity for this Ready batch.
+func (rc *RaftConsensus) refreshLeaseIfQuorum() {
+	rc.mu.RLock()
+	isLeader := rc.clusterState.Leader == rc.nodeID
+	rc.mu.RUnlock()
+	if !isLeader {
+		return
+	}
+
+	status := rc.node.Status()
+
+	// Empty Progress: single-node cluster (RestartNode path) — self is the quorum.
+	if len(status.Progress) == 0 {
+		rc.mu.Lock()
+		rc.leaseLastAck = time.Now()
+		rc.mu.Unlock()
+		return
+	}
+
+	// Count active voters (filter learners, which do not contribute to quorum).
+	// Self is always included in Progress with RecentActive=true.
+	active := 0
+	total := 0
+	for _, p := range status.Progress {
+		if p.IsLearner {
+			continue
+		}
+		total++
+		if p.RecentActive {
+			active++
+		}
+	}
+	// Strict majority: active must be more than half.
+	if active*2 > total {
+		rc.mu.Lock()
+		rc.leaseLastAck = time.Now()
+		rc.mu.Unlock()
+	}
 }
 
 // GetLeader returns the current leader node ID

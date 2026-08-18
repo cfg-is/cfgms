@@ -1501,3 +1501,83 @@ func TestManager_TwoNodeCluster(t *testing.T) {
 	require.NoError(t, managerA.Stop(stopCtx))
 	require.NoError(t, managerB.Stop(stopCtx))
 }
+
+// TestManager_SingleServerMode_HasLeadership_UnconditionallyTrue is the REQUIRED
+// test for Decision 4 of ADR-029: SingleServerMode HasLeadership() must return true
+// unconditionally, with no lease, no expiry, and no new rejection path.
+func TestManager_SingleServerMode_HasLeadership_UnconditionallyTrue(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, nil, "")
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	// HasLeadership must return true immediately without any lease or Raft cluster.
+	assert.True(t, manager.HasLeadership(),
+		"SingleServerMode HasLeadership() must be unconditionally true — no lease, no expiry")
+
+	// GetTerm in SingleServerMode has no Raft node; it returns 0.
+	assert.Equal(t, uint64(0), manager.GetTerm(),
+		"SingleServerMode GetTerm() must return 0 (no Raft cluster)")
+
+	// IsRaftLeader in SingleServerMode returns false (no Raft cluster means no
+	// Raft protocol state — the node is authoritative without Raft).
+	assert.False(t, manager.IsRaftLeader(),
+		"SingleServerMode IsRaftLeader() must return false (no Raft node to query)")
+}
+
+// TestManager_HasLeadership_ClusterMode_DelegatesAndExpires verifies that the
+// Manager's HasLeadership() delegates to RaftConsensus and respects lease expiry.
+func TestManager_HasLeadership_ClusterMode_DelegatesAndExpires(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "hasleader-cluster-test"
+	cfg.Cluster = FastElectionConfig()
+	// Include the node itself in discovery so StartNode bootstraps a single-node
+	// cluster (not RestartNode with no voters, which never elects a leader).
+	cfg.Cluster.Discovery.Config["nodes"] = []interface{}{
+		map[string]interface{}{"id": "hasleader-cluster-test", "address": "127.0.0.1:0"},
+	}
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t), "")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if manager.raftConsensus != nil {
+			manager.raftConsensus.Stop() //nolint:errcheck
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+	defer manager.Stop(context.Background()) //nolint:errcheck
+
+	// Wait for leadership.
+	require.Eventually(t, func() bool {
+		return manager.IsLeader()
+	}, 10*time.Second, 20*time.Millisecond, "single-node cluster must elect itself leader")
+
+	// HasLeadership must return true once the lease is established.
+	require.Eventually(t, func() bool {
+		return manager.HasLeadership()
+	}, 5*time.Second, 10*time.Millisecond, "HasLeadership must be true once lease is established")
+
+	// Expire the lease via direct field access (simulates partition).
+	leaseDuration := time.Duration(float64(cfg.Cluster.ElectionTimeout) * 0.8)
+	rc := manager.raftConsensus
+	rc.mu.Lock()
+	rc.leaseLastAck = time.Now().Add(-(leaseDuration + time.Millisecond))
+	rc.mu.Unlock()
+
+	assert.False(t, manager.HasLeadership(),
+		"Manager.HasLeadership() must be false when underlying lease has expired")
+	assert.True(t, manager.IsLeader(),
+		"Manager.IsLeader() (protocol state) must remain true when only the lease expired")
+}

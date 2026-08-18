@@ -243,6 +243,21 @@ func (c *Config) Validate() error {
 		if c.Cluster.Discovery == nil {
 			return fmt.Errorf("discovery configuration is required for cluster mode")
 		}
+
+		// Validate the ADR-029 lease bound: leaseDuration must be strictly less
+		// than ElectionTimeout and strictly greater than HeartbeatInterval.
+		// The 0.8× ratio always satisfies this for valid timing values, but
+		// we validate explicitly so future ratio changes cannot silently violate it.
+		leaseDuration := c.Cluster.LeaseDuration()
+		if leaseDuration <= 0 {
+			return fmt.Errorf("derived lease duration must be positive (ElectionTimeout=%v)", c.Cluster.ElectionTimeout)
+		}
+		if leaseDuration >= c.Cluster.ElectionTimeout {
+			return fmt.Errorf("derived lease duration (%v) must be less than ElectionTimeout (%v)", leaseDuration, c.Cluster.ElectionTimeout)
+		}
+		if leaseDuration <= c.Cluster.HeartbeatInterval {
+			return fmt.Errorf("derived lease duration (%v) must exceed HeartbeatInterval (%v) so a quorum ack can refresh it", leaseDuration, c.Cluster.HeartbeatInterval)
+		}
 	}
 
 	// Validate health check configuration (HealthCheck is now a pointer)
@@ -292,6 +307,16 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// LeaseDuration returns the leader lease duration derived from ElectionTimeout
+// per ADR-029 Decision 1: leaseDuration = 0.8 × ElectionTimeout.
+//
+// The lease must expire strictly before ElectionTimeout so that a new leader
+// cannot be elected while the outgoing leader still believes it is authoritative.
+// The 0.2× margin covers scheduling pauses (GC, hypervisor descheduling).
+func (c *ClusterConfig) LeaseDuration() time.Duration {
+	return time.Duration(float64(c.ElectionTimeout) * 0.8)
 }
 
 // FastElectionConfig returns a ClusterConfig with test-scale election timings.
