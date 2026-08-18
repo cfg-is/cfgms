@@ -283,6 +283,97 @@ func TestServer_SetGitSyncWebhookHandler_DelegatesToWiredHandler(t *testing.T) {
 		"wired handler status (200) must be returned, not 503/404")
 }
 
+// TestServer_SetReportsHandler_EnforcesPermissionGate verifies that SetReportsHandler wires
+// the RBAC authorization gate onto the reports subrouter (Issue #3282, AC #5). This test is
+// the circuit-breaker: a future refactor that re-registers routes without the gate will fail
+// here rather than silently re-opening the authorization hole.
+//
+// Assertions:
+//   - Unauthenticated → 401 (auth layer still runs first; not 403)
+//   - Authenticated with no report permission → 403 on every GET route
+//   - Authenticated with report:read → passes GET routes (not 403/401)
+//   - Authenticated with report:read but no report:generate → 403 on POST /generate
+//   - Authenticated with report:generate → passes POST /generate gate (not 403/401)
+func TestServer_SetReportsHandler_EnforcesPermissionGate(t *testing.T) {
+	server := setupTestServer(t)
+	h := reportapi.New(nil, nil, nil, logging.NewNoopLogger())
+	server.SetReportsHandler(h)
+
+	t.Run("unauthenticated returns 401 not 403 — auth runs before authz", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/reports/templates", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code,
+			"unauthenticated request must return 401 (auth middleware), not 403 (authz middleware)")
+	})
+
+	noPermKey := NewTestKey(t, server, []string{"steward:read"})
+
+	readRoutes := []string{
+		"/api/v1/reports/templates",
+		"/api/v1/reports/dashboard/overview",
+		"/api/v1/reports/dashboard/trends",
+		"/api/v1/reports/dashboard/alerts",
+		"/api/v1/reports/compliance/status",
+		"/api/v1/reports/drift/summary",
+	}
+
+	t.Run("caller without report:read receives 403 on GET routes", func(t *testing.T) {
+		for _, path := range readRoutes {
+			req := httptest.NewRequest("GET", path, nil)
+			req.Header.Set("X-API-Key", noPermKey)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"caller without report:read must receive 403 on %s", path)
+		}
+	})
+
+	t.Run("caller without report:generate receives 403 on POST /generate", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/reports/generate", nil)
+		req.Header.Set("X-API-Key", noPermKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"caller without report:generate must receive 403 on POST /reports/generate")
+	})
+
+	readKey := NewTestKey(t, server, []string{"report:read"})
+
+	t.Run("caller with report:read passes the GET route gate", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/reports/templates", nil)
+		req.Header.Set("X-API-Key", readKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code,
+			"report:read caller must not receive 403 on GET /reports/templates")
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+			"report:read caller must not receive 401 on GET /reports/templates")
+	})
+
+	t.Run("caller with report:read is refused POST /generate — requires report:generate", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/reports/generate", nil)
+		req.Header.Set("X-API-Key", readKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"report:read-only caller must be refused POST /generate (report:generate required)")
+	})
+
+	generateKey := NewTestKey(t, server, []string{"report:generate"})
+
+	t.Run("caller with report:generate passes POST /generate gate", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/reports/generate", nil)
+		req.Header.Set("X-API-Key", generateKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code,
+			"report:generate caller must pass the RBAC gate on POST /reports/generate")
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+			"report:generate caller must not receive 401 on POST /reports/generate")
+	})
+}
+
 // TestServer_SetWorkflowHandler_NilHandler_NoopSafe re-verifies (regression guard) that
 // passing nil to SetWorkflowHandler does not panic and leaves workflowHandler nil.
 func TestServer_SetWorkflowHandler_NilAfterSet_NoopSafe(t *testing.T) {
