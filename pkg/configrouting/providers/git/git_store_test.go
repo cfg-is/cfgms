@@ -505,7 +505,7 @@ func assertNoCredentialInStruct(t *testing.T, v interface{}, credential, path st
 }
 
 // TestGitConfigStore_ListConfigs verifies that ListConfigs returns entries for all YAML
-// files under the subPath directory.
+// files under the subPath directory and stamps each entry with the store's tenant ID.
 func TestGitConfigStore_ListConfigs(t *testing.T) {
 	remoteDir := createBareRemote(t, map[string][]byte{
 		"configs/networking/fw.yaml":    []byte("type: firewall\n"),
@@ -521,6 +521,9 @@ func TestGitConfigStore_ListConfigs(t *testing.T) {
 	entries, err := store.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{TenantID: "tenant1"})
 	require.NoError(t, err)
 	assert.Len(t, entries, 3, "should find 3 yaml files")
+	for _, e := range entries {
+		assert.Equal(t, "tenant1", e.Key.TenantID, "entries must be stamped with the store's tenant")
+	}
 
 	// Filter by namespace
 	netEntries, err := store.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{
@@ -529,6 +532,85 @@ func TestGitConfigStore_ListConfigs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, netEntries, 2, "networking namespace should have 2 files")
+}
+
+// TestGitConfigStore_ListConfigs_TenantIDScoping verifies that ListConfigs scopes its
+// walk by filter.TenantID: entries are returned when the filter matches the store's
+// tenant, and nothing is returned when the filter names a different tenant.
+// This exercises the primary AC from issue #3438.
+func TestGitConfigStore_ListConfigs_TenantIDScoping(t *testing.T) {
+	// Populate two separate repos — one per tenant — to represent two tenants' configs.
+	remoteDir1 := createBareRemote(t, map[string][]byte{
+		"configs/networking/fw.yaml":  []byte("type: firewall\n"),
+		"configs/networking/dns.yaml": []byte("type: dns\n"),
+	})
+	remoteDir2 := createBareRemote(t, map[string][]byte{
+		"configs/networking/gw.yaml": []byte("type: gateway\n"),
+	})
+
+	workDir := t.TempDir()
+	ss := newMemorySecretStore(nil)
+	store1, err := NewGitConfigStore(context.Background(), makeSource(remoteDir1, "configs"), "tenant1", ss, workDir, logging.NewNoopLogger())
+	require.NoError(t, err)
+	store2, err := NewGitConfigStore(context.Background(), makeSource(remoteDir2, "configs"), "tenant2", ss, workDir, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	t.Run("matching_tenant_returns_entries", func(t *testing.T) {
+		entries, err := store1.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{TenantID: "tenant1"})
+		require.NoError(t, err)
+		assert.Len(t, entries, 2, "should find 2 entries for tenant1")
+		for _, e := range entries {
+			assert.Equal(t, "tenant1", e.Key.TenantID, "entries must be stamped with tenant1")
+		}
+	})
+
+	t.Run("non_matching_tenant_returns_empty", func(t *testing.T) {
+		// Before the fix, store1.ListConfigs with TenantID="tenant2" returned all of
+		// store1's entries mislabeled as tenant2. After the fix it must return nothing.
+		entries, err := store1.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{TenantID: "tenant2"})
+		require.NoError(t, err)
+		assert.Empty(t, entries, "tenant1 store must return nothing for a tenant2 filter")
+	})
+
+	t.Run("store2_returns_its_own_entries", func(t *testing.T) {
+		entries, err := store2.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{TenantID: "tenant2"})
+		require.NoError(t, err)
+		assert.Len(t, entries, 1, "should find 1 entry for tenant2")
+		assert.Equal(t, "tenant2", entries[0].Key.TenantID)
+	})
+}
+
+// TestGitConfigStore_ListConfigs_EmptyTenantFilter verifies that filter.TenantID == ""
+// preserves the unscoped-walk behaviour — all of the store's entries are returned and
+// each is stamped with the store's actual tenant ID.
+func TestGitConfigStore_ListConfigs_EmptyTenantFilter(t *testing.T) {
+	remoteDir := createBareRemote(t, map[string][]byte{
+		"configs/ns1/a.yaml": []byte("a: 1\n"),
+		"configs/ns2/b.yaml": []byte("b: 2\n"),
+	})
+
+	workDir := t.TempDir()
+	ss := newMemorySecretStore(nil)
+	store, err := NewGitConfigStore(context.Background(), makeSource(remoteDir, "configs"), "tenant1", ss, workDir, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	t.Run("nil_filter_returns_all", func(t *testing.T) {
+		entries, err := store.ListConfigs(context.Background(), nil)
+		require.NoError(t, err)
+		assert.Len(t, entries, 2, "nil filter must return all entries (unscoped walk)")
+		for _, e := range entries {
+			assert.Equal(t, "tenant1", e.Key.TenantID, "entries must be stamped with the store's tenant")
+		}
+	})
+
+	t.Run("empty_tenant_id_returns_all", func(t *testing.T) {
+		entries, err := store.ListConfigs(context.Background(), &cfgconfig.ConfigFilter{})
+		require.NoError(t, err)
+		assert.Len(t, entries, 2, "empty TenantID must return all entries (unscoped walk)")
+		for _, e := range entries {
+			assert.Equal(t, "tenant1", e.Key.TenantID, "entries must be stamped with the store's tenant")
+		}
+	})
 }
 
 // TestGitConfigStore_GetConfigNotFound verifies that GetConfig returns ErrConfigNotFound
