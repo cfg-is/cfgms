@@ -20,6 +20,7 @@
  *   /passkeys        → AppShell layout → PasskeysView (self-service passkey management)
  *   /reports         → AppShell layout → ReportsDashboardView
  *   /compliance      → AppShell layout → ComplianceSummaryView
+ *   /monitoring      → AppShell layout → MonitoringView
  *
  * Session presence is inferred from API responses, never from reading
  * cookies (#2495). The fleet view's own data call (GET /api/v1/stewards,
@@ -51,6 +52,7 @@ import PasskeysView from './passkeys/PasskeysView.tsx'
 import Enroll from './pages/Enroll.tsx'
 import ReportsDashboardView from './reports/ReportsDashboardView.tsx'
 import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
+import MonitoringView from './monitoring/MonitoringView.tsx'
 
 function App() {
   return (
@@ -80,6 +82,7 @@ function App() {
                   <Route path="passkeys" element={<PasskeysView />} />
                   <Route path="reports" element={<ReportsDashboardView />} />
                   <Route path="compliance" element={<ComplianceSummaryView />} />
+                  <Route path="monitoring" element={<MonitoringView />} />
                 </Route>
               </Routes>
             </RequireAuth>
