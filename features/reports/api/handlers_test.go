@@ -5,22 +5,17 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sort"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	fleetstorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/service"
 	reportscache "github.com/cfgis/cfgms/features/reports/cache"
 	reportsengine "github.com/cfgis/cfgms/features/reports/engine"
@@ -29,22 +24,24 @@ import (
 	"github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/features/reports/templates"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	dnadrift "github.com/cfgis/cfgms/pkg/dna/drift"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // reportsStack is the reports stack the controller wires in production
 // (features/controller/server/server.go: initializeReportsHandler), built from
-// real CFGMS components only: DNA fleet storage on a per-test SQLite database,
-// the real drift detector, data provider, template processor, exporter, report
-// cache and report engine, plus the real steward registry that is the
-// device→tenant authority. alertStore is a real flatfile-backed AlertStore.
-// Nothing is substituted.
+// real CFGMS components only: a real SQLite-backed entity graph provider
+// (ADR-022) on a per-test database, data provider, template processor,
+// exporter, report cache and report engine, plus the real steward registry
+// that is the device→tenant authority. alertStore is a real flatfile-backed
+// AlertStore. Nothing is substituted.
 type reportsStack struct {
 	handler    *Handler
 	registry   *service.ControllerService
-	storage    *fleetstorage.Manager
+	egProvider *egsqlite.SQLiteEntityGraphProvider
 	alertStore business.AlertStore
 }
 
@@ -52,89 +49,38 @@ func newReportsStack(t *testing.T) *reportsStack {
 	t.Helper()
 	logger := logging.NewNoopLogger()
 
-	store := newDNAStorage(t, logger)
+	egProvider := newTestEGProvider(t)
 	registry := service.NewControllerService(logger)
 	alertStore := newTestAlertStore(t)
 
 	return &reportsStack{
-		handler:    New(newEngine(t, store, logger), exporters.New(logger), registry, alertStore, logger),
+		handler:    New(newEngine(t, egProvider, logger), exporters.New(logger), registry, alertStore, logger),
 		registry:   registry,
-		storage:    store,
+		egProvider: egProvider,
 		alertStore: alertStore,
 	}
 }
 
-// makeDNAWithFragments builds a commonpb.DNA whose Fragments slice is populated
-// from the given fragment-ID → state map. Each fragment's canonical_bytes is the
-// state text and its fragment_hash is the SHA-256 of those bytes, matching the
-// ADR-017 contract the drift detector diffs. Fragments are emitted in sorted ID
-// order so the stored record is deterministic.
-func makeDNAWithFragments(deviceID string, state map[string]string) *commonpb.DNA {
-	ids := make([]string, 0, len(state))
-	for id := range state {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	fragments := make([]*commonpb.Fragment, 0, len(ids))
-	for _, id := range ids {
-		canonical := []byte(state[id])
-		sum := sha256.Sum256(canonical)
-		fragments = append(fragments, &commonpb.Fragment{
-			FragmentId:     id,
-			CanonicalBytes: canonical,
-			FragmentHash:   hex.EncodeToString(sum[:]),
-		})
-	}
-	return &commonpb.DNA{
-		Id:          deviceID,
-		Fragments:   fragments,
-		LastUpdated: timestamppb.New(time.Now()),
-	}
-}
-
-// addDeviceWithDrift registers a device and stores two DNA snapshots with
-// differing fragment content so the drift detector can produce at least one
-// event. attrs1 and attrs2 are fragment-ID → canonical-state maps; any key
-// whose value differs between the two maps will register as a drift event.
-func (s *reportsStack) addDeviceWithDrift(t *testing.T, deviceID, tenantID string, attrs1, attrs2 map[string]string) {
+// newTestEGProvider creates a real SQLite-backed entity graph provider (ADR-022)
+// on a t.TempDir()-isolated database — no mocks, real component.
+func newTestEGProvider(t *testing.T) *egsqlite.SQLiteEntityGraphProvider {
 	t.Helper()
-	require.NoError(t, s.registry.RegisterSteward(deviceID, tenantID, "127.0.0.1:8443", "online"))
-
-	dna1 := makeDNAWithFragments(deviceID, attrs1)
-	require.NoError(t, s.storage.Store(context.Background(), deviceID, dna1,
-		&fleetstorage.StoreOptions{TenantID: tenantID, Status: "online"}))
-
-	dna2 := makeDNAWithFragments(deviceID, attrs2)
-	require.NoError(t, s.storage.Store(context.Background(), deviceID, dna2,
-		&fleetstorage.StoreOptions{TenantID: tenantID, Status: "online"}))
-}
-
-// newDNAStorage creates the real fleet DNA store on a temp SQLite database.
-func newDNAStorage(t *testing.T, logger logging.Logger) *fleetstorage.Manager {
-	t.Helper()
-	cfg := fleetstorage.DefaultConfig()
-	cfg.Backend = fleetstorage.BackendSQLite
-	cfg.DataDir = t.TempDir()
-
-	store, err := fleetstorage.NewManager(cfg, logger)
-	require.NoError(t, err, "real DNA storage must initialize")
+	path := filepath.Join(t.TempDir(), "eg.db")
+	p, err := egsqlite.NewSQLiteEntityGraphProvider(path)
+	require.NoError(t, err, "real entity graph provider must initialize")
 	t.Cleanup(func() {
-		if closeErr := store.Close(); closeErr != nil {
-			t.Logf("closing DNA storage: %v", closeErr)
+		if closeErr := p.Close(); closeErr != nil {
+			t.Logf("closing entity graph provider: %v", closeErr)
 		}
 	})
-	return store
+	return p
 }
 
-// newEngine assembles the real report engine over the given DNA store.
-func newEngine(t *testing.T, store *fleetstorage.Manager, logger logging.Logger) *reportsengine.Engine {
+// newEngine assembles the real report engine over the given entity graph provider.
+func newEngine(t *testing.T, egProvider eginterfaces.EntityGraphProvider, logger logging.Logger) *reportsengine.Engine {
 	t.Helper()
-	detector, err := dnadrift.NewDetector(nil, logger)
-	require.NoError(t, err, "real drift detector must initialize")
-
 	return reportsengine.New(
-		provider.New(store, detector, logger),
+		provider.New(egProvider, logger),
 		templates.New(logger),
 		exporters.New(logger),
 		reportscache.NewMemoryCache(),
@@ -142,23 +88,129 @@ func newEngine(t *testing.T, store *fleetstorage.Manager, logger logging.Logger)
 	)
 }
 
-// addDevice registers a steward in the real registry under tenantID and stores a
-// real DNA record for it, so the device is both authorizable and carries data.
-func (s *reportsStack) addDevice(t *testing.T, deviceID, tenantID string) {
+// storeHostEntity records a state observation for the bare host entity
+// host:<deviceID> at the given time, giving the device an observation history
+// GetDNAData/GetDeviceStats can read. The payload embeds "at" so repeated calls
+// for the same device don't collide under ReportObservations' content-hash dedup.
+func storeHostEntity(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceID string, at time.Time) {
+	t.Helper()
+	eid, err := egtypes.NewEID("host", deviceID, "")
+	require.NoError(t, err)
+	err = egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: deviceID,
+		Observations: []egtypes.Observation{
+			{
+				Source:     deviceID,
+				ObservedAt: at,
+				RecordedAt: at,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind": "host",
+					"observed_at": at.Format(time.RFC3339Nano),
+				},
+			},
+		},
+	})
+	require.NoError(t, err, "storing host entity observation must succeed")
+}
+
+// storeDriftDiff records a drift-diff observation (ADR-022) for deviceID's
+// fragment entity host:<deviceID>/<fragmentID>, changing it from prevVal to
+// currVal. This is the entity graph shape the migrated DataProvider reads via
+// ListDrifted. fragmentID doubles as the drift field's attribute name, so a
+// security-category name (e.g. "auth:enabled") classifies critical via
+// drift.CategorizeAttributeSeverity, and a network-category name (e.g.
+// "host:hostname") classifies warning — matching the pre-migration flat-store
+// detector's keyword classification.
+func storeDriftDiff(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceID, fragmentID, prevVal, currVal string) {
+	t.Helper()
+	eid, err := egtypes.NewEID("host", deviceID, fragmentID)
+	require.NoError(t, err)
+
+	now := time.Now()
+	err = egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: deviceID,
+		Observations: []egtypes.Observation{
+			{
+				Source:     deviceID,
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindDriftDiff,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"config_revision": "rev-1",
+					"fields": []interface{}{
+						map[string]interface{}{
+							"attribute": fragmentID,
+							"desired":   prevVal,
+							"actual":    currVal,
+							"matching":  false,
+						},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err, "failed to store drift-diff observation")
+}
+
+// addDeviceWithDrift registers a device and stores drift-diff observations for
+// each attribute that differs between attrs1 and attrs2, so the entity graph's
+// drift projection has at least one event to serve. attrs1 and attrs2 are
+// fragment-ID → state maps; any key whose value differs between the two maps
+// registers as a drift event.
+func (s *reportsStack) addDeviceWithDrift(t *testing.T, deviceID, tenantID string, attrs1, attrs2 map[string]string) {
 	t.Helper()
 	require.NoError(t, s.registry.RegisterSteward(deviceID, tenantID, "127.0.0.1:8443", "online"))
 
-	dna := &commonpb.DNA{
-		Id:              deviceID,
-		Attributes:      map[string]string{"hostname": deviceID, "os": "linux"},
-		LastUpdated:     timestamppb.New(time.Now()),
-		ConfigHash:      "config-hash-" + deviceID,
-		LastSyncTime:    timestamppb.New(time.Now()),
-		AttributeCount:  2,
-		SyncFingerprint: "fingerprint-" + deviceID,
+	storeHostEntity(t, s.egProvider, deviceID, time.Now())
+	for attr, prevVal := range attrs1 {
+		storeDriftDiff(t, s.egProvider, deviceID, attr, prevVal, attrs2[attr])
 	}
-	require.NoError(t, s.storage.Store(context.Background(), deviceID, dna,
-		&fleetstorage.StoreOptions{TenantID: tenantID, Status: "online"}))
+}
+
+// addDevice registers a steward in the real registry under tenantID and stores a
+// real host-entity observation for it, so the device is both authorizable and
+// carries data.
+func (s *reportsStack) addDevice(t *testing.T, deviceID, tenantID string) {
+	t.Helper()
+	require.NoError(t, s.registry.RegisterSteward(deviceID, tenantID, "127.0.0.1:8443", "online"))
+	storeHostEntity(t, s.egProvider, deviceID, time.Now())
+}
+
+// addTenantOwnedDevice registers a steward and stores its host entity with an
+// owning_tenant, which is the entity graph's only access-control axis (ADR-023).
+// Only such a device is discoverable by a report that names no device_id: that
+// path resolves hosts through EntityFilter.TenantFilter, which matches on the
+// entity index's owning_tenant.
+func (s *reportsStack) addTenantOwnedDevice(t *testing.T, deviceID, tenantID string) {
+	t.Helper()
+	require.NoError(t, s.registry.RegisterSteward(deviceID, tenantID, "127.0.0.1:8443", "online"))
+
+	at := time.Now()
+	eid, err := egtypes.NewEID("host", deviceID, "")
+	require.NoError(t, err)
+	require.NoError(t, s.egProvider.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: deviceID,
+		Observations: []egtypes.Observation{
+			{
+				Source:     deviceID,
+				ObservedAt: at,
+				RecordedAt: at,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind":   "host",
+					"owning_tenant": tenantID,
+					"observed_at":   at.Format(time.RFC3339Nano),
+				},
+			},
+		},
+	}), "storing the tenant-owned host entity must succeed")
 }
 
 // request builds a request carrying the authenticated caller's tenant exactly as
@@ -513,8 +565,8 @@ func TestDeviceScope_CrossTenantRejected(t *testing.T) {
 // rather than serving them unauthorized.
 func TestDeviceScope_FailsClosedWithoutResolver(t *testing.T) {
 	logger := logging.NewNoopLogger()
-	store := newDNAStorage(t, logger)
-	unresolvable := New(newEngine(t, store, logger), exporters.New(logger), nil, nil, logger)
+	egProvider := newTestEGProvider(t)
+	unresolvable := New(newEngine(t, egProvider, logger), exporters.New(logger), nil, nil, logger)
 
 	t.Run("scoped caller with a device selector is refused", func(t *testing.T) {
 		rec := httptest.NewRecorder()
@@ -563,6 +615,68 @@ func TestDashboardOverview(t *testing.T) {
 		stack.handler.getDashboardOverview(rec,
 			request("GET", "/reports/dashboard/overview?tenant_id=tenant-b", "", nil))
 		require.Equal(t, http.StatusOK, rec.Code)
+	})
+}
+
+// TestDashboardOverview_NoDeviceSelector_DiscoversOnlyCallerTenantHosts covers the
+// fleet-wide path end to end through the real stack: with no device_id, the engine
+// has no device selector, so hosts are discovered through the entity graph under
+// the caller's tenant subtree. The KPI device count must therefore cover exactly
+// the caller tenant's hosts — another tenant's host must never be counted, and its
+// existence must not be inferable from the response.
+func TestDashboardOverview_NoDeviceSelector_DiscoversOnlyCallerTenantHosts(t *testing.T) {
+	stack := newReportsStack(t)
+	stack.addTenantOwnedDevice(t, "owned-a1", "tenant-a")
+	stack.addTenantOwnedDevice(t, "owned-a2", "tenant-a")
+	stack.addTenantOwnedDevice(t, "owned-b1", "tenant-b")
+
+	kpiDeviceCount := func(t *testing.T, rec *httptest.ResponseRecorder) float64 {
+		t.Helper()
+		var body struct {
+			KPIs map[string]any `json:"kpis"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		count, ok := body.KPIs["total_devices"].(float64)
+		require.True(t, ok, "kpis.total_devices must be present: %v", body.KPIs)
+		return count
+	}
+
+	t.Run("scoped caller sees only its own tenant's hosts", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardOverview(rec,
+			request("GET", "/reports/dashboard/overview", "tenant-a", nil))
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, float64(2), kpiDeviceCount(t, rec),
+			"discovery must cover tenant-a's two hosts and never tenant-b's")
+		assert.NotContains(t, rec.Body.String(), "owned-b1",
+			"another tenant's device must not appear anywhere in the response")
+	})
+
+	t.Run("root caller scoped by tenant_id sees only that tenant's hosts", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardOverview(rec,
+			request("GET", "/reports/dashboard/overview?tenant_id=tenant-b", "", nil))
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, float64(1), kpiDeviceCount(t, rec),
+			"an unscoped caller naming tenant-b sees tenant-b's single host")
+	})
+
+	t.Run("caller naming neither tenant nor device is refused", func(t *testing.T) {
+		// An unscoped caller with no tenant_id and no device_id names no
+		// authorization cut at all. The provider refuses rather than discovering
+		// every host in every tenant, and the engine surfaces that as a failed
+		// report rather than an empty one.
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardOverview(rec,
+			request("GET", "/reports/dashboard/overview", "", nil))
+
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.NotContains(t, rec.Body.String(), "owned-a1",
+			"a refused report must disclose no device data")
+		assert.NotContains(t, rec.Body.String(), "owned-b1",
+			"a refused report must disclose no device data")
 	})
 }
 
@@ -750,9 +864,10 @@ func TestDashboardAlerts_SeverityFilter(t *testing.T) {
 	// Both devices must be registered in the resolver so the tenant-scoped caller
 	// can select them via the device_id query parameter.
 	makeReq := func(path string) *http.Request {
-		// Include explicit device IDs: device discovery via tenant scanning is not
-		// yet supported (GetDNAData with no DeviceIDs returns nothing by design);
-		// the device_id params are the real-world path for a dashboard caller.
+		// Explicit device IDs: this fixture's drift is stored without an
+		// owning_tenant, so it is reachable through the device selector — the
+		// authorization cut the API boundary verifies — rather than through
+		// tenant-subtree discovery, which resolves hosts by owning_tenant.
 		return request("GET", path+"&device_id=warn-device&device_id=crit-device", "tenant-filter", nil)
 	}
 
@@ -971,14 +1086,14 @@ func TestDashboardAlerts_AckSilence(t *testing.T) {
 // production parser produces the error.
 func TestDashboardAlerts_AlertStateUnavailable(t *testing.T) {
 	logger := logging.NewNoopLogger()
-	store := newDNAStorage(t, logger)
+	egProvider := newTestEGProvider(t)
 	registry := service.NewControllerService(logger)
 	alertStore := newUnreadableTestAlertStore(t)
 
 	stack := &reportsStack{
-		handler:    New(newEngine(t, store, logger), exporters.New(logger), registry, alertStore, logger),
+		handler:    New(newEngine(t, egProvider, logger), exporters.New(logger), registry, alertStore, logger),
 		registry:   registry,
-		storage:    store,
+		egProvider: egProvider,
 		alertStore: alertStore,
 	}
 
@@ -1018,13 +1133,13 @@ func TestDashboardAlerts_AlertStateUnavailable(t *testing.T) {
 // data and the handler does not return 503 for the whole response.
 func TestDashboardAlerts_NilAlertStore(t *testing.T) {
 	logger := logging.NewNoopLogger()
-	store := newDNAStorage(t, logger)
+	egProvider := newTestEGProvider(t)
 	registry := service.NewControllerService(logger)
 	// Explicitly pass nil alertStore — degrade path.
 	stack := &reportsStack{
-		handler:  New(newEngine(t, store, logger), exporters.New(logger), registry, nil, logger),
-		registry: registry,
-		storage:  store,
+		handler:    New(newEngine(t, egProvider, logger), exporters.New(logger), registry, nil, logger),
+		registry:   registry,
+		egProvider: egProvider,
 	}
 
 	// Seed a real warning-severity drift event (hostname is a network keyword) so

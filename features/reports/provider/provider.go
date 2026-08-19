@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,41 @@ type DataProvider struct {
 	logger     logging.Logger
 }
 
+// errTenantScopeRequired is returned by a read that carries neither a device
+// selector nor a tenant scope. Such a read has no authorization cut at all: the
+// entity graph treats an empty EntityFilter.TenantFilter / DriftFilter.TenantFilter
+// as "every tenant" (pkg/entitygraph/providers/sqlite/entity_reads.go and
+// .../drift.go add an owning_tenant predicate only when the filter is set), so
+// serving it would return the whole deployment to whoever asked. ADR-022 §7 makes
+// the caller-tenant-subtree filter mandatory on every read, so this fails closed.
+var errTenantScopeRequired = errors.New("report query requires a tenant scope or an explicit device list")
+
+// hostDiscoveryPageSize bounds one QueryEntities page during fleet-wide host
+// discovery. Discovery pages rather than loading a tenant's whole host set at once.
+const hostDiscoveryPageSize = 100
+
+// tenantScopes normalizes query.TenantIDs into the distinct tenant-subtree filters
+// a read must be split across. EntityFilter and DriftFilter each carry exactly one
+// subtree, so N tenants means N filtered queries — never one unfiltered query
+// standing in for their union. Blank entries are dropped: an empty TenantFilter
+// means "all tenants" to the providers, which is precisely what must not happen.
+func tenantScopes(tenantIDs []string) []string {
+	scopes := make([]string, 0, len(tenantIDs))
+	seen := make(map[string]struct{}, len(tenantIDs))
+	for _, id := range tenantIDs {
+		scope := strings.TrimSpace(id)
+		if scope == "" {
+			continue
+		}
+		if _, dup := seen[scope]; dup {
+			continue
+		}
+		seen[scope] = struct{}{}
+		scopes = append(scopes, scope)
+	}
+	return scopes
+}
+
 // New creates a new data provider instance backed by the entity graph.
 func New(
 	egProvider eginterfaces.EntityGraphProvider,
@@ -42,6 +78,11 @@ func New(
 // Records are sourced from the entity graph: each observation in the host
 // entity's history becomes one DNARecord (DeviceID + StoredAt; DNA is nil because
 // the entity graph stores per-fragment observations, not full DNA snapshots).
+//
+// The query names the hosts one of two ways. DeviceIDs reads each named host's
+// history directly; those IDs are authorized against the caller's tenant at the API
+// boundary. With no DeviceIDs, hosts are discovered per tenant subtree named by
+// TenantIDs, and a query naming neither is refused (errTenantScopeRequired).
 func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuery) ([]storage.DNARecord, error) {
 	// Per-device failures are swallowed so a single bad entity never fails a
 	// fleet-wide report. A cancelled or expired request is fatal — continuing would
@@ -94,44 +135,25 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 			}
 		}
 	} else {
-		// Discover devices by querying the entity graph for all host entities and
-		// fetching each one's observation history within the requested time range.
+		// Fleet-wide discovery. The caller named no device, so the tenant subtree
+		// is the only authorization cut left and it is mandatory (ADR-022 §7):
+		// discovery runs once per requested tenant with that tenant's subtree
+		// filter, and a query that can name no tenant is refused rather than
+		// widened to every host in every tenant.
+		scopes := tenantScopes(query.TenantIDs)
+		if len(scopes) == 0 {
+			return nil, errTenantScopeRequired
+		}
+
 		p.logger.Debug("all-device query: discovering hosts via entity graph",
-			"tenant_count", len(query.TenantIDs))
-		var nextToken string
-		for {
-			page, err := p.egProvider.QueryEntities(ctx, eginterfaces.EntityFilter{Kind: "host"}, eginterfaces.PageToken{Token: nextToken, PageSize: 100})
+			"tenant_scope_count", len(scopes))
+
+		for _, scope := range scopes {
+			scopeRecords, err := p.discoverHostRecords(ctx, scope, egTimeRange)
 			if err != nil {
-				safeErr := logging.SanitizeLogValue(err.Error())
-				safeErr = strings.ReplaceAll(safeErr, "\n", "_")
-				safeErr = strings.ReplaceAll(safeErr, "\r", "_")
-				p.logger.Warn("failed to query host entities for DNA data discovery", "error", safeErr)
-				break
+				return nil, err
 			}
-			for _, entity := range page.Entities {
-				deviceID := entity.Entity.EID.AuthorityName()
-				history, err := p.egProvider.GetHistory(ctx, entity.Entity.EID, egTimeRange)
-				if err != nil {
-					safeDeviceID := logging.SanitizeLogValue(deviceID)
-					safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
-					safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
-					safeErr := logging.SanitizeLogValue(err.Error())
-					safeErr = strings.ReplaceAll(safeErr, "\n", "_")
-					safeErr = strings.ReplaceAll(safeErr, "\r", "_")
-					p.logger.Warn("failed to get entity history for device", "device_id", safeDeviceID, "error", safeErr)
-					continue
-				}
-				for _, rec := range history {
-					allRecords = append(allRecords, storage.DNARecord{
-						DeviceID: deviceID,
-						StoredAt: rec.Observation.RecordedAt,
-					})
-				}
-			}
-			if page.NextToken == "" {
-				break
-			}
-			nextToken = page.NextToken
+			allRecords = append(allRecords, scopeRecords...)
 		}
 	}
 
@@ -143,11 +165,86 @@ func (p *DataProvider) GetDNAData(ctx context.Context, query interfaces.DataQuer
 	return allRecords, nil
 }
 
+// discoverHostRecords returns one DNARecord per observation of every host entity
+// inside tenantScope's subtree, within egTimeRange.
+//
+// The tenant cut is applied by the provider (EntityFilter.TenantFilter), never
+// after the fact in memory. Pagination follows the provider's page token; a token
+// that repeats is a provider fault and ends the walk with an error rather than
+// looping forever. A per-host history failure is skipped so one bad entity cannot
+// void a tenant-wide report, but a failure of the discovery query itself is fatal:
+// it truncates the fleet by an unknown amount, and a report that silently covers
+// an unknown subset of hosts understates drift.
+func (p *DataProvider) discoverHostRecords(
+	ctx context.Context,
+	tenantScope string,
+	egTimeRange eginterfaces.TimeRange,
+) ([]storage.DNARecord, error) {
+	filter := eginterfaces.EntityFilter{Kind: "host", TenantFilter: tenantScope}
+
+	var (
+		records    []storage.DNARecord
+		nextToken  string
+		seenTokens = make(map[string]struct{})
+	)
+
+	for {
+		page, err := p.egProvider.QueryEntities(ctx, filter, eginterfaces.PageToken{
+			Token:    nextToken,
+			PageSize: hostDiscoveryPageSize,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to query host entities for tenant scope: %w", err)
+		}
+
+		for _, view := range page.Entities {
+			if view == nil || view.Entity == nil {
+				continue
+			}
+			eid := view.Entity.EID
+			deviceID := eid.AuthorityName()
+
+			history, err := p.egProvider.GetHistory(ctx, eid, egTimeRange)
+			if err != nil {
+				// Sequential-reassignment form required for CodeQL's ReplaceSanitizer.
+				safeDeviceID := logging.SanitizeLogValue(deviceID)
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\n", "_")
+				safeDeviceID = strings.ReplaceAll(safeDeviceID, "\r", "_")
+				safeErr := logging.SanitizeLogValue(err.Error())
+				safeErr = strings.ReplaceAll(safeErr, "\n", "_")
+				safeErr = strings.ReplaceAll(safeErr, "\r", "_")
+				p.logger.Warn("failed to get entity history for device", "device_id", safeDeviceID, "error", safeErr)
+				continue
+			}
+
+			for _, rec := range history {
+				records = append(records, storage.DNARecord{
+					DeviceID: deviceID,
+					StoredAt: rec.Observation.RecordedAt,
+				})
+			}
+		}
+
+		if page.NextToken == "" {
+			return records, nil
+		}
+		if _, repeated := seenTokens[page.NextToken]; repeated {
+			return nil, fmt.Errorf("host discovery aborted: entity graph page token repeated after %d records", len(records))
+		}
+		seenTokens[page.NextToken] = struct{}{}
+		nextToken = page.NextToken
+	}
+}
+
 // GetDriftEvents retrieves drift events for the queried devices.
 // Events are sourced from the entity graph drift projection via ListDrifted:
 // each DriftState whose DetectedAt falls within query.TimeRange becomes one
 // DriftEvent. When DeviceIDs is non-empty only entities whose EID authority
 // name matches a requested device ID are included.
+//
+// listDriftStates decides the authorization cut applied to the projection read —
+// device selector when the query names devices, tenant subtree otherwise, and a
+// refusal when the query names neither.
 func (p *DataProvider) GetDriftEvents(ctx context.Context, query interfaces.DataQuery) ([]drift.DriftEvent, error) {
 	// A cancelled or expired request is fatal — same rationale as GetDNAData.
 	if err := ctx.Err(); err != nil {
@@ -159,14 +256,22 @@ func (p *DataProvider) GetDriftEvents(ctx context.Context, query interfaces.Data
 		deviceFilter[id] = true
 	}
 
-	driftStates, err := p.egProvider.ListDrifted(ctx, eginterfaces.DriftFilter{})
+	driftStates, err := p.listDriftStates(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list drifted entities: %w", err)
+		return nil, err
 	}
 
 	result := make([]drift.DriftEvent, 0)
 	for _, state := range driftStates {
 		if state == nil {
+			continue
+		}
+		// Drift is reported against a host's fragment entities (subject
+		// host:<device>/<fragment>), so the device identity of an event is the
+		// EID's host authority. A drift state on any other authority kind —
+		// cluster, directory, tenant — names no device and has no place in a
+		// device report, so it is dropped rather than attributed to a device.
+		if state.EID.AuthorityType() != "host" {
 			continue
 		}
 		deviceID := state.EID.AuthorityName()
@@ -187,26 +292,78 @@ func (p *DataProvider) GetDriftEvents(ctx context.Context, query interfaces.Data
 	return result, nil
 }
 
+// listDriftStates reads the drift projection under the narrowest authorization
+// cut the query carries.
+//
+// A device selector is the narrowest cut and takes precedence: every requested
+// device is authorized against the caller's tenant subtree at the API boundary
+// (enforceDeviceTenant, features/reports/api/handlers.go) before the query gets
+// here, and the returned event set is restricted to exactly those devices. Layering
+// a subtree filter on top would also mean resolving the tenant through
+// eg_entity_index, which only carries an owning_tenant for entities whose reporter
+// supplied one — that would silently drop authorized devices from the answer.
+//
+// Without a device selector the tenant subtree is the only cut available, and it is
+// mandatory: an empty DriftFilter makes the providers skip the entity-index join
+// entirely (pkg/entitygraph/providers/sqlite/drift.go) and return every drifted
+// entity in the deployment, desired-vs-actual field values included. One filtered
+// query is issued per requested tenant, and a query naming no tenant is refused.
+func (p *DataProvider) listDriftStates(
+	ctx context.Context,
+	query interfaces.DataQuery,
+) ([]*eginterfaces.DriftState, error) {
+	if len(query.DeviceIDs) > 0 {
+		states, err := p.egProvider.ListDrifted(ctx, eginterfaces.DriftFilter{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list drifted entities: %w", err)
+		}
+		return states, nil
+	}
+
+	scopes := tenantScopes(query.TenantIDs)
+	if len(scopes) == 0 {
+		return nil, errTenantScopeRequired
+	}
+
+	var states []*eginterfaces.DriftState
+	for _, scope := range scopes {
+		scoped, err := p.egProvider.ListDrifted(ctx, eginterfaces.DriftFilter{TenantFilter: scope})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list drifted entities: %w", err)
+		}
+		states = append(states, scoped...)
+	}
+
+	return states, nil
+}
+
 // convertDriftStateToEvent converts an entity graph DriftState to a drift.DriftEvent.
 // Device identity (deviceID = EID authority name) and detection time come from the
 // drift state; attribute changes are derived from non-matching drift fields.
+//
+// The entity graph's drift-diff projection (ADR-022) carries desired/actual/matching
+// only — no severity of its own — so each changed field's severity is classified from
+// its attribute name via drift.CategorizeAttributeSeverity, the same keyword-category
+// rule the pre-migration flat-store path fell back to. The event's overall severity is
+// the most severe of its changes.
 func convertDriftStateToEvent(deviceID string, state *eginterfaces.DriftState) drift.DriftEvent {
 	var changes []*drift.AttributeChange
+	severity := drift.SeverityInfo
 	for _, field := range state.Fields {
 		if field.Matching {
 			continue
 		}
+		fieldSeverity := drift.CategorizeAttributeSeverity(field.Attribute)
 		changes = append(changes, &drift.AttributeChange{
 			Attribute:     field.Attribute,
 			PreviousValue: fmt.Sprintf("%v", field.Desired),
 			CurrentValue:  fmt.Sprintf("%v", field.Actual),
 			ChangeType:    drift.ChangeTypeModified,
-			Severity:      drift.SeverityWarning,
+			Severity:      fieldSeverity,
 		})
-	}
-	severity := drift.SeverityInfo
-	if len(changes) > 0 {
-		severity = drift.SeverityWarning
+		if severityRank(fieldSeverity) > severityRank(severity) {
+			severity = fieldSeverity
+		}
 	}
 	return drift.DriftEvent{
 		DeviceID:    deviceID,
@@ -217,27 +374,38 @@ func convertDriftStateToEvent(deviceID string, state *eginterfaces.DriftState) d
 	}
 }
 
-// GetDeviceStats calculates statistics for specified devices.
+// severityRank orders DriftSeverity values so the most severe of a set of changes
+// can be picked with a plain comparison.
+func severityRank(s drift.DriftSeverity) int {
+	switch s {
+	case drift.SeverityCritical:
+		return 2
+	case drift.SeverityWarning:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// GetDeviceStats calculates statistics for the specified devices.
+//
+// The device list is the authorization cut for this call: the signature carries
+// no tenant, so an empty list names neither a device nor a tenant and there is no
+// safe set to enumerate — discovering hosts here would have to query the entity
+// graph with no tenant filter and would return every tenant's fleet. An empty list
+// therefore yields empty statistics.
+//
+// Callers that want fleet-wide statistics resolve the device set under a tenant
+// scope first: the report engine derives it from the tenant-filtered DNA records
+// (features/reports/engine/engine.go gatherReportData) and the compliance summary
+// builds it from the tenant-scoped steward registry
+// (features/controller/api/handlers_compliance.go).
 func (p *DataProvider) GetDeviceStats(ctx context.Context, deviceIDs []string, timeRange interfaces.TimeRange) (map[string]interfaces.DeviceStats, error) {
 	stats := make(map[string]interfaces.DeviceStats)
 
-	// If no specific devices requested, discover devices from the entity graph.
 	if len(deviceIDs) == 0 {
-		query := interfaces.DataQuery{
-			TimeRange: timeRange,
-			Limit:     1000,
-		}
-		records, err := p.GetDNAData(ctx, query)
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover devices: %w", err)
-		}
-		deviceSet := make(map[string]bool)
-		for _, record := range records {
-			deviceSet[record.DeviceID] = true
-		}
-		for deviceID := range deviceSet {
-			deviceIDs = append(deviceIDs, deviceID)
-		}
+		p.logger.Debug("device stats requested with no device list: no tenant scope to discover under, returning empty stats")
+		return stats, nil
 	}
 
 	for _, deviceID := range deviceIDs {

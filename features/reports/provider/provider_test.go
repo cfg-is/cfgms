@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -111,6 +112,11 @@ func newClosedTestEGProvider(t *testing.T) *egsqlite.SQLiteEntityGraphProvider {
 // storeHostEntity records a state observation for the bare host entity
 // host:<deviceID> at the given time. This gives the host entity an observation
 // history that GetHistory and GetDNAData can read.
+//
+// The payload embeds "at" so two calls for the same device at different times
+// hash differently — ReportObservations content-hash dedupes bit-identical
+// payloads from the same (subject, source), and a fixture calling this twice
+// with the same deviceID intends two distinct history entries, not a dedup.
 func storeHostEntity(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceID string, at time.Time) {
 	t.Helper()
 	eid, err := egtypes.NewEID("host", deviceID, "")
@@ -127,6 +133,7 @@ func storeHostEntity(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceI
 				Confidence: egtypes.ConfidenceHigh,
 				Payload: map[string]interface{}{
 					"entity_kind": "host",
+					"observed_at": at.Format(time.RFC3339Nano),
 				},
 			},
 		},
@@ -161,16 +168,125 @@ func storeDriftState(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceI
 	require.NoError(t, err, "storing drift-diff observation must succeed")
 }
 
+// storeTenantScopedEntity records a state observation that places subject in the
+// entity index under owningTenant.
+//
+// owning_tenant is the entity graph's only access-control axis (ADR-023): both
+// EntityFilter.TenantFilter and DriftFilter.TenantFilter resolve through the index
+// row, so a fixture that must be visible to a tenant-scoped read has to carry one.
+func storeTenantScopedEntity(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	eid egtypes.EID,
+	kind, owningTenant string,
+	at time.Time,
+) {
+	t.Helper()
+	err := egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: eid.AuthorityName(),
+		Observations: []egtypes.Observation{
+			{
+				Source:     eid.AuthorityName(),
+				ObservedAt: at,
+				RecordedAt: at,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind":   kind,
+					"owning_tenant": owningTenant,
+					"observed_at":   at.Format(time.RFC3339Nano),
+				},
+			},
+		},
+	})
+	require.NoError(t, err, "storing tenant-scoped entity observation must succeed")
+}
+
+// storeTenantHost records one observation of the host entity host:<deviceID> owned
+// by owningTenant, so fleet-wide discovery over that tenant subtree finds it.
+func storeTenantHost(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	deviceID, owningTenant string,
+	at time.Time,
+) {
+	t.Helper()
+	eid, err := egtypes.NewEID("host", deviceID, "")
+	require.NoError(t, err)
+	storeTenantScopedEntity(t, egp, eid, "host", owningTenant, at)
+}
+
+// storeTenantHosts records count host entities named <prefix>-<i>, all owned by
+// owningTenant, in a single observation batch (one transaction) and returns their
+// device IDs. Used to build a host set larger than one discovery page.
+func storeTenantHosts(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	prefix, owningTenant string,
+	count int,
+	at time.Time,
+) []string {
+	t.Helper()
+	deviceIDs := make([]string, 0, count)
+	observations := make([]egtypes.Observation, 0, count)
+	for i := 0; i < count; i++ {
+		deviceID := fmt.Sprintf("%s-%03d", prefix, i)
+		eid, err := egtypes.NewEID("host", deviceID, "")
+		require.NoError(t, err)
+		deviceIDs = append(deviceIDs, deviceID)
+		observations = append(observations, egtypes.Observation{
+			Source:     deviceID,
+			ObservedAt: at,
+			RecordedAt: at,
+			Subject:    eid.String(),
+			Kind:       egtypes.ObservationKindState,
+			Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"entity_kind":   "host",
+				"owning_tenant": owningTenant,
+				"observed_at":   at.Format(time.RFC3339Nano),
+			},
+		})
+	}
+	require.NoError(t, egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source:       prefix,
+		Observations: observations,
+	}), "storing the host batch must succeed")
+	return deviceIDs
+}
+
+// storeTenantDriftState indexes the drifted fragment entity under owningTenant and
+// then records its drift-diff, which is the shape a tenant-scoped ListDrifted can
+// see: the drift projection is keyed by subject only, so its tenant is resolved
+// through the fragment's entity index row.
+func storeTenantDriftState(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	deviceID, fragmentID, owningTenant string,
+	at time.Time,
+	fields []interface{},
+) {
+	t.Helper()
+	eid, err := egtypes.NewEID("host", deviceID, fragmentID)
+	require.NoError(t, err)
+	storeTenantScopedEntity(t, egp, eid, "host", owningTenant, at)
+	storeDriftState(t, egp, deviceID, fragmentID, at, fields)
+}
+
 // ── GetDriftEvents ────────────────────────────────────────────────────────────
 
 func TestGetDriftEvents_EmptyEGProvider_ReturnsEmpty(t *testing.T) {
 	// When the entity graph has no drift states, GetDriftEvents returns a
-	// non-nil empty slice without error.
+	// non-nil empty slice without error. The query names a tenant because a
+	// query naming neither tenant nor device is refused outright — see
+	// TestGetDriftEvents_NoTenantScopeNoDevices_FailsClosed.
 	p := &DataProvider{
 		egProvider: newTestEGProvider(t),
 		logger:     logging.NewNoopLogger(),
 	}
 	query := interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
 		TimeRange: interfaces.TimeRange{
 			Start: time.Now().Add(-24 * time.Hour),
 			End:   time.Now(),
@@ -280,6 +396,130 @@ func TestGetDriftEvents_CancelledContext_ReturnsError(t *testing.T) {
 
 	require.Error(t, err, "a cancelled context must cause an error")
 	assert.Contains(t, err.Error(), "context canceled")
+}
+
+// ── GetDriftEvents tenant isolation ──────────────────────────────────────────
+
+// TestGetDriftEvents_NoTenantScopeNoDevices_FailsClosed verifies that a query
+// naming neither a device nor a tenant is refused. Such a query has no
+// authorization cut: an empty DriftFilter makes the provider skip the entity-index
+// join and return every drifted entity in the deployment, and with no device filter
+// nothing downstream narrows it either.
+func TestGetDriftEvents_NoTenantScopeNoDevices_FailsClosed(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	storeTenantDriftState(t, egp, "device-a", "auth:enabled", "root/tenant-a", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.ErrorIs(t, err, errTenantScopeRequired,
+		"a drift query with neither tenant scope nor device list must fail closed")
+	assert.Empty(t, events, "no drift data may be returned when the query is refused")
+}
+
+// TestGetDriftEvents_TenantScope_ExcludesOtherTenants verifies the provider-side
+// tenant cut on the fleet-wide drift path: a caller scoped to one tenant sees only
+// that tenant's drift, and never another tenant's desired/actual field values.
+func TestGetDriftEvents_TenantScope_ExcludesOtherTenants(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	storeTenantDriftState(t, egp, "device-a", "auth:enabled", "root/tenant-a", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "tenant-a-desired", "actual": "tenant-a-actual", "matching": false},
+	})
+	storeTenantDriftState(t, egp, "device-b", "auth:enabled", "root/tenant-b", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "tenant-b-secret", "actual": "tenant-b-actual", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, events, 1, "only the caller tenant's drift may be returned")
+	assert.Equal(t, "device-a", events[0].DeviceID)
+	for _, change := range events[0].Changes {
+		assert.NotContains(t, change.PreviousValue, "tenant-b-secret",
+			"another tenant's desired value must never reach the caller")
+	}
+}
+
+// TestGetDriftEvents_TenantSubtree_IncludesDescendants verifies that the tenant cut
+// is a subtree cut: an MSP-scoped caller sees its client tenants' drift, and a
+// sibling tenant sharing a name prefix is not swept in.
+func TestGetDriftEvents_TenantSubtree_IncludesDescendants(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	storeTenantDriftState(t, egp, "msp-host", "auth:enabled", "root/msp-a", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+	storeTenantDriftState(t, egp, "client-host", "auth:enabled", "root/msp-a/client-1", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+	storeTenantDriftState(t, egp, "sibling-host", "auth:enabled", "root/msp-a-other", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/msp-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	devices := make([]string, 0, len(events))
+	for _, e := range events {
+		devices = append(devices, e.DeviceID)
+	}
+	assert.ElementsMatch(t, []string{"msp-host", "client-host"}, devices,
+		"the subtree cut includes descendants and excludes prefix-sharing siblings")
+}
+
+// TestGetDriftEvents_MultipleTenantScopes_QueriesEachSeparately verifies that a
+// multi-tenant query is answered by one filtered read per tenant — the union of the
+// named tenants, not the whole deployment.
+func TestGetDriftEvents_MultipleTenantScopes_QueriesEachSeparately(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	for _, tc := range []struct{ device, tenant string }{
+		{"device-a", "root/tenant-a"},
+		{"device-b", "root/tenant-b"},
+		{"device-c", "root/tenant-c"},
+	} {
+		storeTenantDriftState(t, egp, tc.device, "auth:enabled", tc.tenant, now, []interface{}{
+			map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+		})
+	}
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		// The blank and duplicate entries must not widen the read: a blank
+		// TenantFilter means "every tenant" to the provider.
+		TenantIDs: []string{"root/tenant-a", "", "root/tenant-b", "root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	devices := make([]string, 0, len(events))
+	for _, e := range events {
+		devices = append(devices, e.DeviceID)
+	}
+	assert.ElementsMatch(t, []string{"device-a", "device-b"}, devices,
+		"exactly the named tenants' drift, each device once, and never tenant-c")
 }
 
 // ── GetDNAData ────────────────────────────────────────────────────────────────
@@ -402,7 +642,155 @@ func TestGetDNAData_EntityGraphError_DeviceIDSanitized(t *testing.T) {
 	})
 }
 
+// ── GetDNAData fleet-wide discovery ──────────────────────────────────────────
+
+// TestGetDNAData_Discovery_NoTenantScope_FailsClosed verifies that a query naming
+// neither a device nor a tenant is refused rather than discovering every host in
+// every tenant: an empty EntityFilter.TenantFilter applies no owning_tenant
+// predicate at all.
+func TestGetDNAData_Discovery_NoTenantScope_FailsClosed(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	storeTenantHost(t, egp, "device-a", "root/tenant-a", now)
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.ErrorIs(t, err, errTenantScopeRequired,
+		"an all-device query with no tenant scope must fail closed")
+	assert.Empty(t, records, "no records may be returned when the query is refused")
+}
+
+// TestGetDNAData_Discovery_ReturnsOnlyScopedTenantHosts is the discovery-path
+// counterpart of TestGetDNAData_WithHostEntity_ReturnsRecords: with no DeviceIDs,
+// hosts are discovered through the entity graph, and only those inside the queried
+// tenant subtree are returned.
+func TestGetDNAData_Discovery_ReturnsOnlyScopedTenantHosts(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	// Two hosts in the queried tenant, one of them with two observations.
+	storeTenantHost(t, egp, "device-a1", "root/tenant-a", now.Add(-30*time.Minute))
+	storeTenantHost(t, egp, "device-a1", "root/tenant-a", now.Add(-10*time.Minute))
+	storeTenantHost(t, egp, "device-a2", "root/tenant-a", now.Add(-20*time.Minute))
+	// One host in another tenant, which must not be discovered.
+	storeTenantHost(t, egp, "device-b1", "root/tenant-b", now.Add(-15*time.Minute))
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+
+	counts := make(map[string]int)
+	for _, rec := range records {
+		counts[rec.DeviceID]++
+		assert.False(t, rec.StoredAt.IsZero(), "each discovered record carries its observation time")
+	}
+	assert.Equal(t, map[string]int{"device-a1": 2, "device-a2": 1}, counts,
+		"discovery must cover every host of the scoped tenant and no other tenant's host")
+}
+
+// TestGetDNAData_Discovery_PagesBeyondFirstPage verifies that discovery follows the
+// entity graph's page token: a host set larger than one page is fully walked, and
+// the walk terminates.
+func TestGetDNAData_Discovery_PagesBeyondFirstPage(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	// One more than two full pages, so at least two page tokens are followed.
+	total := hostDiscoveryPageSize*2 + 1
+	deviceIDs := storeTenantHosts(t, egp, "paged", "root/tenant-paged", total, now.Add(-10*time.Minute))
+	// A host in another tenant must stay out of the paged walk.
+	storeTenantHost(t, egp, "other-tenant-host", "root/tenant-other", now.Add(-10*time.Minute))
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-paged"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, records, total,
+		"every host across all pages must be discovered exactly once")
+
+	seen := make(map[string]bool, len(records))
+	for _, rec := range records {
+		assert.False(t, seen[rec.DeviceID], "a host must not be returned twice across pages")
+		seen[rec.DeviceID] = true
+	}
+	for _, deviceID := range deviceIDs {
+		assert.True(t, seen[deviceID], "host %s must appear in the discovered set", deviceID)
+	}
+	assert.False(t, seen["other-tenant-host"], "another tenant's host must never be discovered")
+}
+
+// TestGetDNAData_Discovery_QueryFailure_ReturnsError verifies that a failure of the
+// discovery query itself is fatal. Truncating the fleet silently would understate
+// every count computed from the result.
+func TestGetDNAData_Discovery_QueryFailure_ReturnsError(t *testing.T) {
+	p := &DataProvider{egProvider: newClosedTestEGProvider(t), logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: time.Now().Add(-1 * time.Hour), End: time.Now()},
+	})
+
+	require.Error(t, err, "a failed discovery query must not be reported as an empty fleet")
+	assert.Contains(t, err.Error(), "failed to query host entities")
+	assert.Empty(t, records)
+}
+
+// TestGetDNAData_Discovery_HostOutsideTimeRange_YieldsNoRecords verifies that a
+// discovered host contributes records only for observations inside the requested
+// window — discovery widens which hosts are considered, never the time cut.
+func TestGetDNAData_Discovery_HostOutsideTimeRange_YieldsNoRecords(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	storeTenantHost(t, egp, "device-recent", "root/tenant-a", now.Add(-10*time.Minute))
+	storeTenantHost(t, egp, "device-stale", "root/tenant-a", now.Add(-72*time.Hour))
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, records, 1, "only the in-window observation may produce a record")
+	assert.Equal(t, "device-recent", records[0].DeviceID)
+}
+
 // ── GetDeviceStats ────────────────────────────────────────────────────────────
+
+// TestGetDeviceStats_NoDeviceIDs_ReturnsEmpty verifies GetDeviceStats' fail-closed
+// contract: its signature carries no tenant, so an empty device list has no
+// authorization cut and yields no statistics rather than discovering — and
+// reporting on — every tenant's fleet.
+func TestGetDeviceStats_NoDeviceIDs_ReturnsEmpty(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	storeTenantHost(t, egp, "device-a", "root/tenant-a", now)
+	storeTenantHost(t, egp, "device-b", "root/tenant-b", now)
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	stats, err := p.GetDeviceStats(context.Background(), nil, interfaces.TimeRange{
+		Start: now.Add(-1 * time.Hour),
+		End:   now.Add(1 * time.Hour),
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, stats, "no device list means no statistics, never a cross-tenant scan")
+}
 
 // TestGetDeviceStats_WithEntityGraph_ComputesStats is the required AC test verifying
 // that GetDeviceStats reads from the entity graph provider: history for record count
@@ -740,8 +1128,8 @@ func TestConvertDriftStateToEvent_NonMatchingFields_ProducesChanges(t *testing.T
 	require.NoError(t, err)
 
 	state := &eginterfaces.DriftState{
-		EID:         eid,
-		DetectedAt:  time.Now(),
+		EID:        eid,
+		DetectedAt: time.Now(),
 		Fields: []eginterfaces.DriftField{
 			{Attribute: "hostname", Desired: "web01", Actual: "web02", Matching: false},
 			{Attribute: "os", Desired: "linux", Actual: "linux", Matching: true},

@@ -25,7 +25,7 @@
 // Usage Example:
 //
 //	// Create components
-//	dataProvider := provider.New(storageManager, driftDetector, logger)
+//	dataProvider := provider.New(egProvider, logger)
 //	templateProcessor := templates.New(logger)
 //	exporter := exporters.New(logger)
 //	cache := memory.NewCache() // or other cache implementation

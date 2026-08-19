@@ -403,7 +403,7 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 				CurrentValue:  currHash,
 				ChangeType:    ChangeTypeAdded,
 				Severity:      d.categorizeSeverity(fragmentID, "", currHash),
-				Category:      d.categorizeAttribute(fragmentID),
+				Category:      categorizeAttribute(fragmentID),
 				Impact:        d.assessImpact(fragmentID, "", currHash, ChangeTypeAdded),
 			}
 
@@ -414,7 +414,7 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 				CurrentValue:  "",
 				ChangeType:    ChangeTypeRemoved,
 				Severity:      d.categorizeSeverity(fragmentID, prevHash, ""),
-				Category:      d.categorizeAttribute(fragmentID),
+				Category:      categorizeAttribute(fragmentID),
 				Impact:        d.assessImpact(fragmentID, prevHash, "", ChangeTypeRemoved),
 			}
 
@@ -425,7 +425,7 @@ func (d *detector) analyzeDNAChanges(ctx context.Context, previous, current *com
 				CurrentValue:  currHash,
 				ChangeType:    ChangeTypeModified,
 				Severity:      d.categorizeSeverity(fragmentID, prevHash, currHash),
-				Category:      d.categorizeAttribute(fragmentID),
+				Category:      categorizeAttribute(fragmentID),
 				Impact:        d.assessImpact(fragmentID, prevHash, currHash, ChangeTypeModified),
 			}
 		}
@@ -509,7 +509,12 @@ func (d *detector) categorizeSeverity(attribute, prevValue, currValue string) Dr
 		return SeverityCritical
 	}
 
-	category := d.categorizeAttribute(attribute)
+	return severityForCategory(categorizeAttribute(attribute))
+}
+
+// severityForCategory maps an attribute category to the DriftSeverity used when no
+// CriticalAttributes/SecurityAttributes regex or value-pattern rule fires.
+func severityForCategory(category string) DriftSeverity {
 	switch category {
 	case "security":
 		return SeverityCritical
@@ -522,7 +527,18 @@ func (d *detector) categorizeSeverity(attribute, prevValue, currValue string) Dr
 	}
 }
 
-func (d *detector) categorizeAttribute(attribute string) string {
+// CategorizeAttributeSeverity buckets an attribute name into a DriftSeverity using
+// the same keyword-based category map DetectDrift falls back to when no
+// DetectorConfig.CriticalAttributes/SecurityAttributes pattern or value-based rule
+// matches. Exported for callers that observe a drifted attribute name without a
+// live Detector instance — e.g. the entity graph's persisted DriftField (ADR-022),
+// whose drift-diff projection carries desired/actual/matching only and no severity
+// of its own.
+func CategorizeAttributeSeverity(attribute string) DriftSeverity {
+	return severityForCategory(categorizeAttribute(attribute))
+}
+
+func categorizeAttribute(attribute string) string {
 	attributeLower := strings.ToLower(attribute)
 
 	securityKeywords := []string{"password", "key", "cert", "auth", "security", "firewall", "permission", "user", "group"}
@@ -557,7 +573,7 @@ func (d *detector) categorizeAttribute(attribute string) string {
 }
 
 func (d *detector) assessImpact(attribute, prevValue, currValue string, changeType ChangeType) string {
-	category := d.categorizeAttribute(attribute)
+	category := categorizeAttribute(attribute)
 
 	switch category {
 	case "security":
