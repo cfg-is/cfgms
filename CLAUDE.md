@@ -145,6 +145,21 @@ that evaluates them across the split. Their jobs fail on findings, but a red one
 does **not** block a merge — the ruleset does not list them. Treat a finding
 there as real work, not as optional.
 
+`golangci-lint` is advisory too, but in a stronger sense than the three above
+(#3385). `golangci-lint.yml` runs a two-leg matrix — `GOOS=linux` and
+`GOOS=windows`, both on a Linux runner — on every `pull_request` and
+`merge_group`, and carries `continue-on-error: true` at the **job** level, so
+findings do not even turn the job red. Both legs run on Linux deliberately:
+golangci-lint drives `go/packages`, which honours `GOOS` when resolving build
+constraints, so a Linux runner analyses `//go:build windows` files and reports
+findings identical to a native Windows run — validated before the job was
+written, and recorded in a comment on the matrix. No Windows runner is involved.
+The job is advisory because `develop` carries 139 pre-existing findings, **all
+of them on the `GOOS=windows` leg** (`GOOS=linux` is clean); #3439 through #3441
+clear that backlog and #3442 then flips this job to blocking. Because it is
+advisory it has no stub on either side of the split — stubs exist only to
+satisfy *required* contexts, so an absent advisory run blocks nothing.
+
 `security-validation`'s merge-queue side is known to work: runs `30906412345`
 and `30906246182`, job `security-validation`, event `merge_group`, branch
 `gh-readonly-queue/develop/pr-3156-…`, conclusion `success`. A docs-only PR is
