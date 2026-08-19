@@ -148,8 +148,14 @@ there as real work, not as optional.
 `golangci-lint` is advisory too, but in a stronger sense than the three above
 (#3385). `golangci-lint.yml` runs a two-leg matrix — `GOOS=linux` and
 `GOOS=windows`, both on a Linux runner — on every `pull_request` and
-`merge_group`, and carries `continue-on-error: true` at the **job** level, so
-findings do not even turn the job red. Both legs run on Linux deliberately:
+`merge_group`. Two separate mechanisms keep it non-blocking, and they are worth
+telling apart. Findings alone never turn the job red because the run step
+classifies golangci-lint's exit code and deliberately exits 0 on exit 1 (the
+findings result); a non-findings exit — config error, typechecking error,
+missing toolchain — is *not* swallowed, because "0 issues." printed alongside
+exit 7 is a false clean, not a pass. Separately, `continue-on-error: true` at
+the **job** level means that even when the job does go red that way, the
+workflow run as a whole still succeeds. Both legs run on Linux deliberately:
 golangci-lint drives `go/packages`, which honours `GOOS` when resolving build
 constraints, so a Linux runner analyses `//go:build windows` files and reports
 findings identical to a native Windows run — validated before the job was

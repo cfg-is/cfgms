@@ -143,9 +143,11 @@ jobs:
               {
                 echo "Findings reported — advisory, not blocking (Issue #3385)."
                 echo ""
-                echo '```'
-                tail -n 40 lint-output.txt
-                echo '```'
+                # Indented code block, not a fenced one. Lint output echoes source
+                # text that a fork PR controls, and a backtick fence in that text
+                # would break out of a ``` fence and inject markdown into the job
+                # summary. An indented block has no terminator to forge.
+                tail -n 40 lint-output.txt | sed 's/^/    /'
               } >> "$GITHUB_STEP_SUMMARY"
               ;;
             *)
@@ -158,9 +160,8 @@ jobs:
               {
                 echo "**Lint could not run — exit ${rc} (tooling/configuration failure, not a findings result).**"
                 echo ""
-                echo '```'
-                tail -n 40 lint-output.txt
-                echo '```'
+                # Indented, not fenced — see the note in the findings branch above.
+                tail -n 40 lint-output.txt | sed 's/^/    /'
               } >> "$GITHUB_STEP_SUMMARY"
               exit "$rc"
               ;;
