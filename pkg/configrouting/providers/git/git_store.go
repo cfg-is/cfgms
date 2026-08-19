@@ -192,6 +192,9 @@ func (s *GitConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey) 
 }
 
 // ListConfigs enumerates config files under <repoDir>/<subPath>/<filter.Namespace>/.
+// When filter.TenantID is non-empty it is validated and the walk is skipped entirely
+// if the filter names a different tenant than this store holds — matching the scoping
+// behaviour of the flatfile and database providers.
 func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
 	base := s.repoDir
 	if s.source.SubPath != "" {
@@ -199,6 +202,18 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		base, err = security.ValidateAndCleanPath(s.repoDir, s.source.SubPath)
 		if err != nil {
 			return nil, fmt.Errorf("invalid subPath: %w", err)
+		}
+	}
+
+	// Scope by TenantID: validate to catch traversal attempts, then skip the walk
+	// entirely when the filter names a tenant other than the one this store holds.
+	// Empty TenantID preserves today's unscoped-walk behaviour.
+	if filter != nil && filter.TenantID != "" {
+		if _, err := security.ValidateAndCleanPath(s.repoDir, filter.TenantID); err != nil {
+			return nil, fmt.Errorf("invalid tenant ID in filter: %w", err)
+		}
+		if filter.TenantID != s.tenantID {
+			return nil, nil
 		}
 	}
 
@@ -251,13 +266,9 @@ func (s *GitConfigStore) ListConfigs(_ context.Context, filter *cfgconfig.Config
 		ns := parts[0]
 		name := strings.TrimSuffix(parts[len(parts)-1], ".yaml")
 
-		tenantID := ""
-		if filter != nil {
-			tenantID = filter.TenantID
-		}
 		entries = append(entries, &cfgconfig.ConfigEntry{
 			Key: &cfgconfig.ConfigKey{
-				TenantID:  tenantID,
+				TenantID:  s.tenantID,
 				Namespace: ns,
 				Name:      name,
 			},
