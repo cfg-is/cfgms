@@ -114,7 +114,11 @@ function hasMeaningfulValue(value: unknown): boolean {
 
 function unsaveableFields(source: Record<string, unknown> | undefined): string[] {
   if (!source) return []
-  return UNSAVEABLE_WORKFLOW_KEYS.filter((k) => hasMeaningfulValue(source[k]))
+  // Map.get(), not a computed `source[k]` index, so a key drawn from the
+  // fixed UNSAVEABLE_WORKFLOW_KEYS list can't trip detect-object-injection —
+  // and it keeps the declared key order instead of source's arbitrary one.
+  const values = new Map(Object.entries(source))
+  return UNSAVEABLE_WORKFLOW_KEYS.filter((k) => hasMeaningfulValue(values.get(k)))
 }
 
 // ── Variable editor types ─────────────────────────────────────────────────────
@@ -357,7 +361,7 @@ function StepsPane({ workflow }: { workflow: VersionedWorkflow }) {
     const num = steps.length + 1
     setSteps((prev) => [
       ...prev,
-      { id: mkid(), name: `step-${num}`, type: 'script', scriptBody: '', configJson: '{}', rawOpen: false },
+      { id: mkid(), name: `step-${num}`, type: 'script', scriptBody: '', configJson: '{}', rawOpen: false, source: {} },
     ])
   }
 

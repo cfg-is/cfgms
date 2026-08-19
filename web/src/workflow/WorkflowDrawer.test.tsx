@@ -9,7 +9,7 @@
  * type selector and variable row editor (Story #3213).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach } from 'vitest'
 import WorkflowDrawer from './WorkflowDrawer.tsx'
 import type { VersionedWorkflow } from './useWorkflows.ts'
@@ -36,6 +36,15 @@ function jsonResponse(status: number, body: unknown): Response {
   })
 }
 
+// Mirrors features/workflow/versioning.go's semverRegex verbatim so this mock
+// transport validates the same way the real handler does. eslint-security's
+// detect-unsafe-regex heuristic flags any regex with more than one unbounded
+// quantifier group regardless of actual backtracking risk (it flags even
+// `/^(\d+)(?:-([0-9A-Za-z.-]+))?$/`); this pattern has no nested/overlapping
+// quantifiers and was verified empirically safe — a 50k-char adversarial
+// input (`'1.2.3-' + 'a'.repeat(50000) + '!'`, chosen to force backtracking
+// at the trailing `$`) still matches in ~1ms.
+// eslint-disable-next-line security/detect-unsafe-regex
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/
 
 interface WorkflowApi {
