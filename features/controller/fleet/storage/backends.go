@@ -375,11 +375,6 @@ func (b *DatabaseBackend) StoreRecord(ctx context.Context, record *DNARecord, co
 		return fmt.Errorf("failed to marshal DNA to JSON: %w", err)
 	}
 
-	// Extract fleet query fields from DNA attributes for indexed columns
-	osVal := extractDNAAttr(record.DNA, "os")
-	arch := extractDNAAttr(record.DNA, "architecture")
-	hostname := extractDNAAttr(record.DNA, "hostname")
-
 	// Execute insert with prepared statement
 	_, err = b.stmts.insertRecord.ExecContext(ctx,
 		record.DeviceID,
@@ -392,9 +387,9 @@ func (b *DatabaseBackend) StoreRecord(ctx context.Context, record *DNARecord, co
 		record.CompressionRatio,
 		record.ShardID,
 		record.TenantID,
-		osVal,
-		arch,
-		hostname,
+		"", // os — flat attributes path retired (Issue #3329)
+		"", // architecture — flat attributes path retired
+		"", // hostname — flat attributes path retired
 		record.Status,
 	)
 

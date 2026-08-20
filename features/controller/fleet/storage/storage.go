@@ -124,8 +124,7 @@ type QueryOptions struct {
 	TimeRange   *TimeRange `json:"time_range,omitempty"`
 	Limit       int        `json:"limit,omitempty"`
 	Offset      int        `json:"offset,omitempty"`
-	IncludeData bool       `json:"include_data"`         // Include full DNA data or just metadata
-	Attributes  []string   `json:"attributes,omitempty"` // Filter to specific attributes
+	IncludeData bool       `json:"include_data"` // Include full DNA data or just metadata
 }
 
 // HistoryResult contains the results of a historical query
@@ -359,9 +358,6 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 					continue
 				}
 			}
-			if len(options.Attributes) > 0 && record.DNA != nil {
-				record.DNA = m.filterAttributes(record.DNA, options.Attributes)
-			}
 			records = append(records, record)
 			bytesProcessed += record.OriginalSize
 			compressionSavings += (record.OriginalSize - record.CompressedSize)
@@ -389,9 +385,6 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 					m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", ref.ContentHash)
 					continue
 				}
-			}
-			if len(options.Attributes) > 0 && record.DNA != nil {
-				record.DNA = m.filterAttributes(record.DNA, options.Attributes)
 			}
 			records = append(records, record)
 			bytesProcessed += record.OriginalSize
@@ -509,33 +502,20 @@ func DefaultConfig() *Config {
 
 // Helper methods
 
+// generateContentHash returns a deterministic identifier for DNA content used for
+// deduplication. It uses the pre-computed aggregate root (Issue #3329) when
+// available; otherwise it falls back to a hash of the stable identity fields
+// (ID, ConfigHash, SyncFingerprint) that exclude timestamps and the retired flat
+// attributes map.
 func (m *Manager) generateContentHash(dna *commonpb.DNA) (string, error) {
-	// Create deterministic hash of DNA content for deduplication
+	if dna.AggregateRoot != "" {
+		return dna.AggregateRoot, nil
+	}
+	// Fallback for DNA that has not yet been migrated to the fragment model.
 	hasher := sha256.New()
-
-	// Hash DNA ID and attributes in deterministic order
 	hasher.Write([]byte(dna.Id))
-
-	// Sort attributes for consistent hashing
-	keys := make([]string, 0, len(dna.Attributes))
-	for k := range dna.Attributes {
-		keys = append(keys, k)
-	}
-
-	// Simple sort for deterministic ordering
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
-
-	for _, key := range keys {
-		hasher.Write([]byte(key))
-		hasher.Write([]byte(dna.Attributes[key]))
-	}
-
+	hasher.Write([]byte(dna.ConfigHash))
+	hasher.Write([]byte(dna.SyncFingerprint))
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
 }
 
@@ -615,30 +595,6 @@ func (m *Manager) storeReference(ctx context.Context, deviceID, contentHash stri
 func (m *Manager) decompressRecord(record *DNARecord) error {
 	// Design decision: storage backend selection is handled at construction; this method stub exists to satisfy the interface for backend types that implement a subset of operations.
 	return nil
-}
-
-func (m *Manager) filterAttributes(dna *commonpb.DNA, attributes []string) *commonpb.DNA {
-	if len(attributes) == 0 {
-		return dna
-	}
-
-	filtered := &commonpb.DNA{
-		Id:              dna.Id,
-		Attributes:      make(map[string]string),
-		LastUpdated:     dna.LastUpdated,
-		ConfigHash:      dna.ConfigHash,
-		LastSyncTime:    dna.LastSyncTime,
-		AttributeCount:  dna.AttributeCount,
-		SyncFingerprint: dna.SyncFingerprint,
-	}
-
-	for _, attr := range attributes {
-		if value, exists := dna.Attributes[attr]; exists {
-			filtered.Attributes[attr] = value
-		}
-	}
-
-	return filtered
 }
 
 func (m *Manager) startMaintenanceTasks() {
