@@ -733,6 +733,53 @@ def _pq_script_path():
     return str(Path(__file__).resolve().parent.parent.parent / "scripts" / "project-queue.sh")
 
 
+def _pipeline_helper_path():
+    """Return the pipeline-helper.sh path, honoring CFGMS_TEST_PIPELINE_HELPER."""
+    override = os.environ.get("CFGMS_TEST_PIPELINE_HELPER")
+    if override:
+        return override
+    return str(Path(__file__).resolve().parent.parent.parent / "scripts" / "pipeline-helper.sh")
+
+
+def live_story_lease_item_ids():
+    """Item IDs holding a live (unexpired) story lease, from `lease-list`.
+
+    One call returns every lease as TSV: ``key<TAB>holder<TAB>exp<TAB>expired``.
+    Story leases are keyed ``story-<ITEM_ID>``; other kinds (``pr-<N>``, ``sweep``)
+    are ignored here.
+
+    A lease is the cross-host interlock, so this is the only signal that
+    distinguishes work happening on ANOTHER machine from work that died. It
+    fails **open** — returning an empty set on any error — because the caller
+    uses it to suppress a stall report, and a lease lookup that cannot run
+    should not silently hide genuinely dead dispatches.
+    """
+    script = _pipeline_helper_path()
+    try:
+        result = subprocess.run(
+            [resolve_bash(), script, "lease-list"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            check=False, timeout=30,
+        )
+    except Exception:
+        return set()
+    if result.returncode != 0 or not result.stdout.strip():
+        return set()
+
+    live = set()
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        key, _holder, _exp, expired = parts[0], parts[1], parts[2], parts[3]
+        if not key.startswith("story-"):
+            continue
+        if expired.strip().lower() in ("true", "1", "yes"):
+            continue
+        live.add(key[len("story-"):])
+    return live
+
+
 def project_queue_list_by_status(status):
     """Call project-queue.sh list-by-status; return [{number, title, item_id}].
 
@@ -1233,7 +1280,8 @@ def ci_summary(checks):
 
 
 def compute_stalled_dispatches(in_progress_issues, containers, pr_summaries,
-                               epic_nums=None, closed_nums=None):
+                               epic_nums=None, closed_nums=None,
+                               leased_item_ids=None):
     """Detect In-Progress stories with no running agent container and no open PR.
 
     A story is stalled when:
@@ -1241,6 +1289,7 @@ def compute_stalled_dispatches(in_progress_issues, containers, pr_summaries,
     - No container named `cfg-agent-<N>` is currently running
     - No open PR (including WIP drafts) references this story number
     - Its own issue is NOT closed
+    - No live story lease is held for it on any host
 
     Draft PRs count as "open PR" — they should go through dispatch-fix, not
     re-dispatch. Only pure container deaths with no PR artifact trigger this.
@@ -1274,9 +1323,27 @@ def compute_stalled_dispatches(in_progress_issues, containers, pr_summaries,
 
     `compute_dispatch_recommendations` below already applies this check as its
     self-closure gate; this function simply never had it.
+
+    Stories holding a live lease (item IDs in `leased_item_ids`) are skipped for
+    a third, distinct reason: they are being worked **on another host**. Under
+    Self-Dispatch Mode a story is claimed by lease and worked in-session, so
+    there is no container on this machine and no PR until the work is pushed —
+    the exact signature of a dead dispatch. Only the lease tells them apart.
+
+    Observed on story #3439 on 2026-08-20: preflight reported "no container
+    cfg-agent-3439 running and no open PR" while
+    `lease-status story-PVTI_lADOCrV4cc4BX5ezzg2-cMk` returned
+    `HELD:...:CFG-70-02:expired=false` — held by the Windows host, actively
+    working it. Re-dispatching would have put two hosts on the same branch,
+    which is worse than the closed-issue case: that one wastes an agent, this
+    one corrupts live work.
+
+    Expired leases do not count — an expired lease is exactly how a genuinely
+    dead dispatch presents, and suppressing on it would hide the real thing.
     """
     epic_nums = set(epic_nums or ())
     closed_nums = set(closed_nums or ())
+    leased_item_ids = set(leased_item_ids or ())
     running_story_nums = set()
     for name in containers or []:
         tail = name.removeprefix("cfg-agent-")
@@ -1297,6 +1364,8 @@ def compute_stalled_dispatches(in_progress_issues, containers, pr_summaries,
         if n in epic_nums:
             continue
         if n in closed_nums:
+            continue
+        if item.get("item_id") and item["item_id"] in leased_item_ids:
             continue
         if n in running_story_nums:
             continue
@@ -2625,6 +2694,7 @@ def main():
             s["number"] for s in in_progress_parsed
             if s.get("state") in ("CLOSED", "MERGED") and s.get("number") is not None
         },
+        leased_item_ids=live_story_lease_item_ids(),
     )
 
     parse_warning_count = sum(
