@@ -196,7 +196,13 @@ The `cfg migrate --provider storage` pathway covers the following store kinds. E
 | `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
 | `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
 | `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |
-| `pending_registration` | ✓ | ✓ | In-flight steward registration requests (Issue #3224) |
+| `pending_registration` | ✓ | ✓ | In-flight steward registration requests (Issue #3224); the PostgreSQL store is reachable through `DatabaseProvider.CreatePendingRegistrationStore` as of Issue #3401 — before that the constructor returned `ErrNotSupported`, so a cluster-mode controller answered every registration endpoint with `503 registration store unavailable` |
+
+**Running the PostgreSQL store tests.** The `pkg/storage/providers/database` tests, and the
+Postgres-backed tests in `pkg/storage/interfaces` and `features/controller/api`, skip
+themselves when no test database is reachable. `make test-integration-setup && make
+test-integration-db` is their run path; no CI workflow provisions PostgreSQL, so a green
+CI run is not evidence that any of them executed.
 
 Kinds marked `—` are silently skipped when the destination backend does not support that store. The integrity check at the end of a `Run` only compares kinds that both source and destination support, so a cross-backend migration (OSS → Postgres) will not fail on `trigger` or `push` records.
 

@@ -1722,7 +1722,14 @@ test-integration-short:
 	@echo ""
 	@echo "✅ Short integration tests completed successfully!"
 
-# Test database provider specifically
+# Test database provider specifically, plus the packages whose tests exercise a
+# Postgres-backed store through it: the cluster storage manager
+# (pkg/storage/interfaces) and the controller registration handlers
+# (features/controller/api), which prove the cluster-mode 503->200 path (Issue #3401).
+# Those tests skip when Postgres is unreachable, so this target is their only run path.
+# -p 1 is required, not tidiness: these packages share one Postgres instance and the
+# database provider's setupTestDatabase drops every table, so running them concurrently
+# lets one package truncate another's fixtures mid-test.
 test-integration-db:
 	@echo "📊 Testing Database Storage Provider"
 	@echo "==================================="
@@ -1733,7 +1740,7 @@ test-integration-db:
 	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
-	go test -v -tags=integration ./pkg/storage/providers/database/...
+	go test -v -p 1 -tags=integration ./pkg/storage/providers/database/... ./pkg/storage/interfaces/... ./features/controller/api/...
 
 # Test git provider specifically  
 test-integration-git:

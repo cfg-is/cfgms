@@ -68,9 +68,9 @@ func alertStoreProviders(t *testing.T) map[string]business.AlertStore {
 	return stores
 }
 
-// testAlertStoreDSN builds the PostgreSQL DSN used by the alert-store handler tests
-// from the standard CFGMS test-database environment variables.
-func testAlertStoreDSN() string {
+// testDatabaseDSN builds the PostgreSQL DSN used by the handler tests that run against
+// a real test database, from the standard CFGMS test-database environment variables.
+func testDatabaseDSN() string {
 	host := os.Getenv("CFGMS_TEST_DB_HOST")
 	if host == "" {
 		host = "localhost"
@@ -89,7 +89,7 @@ func testAlertStoreDSN() string {
 // allowlisted */providers_test.go path (see scripts/check-providers.sh).
 func tryNewDatabaseAlertStore(t *testing.T) business.AlertStore {
 	t.Helper()
-	dsn := testAlertStoreDSN()
+	dsn := testDatabaseDSN()
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil
@@ -104,5 +104,37 @@ func tryNewDatabaseAlertStore(t *testing.T) business.AlertStore {
 		return nil
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// tryNewDatabasePendingRegistrationStore returns a real PostgreSQL-backed
+// PendingRegistrationStore obtained through DatabaseProvider.CreatePendingRegistrationStore
+// — the exact constructor a cluster-mode controller calls via CreateClusterStorageManager
+// (Issue #3401) — or nil when the test database is not reachable. It never skips: callers
+// keep running against the providers that are available. The concrete database import is
+// confined to this allowlisted */providers_test.go path (see scripts/check-providers.sh).
+func tryNewDatabasePendingRegistrationStore(t *testing.T) business.PendingRegistrationStore {
+	t.Helper()
+	dsn := testDatabaseDSN()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil
+	}
+	if pingErr := db.Ping(); pingErr != nil {
+		_ = db.Close()
+		return nil
+	}
+	_ = db.Close()
+
+	// Postgres is reachable, so the provider has no excuse to decline. Failing here rather
+	// than returning nil is deliberate: if CreatePendingRegistrationStore regresses to
+	// ErrNotSupported (Issue #3401), the caller must fail, not skip.
+	provider := &database.DatabaseProvider{}
+	st, err := provider.CreatePendingRegistrationStore(map[string]interface{}{"dsn": dsn})
+	require.NoError(t, err, "DatabaseProvider.CreatePendingRegistrationStore must return a working store against a reachable test database, never ErrNotSupported (Issue #3401)")
+	require.NotNil(t, st, "DatabaseProvider.CreatePendingRegistrationStore must return a non-nil store")
+	if closer, ok := st.(interface{ Close() error }); ok {
+		t.Cleanup(func() { _ = closer.Close() })
+	}
 	return st
 }

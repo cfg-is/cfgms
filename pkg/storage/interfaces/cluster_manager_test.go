@@ -87,6 +87,10 @@ func TestCreateClusterStorageManager_DatabaseProvider(t *testing.T) {
 		"database-backed RBAC store must be non-nil")
 	assert.NotNil(t, sm.GetClientTenantStore(),
 		"database-backed client tenant store must be non-nil")
+	// Issue #3401: CreatePendingRegistrationStore returned ErrNotSupported, leaving this
+	// store nil and every cluster-mode registration endpoint answering 503.
+	assert.NotNil(t, sm.GetPendingRegistrationStore(),
+		"database-backed pending registration store must be non-nil — a nil store makes every cluster-mode registration endpoint return 503")
 }
 
 // TestCreateClusterStorageManager_WithS3Config verifies that s3Config is accepted

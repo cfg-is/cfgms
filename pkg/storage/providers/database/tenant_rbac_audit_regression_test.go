@@ -28,7 +28,7 @@ import (
 // to UpdateTenant) silently broke: a second migration run against a
 // partially-populated target failed outright instead of upserting.
 func TestDatabaseTenantStore_CreateDuplicate_ReturnsAlreadyExists(t *testing.T) {
-	store := newTestTenantStore(t)
+	store := newRegressionTenantStore(t)
 	ctx := context.Background()
 
 	tenant := &business.TenantData{
@@ -53,13 +53,13 @@ func TestDatabaseTenantStore_CreateDuplicate_ReturnsAlreadyExists(t *testing.T) 
 // missing tenant produced 500 while an out-of-scope tenant produced 404 — a status
 // split that disclosed the existence of tenants outside the caller's subtree.
 func TestDatabaseTenantStore_MissingTenantContract(t *testing.T) {
-	business.TenantStoreMissingTenantContract(t, newTestTenantStore(t))
+	business.TenantStoreMissingTenantContract(t, newRegressionTenantStore(t))
 }
 
 // TestDatabaseTenantStore_LifecycleContract holds the Postgres provider to the
 // shared suspension provenance persistence contract (ADR-027 Decision 2, Issue #3158).
 func TestDatabaseTenantStore_LifecycleContract(t *testing.T) {
-	business.TenantStoreLifecycleContract(t, newTestTenantStore(t))
+	business.TenantStoreLifecycleContract(t, newRegressionTenantStore(t))
 }
 
 // TestDatabaseRBACStore_StoreRole_NoParent guards against a regression where
@@ -144,7 +144,11 @@ func TestDatabaseAuditStore_GetAuditEntry_NoIPAddress(t *testing.T) {
 
 // ── factory helpers ─────────────────────────────────────────────────────────
 
-func newTestTenantStore(t *testing.T) *DatabaseTenantStore {
+// newRegressionTenantStore returns a bare DatabaseTenantStore for the regression suite.
+// Named distinctly from tenant_pending_deletion_test.go's newTestTenantStore: this file is
+// //go:build integration and that one is untagged, so identical names compiled together
+// under -tags=integration (the tag `make test-integration-db` passes) and broke the build.
+func newRegressionTenantStore(t *testing.T) *DatabaseTenantStore {
 	t.Helper()
 	dsn := buildTestDSN()
 	store, err := NewDatabaseTenantStore(dsn, getTestConfig())

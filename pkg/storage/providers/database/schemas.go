@@ -1344,6 +1344,10 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS sessions;",
 		"DROP TABLE IF EXISTS session_token_store;",
 		"DROP TABLE IF EXISTS cfgms_alert_states;",
+		// Issue #3401: omitted here, so pending-registration rows survived
+		// setupTestDatabase and every re-run of the store's tests failed with
+		// "already exists" on the second and later runs.
+		"DROP TABLE IF EXISTS cfgms_pending_registrations;",
 	}
 
 	for _, query := range dropQueries {
