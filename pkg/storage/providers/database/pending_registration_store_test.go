@@ -258,3 +258,99 @@ func TestDatabasePendingRegistrationStore_ListAll_TenantFilter(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"pr-db-allt-t1-pend", "pr-db-allt-t1-appr"}, ids)
 }
+
+// TestDatabasePendingRegistrationStore_AddDuplicate verifies that adding a second
+// entry with the same PendingID returns an error, matching the SQLite implementation's
+// contract so the migrator's idempotent retry (which pre-checks via GetPendingByID)
+// continues to work.
+func TestDatabasePendingRegistrationStore_AddDuplicate(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	entry := testDBPendingEntry("pr-db-dup", "tenant-db-dup")
+	require.NoError(t, store.AddPending(ctx, entry), "first insert must succeed")
+
+	err := store.AddPending(ctx, entry)
+	require.Error(t, err, "duplicate PendingID must return an error")
+}
+
+// TestDatabasePendingRegistrationStore_GetPendingByToken verifies that GetPendingByToken
+// finds an entry by hashed token and returns ErrPendingRegistrationNotFound for
+// an unknown token.
+func TestDatabasePendingRegistrationStore_GetPendingByToken(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	entry := testDBPendingEntry("pr-db-tok", "tenant-db-tok")
+	rawToken := "cfgms_reg_tok_pr-db-tok"
+	entry.TokenStr = rawToken
+	require.NoError(t, store.AddPending(ctx, entry))
+
+	got, err := store.GetPendingByToken(ctx, rawToken)
+	require.NoError(t, err)
+	assert.Equal(t, "pr-db-tok", got.PendingID)
+	assert.Equal(t, business.RegistrationTokenLookupKey(rawToken), got.TokenStr)
+
+	_, err = store.GetPendingByToken(ctx, "no-such-token")
+	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
+}
+
+// TestDatabasePendingRegistrationStore_UpdateStatus_NotFound verifies that
+// UpdateStatus returns ErrPendingRegistrationNotFound when no row matches.
+func TestDatabasePendingRegistrationStore_UpdateStatus_NotFound(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+
+	err := store.UpdateStatus(context.Background(), "no-such-id", business.PendingRegistrationStatusApproved)
+	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
+}
+
+// TestDatabasePendingRegistrationStore_UpdateStatus_Claimed_SetsClaimed verifies that
+// transitioning to "claimed" also sets claimed_at to a non-nil time.
+func TestDatabasePendingRegistrationStore_UpdateStatus_Claimed_SetsClaimed(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-claimed-at", "tenant-db-claimed")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-claimed-at", business.PendingRegistrationStatusApproved))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-claimed-at", business.PendingRegistrationStatusClaimed))
+
+	got, err := store.GetPendingByID(ctx, "pr-db-claimed-at")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status)
+	require.NotNil(t, got.ClaimedAt, "claimed_at must be set when status transitions to claimed")
+}
+
+// TestDatabasePendingRegistrationStore_TenantScoping verifies the three-way scoping
+// contract for ListPending: an unscoped caller (empty tenantID) sees all entries,
+// a tenant-scoped caller sees only its own, and a cross-tenant lookup is empty.
+func TestDatabasePendingRegistrationStore_TenantScoping(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-scope-t1a", "tenant-scope-1")))
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-scope-t1b", "tenant-scope-1")))
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-scope-t2a", "tenant-scope-2")))
+
+	// Unscoped caller sees all three.
+	all, err := store.ListPending(ctx, "")
+	require.NoError(t, err)
+	ids := make([]string, 0, len(all))
+	for _, e := range all {
+		ids = append(ids, e.PendingID)
+	}
+	assert.ElementsMatch(t, []string{"pr-db-scope-t1a", "pr-db-scope-t1b", "pr-db-scope-t2a"}, ids, "unscoped caller must see all tenants")
+
+	// Tenant-1 scoped caller sees only its own two entries.
+	t1Entries, err := store.ListPending(ctx, "tenant-scope-1")
+	require.NoError(t, err)
+	require.Len(t, t1Entries, 2)
+	for _, e := range t1Entries {
+		assert.Equal(t, "tenant-scope-1", e.TenantID)
+	}
+
+	// Cross-tenant negative: tenant-2 caller must not see tenant-1 entries.
+	t2Entries, err := store.ListPending(ctx, "tenant-scope-2")
+	require.NoError(t, err)
+	require.Len(t, t2Entries, 1)
+	assert.Equal(t, "pr-db-scope-t2a", t2Entries[0].PendingID)
+}
