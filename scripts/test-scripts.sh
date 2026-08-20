@@ -3416,6 +3416,65 @@ SCRIPTEOF
 # Test: resource-sampler.sh report emits no literal ${ placeholder (Issue #2485 AC3)
 # Runs report against a fixture samples file and asserts the emitted
 # RESOURCE_PROFILE: line contains no unexpanded variable placeholder.
+test_claude_pipeline_suites() {
+    # The 21 self-contained suites under .claude/scripts/tests/ guard the dispatch
+    # machinery: the Files-In-Scope path parser, lease handling, capacity gating,
+    # per-agent credential injection, stalled-dispatch detection, merge-group
+    # diagnosis. Every one shipped with a "Run: ..." line in its header and was
+    # then run by nothing — not this script, not any workflow. Measured
+    # 2026-08-20: all 21 passed, so they were correct but unenforced.
+    #
+    # That is the failure mode this closes. The parser gap fixed alongside this
+    # (go.mod / go.sum / .nancy-ignore absent from BACKTICK_PATH_RE, so every
+    # dependency-bump story dispatched with its file-overlap check comparing
+    # against an empty set) was already covered by a regression test file from
+    # Issue #1861 — a file that had never executed. Adding a test there without
+    # this hook documents an invariant rather than enforcing one.
+    #
+    # Each suite owns its own assertions and exits non-zero on failure; this
+    # records one pass/fail per suite rather than per assertion.
+    local tests_dir
+    tests_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude/scripts/tests"
+
+    if [[ ! -d "$tests_dir" ]]; then
+        log_test "Testing .claude pipeline suites..."
+        log_fail ".claude/scripts/tests not found at ${tests_dir}"
+        return
+    fi
+
+    local suite base out rc found=0
+    for suite in "$tests_dir"/*.test.sh "$tests_dir"/test-*.sh "$tests_dir"/test-*.py; do
+        [[ -f "$suite" ]] || continue
+        base="$(basename "$suite")"
+        found=$((found + 1))
+        log_test "Testing ${base}..."
+
+        set +e
+        if [[ "$suite" == *.py ]]; then
+            out=$(timeout 180 python3 "$suite" 2>&1)
+        else
+            out=$(timeout 180 bash "$suite" 2>&1)
+        fi
+        rc=$?
+        set -e
+
+        if [[ $rc -eq 0 ]]; then
+            log_pass "${base}"
+        elif [[ $rc -eq 124 ]]; then
+            log_fail "${base}: timed out after 180s"
+            echo "$out" | tail -20
+        else
+            log_fail "${base}: exit ${rc}"
+            echo "$out" | tail -20
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        log_test "Testing .claude pipeline suites..."
+        log_fail "no suites matched in ${tests_dir} — the glob or the layout changed"
+    fi
+}
+
 test_resource_sampler_no_placeholder() {
     log_test "Testing resource-sampler.sh: RESOURCE_PROFILE line contains no literal \${ placeholder..."
 
@@ -3734,6 +3793,9 @@ test_resource_sampler_loop_guard
 echo ""
 test_resource_sampler_no_placeholder
 echo ""
+test_claude_pipeline_suites
+echo ""
+
 echo ""
 echo "📊 Test Summary"
 echo "==============="

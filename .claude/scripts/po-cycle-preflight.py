@@ -41,12 +41,12 @@ REPO = "cfg-is/cfgms"
 SECTION_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
 ISSUE_NUM_RE = re.compile(r"#(\d+)")
 BACKTICK_PATH_RE = re.compile(
-    r"`((?:[^`\n]+\.(?:go|md|proto|sh|yaml|yml|json|toml|ts|tsx|ps1|wxs|py))"
-    r"|(?:[a-zA-Z0-9_./-]*/)?(?:Makefile|Dockerfile(?:\.[\w-]+)?))`"
+    r"`((?:[^`\n]+\.(?:go|md|proto|sh|yaml|yml|json|toml|ts|tsx|ps1|wxs|py|mod|sum))"
+    r"|(?:[a-zA-Z0-9_./-]*/)?(?:Makefile|Dockerfile(?:\.[\w-]+)?|\.nancy-ignore))`"
 )
 BARE_PATH_RE = re.compile(
     r"(?:^|[\s(\[])"
-    r"([a-zA-Z0-9_./-]+/[a-zA-Z0-9_./-]+\.(?:go|md|proto|sh|yaml|yml|json|toml|ts|tsx|ps1|wxs|py))"
+    r"([a-zA-Z0-9_./-]+/[a-zA-Z0-9_./-]+\.(?:go|md|proto|sh|yaml|yml|json|toml|ts|tsx|ps1|wxs|py|mod|sum))"
 )
 #: A path may be written with the line it refers to (`handlers.go:114`, or a
 #: `:114-126` range). Both PATH regexes above end at the extension, so the colon
@@ -56,8 +56,8 @@ BARE_PATH_RE = re.compile(
 #: Covers extensionless names too (`Dockerfile:155`), which the PATH regexes match
 #: only when the name ends the reference.
 LINE_SUFFIX_RE = re.compile(
-    r"(\.(?:go|md|proto|sh|yaml|yml|json|toml|ts|tsx|ps1|wxs|py)"
-    r"|Makefile|Dockerfile(?:\.[\w-]+)?):\d+(?:-\d+)?"
+    r"(\.(?:go|md|proto|sh|yaml|yml|json|toml|ts|tsx|ps1|wxs|py|mod|sum)"
+    r"|Makefile|Dockerfile(?:\.[\w-]+)?|\.nancy-ignore):\d+(?:-\d+)?"
 )
 
 #: A declaration inside `## Files In Scope` is conventionally a list item or a
