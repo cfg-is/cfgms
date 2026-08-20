@@ -1,0 +1,176 @@
+name: golangci-lint
+
+# ADVISORY (Issue #3385). This job reports golangci-lint findings for both build
+# configurations but never blocks a PR or a merge: `continue-on-error: true` is
+# set at the job level, so even an infrastructure failure cannot gate a merge.
+# It is deliberately NOT in the branch ruleset's required-check list.
+#
+# Why advisory: `develop` carries 139 pre-existing findings today (all of them on
+# the GOOS=windows side — see the cross-GOOS note below), tracked by #3439 through
+# #3441. Making the job blocking on day one would paint every PR red. #3442 flips
+# it to blocking once that backlog is clear.
+#
+# Why it lands ahead of that cleanup: CI has never run golangci-lint, so Windows
+# build-configuration lint debt has been accumulating with no signal at all. This
+# job creates the signal immediately rather than only after the cleanup finishes.
+#
+# No PR/merge-queue stub job exists here, and none is needed. Stubs exist only to
+# satisfy *required* contexts across the #2595 PR/merge-queue split; an advisory
+# check has no context to satisfy, so a skipped run is simply absent. That also
+# keeps this workflow clear of the stub-exclusivity hazard documented in
+# CLAUDE.md — there is only ever one run posting this check name.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    # Pure documentation changes cannot alter Go lint results. Because this check
+    # is advisory rather than required, skipping it here needs no stub — nothing
+    # is waiting on the context.
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.claude/**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+      - 'web/**'
+  merge_group:
+  workflow_dispatch:
+
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: '1.26.6'
+  GOLANGCI_LINT_VERSION: 'v2.12.2'
+
+permissions: {}
+
+jobs:
+  golangci-lint:
+    name: golangci-lint (${{ matrix.goos }})
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    # Advisory posture (Issue #3385). Job-level, so neither a finding nor a
+    # toolchain failure can ever block a PR or the merge queue.
+    continue-on-error: true
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # CROSS-GOOS VALIDATION (Issue #3385 acceptance criterion).
+        #
+        # Both legs run on a Linux runner. golangci-lint drives go/packages, which
+        # honours GOOS when resolving build constraints, so a Linux runner analyses
+        # the Windows build configuration — including `//go:build windows` files —
+        # without a Windows runner.
+        #
+        # Measured before this job was written, golangci-lint v2.12.2 against
+        # ./features/modules/hyperv/... and ./features/steward/dex/...:
+        #   * Linux container, GOOS=windows  -> 17 findings in *_windows.go
+        #   * Windows host,    GOOS=windows  -> the same 17 findings
+        # Identical output, so the self-hosted Windows runner fallback described in
+        # CLAUDE.md ("Native Windows builds: run on self-hosted Windows runner") is
+        # not needed here and is deliberately not used.
+        #
+        # Full-repo baseline measured the same way: GOOS=linux 0 findings,
+        # GOOS=windows 139 findings (errcheck 120, unused 10, staticcheck 5,
+        # unconvert 2, goimports 1, govet 1). The entire backlog tracked by #3439
+        # through #3441 is Windows-side, which is exactly the debt this job exists
+        # to surface.
+        #
+        # Caveat worth preserving: cross-compiling *into* a cgo-dependent target
+        # makes golangci-lint exit 7 with a typechecking error and the misleading
+        # message "0 issues." GOOS=windows from Linux is cgo-free and unaffected,
+        # but the exit-code classification in the run step below exists so that a
+        # false-clean of that shape is reported rather than read as success.
+        goos: [ linux, windows ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # Matches the cache posture of the sibling Go analysis jobs in
+          # security-scan.yml. The Actions cache is already at its 10 GB ceiling,
+          # and setup-go's cache key is shared repo-wide; the 20-minute timeout
+          # above absorbs the cold-cache cost.
+          cache: false
+
+      - name: Install golangci-lint
+        env:
+          GOTOOLCHAIN: go${{ env.GO_VERSION }}
+        run: |
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
+          golangci-lint --version
+
+      - name: Run golangci-lint (GOOS=${{ matrix.goos }})
+        id: lint
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: amd64
+        run: |
+          set +e
+          golangci-lint run --timeout 15m ./... 2>&1 | tee lint-output.txt
+          rc="${PIPESTATUS[0]}"
+          set -e
+
+          {
+            echo "## golangci-lint — GOOS=${GOOS} (advisory)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          case "$rc" in
+            0)
+              echo "✅ No findings for GOOS=${GOOS}."
+              echo "No findings." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            1)
+              # Findings. Advisory by design — report, do not fail.
+              echo "⚠️  golangci-lint reported findings for GOOS=${GOOS}."
+              echo "This job is advisory (Issue #3385); findings do not block this PR."
+              echo "Backlog: #3439 (cmd/), #3440 (features/steward/), #3441 (features/modules/),"
+              echo "#3442 (pkg/ and test/, then flips this job to blocking)."
+              {
+                echo "Findings reported — advisory, not blocking (Issue #3385)."
+                echo ""
+                # Indented code block, not a fenced one. Lint output echoes source
+                # text that a fork PR controls, and a backtick fence in that text
+                # would break out of a ``` fence and inject markdown into the job
+                # summary. An indented block has no terminator to forge.
+                tail -n 40 lint-output.txt | sed 's/^/    /'
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              # Not a findings result: config error (3), typechecking error (7),
+              # timeout, or a missing toolchain. "0 issues." on one of these is a
+              # false clean, so surface it loudly. The job still cannot block a
+              # merge — continue-on-error is set at the job level.
+              echo "❌ golangci-lint could not complete for GOOS=${GOOS} (exit ${rc})."
+              echo "This is a tooling/configuration failure, not a lint result."
+              {
+                echo "**Lint could not run — exit ${rc} (tooling/configuration failure, not a findings result).**"
+                echo ""
+                # Indented, not fenced — see the note in the findings branch above.
+                tail -n 40 lint-output.txt | sed 's/^/    /'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit "$rc"
+              ;;
+          esac
+
+      - name: Upload golangci-lint output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always() && hashFiles('lint-output.txt') != ''
+        with:
+          name: golangci-lint-${{ matrix.goos }}
+          path: lint-output.txt
+          retention-days: 30
