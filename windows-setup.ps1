@@ -39,6 +39,174 @@ choco install -y golang git make gh nodejs
 # Refresh environment to pick up new PATHs
 refreshenv
 
+# =====================================================================
+# CFGMS validation tooling (lint + security scanners)
+#
+# A Windows dev box runs the same gates as CI (`make test-commit`,
+# `make security-scan`), so it needs the same tools at the same versions.
+# Every version below is pinned to match
+# .github/workflows/dependency-pin-check.yml and .devcontainer/Dockerfile
+# — if you bump one, bump all three or the pin-check workflow will flag it.
+#
+# Two install paths, deliberately:
+#
+#   go install        for tools that are go-gettable at a version tag.
+#
+#   Verified download for tools distributed only as release binaries. Each
+#                     is SHA-256 checked against a value pinned HERE rather
+#                     than fetched at runtime — same reasoning as
+#                     .github/scripts/install-trivy.sh: a checksum fetched
+#                     at runtime is worthless if the supply chain is
+#                     mid-compromise. Take the values from the release's
+#                     own checksums asset when bumping a version.
+#
+# Trivy note: NEVER pin v0.69.4, v0.69.5 or v0.69.6 — those releases are
+# known-compromised (CVE-2026-33634). See docs/runbooks/trivy-rollback.md.
+# =====================================================================
+Write-Host "`n=== Installing CFGMS Validation Tooling ===" -ForegroundColor Yellow
+
+$goPath = (& go env GOPATH)
+if ($LASTEXITCODE -ne 0 -or -not $goPath) {
+    Write-Host "  [--] Go not on PATH — skipping tooling install" -ForegroundColor Yellow
+    $goBinDir = $null
+} else {
+    $goBinDir = Join-Path $goPath 'bin'
+    if (-not (Test-Path $goBinDir)) {
+        New-Item -ItemType Directory -Path $goBinDir -Force | Out-Null
+    }
+}
+
+if ($goBinDir) {
+
+    # --- go install path -------------------------------------------------
+    $goTools = @(
+        @{ Name = 'gosec';       Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.28.0' },
+        @{ Name = 'staticcheck'; Package = 'honnef.co/go/tools/cmd/staticcheck@2026.1' },
+        @{ Name = 'gitleaks';    Package = 'github.com/zricethezav/gitleaks/v8@v8.30.1' },
+        @{ Name = 'go-licenses'; Package = 'github.com/google/go-licenses/v2@v2.0.1' }
+    )
+
+    foreach ($tool in $goTools) {
+        Write-Host "  installing $($tool.Name) ..."
+        & go install $tool.Package
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [--] $($tool.Name): go install failed" -ForegroundColor Yellow
+        } else {
+            Write-Host "  [OK] $($tool.Name)" -ForegroundColor Green
+        }
+    }
+
+    # --- verified-download path ------------------------------------------
+    # Installs $Name.exe into $DestDir after verifying the download's
+    # SHA-256. Returns $true only when the binary was installed; a hash
+    # mismatch installs nothing and returns $false.
+    function Install-VerifiedBinary {
+        param(
+            [Parameter(Mandatory)][string]$Name,
+            [Parameter(Mandatory)][string]$Url,
+            [Parameter(Mandatory)][string]$Sha256,
+            [Parameter(Mandatory)][string]$DestDir,
+            # File to pull out of the archive. Omit for a bare .exe download.
+            [string]$ArchiveMember
+        )
+
+        $work = Join-Path ([System.IO.Path]::GetTempPath()) ("cfgms-$Name-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+
+        try {
+            $leaf    = Split-Path $Url -Leaf
+            $archive = Join-Path $work $leaf
+
+            $progressPreference = 'SilentlyContinue'   # Invoke-WebRequest is ~10x slower with the progress bar
+            Invoke-WebRequest -Uri $Url -OutFile $archive -UseBasicParsing
+
+            $actual = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $Sha256.ToLowerInvariant()) {
+                Write-Host "  [!!] $Name : SHA-256 MISMATCH - refusing to install" -ForegroundColor Red
+                Write-Host "       expected $($Sha256.ToLowerInvariant())"
+                Write-Host "       actual   $actual"
+                return $false
+            }
+
+            $dest = Join-Path $DestDir "$Name.exe"
+
+            if (-not $ArchiveMember) {
+                Copy-Item -Path $archive -Destination $dest -Force
+            }
+            elseif ($leaf -like '*.zip') {
+                Expand-Archive -Path $archive -DestinationPath $work -Force
+                # Some archives nest the binary one directory down.
+                $found = @(Get-ChildItem -Path $work -Filter $ArchiveMember -Recurse -File)
+                if ($found.Count -eq 0) {
+                    Write-Host "  [--] $Name : '$ArchiveMember' not found in archive" -ForegroundColor Yellow
+                    return $false
+                }
+                Copy-Item -Path $found[0].FullName -Destination $dest -Force
+            }
+            else {
+                # .tar.gz — bsdtar ships with Windows 10 1803+ and Server 2019+.
+                & tar -xzf $archive -C $work $ArchiveMember
+                $extracted = Join-Path $work $ArchiveMember
+                if ($LASTEXITCODE -ne 0 -or -not (Test-Path $extracted)) {
+                    Write-Host "  [--] $Name : could not extract '$ArchiveMember'" -ForegroundColor Yellow
+                    return $false
+                }
+                Copy-Item -Path $extracted -Destination $dest -Force
+            }
+
+            Write-Host "  [OK] $Name -> $dest" -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "  [--] $Name : $($_.Exception.Message)" -ForegroundColor Yellow
+            return $false
+        }
+        finally {
+            Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $verifiedTools = @(
+        @{
+            Name   = 'golangci-lint'
+            Url    = 'https://github.com/golangci/golangci-lint/releases/download/v2.12.2/golangci-lint-2.12.2-windows-amd64.zip'
+            Sha256 = 'bd42e3ebc8cb4ececb86941983baaf1dc221bbb04d838e94ce63b49cc91e02bb'
+            Member = 'golangci-lint.exe'
+        },
+        @{
+            Name   = 'trivy'
+            Url    = 'https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_windows-64bit.zip'
+            Sha256 = '94c40e0696e4b907a74b7b2e1438d5d72ebaca83115817407f568a002d520842'
+            Member = 'trivy.exe'
+        },
+        @{
+            Name   = 'trufflehog'
+            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.0/trufflehog_3.97.0_windows_amd64.tar.gz'
+            Sha256 = '2a8208e6e5be8d6cd855322480eda4790a437f805dbd6538ad7495c27f40d4e5'
+            Member = 'trufflehog.exe'
+        },
+        @{
+            Name   = 'nancy'
+            Url    = 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-windows-amd64.exe'
+            Sha256 = '77ecff35d3772794d4119b98b6405170d7b480bdc92076871ead4f52f574a0cf'
+            Member = $null
+        }
+    )
+
+    foreach ($tool in $verifiedTools) {
+        Write-Host "  installing $($tool.Name) ..."
+        $null = Install-VerifiedBinary -Name $tool.Name -Url $tool.Url `
+            -Sha256 $tool.Sha256 -DestDir $goBinDir -ArchiveMember $tool.Member
+    }
+
+    # Pre-seed the Trivy vulnerability DB so the first `make security-scan`
+    # isn't also a large download. Best-effort — a failure here is not fatal.
+    if (Test-Path (Join-Path $goBinDir 'trivy.exe')) {
+        Write-Host "  warming Trivy vulnerability DB (best-effort) ..."
+        & (Join-Path $goBinDir 'trivy.exe') fs --download-db-only 2>$null | Out-Null
+    }
+}
+
 # Install Docker Desktop (required for integration tests)
 if (-not $SkipDocker) {
     Write-Host "`n=== Installing Docker Desktop ===" -ForegroundColor Yellow
