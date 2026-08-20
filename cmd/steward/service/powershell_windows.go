@@ -6,49 +6,22 @@
 package service
 
 import (
-	"bytes"
-	"fmt"
 	"os/exec"
-	"strings"
 )
-
-// psRunner is the injectable PowerShell execution abstraction.
-// Production code uses execPSRunner; tests substitute a recording implementation.
-type psRunner interface {
-	// RunPS executes scriptBlock via powershell.exe.
-	// args are non-sensitive positional arguments passed as separate exec.Command
-	// arguments after the script block — they MUST NOT contain passwords or other
-	// secrets, as they appear in cmd.Args (visible to process-list tools).
-	// stdinData is sensitive data (e.g. passwords) piped to the process via stdin;
-	// it does NOT appear in cmd.Args or the process list.
-	RunPS(scriptBlock string, args []string, stdinData string) (string, error)
-}
-
-// execPSRunner executes PowerShell scripts via os/exec.
-// User-supplied values in args are passed as separate exec.Command arguments —
-// never interpolated into the script block string.
-type execPSRunner struct{}
-
-// RunPS executes scriptBlock with args as separate exec arguments.
-// stdinData is piped via stdin and does NOT appear in cmd.Args.
-func (r *execPSRunner) RunPS(scriptBlock string, args []string, stdinData string) (string, error) {
-	cmd := buildPSCmd(scriptBlock, args)
-	if stdinData != "" {
-		cmd.Stdin = strings.NewReader(stdinData)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("powershell: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return strings.TrimSpace(stdout.String()), nil
-}
 
 // buildPSCmd constructs the exec.Cmd for PowerShell execution without running it.
 // User-supplied values in args appear in cmd.Args as separate elements after the
-// script block. Sensitive values (passwords) must NOT be in args — pass via
-// cmd.Stdin in the caller (or stdinData in execPSRunner.RunPS).
+// script block. Sensitive values (passwords) must NOT be in args — pass them via
+// cmd.Stdin in the caller, where they do not appear in cmd.Args or the process
+// list.
+//
+// The psRunner/execPSRunner injection seam that used to wrap this helper was
+// removed with the last of its callers: the hyperv WinRM + service-account
+// install path deleted in 2e4bfcec (Issue #1894, "steward: generic install —
+// remove hyperv/winrm flags"). The helper itself is kept because it is the
+// safe-by-construction way to build a PowerShell invocation — script block
+// fixed, user values as separate argv entries, never string-composed — and its
+// injection-safety tests still pin that contract for the next caller.
 func buildPSCmd(scriptBlock string, args []string) *exec.Cmd {
 	exeArgs := make([]string, 0, 4+len(args))
 	exeArgs = append(exeArgs, "-NonInteractive", "-NoProfile", "-Command", scriptBlock)
