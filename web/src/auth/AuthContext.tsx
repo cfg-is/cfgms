@@ -96,6 +96,7 @@ function toAssertionJSON(cred: PublicKeyCredential): AssertionJSON {
 export interface Principal {
   username: string
   tenantId: string // Issue #2919: empty string means root scope; populated on login
+  rootScope: boolean // Issue #3131: true only for principals explicitly marked root-scoped (ADR-025 A2.1)
 }
 
 /**
@@ -222,7 +223,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await passkeyLoginFinishRequest(toAssertionJSON(rawCred as PublicKeyCredential))
     if (result.ok) {
       sessionEstablishedRef.current = true
-      setPrincipal({ username: result.username, tenantId: result.tenantId })
+      setPrincipal({ username: result.username, tenantId: result.tenantId, rootScope: result.rootScope })
       setStatus('signedIn')
       return true
     }

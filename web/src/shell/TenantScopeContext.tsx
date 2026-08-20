@@ -8,10 +8,10 @@
  * sees in the switcher and gives later views (fleet overview, #2497) a
  * shared "current scope" to filter by.
  *
- * There is no list-tenants API (see story Out of Scope) — selectable scopes
- * are the principal's own root path plus whatever descendant paths a later
- * view has actually observed in its data (registerObservedPath), matching
- * CLAUDE.md's recursive root/msp-a/client-1 path model.
+ * GET /api/v1/tenants lists tenants visible to the caller (Issue #3125). The
+ * switcher still builds selectable scopes from the principal's own root path
+ * plus descendant paths observed in view data (registerObservedPath); the
+ * TenantAdminView (Issue #3131) fetches the full tenant list independently.
  */
 import {
   createContext,

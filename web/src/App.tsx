@@ -21,6 +21,7 @@
  *   /reports         → AppShell layout → ReportsDashboardView
  *   /compliance      → AppShell layout → ComplianceSummaryView
  *   /monitoring      → AppShell layout → MonitoringView
+ *   /tenants         → AppShell layout → TenantAdminView
  *
  * Session presence is inferred from API responses, never from reading
  * cookies (#2495). The fleet view's own data call (GET /api/v1/stewards,
@@ -53,6 +54,7 @@ import Enroll from './pages/Enroll.tsx'
 import ReportsDashboardView from './reports/ReportsDashboardView.tsx'
 import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
 import MonitoringView from './monitoring/MonitoringView.tsx'
+import TenantAdminView from './tenants/TenantAdminView.tsx'
 
 function App() {
   return (
@@ -83,6 +85,7 @@ function App() {
                   <Route path="reports" element={<ReportsDashboardView />} />
                   <Route path="compliance" element={<ComplianceSummaryView />} />
                   <Route path="monitoring" element={<MonitoringView />} />
+                  <Route path="tenants" element={<TenantAdminView />} />
                 </Route>
               </Routes>
             </RequireAuth>
