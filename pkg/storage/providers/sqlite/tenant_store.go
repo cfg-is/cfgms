@@ -416,6 +416,17 @@ func (s *SQLiteTenantStore) attemptApproveDeletion(ctx context.Context, subtreeR
 		}
 	}()
 
+	// SQLite has no row-level locking, and a plain BEGIN is deferred: it does not take
+	// the write lock until the first write statement runs. This no-op write forces that
+	// escalation immediately, before any pinned-tenant status is read below, so a
+	// concurrent writer (e.g. RestoreTenant/UpdateTenant on another connection) either
+	// commits first and is visible to the status recheck, or blocks (SQLITE_BUSY, caught
+	// by retryOnBusy on its own path) until this transaction commits or rolls back.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tenant_pending_deletions SET state = state WHERE subtree_root_id = ?`, subtreeRootID); err != nil {
+		return nil, fmt.Errorf("failed to acquire write lock on pending deletion: %w", err)
+	}
+
 	var (
 		requestedBy    string
 		eligibleAtStr  string
@@ -484,6 +495,45 @@ func (s *SQLiteTenantStore) attemptApproveDeletion(ctx context.Context, subtreeR
 
 	if !stringSlicesEqual(currentMembers, sortedPinned) {
 		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
+	}
+
+	// Re-verify every pinned member is still suspended. The CTE above only compares ID
+	// sets, so a tenant concurrently restored to Active (e.g. by a second controller
+	// replica calling RestoreTenant/UpdateTenant on another connection) keeps the same
+	// ID and would otherwise slip through unchanged. The write lock forced above
+	// ensures this read observes either a fully-committed restore or none at all.
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(pinnedMembers)), ",")
+	statusArgs := make([]interface{}, len(pinnedMembers))
+	for i, id := range pinnedMembers {
+		statusArgs[i] = id
+	}
+	statusRows, err := tx.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, status FROM tenants WHERE id IN (%s)`, placeholders), statusArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pinned tenant status: %w", err)
+	}
+	currentStatus := make(map[string]string, len(pinnedMembers))
+	for statusRows.Next() {
+		var id, status string
+		if err := statusRows.Scan(&id, &status); err != nil {
+			_ = statusRows.Close()
+			return nil, fmt.Errorf("failed to scan pinned tenant status: %w", err)
+		}
+		currentStatus[id] = status
+	}
+	if err := statusRows.Err(); err != nil {
+		_ = statusRows.Close()
+		return nil, fmt.Errorf("pinned tenant status query iteration error: %w", err)
+	}
+	_ = statusRows.Close()
+
+	if len(currentStatus) != len(pinnedMembers) {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
+	}
+	for _, id := range pinnedMembers {
+		if currentStatus[id] != string(business.TenantStatusSuspended) {
+			return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
+		}
 	}
 
 	// Hard-delete every tenant in the pinned set.

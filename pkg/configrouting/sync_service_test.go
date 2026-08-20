@@ -5,7 +5,6 @@ package configrouting
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,21 +20,21 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
-	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ---- real TenantStore for sync-service tests ----
 
 // newSyncTenantStore returns a real SQLite-backed TenantStore. CFGMS mandates
 // real component testing, so the sync service resolves tenant hierarchy through
-// the production tenant store rather than a hand-written double.
+// the production tenant store rather than a hand-written double. The store is
+// obtained from the composite storage manager built by pkg/testing, which keeps
+// the provider selection behind pkg/storage/interfaces (central provider rule)
+// and registers its own cleanup.
 func newSyncTenantStore(t *testing.T) business.TenantStore {
 	t.Helper()
-	dir := t.TempDir()
-	p := sqlite.NewSQLiteProvider(dir)
-	store, err := p.CreateTenantStore(map[string]interface{}{"path": filepath.Join(dir, "tenants.db")})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
+	store := pkgtesting.SetupTestStorage(t).GetTenantStore()
+	require.NotNil(t, store, "test storage manager must provide a TenantStore")
 	return store
 }
 

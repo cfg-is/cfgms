@@ -138,6 +138,47 @@ func TestGetPendingDeletion_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrPendingDeletionNotFound)
 }
 
+// TestGetPendingDeletion_StateReflectsElapsedHold pins the fix for a stale read path:
+// storage writes State: DeletionStateHold once at request time and no production
+// code path ever transitions it to DeletionStateEligible (ApproveDeletion branches on
+// EligibleAt directly, never on the stored column). Without deriving State from
+// EligibleAt on read, GET would report "hold" forever, even long after the hold
+// period elapsed and the deletion became approvable.
+func TestGetPendingDeletion_StateReflectsElapsedHold(t *testing.T) {
+	m := newTestTenantManager(t)
+	rootID, _, _ := makeSuspendedSubtree(t, m)
+	ctx := context.Background()
+
+	// Freshly requested: hold period has not elapsed yet.
+	pending, err := m.RequestTenantDeletion(ctx, rootID, "alice", 720*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, business.DeletionStateHold, pending.State)
+
+	got, err := m.GetPendingDeletion(ctx, rootID)
+	require.NoError(t, err)
+	assert.Equal(t, business.DeletionStateHold, got.State, "hold period has not elapsed")
+
+	require.NoError(t, m.CancelTenantDeletion(ctx, rootID))
+
+	// Re-suspend (cancel returns to plain Suspended, which it already is) and request
+	// again with an elapsed hold period by writing the pending record directly.
+	now := time.Now()
+	elapsed := &business.PendingDeletion{
+		SubtreeRootID:   rootID,
+		RequestedBy:     "alice",
+		RequestedAt:     now.Add(-721 * time.Hour),
+		EligibleAt:      now.Add(-1 * time.Hour),
+		State:           business.DeletionStateHold, // stored as Hold even though elapsed
+		PinnedMemberIDs: []string{rootID},
+	}
+	require.NoError(t, m.store.RequestDeletion(ctx, elapsed))
+
+	got, err = m.GetPendingDeletion(ctx, rootID)
+	require.NoError(t, err)
+	assert.Equal(t, business.DeletionStateEligible, got.State,
+		"GetPendingDeletion must derive Eligible from EligibleAt, not trust the stale stored state")
+}
+
 func TestApproveTenantDeletion_HoldNotElapsed(t *testing.T) {
 	m := newTestTenantManager(t)
 	rootID, _, _ := makeSuspendedSubtree(t, m)

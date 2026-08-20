@@ -644,8 +644,23 @@ func (m *Manager) ApproveTenantDeletion(ctx context.Context, tenantID, approverI
 
 // GetPendingDeletion returns the current pending-deletion record for tenantID, if any.
 // Returns ErrPendingDeletionNotFound when none exists.
+//
+// State is computed here rather than trusted from storage: RequestDeletion writes
+// DeletionStateHold once and no production path ever updates it to
+// DeletionStateEligible (ApproveDeletion branches on EligibleAt directly, not on the
+// stored state column). Deriving it from EligibleAt on every read keeps the read path
+// (and the countdown it renders) accurate without a background transition process.
 func (m *Manager) GetPendingDeletion(ctx context.Context, tenantID string) (*business.PendingDeletion, error) {
-	return m.store.GetPendingDeletion(ctx, tenantID)
+	pending, err := m.store.GetPendingDeletion(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if !time.Now().Before(pending.EligibleAt) {
+		pending.State = business.DeletionStateEligible
+	} else {
+		pending.State = business.DeletionStateHold
+	}
+	return pending, nil
 }
 
 // ListTenants lists tenants with optional filtering

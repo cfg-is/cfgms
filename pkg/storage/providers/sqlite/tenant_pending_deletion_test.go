@@ -356,3 +356,78 @@ func TestPendingDeletion_CrossConnectionRace(t *testing.T) {
 		}
 	}
 }
+
+// TestPendingDeletion_ApprovalVsRestore_CrossConnectionRace is the race the AC names
+// literally: "racing an approval and a restore" (not two concurrent approvals). It races
+// ApproveDeletion against the store-level write RestoreTenant performs (UpdateTenant
+// flipping the tenant back to Active) from a second, independent *sql.DB connection.
+//
+// Before the fix this could silently hard-delete a tenant a concurrent restore had just
+// reactivated: ApproveDeletion's membership check only compared ID sets, never status.
+// Exactly one operation may "win" the tenant's fate — either the restore is honored and
+// the tenant survives Active, or the restore is rejected (blocked out, or rejected by the
+// 0-rows-affected update after deletion) and the tenant is gone. What must never happen is
+// both succeeding: a tenant reported as restored while it was actually deleted underneath.
+func TestPendingDeletion_ApprovalVsRestore_CrossConnectionRace(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "race.db")
+
+	store1 := newTenantStoreAtPath(t, dbPath) // performs the approval
+	store2 := newTenantStoreAtPath(t, dbPath) // performs the restore
+	ctx := context.Background()
+
+	require.NoError(t, store1.CreateTenant(ctx, suspendedTenant("root", "")))
+
+	now := time.Now()
+	pending := &business.PendingDeletion{
+		SubtreeRootID:   "root",
+		RequestedBy:     "alice",
+		RequestedAt:     now.Add(-721 * time.Hour),
+		EligibleAt:      now.Add(-1 * time.Hour),
+		State:           business.DeletionStateEligible,
+		PinnedMemberIDs: []string{"root"},
+	}
+	require.NoError(t, store1.RequestDeletion(ctx, pending))
+
+	restored, err := store2.GetTenant(ctx, "root")
+	require.NoError(t, err)
+	restored.DirectlySuspended = false
+	restored.Status = business.TenantStatusActive
+
+	var (
+		wg         sync.WaitGroup
+		approveErr error
+		deleted    []string
+		restoreErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		deleted, approveErr = store1.ApproveDeletion(ctx, "root", "bob", true, now)
+	}()
+	go func() {
+		defer wg.Done()
+		restoreErr = store2.UpdateTenant(ctx, restored)
+	}()
+	wg.Wait()
+
+	switch restoreErr {
+	case nil:
+		// The restore committed and is visible: approval must not have deleted the
+		// tenant out from under it.
+		require.Error(t, approveErr, "approval must not silently delete a concurrently-restored tenant")
+		assert.ErrorIs(t, approveErr, business.ErrMembershipChanged)
+		tenant, err := store1.GetTenant(ctx, "root")
+		require.NoError(t, err, "restored tenant must still exist")
+		assert.Equal(t, business.TenantStatusActive, tenant.Status)
+	default:
+		// The restore lost the race — either blocked out and then found the row gone,
+		// or rejected outright. Either way the approval must have won cleanly.
+		assert.ErrorIs(t, restoreErr, business.ErrTenantDoesNotExist,
+			"a losing restore must fail because the row is gone, not for an unrelated reason: %v", restoreErr)
+		require.NoError(t, approveErr)
+		assert.Contains(t, deleted, "root")
+		_, err := store1.GetTenant(ctx, "root")
+		assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+	}
+}

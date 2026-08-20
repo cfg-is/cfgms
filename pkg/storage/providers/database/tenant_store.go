@@ -567,24 +567,32 @@ func (s *DatabaseTenantStore) ApproveDeletion(ctx context.Context, subtreeRootID
 
 	// (b) Subtree membership must match exactly.
 	// Use a recursive CTE to collect all current members within the transaction.
+	// The CTE also yields each member's depth below the subtree root so the
+	// hard-delete below can run leaf-first; see the delete loop for why ordering
+	// is load-bearing on PostgreSQL.
 	rows, err := tx.QueryContext(ctx, `
 		WITH RECURSIVE subtree AS (
-		  SELECT id FROM cfgms_tenants WHERE id = $1
+		  SELECT id, 0 AS depth FROM cfgms_tenants WHERE id = $1
 		  UNION ALL
-		  SELECT t.id FROM cfgms_tenants t JOIN subtree s ON t.parent_id = s.id
+		  SELECT t.id, s.depth + 1 FROM cfgms_tenants t JOIN subtree s ON t.parent_id = s.id
 		)
-		SELECT id FROM subtree ORDER BY id`, subtreeRootID)
+		SELECT id, depth FROM subtree ORDER BY depth DESC, id`, subtreeRootID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query current subtree membership: %w", err)
 	}
-	var currentMembers []string
+	// deepestFirst holds the same IDs as currentMembers, ordered children before
+	// parents.
+	var deepestFirst []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var (
+			id    string
+			depth int
+		)
+		if err := rows.Scan(&id, &depth); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("failed to scan subtree member: %w", err)
 		}
-		currentMembers = append(currentMembers, id)
+		deepestFirst = append(deepestFirst, id)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -592,14 +600,56 @@ func (s *DatabaseTenantStore) ApproveDeletion(ctx context.Context, subtreeRootID
 	}
 	_ = rows.Close()
 
-	if !stringSlicesEqualSorted(currentMembers, sortedCopy(pinnedMembers)) {
+	if !stringSlicesEqualSorted(sortedCopy(deepestFirst), sortedCopy(pinnedMembers)) {
 		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
 	}
 
-	// Hard-delete every tenant in the pinned set (leaves first is not required
-	// because the cascaded path suppresses ErrTenantHasChildren, but we delete
-	// in a single statement so ordering doesn't matter at the SQL level).
-	for _, tenantID := range pinnedMembers {
+	// Row-lock every pinned tenant and re-verify it is still suspended. The CTE above
+	// only compares ID sets, so a tenant concurrently restored to Active (e.g. by a
+	// second controller replica calling RestoreTenant/UpdateTenant on another
+	// connection) keeps the same ID and would otherwise slip through unchanged. FOR
+	// UPDATE here blocks that concurrent UPDATE until this transaction commits or
+	// rolls back, closing the cross-connection race between approval and restore.
+	statusRows, err := tx.QueryContext(ctx,
+		`SELECT id, status FROM cfgms_tenants WHERE id = ANY($1) FOR UPDATE`, pq.Array(pinnedMembers))
+	if err != nil {
+		return nil, fmt.Errorf("failed to lock pinned tenant rows: %w", err)
+	}
+	currentStatus := make(map[string]string, len(pinnedMembers))
+	for statusRows.Next() {
+		var id, status string
+		if err := statusRows.Scan(&id, &status); err != nil {
+			_ = statusRows.Close()
+			return nil, fmt.Errorf("failed to scan pinned tenant status: %w", err)
+		}
+		currentStatus[id] = status
+	}
+	if err := statusRows.Err(); err != nil {
+		_ = statusRows.Close()
+		return nil, fmt.Errorf("pinned tenant status query iteration error: %w", err)
+	}
+	_ = statusRows.Close()
+
+	if len(currentStatus) != len(pinnedMembers) {
+		return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
+	}
+	for _, id := range pinnedMembers {
+		if currentStatus[id] != string(business.TenantStatusSuspended) {
+			return nil, fmt.Errorf("approve deletion %s: %w", subtreeRootID, business.ErrMembershipChanged)
+		}
+	}
+
+	// Hard-delete every tenant in the pinned set, deepest member first. Ordering
+	// is required: cfgms_tenants declares
+	// FOREIGN KEY (parent_id) REFERENCES cfgms_tenants(id) ON DELETE RESTRICT
+	// (schemas.go), and RESTRICT is checked without deferral, so removing a
+	// parent while any child row still references it raises a foreign-key
+	// violation and rolls back the whole approval transaction. pinnedMembers is
+	// recorded in BFS order (parents before children) by RequestTenantDeletion,
+	// which is exactly the wrong order here; deepestFirst comes from the
+	// membership CTE above, whose ID set was just proven identical to
+	// pinnedMembers, so every child is removed before its parent.
+	for _, tenantID := range deepestFirst {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM cfgms_tenants WHERE id = $1`, tenantID); err != nil {
 			return nil, fmt.Errorf("failed to delete tenant %s: %w", tenantID, err)
 		}
