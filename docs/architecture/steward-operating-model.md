@@ -641,7 +641,27 @@ How a steward joins a controller.
 
 The steward binary is built with the controller's URL compiled in at link time (`-ldflags="-X main.ControllerURL=..."`). A given steward binary will only ever talk to its compile-time controller. Scope: per controller (or controller cluster), not per tenant — one steward binary serves all tenants the controller manages.
 
-A steward binary today connects to exactly one controller URL. Multi-controller deployments — where a steward might fail over between geographically distributed controllers (e.g., `east.cfg.ms`, `west.cfg.ms`) — are not yet supported. [GAP: multi-controller / subdomain-matching binary support — see issue #1517]
+A steward binary today connects to exactly one controller URL. Multi-controller deployments — where a steward might fail over between geographically distributed controllers (e.g., `east.cfg.ms`, `west.cfg.ms`) — are not yet supported. [GAP: multi-controller / subdomain-matching binary support — still open, re-confirmed live 2026-08-20 by story #3096; see `docs/testing/controller-ha-real-cluster-runbook.md` §6]
+
+> The citation on this gap previously pointed at issue #1517, which is closed and
+> was **controller-trust anchoring** (ADR-013: install-time vs compile-time trust
+> options), not multi-controller failover. That was a mis-citation, corrected here.
+
+**What story #3096 established about the scope of this gap.** Measured against the
+real 3-node cfg-lab cluster, a single controller URL is **not** a barrier to
+surviving a *leader* failover. A steward attached to a surviving node keeps its
+gRPC-over-QUIC ControlChannel open across a Raft re-election and misses no
+heartbeats — the leader changing is invisible to it, because every node serves
+steward traffic directly against the shared backend and no request is forwarded
+to the leader. Measured: leader SIGKILLed, re-election 12.02s, steward's next
+heartbeat landed 6s after the kill, zero reconnects
+(`test/e2e/ha/steward_continuity_real_test.go`).
+
+The gap therefore bites in exactly one case: when the steward's **own** node is
+the one that fails. There is no second URL to fall back to, so that steward is
+offline until its node returns. The existing options are an LB/VIP in front of
+the cluster or per-steward node assignment; neither is built. Both are recorded,
+with the evidence, in runbook §6.
 
 ### Registration Credentials
 

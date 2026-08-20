@@ -5,6 +5,7 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -51,6 +52,21 @@ func (c *stewardStoreApprovalChecker) IsApproved(ctx context.Context, stewardID 
 	}
 	record, err := c.store.GetSteward(ctx, stewardID)
 	if err != nil {
+		// "No such steward" is a determinate authorization answer, not a failure
+		// of the approval service: a steward with no record is definitively not
+		// approved. Reporting it as an error made ControlChannel answer
+		// codes.Unavailable ("steward approval service unavailable"), which the
+		// client treats as a transient transport fault and retries — so a steward
+		// holding a still-valid mTLS cert whose record is gone reconnected
+		// indefinitely while the controller logged the miss at ERROR on every
+		// attempt. Observed live on the cfg-lab cluster (story #3096): three such
+		// stewards produced ~1 reconnect/second each and 78 MB of controller log
+		// in a day. Denying with (false, nil) is equally fail-closed — admission
+		// is still refused — but it is reported as PermissionDenied, the
+		// determinate answer it actually is.
+		if errors.Is(err, business.ErrStewardNotFound) {
+			return false, nil
+		}
 		return false, fmt.Errorf("load steward approval state: %w", err)
 	}
 	switch record.Status {

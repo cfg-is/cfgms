@@ -1247,6 +1247,25 @@ func (s *Server) SetIPTrustStore(store business.IPTrustStore) {
 	s.ipTrustStore = store
 }
 
+// IPTrustStore returns the wired IP-trust store, or nil when unwired. Exposed so
+// controller startup wiring can be regression-tested: the three
+// /api/v1/registration/ip-trust endpoints 503 when this is nil, which is exactly
+// what shipped until story #3096 found the setter had no production caller.
+func (s *Server) IPTrustStore() business.IPTrustStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ipTrustStore
+}
+
+// PendingStore returns the wired pending-registration store, or nil when
+// unwired. Exposed alongside IPTrustStore so both halves of the registration
+// admission path can be regression-tested from controller startup (#3096).
+func (s *Server) PendingStore() business.PendingRegistrationStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pendingStore
+}
+
 // SetAlertStore wires the alert store for alert acknowledge and silence (Issue #3266).
 // Call this after New() returns but before Start() is called.
 func (s *Server) SetAlertStore(store business.AlertStore) {
