@@ -2011,3 +2011,96 @@ func TestHandleRegister_EmptyHostnameStillRegisters(t *testing.T) {
 	assert.Empty(t, info.DNA.Attributes["hostname"],
 		"no hostname attribute should be set when none was sent at registration")
 }
+
+// TestHandleListPendingRegistrations_ClusterMode_Returns200Not503 is the REQUIRED TEST for
+// Issue #3401: against a cluster-mode controller — one whose pending-registration store is
+// the PostgreSQL store the database provider returns — GET /api/v1/registration/pending must
+// return 200 rather than the 503 "registration store unavailable" the nil store produced
+// before DatabaseProvider.CreatePendingRegistrationStore was wired.
+//
+// The first subtest is the negative control: it reproduces the pre-fix 503 by leaving the
+// store nil, so a regression that unwires the provider fails here rather than passing
+// silently. The remaining subtests run only when the test database is reachable
+// (make test-integration-db); they are skipped, not failed, when it is not.
+func TestHandleListPendingRegistrations_ClusterMode_Returns200Not503(t *testing.T) {
+	server, ts, _ := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	listPending := func(t *testing.T) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/api/v1/registration/pending", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer reg-approval-key")
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	t.Run("nil pending store reproduces the pre-fix 503", func(t *testing.T) {
+		server.SetPendingStore(nil)
+		resp := listPending(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode,
+			"a controller with no pending-registration store must return 503 — this is the failure Issue #3401 removes")
+	})
+
+	pendingStore := tryNewDatabasePendingRegistrationStore(t)
+	if pendingStore == nil {
+		t.Skip("PostgreSQL test database not reachable — run `make test-integration-setup && make test-integration-db` to exercise the cluster-mode path")
+	}
+	server.SetPendingStore(pendingStore)
+
+	t.Run("postgres-backed store returns 200", func(t *testing.T) {
+		resp := listPending(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode,
+			"a cluster-mode controller backed by the database provider must return 200, not 503")
+
+		var pending []PendingRegistration
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+	})
+
+	t.Run("postgres-backed store returns entries end to end", func(t *testing.T) {
+		now := time.Now().UTC()
+		// "default" matches the API key's TenantID in newRegistrationApprovalServer, so the
+		// tenant-scoped list returns this entry. The PendingID is unique per run because the
+		// Postgres table is shared across tests and retains rows between them.
+		pendingID := fmt.Sprintf("pending-cluster-%d", now.UnixNano())
+		entry := &business.PendingRegistrationEntry{
+			PendingID:    pendingID,
+			StewardID:    "steward-" + pendingID,
+			TenantID:     "default",
+			TokenStr:     "cfgms_reg_tok_" + pendingID,
+			SourceIP:     "10.20.30.40",
+			RegisteredAt: now,
+			ExpiresAt:    now.Add(5 * 24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}
+		require.NoError(t, pendingStore.AddPending(context.Background(), entry))
+		t.Cleanup(func() {
+			_ = pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusDenied)
+		})
+
+		resp := listPending(t)
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var pending []PendingRegistration
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pending))
+
+		var found *PendingRegistration
+		for i := range pending {
+			if pending[i].PendingID == pendingID {
+				found = &pending[i]
+				break
+			}
+		}
+		require.NotNil(t, found, "the entry written through the Postgres store must be returned by the handler")
+		assert.Equal(t, "steward-"+pendingID, found.StewardID)
+		assert.Equal(t, "default", found.TenantID)
+		assert.Equal(t, "10.20.30.40", found.SourceIP)
+	})
+}

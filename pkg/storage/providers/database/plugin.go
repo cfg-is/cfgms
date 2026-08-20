@@ -215,10 +215,17 @@ func (p *DatabaseProvider) CreatePushStore(config map[string]interface{}) (busin
 	return nil, business.ErrNotSupported
 }
 
-// CreatePendingRegistrationStore is not supported by the database provider.
-// Pending registration state belongs in the business-data tier (SQLite for OSS).
+// CreatePendingRegistrationStore creates a PostgreSQL-backed PendingRegistrationStore (Issue #3401).
 func (p *DatabaseProvider) CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabasePendingRegistrationStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database pending registration store: %w", err)
+	}
+	return store, nil
 }
 
 // CreateRefreshPolicyStore creates a PostgreSQL-backed RefreshPolicyStore (Issue #2329).

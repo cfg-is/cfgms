@@ -193,6 +193,38 @@ func TestDatabaseProvider_CreateAuditStore(t *testing.T) {
 	}
 }
 
+// TestDatabaseProvider_CreatePendingRegistrationStore verifies that the provider
+// returns a working Postgres-backed store instead of ErrNotSupported (Issue #3401).
+// A working store means GET /api/v1/registration/pending returns 200, not 503 —
+// the handler guards on a nil pendingStore, which only arises when the constructor
+// returns ErrNotSupported.
+func TestDatabaseProvider_CreatePendingRegistrationStore(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database integration tests in short mode")
+	}
+
+	db := setupTestDatabase(t)
+	defer func() { _ = db.Close() }()
+
+	provider := &DatabaseProvider{}
+
+	store, err := provider.CreatePendingRegistrationStore(getTestConfig())
+	require.NoError(t, err, "CreatePendingRegistrationStore must not return ErrNotSupported")
+	require.NotNil(t, store, "CreatePendingRegistrationStore must return a non-nil store")
+
+	// Confirm the store is functional: ListPending on an empty table returns
+	// without error — the same path a cluster-mode controller takes when the
+	// endpoint is first hit. ListPending accumulates rows with append, so an
+	// empty table yields a nil slice; assert.Empty accepts both nil and empty.
+	entries, err := store.ListPending(context.Background(), "")
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+
+	if dbStore, ok := store.(*DatabasePendingRegistrationStore); ok {
+		_ = dbStore.Close()
+	}
+}
+
 func TestDatabaseProvider_DSNGeneration(t *testing.T) {
 	provider := &DatabaseProvider{}
 
@@ -431,6 +463,9 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	_, err = provider.CreateAuditStore(invalidConfig)
 	assert.Error(t, err)
 
+	_, err = provider.CreatePendingRegistrationStore(invalidConfig)
+	assert.Error(t, err, "CreatePendingRegistrationStore must propagate DSN errors")
+
 	// Test missing password
 	missingPasswordConfig := map[string]interface{}{
 		"host":     "localhost",
@@ -439,6 +474,10 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 
 	_, err = provider.CreateClientTenantStore(missingPasswordConfig)
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "password is required")
+
+	_, err = provider.CreatePendingRegistrationStore(missingPasswordConfig)
+	assert.Error(t, err, "CreatePendingRegistrationStore must propagate missing-password errors")
 	assert.Contains(t, err.Error(), "password is required")
 }
 
