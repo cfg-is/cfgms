@@ -364,7 +364,10 @@ func (sbd *splitBrainDetector) performQuorumValidation() {
 	// If we don't have quorum and we're the leader, Raft handles step-down automatically.
 	// CheckQuorum:true in raft.Config causes the leader to step down when it can no longer
 	// reach a quorum of peers — no explicit demotion is needed here.
-	if !hasQuorum && sbd.manager.IsLeader() {
+	// IsRaftLeader: this is a protocol-state check for logging only — the split-brain
+	// detector observes whether Raft's internal leader bit is set, not whether this
+	// node has authority to act. Raft's CheckQuorum:true handles the actual step-down.
+	if !hasQuorum && sbd.manager.IsRaftLeader() {
 		sbd.logger.Warn("Quorum lost — Raft CheckQuorum:true will step down the leader automatically",
 			"healthy_nodes", healthyNodes, "required_quorum", requiredQuorum)
 	}
@@ -431,8 +434,9 @@ func (sbd *splitBrainDetector) applyQuorumBasedResolution(status *SplitBrainStat
 		}
 	}
 
-	// Raft CheckQuorum:true handles leader step-down on quorum loss automatically.
-	if healthyNodes < sbd.manager.cfg.Cluster.MinQuorum && sbd.manager.IsLeader() {
+	// IsRaftLeader: protocol-state check for logging only; Raft's CheckQuorum:true
+	// handles step-down automatically without any explicit demotion here.
+	if healthyNodes < sbd.manager.cfg.Cluster.MinQuorum && sbd.manager.IsRaftLeader() {
 		sbd.logger.Warn("Quorum lost — Raft will step down the leader via CheckQuorum")
 		return "raft_will_step_down"
 	}
@@ -442,8 +446,10 @@ func (sbd *splitBrainDetector) applyQuorumBasedResolution(status *SplitBrainStat
 
 // applyOldestLeaderResolution applies oldest leader resolution
 func (sbd *splitBrainDetector) applyOldestLeaderResolution(status *SplitBrainStatus) string {
-	// Raft CheckQuorum:true handles leader step-down — no explicit demotion needed.
-	if sbd.manager.IsLeader() {
+	// IsRaftLeader: protocol-state check for logging only; Raft's CheckQuorum:true
+	// manages the step-down. HasLeadership() is not used here because these
+	// resolution functions only log — they take no side-effecting action.
+	if sbd.manager.IsRaftLeader() {
 		sbd.logger.Warn("Leader resolution — Raft manages step-down via CheckQuorum")
 		return "raft_manages_step_down"
 	}
@@ -453,8 +459,10 @@ func (sbd *splitBrainDetector) applyOldestLeaderResolution(status *SplitBrainSta
 
 // applyStepDownResolution applies step-down resolution
 func (sbd *splitBrainDetector) applyStepDownResolution(status *SplitBrainStatus) string {
-	// Raft CheckQuorum:true handles leader step-down — no explicit demotion needed.
-	if sbd.manager.IsLeader() {
+	// IsRaftLeader: protocol-state check for logging only; Raft's CheckQuorum:true
+	// manages the step-down. HasLeadership() is not used here because these
+	// resolution functions only log — they take no side-effecting action.
+	if sbd.manager.IsRaftLeader() {
 		sbd.logger.Warn("Step-down resolution — Raft manages leader step-down via CheckQuorum")
 		return "raft_manages_step_down"
 	}

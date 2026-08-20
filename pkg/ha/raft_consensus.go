@@ -7,11 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/quorum"
 	"go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
@@ -30,6 +33,58 @@ type RaftConsensus struct {
 	logStore     *RaftLogStore // durable WAL; nil when logDir was empty (tests)
 	config       *raft.Config
 	tickInterval time.Duration // derived from ClusterConfig.HeartbeatInterval
+
+	// Lease state — monotonic-clock leader authority (ADR-029 Decision 1 & 2).
+	// leaseLastAck is the instant at which a quorum of voters had most recently
+	// acknowledged this leader. It is derived in refreshLeaseIfQuorum() from
+	// peerAcks — real per-peer response timestamps — never from a coarse
+	// "recently active" flag. It is written by refreshLeaseIfQuorum() from the
+	// single runRaft goroutine and read by HasLeadership() from any goroutine;
+	// both paths hold rc.mu (write: Lock, read: RLock).
+	// leaseDuration = 0.8 × ClusterConfig.ElectionTimeout (set once at construction).
+	leaseLastAck  time.Time
+	leaseDuration time.Duration
+
+	// peerAcks records, per peer node ID, the instant this node received that
+	// peer's most recent MsgHeartbeatResp/MsgAppResp and the term that response
+	// carried. Written by recordPeerAck() from the transport receive path, read
+	// by refreshLeaseIfQuorum(); guarded by rc.mu.
+	//
+	// These are the only evidence of contact the lease accepts. etcd/raft's
+	// Progress.RecentActive cannot be used: it is cleared only when
+	// MsgCheckQuorum fires, once per ElectionTimeout (raft.go:865-871,
+	// 1287-1292), so RecentActive==true means "heard from this peer at some
+	// point in the current check-quorum window" — the last real contact may be a
+	// full ElectionTimeout in the past. Stamping the lease from it yields an
+	// effective authority window of up to 1.8 × ElectionTimeout, which overlaps
+	// the successor's election and destroys the ADR-029 Decision 1 bound.
+	//
+	// Only nodes in the current voter configuration may occupy a slot: see
+	// recordPeerAck(), which is fed peer-controlled node IDs off the wire.
+	peerAcks map[uint64]peerAck
+
+	// voters is an immutable snapshot of the current Raft voter configuration
+	// (Status().Config.Voters.IDs()). It is published by syncVotersLocked() from
+	// the runRaft goroutine — on every tick and after every Advance, on every
+	// node regardless of role — and read lock-free by recordPeerAck() on the
+	// transport receive path.
+	//
+	// It is atomic rather than rc.mu-guarded so that a message from an unknown
+	// node ID is rejected without ever acquiring rc.mu: the receive path runs on
+	// peer HTTP requests, and taking the mutex there for traffic that will be
+	// discarded hands a peer a lever on the runRaft loop's lock.
+	//
+	// The pointed-to map is never mutated after Store; each Status() call
+	// returns a freshly built map (quorum.JointConfig.IDs).
+	voters atomic.Pointer[map[uint64]struct{}]
+
+	// leaseBase is a fixed reference instant, captured once at construction with
+	// its monotonic reading intact. Ack instants are expressed as offsets from it
+	// so they can be ordered by raft's quorum machinery as uint64 indices and
+	// converted back into monotonic time.Time values (base.Add preserves the
+	// monotonic reading). No wall-clock arithmetic enters the lease path
+	// (ADR-029 Decision 2).
+	leaseBase time.Time
 
 	// Node identity
 	nodeID   uint64
@@ -67,13 +122,28 @@ type RaftConsensus struct {
 	logger logging.Logger
 }
 
-// ClusterState represents the replicated state machine
+// ClusterState represents the replicated state machine.
+//
+// Leader is deliberately not serialized (`json:"-"`). Leadership is local Raft
+// protocol state, not replicated state: a snapshot is peer-supplied data, and
+// accepting a Leader value out of one would let any node that can produce a
+// snapshot name the recipient as leader. Nodes/Sessions are the replicated
+// content; leadership is always read from rc.node.Status().
 type ClusterState struct {
 	mu           sync.RWMutex
-	Leader       uint64
+	Leader       uint64 `json:"-"`
 	Nodes        map[uint64]*NodeInfo
 	Sessions     map[string]SessionUpdateCommand
 	LastModified time.Time
+}
+
+// peerAck is a single observed contact from a peer: the instant its response
+// was received (monotonic) and the term that response carried. The term is
+// retained so acks from a superseded term are never counted toward the current
+// term's lease.
+type peerAck struct {
+	at   time.Time
+	term uint64
 }
 
 // RaftCommand represents commands sent through Raft
@@ -207,13 +277,16 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 	}
 
 	rc := &RaftConsensus{
-		nodeID:       nodeID,
-		nodeInfo:     nodeInfo,
-		storage:      storage,
-		logStore:     logStore,
-		config:       config,
-		tickInterval: tickInterval,
-		appliedIndex: recoveredApplied,
+		nodeID:        nodeID,
+		nodeInfo:      nodeInfo,
+		storage:       storage,
+		logStore:      logStore,
+		config:        config,
+		tickInterval:  tickInterval,
+		leaseDuration: clusterCfg.LeaseDuration(),
+		leaseBase:     time.Now(),
+		peerAcks:      make(map[uint64]peerAck),
+		appliedIndex:  recoveredApplied,
 		clusterState: &ClusterState{
 			Nodes:    make(map[uint64]*NodeInfo),
 			Sessions: make(map[string]SessionUpdateCommand),
@@ -382,6 +455,11 @@ func (rc *RaftConsensus) runRaft() {
 		select {
 		case <-ticker.C:
 			rc.node.Tick()
+			// Re-evaluate the lease on every tick: acks are recorded on the
+			// transport receive path, so waiting for a Ready batch would delay
+			// both the grant and — for a single-node cluster, which produces no
+			// peer traffic at all — every refresh.
+			rc.refreshLeaseIfQuorum()
 
 		case rd := <-rc.node.Ready():
 			// Process Ready updates from Raft
@@ -528,6 +606,10 @@ func (rc *RaftConsensus) processReady(rd raft.Ready) {
 
 	// 6. Advance the Raft state machine.
 	rc.node.Advance()
+
+	// 7. Refresh leader lease if this node has quorum acks.
+	// Called after Advance() so Status().Progress reflects the latest peer activity.
+	rc.refreshLeaseIfQuorum()
 }
 
 // entriesToApply filters out entries that have already been applied
@@ -731,12 +813,33 @@ func (rc *RaftConsensus) publishSnapshot(snapshot *raftpb.Snapshot) {
 
 	var state ClusterState
 	if err := json.Unmarshal(snapshot.Data, &state); err != nil {
-		rc.logger.Error("Failed to unmarshal snapshot", "error", err)
+		// The decode error text embeds fragments of peer-supplied snapshot bytes.
+		rc.logger.Error("Failed to unmarshal snapshot",
+			"error", logging.SanitizeLogValue(err.Error()))
 		return
 	}
 
+	// Copy the replicated fields into the existing ClusterState rather than
+	// swapping the pointer. Two reasons:
+	//
+	//  1. Leadership must not come from a snapshot. Snapshot bytes arrive from a
+	//     peer; installing them wholesale set clusterState.Leader from that data,
+	//     so a follower that applied a snapshot naming it leader reported itself
+	//     leader. Leader is `json:"-"` and is left untouched here — it is owned by
+	//     updateLeadership() and, for every authority decision, read from
+	//     rc.node.Status() instead.
+	//  2. Swapping the pointer also swapped the embedded mutex: the old state's
+	//     lock was taken and the new state's (never-locked) mutex was unlocked.
+	if state.Nodes == nil {
+		state.Nodes = make(map[uint64]*NodeInfo)
+	}
+	if state.Sessions == nil {
+		state.Sessions = make(map[string]SessionUpdateCommand)
+	}
 	rc.clusterState.mu.Lock()
-	rc.clusterState = &state
+	rc.clusterState.Nodes = state.Nodes
+	rc.clusterState.Sessions = state.Sessions
+	rc.clusterState.LastModified = state.LastModified
 	rc.clusterState.mu.Unlock()
 }
 
@@ -794,11 +897,248 @@ func (rc *RaftConsensus) GetSessionsForNode(nodeID string) []string {
 	return stewardIDs
 }
 
-// IsLeader returns true if this node is the leader
+// IsLeader returns true if this node is the leader.
+// Deprecated: use IsRaftLeader() for protocol state or HasLeadership() for authority.
+// Retained for callers not yet migrated to the split API (#3389).
 func (rc *RaftConsensus) IsLeader() bool {
+	return rc.IsRaftLeader()
+}
+
+// IsRaftLeader returns the raw Raft replication-protocol leader state, read from
+// the Raft state machine itself (Status().RaftState), not from the replicated
+// ClusterState.Leader field. ClusterState is state-machine content that arrives
+// from peers via snapshots; only rc.node knows whether this node is the leader.
+//
+// Even so, this value can lag reality during a network partition — the local
+// Raft node has not yet noticed it was deposed (see ADR-029). Use
+// HasLeadership() when deciding whether to act on authority.
+func (rc *RaftConsensus) IsRaftLeader() bool {
+	return rc.node.Status().RaftState == raft.StateLeader
+}
+
+// HasLeadership returns true only when this node is the Raft leader AND its
+// leader lease has not expired. The lease duration is 0.8 × ElectionTimeout
+// (ADR-029 Decision 1), measured on a monotonic clock — no wall-clock arithmetic.
+//
+// A zero leaseLastAck (no quorum ack yet observed) is treated as expired.
+// This is the admission primitive for every side-effecting path.
+//
+// Leadership is read from rc.node.Status(), the authoritative Raft state, and is
+// re-checked here rather than trusted from whatever set the lease: the lease
+// alone would keep returning true for up to leaseDuration after a step-down.
+func (rc *RaftConsensus) HasLeadership() bool {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
-	return rc.clusterState.Leader == rc.nodeID
+	if rc.node.Status().RaftState != raft.StateLeader {
+		return false
+	}
+	if rc.leaseLastAck.IsZero() {
+		return false
+	}
+	return time.Since(rc.leaseLastAck) < rc.leaseDuration
+}
+
+// GetTerm returns the current Raft term. Mirrors GetLeader() — a thin read of
+// rc.node.Status().GetTerm() under the same locking convention. The term is the
+// fencing-token source required by ADR-029 Decision 5 (#3390 wires it).
+//
+// GetTerm() calls the generated nil-safe accessor (not .Term directly): raft
+// v3.7.0 migrated HardState to protobuf-v2 which made Term a *uint64; calling
+// .Term where uint64 is expected does not compile. See raft_transport.go:294.
+func (rc *RaftConsensus) GetTerm() uint64 {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	return rc.node.Status().GetTerm()
+}
+
+// recordPeerAck timestamps a follower response as evidence of contact with that
+// peer. Only MsgHeartbeatResp and MsgAppResp qualify: both are sent by a
+// follower that has accepted this node as leader for the term they carry, so
+// their arrival instant is a real, instantaneous ack — unlike
+// Progress.RecentActive, which is a coarse per-ElectionTimeout flag.
+//
+// The message is recorded before it is stepped into raft; a message that raft
+// then discards as stale is filtered at lease time by its term, which must
+// equal the leader's current term.
+//
+// m.GetFrom() is peer-controlled input read straight off the wire, and Process()
+// records the ack *before* node.Step gets a chance to reject the message, so the
+// node ID is checked against the published voter set before it is allowed to
+// occupy a map slot. Without that check an authenticated peer could flood
+// synthetic From IDs and grow peerAcks without bound (CWE-770). Only voters are
+// ever consulted by voterAckIndex, so a non-voter's ack has no use to drop.
+//
+// Fails closed: until the runRaft goroutine has published a voter set, no ack is
+// recorded. That window is bounded by one tick, and a node whose configuration
+// raft has not yet loaded cannot be a leader holding a lease anyway.
+func (rc *RaftConsensus) recordPeerAck(m *raftpb.Message) {
+	switch m.GetType() {
+	case raftpb.MsgHeartbeatResp, raftpb.MsgAppResp:
+	default:
+		return
+	}
+	from := m.GetFrom()
+	if from == raft.None || from == rc.nodeID {
+		return
+	}
+	voters := rc.voters.Load()
+	if voters == nil {
+		return
+	}
+	if _, ok := (*voters)[from]; !ok {
+		return
+	}
+
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.peerAcks[from] = peerAck{at: time.Now(), term: m.GetTerm()}
+}
+
+// syncVotersLocked publishes the current voter configuration for the receive
+// path and drops any recorded ack from a node that is no longer a voter, so
+// peerAcks is bounded by the size of the voter set at all times.
+//
+// It runs on every node regardless of role. Pruning used to sit behind
+// refreshLeaseIfQuorum's StateLeader early return, which meant a follower — the
+// state a node spends most of its life in — never pruned at all.
+//
+// voters must be a map the caller does not retain or mutate (Status() returns a
+// fresh one per call); it is published by pointer and read without a lock.
+// Caller must hold rc.mu.
+func (rc *RaftConsensus) syncVotersLocked(voters map[uint64]struct{}) {
+	rc.voters.Store(&voters)
+	for id := range rc.peerAcks {
+		if _, ok := voters[id]; !ok {
+			delete(rc.peerAcks, id)
+		}
+	}
+}
+
+// voterAckIndex adapts recorded ack instants to raft's quorum machinery.
+//
+// Each voter's "index" is its last ack expressed as nanoseconds since base,
+// plus one — the +1 reserves 0 for "never acked", which is also the value
+// MajorityConfig.CommittedIndex assigns to voters that have not reported in.
+// Feeding these into Config.Voters.CommittedIndex therefore returns the newest
+// instant that a quorum of voters has acked at or after (the k-th newest ack,
+// k = quorum size), computed by raft's own tested quorum code so that joint
+// configurations mid-conf-change are handled correctly rather than re-derived.
+type voterAckIndex struct {
+	self   uint64
+	selfAt time.Time
+	base   time.Time
+	acks   map[uint64]peerAck
+	term   uint64
+}
+
+// AckedIndex implements quorum.AckedIndexer.
+func (v *voterAckIndex) AckedIndex(voterID uint64) (quorum.Index, bool) {
+	if voterID == v.self {
+		// A leader is trivially in contact with itself, right now.
+		return v.index(v.selfAt), true
+	}
+	a, ok := v.acks[voterID]
+	if !ok || a.term != v.term {
+		// Never heard from, or last heard from in a superseded term: not
+		// evidence of contact under the current term. Fail closed.
+		return 0, false
+	}
+	return v.index(a.at), true
+}
+
+func (v *voterAckIndex) index(t time.Time) quorum.Index {
+	d := t.Sub(v.base)
+	if d < 0 {
+		d = 0
+	}
+	return quorum.Index(d) + 1
+}
+
+// refreshLeaseIfQuorum advances leaseLastAck to the instant at which a quorum of
+// voters had most recently acknowledged this leader (ADR-029 Decision 1).
+//
+// Leadership is taken from rc.node.Status() — the Raft state machine itself —
+// and never from clusterState.Leader, which is state-machine content a peer
+// snapshot can set. Three conditions must all hold, and each fails closed:
+//
+//   - Status().RaftState == StateLeader.
+//   - Self present in Status().Progress. Progress is populated only on the
+//     leader and a leader always has its own entry (raft.go:949-951); a node
+//     whose self-Progress is absent is not promotable (raft.go:1946-1949) and
+//     cannot legitimately be leader. An empty Progress map is therefore never a
+//     single-node leader — it is a node that is not leading — so it yields no
+//     lease.
+//   - Self present in the current voter configuration. A leader removed from the
+//     configuration is in no quorum.
+//
+// The lease instant itself is the k-th newest real ack across voters (k = quorum
+// size), not time.Now(): stamping "now" whenever a coarse RecentActive flag was
+// set stretched the effective authority window to ~1.8 × ElectionTimeout,
+// because RecentActive is only cleared once per check-quorum window. Deriving it
+// from the acks themselves keeps the window at leaseDuration measured from real
+// contact, preserving the 0.2 × ElectionTimeout margin (config.go LeaseDuration).
+//
+// leaseLastAck only ever moves forward: a quorum contact that happened does not
+// stop having happened, and a voter set that grows (conf change) must not
+// retroactively invalidate authority already granted.
+//
+// Before any of that it publishes the voter set and prunes acks from nodes that
+// are no longer voters (syncVotersLocked). That housekeeping is role
+// independent and deliberately sits ahead of the StateLeader return: it is what
+// bounds peerAcks, and a follower never reaches the leader path.
+//
+// Called from the runRaft goroutine on every tick and after every Advance().
+func (rc *RaftConsensus) refreshLeaseIfQuorum() {
+	// One critical section for the leadership determination and the write.
+	// Splitting them let a node that lost leadership in between still refresh
+	// its lease. rc.node.Status() is a channel round-trip into raft's own run
+	// loop, which never calls back into RaftConsensus, so holding rc.mu across
+	// it cannot deadlock.
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	status := rc.node.Status()
+
+	// Publish the voter set and prune non-voter acks first, unconditionally:
+	// this is the only bound on peerAcks, and a follower must apply it too.
+	voters := status.Config.Voters.IDs()
+	rc.syncVotersLocked(voters)
+
+	if status.RaftState != raft.StateLeader {
+		return
+	}
+	if _, ok := status.Progress[rc.nodeID]; !ok {
+		return
+	}
+	if _, ok := voters[rc.nodeID]; !ok {
+		return
+	}
+
+	idx := status.Config.Voters.CommittedIndex(&voterAckIndex{
+		self:   rc.nodeID,
+		selfAt: time.Now(),
+		base:   rc.leaseBase,
+		acks:   rc.peerAcks,
+		term:   status.GetTerm(),
+	})
+	if idx == 0 {
+		// Fewer than a quorum of voters have acked in the current term. Leave
+		// leaseLastAck where it is: the existing lease ages out on its own.
+		return
+	}
+
+	// Decode the quorum index back into a monotonic instant. offset is the
+	// nanosecond distance from leaseBase that voterAckIndex encoded, so it is
+	// bounded by the process uptime; the check makes that explicit and fails
+	// closed rather than wrapping into a negative duration if it ever were not.
+	offset := uint64(idx) - 1
+	if offset > math.MaxInt64 {
+		return
+	}
+	ackAt := rc.leaseBase.Add(time.Duration(offset)) // #nosec G115 -- bounded by the check above
+	if ackAt.After(rc.leaseLastAck) {
+		rc.leaseLastAck = ackAt
+	}
 }
 
 // GetLeader returns the current leader node ID
@@ -915,6 +1255,9 @@ func (rc *RaftConsensus) Process(ctx context.Context, m *raftpb.Message) error {
 	if m == nil {
 		return fmt.Errorf("cannot process nil raft message")
 	}
+	// Timestamp follower responses before stepping: this is the only place a
+	// peer's liveness is observed, and it is what the leader lease is built from.
+	rc.recordPeerAck(m)
 	return rc.node.Step(ctx, m)
 }
 

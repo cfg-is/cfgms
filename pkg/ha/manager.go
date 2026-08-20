@@ -369,7 +369,9 @@ func (m *Manager) GetClusterNodes() ([]*NodeInfo, error) {
 	return nodes, nil
 }
 
-// IsLeader returns true if this node is the cluster leader
+// IsLeader returns true if this node is the cluster leader.
+// Deprecated: use IsRaftLeader() for protocol state or HasLeadership() for authority.
+// Retained for callers not yet migrated to the split API (#3389).
 func (m *Manager) IsLeader() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -385,6 +387,50 @@ func (m *Manager) IsLeader() bool {
 	}
 
 	return false
+}
+
+// IsRaftLeader returns the raw Raft replication-protocol state. Returns false in
+// SingleServerMode (no Raft node exists; use HasLeadership() for authority there).
+// For status and observability only — not an admission primitive.
+func (m *Manager) IsRaftLeader() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.raftConsensus != nil {
+		return m.raftConsensus.IsRaftLeader()
+	}
+	return false
+}
+
+// HasLeadership returns true when this node is authorised to perform side-effecting
+// operations. In SingleServerMode it is unconditionally true (Decision 4, ADR-029):
+// there is no quorum to lose and no peer to overlap with, so no lease is needed.
+// In ClusterMode it delegates to RaftConsensus.HasLeadership() which enforces the
+// 0.8 × ElectionTimeout lease bound.
+func (m *Manager) HasLeadership() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.cfg.Mode == SingleServerMode {
+		return true
+	}
+
+	if m.raftConsensus != nil {
+		return m.raftConsensus.HasLeadership()
+	}
+
+	return false
+}
+
+// GetTerm returns the current Raft term, sourced from the underlying RaftConsensus.
+// Returns 0 in SingleServerMode (no Raft cluster) and when no consensus engine is
+// available. The term is the fencing-token source for ADR-029 Decision 5.
+func (m *Manager) GetTerm() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.raftConsensus != nil {
+		return m.raftConsensus.GetTerm()
+	}
+	return 0
 }
 
 // GetLeader returns the current cluster leader node
