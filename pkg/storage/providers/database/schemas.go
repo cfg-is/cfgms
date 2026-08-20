@@ -1348,6 +1348,9 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		// setupTestDatabase and every re-run of the store's tests failed with
 		// "already exists" on the second and later runs.
 		"DROP TABLE IF EXISTS cfgms_pending_registrations;",
+		// Issue #3402: trigger and push records must be cleaned up between test runs.
+		"DROP TABLE IF EXISTS cfgms_triggers;",
+		"DROP TABLE IF EXISTS cfgms_push_records;",
 	}
 
 	for _, query := range dropQueries {
@@ -1356,6 +1359,80 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	return nil
+}
+
+// CreateTriggersTable creates the cfgms_triggers table for durable workflow trigger persistence (Issue #3402).
+func (s DatabaseSchemas) CreateTriggersTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS cfgms_triggers (
+			id                 TEXT NOT NULL PRIMARY KEY,
+			tenant_id          TEXT NOT NULL,
+			name               TEXT NOT NULL DEFAULT '',
+			type               TEXT NOT NULL DEFAULT '',
+			status             TEXT NOT NULL DEFAULT '',
+			workflow_name      TEXT NOT NULL DEFAULT '',
+			created_at         TIMESTAMPTZ NOT NULL,
+			updated_at         TIMESTAMPTZ NOT NULL,
+			webhook_path       TEXT NOT NULL DEFAULT '',
+			webhook_method     JSONB NOT NULL DEFAULT '[]',
+			bearer_token_ref   TEXT,
+			hmac_secret_ref    TEXT,
+			apikey_ref         TEXT,
+			basic_username_ref TEXT,
+			basic_password_ref TEXT,
+			config_payload     BYTEA
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create cfgms_triggers table: %w", err)
+	}
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_triggers_tenant_id  ON cfgms_triggers(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_triggers_status     ON cfgms_triggers(status);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_triggers_type       ON cfgms_triggers(type);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_triggers_created_at ON cfgms_triggers(created_at DESC);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_triggers_tenant_status ON cfgms_triggers(tenant_id, status);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create cfgms_triggers index: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreatePushRecordsTable creates the cfgms_push_records table for durable push-state persistence (Issue #3402).
+// A new leader reads this table to resume pending and in-progress pushes after failover.
+func (s DatabaseSchemas) CreatePushRecordsTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS cfgms_push_records (
+			id           TEXT NOT NULL PRIMARY KEY,
+			config_id    TEXT NOT NULL DEFAULT '',
+			tenant_id    TEXT NOT NULL,
+			version      TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL DEFAULT 'pending',
+			initiated_by TEXT NOT NULL DEFAULT '',
+			data         BYTEA,
+			created_at   TIMESTAMPTZ NOT NULL,
+			updated_at   TIMESTAMPTZ NOT NULL
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create cfgms_push_records table: %w", err)
+	}
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_push_records_tenant_id  ON cfgms_push_records(tenant_id);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_push_records_status     ON cfgms_push_records(status);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_push_records_config_id  ON cfgms_push_records(config_id);",
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_push_records_created_at ON cfgms_push_records(created_at ASC);",
+		// Composite index optimises both GetPendingPushes (status filter) and
+		// ListPushesByConfigID (config_id + tenant_id filter).
+		"CREATE INDEX IF NOT EXISTS idx_cfgms_push_records_config_tenant ON cfgms_push_records(config_id, tenant_id);",
+	}
+	for _, idx := range indexes {
+		if _, err := db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("failed to create cfgms_push_records index: %w", err)
+		}
+	}
 	return nil
 }
 

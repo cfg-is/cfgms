@@ -203,16 +203,32 @@ func (p *DatabaseProvider) CreateCommandStore(config map[string]interface{}) (bu
 	return store, nil
 }
 
-// CreateTriggerStore is not supported by the database provider.
-// Trigger persistence belongs in the business-data tier (SQLite for OSS).
+// CreateTriggerStore creates a PostgreSQL-backed TriggerStore (Issue #3402).
 func (p *DatabaseProvider) CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseTriggerStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database trigger store: %w", err)
+	}
+	return store, nil
 }
 
-// CreatePushStore is not supported by the database provider.
-// Push-state persistence belongs in the business-data tier (SQLite for OSS).
+// CreatePushStore creates a PostgreSQL-backed PushStore (Issue #3402).
+// The push store gives resumePendingPushes a durable record to read in cluster
+// mode, enabling failover replay of in-flight configuration pushes.
 func (p *DatabaseProvider) CreatePushStore(config map[string]interface{}) (business.PushStore, error) {
-	return nil, business.ErrNotSupported
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabasePushStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database push store: %w", err)
+	}
+	return store, nil
 }
 
 // CreatePendingRegistrationStore creates a PostgreSQL-backed PendingRegistrationStore (Issue #3401).
