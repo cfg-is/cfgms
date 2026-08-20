@@ -305,7 +305,7 @@ func (h *DNAHandler) HandleHeartbeatRoot(ctx context.Context, stewardID, claimed
 }
 
 // aggregateRootHexLen is the length of a SHA-256 digest rendered as lowercase hex.
-const aggregateRootHexLen = 64
+const aggregateRootHexLen = sdna.AggregateRootHexLen
 
 // isValidAggregateRoot reports whether s is a well-formed aggregate root: exactly
 // 64 lowercase hexadecimal characters, the only encoding sdna.AggregateRoot
@@ -315,17 +315,12 @@ const aggregateRootHexLen = 64
 // it at the boundary keeps attacker-controlled data out of the per-steward
 // pendingDeltas map (retained until a delta arrives — a memory-amplification
 // vector at 50k+ steward scale) and out of the log sink.
+//
+// The predicate itself lives next to the producer (sdna.IsValidAggregateRoot) so
+// the DNA storage manager, which content-addresses on the same field, validates
+// against one definition rather than a second copy that can drift.
 func isValidAggregateRoot(s string) bool {
-	if len(s) != aggregateRootHexLen {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+	return sdna.IsValidAggregateRoot(s)
 }
 
 // HandleGRPC processes a SyncDNA RPC on the shared gRPC-over-QUIC server.

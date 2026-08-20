@@ -30,6 +30,7 @@ import (
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -309,7 +310,7 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA,
 	duration := time.Since(startTime)
 	m.logger.Debug("DNA stored successfully",
 		"device_id", deviceID,
-		"content_hash", contentHash[:16],
+		"content_hash", shortHash(contentHash),
 		"original_size", originalSize,
 		"compressed_size", compressedSize,
 		"compression_ratio", compressionRatio,
@@ -502,21 +503,68 @@ func DefaultConfig() *Config {
 
 // Helper methods
 
-// generateContentHash returns a deterministic identifier for DNA content used for
-// deduplication. It uses the pre-computed aggregate root (Issue #3329) when
-// available; otherwise it falls back to a hash of the stable identity fields
-// (ID, ConfigHash, SyncFingerprint) that exclude timestamps and the retired flat
-// attributes map.
+// generateContentHash returns a deterministic identifier for DNA content used
+// for deduplication (Issue #3329). See ContentHash for the precedence rules and
+// for why a steward-supplied aggregate root is never trusted unvalidated.
 func (m *Manager) generateContentHash(dna *commonpb.DNA) (string, error) {
-	if dna.AggregateRoot != "" {
-		return dna.AggregateRoot, nil
+	return ContentHash(dna)
+}
+
+// ContentHash returns a deterministic identifier for DNA content (Issue #3329).
+// It is the aggregate-root-first hash exported so callers outside this package
+// (e.g. controller/server's expected-DNA-hash wiring) can compute the same
+// identity without duplicating the fallback logic.
+//
+// The returned value is always a 64-character lowercase hex digest. It is used
+// as a content-address: a log field, a database key, and — for the file backend
+// — a filesystem path component. DNA.aggregate_root is an arbitrary,
+// unbounded, steward-supplied string on the registration path
+// (RegisterSteward -> storeDNA -> Manager.Store), where no equivalent of the
+// heartbeat path's sdna.IsValidAggregateRoot check runs, so the field is never
+// returned unless it has exactly the shape sdna.AggregateRoot produces.
+// Precedence, strongest first:
+//
+//  1. The root recomputed server-side from the manifest — self-supplied data,
+//     independent of what the steward claimed the root to be.
+//  2. The claimed aggregate root, when it is a well-formed digest.
+//  3. A hash of the stable identity fields (ID, ConfigHash, SyncFingerprint)
+//     that exclude timestamps and the retired flat attributes map, for DNA that
+//     has not yet been migrated to the fragment model — and for any DNA whose
+//     claimed root is malformed.
+func ContentHash(dna *commonpb.DNA) (string, error) {
+	if manifest := dna.GetManifest(); len(manifest) > 0 {
+		root, err := sdna.AggregateRoot(manifest)
+		if err != nil {
+			return "", fmt.Errorf("failed to compute aggregate root from manifest: %w", err)
+		}
+		return root, nil
 	}
-	// Fallback for DNA that has not yet been migrated to the fragment model.
+	if root := dna.GetAggregateRoot(); sdna.IsValidAggregateRoot(root) {
+		return root, nil
+	}
+	// Fallback for DNA that has not yet been migrated to the fragment model, and
+	// for a malformed claimed root.
 	hasher := sha256.New()
-	hasher.Write([]byte(dna.Id))
-	hasher.Write([]byte(dna.ConfigHash))
-	hasher.Write([]byte(dna.SyncFingerprint))
+	hasher.Write([]byte(dna.GetId()))
+	hasher.Write([]byte(dna.GetConfigHash()))
+	hasher.Write([]byte(dna.GetSyncFingerprint()))
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// hashPrefixLen is the number of leading characters of a content hash emitted
+// in log fields — enough to correlate records without logging the full address.
+const hashPrefixLen = 16
+
+// shortHash returns at most the first hashPrefixLen characters of contentHash.
+//
+// Slicing a hash unconditionally (contentHash[:16]) panics on any shorter value,
+// and the slice expression is evaluated eagerly at the call site regardless of
+// log level — so a single short hash crashes the controller process even with
+// debug logging off. ContentHash now guarantees a 64-hex digest, but hashes read
+// back from a backend or written by an older process are not re-validated, so
+// every log site goes through here.
+func shortHash(contentHash string) string {
+	return contentHash[:min(hashPrefixLen, len(contentHash))]
 }
 
 func (m *Manager) getShardID(deviceID string, timestamp time.Time) string {
@@ -585,7 +633,7 @@ func (m *Manager) storeReference(ctx context.Context, deviceID, contentHash stri
 	duration := time.Since(startTime)
 	m.logger.Debug("DNA reference stored (deduplicated)",
 		"device_id", deviceID,
-		"content_hash", contentHash[:16],
+		"content_hash", shortHash(contentHash),
 		"version", version,
 		"duration", duration)
 

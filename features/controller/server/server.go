@@ -1036,6 +1036,51 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			logger.Info("DNA hash mismatch detection wired (Issue #2524)")
 		}
 
+		// Issue #2524: Wire post-DNA-sync hook so each successful full sync
+		// updates the expected hash in the heartbeat service, suppressing
+		// repeated mismatch triggers once the steward's DNA is in sync.
+		// Issue #3329: uses the aggregate-root-first dnaStorage.ContentHash in
+		// place of the retired stewarddna.ComputeHash(dna.Attributes) — the
+		// mismatch-detection wiring above depends on expectedDNAHash actually
+		// being set, or it can never fire (see dna_handler.go HandleHeartbeatRoot).
+		if controllerService != nil && heartbeatService != nil {
+			controllerService.SetPostDNASyncHook(func(stewardID string, dna *common.DNA) {
+				hash, hashErr := dnaStorage.ContentHash(dna)
+				if hashErr != nil {
+					logger.Warn("Failed to compute DNA content hash for expected-hash wiring",
+						"steward_id", logging.SanitizeLogValue(stewardID), "error", hashErr)
+					return
+				}
+				heartbeatService.SetExpectedDNAHash(stewardID, hash)
+			})
+			logger.Info("Post-DNA-sync hook wired (Issue #2524)")
+		}
+
+		// Issue #2524: Warm expectedDNAHash for every previously-known steward
+		// from durable storage.  Without this, a controller restart silently
+		// disables mismatch detection for all known stewards until each runs a
+		// fresh full sync — even though their DNA is already durably stored and
+		// loaded by LoadFromStorage (ControllerService.LoadFromStorage comment
+		// calls out the identical startup-gap pattern this mirrors).
+		if controllerService != nil && heartbeatService != nil {
+			warmed := 0
+			for _, steward := range controllerService.GetAllStewards() {
+				if steward.DNA != nil {
+					hash, hashErr := dnaStorage.ContentHash(steward.DNA)
+					if hashErr != nil {
+						logger.Warn("Failed to compute DNA content hash while warming expected hashes",
+							"steward_id", logging.SanitizeLogValue(steward.ID), "error", hashErr)
+						continue
+					}
+					if hash != "" {
+						heartbeatService.SetExpectedDNAHash(steward.ID, hash)
+						warmed++
+					}
+				}
+			}
+			logger.Info("Expected DNA hashes warmed from durable storage (Issue #2524)", "warmed", warmed)
+		}
+
 	} else {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}

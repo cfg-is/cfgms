@@ -21,6 +21,31 @@ func FragmentHash(canonicalBytes []byte) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
+// AggregateRootHexLen is the length of a SHA-256 digest rendered as lowercase
+// hex — the only encoding AggregateRoot and FragmentHash produce (ADR-017 §6).
+const AggregateRootHexLen = 64
+
+// IsValidAggregateRoot reports whether s is a well-formed aggregate root:
+// exactly AggregateRootHexLen lowercase hexadecimal characters.
+//
+// An aggregate root arrives from a steward as an arbitrary, unbounded string
+// (common.proto DNA.aggregate_root). Every controller-side consumer that treats
+// it as an identity — log field, map key, content-address, filesystem path
+// component — must validate it here first; a root that is not the exact shape
+// AggregateRoot produces is attacker-supplied data, not a digest.
+func IsValidAggregateRoot(s string) bool {
+	if len(s) != AggregateRootHexLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // AggregateRoot computes the Merkle-style aggregate root over the manifest.
 //
 // The manifest is sorted by fragment_id (byte-wise, not locale-aware) before

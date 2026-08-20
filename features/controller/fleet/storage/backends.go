@@ -7,6 +7,7 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	_ "github.com/lib/pq"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -89,11 +91,70 @@ func NewFileBackend(config *Config, logger logging.Logger) (*FileBackend, error)
 	return backend, nil
 }
 
+// validateHashPathComponent rejects any content hash that is not the exact shape
+// ContentHash produces (64 lowercase hex characters).
+//
+// The hash originates in DNA.aggregate_root, an arbitrary steward-supplied
+// string, and FileBackend interpolates it into a filesystem path. filepath.Join
+// cleans "../" segments rather than rejecting them, so an unvalidated hash such
+// as "../../../../etc/cron.d/x" escapes basePath and turns StoreRecord into an
+// arbitrary file write (and GetRecord into an arbitrary read). Validating the
+// component is the only thing standing between the two.
+func validateHashPathComponent(contentHash string) error {
+	if !sdna.IsValidAggregateRoot(contentHash) {
+		return fmt.Errorf("invalid content hash: must be %d lowercase hex characters", sdna.AggregateRootHexLen)
+	}
+	return nil
+}
+
+// safePathComponent returns a filesystem-safe representation of s for use as a
+// single path component.
+//
+// Values that are already safe (non-empty, no path separators, no "."/".."
+// traversal, no characters outside the conservative set below) are returned
+// unchanged so operators keep readable filenames. Anything else is replaced by
+// its SHA-256 digest, which is deterministic and injective — a lossy
+// character-substitution scheme would let two distinct device IDs collide onto
+// one reference file and silently drop a record.
+func safePathComponent(s string) string {
+	if isSafePathComponent(s) {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("id-%x", sum[:])
+}
+
+// maxSafePathComponentLen bounds a path component well below the 255-byte limit
+// common to ext4, APFS and NTFS, leaving room for the hash prefix and suffix
+// that FileBackend concatenates around it.
+const maxSafePathComponentLen = 128
+
+func isSafePathComponent(s string) bool {
+	if s == "" || len(s) > maxSafePathComponentLen || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '.' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // StoreRecord stores a DNA record with compressed data to the filesystem
 func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compressedData []byte) error {
 	// Create file path based on shard and content hash
+	if err := validateHashPathComponent(record.ContentHash); err != nil {
+		return fmt.Errorf("refusing to store DNA record: %w", err)
+	}
 	fileName := fmt.Sprintf("%s.dna", record.ContentHash)
-	filePath := filepath.Join(b.basePath, record.ShardID, fileName)
+	filePath := filepath.Join(b.basePath, safePathComponent(record.ShardID), fileName)
 
 	// Create record data structure for storage
 	recordData := struct {
@@ -115,14 +176,9 @@ func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compre
 		return fmt.Errorf("failed to write record file: %w", err)
 	}
 
-	hashDisplay := record.ContentHash
-	if len(hashDisplay) > 16 {
-		hashDisplay = hashDisplay[:16]
-	}
-
 	b.logger.Debug("DNA record stored to file",
 		"device_id", record.DeviceID,
-		"content_hash", hashDisplay,
+		"content_hash", shortHash(record.ContentHash),
 		"file_path", filePath,
 		"file_size", len(data))
 
@@ -131,9 +187,14 @@ func (b *FileBackend) StoreRecord(ctx context.Context, record *DNARecord, compre
 
 // StoreReference stores a reference to existing content
 func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) error {
-	// For file backend, references are stored as separate files
-	fileName := fmt.Sprintf("%s_ref_%s.json", record.ContentHash, record.DeviceID)
-	filePath := filepath.Join(b.basePath, record.ShardID, "refs", fileName)
+	// For file backend, references are stored as separate files. Both
+	// interpolated components are attacker-influenced: the content hash comes
+	// from DNA.aggregate_root and the device ID from the registering steward.
+	if err := validateHashPathComponent(record.ContentHash); err != nil {
+		return fmt.Errorf("refusing to store DNA reference: %w", err)
+	}
+	fileName := fmt.Sprintf("%s_ref_%s.json", record.ContentHash, safePathComponent(record.DeviceID))
+	filePath := filepath.Join(b.basePath, safePathComponent(record.ShardID), "refs", fileName)
 
 	// Ensure refs directory exists
 	if err := os.MkdirAll(filepath.Dir(filePath), 0750); err != nil {
@@ -151,14 +212,9 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 		return fmt.Errorf("failed to write reference file: %w", err)
 	}
 
-	hashDisplay := record.ContentHash
-	if len(hashDisplay) > 16 {
-		hashDisplay = hashDisplay[:16]
-	}
-
 	b.logger.Debug("DNA reference stored to file",
 		"device_id", record.DeviceID,
-		"content_hash", hashDisplay,
+		"content_hash", shortHash(record.ContentHash),
 		"ref_file", filePath)
 
 	return nil
@@ -166,14 +222,18 @@ func (b *FileBackend) StoreReference(ctx context.Context, record *DNARecord) err
 
 // GetRecord retrieves a DNA record by content hash and shard
 func (b *FileBackend) GetRecord(ctx context.Context, contentHash, shardID string) (*DNARecord, error) {
+	if err := validateHashPathComponent(contentHash); err != nil {
+		return nil, fmt.Errorf("refusing to read DNA record: %w", err)
+	}
 	fileName := fmt.Sprintf("%s.dna", contentHash)
-	filePath := filepath.Join(b.basePath, shardID, fileName)
+	filePath := filepath.Join(b.basePath, safePathComponent(shardID), fileName)
 
 	// Read file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("DNA record not found: content_hash=%s, shard_id=%s", contentHash[:16], shardID)
+			return nil, fmt.Errorf("DNA record not found: content_hash=%s, shard_id=%s",
+				shortHash(contentHash), logging.SanitizeLogValue(shardID))
 		}
 		return nil, fmt.Errorf("failed to read record file: %w", err)
 	}
@@ -193,6 +253,12 @@ func (b *FileBackend) GetRecord(ctx context.Context, contentHash, shardID string
 
 // HasContent checks if content with the given hash already exists
 func (b *FileBackend) HasContent(ctx context.Context, contentHash string) (bool, error) {
+	// A malformed hash cannot name a stored record, and probing with it would
+	// turn the dedup lookup into a filesystem-existence oracle outside basePath.
+	if err := validateHashPathComponent(contentHash); err != nil {
+		return false, fmt.Errorf("refusing to look up DNA content: %w", err)
+	}
+
 	// Check all shards for the content
 	shardDirs := []string{"default"}
 	if b.config.EnableSharding {

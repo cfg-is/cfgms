@@ -122,6 +122,35 @@ func TestOptimizedDNACompressor_Decompress_CorruptGzip(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestOptimizedDNACompressor_Decompress_CorruptChecksum exercises the
+// reader.Close() CRC32-validation path directly (Issue #3329): the deflate
+// stream itself is well-formed and decodes to completion via ReadFrom, but
+// the gzip trailer's CRC32 no longer matches the decompressed bytes, so the
+// checksum mismatch can only be detected at Close(), not at NewReader or
+// ReadFrom. Before this fix, that Close() error was swallowed and corrupt
+// bytes were returned as if valid.
+func TestOptimizedDNACompressor_Decompress_CorruptChecksum(t *testing.T) {
+	compressor, err := NewOptimizedDNACompressor("gzip", 6)
+	require.NoError(t, err)
+	defer func() { _ = compressor.Close() }()
+
+	dna := buildRealisticDNA()
+	compressed, _, err := compressor.Compress(dna)
+	require.NoError(t, err)
+
+	// The gzip trailer is the last 8 bytes: a 4-byte little-endian CRC32
+	// followed by a 4-byte little-endian ISIZE. Flipping a bit in the CRC32
+	// field corrupts only the checksum, leaving the deflate stream decodable.
+	corrupted := make([]byte, len(compressed))
+	copy(corrupted, compressed)
+	trailerStart := len(corrupted) - 8
+	corrupted[trailerStart] ^= 0xFF
+
+	_, err = compressor.Decompress(corrupted)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checksum")
+}
+
 func TestOptimizedDNACompressor_Decompress_ValidGzipBadJSON(t *testing.T) {
 	compressor, err := NewOptimizedDNACompressor("gzip", 6)
 	require.NoError(t, err)
@@ -134,6 +163,29 @@ func TestOptimizedDNACompressor_Decompress_ValidGzipBadJSON(t *testing.T) {
 
 	_, err = compressor.Decompress(buf.Bytes())
 	assert.Error(t, err)
+}
+
+// TestGzipCompressor_Decompress_CorruptChecksum is the GzipCompressor analogue
+// of TestOptimizedDNACompressor_Decompress_CorruptChecksum: it corrupts only
+// the gzip trailer's CRC32 so the checksum mismatch is detectable solely at
+// reader.Close(), not at NewReader or ReadFrom.
+func TestGzipCompressor_Decompress_CorruptChecksum(t *testing.T) {
+	compressor, err := NewGzipCompressor(6)
+	require.NoError(t, err)
+	defer func() { _ = compressor.Close() }()
+
+	dna := buildRealisticDNA()
+	compressed, _, err := compressor.Compress(dna)
+	require.NoError(t, err)
+
+	corrupted := make([]byte, len(compressed))
+	copy(corrupted, compressed)
+	trailerStart := len(corrupted) - 8
+	corrupted[trailerStart] ^= 0xFF
+
+	_, err = compressor.Decompress(corrupted)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checksum")
 }
 
 func TestOptimizedDNACompressor_Stats(t *testing.T) {
