@@ -141,7 +141,9 @@ Three shapes sit behind that column:
 
 **Advisory, not required:** `nancy-scan`, `gosec-scan` and `staticcheck-scan`
 (PR side only), plus `security-validation`, the `security-scan.yml` aggregate
-that evaluates them across the split. Their jobs fail on findings, but a red one
+that evaluates them across the split, and `golangci-lint` (both `GOOS=linux` and
+`GOOS=windows`, PR and merge queue) — see the paragraph below, which is where
+that one differs. Their jobs fail on findings, but a red one
 does **not** block a merge — the ruleset does not list them. Treat a finding
 there as real work, not as optional.
 
