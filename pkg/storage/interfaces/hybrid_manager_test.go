@@ -360,8 +360,15 @@ func (p *mockProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACS
 	return &mockRBACStore{}, nil
 }
 
+// CreateTenantStore reports that this provider has no tenant backend.
+// HybridStorageManager never wires a TenantStore (it consumes ClientTenantStore
+// only), and this package cannot import a real provider without the import cycle
+// described on mockProvider. Reporting ErrNotSupported keeps the provider honest
+// instead of handing callers a tenant store that silently succeeds. Real
+// TenantStore behaviour — including the pending-deletion pipeline — is covered
+// against the SQLite and PostgreSQL providers in their own packages.
 func (p *mockProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
-	return &mockTenantStore{}, nil
+	return nil, business.ErrNotSupported
 }
 
 func (p *mockProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
@@ -669,33 +676,6 @@ func (s *mockRBACStore) GetSubjectAssignments(_ context.Context, _, _ string) ([
 }
 func (s *mockRBACStore) Initialize(_ context.Context) error { return nil }
 func (s *mockRBACStore) Close() error                       { return nil }
-
-// mockTenantStore implements business.TenantStore for testing
-type mockTenantStore struct{}
-
-func (s *mockTenantStore) CreateTenant(_ context.Context, _ *business.TenantData) error { return nil }
-func (s *mockTenantStore) GetTenant(_ context.Context, tenantID string) (*business.TenantData, error) {
-	return &business.TenantData{ID: tenantID, Name: "Test Tenant"}, nil
-}
-func (s *mockTenantStore) UpdateTenant(_ context.Context, _ *business.TenantData) error { return nil }
-func (s *mockTenantStore) DeleteTenant(_ context.Context, _ string) error               { return nil }
-func (s *mockTenantStore) ListTenants(_ context.Context, _ *business.TenantFilter) ([]*business.TenantData, error) {
-	return nil, nil
-}
-func (s *mockTenantStore) GetTenantHierarchy(_ context.Context, tenantID string) (*business.TenantHierarchy, error) {
-	return &business.TenantHierarchy{TenantID: tenantID}, nil
-}
-func (s *mockTenantStore) GetChildTenants(_ context.Context, _ string) ([]*business.TenantData, error) {
-	return nil, nil
-}
-func (s *mockTenantStore) GetTenantPath(_ context.Context, tenantID string) ([]string, error) {
-	return []string{tenantID}, nil
-}
-func (s *mockTenantStore) IsTenantAncestor(_ context.Context, _, _ string) (bool, error) {
-	return false, nil
-}
-func (s *mockTenantStore) Initialize(_ context.Context) error { return nil }
-func (s *mockTenantStore) Close() error                       { return nil }
 
 // mockRegistrationTokenStore implements business.RegistrationTokenStore for testing
 type mockRegistrationTokenStore struct{}

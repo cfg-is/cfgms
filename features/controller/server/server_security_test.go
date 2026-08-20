@@ -4,6 +4,7 @@ package server
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -245,12 +246,18 @@ func TestServer_StorageProviderValidation(t *testing.T) {
 							t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
 							return
 						}
-						// Fail if in CI/integration mode without Docker, skip in development
-						if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" || os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" {
+						// CI is the one place the infrastructure is guaranteed to be
+						// provisioned, so a missing database there is a hard failure.
+						if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
 							t.Fatalf("REQUIRED INFRASTRUCTURE MISSING: Database provider requires Docker environment in CI/integration mode - run 'make test-integration-setup'")
-						} else {
-							t.Skipf("Database provider requires Docker environment - run 'make test-integration-setup'")
 						}
+						// Locally, isDockerTestEnvironment has already probed the port, so
+						// reaching here means nothing is listening — whether or not stale
+						// credentials are still exported. Skip with an actionable message
+						// rather than failing on a "connection refused" further down.
+						t.Skipf("Database provider requires a running Docker environment (nothing listening on %s) - "+
+							"run 'make test-integration-setup', or 'make test-integration-cleanup' to clear a stale .env.test",
+							dockerTestDBAddr())
 						return
 					default:
 						// Use git or other local providers
@@ -1189,7 +1196,35 @@ func TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk(t *testing.T
 		"buildGRPCControlPlaneTLSConfig must not write server key to disk")
 }
 
-// Check if we're running in Docker integration test environment
+// dockerTestDBAddr returns the host:port the Docker test Postgres is expected on.
+// It mirrors createDockerTestStorageConfig, which reads CFGMS_TEST_DB_HOST and uses
+// port 5433 (the docker-compose.test.yml published port for postgres-test).
+func dockerTestDBAddr() string {
+	host := os.Getenv("CFGMS_TEST_DB_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	return net.JoinHostPort(host, "5433")
+}
+
+// isDockerTestEnvironment reports whether the Docker-backed integration infrastructure
+// is actually available to this test run.
+//
+// Credentials in the environment are NOT evidence that the containers are running.
+// `make test-integration-docker` sources .env.test whenever the file exists, and that
+// file outlives the containers it was generated for: a previous session that was torn
+// down (or a machine with no Docker daemon at all) still leaves CFGMS_TEST_DB_PASSWORD
+// and CFGMS_TEST_GITEA_URL exported. Detecting on the credentials alone made the suite
+// claim a Docker environment that did not exist and then fail on "connection refused"
+// against port 5433. Both the credentials and a live listener are required.
 func isDockerTestEnvironment() bool {
-	return os.Getenv("CFGMS_TEST_DB_PASSWORD") != "" && os.Getenv("CFGMS_TEST_GITEA_URL") != ""
+	if os.Getenv("CFGMS_TEST_DB_PASSWORD") == "" || os.Getenv("CFGMS_TEST_GITEA_URL") == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", dockerTestDBAddr(), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }

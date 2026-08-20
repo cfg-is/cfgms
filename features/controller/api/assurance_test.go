@@ -98,6 +98,7 @@ func TestPermissionAssurance_CatastrophicForwardDeclarations(t *testing.T) {
 		"module:reject",
 		"publisher-trust:add",
 		"registration:approve-by-cidr", // Issue #2969: bulk CIDR approval
+		"tenant:approve-delete",        // Issue #3182: ADR-027 dual-control deletion approval
 	}
 	for _, perm := range catastrophic {
 		req, found := permissionAssurance[perm]
@@ -272,6 +273,33 @@ func TestPermissionAssurance_CrossRegistryInvariant(t *testing.T) {
 			"to API keys and web accounts (Issue #3195)")
 }
 
+// TestPermissionAssurance_TenantDeletionPipelineStrong is a REQUIRED test (Issue #3182 AC:
+// "tenant:delete and tenant:approve-delete are registered in permissionAssurance at
+// Min: session.AssuranceStrong; tenant:approve-delete additionally carries RequireUserPresence: true").
+// Requesting a deletion is a denial-of-service risk against the subtree; approving it is
+// irreversible — both must be gated at the strongest assurance level available.
+func TestPermissionAssurance_TenantDeletionPipelineStrong(t *testing.T) {
+	req, found := permissionAssurance["tenant:delete"]
+	require.True(t, found, "tenant:delete must be in permissionAssurance (Issue #3182)")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"tenant:delete must require AssuranceStrong (requesting deletion is a DoS risk)")
+	assert.False(t, req.RequireUserPresence,
+		"tenant:delete must not require user presence (non-catastrophic: cancellable during hold)")
+
+	req, found = permissionAssurance["tenant:approve-delete"]
+	require.True(t, found, "tenant:approve-delete must be in permissionAssurance (Issue #3182)")
+	assert.Equal(t, session.AssuranceStrong, req.Min,
+		"tenant:approve-delete must require AssuranceStrong (approval is irreversible)")
+	assert.True(t, req.RequireUserPresence,
+		"tenant:approve-delete must require user presence (irreversible cascade delete)")
+
+	// Both must be grantable to web accounts and API keys.
+	assert.True(t, isKnownPermission("tenant:delete"),
+		"tenant:delete must be in knownPermissions so it can be granted to a principal")
+	assert.True(t, isKnownPermission("tenant:approve-delete"),
+		"tenant:approve-delete must be in knownPermissions so it can be granted to a principal")
+}
+
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
@@ -280,6 +308,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"module:reject":                true,
 		"publisher-trust:add":          true,
 		"registration:approve-by-cidr": true, // Issue #2969
+		"tenant:approve-delete":        true, // Issue #3182: ADR-027 dual-control deletion approval
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {

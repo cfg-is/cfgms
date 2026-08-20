@@ -125,6 +125,20 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "tenant",
 		Actions:      []string{"create", "read", "update", "delete"},
 	},
+	{
+		Id:           "tenant.delete",
+		Name:         "Request Tenant Deletion",
+		Description:  "Request deletion of a fully-suspended tenant subtree and cancel an in-flight deletion request (ADR-027 Decisions 3-4)",
+		ResourceType: "tenant",
+		Actions:      []string{"delete"},
+	},
+	{
+		Id:           "tenant.approve-delete",
+		Name:         "Approve Tenant Deletion",
+		Description:  "Dual-control approval of a tenant deletion after the hold period elapses (ADR-027 Decision 4); requires user-presence proof",
+		ResourceType: "tenant",
+		Actions:      []string{"delete"},
+	},
 
 	// RBAC Management Permissions
 	{

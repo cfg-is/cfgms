@@ -20,13 +20,12 @@ import (
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
-	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	flatfile "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
 // gitRouterMemorySecretStore is a real in-memory SecretStore for git router tests.
-// Same pattern as simpleTenantStore: lightweight in-memory implementation with real CRUD.
+// Lightweight in-memory implementation with real CRUD.
 type gitRouterMemorySecretStore struct {
 	secrets map[string]string
 }
@@ -135,9 +134,9 @@ func TestNewControllerRouterWithGit_RoutesGitTenantToGitStore(t *testing.T) {
 		"configs/policies/baseline.yaml": []byte(configContent),
 	})
 
-	ts := newSimpleTenantStore()
-	ts.add("git-tenant", "", nil)
-	ts.add("ctrl-tenant", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "git-tenant", "", nil)
+	addTenant(t, ts, "ctrl-tenant", "", nil)
 
 	flatfileRoot := t.TempDir()
 	controllerStore, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -179,8 +178,8 @@ func TestNewControllerRouterWithGit_RoutesGitTenantToGitStore(t *testing.T) {
 // TestNewControllerRouterWithGit_FallsBackOnInitFailure verifies that when GitConfigStore
 // construction fails, storeForSource falls back to the controller store.
 func TestNewControllerRouterWithGit_FallsBackOnInitFailure(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("git-tenant", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "git-tenant", "", nil)
 
 	flatfileRoot := t.TempDir()
 	controllerStore, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -217,8 +216,8 @@ func TestNewControllerRouterWithGit_GitStoreIsCached(t *testing.T) {
 		"configs/ns/cfg.yaml": []byte("cached: true\n"),
 	})
 
-	ts := newSimpleTenantStore()
-	ts.add("t1", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "t1", "", nil)
 
 	flatfileRoot := t.TempDir()
 	controllerStore, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -251,7 +250,7 @@ func TestNewControllerRouterWithGit_GitStoreIsCached(t *testing.T) {
 // returns the controller store for controller-type sources (regression test for Phase 1 behavior).
 func TestStoreForSource_ControllerTypeReturnsControllerStore(t *testing.T) {
 	cs := &recordingConfigStore{}
-	ts := newSimpleTenantStore()
+	ts := newTenantStore(t)
 
 	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), t.TempDir(), logging.NewNoopLogger()).(*controllerRouter)
 	ctrlSource := &pkgconfig.ConfigSourceInfo{Type: pkgconfig.ConfigSourceTypeController}
@@ -263,8 +262,8 @@ func TestStoreForSource_ControllerTypeReturnsControllerStore(t *testing.T) {
 // TestSyncTenantWithRemote_NonGitTenantReturnsEmpty verifies that SyncTenantWithRemote
 // returns ("","",nil) for a tenant whose effective source is ConfigSourceTypeController.
 func TestSyncTenantWithRemote_NonGitTenantReturnsEmpty(t *testing.T) {
-	ts := newSimpleTenantStore()
-	ts.add("ctrl-tenant", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "ctrl-tenant", "", nil)
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -286,8 +285,8 @@ func TestSyncTenantWithRemote_GitTenantReturnsSHAs(t *testing.T) {
 		"configs/default/app.yaml": []byte("version: 1\n"),
 	})
 
-	ts := newSimpleTenantStore()
-	ts.add("git-tenant", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "git-tenant", "", nil)
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -340,8 +339,8 @@ func TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore(t *testing.T) 
 		"configs/default/app.yaml": []byte("v1\n"),
 	})
 
-	ts := newSimpleTenantStore()
-	ts.add("git-tenant", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "git-tenant", "", nil)
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -386,8 +385,8 @@ func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) 
 		"configs/default/app.yaml": []byte("v1\n"),
 	})
 
-	ts := newSimpleTenantStore()
-	ts.add("git-tenant", "", nil)
+	ts := newTenantStore(t)
+	addTenant(t, ts, "git-tenant", "", nil)
 
 	flatfileRoot := t.TempDir()
 	cs, err := flatfile.NewFlatFileConfigStore(flatfileRoot)
@@ -420,6 +419,3 @@ func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) 
 	_, _, syncErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
 	assert.Error(t, syncErr, "sync must return an error when the cached git store's remote is broken")
 }
-
-// Compile-time check: business.TenantStore is satisfied by simpleTenantStore.
-var _ business.TenantStore = (*simpleTenantStore)(nil)

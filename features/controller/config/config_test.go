@@ -1014,3 +1014,121 @@ func TestLoadWithPath_CertPath_AbsoluteHonoured(t *testing.T) {
 	assert.Equal(t, absoluteCertPath, cfg.CertPath,
 		"absolute cert_path must be used unchanged")
 }
+
+// --- TenantAdminConfig accessors (ADR-027, Issue #3182) ---
+
+// TestTenantAdminConfig_GetDeleteHoldPeriod covers every branch of the accessor:
+// a nil receiver (section absent from the config file), a present section that
+// leaves delete_hold_period unset (zero value), and an explicit override.
+func TestTenantAdminConfig_GetDeleteHoldPeriod(t *testing.T) {
+	const defaultHold = 720 * time.Hour
+
+	tests := []struct {
+		name string
+		cfg  *TenantAdminConfig
+		want time.Duration
+	}{
+		{
+			name: "nil receiver defaults to 30 days",
+			cfg:  nil,
+			want: defaultHold,
+		},
+		{
+			name: "zero value defaults to 30 days",
+			cfg:  &TenantAdminConfig{},
+			want: defaultHold,
+		},
+		{
+			name: "explicit zero duration defaults to 30 days",
+			cfg:  &TenantAdminConfig{DeleteHoldPeriod: Duration(0)},
+			want: defaultHold,
+		},
+		{
+			name: "configured value is honoured",
+			cfg:  &TenantAdminConfig{DeleteHoldPeriod: Duration(2 * time.Hour)},
+			want: 2 * time.Hour,
+		},
+		{
+			name: "sub-second value is honoured",
+			cfg:  &TenantAdminConfig{DeleteHoldPeriod: Duration(time.Millisecond)},
+			want: time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cfg.GetDeleteHoldPeriod())
+		})
+	}
+}
+
+// TestTenantAdminConfig_GetDeleteRequiresDualControl covers every branch: nil
+// receiver, present section with the pointer unset, and both explicit values.
+// The default must be true — dual control is fail-closed.
+func TestTenantAdminConfig_GetDeleteRequiresDualControl(t *testing.T) {
+	dualControlOn := true
+	dualControlOff := false
+
+	tests := []struct {
+		name string
+		cfg  *TenantAdminConfig
+		want bool
+	}{
+		{
+			name: "nil receiver requires dual control",
+			cfg:  nil,
+			want: true,
+		},
+		{
+			name: "unset pointer requires dual control",
+			cfg:  &TenantAdminConfig{},
+			want: true,
+		},
+		{
+			name: "explicit true requires dual control",
+			cfg:  &TenantAdminConfig{DeleteRequiresDualControl: &dualControlOn},
+			want: true,
+		},
+		{
+			name: "explicit false disables dual control",
+			cfg:  &TenantAdminConfig{DeleteRequiresDualControl: &dualControlOff},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cfg.GetDeleteRequiresDualControl())
+		})
+	}
+}
+
+// TestTenantAdminConfig_YAMLRoundTrip verifies the accessors read what the YAML
+// loader produces, including the section-present-but-fields-absent case that
+// exercises the zero-value default.
+func TestTenantAdminConfig_YAMLRoundTrip(t *testing.T) {
+	t.Run("fields absent falls back to defaults", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte("tenant_admin: {}\n"), &cfg))
+		require.NotNil(t, cfg.TenantAdmin, "tenant_admin section must be parsed")
+		assert.Equal(t, 720*time.Hour, cfg.TenantAdmin.GetDeleteHoldPeriod())
+		assert.True(t, cfg.TenantAdmin.GetDeleteRequiresDualControl())
+	})
+
+	t.Run("section absent leaves nil receiver on defaults", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte("listen_addr: 0.0.0.0:8443\n"), &cfg))
+		require.Nil(t, cfg.TenantAdmin)
+		assert.Equal(t, 720*time.Hour, cfg.TenantAdmin.GetDeleteHoldPeriod())
+		assert.True(t, cfg.TenantAdmin.GetDeleteRequiresDualControl())
+	})
+
+	t.Run("explicit values are parsed", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte(
+			"tenant_admin:\n  delete_hold_period: 48h\n  delete_requires_dual_control: false\n"), &cfg))
+		require.NotNil(t, cfg.TenantAdmin)
+		assert.Equal(t, 48*time.Hour, cfg.TenantAdmin.GetDeleteHoldPeriod())
+		assert.False(t, cfg.TenantAdmin.GetDeleteRequiresDualControl())
+	})
+}

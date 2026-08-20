@@ -71,6 +71,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"PUT", "/api/v1/tenants/test-id", "tenant:update"},                            // Issue #3125: update requires AssuranceStrong (supply-chain-adjacent config transitions)
 	{"POST", "/api/v1/tenants/test-id/suspend", "tenant:manage"},                   // Issue #3181: suspension is denial-of-service; requires AssuranceStrong
 	{"POST", "/api/v1/tenants/test-id/config-source/test", "tenant:manage"},        // Issue #3181: git credential probe; requires AssuranceStrong
+	{"POST", "/api/v1/tenants/test-id/delete", "tenant:delete"},                    // Issue #3182: ADR-027 Decision 3 — deletion request (hold-period timer)
+	{"DELETE", "/api/v1/tenants/test-id/delete", "tenant:delete"},                  // Issue #3182: ADR-027 Decision 3 — cancel in-flight deletion request
+	{"POST", "/api/v1/tenants/test-id/delete/approve", "tenant:approve-delete"},    // Issue #3182: ADR-027 Decision 4 — dual-control approval; RequireUserPresence
 	{"POST", "/api/v1/tenants/test-id/access-grants", "tenant:crossing-grant"},     // ADR-025 Decision 2(a): client-granted support access
 	{"POST", "/api/v1/tenants/test-id/break-glass", "tenant:crossing-break-glass"}, // ADR-025 Decision 2(b): tenant-crossing break-glass elevation
 	{"POST", "/api/v1/stewards/refresh/pending-123/approve", "refresh:approve"},

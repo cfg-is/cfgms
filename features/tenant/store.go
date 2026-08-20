@@ -5,6 +5,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -37,6 +38,12 @@ type Store interface {
 
 	// IsTenantAncestor checks if one tenant is an ancestor of another
 	IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error)
+
+	// Pending-deletion pipeline (ADR-027 Decisions 3-4, Issue #3182)
+	RequestDeletion(ctx context.Context, pending *business.PendingDeletion) error
+	CancelDeletion(ctx context.Context, subtreeRootID string) error
+	ApproveDeletion(ctx context.Context, subtreeRootID, approvedBy string, requireDualControl bool, now time.Time) ([]string, error)
+	GetPendingDeletion(ctx context.Context, subtreeRootID string) (*business.PendingDeletion, error)
 }
 
 // NewStorageAdapter wraps a business.TenantStore in tenant.Store.
@@ -59,4 +66,12 @@ var (
 	ErrCircularReference    = fmt.Errorf("circular reference in tenant hierarchy")
 	ErrTenantHasChildren    = fmt.Errorf("tenant has child tenants")
 	ErrCannotSuspendDefault = fmt.Errorf("cannot suspend default tenant")
+
+	// Deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
+	ErrTenantNotFullySuspended = fmt.Errorf("target subtree is not fully suspended")
+	ErrPendingDeletionExists   = business.ErrPendingDeletionExists
+	ErrPendingDeletionNotFound = business.ErrPendingDeletionNotFound
+	ErrHoldNotElapsed          = business.ErrHoldNotElapsed
+	ErrMembershipChanged       = business.ErrMembershipChanged
+	ErrSameApprover            = business.ErrSameApprover
 )

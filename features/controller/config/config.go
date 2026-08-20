@@ -176,6 +176,33 @@ type ExecutionSecurityConfig struct {
 	RequireSignedAdhoc bool `yaml:"require_signed_adhoc"`
 }
 
+// TenantAdminConfig holds global tenant-administration policy settings (ADR-027, Issue #3182).
+type TenantAdminConfig struct {
+	// DeleteHoldPeriod is the minimum time between RequestTenantDeletion and
+	// ApproveTenantDeletion. Defaults to 720h (30 days) when absent.
+	DeleteHoldPeriod Duration `yaml:"delete_hold_period,omitempty"`
+
+	// DeleteRequiresDualControl controls whether the operator who requested a
+	// tenant deletion may also approve it. Defaults to true (dual-control required).
+	DeleteRequiresDualControl *bool `yaml:"delete_requires_dual_control,omitempty"`
+}
+
+// GetDeleteHoldPeriod returns the configured hold period, defaulting to 30 days.
+func (c *TenantAdminConfig) GetDeleteHoldPeriod() time.Duration {
+	if c == nil || time.Duration(c.DeleteHoldPeriod) == 0 {
+		return 30 * 24 * time.Hour // 720h default
+	}
+	return time.Duration(c.DeleteHoldPeriod)
+}
+
+// GetDeleteRequiresDualControl returns whether dual-control is required, defaulting to true.
+func (c *TenantAdminConfig) GetDeleteRequiresDualControl() bool {
+	if c == nil || c.DeleteRequiresDualControl == nil {
+		return true
+	}
+	return *c.DeleteRequiresDualControl
+}
+
 // Config holds the controller configuration
 type Config struct {
 	// SecurityProfile selects deployment security invariants. Public-beta is a
@@ -246,6 +273,9 @@ type Config struct {
 	// When absent, the default four-ring set (pre-release, early, default, stable) is applied
 	// with "default" as the fallback ring.
 	DeploymentRings *DeploymentRingConfig `yaml:"deployment_rings,omitempty"`
+
+	// TenantAdmin holds global tenant-administration policy (ADR-027 Decisions 3-4, Issue #3182).
+	TenantAdmin *TenantAdminConfig `yaml:"tenant_admin,omitempty"`
 }
 
 // EffectiveRings returns the deployment ring configuration with defaults applied.
