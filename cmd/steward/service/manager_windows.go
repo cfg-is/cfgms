@@ -19,6 +19,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
+// Windows SCM, service, and registry handles are released throughout this file
+// with an explicit `_ =` (or a deferred closure). Every such release runs after
+// the operation's outcome is already decided, and the Windows API offers no
+// remedy for a failed release beyond leaking the handle until process exit — so
+// the error is deliberately dropped rather than handled or logged. This mirrors
+// the `_ = exec.Command(...).Run()` cleanup convention in the Linux and darwin
+// siblings of this package.
+
 const (
 	// windowsInstallDir is the install root. It equals the launcher's own
 	// defaultRoot() on Windows (cmd/cfgms-steward-launcher/main.go), so the
@@ -90,7 +98,7 @@ func setServiceEnvironment(root registry.Key, keyPath, logDir string) error {
 	if err != nil {
 		return fmt.Errorf("open service key %s: %w", keyPath, err)
 	}
-	defer key.Close()
+	defer func() { _ = key.Close() }()
 	if err := key.SetStringsValue("Environment", []string{
 		"CFGMS_LOG_DIR=" + logDir,
 		"CFGMS_SECURITY_PROFILE=public-beta",
@@ -116,7 +124,7 @@ func (m *windowsManager) IsElevated() bool {
 	if err != nil {
 		return false
 	}
-	scm.Disconnect()
+	_ = scm.Disconnect()
 	return true
 }
 
@@ -173,7 +181,7 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 	if err != nil {
 		return fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	// Stop and delete existing service to allow binary replacement (idempotent).
 	if existing, err := scm.OpenService(windowsServiceName); err == nil {
@@ -184,10 +192,10 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 		}
 		fmt.Println("Removing existing service definition...")
 		if err := existing.Delete(); err != nil {
-			existing.Close()
+			_ = existing.Close()
 			return fmt.Errorf("failed to delete existing service: %w", err)
 		}
-		existing.Close()
+		_ = existing.Close()
 	}
 
 	// Create install directory.
@@ -241,7 +249,7 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 	if err != nil {
 		return fmt.Errorf("failed to create Windows service: %w", err)
 	}
-	defer newSvc.Close()
+	defer func() { _ = newSvc.Close() }()
 
 	// Point CFGMS_LOG_DIR at the platform-conventional log directory so an
 	// installed steward never falls back to the undiscoverable /tmp/cfgms
@@ -301,7 +309,7 @@ func (m *windowsManager) Uninstall(purge bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	existing, err := scm.OpenService(windowsServiceName)
 	if err != nil {
@@ -315,10 +323,10 @@ func (m *windowsManager) Uninstall(purge bool) error {
 
 		fmt.Println("Removing service definition...")
 		if err := existing.Delete(); err != nil {
-			existing.Close()
+			_ = existing.Close()
 			return fmt.Errorf("failed to delete service: %w", err)
 		}
-		existing.Close()
+		_ = existing.Close()
 	}
 
 	if purge {
@@ -375,14 +383,14 @@ func (m *windowsManager) Status() (*ServiceStatus, error) {
 		// Cannot connect to SCM — report not installed.
 		return status, nil
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	existing, err := scm.OpenService(windowsServiceName)
 	if err != nil {
 		// Service not registered.
 		return status, nil
 	}
-	defer existing.Close()
+	defer func() { _ = existing.Close() }()
 
 	status.Installed = true
 

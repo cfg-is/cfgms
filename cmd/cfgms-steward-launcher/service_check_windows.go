@@ -63,7 +63,7 @@ func serviceRegistrationOK(name string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("connect SCM: %w", err)
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	svc, err := scm.OpenService(name)
 	if err != nil {
@@ -72,7 +72,9 @@ func serviceRegistrationOK(name string) (bool, error) {
 		}
 		return false, fmt.Errorf("open service %q: %w", name, err)
 	}
-	svc.Close()
+	// Handle opened only to prove the registration exists; releasing it cannot
+	// fail in a way that changes the verdict, and there is no remedy if it does.
+	_ = svc.Close()
 	return true, nil
 }
 
@@ -93,7 +95,7 @@ func repairServiceRegistration(name, exePath string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("connect SCM: %w", err)
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 
 	newSvc, err := scm.CreateService(
 		name,
@@ -108,7 +110,7 @@ func repairServiceRegistration(name, exePath string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create service %q: %w", name, err)
 	}
-	defer newSvc.Close()
+	defer func() { _ = newSvc.Close() }()
 
 	// Same recovery policy as install: 3 escalating restart delays, 1-day reset.
 	recoveryActions := []mgr.RecoveryAction{

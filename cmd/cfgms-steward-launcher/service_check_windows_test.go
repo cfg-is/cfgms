@@ -62,12 +62,12 @@ func deleteServiceIfPresent(name string) {
 	if err != nil {
 		return
 	}
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 	s, err := scm.OpenService(name)
 	if err != nil {
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	_ = s.Delete()
 }
 
@@ -88,7 +88,7 @@ func TestServiceRegistrationOK_DetectsMissingService(t *testing.T) {
 	// Create it → present → (true, nil).
 	s, err := scm.CreateService(name, testRepairExePath, mgr.Config{StartType: mgr.StartAutomatic})
 	require.NoError(t, err)
-	s.Close()
+	require.NoError(t, s.Close())
 
 	ok, err = serviceRegistrationOK(name)
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestServiceRegistrationOK_DetectsMissingService(t *testing.T) {
 	existing, err := scm.OpenService(name)
 	require.NoError(t, err)
 	require.NoError(t, existing.Delete())
-	existing.Close()
+	require.NoError(t, existing.Close())
 
 	ok, err = serviceRegistrationOK(name)
 	require.NoError(t, err)
@@ -123,10 +123,10 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 	// Now present with the expected config.
 	scm, err := mgr.Connect()
 	require.NoError(t, err)
-	defer scm.Disconnect()
+	defer func() { _ = scm.Disconnect() }()
 	s, err := scm.OpenService(name)
 	require.NoError(t, err, "repaired service must exist")
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	cfg, err := s.Config()
 	require.NoError(t, err)
@@ -163,7 +163,7 @@ func TestRepairServiceRegistration_ErrorsOnConflict(t *testing.T) {
 	// Pre-create the service so a second create collides.
 	s, err := scm.CreateService(name, testRepairExePath, mgr.Config{StartType: mgr.StartAutomatic})
 	require.NoError(t, err)
-	s.Close()
+	require.NoError(t, s.Close())
 
 	err = repairServiceRegistration(name, testRepairExePath, nil)
 	require.Error(t, err, "recreating an already-existing service must return an error, not silently succeed")

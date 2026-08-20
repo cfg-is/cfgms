@@ -296,11 +296,11 @@ func TestSupervise_RepairsMissingServiceRegistration(t *testing.T) {
 	// "AV remediation deleted the registration" failure mode.
 	s, err := scm.CreateService(name, testRepairExePath, mgr.Config{StartType: mgr.StartAutomatic})
 	require.NoError(t, err)
-	s.Close()
+	require.NoError(t, s.Close())
 	existing, err := scm.OpenService(name)
 	require.NoError(t, err)
 	require.NoError(t, existing.Delete())
-	existing.Close()
+	require.NoError(t, existing.Close())
 
 	ok, err := serviceRegistrationOK(name)
 	require.NoError(t, err)
