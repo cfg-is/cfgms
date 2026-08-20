@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/dna/drift"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -284,10 +285,22 @@ func (e *Engine) gatherReportData(ctx context.Context, req interfaces.ReportRequ
 		return nil, fmt.Errorf("failed to get drift events: %w", err)
 	}
 
-	// Get device statistics
-	deviceStats, err := e.dataProvider.GetDeviceStats(ctx, req.DeviceIDs, req.TimeRange)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get device stats: %w", err)
+	// Get device statistics. GetDeviceStats takes device IDs and no tenant, so a
+	// report that named no device must name the devices here: they are derived
+	// from the DNA records just fetched, which the provider already cut to the
+	// requested tenant subtree. Handing the provider an empty list instead would
+	// ask it to discover devices with no tenant scope at all, which it refuses.
+	statsDeviceIDs := req.DeviceIDs
+	if len(statsDeviceIDs) == 0 {
+		statsDeviceIDs = distinctDeviceIDs(dnaRecords)
+	}
+
+	deviceStats := make(map[string]interfaces.DeviceStats)
+	if len(statsDeviceIDs) > 0 {
+		deviceStats, err = e.dataProvider.GetDeviceStats(ctx, statsDeviceIDs, req.TimeRange)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get device stats: %w", err)
+		}
 	}
 
 	// Get trend data for key metrics
@@ -310,6 +323,24 @@ func (e *Engine) gatherReportData(ctx context.Context, req interfaces.ReportRequ
 		DeviceStats: deviceStats,
 		TrendData:   trendData,
 	}, nil
+}
+
+// distinctDeviceIDs returns the unique device IDs present in records, in first-seen
+// order so a report's device set is stable across runs over the same data.
+func distinctDeviceIDs(records []storage.DNARecord) []string {
+	ids := make([]string, 0, len(records))
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		if record.DeviceID == "" {
+			continue
+		}
+		if _, dup := seen[record.DeviceID]; dup {
+			continue
+		}
+		seen[record.DeviceID] = struct{}{}
+		ids = append(ids, record.DeviceID)
+	}
+	return ids
 }
 
 // enrichReportMetadata adds metadata to the generated report

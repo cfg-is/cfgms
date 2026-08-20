@@ -4,102 +4,86 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sort"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	"github.com/cfgis/cfgms/pkg/dna/drift"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// setupComplianceTestServer creates a test server with a real DataProvider
-// backed by a t.TempDir()-isolated SQLite DNA storage manager, following the
+// setupComplianceTestServer creates a test server with a real DataProvider backed
+// by a t.TempDir()-isolated SQLite entity graph provider (ADR-022), following the
 // real-component TDD mandate (no mocks). Returns the server and the underlying
-// storage manager so individual tests can store fixture DNA snapshots.
-func setupComplianceTestServer(t *testing.T) (*Server, *fleetStorage.Manager) {
+// entity graph provider so individual tests can seed fixture drift observations.
+func setupComplianceTestServer(t *testing.T) (*Server, *egsqlite.SQLiteEntityGraphProvider) {
 	t.Helper()
 	server := setupTestServer(t)
 
-	cfg := fleetStorage.DefaultConfig()
-	cfg.DataDir = t.TempDir()
-	storageManager, err := fleetStorage.NewManager(cfg, logging.NewNoopLogger())
-	require.NoError(t, err, "failed to create fleet storage manager")
+	path := filepath.Join(t.TempDir(), "eg.db")
+	egProvider, err := egsqlite.NewSQLiteEntityGraphProvider(path)
+	require.NoError(t, err, "failed to create test entity graph provider")
 	t.Cleanup(func() {
-		if err := storageManager.Close(); err != nil {
-			t.Logf("fleet storage manager Close() failed: %v", err)
+		if err := egProvider.Close(); err != nil {
+			t.Logf("entity graph provider Close() failed: %v", err)
 		}
 	})
 
-	detector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logging.NewNoopLogger())
-	require.NoError(t, err, "failed to create drift detector")
-	t.Cleanup(func() {
-		if err := detector.Close(); err != nil {
-			t.Logf("drift detector Close() failed: %v", err)
-		}
-	})
-
-	dp := reportsprovider.New(storageManager, detector, logging.NewNoopLogger())
+	dp := reportsprovider.New(egProvider, logging.NewNoopLogger())
 	server.SetDataProvider(dp)
-	return server, storageManager
+	return server, egProvider
 }
 
-// buildComplianceDNA constructs a commonpb.DNA for deviceID from a
-// fragment-id → state map. Each fragment's canonical_bytes is the state text;
-// fragment_hash is SHA-256, matching the ADR-017 fragment contract the drift
-// detector diffs. Fragments are emitted in sorted order for determinism.
-func buildComplianceDNA(deviceID string, state map[string]string) *commonpb.DNA {
-	ids := make([]string, 0, len(state))
-	for id := range state {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	fragments := make([]*commonpb.Fragment, 0, len(ids))
-	for _, id := range ids {
-		canonical := []byte(state[id])
-		sum := sha256.Sum256(canonical)
-		fragments = append(fragments, &commonpb.Fragment{
-			FragmentId:     id,
-			Authority:      "osquery",
-			CanonicalBytes: canonical,
-			FragmentHash:   hex.EncodeToString(sum[:]),
-		})
-	}
-
-	return &commonpb.DNA{
-		Id:          deviceID,
-		Fragments:   fragments,
-		LastUpdated: timestamppb.Now(),
-	}
-}
-
-// storeDNAPair stores two consecutive DNA snapshots for deviceID, changing the
-// named attribute from prevVal to currVal. Uses storageManager.Store which
-// timestamps each record at time.Now(), so both records fall within the
-// compliance handler's 24h look-back window.
-func storeDNAPair(t *testing.T, sm *fleetStorage.Manager, deviceID, fragmentID, prevVal, currVal string) {
+// storeDNAPair records one drift-diff observation for deviceID's fragment
+// attribute, changing it from prevVal to currVal. This is the entity graph
+// shape (ADR-022) the migrated DataProvider reads via ListDrifted: a real
+// SQLite-backed drift-diff observation, not a mocked DriftEvent. The
+// attribute name is also the fragment id, so callers passing a security-
+// category name (e.g. "security:firewall_rules") get a critical-severity
+// event via drift.CategorizeAttributeSeverity — matching the pre-migration
+// flat-store detector's keyword classification.
+func storeDNAPair(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceID, fragmentID, prevVal, currVal string) {
 	t.Helper()
-	ctx := context.Background()
-	require.NoError(t,
-		sm.Store(ctx, deviceID, buildComplianceDNA(deviceID, map[string]string{fragmentID: prevVal}), nil),
-		"failed to store first DNA snapshot")
-	require.NoError(t,
-		sm.Store(ctx, deviceID, buildComplianceDNA(deviceID, map[string]string{fragmentID: currVal}), nil),
-		"failed to store second DNA snapshot")
+	eid, err := egtypes.NewEID("host", deviceID, fragmentID)
+	require.NoError(t, err, "failed to construct fragment entity ID")
+
+	now := time.Now()
+	err = egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: deviceID,
+		Observations: []egtypes.Observation{
+			{
+				Source:     deviceID,
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindDriftDiff,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"config_revision": "rev-1",
+					"fields": []interface{}{
+						map[string]interface{}{
+							"attribute": fragmentID,
+							"desired":   prevVal,
+							"actual":    currVal,
+							"matching":  false,
+						},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err, "failed to store drift-diff observation")
 }
 
 // ── handleGetStewardCompliance ────────────────────────────────────────────────

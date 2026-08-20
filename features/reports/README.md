@@ -74,11 +74,27 @@ features/reports/
 ## 🔗 Integration
 
 ### Existing System Integration
-- **DNA Storage**: Leverages `storage.Manager` for efficient data queries
-- **Drift Detection**: Integrates with `drift.Detector` for event analysis
+- **Entity Graph**: Reads device identity, observation history, and drift state from `pkg/entitygraph/interfaces.EntityGraphProvider` (ADR-022). `GetDNAData`, `GetDeviceStats`, and `GetDriftEvents` all read from the entity graph; the flat `DNARecord` store is no longer used for reports (Issue #3328).
 - **Template System**: Extends existing template processing capabilities
 - **REST API**: Integrates with controller API infrastructure
 - **Multi-tenancy**: Supports tenant isolation and RBAC
+
+### Query Scoping
+
+Every report read carries exactly one authorization cut, and a read that carries
+none is refused rather than widened (ADR-022 §7):
+
+- **Device selector** (`DataQuery.DeviceIDs`) — the narrowest cut. Each device ID
+  is authorized against the caller's tenant subtree at the API boundary before the
+  query reaches the data provider, and results cover only those devices.
+- **Tenant scope** (`DataQuery.TenantIDs`) — used when no device is named. Hosts
+  are discovered through `QueryEntities` with `EntityFilter.TenantFilter` set to
+  the tenant subtree, and drift through `ListDrifted` with
+  `DriftFilter.TenantFilter`; several tenants mean one filtered query each, never
+  one unfiltered query. A host is discoverable this way only if its entity carries
+  an `owning_tenant`, the entity graph's sole access-control axis.
+- **Neither** — refused. An empty tenant filter means "every tenant" to the entity
+  graph providers, so such a query would return the whole deployment.
 
 ### Performance Optimizations
 - **Content-addressable storage** with 90%+ compression
@@ -90,7 +106,7 @@ features/reports/
 
 ### Generate Compliance Report
 ```go
-service := reports.NewService(storageManager, driftDetector, cache, logger)
+service := reports.NewService(egProvider, cache, logger)
 
 timeRange := reports.TimeRange{
     Start: time.Now().Add(-7 * 24 * time.Hour),
@@ -129,8 +145,7 @@ curl -X POST /api/v1/reports/generate \
 
 Comprehensive test suite includes:
 - **Unit tests** for core engine functionality
-- **Integration tests** for data provider and storage
-- **Mock implementations** for isolated testing
+- **Integration tests** for data provider against real `SQLiteEntityGraphProvider` (no mocks, per CLAUDE.md)
 - **Example tests** demonstrating usage patterns
 
 ## 📈 Business Value

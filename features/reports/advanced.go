@@ -65,7 +65,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/rbac"
 	reportcache "github.com/cfgis/cfgms/features/reports/cache"
 	"github.com/cfgis/cfgms/features/reports/engine"
@@ -75,7 +74,7 @@ import (
 	"github.com/cfgis/cfgms/features/reports/templates"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	"github.com/cfgis/cfgms/pkg/dna/drift"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -119,20 +118,19 @@ func DefaultAdvancedServiceConfig() AdvancedServiceConfig {
 
 // NewAdvancedService creates a new advanced reports service
 func NewAdvancedService(
-	storageManager *storage.Manager,
-	driftDetector drift.Detector,
+	egProvider eginterfaces.EntityGraphProvider,
 	auditManager *audit.Manager,
 	auditStore business.AuditStore,
 	rbacManager *rbac.Manager,
 	cache interfaces.ReportCache,
 	logger logging.Logger,
 ) *AdvancedService {
-	// Create base service for backward compatibility
-	baseService := NewService(storageManager, driftDetector, cache, logger)
+	// Create base service
+	baseService := NewService(egProvider, cache, logger)
 
 	// Create advanced data provider
 	advancedProvider := provider.NewAdvancedProvider(
-		storageManager, driftDetector, auditManager, auditStore, logger,
+		egProvider, auditManager, auditStore, logger,
 	)
 
 	// Create template processor
@@ -159,8 +157,7 @@ func NewAdvancedService(
 
 // NewAdvancedServiceWithConfig creates a new advanced reports service with custom configuration
 func NewAdvancedServiceWithConfig(
-	storageManager *storage.Manager,
-	driftDetector drift.Detector,
+	egProvider eginterfaces.EntityGraphProvider,
 	auditManager *audit.Manager,
 	auditStore business.AuditStore,
 	rbacManager *rbac.Manager,
@@ -169,11 +166,11 @@ func NewAdvancedServiceWithConfig(
 	logger logging.Logger,
 ) *AdvancedService {
 	// Create base service
-	baseService := NewServiceWithConfig(storageManager, driftDetector, cache, config.ServiceConfig, logger)
+	baseService := NewServiceWithConfig(egProvider, cache, config.ServiceConfig, logger)
 
 	// Create advanced data provider
 	advancedProvider := provider.NewAdvancedProvider(
-		storageManager, driftDetector, auditManager, auditStore, logger,
+		egProvider, auditManager, auditStore, logger,
 	)
 
 	// Create template processor

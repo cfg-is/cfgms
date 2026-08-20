@@ -4,21 +4,20 @@ package provider
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"sort"
+	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/reports/interfaces"
 	"github.com/cfgis/cfgms/pkg/dna/drift"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -85,101 +84,209 @@ func (l *warnCapturingLogger) countMessages(msg string) int {
 	return count
 }
 
-// newTestStorageManager creates a real storage.Manager backed by a t.TempDir()-isolated
-// SQLite database, following the same convention as storage_test.go's createTestConfig.
-func newTestStorageManager(t *testing.T) *storage.Manager {
+// newTestEGProvider creates a real SQLiteEntityGraphProvider backed by a t.TempDir()
+// isolated database — no mocks, real component following CLAUDE.md testing standards.
+func newTestEGProvider(t *testing.T) *egsqlite.SQLiteEntityGraphProvider {
 	t.Helper()
-	config := storage.DefaultConfig()
-	config.DataDir = t.TempDir()
-	manager, err := storage.NewManager(config, logging.NewNoopLogger())
-	require.NoError(t, err, "failed to create test storage manager")
+	path := filepath.Join(t.TempDir(), "eg.db")
+	p, err := egsqlite.NewSQLiteEntityGraphProvider(path)
+	require.NoError(t, err, "failed to create test entity graph provider")
 	t.Cleanup(func() {
-		if err := manager.Close(); err != nil {
-			t.Logf("test storage manager Close() failed: %v", err)
+		if err := p.Close(); err != nil {
+			t.Logf("test entity graph provider Close() failed: %v", err)
 		}
 	})
-	return manager
+	return p
 }
 
-// newClosedTestStorageManager returns a real storage.Manager whose SQLite database
-// has been closed. Every GetHistory call against it fails with a genuine storage
-// error — no substitute implementation is needed to exercise the error paths, and
-// because SQLiteBackend.GetHistoryByDeviceID formats the caller-supplied device ID
-// into its error text, the resulting error carries real tainted input.
-func newClosedTestStorageManager(t *testing.T) *storage.Manager {
+// newClosedTestEGProvider returns a real SQLiteEntityGraphProvider whose database has
+// been closed. Every method call against it fails with a genuine storage error — no
+// substitute needed to exercise the error paths.
+func newClosedTestEGProvider(t *testing.T) *egsqlite.SQLiteEntityGraphProvider {
 	t.Helper()
-	manager := newTestStorageManager(t)
-	require.NoError(t, manager.Close(), "closing the test storage manager must succeed")
-	return manager
+	p := newTestEGProvider(t)
+	require.NoError(t, p.Close(), "closing the test entity graph provider must succeed")
+	return p
 }
 
-// closedStoreErrorText returns the exact error text a closed storage.Manager produces
-// for deviceID, so assertions compare against the real message rather than a
-// hand-written approximation of one.
-func closedStoreErrorText(t *testing.T, manager *storage.Manager, deviceID string) string {
+// storeHostEntity records a state observation for the bare host entity
+// host:<deviceID> at the given time. This gives the host entity an observation
+// history that GetHistory and GetDNAData can read.
+//
+// The payload embeds "at" so two calls for the same device at different times
+// hash differently — ReportObservations content-hash dedupes bit-identical
+// payloads from the same (subject, source), and a fixture calling this twice
+// with the same deviceID intends two distinct history entries, not a dedup.
+func storeHostEntity(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceID string, at time.Time) {
 	t.Helper()
-	_, err := manager.GetHistory(context.Background(), deviceID, &storage.QueryOptions{IncludeData: true})
-	require.Error(t, err, "a closed storage manager must fail GetHistory")
-	return err.Error()
-}
-
-// newTestDriftDetector creates a real drift.Detector with the default configuration.
-func newTestDriftDetector(t *testing.T) drift.Detector {
-	t.Helper()
-	detector, err := drift.NewDetector(drift.DefaultDetectorConfig(), logging.NewNoopLogger())
-	require.NoError(t, err, "failed to create test drift detector")
-	t.Cleanup(func() {
-		if err := detector.Close(); err != nil {
-			t.Logf("test drift detector Close() failed: %v", err)
-		}
+	eid, err := egtypes.NewEID("host", deviceID, "")
+	require.NoError(t, err)
+	err = egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: deviceID,
+		Observations: []egtypes.Observation{
+			{
+				Source:     deviceID,
+				ObservedAt: at,
+				RecordedAt: at,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind": "host",
+					"observed_at": at.Format(time.RFC3339Nano),
+				},
+			},
+		},
 	})
-	return detector
+	require.NoError(t, err, "storing host entity observation must succeed")
 }
 
-// newTestDNA builds a minimal commonpb.DNA for the given device ID from a
-// fragment-id → state map. Each entry becomes a commonpb.Fragment whose
-// canonical_bytes is the state text and whose fragment_hash is the SHA-256 of
-// those bytes, matching the ADR-017 fragment contract the drift detector diffs:
-// two snapshots differing in one entry's state differ in exactly that
-// fragment's hash. Fragments are emitted in sorted fragment-id order so the
-// stored record is deterministic.
-func newTestDNA(deviceID string, state map[string]string) *commonpb.DNA {
-	ids := make([]string, 0, len(state))
-	for id := range state {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+// storeDriftState records a drift-diff observation for a fragment entity
+// host:<deviceID>/<fragmentID> at the given time with the given field diffs.
+// This creates a drift projection that ListDrifted and GetDriftEvents will return.
+func storeDriftState(t *testing.T, egp eginterfaces.EntityGraphProvider, deviceID, fragmentID string, at time.Time, fields []interface{}) {
+	t.Helper()
+	eid, err := egtypes.NewEID("host", deviceID, fragmentID)
+	require.NoError(t, err)
+	err = egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: deviceID,
+		Observations: []egtypes.Observation{
+			{
+				Source:     deviceID,
+				ObservedAt: at,
+				RecordedAt: at,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindDriftDiff,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"config_revision": "rev-1",
+					"fields":          fields,
+				},
+			},
+		},
+	})
+	require.NoError(t, err, "storing drift-diff observation must succeed")
+}
 
-	fragments := make([]*commonpb.Fragment, 0, len(ids))
-	for _, id := range ids {
-		canonical := []byte(state[id])
-		sum := sha256.Sum256(canonical)
-		fragments = append(fragments, &commonpb.Fragment{
-			FragmentId:     id,
-			Authority:      "osquery",
-			CanonicalBytes: canonical,
-			FragmentHash:   hex.EncodeToString(sum[:]),
+// storeTenantScopedEntity records a state observation that places subject in the
+// entity index under owningTenant.
+//
+// owning_tenant is the entity graph's only access-control axis (ADR-023): both
+// EntityFilter.TenantFilter and DriftFilter.TenantFilter resolve through the index
+// row, so a fixture that must be visible to a tenant-scoped read has to carry one.
+func storeTenantScopedEntity(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	eid egtypes.EID,
+	kind, owningTenant string,
+	at time.Time,
+) {
+	t.Helper()
+	err := egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: eid.AuthorityName(),
+		Observations: []egtypes.Observation{
+			{
+				Source:     eid.AuthorityName(),
+				ObservedAt: at,
+				RecordedAt: at,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind":   kind,
+					"owning_tenant": owningTenant,
+					"observed_at":   at.Format(time.RFC3339Nano),
+				},
+			},
+		},
+	})
+	require.NoError(t, err, "storing tenant-scoped entity observation must succeed")
+}
+
+// storeTenantHost records one observation of the host entity host:<deviceID> owned
+// by owningTenant, so fleet-wide discovery over that tenant subtree finds it.
+func storeTenantHost(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	deviceID, owningTenant string,
+	at time.Time,
+) {
+	t.Helper()
+	eid, err := egtypes.NewEID("host", deviceID, "")
+	require.NoError(t, err)
+	storeTenantScopedEntity(t, egp, eid, "host", owningTenant, at)
+}
+
+// storeTenantHosts records count host entities named <prefix>-<i>, all owned by
+// owningTenant, in a single observation batch (one transaction) and returns their
+// device IDs. Used to build a host set larger than one discovery page.
+func storeTenantHosts(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	prefix, owningTenant string,
+	count int,
+	at time.Time,
+) []string {
+	t.Helper()
+	deviceIDs := make([]string, 0, count)
+	observations := make([]egtypes.Observation, 0, count)
+	for i := 0; i < count; i++ {
+		deviceID := fmt.Sprintf("%s-%03d", prefix, i)
+		eid, err := egtypes.NewEID("host", deviceID, "")
+		require.NoError(t, err)
+		deviceIDs = append(deviceIDs, deviceID)
+		observations = append(observations, egtypes.Observation{
+			Source:     deviceID,
+			ObservedAt: at,
+			RecordedAt: at,
+			Subject:    eid.String(),
+			Kind:       egtypes.ObservationKindState,
+			Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"entity_kind":   "host",
+				"owning_tenant": owningTenant,
+				"observed_at":   at.Format(time.RFC3339Nano),
+			},
 		})
 	}
-
-	return &commonpb.DNA{
-		Id:          deviceID,
-		Fragments:   fragments,
-		LastUpdated: timestamppb.Now(),
-	}
+	require.NoError(t, egp.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source:       prefix,
+		Observations: observations,
+	}), "storing the host batch must succeed")
+	return deviceIDs
 }
 
-func TestGetDriftEvents_NoDeviceIDs_NoDiscoveredDevices_ReturnsEmpty(t *testing.T) {
-	// When DeviceIDs is empty and no DNA records exist to discover devices from,
-	// GetDriftEvents returns an empty (non-nil) slice without error.
-	p := &DataProvider{
-		// Real, empty storage: no DNA records exist, so device discovery finds nothing.
-		storageManager: newTestStorageManager(t),
-		driftDetector:  newTestDriftDetector(t),
-		logger:         logging.NewNoopLogger(),
-	}
+// storeTenantDriftState indexes the drifted fragment entity under owningTenant and
+// then records its drift-diff, which is the shape a tenant-scoped ListDrifted can
+// see: the drift projection is keyed by subject only, so its tenant is resolved
+// through the fragment's entity index row.
+func storeTenantDriftState(
+	t *testing.T,
+	egp eginterfaces.EntityGraphProvider,
+	deviceID, fragmentID, owningTenant string,
+	at time.Time,
+	fields []interface{},
+) {
+	t.Helper()
+	eid, err := egtypes.NewEID("host", deviceID, fragmentID)
+	require.NoError(t, err)
+	storeTenantScopedEntity(t, egp, eid, "host", owningTenant, at)
+	storeDriftState(t, egp, deviceID, fragmentID, at, fields)
+}
 
+// ── GetDriftEvents ────────────────────────────────────────────────────────────
+
+func TestGetDriftEvents_EmptyEGProvider_ReturnsEmpty(t *testing.T) {
+	// When the entity graph has no drift states, GetDriftEvents returns a
+	// non-nil empty slice without error. The query names a tenant because a
+	// query naming neither tenant nor device is refused outright — see
+	// TestGetDriftEvents_NoTenantScopeNoDevices_FailsClosed.
+	p := &DataProvider{
+		egProvider: newTestEGProvider(t),
+		logger:     logging.NewNoopLogger(),
+	}
 	query := interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
 		TimeRange: interfaces.TimeRange{
 			Start: time.Now().Add(-24 * time.Hour),
 			End:   time.Now(),
@@ -188,162 +295,326 @@ func TestGetDriftEvents_NoDeviceIDs_NoDiscoveredDevices_ReturnsEmpty(t *testing.
 
 	events, err := p.GetDriftEvents(context.Background(), query)
 
-	require.NoError(t, err, "GetDriftEvents must not return an error")
-	assert.NotNil(t, events, "GetDriftEvents must return a non-nil slice")
-	assert.Empty(t, events, "no discovered devices means no drift events")
-}
-
-func TestGetDriftEvents_WithDeviceIDs_NoStoredSnapshots_ReturnsEmpty(t *testing.T) {
-	// A device with no stored DNA snapshots in the queried time range produces
-	// zero events, not an error. A real storage.Manager with nothing stored returns
-	// 0 records for both device IDs, which is below the 2-snapshot pairing threshold.
-	p := &DataProvider{
-		storageManager: newTestStorageManager(t),
-		driftDetector:  newTestDriftDetector(t),
-		logger:         logging.NewNoopLogger(),
-	}
-
-	query := interfaces.DataQuery{
-		TimeRange: interfaces.TimeRange{
-			Start: time.Now().Add(-7 * 24 * time.Hour),
-			End:   time.Now(),
-		},
-		DeviceIDs: []string{"device-1", "device-2"},
-	}
-
-	events, err := p.GetDriftEvents(context.Background(), query)
-
 	require.NoError(t, err)
 	assert.NotNil(t, events)
-	assert.Empty(t, events, "devices with no stored snapshots produce no drift events")
+	assert.Empty(t, events, "no drift states in the entity graph means no drift events")
 }
 
-// TestGetDriftEvents_TwoSnapshots_ProducesRealEvents is the required AC test verifying
-// that two fixture DNA snapshots with a real fragment-state difference produce a non-empty
-// DriftEvent slice with Severity set from the actual change.
-//
-// Uses real storage.Manager (SQLite, t.TempDir()) and real drift.Detector — no mocks.
-func TestGetDriftEvents_TwoSnapshots_ProducesRealEvents(t *testing.T) {
-	manager := newTestStorageManager(t)
-	detector := newTestDriftDetector(t)
+func TestGetDriftEvents_DeviceIDFilterExcludesOtherDevices(t *testing.T) {
+	// A device ID filter must exclude drift states belonging to other devices.
+	egp := newTestEGProvider(t)
+	now := time.Now()
 
-	deviceID := "test-device-two-snapshots"
-	ctx := context.Background()
-
-	// Store first DNA snapshot.
-	dna1 := newTestDNA(deviceID, map[string]string{
-		"host:os":       "linux",
-		"host:hostname": "host-before",
-		"host:arch":     "amd64",
+	storeDriftState(t, egp, "device-wanted", "host:hostname", now, []interface{}{
+		map[string]interface{}{"attribute": "hostname", "desired": "web01", "actual": "web02", "matching": false},
 	})
-	require.NoError(t, manager.Store(ctx, deviceID, dna1, nil))
-
-	// Store second DNA snapshot with a different hostname (network fragment → SeverityWarning).
-	dna2 := newTestDNA(deviceID, map[string]string{
-		"host:os":       "linux",
-		"host:hostname": "host-after",
-		"host:arch":     "amd64",
+	storeDriftState(t, egp, "device-excluded", "host:hostname", now, []interface{}{
+		map[string]interface{}{"attribute": "hostname", "desired": "db01", "actual": "db02", "matching": false},
 	})
-	require.NoError(t, manager.Store(ctx, deviceID, dna2, nil))
 
-	p := &DataProvider{
-		storageManager: manager,
-		driftDetector:  detector,
-		logger:         logging.NewNoopLogger(),
-	}
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
 
-	events, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
-		DeviceIDs: []string{deviceID},
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		DeviceIDs: []string{"device-wanted"},
 		TimeRange: interfaces.TimeRange{
-			Start: time.Now().Add(-1 * time.Hour),
-			End:   time.Now().Add(1 * time.Hour),
+			Start: now.Add(-1 * time.Hour),
+			End:   now.Add(1 * time.Hour),
 		},
 	})
 
 	require.NoError(t, err)
-	assert.NotEmpty(t, events, "two DNA snapshots with a real fragment-state difference must produce drift events")
-	for _, event := range events {
-		assert.NotEmpty(t, event.Severity, "each DriftEvent must have Severity set from the actual change")
-	}
+	require.Len(t, events, 1, "only device-wanted's drift event must be returned")
+	assert.Equal(t, "device-wanted", events[0].DeviceID)
 }
 
-// TestGetDriftEvents_SingleSnapshot_NoEvents is the required AC test verifying that
-// a device with only one stored snapshot (fewer than 2) in the queried time range
-// returns an empty slice without error.
+// TestGetDriftEvents_WithDriftState_ProducesEvent is the required AC test verifying
+// that a persisted drift-diff observation in the entity graph produces a non-empty
+// DriftEvent slice with Severity and DeviceID set correctly.
 //
-// Uses real storage.Manager (SQLite, t.TempDir()) and real drift.Detector — no mocks.
-func TestGetDriftEvents_SingleSnapshot_NoEvents(t *testing.T) {
-	manager := newTestStorageManager(t)
-	detector := newTestDriftDetector(t)
+// Uses the real SQLiteEntityGraphProvider (t.TempDir()) — no mocks.
+func TestGetDriftEvents_WithDriftState_ProducesEvent(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	deviceID := "test-device-drift"
 
-	deviceID := "test-device-single-snapshot"
-	ctx := context.Background()
+	storeDriftState(t, egp, deviceID, "host:hostname", now, []interface{}{
+		map[string]interface{}{"attribute": "hostname", "desired": "web01", "actual": "web02", "matching": false},
+	})
 
-	// Store exactly one DNA snapshot — no consecutive pair to diff.
-	require.NoError(t, manager.Store(ctx, deviceID, newTestDNA(deviceID, map[string]string{
-		"host:os":       "linux",
-		"host:hostname": "host-only",
-	}), nil))
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
 
-	p := &DataProvider{
-		storageManager: manager,
-		driftDetector:  detector,
-		logger:         logging.NewNoopLogger(),
-	}
-
-	events, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
 		DeviceIDs: []string{deviceID},
 		TimeRange: interfaces.TimeRange{
-			Start: time.Now().Add(-1 * time.Hour),
-			End:   time.Now().Add(1 * time.Hour),
+			Start: now.Add(-1 * time.Hour),
+			End:   now.Add(1 * time.Hour),
 		},
 	})
 
-	require.NoError(t, err, "single snapshot must not return an error")
-	assert.Empty(t, events, "single snapshot has no baseline pair to diff against — zero events")
+	require.NoError(t, err)
+	assert.NotEmpty(t, events, "a drift-diff observation must produce a drift event")
+	assert.Equal(t, deviceID, events[0].DeviceID)
+	assert.NotEmpty(t, events[0].Severity, "each DriftEvent must have Severity set")
 }
 
-// ── GetDriftEvents log sanitization ──────────────────────────────────────────
+func TestGetDriftEvents_OutsideTimeRange_Excluded(t *testing.T) {
+	// A drift state whose DetectedAt is outside the query range is excluded.
+	egp := newTestEGProvider(t)
+	past := time.Now().Add(-48 * time.Hour)
+	deviceID := "test-device-time-filter"
 
-// TestGetDriftEvents_StorageError_LogValueSanitized covers the log-injection
-// mitigation in GetDriftEvents' per-device history-load failure path
-// (provider.go, "failed to get DNA history for drift detection"), the analogue of
-// the GetDNAData and GetDeviceStats fixes.
+	storeDriftState(t, egp, deviceID, "host:hostname", past, []interface{}{
+		map[string]interface{}{"attribute": "hostname", "desired": "old", "actual": "new", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		DeviceIDs: []string{deviceID},
+		TimeRange: interfaces.TimeRange{
+			Start: time.Now().Add(-1 * time.Hour),
+			End:   time.Now(),
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, events, "drift state outside the requested time range must be excluded")
+}
+
+func TestGetDriftEvents_CancelledContext_ReturnsError(t *testing.T) {
+	// A cancelled context must be fatal, not swallowed.
+	p := &DataProvider{
+		egProvider: newTestEGProvider(t),
+		logger:     logging.NewNoopLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
+		TimeRange: interfaces.TimeRange{Start: time.Now().Add(-1 * time.Hour), End: time.Now()},
+	})
+
+	require.Error(t, err, "a cancelled context must cause an error")
+	assert.Contains(t, err.Error(), "context canceled")
+}
+
+// ── GetDriftEvents tenant isolation ──────────────────────────────────────────
+
+// TestGetDriftEvents_NoTenantScopeNoDevices_FailsClosed verifies that a query
+// naming neither a device nor a tenant is refused. Such a query has no
+// authorization cut: an empty DriftFilter makes the provider skip the entity-index
+// join and return every drifted entity in the deployment, and with no device filter
+// nothing downstream narrows it either.
+func TestGetDriftEvents_NoTenantScopeNoDevices_FailsClosed(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	storeTenantDriftState(t, egp, "device-a", "auth:enabled", "root/tenant-a", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.ErrorIs(t, err, errTenantScopeRequired,
+		"a drift query with neither tenant scope nor device list must fail closed")
+	assert.Empty(t, events, "no drift data may be returned when the query is refused")
+}
+
+// TestGetDriftEvents_TenantScope_ExcludesOtherTenants verifies the provider-side
+// tenant cut on the fleet-wide drift path: a caller scoped to one tenant sees only
+// that tenant's drift, and never another tenant's desired/actual field values.
+func TestGetDriftEvents_TenantScope_ExcludesOtherTenants(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	storeTenantDriftState(t, egp, "device-a", "auth:enabled", "root/tenant-a", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "tenant-a-desired", "actual": "tenant-a-actual", "matching": false},
+	})
+	storeTenantDriftState(t, egp, "device-b", "auth:enabled", "root/tenant-b", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "tenant-b-secret", "actual": "tenant-b-actual", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, events, 1, "only the caller tenant's drift may be returned")
+	assert.Equal(t, "device-a", events[0].DeviceID)
+	for _, change := range events[0].Changes {
+		assert.NotContains(t, change.PreviousValue, "tenant-b-secret",
+			"another tenant's desired value must never reach the caller")
+	}
+}
+
+// TestGetDriftEvents_TenantSubtree_IncludesDescendants verifies that the tenant cut
+// is a subtree cut: an MSP-scoped caller sees its client tenants' drift, and a
+// sibling tenant sharing a name prefix is not swept in.
+func TestGetDriftEvents_TenantSubtree_IncludesDescendants(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	storeTenantDriftState(t, egp, "msp-host", "auth:enabled", "root/msp-a", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+	storeTenantDriftState(t, egp, "client-host", "auth:enabled", "root/msp-a/client-1", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+	storeTenantDriftState(t, egp, "sibling-host", "auth:enabled", "root/msp-a-other", now, []interface{}{
+		map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/msp-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	devices := make([]string, 0, len(events))
+	for _, e := range events {
+		devices = append(devices, e.DeviceID)
+	}
+	assert.ElementsMatch(t, []string{"msp-host", "client-host"}, devices,
+		"the subtree cut includes descendants and excludes prefix-sharing siblings")
+}
+
+// TestGetDriftEvents_MultipleTenantScopes_QueriesEachSeparately verifies that a
+// multi-tenant query is answered by one filtered read per tenant — the union of the
+// named tenants, not the whole deployment.
+func TestGetDriftEvents_MultipleTenantScopes_QueriesEachSeparately(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	for _, tc := range []struct{ device, tenant string }{
+		{"device-a", "root/tenant-a"},
+		{"device-b", "root/tenant-b"},
+		{"device-c", "root/tenant-c"},
+	} {
+		storeTenantDriftState(t, egp, tc.device, "auth:enabled", tc.tenant, now, []interface{}{
+			map[string]interface{}{"attribute": "auth:enabled", "desired": "true", "actual": "false", "matching": false},
+		})
+	}
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		// The blank and duplicate entries must not widen the read: a blank
+		// TenantFilter means "every tenant" to the provider.
+		TenantIDs: []string{"root/tenant-a", "", "root/tenant-b", "root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	devices := make([]string, 0, len(events))
+	for _, e := range events {
+		devices = append(devices, e.DeviceID)
+	}
+	assert.ElementsMatch(t, []string{"device-a", "device-b"}, devices,
+		"exactly the named tenants' drift, each device once, and never tenant-c")
+}
+
+// ── GetDNAData ────────────────────────────────────────────────────────────────
+
+// TestGetDNAData_WithHostEntity_ReturnsRecords is the required AC test verifying
+// that a host entity with observation history in the entity graph produces
+// DNARecord entries in GetDNAData.
 //
-// The failing store is a real storage.Manager whose database has been closed.
-// SQLiteBackend formats the caller-supplied device ID into its error text, so a
-// device ID carrying \n/\r produces a genuinely tainted error from real CFGMS
-// code — both the device_id and error fields must be stripped in the log while
-// their payload text survives.
-func TestGetDriftEvents_StorageError_LogValueSanitized(t *testing.T) {
+// Uses the real SQLiteEntityGraphProvider (t.TempDir()) — no mocks.
+func TestGetDNAData_WithHostEntity_ReturnsRecords(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	deviceID := "test-device-dna"
+
+	// Store two state observations for the host entity — each becomes one DNARecord.
+	storeHostEntity(t, egp, deviceID, now.Add(-30*time.Minute))
+	storeHostEntity(t, egp, deviceID, now.Add(-10*time.Minute))
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		DeviceIDs: []string{deviceID},
+		TimeRange: interfaces.TimeRange{
+			Start: now.Add(-1 * time.Hour),
+			End:   now.Add(1 * time.Hour),
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Len(t, records, 2, "two stored observations must yield two DNARecords")
+	for _, rec := range records {
+		assert.Equal(t, deviceID, rec.DeviceID)
+	}
+}
+
+func TestGetDNAData_EmptyProvider_ReturnsEmpty(t *testing.T) {
+	p := &DataProvider{
+		egProvider: newTestEGProvider(t),
+		logger:     logging.NewNoopLogger(),
+	}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		DeviceIDs: []string{"nonexistent-device"},
+		TimeRange: interfaces.TimeRange{
+			Start: time.Now().Add(-1 * time.Hour),
+			End:   time.Now(),
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, records)
+}
+
+func TestGetDNAData_CancelledContext_ReturnsError(t *testing.T) {
+	p := &DataProvider{
+		egProvider: newTestEGProvider(t),
+		logger:     logging.NewNoopLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := p.GetDNAData(ctx, interfaces.DataQuery{
+		DeviceIDs: []string{"some-device"},
+		TimeRange: interfaces.TimeRange{Start: time.Now().Add(-1 * time.Hour), End: time.Now()},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled")
+}
+
+// TestGetDNAData_EntityGraphError_DeviceIDSanitized covers the log-injection
+// mitigation in GetDNAData's per-device history-load failure path.
+// A closed entity graph provider causes GetHistory to fail; the device_id
+// must be sanitized in the logged Warn entry even when it contains \n/\r.
+func TestGetDNAData_EntityGraphError_DeviceIDSanitized(t *testing.T) {
 	timeRange := interfaces.TimeRange{
 		Start: time.Now().Add(-24 * time.Hour),
 		End:   time.Now(),
 	}
 
-	t.Run("newlines_stripped_in_device_id_and_error", func(t *testing.T) {
-		manager := newClosedTestStorageManager(t)
-		dirtyDeviceID := "device-1\nINJECTED drift event\r\nseverity=critical"
-
-		require.Contains(t, closedStoreErrorText(t, manager, dirtyDeviceID), "\n",
-			"precondition: the real storage error must carry the injected newlines")
+	t.Run("newlines_stripped_from_device_id", func(t *testing.T) {
+		egp := newClosedTestEGProvider(t)
+		dirtyDeviceID := "device-1\nINJECTED log line\r\nalso injected"
 
 		capLog := &warnCapturingLogger{}
-		p := &DataProvider{
-			storageManager: manager,
-			driftDetector:  newTestDriftDetector(t),
-			logger:         capLog,
-		}
+		p := &DataProvider{egProvider: egp, logger: capLog}
 
-		events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		_, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
 			TimeRange: timeRange,
 			DeviceIDs: []string{dirtyDeviceID},
 		})
 
-		require.NoError(t, err, "GetDriftEvents logs the per-device failure and continues")
-		assert.Empty(t, events, "a device whose history cannot be read contributes no drift events")
-		require.Equal(t, 1, capLog.countMessages("failed to get DNA history for drift detection"),
-			"the failing device must be warned about exactly once")
+		require.NoError(t, err, "GetDNAData logs the per-device failure and continues")
+		require.True(t, capLog.countMessages("failed to get entity history for device") > 0,
+			"the failing device must trigger a warn log")
 
 		loggedID := capLog.kvValue("device_id")
 		require.NotNil(t, loggedID, "expected 'device_id' key in logged Warn entries")
@@ -352,127 +623,230 @@ func TestGetDriftEvents_StorageError_LogValueSanitized(t *testing.T) {
 		assert.NotContains(t, loggedIDStr, "\n", "\\n must be stripped from logged device_id")
 		assert.NotContains(t, loggedIDStr, "\r", "\\r must be stripped from logged device_id")
 		assert.Contains(t, loggedIDStr, "device-1", "device id text must be preserved")
-
-		loggedErr := capLog.kvValue("error")
-		require.NotNil(t, loggedErr, "expected 'error' key in logged Warn entries")
-		loggedErrStr, ok := loggedErr.(string)
-		require.True(t, ok, "sanitized error must be logged as a string")
-		assert.NotContains(t, loggedErrStr, "\n", "\\n must be stripped from logged error")
-		assert.NotContains(t, loggedErrStr, "\r", "\\r must be stripped from logged error")
-		assert.Contains(t, loggedErrStr, "failed to query DNA records", "error message text must be preserved")
 	})
 
-	t.Run("clean_device_id_and_error_pass_through", func(t *testing.T) {
-		manager := newClosedTestStorageManager(t)
-		rawErr := closedStoreErrorText(t, manager, "device-clean")
-		require.NotContains(t, rawErr, "\n", "precondition: this storage error is untainted")
+	t.Run("clean_device_id_passes_through", func(t *testing.T) {
+		egp := newClosedTestEGProvider(t)
 
 		capLog := &warnCapturingLogger{}
-		p := &DataProvider{
-			storageManager: manager,
-			driftDetector:  newTestDriftDetector(t),
-			logger:         capLog,
-		}
+		p := &DataProvider{egProvider: egp, logger: capLog}
 
-		events, err := p.GetDriftEvents(context.Background(), interfaces.DataQuery{
+		_, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
 			TimeRange: timeRange,
 			DeviceIDs: []string{"device-clean"},
 		})
 
 		require.NoError(t, err)
-		assert.Empty(t, events)
-
 		assert.Equal(t, "device-clean", capLog.kvValue("device_id"),
 			"clean device id must pass through unchanged")
-		assert.Equal(t, rawErr, capLog.kvValue("error"),
-			"clean error message must pass through unchanged")
 	})
 }
 
-// TestGetDriftEvents_DetectDriftError_SkipsPairAndLogsSanitized covers the
-// drift-detection failure branch in GetDriftEvents ("drift detection failed for
-// consecutive snapshots"): the offending snapshot pair is skipped rather than
-// failing the whole report, and both logged fields are sanitized.
-//
-// The failure comes from the real drift.Detector rejecting a malformed pair: the
-// two snapshots stored under one fleet device ID carry mismatched DNA.Id values,
-// which DetectDrift refuses to compare. Storage is a real SQLite-backed
-// storage.Manager under t.TempDir() — no substitute detector or store.
-func TestGetDriftEvents_DetectDriftError_SkipsPairAndLogsSanitized(t *testing.T) {
-	ctx := context.Background()
-	timeRange := interfaces.TimeRange{
-		Start: time.Now().Add(-1 * time.Hour),
-		End:   time.Now().Add(1 * time.Hour),
-	}
+// ── GetDNAData fleet-wide discovery ──────────────────────────────────────────
 
-	// storeMismatchedPair writes two snapshots for deviceID whose embedded DNA.Id
-	// values differ, so the consecutive pair is one the real detector rejects.
-	storeMismatchedPair := func(t *testing.T, manager *storage.Manager, deviceID string) {
-		t.Helper()
-		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA("dna-id-before", map[string]string{
-			"host:os":       "linux",
-			"host:hostname": "host-before",
-		}), nil))
-		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA("dna-id-after", map[string]string{
-			"host:os":       "linux",
-			"host:hostname": "host-after",
-		}), nil))
-	}
+// TestGetDNAData_Discovery_NoTenantScope_FailsClosed verifies that a query naming
+// neither a device nor a tenant is refused rather than discovering every host in
+// every tenant: an empty EntityFilter.TenantFilter applies no owning_tenant
+// predicate at all.
+func TestGetDNAData_Discovery_NoTenantScope_FailsClosed(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	storeTenantHost(t, egp, "device-a", "root/tenant-a", now)
 
-	t.Run("baseline_matching_dna_ids_produce_events", func(t *testing.T) {
-		// Proves the fixture shape reaches DetectDrift at all: with consistent DNA
-		// IDs the very same two snapshots yield events, so the empty result below
-		// is caused by the detection error and not by an unreached code path.
-		manager := newTestStorageManager(t)
-		deviceID := "device-matching-ids"
-		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA(deviceID, map[string]string{
-			"host:os":       "linux",
-			"host:hostname": "host-before",
-		}), nil))
-		require.NoError(t, manager.Store(ctx, deviceID, newTestDNA(deviceID, map[string]string{
-			"host:os":       "linux",
-			"host:hostname": "host-after",
-		}), nil))
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
 
-		capLog := &warnCapturingLogger{}
-		p := &DataProvider{
-			storageManager: manager,
-			driftDetector:  newTestDriftDetector(t),
-			logger:         capLog,
-		}
-
-		events, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
-			TimeRange: timeRange,
-			DeviceIDs: []string{deviceID},
-		})
-
-		require.NoError(t, err)
-		assert.NotEmpty(t, events, "a well-formed pair must produce drift events")
-		assert.Zero(t, capLog.countMessages("drift detection failed for consecutive snapshots"),
-			"a well-formed pair must not warn")
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
 	})
 
-	t.Run("newlines_stripped_in_device_id", func(t *testing.T) {
-		manager := newTestStorageManager(t)
-		dirtyDeviceID := "device-1\nINJECTED drift event\r\nseverity=critical"
-		storeMismatchedPair(t, manager, dirtyDeviceID)
+	require.ErrorIs(t, err, errTenantScopeRequired,
+		"an all-device query with no tenant scope must fail closed")
+	assert.Empty(t, records, "no records may be returned when the query is refused")
+}
+
+// TestGetDNAData_Discovery_ReturnsOnlyScopedTenantHosts is the discovery-path
+// counterpart of TestGetDNAData_WithHostEntity_ReturnsRecords: with no DeviceIDs,
+// hosts are discovered through the entity graph, and only those inside the queried
+// tenant subtree are returned.
+func TestGetDNAData_Discovery_ReturnsOnlyScopedTenantHosts(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	// Two hosts in the queried tenant, one of them with two observations.
+	storeTenantHost(t, egp, "device-a1", "root/tenant-a", now.Add(-30*time.Minute))
+	storeTenantHost(t, egp, "device-a1", "root/tenant-a", now.Add(-10*time.Minute))
+	storeTenantHost(t, egp, "device-a2", "root/tenant-a", now.Add(-20*time.Minute))
+	// One host in another tenant, which must not be discovered.
+	storeTenantHost(t, egp, "device-b1", "root/tenant-b", now.Add(-15*time.Minute))
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+
+	counts := make(map[string]int)
+	for _, rec := range records {
+		counts[rec.DeviceID]++
+		assert.False(t, rec.StoredAt.IsZero(), "each discovered record carries its observation time")
+	}
+	assert.Equal(t, map[string]int{"device-a1": 2, "device-a2": 1}, counts,
+		"discovery must cover every host of the scoped tenant and no other tenant's host")
+}
+
+// TestGetDNAData_Discovery_PagesBeyondFirstPage verifies that discovery follows the
+// entity graph's page token: a host set larger than one page is fully walked, and
+// the walk terminates.
+func TestGetDNAData_Discovery_PagesBeyondFirstPage(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+
+	// One more than two full pages, so at least two page tokens are followed.
+	total := hostDiscoveryPageSize*2 + 1
+	deviceIDs := storeTenantHosts(t, egp, "paged", "root/tenant-paged", total, now.Add(-10*time.Minute))
+	// A host in another tenant must stay out of the paged walk.
+	storeTenantHost(t, egp, "other-tenant-host", "root/tenant-other", now.Add(-10*time.Minute))
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-paged"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, records, total,
+		"every host across all pages must be discovered exactly once")
+
+	seen := make(map[string]bool, len(records))
+	for _, rec := range records {
+		assert.False(t, seen[rec.DeviceID], "a host must not be returned twice across pages")
+		seen[rec.DeviceID] = true
+	}
+	for _, deviceID := range deviceIDs {
+		assert.True(t, seen[deviceID], "host %s must appear in the discovered set", deviceID)
+	}
+	assert.False(t, seen["other-tenant-host"], "another tenant's host must never be discovered")
+}
+
+// TestGetDNAData_Discovery_QueryFailure_ReturnsError verifies that a failure of the
+// discovery query itself is fatal. Truncating the fleet silently would understate
+// every count computed from the result.
+func TestGetDNAData_Discovery_QueryFailure_ReturnsError(t *testing.T) {
+	p := &DataProvider{egProvider: newClosedTestEGProvider(t), logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: time.Now().Add(-1 * time.Hour), End: time.Now()},
+	})
+
+	require.Error(t, err, "a failed discovery query must not be reported as an empty fleet")
+	assert.Contains(t, err.Error(), "failed to query host entities")
+	assert.Empty(t, records)
+}
+
+// TestGetDNAData_Discovery_HostOutsideTimeRange_YieldsNoRecords verifies that a
+// discovered host contributes records only for observations inside the requested
+// window — discovery widens which hosts are considered, never the time cut.
+func TestGetDNAData_Discovery_HostOutsideTimeRange_YieldsNoRecords(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	storeTenantHost(t, egp, "device-recent", "root/tenant-a", now.Add(-10*time.Minute))
+	storeTenantHost(t, egp, "device-stale", "root/tenant-a", now.Add(-72*time.Hour))
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	records, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
+		TenantIDs: []string{"root/tenant-a"},
+		TimeRange: interfaces.TimeRange{Start: now.Add(-1 * time.Hour), End: now.Add(1 * time.Hour)},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, records, 1, "only the in-window observation may produce a record")
+	assert.Equal(t, "device-recent", records[0].DeviceID)
+}
+
+// ── GetDeviceStats ────────────────────────────────────────────────────────────
+
+// TestGetDeviceStats_NoDeviceIDs_ReturnsEmpty verifies GetDeviceStats' fail-closed
+// contract: its signature carries no tenant, so an empty device list has no
+// authorization cut and yields no statistics rather than discovering — and
+// reporting on — every tenant's fleet.
+func TestGetDeviceStats_NoDeviceIDs_ReturnsEmpty(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	storeTenantHost(t, egp, "device-a", "root/tenant-a", now)
+	storeTenantHost(t, egp, "device-b", "root/tenant-b", now)
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	stats, err := p.GetDeviceStats(context.Background(), nil, interfaces.TimeRange{
+		Start: now.Add(-1 * time.Hour),
+		End:   now.Add(1 * time.Hour),
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, stats, "no device list means no statistics, never a cross-tenant scan")
+}
+
+// TestGetDeviceStats_WithEntityGraph_ComputesStats is the required AC test verifying
+// that GetDeviceStats reads from the entity graph provider: history for record count
+// and last-seen, drift projection for drift events.
+//
+// Uses the real SQLiteEntityGraphProvider (t.TempDir()) — no mocks.
+func TestGetDeviceStats_WithEntityGraph_ComputesStats(t *testing.T) {
+	egp := newTestEGProvider(t)
+	now := time.Now()
+	deviceID := "test-device-stats"
+
+	// Two observations → DNARecordCount = 2, LastSeen = now.
+	storeHostEntity(t, egp, deviceID, now.Add(-30*time.Minute))
+	storeHostEntity(t, egp, deviceID, now)
+
+	// One drift event → DriftEventCount = 1.
+	storeDriftState(t, egp, deviceID, "host:hostname", now.Add(-10*time.Minute), []interface{}{
+		map[string]interface{}{"attribute": "hostname", "desired": "web01", "actual": "web02", "matching": false},
+	})
+
+	p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
+
+	stats, err := p.GetDeviceStats(context.Background(), []string{deviceID}, interfaces.TimeRange{
+		Start: now.Add(-1 * time.Hour),
+		End:   now.Add(1 * time.Hour),
+	})
+
+	require.NoError(t, err)
+	require.Contains(t, stats, deviceID)
+	s := stats[deviceID]
+	assert.Equal(t, deviceID, s.DeviceID)
+	assert.Equal(t, 2, s.DNARecordCount, "two host entity observations must yield DNARecordCount = 2")
+	assert.Equal(t, 1, s.DriftEventCount, "one drift-diff observation must yield DriftEventCount = 1")
+	assert.NotZero(t, s.LastSeen, "LastSeen must be populated from entity observation timestamps")
+}
+
+func TestGetDeviceStats_CalculateError_DeviceIDSanitized(t *testing.T) {
+	// A device with an invalid EID (containing '/') causes calculateDeviceStats
+	// to fail (NewEID returns an error); GetDeviceStats logs the device_id sanitized.
+	timeRange := interfaces.TimeRange{
+		Start: time.Now().Add(-24 * time.Hour),
+		End:   time.Now(),
+	}
+
+	t.Run("invalid_device_id_with_slash_and_newlines", func(t *testing.T) {
+		egp := newTestEGProvider(t)
+		// A device ID containing '/' will fail NewEID; we also add \n/\r to check sanitization.
+		dirtyDeviceID := "device-1/injected\nINJECTED admin login\r\nfrom 10.0.0.1"
 
 		capLog := &warnCapturingLogger{}
-		p := &DataProvider{
-			storageManager: manager,
-			driftDetector:  newTestDriftDetector(t),
-			logger:         capLog,
-		}
+		p := &DataProvider{egProvider: egp, logger: capLog}
 
-		events, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
-			TimeRange: timeRange,
-			DeviceIDs: []string{dirtyDeviceID},
-		})
+		stats, err := p.GetDeviceStats(context.Background(), []string{dirtyDeviceID}, timeRange)
 
-		require.NoError(t, err, "a rejected snapshot pair is skipped, not surfaced as a query error")
-		assert.Empty(t, events, "the only snapshot pair was rejected, so no events remain")
-		require.Equal(t, 1, capLog.countMessages("drift detection failed for consecutive snapshots"),
-			"exactly one consecutive pair exists, so exactly one warning is expected")
+		require.NoError(t, err, "GetDeviceStats logs the per-device failure and continues")
+		assert.Empty(t, stats, "device with a failing calculateDeviceStats must be skipped")
 
 		loggedID := capLog.kvValue("device_id")
 		require.NotNil(t, loggedID, "expected 'device_id' key in logged Warn entries")
@@ -481,41 +855,19 @@ func TestGetDriftEvents_DetectDriftError_SkipsPairAndLogsSanitized(t *testing.T)
 		assert.NotContains(t, loggedIDStr, "\n", "\\n must be stripped from logged device_id")
 		assert.NotContains(t, loggedIDStr, "\r", "\\r must be stripped from logged device_id")
 		assert.Contains(t, loggedIDStr, "device-1", "device id text must be preserved")
-
-		loggedErr := capLog.kvValue("error")
-		require.NotNil(t, loggedErr, "expected 'error' key in logged Warn entries")
-		loggedErrStr, ok := loggedErr.(string)
-		require.True(t, ok, "sanitized error must be logged as a string")
-		assert.NotContains(t, loggedErrStr, "\n", "\\n must be stripped from logged error")
-		assert.NotContains(t, loggedErrStr, "\r", "\\r must be stripped from logged error")
-		assert.Contains(t, loggedErrStr, "DNA IDs must match for comparison",
-			"the real detector's rejection reason must be preserved")
 	})
 
-	t.Run("clean_device_id_and_error_pass_through", func(t *testing.T) {
-		manager := newTestStorageManager(t)
-		deviceID := "device-clean-mismatched-dna"
-		storeMismatchedPair(t, manager, deviceID)
+	t.Run("clean_device_id_not_in_graph_returns_empty_stats", func(t *testing.T) {
+		egp := newTestEGProvider(t)
+		p := &DataProvider{egProvider: egp, logger: logging.NewNoopLogger()}
 
-		capLog := &warnCapturingLogger{}
-		p := &DataProvider{
-			storageManager: manager,
-			driftDetector:  newTestDriftDetector(t),
-			logger:         capLog,
-		}
-
-		events, err := p.GetDriftEvents(ctx, interfaces.DataQuery{
-			TimeRange: timeRange,
-			DeviceIDs: []string{deviceID},
-		})
+		stats, err := p.GetDeviceStats(context.Background(), []string{"device-clean"}, timeRange)
 
 		require.NoError(t, err)
-		assert.Empty(t, events)
-
-		assert.Equal(t, deviceID, capLog.kvValue("device_id"),
-			"clean device id must pass through unchanged")
-		assert.Equal(t, "DNA IDs must match for comparison", capLog.kvValue("error"),
-			"clean error message must pass through unchanged")
+		// A device with no observations in the graph has DNARecordCount=0 and
+		// no drift events; calculateDeviceStats succeeds with zeroed stats.
+		assert.Contains(t, stats, "device-clean")
+		assert.Equal(t, 0, stats["device-clean"].DNARecordCount)
 	})
 }
 
@@ -538,42 +890,38 @@ func TestGetTrendData_UnsupportedMetric_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown_metric")
 }
 
-// newTrendFixture stores real DNA history in a real storage.Manager and returns a
-// provider plus a query spanning exactly two daily buckets.
+// newTrendFixture seeds the entity graph with two devices (device-a and device-b)
+// and returns a provider plus a query spanning exactly two daily buckets.
 //
 // The range is anchored on UTC midnight so createTimeBuckets is deterministic:
-// bucket[0] is yesterday (no records were stored then) and bucket[1] is today
-// (every record and every drift event lands there). Fixture contents:
+// bucket[0] is yesterday (no records stored there) and bucket[1] is today
+// (every observation and drift event lands there). Fixture contents:
 //
-//	device-a — two snapshots differing only in hostname, which the drift detector
-//	           categorises as network/warning: exactly one DriftEvent.
-//	device-b — one snapshot: counted as a device, contributes no drift event.
+//	device-a — two host-entity observations (for DNARecordCount) plus one drift-diff
+//	           observation (one DriftEvent, SeverityWarning).
+//	device-b — one host-entity observation: counted as a device, no drift event.
 func newTrendFixture(t *testing.T) (*DataProvider, interfaces.DataQuery) {
 	t.Helper()
 
-	manager := newTestStorageManager(t)
-	ctx := context.Background()
+	egp := newTestEGProvider(t)
+	now := time.Now().UTC()
 
-	require.NoError(t, manager.Store(ctx, "device-a", newTestDNA("device-a", map[string]string{
-		"host:os":       "linux",
-		"host:hostname": "host-before",
-	}), nil))
-	require.NoError(t, manager.Store(ctx, "device-a", newTestDNA("device-a", map[string]string{
-		"host:os":       "linux",
-		"host:hostname": "host-after",
-	}), nil))
-	require.NoError(t, manager.Store(ctx, "device-b", newTestDNA("device-b", map[string]string{
-		"host:os":       "windows",
-		"host:hostname": "host-b",
-	}), nil))
+	// device-a: two observations + one drift event (hostname change)
+	storeHostEntity(t, egp, "device-a", now.Add(-20*time.Minute))
+	storeHostEntity(t, egp, "device-a", now.Add(-10*time.Minute))
+	storeDriftState(t, egp, "device-a", "host:hostname", now.Add(-5*time.Minute), []interface{}{
+		map[string]interface{}{"attribute": "hostname", "desired": "host-before", "actual": "host-after", "matching": false},
+	})
+
+	// device-b: one observation, no drift
+	storeHostEntity(t, egp, "device-b", now.Add(-15*time.Minute))
 
 	p := &DataProvider{
-		storageManager: manager,
-		driftDetector:  newTestDriftDetector(t),
-		logger:         logging.NewNoopLogger(),
+		egProvider: egp,
+		logger:     logging.NewNoopLogger(),
 	}
 
-	midnightUTC := time.Now().UTC().Truncate(24 * time.Hour)
+	midnightUTC := now.Truncate(24 * time.Hour)
 	query := interfaces.DataQuery{
 		TimeRange: interfaces.TimeRange{
 			Start: midnightUTC.Add(-24 * time.Hour),
@@ -604,11 +952,11 @@ func TestGetTrendData_DriftEvents_CountsEventsPerDailyBucket(t *testing.T) {
 	require.NoError(t, err)
 	assertDailyBuckets(t, query, points)
 
-	assert.Equal(t, 0.0, points[0].Value, "no DNA was stored yesterday, so no drift events bucket there")
+	assert.Equal(t, 0.0, points[0].Value, "no drift stored yesterday, so no drift events in that bucket")
 	assert.Equal(t, "0 events", points[0].Label)
 
 	assert.Equal(t, 1.0, points[1].Value,
-		"device-a's single hostname change is the only drift event, and it lands in today's bucket")
+		"device-a's single hostname drift-diff is the only event, landing in today's bucket")
 	assert.Equal(t, "1 events", points[1].Label)
 }
 
@@ -638,23 +986,19 @@ func TestGetTrendData_DeviceCount_CountsUniqueDevicesPerDailyBucket(t *testing.T
 	require.NoError(t, err)
 	assertDailyBuckets(t, query, points)
 
-	assert.Equal(t, 0.0, points[0].Value, "no DNA was stored yesterday")
+	assert.Equal(t, 0.0, points[0].Value, "no observations were stored yesterday")
 	assert.Equal(t, "0 devices", points[0].Label)
 
 	assert.Equal(t, 2.0, points[1].Value,
-		"device-a (three records across two devices' worth of snapshots) and device-b are two unique devices")
+		"device-a and device-b both have observations today — two unique devices")
 	assert.Equal(t, "2 devices", points[1].Label)
 }
 
 // ── GetTrendData day-query failure paths ─────────────────────────────────────
 
 // TestGetTrendData_ComplianceScore_DayQueryFails_SkipsBucketAndWarns covers the
-// error branch in getComplianceTrends: when the per-day GetDriftEvents call fails,
-// that bucket is dropped from the trend line and a Warn naming the bucket is emitted.
-//
-// The failure is produced by a real cancelled request rather than a substituted
-// store: GetDriftEvents rejects an aborted context, which is exactly the systemic
-// (as opposed to per-device) failure this branch exists to absorb.
+// error branch in getComplianceTrends: when the per-day GetDriftEvents call fails
+// (cancelled context), that bucket is dropped and a Warn is emitted.
 func TestGetTrendData_ComplianceScore_DayQueryFails_SkipsBucketAndWarns(t *testing.T) {
 	p, query := newTrendFixture(t)
 	capLog := &warnCapturingLogger{}
@@ -777,159 +1121,47 @@ func TestCalculateRiskLevel_LowCompliance_ReturnsCritical(t *testing.T) {
 	assert.Equal(t, interfaces.RiskLevelCritical, level)
 }
 
-// ── GetDNAData log sanitization ───────────────────────────────────────────────
+// ── convertDriftStateToEvent ──────────────────────────────────────────────────
 
-// TestGetDNAData_StorageError_LogValueSanitized is the required AC test for the
-// CodeQL go/log-injection fix at provider.go (GetDNAData error log path).
-//
-// It asserts that a storage error containing \n/\r is stripped in the logged
-// "error" field (preventing log-line forgery), and that a normal error message
-// passes through unchanged.
-//
-// The failing store is a real storage.Manager whose database has been closed. Its
-// error text embeds the caller-supplied device ID (SQLiteBackend formats it into
-// "failed to count history for device %s"), so a device ID carrying newlines
-// produces a genuinely tainted error from real CFGMS code — the exact flow CodeQL
-// flags — with no substitute store involved.
-func TestGetDNAData_StorageError_LogValueSanitized(t *testing.T) {
-	timeRange := interfaces.TimeRange{
-		Start: time.Now().Add(-24 * time.Hour),
-		End:   time.Now(),
+func TestConvertDriftStateToEvent_NonMatchingFields_ProducesChanges(t *testing.T) {
+	eid, err := egtypes.NewEID("host", "device-1", "host:hostname")
+	require.NoError(t, err)
+
+	state := &eginterfaces.DriftState{
+		EID:        eid,
+		DetectedAt: time.Now(),
+		Fields: []eginterfaces.DriftField{
+			{Attribute: "hostname", Desired: "web01", Actual: "web02", Matching: false},
+			{Attribute: "os", Desired: "linux", Actual: "linux", Matching: true},
+		},
 	}
 
-	t.Run("newlines_stripped", func(t *testing.T) {
-		manager := newClosedTestStorageManager(t)
-		dirtyDeviceID := "device-1\nforged log line\r\nalso forged"
+	event := convertDriftStateToEvent("device-1", state)
 
-		rawErr := closedStoreErrorText(t, manager, dirtyDeviceID)
-		require.Contains(t, rawErr, "\n",
-			"precondition: the real storage error must carry the injected newlines")
-
-		capLog := &warnCapturingLogger{}
-		p := &DataProvider{storageManager: manager, logger: capLog}
-
-		_, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
-			TimeRange: timeRange,
-			DeviceIDs: []string{dirtyDeviceID},
-		})
-
-		require.NoError(t, err, "GetDNAData logs the error and continues; it must not surface it")
-		loggedErr := capLog.kvValue("error")
-		require.NotNil(t, loggedErr, "expected 'error' key in logged Warn entries")
-		loggedStr, ok := loggedErr.(string)
-		require.True(t, ok, "sanitized error must be logged as a string")
-		assert.NotContains(t, loggedStr, "\n", "\\n must be stripped from logged error")
-		assert.NotContains(t, loggedStr, "\r", "\\r must be stripped from logged error")
-		assert.Contains(t, loggedStr, "failed to query DNA records", "error message text must be preserved")
-
-		loggedID := capLog.kvValue("device_id")
-		loggedIDStr, ok := loggedID.(string)
-		require.True(t, ok, "sanitized device_id must be logged as a string")
-		assert.NotContains(t, loggedIDStr, "\n", "\\n must be stripped from logged device_id")
-		assert.NotContains(t, loggedIDStr, "\r", "\\r must be stripped from logged device_id")
-		assert.Contains(t, loggedIDStr, "device-1", "device id text must be preserved")
-	})
-
-	t.Run("clean_error_passes_through", func(t *testing.T) {
-		manager := newClosedTestStorageManager(t)
-		rawErr := closedStoreErrorText(t, manager, "device-clean")
-		require.NotContains(t, rawErr, "\n", "precondition: this storage error is untainted")
-
-		capLog := &warnCapturingLogger{}
-		p := &DataProvider{storageManager: manager, logger: capLog}
-
-		_, err := p.GetDNAData(context.Background(), interfaces.DataQuery{
-			TimeRange: timeRange,
-			DeviceIDs: []string{"device-clean"},
-		})
-
-		require.NoError(t, err)
-		loggedErr := capLog.kvValue("error")
-		require.NotNil(t, loggedErr)
-		loggedStr, ok := loggedErr.(string)
-		require.True(t, ok)
-		assert.Equal(t, rawErr, loggedStr,
-			"clean error message must pass through unchanged")
-	})
+	assert.Equal(t, "device-1", event.DeviceID)
+	assert.Equal(t, drift.SeverityWarning, event.Severity)
+	assert.Len(t, event.Changes, 1, "only non-matching fields produce attribute changes")
+	assert.Equal(t, "hostname", event.Changes[0].Attribute)
+	assert.Equal(t, "web01", event.Changes[0].PreviousValue)
+	assert.Equal(t, "web02", event.Changes[0].CurrentValue)
+	assert.Equal(t, 1, event.ChangeCount)
 }
 
-// ── GetDeviceStats log sanitization ──────────────────────────────────────────
+func TestConvertDriftStateToEvent_AllMatching_ProducesInfoEvent(t *testing.T) {
+	eid, err := egtypes.NewEID("host", "device-2", "host:hostname")
+	require.NoError(t, err)
 
-// TestGetDeviceStats_CalculateError_LogValueSanitized covers the log-injection
-// mitigation in GetDeviceStats' per-device failure path (provider.go), the
-// analogue of the GetDNAData fix. A single-device storage failure propagates out
-// of calculateDeviceStats; GetDeviceStats then skips the device and logs a Warn.
-//
-// Both the caller-supplied device_id AND the wrapped error message can carry
-// attacker-controlled \n/\r, so this asserts both fields are stripped in the log
-// while their payload text survives.
-func TestGetDeviceStats_CalculateError_LogValueSanitized(t *testing.T) {
-	timeRange := interfaces.TimeRange{
-		Start: time.Now().Add(-24 * time.Hour),
-		End:   time.Now(),
+	state := &eginterfaces.DriftState{
+		EID:        eid,
+		DetectedAt: time.Now(),
+		Fields: []eginterfaces.DriftField{
+			{Attribute: "hostname", Desired: "web01", Actual: "web01", Matching: true},
+		},
 	}
 
-	t.Run("newlines_stripped_in_device_id_and_error", func(t *testing.T) {
-		manager := newClosedTestStorageManager(t)
-		dirtyDeviceID := "device-1\nINJECTED admin login\r\nfrom 10.0.0.1"
+	event := convertDriftStateToEvent("device-2", state)
 
-		require.Contains(t, closedStoreErrorText(t, manager, dirtyDeviceID), "\n",
-			"precondition: the real storage error must carry the injected newlines")
-
-		capLog := &warnCapturingLogger{}
-		p := &DataProvider{
-			storageManager: manager,
-			logger:         capLog,
-		}
-
-		stats, err := p.GetDeviceStats(context.Background(), []string{dirtyDeviceID}, timeRange)
-
-		require.NoError(t, err, "GetDeviceStats logs the per-device failure and continues")
-		assert.Empty(t, stats, "device with a failing calculateDeviceStats must be skipped")
-
-		loggedID := capLog.kvValue("device_id")
-		require.NotNil(t, loggedID, "expected 'device_id' key in logged Warn entries")
-		loggedIDStr, ok := loggedID.(string)
-		require.True(t, ok, "sanitized device_id must be logged as a string")
-		assert.NotContains(t, loggedIDStr, "\n", "\\n must be stripped from logged device_id")
-		assert.NotContains(t, loggedIDStr, "\r", "\\r must be stripped from logged device_id")
-		assert.Contains(t, loggedIDStr, "device-1", "device id text must be preserved")
-
-		loggedErr := capLog.kvValue("error")
-		require.NotNil(t, loggedErr, "expected 'error' key in logged Warn entries")
-		loggedErrStr, ok := loggedErr.(string)
-		require.True(t, ok, "sanitized error must be logged as a string")
-		assert.NotContains(t, loggedErrStr, "\n", "\\n must be stripped from logged error")
-		assert.NotContains(t, loggedErrStr, "\r", "\\r must be stripped from logged error")
-		assert.Contains(t, loggedErrStr, "failed to get DNA records", "error message text must be preserved")
-	})
-
-	t.Run("clean_device_id_and_error_pass_through", func(t *testing.T) {
-		manager := newClosedTestStorageManager(t)
-		rawErr := closedStoreErrorText(t, manager, "device-clean")
-		require.NotContains(t, rawErr, "\n", "precondition: this storage error is untainted")
-
-		capLog := &warnCapturingLogger{}
-		p := &DataProvider{
-			storageManager: manager,
-			logger:         capLog,
-		}
-
-		stats, err := p.GetDeviceStats(context.Background(), []string{"device-clean"}, timeRange)
-
-		require.NoError(t, err)
-		assert.Empty(t, stats)
-
-		loggedID := capLog.kvValue("device_id")
-		require.NotNil(t, loggedID)
-		assert.Equal(t, "device-clean", loggedID,
-			"clean device id must pass through unchanged")
-
-		loggedErr := capLog.kvValue("error")
-		require.NotNil(t, loggedErr)
-		loggedErrStr, ok := loggedErr.(string)
-		require.True(t, ok)
-		assert.Contains(t, loggedErrStr, rawErr,
-			"clean error message must pass through unchanged")
-	})
+	assert.Equal(t, drift.SeverityInfo, event.Severity, "all-matching drift state yields info severity")
+	assert.Empty(t, event.Changes)
+	assert.Equal(t, 0, event.ChangeCount)
 }
