@@ -117,7 +117,7 @@ func (s *Server) handleRevokeIPTrust(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Failed to revoke IP trust range",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"cidr", logging.SanitizeLogValue(cidr),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to revoke IP trust range", http.StatusInternalServerError)
 		return
 	}
@@ -153,7 +153,8 @@ func (s *Server) handleListIPTrust(w http.ResponseWriter, r *http.Request) {
 	entries, err := s.ipTrustStore.ListTrustedRanges(r.Context(), tenantID)
 	if err != nil {
 		s.logger.Error("Failed to list IP trust ranges",
-			"tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to list IP trust ranges", http.StatusInternalServerError)
 		return
 	}
@@ -198,6 +199,8 @@ func (s *Server) emitIPTrustAudit(r *http.Request, action, tenantID, cidr string
 		Severity(business.AuditSeverityHigh).
 		Detail("cidr", cidr)
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
-		s.logger.Warn("Failed to emit ip-trust audit event", "error", err, "action", action)
+		s.logger.Warn("Failed to emit ip-trust audit event",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"action", logging.SanitizeLogValue(action))
 	}
 }
