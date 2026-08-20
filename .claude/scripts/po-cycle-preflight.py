@@ -73,6 +73,17 @@ NONE_PREFIX_RE = re.compile(r"^\s*none\b\s*[-—:(]", re.IGNORECASE)
 
 BRANCH_STORY_RE = re.compile(r"feature/(?:story-(\d+)|item-([a-zA-Z0-9]+)-agent)")
 
+#: A branch minted by `agent-dispatch.sh`, which always appends `-agent`:
+#: `feature/story-<N>-agent` or `feature/item-<id>-agent`. Anything else on a
+#: `feature/` branch is hand-authored.
+#:
+#: Deliberately NOT `BRANCH_STORY_RE` above. That pattern matches
+#: `feature/story-(\d+)` with no suffix requirement, so it also matches a
+#: hand-named branch such as
+#: `feature/story-3095-real-cluster-network-partition-split-brain` — using it to
+#: decide pipeline ownership would claim genuine manual work.
+AGENT_BRANCH_RE = re.compile(r"^feature/(?:story-\d+|item-[A-Za-z0-9]+)-agent$")
+
 # Permission levels that indicate a trusted (first-party) collaborator.
 _TRUSTED_PERMS = frozenset({"push", "maintain", "admin"})
 
@@ -1669,18 +1680,33 @@ def compute_review_recommendations(pr_summaries, queued_pr_numbers, active_fix_p
             })
             continue
 
-        # PRIORITY 0.6: founder-managed / fenced-off PRs. A draft PR that is NOT
-        # a wip_session_failed resume is manual work in progress; a PR whose
-        # linked story has project status Blocked was deliberately removed from
-        # the autonomous pipeline (e.g. #1887's Hyper-V branch needing a real
+        # PRIORITY 0.6: founder-managed / fenced-off PRs. A draft PR on a
+        # hand-authored branch is manual work in progress; a PR whose linked
+        # story has project status Blocked was deliberately removed from the
+        # autonomous pipeline (e.g. #1887's Hyper-V branch needing a real
         # Windows host). The cron must leave both entirely alone — rebasing or
         # dispatch-fixing them would clobber manual work pushed to the branch.
-        if pr.get("is_draft"):
+        #
+        # Draft status ALONE is not the discriminator, and treating it as one
+        # was silently terminal. An agent that finishes without flipping its PR
+        # out of draft produced a PR that is skipped here (never reviewed),
+        # does not match `resume_failed_session` (never resumed), and — because
+        # it HAS an open PR — is never reported by `compute_stalled_dispatches`
+        # either. Nothing in the pipeline would touch it again and its story sat
+        # `In Progress` forever.
+        #
+        # Observed on PR #3464 / story #3329 on 2026-08-20: branch
+        # `feature/story-3329-agent`, container `cfg-agent-3329` exited 0, zero
+        # comments, and CI fully green — completed work, permanently stranded.
+        # Contrast PR #3362, branch
+        # `feature/story-3095-real-cluster-network-partition-split-brain`, which
+        # is genuinely hand-authored and must keep the carve-out.
+        if pr.get("is_draft") and not AGENT_BRANCH_RE.match(pr.get("head_ref", "") or ""):
             recs.append({
                 "pr": pr["pr"],
                 "story": pr["story_number"],
                 "action": "skip",
-                "reason": "draft PR — not pipeline-managed (manual work in progress); cron leaves it untouched",
+                "reason": "draft PR on a hand-authored branch — not pipeline-managed (manual work in progress); cron leaves it untouched",
             })
             continue
         if pr.get("story_number") in blocked_story_nums:
