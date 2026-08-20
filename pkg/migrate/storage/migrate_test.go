@@ -78,7 +78,9 @@ func TestStorageMigrate_FlatfileToDatabaseRoundTrip(t *testing.T) {
 	dst := newOSSManager(t)
 
 	// Phase 1: OSS → Postgres
-	m1 := migratestorage.NewStorageMigrator(src, pg)
+	// trigger and push are acknowledged skips: the database provider does not expose
+	// those stores, so their records cannot be migrated to Postgres.
+	m1 := migratestorage.NewStorageMigrator(src, pg, migratestorage.WithSkippedKinds("trigger", "push"))
 	report1, err := m1.Run(ctx)
 	require.NoError(t, err, "OSS→Postgres migration must succeed")
 
@@ -108,7 +110,7 @@ func TestStorageMigrate_DatabaseIdempotent(t *testing.T) {
 	seedOSSManager(t, src)
 	pg := newDatabaseManager(t)
 
-	m := migratestorage.NewStorageMigrator(src, pg)
+	m := migratestorage.NewStorageMigrator(src, pg, migratestorage.WithSkippedKinds("trigger", "push"))
 
 	report1, err := m.Run(ctx)
 	require.NoError(t, err, "first run must succeed")
@@ -132,7 +134,7 @@ func TestStorageMigrate_DatabasePlan(t *testing.T) {
 	seedOSSManager(t, src)
 	pg := newDatabaseManager(t)
 
-	m := migratestorage.NewStorageMigrator(src, pg)
+	m := migratestorage.NewStorageMigrator(src, pg, migratestorage.WithSkippedKinds("trigger", "push"))
 	plan, err := m.Plan(ctx)
 	require.NoError(t, err, "Plan must succeed")
 	require.NotEmpty(t, plan.Counts, "Plan must report non-zero counts")

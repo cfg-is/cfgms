@@ -191,12 +191,12 @@ The `cfg migrate --provider storage` pathway covers the following store kinds. E
 | `session` | ✓ | ✓ | Admin sessions |
 | `steward` | ✓ | ✓ | Steward fleet records |
 | `command` | ✓ | ✓ | Command records |
-| `trigger` | ✓ | — | OSS only; Postgres backend does not expose a `TriggerStore` |
-| `push` | ✓ | — | OSS only; Postgres backend does not expose a `PushStore` |
+| `trigger` | ✓ | — | OSS only; Postgres backend does not expose a `TriggerStore` (Issue #3404) |
+| `push` | ✓ | — | OSS only; Postgres backend does not expose a `PushStore` (Issue #3404) |
 | `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
 | `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
 | `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |
-| `pending_registration` | ✓ | ✓ | In-flight steward registration requests (Issue #3224); the PostgreSQL store is reachable through `DatabaseProvider.CreatePendingRegistrationStore` as of Issue #3401 — before that the constructor returned `ErrNotSupported`, so a cluster-mode controller answered every registration endpoint with `503 registration store unavailable` |
+| `pending_registration` | ✓ | ✓ | In-flight steward registration requests (Issue #3224); the PostgreSQL store is reachable through `DatabaseProvider.CreatePendingRegistrationStore` as of Issue #3401 |
 
 **Running the PostgreSQL store tests.** The `pkg/storage/providers/database` tests, and the
 Postgres-backed tests in `pkg/storage/interfaces` and `features/controller/api`, skip
@@ -204,7 +204,28 @@ themselves when no test database is reachable. `make test-integration-setup && m
 test-integration-db` is their run path; no CI workflow provisions PostgreSQL, so a green
 CI run is not evidence that any of them executed.
 
-Kinds marked `—` are silently skipped when the destination backend does not support that store. The integrity check at the end of a `Run` only compares kinds that both source and destination support, so a cross-backend migration (OSS → Postgres) will not fail on `trigger` or `push` records.
+**Fail-loud on unmigratable kinds (Issue #3404).** Kinds marked `—` cause the migration to
+**fail** when the source has records of that kind and the destination backend does not
+support the store. The migration does not silently drop records and report success. This
+applies to both `Plan` (dry-run) and `Run` — the dry run surfaces unmigratable kinds
+before any writes are attempted, so an operator learns about a destination gap before
+committing to a maintenance window.
+
+To migrate from a backend that has `trigger` or `push` records to one that does not (e.g.
+OSS → Postgres), pass `WithSkippedKinds` to explicitly acknowledge the data loss:
+
+```go
+m := storage.NewStorageMigrator(src, dst,
+    storage.WithSkippedKinds("trigger", "push"))
+```
+
+The acknowledged kinds and their source counts appear in
+`MigrationReport.SkippedKinds`. The default path (without the option) fails; there is
+no silent drop.
+
+The per-kind integrity check at the end of `Run` compares counts for all kinds the
+destination supports (and that are not explicitly skipped). An idempotent re-run after a
+partial migration converges: already-imported records are upserted without duplicates.
 
 **Not yet covered:** `AlertStore` (tenant-scoped alert acknowledgement and silence records, Issue #3266) has no entry in this table because `pkg/migrate/storage/migrate.go` does not define a kind constant or export/import case for it yet — a `cfg migrate --provider storage` run does not transfer alert acknowledge/silence state in either direction. Wire it into the migrator (kind constant, export/import case, kind-availability map entry) before relying on migration to carry this state.
 
