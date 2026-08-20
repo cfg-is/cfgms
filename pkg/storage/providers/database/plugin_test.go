@@ -212,12 +212,13 @@ func TestDatabaseProvider_CreatePendingRegistrationStore(t *testing.T) {
 	require.NoError(t, err, "CreatePendingRegistrationStore must not return ErrNotSupported")
 	require.NotNil(t, store, "CreatePendingRegistrationStore must return a non-nil store")
 
-	// Confirm the store is functional: ListPending on an empty table returns an
-	// empty slice without error — the same path a cluster-mode controller takes
-	// when the endpoint is first hit.
+	// Confirm the store is functional: ListPending on an empty table returns
+	// without error — the same path a cluster-mode controller takes when the
+	// endpoint is first hit. ListPending accumulates rows with append, so an
+	// empty table yields a nil slice; assert.Empty accepts both nil and empty.
 	entries, err := store.ListPending(context.Background(), "")
 	require.NoError(t, err)
-	assert.NotNil(t, entries)
+	assert.Empty(t, entries)
 
 	if dbStore, ok := store.(*DatabasePendingRegistrationStore); ok {
 		_ = dbStore.Close()
@@ -462,6 +463,9 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	_, err = provider.CreateAuditStore(invalidConfig)
 	assert.Error(t, err)
 
+	_, err = provider.CreatePendingRegistrationStore(invalidConfig)
+	assert.Error(t, err, "CreatePendingRegistrationStore must propagate DSN errors")
+
 	// Test missing password
 	missingPasswordConfig := map[string]interface{}{
 		"host":     "localhost",
@@ -470,6 +474,10 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 
 	_, err = provider.CreateClientTenantStore(missingPasswordConfig)
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "password is required")
+
+	_, err = provider.CreatePendingRegistrationStore(missingPasswordConfig)
+	assert.Error(t, err, "CreatePendingRegistrationStore must propagate missing-password errors")
 	assert.Contains(t, err.Error(), "password is required")
 }
 
