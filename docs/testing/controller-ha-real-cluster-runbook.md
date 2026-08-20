@@ -754,4 +754,264 @@ elevation. Both real runs above happened to land on `cfgms-ha-node2`
 
 ## 6. Steward fleet continuity through failover (story #3096)
 
-*To be filled in when #3096 lands.*
+Live-validated 2026-08-20 against the same real 3-node cluster (`cfgms-ctrl-01`,
+`cfgms-ha-node2`, `cfgms-ha-node3`), via a new suite
+`test/e2e/ha/steward_continuity_real_test.go` (`//go:build e2e`, same gating and
+helpers as §4's `leader_election_real_test.go`).
+
+### Headline
+
+**Steward continuity through a controller leader failover works, and works
+cleanly.** A steward attached to a *surviving* node does not notice a leader
+change at all.
+
+| Measurement | Value |
+|---|---|
+| Leader killed | `cfgms-ha-node2` (SIGKILL to the main process) |
+| New leader | `cfgms-ha-node3` |
+| Re-election time | **12.02s** |
+| Steward's next heartbeat after the kill | **+6s** |
+| Heartbeats missed | **0** (cadence ~25s held straight through) |
+| Steward reconnects / ControlChannel errors during failover | **0** |
+| Steward status throughout | `active` |
+
+The reason is structural, and it is the answer to this story's central
+investigation question: **there is no leader-forwarding step in the steward
+path.** Every node serves steward traffic itself, straight against the shared
+Postgres backend. Confirmed live by registering a steward through
+`cfgms-ctrl-01` while it was a *follower* — HTTP 200, certificate issued, row
+written. So the leader is not in a steward's request path, and a leader change
+is invisible to a steward whose own node stays up.
+
+This also means the blue/green precedent in
+[`operating-model.md`](../architecture/operating-model.md) (§"Stewards reconnect
+via the gRPC-over-QUIC backoff already built into the client", 1–3s) does **not**
+need to transfer: for leader failover, the steward's connection is never broken,
+so no client-side backoff is exercised at all.
+
+**The converse is the real gap.** A steward has exactly one controller URL, so
+when *its own* node dies it does not fail over anywhere — it retries that one
+node until it returns. That is the `steward-operating-model.md` multi-controller
+gap (re-confirmed and re-scoped there), not a defect this story fixes; it is
+explicitly out of scope per the epic's Non-Goals. If a deployment needs it today,
+the only existing lever is an LB/VIP in front of the cluster — and note that
+because *any* node serves steward traffic, such an LB does **not** need to
+health-gate on `is_leader`; a plain liveness gate on `GET /api/v1/health`
+suffices. That is a meaningfully cheaper answer than the leader-only LB the story
+brief hypothesised, and it falls out of the no-forwarding finding above.
+
+### Reproduction
+
+```bash
+export CFGMS_E2E_HA_CLUSTER_NODES="https://192.168.234.103:9080,https://192.168.234.104:9080,https://192.168.234.106:9080"
+export CFGMS_E2E_HA_ADMIN_BUNDLE="C:/Users/cfg/admin.bundle.yaml"
+go test -tags e2e -run TestRealClusterStewardContinuity -v ./test/e2e/ha/...
+```
+
+`CFGMS_E2E_HA_STEWARD_ID` pins which steward to observe; unset means "first
+`active` one". The suite **skips** rather than passing vacuously when no active
+steward exists, because enrolling one is currently blocked by F2/F3 below.
+
+### Enrolling a steward against the cluster (the procedure that works today)
+
+This is the reconnect/enrolment procedure this story was asked to prove. It
+works, but only with F1's fix in place and only until the next controller
+restart (F3).
+
+1. Add a trusted CIDR for the tenant so the default `ip-trust` approval hook
+   returns `approve` instead of `quarantine`:
+   ```bash
+   POST /api/v1/registration/ip-trust {"tenant_id":"<tenant>","cidr":"<lan>/24","pre_seeded":true}
+   ```
+2. Mint a registration token (`POST /api/v1/registration/tokens`), then run the
+   steward with the controller CA pinned:
+   ```bash
+   CFGMS_HTTP_CA_CERT_PATH=/path/to/controller-ca.crt \
+     cfgms-steward --regtoken <token> --controller-url https://<any-node>:9080
+   ```
+   Any node works — leader or follower.
+3. Reverse with `DELETE /api/v1/registration/ip-trust/<tenant>/<cidr>` (verified
+   reversible: the entry soft-revokes, `revoked: true`, and enrolment stops
+   being possible again). All scaffolding used for this story was reverted this
+   way; the lab was left with 0 steward records, a healthy 3-node quorum, and
+   `NRestarts=0` on all three nodes.
+
+### Findings
+
+Five defects were found live. Two were small enough to fix inside this story
+(F1, F5); the other three are recorded here with file/line pointers and a
+recommended follow-up, per the epic's "document, don't fix" Non-Goal. **Filing
+the issues is the PO's call** — no issue numbers are invented below.
+
+#### F1 (FIXED HERE) — the IP-trust operator API was dead wiring on every deployment
+
+`api.Server.SetIPTrustStore` (`features/controller/api/server.go`) had **no
+production caller**, so `s.ipTrustStore` was always nil and all three
+`/api/v1/registration/ip-trust` endpoints returned `503 ip-trust store
+unavailable` on every deployment shape — even though the Postgres provider
+implements `CreateIPTrustStore` and `StorageManager.GetIPTrustStore()` returned a
+live store that was handed to the approval hook a few lines later
+(`features/controller/server/server.go`). Every handler unit test calls
+`SetIPTrustStore` itself, which is why only startup wiring was broken and nothing
+caught it. Same bug class as Issue #2548's tag/role store wiring.
+
+This mattered here because the default `ip-trust` hook quarantines any untrusted
+source IP, and an operator had **no way** to mark one trusted — so with F2 below,
+enrolment against a cluster was impossible by any route.
+
+Fixed by `wireRegistrationAPIStores`
+(`features/controller/server/registration_api_store_wiring.go`), with a
+regression test that does not need a Postgres-backed manager. Verified live: the
+endpoint went from `503` to serving reads and writes, and enrolment then
+succeeded.
+
+#### F2 (documented) — the Postgres backend has no PendingRegistrationStore, so the quarantine path cannot work in a cluster
+
+`DatabaseProvider.CreatePendingRegistrationStore`
+(`pkg/storage/providers/database/plugin.go`) returns `business.ErrNotSupported`.
+`CreateClusterStorageManager` (`pkg/storage/interfaces/provider.go`) tolerates
+that and leaves the store nil, so `SetPendingStore` is skipped and every
+quarantine registration fails at `handlers_registration.go` with
+`503 Registration admission service unavailable` — reproduced on all three nodes.
+Every `/api/v1/registration/*` admin endpoint 503s for the same reason.
+
+Because Postgres is the only backend a multi-node cluster can share, the
+quarantine/approval workflow is **unavailable in cluster mode by construction**.
+Only the ip-trust auto-approve path (F1) can enrol anything. *Recommended
+follow-up: implement `PendingRegistrationStore` for the database provider.* This
+is a missing implementation, not a bug in existing behaviour, so it is documented
+rather than built here.
+
+#### F3 (documented — highest impact) — RLS hides steward records from the controller's own DB role
+
+**This is the root cause of the "steward fleet has been empty since the §2
+migration" mystery recorded in §3 and §4.** The rows were never missing; they are
+invisible.
+
+`pkg/storage/providers/database/migrations/004_add_sessions_stewards_commands.sql`
+states its intent in its own header comment — *"permissive when app.current_tenant
+is not set (empty string)"* — and implements it as:
+
+```sql
+CREATE POLICY rls_read ON steward_records FOR SELECT USING (
+    current_setting('app.current_tenant', true) = ''
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+```
+
+`current_setting(..., true)` returns **NULL**, not `''`, when the setting was
+never applied in the session. `NULL = ''` is NULL, `tenant_id = NULL` is NULL,
+`NULL OR NULL` is NULL — so the row is filtered out and the intended "unscoped
+caller sees everything" branch **never fires**. Proven directly against the live
+database:
+
+| Session state | `select count(*) from steward_records` as role `cfgms` |
+|---|---|
+| `app.current_tenant` unset | **0** |
+| `set app.current_tenant = ''` | 2 |
+| `set app.current_tenant = 'infra-hyperv'` | 2 |
+| (as superuser, RLS bypassed) | 2 |
+
+and `select current_setting('app.current_tenant', true) is null` → `true`.
+
+Consequences observed live: writes succeed (registration sets the tenant), then
+any read without tenant context sees nothing. After a controller restart the
+ControlChannel approval check — which has no tenant context — cannot find *any*
+steward, so **every** steward is denied admission and the fleet cannot recover.
+The same policy shape is applied to `sessions`, `steward_records`,
+`command_records` and `command_transitions`.
+
+*Recommended follow-up: wrap the unscoped branch in `coalesce(...)`, e.g.*
+`coalesce(current_setting('app.current_tenant', true), '') = ''`*, in a new
+migration across all four tables.* Deliberately **not** fixed inside this story:
+it is a tenant-isolation control, and changing RLS semantics warrants its own
+story and security review rather than riding along in a failover-continuity PR.
+
+#### F4 (documented) — the fleet view is node-local, not cluster-wide
+
+`GET /api/v1/stewards` (unfiltered) is served from
+`ControllerService.GetAllStewards()`
+(`features/controller/service/controller_service.go`), an in-process map — not
+the shared store. Measured: a steward actively heartbeating through
+`cfgms-ctrl-01` was reported by that node and **not** by the other two, including
+the leader, while its row sat in shared Postgres the whole time. The e2e suite
+records this per-node split as a log line rather than an assertion, so it does not
+block on a known gap.
+
+So while a steward's *connection* survives failover cleanly, the new leader has
+no knowledge of it. *Recommended follow-up: read the fleet list from the shared
+`StewardStore` (which requires F3 first, or the read returns nothing).*
+
+#### F5 (FIXED HERE) — a missing steward record was reported as an approval-service outage
+
+`stewardStoreApprovalChecker.IsApproved`
+(`pkg/controlplane/providers/grpc/approval.go`) wrapped every store error,
+including `business.ErrStewardNotFound`, so ControlChannel answered
+`codes.Unavailable "steward approval service unavailable"` for a steward that
+simply has no record. `Unavailable` reads as transient, so the steward retried
+forever, and the controller logged the miss at ERROR on every attempt — **78 MB
+of controller log and 63 MB of steward log in a single day** across three such
+stewards on this cluster.
+
+A steward with no record is definitively *not approved* — a determinate answer,
+not a dependency failure. Now returns `(false, nil)`, which is equally
+fail-closed (admission still refused) but surfaces as `PermissionDenied`.
+Verified live: the message changed to `PermissionDenied: steward reconnect not
+approved`.
+
+**This does not stop the retry loop**, which is a separate defect, below.
+
+#### F6 (documented) — rejected stewards reconnect at ~1 Hz forever; backoff never grows
+
+`Provider.reconnectLoop` (`pkg/controlplane/providers/grpc/provider.go`)
+constructs a **fresh** backoff on every entry, and `dialAndOpenStream()` succeeds
+for a stream the server rejects — the rejection only surfaces on the first
+`Recv()`. So the client logs "reconnected", resets/rebuilds its backoff, is
+rejected, and re-enters the loop at the initial interval. Observed live at
+`attempt 1, backoff 1s` indefinitely. This is what turned F5's misclassification
+into a log flood, and it will do the same for any persistently-rejected steward
+regardless of status code.
+
+*Recommended follow-up: persist backoff across reconnect cycles, and/or treat a
+stream rejected before its first message as a failed attempt rather than a
+successful connect.* Not fixed here: it changes reconnect timing in the shared
+control-plane client, which is the very thing this story measures.
+
+### Cluster-restart hazard found while running this story (F1 of §4's concern, new)
+
+Restarting the cluster no longer works unattended, and this bit twice during this
+story. Since Issue #3284 the Raft log is persisted to `<data>/raft-log/raft.db`,
+and `NewRaftConsensus` (`pkg/ha/raft_consensus.go`) takes `raft.RestartNode`
+whenever that file has data. But nothing restores the **ConfState**, and
+`config.Applied` is set to the recovered applied index, so the original
+`ConfChange` entries are never re-delivered either. Every node comes back with an
+empty voter set and no election ever happens:
+
+```
+newRaft 9fe7091e2a553a03 [peers: [], term: 3, commit: 8, applied: 8, ...]
+newRaft 9fe70c1e2a553f1c [peers: [], term: 2, commit: 7, applied: 7, ...]
+```
+
+`GET /api/v1/raft/status` then reports `"leader":0` forever, with terms diverging
+between nodes. Reproduced deterministically across two full stop/start cycles of
+all three nodes. Note the WAL paths differ per node
+(`/var/lib/cfgms/data/raft-log/` on `cfgms-ctrl-01`, `/var/lib/cfgms/raft-log/`
+on the other two), and `raft.db.wiped-3095` files on all three show story #3095
+hit this too.
+
+**Recovery** (also now built into `haRestoreQuorum` so the e2e suites leave the
+lab healthy):
+
+```bash
+# on all three nodes
+sudo systemctl stop cfgms-controller.service
+sudo find /var/lib/cfgms -name raft.db -delete
+# then start all three together
+sudo systemctl start cfgms-controller.service
+```
+
+Quorum re-forms in seconds via the `StartNode` bootstrap path. *Recommended
+follow-up: persist and restore the ConfState (or re-apply the bootstrap
+ConfChanges on restart) so a cluster can restart without discarding its log.*
+This supersedes the "Raft state is entirely in-memory" note in §3/§4 — that was
+true before #3284 and is why those stories' stop-all/start-all drills worked.

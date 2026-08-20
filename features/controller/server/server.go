@@ -1328,11 +1328,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Signing rotation service wired to HTTP API server (Issue #1816)")
 	}
 
-	// Issue #1696: Wire durable pending registration store for status poll endpoint.
-	if pendingStore := storageManager.GetPendingRegistrationStore(); pendingStore != nil {
-		httpServer.SetPendingStore(pendingStore)
-		logger.Info("Durable pending registration store wired to HTTP API server (Issue #1696)")
-	}
+	// Wire the registration admission stores the REST handlers read from.
+	wireRegistrationAPIStores(httpServer,
+		storageManager.GetPendingRegistrationStore(),
+		storageManager.GetIPTrustStore(),
+		logger)
 
 	// Issue #1697: Create background expiry jobs.
 	// IPTrustExpiryJob is only wired when the IPTrustStore is available (database provider).

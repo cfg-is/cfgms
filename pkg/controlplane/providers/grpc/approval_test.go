@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -201,5 +202,40 @@ func TestStewardStoreApprovalChecker_StoreFailureFailsClosed(t *testing.T) {
 	checker := NewStewardStoreApprovalChecker(&approvalTestStore{err: errors.New("database unavailable")})
 	ok, err := checker.IsApproved(t.Context(), "steward")
 	require.ErrorContains(t, err, "database unavailable")
+	assert.False(t, ok)
+}
+
+// TestStewardStoreApprovalChecker_NotFoundIsDeniedNotError is the regression
+// guard for the story #3096 finding: a steward whose record does not exist is
+// definitively NOT approved, which is a determinate answer, not an approval
+// *service* failure. Returning an error here made ControlChannel answer
+// codes.Unavailable ("steward approval service unavailable") instead of
+// codes.PermissionDenied — a retryable status, so a steward still holding a
+// valid mTLS cert whose record had been lost reconnected ~once a second forever
+// and the controller logged the miss at ERROR every time (78 MB of controller
+// log in one day across three such stewards on the real cfg-lab cluster).
+//
+// The denial must stay fail-closed — admission is still refused — so this
+// asserts BOTH halves: not approved, and no error.
+func TestStewardStoreApprovalChecker_NotFoundIsDeniedNotError(t *testing.T) {
+	checker := NewStewardStoreApprovalChecker(&approvalTestStore{err: business.ErrStewardNotFound})
+
+	ok, err := checker.IsApproved(t.Context(), "steward-with-no-record")
+
+	require.NoError(t, err, "an absent record is a determinate deny, not a service failure")
+	assert.False(t, ok, "an absent record must still be denied (fail-closed)")
+}
+
+// TestStewardStoreApprovalChecker_WrappedNotFoundIsDenied proves the check uses
+// errors.Is rather than an equality comparison, so a store that annotates its
+// not-found sentinel on the way out still yields a determinate deny instead of
+// falling through to the Unavailable path.
+func TestStewardStoreApprovalChecker_WrappedNotFoundIsDenied(t *testing.T) {
+	wrapped := fmt.Errorf("query steward %q: %w", "steward-x", business.ErrStewardNotFound)
+	checker := NewStewardStoreApprovalChecker(&approvalTestStore{err: wrapped})
+
+	ok, err := checker.IsApproved(t.Context(), "steward-x")
+
+	require.NoError(t, err)
 	assert.False(t, ok)
 }
