@@ -9,10 +9,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
@@ -210,4 +213,136 @@ func TestNewRaftTransport_WithoutClientCert_EmptyTLSCertificates(t *testing.T) {
 		assert.Empty(t, httpT.TLSClientConfig.Certificates,
 			"TLSClientConfig.Certificates must be empty when no client cert is provided")
 	}
+}
+
+// callHandleStatus calls transport.HandleStatus and decodes the response body into
+// raftStatusResponse. Fails the test if the response is not 200 or cannot be decoded.
+func callHandleStatus(t *testing.T, transport *raftTransport) raftStatusResponse {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/raft/status", nil)
+	w := httptest.NewRecorder()
+	transport.HandleStatus(w, req)
+	require.Equal(t, 200, w.Code, "HandleStatus must return 200")
+
+	var resp raftStatusResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp),
+		"HandleStatus response must decode into raftStatusResponse")
+	return resp
+}
+
+// TestHandleStatus_BothSurfacesAgreeOnIsLeader is the REQUIRED test asserting that
+// HandleStatus (the raft status surface, /api/v1/raft/status) and Manager.HasLeadership()
+// (the ha status surface, /api/v1/ha/status) agree on is_leader for all three
+// leadership states mandated by Issue #3435's acceptance criteria:
+//
+//  1. Non-leader: both surfaces report is_leader=false.
+//  2. Raft leader with valid lease: both report is_leader=true.
+//  3. Raft leader with expired lease: both report is_leader=false (raft_is_leader=true).
+//
+// The ha status surface is represented by rc.HasLeadership() — the same method
+// Manager.HasLeadership() delegates to in ClusterMode — so both surfaces draw from
+// the identical source of truth and can only diverge if one of them is wired
+// incorrectly. States 2 and 3 additionally confirm that is_leader tracks HasLeadership()
+// (not IsLeader()/IsRaftLeader()) by demonstrating the split when lease expires.
+func TestHandleStatus_BothSurfacesAgreeOnIsLeader(t *testing.T) {
+	t.Run("non-leader", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// nil peers → RestartNode with empty voter config → node stays follower,
+		// cannot self-elect, IsRaftLeader() = false and HasLeadership() = false.
+		nodeInfo := &NodeInfo{ID: "status-non-leader", State: NodeStateHealthy, Role: NodeRoleFollower}
+		rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
+		require.NoError(t, err)
+		defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+		transport := newRaftTransport(1, "localhost:8080", rc, nil, nil, nil, nil, logging.GetLogger())
+
+		resp := callHandleStatus(t, transport)
+
+		// Both surfaces: HandleStatus.is_leader and rc.HasLeadership() must be false.
+		assert.False(t, resp.IsLeader,
+			"is_leader must be false in the non-leader state (HasLeadership() = false)")
+		assert.False(t, resp.RaftIsLeader,
+			"raft_is_leader must be false in the non-leader state (IsRaftLeader() = false)")
+		assert.Equal(t, rc.HasLeadership(), resp.IsLeader,
+			"HandleStatus.is_leader must equal rc.HasLeadership() (ha status surface)")
+		assert.Equal(t, rc.IsRaftLeader(), resp.RaftIsLeader,
+			"HandleStatus.raft_is_leader must equal rc.IsRaftLeader()")
+	})
+
+	t.Run("raft-leader-with-valid-lease", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		cfg := FastElectionConfig()
+		nodeInfo := &NodeInfo{ID: "status-leader-lease", State: NodeStateHealthy, Role: NodeRoleFollower}
+		// One peer (self) → StartNode bootstraps a single-node cluster that can elect itself.
+		peers := []raft.Peer{{ID: 1}}
+		rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
+		require.NoError(t, err)
+		defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+		// Wait for both Raft leadership and lease establishment.
+		require.Eventually(t, rc.HasLeadership,
+			5*time.Second, 5*time.Millisecond,
+			"single-node cluster must elect itself leader and establish the lease")
+
+		transport := newRaftTransport(1, "localhost:8080", rc, nil, nil, nil, nil, logging.GetLogger())
+
+		resp := callHandleStatus(t, transport)
+
+		// Both surfaces must report true while the lease is valid.
+		assert.True(t, resp.IsLeader,
+			"is_leader must be true when HasLeadership() is true (lease valid)")
+		assert.True(t, resp.RaftIsLeader,
+			"raft_is_leader must be true when IsRaftLeader() is true")
+		assert.Equal(t, rc.HasLeadership(), resp.IsLeader,
+			"HandleStatus.is_leader must equal rc.HasLeadership() (ha status surface)")
+		assert.Equal(t, rc.IsRaftLeader(), resp.RaftIsLeader,
+			"HandleStatus.raft_is_leader must equal rc.IsRaftLeader()")
+	})
+
+	t.Run("raft-leader-with-expired-lease", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		cfg := FastElectionConfig()
+		nodeInfo := &NodeInfo{ID: "status-expired-lease", State: NodeStateHealthy, Role: NodeRoleFollower}
+		peers := []raft.Peer{{ID: 1}}
+		rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
+		require.NoError(t, err)
+		defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+		require.Eventually(t, rc.HasLeadership,
+			5*time.Second, 5*time.Millisecond,
+			"single-node cluster must elect itself leader and establish the lease")
+
+		// Expire the lease by backdating leaseLastAck past leaseDuration.
+		// This reproduces what happens when heartbeat responses stop arriving.
+		leaseDuration := time.Duration(float64(cfg.ElectionTimeout) * 0.8)
+		rc.mu.Lock()
+		rc.leaseLastAck = time.Now().Add(-(leaseDuration + time.Millisecond))
+		rc.mu.Unlock()
+
+		// HasLeadership must now be false; IsRaftLeader must remain true.
+		require.False(t, rc.HasLeadership(), "HasLeadership must be false after lease expiry")
+		require.True(t, rc.IsRaftLeader(), "IsRaftLeader must remain true (Raft protocol still leader)")
+
+		transport := newRaftTransport(1, "localhost:8080", rc, nil, nil, nil, nil, logging.GetLogger())
+
+		resp := callHandleStatus(t, transport)
+
+		// is_leader follows HasLeadership (false), raft_is_leader follows IsRaftLeader (true).
+		// This is the key discriminator: if is_leader were wired to IsRaftLeader or IsLeader,
+		// it would be true here — proving the correct primitive is used.
+		assert.False(t, resp.IsLeader,
+			"is_leader must be false when lease has expired (HasLeadership() = false)")
+		assert.True(t, resp.RaftIsLeader,
+			"raft_is_leader must be true while Raft protocol still sees this node as leader")
+		assert.Equal(t, rc.HasLeadership(), resp.IsLeader,
+			"HandleStatus.is_leader must equal rc.HasLeadership() (ha status surface)")
+		assert.Equal(t, rc.IsRaftLeader(), resp.RaftIsLeader,
+			"HandleStatus.raft_is_leader must equal rc.IsRaftLeader()")
+	})
 }
