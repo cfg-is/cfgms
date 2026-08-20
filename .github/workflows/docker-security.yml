@@ -32,7 +32,7 @@ env:
   GO_VERSION: '1.26.6'
   REGISTRY: ghcr.io
   IMAGE_PREFIX: cfg-is/cfgms
-  TRIVY_VERSION: 'v0.73.0'
+  TRIVY_VERSION: 'v0.74.0'
 
 permissions: {}
 
@@ -54,7 +54,7 @@ jobs:
         persist-credentials: false
 
     - name: Install Trivy (cached)
-      # zizmor: ignore[unpinned-tools] — TRIVY_VERSION is pinned to a specific clean release (v0.73.0, post-CVE-2026-33634); the action itself is SHA-pinned
+      # zizmor: ignore[unpinned-tools] — TRIVY_VERSION is pinned to a specific clean release (v0.74.0, post-CVE-2026-33634); the action itself is SHA-pinned
       uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1 — pinned to SHA per CVE-2026-33634
       with:
         version: ${{ env.TRIVY_VERSION }}
@@ -144,7 +144,7 @@ jobs:
         persist-credentials: false
 
     - name: Install Trivy (cached)
-      # zizmor: ignore[unpinned-tools] — TRIVY_VERSION is pinned to a specific clean release (v0.73.0, post-CVE-2026-33634); the action itself is SHA-pinned
+      # zizmor: ignore[unpinned-tools] — TRIVY_VERSION is pinned to a specific clean release (v0.74.0, post-CVE-2026-33634); the action itself is SHA-pinned
       uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1 — pinned to SHA per CVE-2026-33634
       with:
         version: ${{ env.TRIVY_VERSION }}

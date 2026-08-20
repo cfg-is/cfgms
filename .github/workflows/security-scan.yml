@@ -105,12 +105,12 @@ jobs:
 
     - name: Install Trivy
       env:
-        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.73.0 is
+        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.74.0 is
         # the post-incident clean release. The install helper verifies the
         # archive SHA-256 against this pinned value before extraction. See
         # docs/runbooks/trivy-rollback.md for rollback procedure.
-        TRIVY_VERSION: 'v0.73.0'
-        TRIVY_SHA256: '2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b'
+        TRIVY_VERSION: 'v0.74.0'
+        TRIVY_SHA256: '2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a'
       run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Run Trivy Scan
@@ -460,10 +460,10 @@ jobs:
         make install-nancy
         
         # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
-        # v0.73.0 is the post-incident clean release. The install helper
+        # v0.74.0 is the post-incident clean release. The install helper
         # verifies the archive SHA-256 against the pinned value before
         # extraction. See docs/runbooks/trivy-rollback.md for rollback.
-        sudo .github/scripts/install-trivy.sh 'v0.73.0' '2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b'
+        sudo .github/scripts/install-trivy.sh 'v0.74.0' '2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a'
 
         # Install gosec and staticcheck
         go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
