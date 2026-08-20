@@ -808,7 +808,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	// CAS reload: re-read from the durable store (not cache) to detect any
 	// admin-mediated mutations that occurred between begin and finish.
 	// Combined with LoadAndDelete above, this closes the TOCTOU window.
-	freshAcct, freshErr := s.loadWebAccountFromStore(r.Context(), acct.Username)
+	freshAcct, freshErr := s.loadWebAccountFromStore(r.Context(), acct.Username, webAccountStorageTenant(acct.TenantID))
 	if freshErr != nil {
 		s.logger.Error("CAS reload failed for enrollment finish",
 			"account_id", logging.SanitizeLogValue(acct.ID),
@@ -936,7 +936,7 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 	// credentials.
 	s.credentialMu.Lock()
 
-	freshAcct, freshErr := s.loadWebAccountFromStore(r.Context(), acct.Username)
+	freshAcct, freshErr := s.loadWebAccountFromStore(r.Context(), acct.Username, webAccountStorageTenant(acct.TenantID))
 	if freshErr != nil {
 		s.credentialMu.Unlock()
 		s.logger.Error("Failed to reload web account for credential revocation",

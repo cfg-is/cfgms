@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2362,7 +2363,7 @@ func TestWebAccounts_CrossNode_DisabledStatusPropagates(t *testing.T) {
 	// expired (or never covered this particular key). The bug was that the old code returned
 	// that stale map entry without ever touching the store; the fix re-checks the store on
 	// every cache hit, and because node B's SOPS cache is cold, it reads fresh from disk.
-	acctFromA, err := nodeA.loadWebAccountFromStore(context.Background(), username)
+	acctFromA, err := nodeA.loadWebAccountFromStore(context.Background(), username, "")
 	require.NoError(t, err)
 	require.NotNil(t, acctFromA, "node A must be able to load the account from the shared store")
 	require.False(t, acctFromA.Disabled, "account must not be disabled before the disable operation")
@@ -2516,4 +2517,138 @@ func TestWebAccounts_GetWebAccountByID_StaleCacheEntryDoesNotResolveToRecreatedA
 	require.NotNil(t, byNewID, "the recreated account must still resolve by its own principal ID")
 	assert.Equal(t, newAcct.ID, byNewID.ID)
 	assert.True(t, byNewID.RootScope)
+}
+
+// listSecretsCall records one ListSecrets round-trip: the filter the caller asked
+// for and the tenants the backend actually returned records for.
+type listSecretsCall struct {
+	filter        *secretsif.SecretFilter
+	resultTenants []string
+}
+
+// listSecretsCapture is a secretsif.SecretStore wrapper that records each ListSecrets
+// call and its results so tests can assert tenant-scoped dispatch — and the tenant
+// footprint of what the backend materialised — without depending on any concrete
+// provider implementation. It embeds the interface, so it is a real SecretStore
+// delegating to the real store, not a mock.
+type listSecretsCapture struct {
+	secretsif.SecretStore
+	mu    sync.Mutex
+	calls []listSecretsCall
+}
+
+func (c *listSecretsCapture) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	metas, err := c.SecretStore.ListSecrets(ctx, filter)
+	call := listSecretsCall{
+		filter: &secretsif.SecretFilter{
+			TenantID: filter.TenantID,
+			Tags:     append([]string(nil), filter.Tags...),
+			Metadata: filter.Metadata,
+		},
+	}
+	for _, m := range metas {
+		call.resultTenants = append(call.resultTenants, m.TenantID)
+	}
+	c.mu.Lock()
+	c.calls = append(c.calls, call)
+	c.mu.Unlock()
+	return metas, err
+}
+
+// snapshot returns a copy of the recorded calls.
+func (c *listSecretsCapture) snapshot() []listSecretsCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]listSecretsCall, len(c.calls))
+	copy(out, c.calls)
+	return out
+}
+
+// TestGetWebAccountByID_DecryptScopedToTenant is the [REQUIRED TEST] from Issue #3347 AC:
+// resolving one web account must not decrypt secrets from other tenants.
+// It populates the store with accounts across two tenants and asserts that
+// getWebAccountByID on a cache hit calls ListSecrets scoped to the account's tenant
+// (TenantID set), bounding what the backend returns before any decryption occurs.
+// The backend honours filter.TenantID per #3438, so a scoped call = bounded decrypt.
+func TestGetWebAccountByID_DecryptScopedToTenant(t *testing.T) {
+	server := setupTestServer(t)
+	admin := testAdminPrincipal()
+
+	const tenantA = "msp-a"
+	const tenantB = "msp-b"
+
+	// Populate store: 3 accounts in tenantA, 4 in tenantB.
+	for _, username := range []string{"scope-a1", "scope-a2", "scope-a3"} {
+		rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: tenantA})
+		require.Equal(t, http.StatusCreated, rec.Code, "create %s: %s", username, rec.Body.String())
+	}
+	for _, username := range []string{"scope-b1", "scope-b2", "scope-b3", "scope-b4"} {
+		rec := postWebAccount(t, server, admin, WebAccountRequest{Username: username, TenantID: tenantB})
+		require.Equal(t, http.StatusCreated, rec.Code, "create %s: %s", username, rec.Body.String())
+	}
+
+	// Retrieve the cached entry to get the principal ID for the lookup target.
+	server.mu.RLock()
+	target := server.webAccounts["scope-a1"]
+	server.mu.RUnlock()
+	require.NotNil(t, target, "scope-a1 must be cached after creation")
+	targetID := target.ID
+
+	// Wrap the secret store at the secretsif.SecretStore interface level to capture
+	// the filters used by each ListSecrets call — no concrete provider import needed.
+	capture := &listSecretsCapture{SecretStore: server.secretStore}
+	server.secretStore = capture
+	t.Cleanup(func() { server.secretStore = capture.SecretStore })
+
+	// getWebAccountByID takes the cache-hit path: cached entry exists, so it calls
+	// loadWebAccountFromStore(ctx, cached.Username, webAccountStorageTenant(cached.TenantID))
+	// which issues one ListSecrets scoped to tenantA.
+	acct, err := server.getWebAccountByID(context.Background(), targetID)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Equal(t, tenantA, acct.TenantID)
+
+	calls := capture.snapshot()
+
+	require.GreaterOrEqual(t, len(calls), 1, "cache-hit path must trigger at least one ListSecrets call")
+	first := calls[0]
+	assert.Equal(t, tenantA, first.filter.TenantID,
+		"first ListSecrets call must be scoped to tenantA, not left unscoped across all tenants")
+	assert.Contains(t, first.filter.Tags, "web-account",
+		"ListSecrets call must carry the web-account type tag to further limit the query")
+
+	// Every call made while resolving a tenantA principal must be tenant-scoped.
+	// An unscoped call is what makes the backend walk (and decrypt) other tenants'
+	// records, even though the caller's metadata filter discards them afterwards.
+	for i, call := range calls {
+		assert.Equal(t, tenantA, call.filter.TenantID,
+			"ListSecrets call %d was issued unscoped while resolving a tenantA principal", i)
+	}
+
+	// Establish the premise the assertions above rely on: that filter.TenantID actually
+	// bounds what the backend materialises (Issue #3438). Without this, "we passed a
+	// tenant filter" would prove nothing about decrypt scope. Compare a tenantA-scoped
+	// listing against an unscoped one over the same corpus.
+	base := capture.SecretStore
+	scoped, err := base.ListSecrets(context.Background(), &secretsif.SecretFilter{
+		TenantID: tenantA,
+		Tags:     []string{"web-account"},
+		Metadata: map[string]string{secretsif.MetadataKeySecretType: webAccountSecretType},
+	})
+	require.NoError(t, err)
+	unscoped, err := base.ListSecrets(context.Background(), &secretsif.SecretFilter{
+		Tags:     []string{"web-account"},
+		Metadata: map[string]string{secretsif.MetadataKeySecretType: webAccountSecretType},
+	})
+	require.NoError(t, err)
+
+	for _, m := range scoped {
+		assert.Equal(t, tenantA, m.TenantID,
+			"tenant-scoped listing returned a record for tenant %q; filter.TenantID does not bound the backend",
+			m.TenantID)
+	}
+	assert.Len(t, scoped, 3, "tenantA has 3 web accounts; a scoped listing must reach only those")
+	assert.Len(t, unscoped, 7,
+		"an unscoped listing reaches all 7 accounts across both tenants — this is the "+
+			"cross-tenant decrypt surface that scoping the lookup avoids")
 }

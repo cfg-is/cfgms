@@ -218,14 +218,14 @@ func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccoun
 	cached := s.webAccounts[username]
 	s.mu.RUnlock()
 	if cached == nil {
-		return s.loadWebAccountFromStore(ctx, username)
+		return s.loadWebAccountFromStore(ctx, username, "")
 	}
 	// Issue #3311: Re-verify from the durable store on every cache hit so a status
 	// change written by another controller node propagates on this node's very next
 	// request. If the store returns nil (no matching record — e.g. account injected
 	// into cache for tests but not persisted, or concurrently deleted), fall back to
 	// the cached value so behaviour is equivalent to the pre-fix cache-hit path.
-	fresh, err := s.loadWebAccountFromStore(ctx, username)
+	fresh, err := s.loadWebAccountFromStore(ctx, username, "")
 	if err != nil {
 		return nil, err
 	}
@@ -264,14 +264,31 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 
 	if cached != nil {
 		// Issue #3311: Re-verify from the durable store on every cache hit.
-		fresh, err := s.loadWebAccountFromStore(ctx, cached.Username)
+		// Issue #3347: Scope the first lookup to the cached account's tenant so only
+		// that tenant's secrets are decrypted (the hot path).
+		fresh, err := s.loadWebAccountFromStore(ctx, cached.Username, webAccountStorageTenant(cached.TenantID))
 		if err != nil {
 			return nil, err
 		}
 		if fresh == nil {
-			// Store has no entry; return the cached account (e.g. injected via
-			// cacheWebAccount for tests, or concurrently deleted from the store).
-			return cached, nil
+			// Scoped lookup returned nil. Two causes are possible:
+			//   a) No backing store record (account injected via cacheWebAccount for tests,
+			//      or concurrently deleted): return the cached value as before.
+			//   b) Account recreated under a different tenant: the stale cache entry must
+			//      NOT be returned — returning it would hand an orphaned session the old
+			//      principal's permissions and tenant scope.
+			// Distinguish by a follow-up unscoped reload. If the unscoped lookup also
+			// returns nil (case a), return the cached account. If it finds a record, fall
+			// through to the identity check below (case b).
+			fresh, err = s.loadWebAccountFromStore(ctx, cached.Username, "")
+			if err != nil {
+				return nil, err
+			}
+			if fresh == nil {
+				// Truly absent: return the cached account (e.g. test-injected or deleted).
+				return cached, nil
+			}
+			// fresh != nil means the account moved to a different tenant; identity check follows.
 		}
 		if fresh.ID == principalID {
 			return fresh, nil
@@ -291,6 +308,7 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 		return nil, nil
 	}
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Tags: []string{"web-account"},
 		Metadata: map[string]string{
 			secretsif.MetadataKeySecretType: webAccountSecretType,
 			"id":                            principalID,
@@ -306,7 +324,7 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 	if username == "" {
 		return nil, fmt.Errorf("web account for principal ID is missing username metadata")
 	}
-	return s.loadWebAccountFromStore(ctx, username)
+	return s.loadWebAccountFromStore(ctx, username, metas[0].TenantID)
 }
 
 // loadWebAccountFromStore reloads an account record from the central secret store
@@ -320,11 +338,13 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 // single-slash key splitting would produce the wrong TenantID. ListSecrets also
 // bypasses the SOPS in-process cache, so the result always reflects the latest
 // on-disk state — which is the property required for cross-node propagation (Issue #3311).
-func (s *Server) loadWebAccountFromStore(ctx context.Context, username string) (*webAccount, error) {
+func (s *Server) loadWebAccountFromStore(ctx context.Context, username, tenantHint string) (*webAccount, error) {
 	if s.secretStore == nil {
 		return nil, nil
 	}
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		TenantID: tenantHint,
+		Tags:     []string{"web-account"},
 		Metadata: map[string]string{
 			secretsif.MetadataKeySecretType: webAccountSecretType,
 			"username":                      username,
@@ -496,7 +516,7 @@ func (s *Server) getWebAccountByEnrollmentToken(ctx context.Context, rawToken st
 	if username == "" {
 		return nil, fmt.Errorf("account matched by enrollment token is missing username metadata")
 	}
-	return s.loadWebAccountFromStore(ctx, username)
+	return s.loadWebAccountFromStore(ctx, username, "")
 }
 
 // --- enrollment magic link (Issue #2974) ---
