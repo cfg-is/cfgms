@@ -373,5 +373,16 @@ tenant check on the full-sync path was removed.
 controller through `CollectModuleFragments`, which emits fragments for every
 monitored resourceID — not only `cluster:*` — since Issue #3333. The full-sync
 projection above therefore covers the same resource set the flat attribute map
-did. `PublishDNAUpdate`'s control-plane delta carries the same data between full
-syncs and is unaffected by this amendment.
+did.
+
+**Amendment 4 (Issue #3330): fragment-based control-plane delta.** `PublishDNAUpdate`'s
+lightweight change notification was re-homed from a flat `map[string]string` diff
+(attribute delta) to a fragment-based delta. The skip-when-unchanged gate now compares
+`[]*commonpb.Fragment` by `(FragmentId, FragmentHash)` pairs rather than flat key-value
+equality. When any fragment is added, removed, or has a changed hash, the steward sends
+**all current fragments** (not only changed ones) serialised as a protojson JSON array
+string in `Details["dna"]`; `handleDNAEvent` on the controller decodes them via
+`extractFragmentsFromDetails` and derives `DNA.Attributes` from `FlattenDNAFragments`
+for legacy consumers. The integrity check (`checkDNAIntegrityWithTable`) is satisfied
+because the full current set — which always includes `host:os` (carrying `hostname` and
+`os`) — is transmitted on every delta publish.

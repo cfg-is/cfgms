@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 
@@ -259,13 +260,14 @@ type TransportClient struct {
 
 	// DNA state for hash-based sync (Issue #418).
 	// dnaMu guards currentDNAHash, currentDNAAttrs, lastPublishedDNA,
-	// currentDNAFragments, and currentDNAAggregateRoot.
+	// currentDNAFragments, currentDNAAggregateRoot, and lastPublishedFragments.
 	dnaMu                   sync.RWMutex
 	currentDNAHash          string               // SHA-256 hash of most-recently collected DNA (Issue #2521)
 	currentDNAAttrs         map[string]string    // full enriched snapshot of most-recently collected DNA (Issue #2521)
-	lastPublishedDNA        map[string]string    // full DNA from the last PublishDNAUpdate call
+	lastPublishedDNA        map[string]string    // full DNA from the last PublishDNAUpdate call (used as config-apply fallback)
 	currentDNAFragments     []*commonpb.Fragment // fragments from last fragment-collection (Issue #2906)
 	currentDNAAggregateRoot string               // AggregateRoot of currentDNAFragments (Issue #2906)
+	lastPublishedFragments  []*commonpb.Fragment // fragments from the last successful PublishDNAUpdate (Issue #3330)
 
 	// driftDiffs buffers drift-diff records accumulated since the last DNA sync
 	// (Issue #3373). The drift handler registered in InitializeConfigExecutor appends;
@@ -1620,19 +1622,29 @@ func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[str
 
 	// Always update local DNA state first so the hash is available for heartbeats
 	// even when the control plane is temporarily unavailable. currentDNAAttrs and
-	// currentDNAHash track the freshest collected state; lastPublishedDNA tracks
-	// what has been sent to the controller for delta-compression. (Issue #2521)
+	// currentDNAHash track the freshest collected state; lastPublishedDNA is kept
+	// for the config-apply fallback at syncConfigNow. Fragment delta drives the
+	// periodic publish decision; lastPublishedFragments tracks what was last sent.
+	// A non-empty configHash means config was applied — that always triggers a
+	// publish regardless of fragment delta. (Issue #3330)
 	c.dnaMu.Lock()
-	delta := computeDelta(c.lastPublishedDNA, dnaAttrs)
+	currentFrags := make([]*commonpb.Fragment, len(c.currentDNAFragments))
+	copy(currentFrags, c.currentDNAFragments)
+	fragDelta := computeFragmentDelta(c.lastPublishedFragments, currentFrags)
 	newHash := dna.ComputeHash(dnaAttrs)
 	c.lastPublishedDNA = copyStringMap(dnaAttrs)
 	c.currentDNAAttrs = copyStringMap(dnaAttrs)
 	c.currentDNAHash = newHash
+	if len(fragDelta) > 0 {
+		c.lastPublishedFragments = currentFrags
+	}
 	c.dnaMu.Unlock()
 
-	// Skip publish when nothing changed — no need to validate the connection.
-	if len(delta) == 0 {
-		c.logger.Debug("No DNA changes detected, skipping control plane publish")
+	// Skip periodic-refresh publishes when no fragment changed.
+	// Config-apply publishes (configHash != "") always proceed so the controller
+	// records the applied config hash even when DNA fragments are stable.
+	if len(fragDelta) == 0 && configHash == "" {
+		c.logger.Debug("No DNA fragment changes detected, skipping control plane publish")
 		return nil
 	}
 
@@ -1645,29 +1657,41 @@ func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[str
 		return fmt.Errorf("not registered")
 	}
 
+	details := map[string]interface{}{
+		"dna_hash":         newHash,
+		"config_hash":      configHash,
+		"sync_fingerprint": syncFingerprint,
+		"is_delta":         true,
+		"total_count":      len(currentFrags),
+	}
+
+	// Only include the fragment payload when there are fragments to send.
+	// Config-apply events with no current fragments omit "dna" so the controller
+	// does not process an empty fragment set. (Issue #3330)
+	if len(currentFrags) > 0 {
+		dnaPayload, err := marshalFragmentsToJSONString(currentFrags)
+		if err != nil {
+			return fmt.Errorf("failed to marshal fragment payload: %w", err)
+		}
+		details["dna"] = dnaPayload
+	}
+
 	event := &cpTypes.Event{
 		ID:        fmt.Sprintf("evt_dna_%d", time.Now().UnixNano()),
 		Type:      cpTypes.EventDNAChanged,
 		StewardID: stewardID,
 		TenantID:  tenantID,
 		Timestamp: time.Now(),
-		Details: map[string]interface{}{
-			"dna":              delta, // delta only — not full DNA
-			"dna_hash":         newHash,
-			"config_hash":      configHash,
-			"sync_fingerprint": syncFingerprint,
-			"is_delta":         true,
-			"total_count":      len(dnaAttrs),
-		},
+		Details:   details,
 	}
 
 	if err := c.publishEventWithQueue(ctx, event); err != nil {
-		return fmt.Errorf("failed to publish DNA delta: %w", err)
+		return fmt.Errorf("failed to publish DNA fragment update: %w", err)
 	}
 
-	c.logger.Info("Published DNA delta",
-		"delta_count", len(delta),
-		"total_count", len(dnaAttrs),
+	c.logger.Info("Published DNA fragment update",
+		"changed_count", len(fragDelta),
+		"total_count", len(currentFrags),
 		"dna_hash", newHash)
 	return nil
 }
@@ -2146,6 +2170,12 @@ func (c *TransportClient) runDNARefreshTick(ctx context.Context, collector DNACo
 	if len(attrs) == 0 && len(frags) == 0 {
 		return
 	}
+	// Update currentDNAFragments BEFORE PublishDNAUpdate so the fragment delta
+	// computed inside PublishDNAUpdate reflects this tick's collected state, not
+	// the previous tick's. (Issue #3330)
+	if len(frags) > 0 {
+		c.setCurrentDNAFragments(frags)
+	}
 	if len(attrs) > 0 {
 		// Always refresh the current snapshot so heartbeats carry a truthful hash
 		// even when no delta is published. (Issue #2521)
@@ -2153,9 +2183,6 @@ func (c *TransportClient) runDNARefreshTick(ctx context.Context, collector DNACo
 		if err := c.PublishDNAUpdate(ctx, attrs, "", ""); err != nil {
 			c.logger.Warn("DNA refresh publish failed", "error", err)
 		}
-	}
-	if len(frags) > 0 {
-		c.setCurrentDNAFragments(frags)
 	}
 }
 
@@ -2818,28 +2845,66 @@ func (c *TransportClient) startHeartbeat() {
 // DNA sync helpers (Issue #418)
 // ---------------------------------------------------------------------------
 
-// computeDelta returns attributes that changed between oldAttrs and newAttrs.
-// Added or updated keys carry their new value.  Keys present in oldAttrs but
-// absent from newAttrs (deletions) are emitted with an empty-string sentinel so
-// the controller can unset them rather than silently accumulating stale state.
-// When oldAttrs is nil or empty every attribute in newAttrs is returned.
-//
-// The returned map is always an independent copy — mutating it does not affect
-// either input map.
-func computeDelta(oldAttrs, newAttrs map[string]string) map[string]string {
-	delta := make(map[string]string)
-	for k, v := range newAttrs {
-		if oldV, exists := oldAttrs[k]; !exists || oldV != v {
-			delta[k] = v
+// computeFragmentDelta returns fragments from current that differ from old by
+// fragment_id/fragment_hash comparison. A fragment is "changed" when its
+// fragment_id is absent from old, or its fragment_hash differs. Fragments
+// present in old but absent from current are included as sentinel entries
+// carrying only the fragment_id so the controller knows they were removed.
+// Returns nil (empty) when nothing changed — callers check len(delta) > 0.
+// (Issue #3330, replaces computeDelta's flat-map diff for the change-notification path)
+func computeFragmentDelta(old, current []*commonpb.Fragment) []*commonpb.Fragment {
+	oldByID := make(map[string]string, len(old))
+	for _, f := range old {
+		if f != nil {
+			oldByID[f.GetFragmentId()] = f.GetFragmentHash()
 		}
 	}
-	// Emit sentinel (empty string) for keys deleted from newAttrs.
-	for k := range oldAttrs {
-		if _, exists := newAttrs[k]; !exists {
-			delta[k] = ""
+
+	var delta []*commonpb.Fragment
+	seen := make(map[string]bool, len(current))
+	for _, f := range current {
+		if f == nil {
+			continue
+		}
+		seen[f.GetFragmentId()] = true
+		oldHash, existed := oldByID[f.GetFragmentId()]
+		if !existed || oldHash != f.GetFragmentHash() {
+			delta = append(delta, f)
+		}
+	}
+
+	// Sentinel entries for fragments removed from current.
+	for _, f := range old {
+		if f != nil && !seen[f.GetFragmentId()] {
+			delta = append(delta, &commonpb.Fragment{FragmentId: f.GetFragmentId()})
 		}
 	}
 	return delta
+}
+
+// marshalFragmentsToJSONString encodes each fragment with protojson and returns
+// a JSON array string suitable for storage in an event Details value. protojson
+// is used instead of encoding/json because commonpb.Fragment is a proto message
+// and encoding/json mis-handles proto well-known types (timestamps, oneofs,
+// enums-as-numbers). The plain JSON string round-trips safely through the
+// control-plane envelope's encoding/json pass without requiring a byte-envelope.
+// (Issue #3330)
+func marshalFragmentsToJSONString(frags []*commonpb.Fragment) (string, error) {
+	opts := protojson.MarshalOptions{EmitUnpopulated: false}
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i, frag := range frags {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		b, err := opts.Marshal(frag)
+		if err != nil {
+			return "", fmt.Errorf("marshal fragment %q: %w", frag.GetFragmentId(), err)
+		}
+		sb.Write(b)
+	}
+	sb.WriteByte(']')
+	return sb.String(), nil
 }
 
 // paramKeys returns the sorted key names from a command params map.
