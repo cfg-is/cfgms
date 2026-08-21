@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
@@ -2653,6 +2655,7 @@ func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplan
 
 // handleDNAEvent processes DNA change events from stewards.
 // Story #363: Replaces handleDNAUpdate which used direct topic subscription.
+// Issue #3330: re-homed from flat attribute delta to fragment-based payload.
 func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Event) error {
 	s.logger.Info("Received DNA change event",
 		"steward_id", event.StewardID,
@@ -2664,12 +2667,32 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 		LastUpdated: timestamppb.New(event.Timestamp),
 	}
 
-	// Extract attributes from event details
+	// Extract fragment list from event details. The payload is a protojson-encoded
+	// JSON array string produced by the steward's marshalFragmentsToJSONString —
+	// the transport envelope round-trips it as []interface{} via encoding/json, so
+	// we re-marshal to bytes and protojson-unmarshal each element back. (Issue #3330)
 	if details := event.Details; details != nil {
-		if attrs, ok := details["dna"].(map[string]interface{}); ok {
-			dna.Attributes = make(map[string]string, len(attrs))
-			for k, v := range attrs {
-				dna.Attributes[k] = fmt.Sprintf("%v", v)
+		if rawDNA, ok := details["dna"]; ok {
+			frags, fragErr := extractFragmentsFromDetails(rawDNA)
+			if fragErr != nil {
+				s.logger.Warn("Failed to extract fragment list from DNA event; skipping DNA field",
+					"steward_id", event.StewardID,
+					"error", logging.SanitizeLogValue(fragErr.Error()))
+			} else {
+				dna.Fragments = frags
+				// Fragments are the sole DNA payload this path builds (Issue #3330).
+				// The flat attribute map is deliberately NOT rebuilt here: every
+				// controller consumer of this record projects it from the fragments
+				// themselves via service.FlattenDNAFragments (fleet inventory and
+				// attribute filters in features/controller/api, the cluster hostname
+				// lookup in handlers_clusters.go, and the DNA fingerprint below).
+				// AttributeCount is still derived because re-registration change
+				// detection compares it (features/controller/service).
+				attrCount := len(service.FlattenDNAFragments(frags))
+				if attrCount <= math.MaxInt32 {
+					// #nosec G115 -- explicitly bounded above
+					dna.AttributeCount = int32(attrCount)
+				}
 			}
 		}
 		if hash, ok := details["config_hash"].(string); ok {
@@ -2685,7 +2708,7 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 	if err != nil {
 		s.logger.Error("Failed to sync DNA",
 			"steward_id", event.StewardID,
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to sync DNA: %w", err)
 	}
 
@@ -2700,6 +2723,35 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 	}
 
 	return nil
+}
+
+// extractFragmentsFromDetails decodes the "dna" value from a DNA change event's
+// Details map into a []*common.Fragment slice.
+//
+// The steward pre-marshals fragments with protojson into a JSON array string.
+// The control-plane transport envelope's encoding/json pass decodes that string
+// back to []interface{} via stringMapToInterfaceMap, so this function
+// re-marshals the decoded value to bytes and protojson-unmarshals each element.
+// Fragments that fail to unmarshal are skipped rather than failing the whole
+// extraction — a compromised steward must not block a valid fragment set.
+func extractFragmentsFromDetails(raw interface{}) ([]*common.Fragment, error) {
+	payloadBytes, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("re-marshal fragment payload: %w", err)
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal(payloadBytes, &elems); err != nil {
+		return nil, fmt.Errorf("unmarshal fragment array: %w", err)
+	}
+	frags := make([]*common.Fragment, 0, len(elems))
+	for _, elem := range elems {
+		frag := &common.Fragment{}
+		if err := protojson.Unmarshal(elem, frag); err != nil {
+			continue // skip malformed fragments; hostile input must not blank the set
+		}
+		frags = append(frags, frag)
+	}
+	return frags, nil
 }
 
 // handleConfigAppliedEvent processes configuration applied events from stewards.

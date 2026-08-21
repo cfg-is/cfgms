@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
-**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority; 2026-08-15 — [Amendment 4](#amendment-4-2026-08-15--dnatransferattributes-retired-from-the-full-sync-wire-protocol): `DNATransfer.Attributes` retired from the full-sync wire protocol
+**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority; 2026-08-15 — [Amendment 4](#amendment-4-2026-08-15--dnatransferattributes-retired-from-the-full-sync-wire-protocol): `DNATransfer.Attributes` retired from the full-sync wire protocol; 2026-08-21 — [Amendment 5](#amendment-5-2026-08-21--fragment-based-control-plane-delta-issue-3330): fragment-based control-plane delta
 **Issue:** #2901
 **Epic:** #2852 — DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph (ADR-017)
 
@@ -373,5 +373,25 @@ tenant check on the full-sync path was removed.
 controller through `CollectModuleFragments`, which emits fragments for every
 monitored resourceID — not only `cluster:*` — since Issue #3333. The full-sync
 projection above therefore covers the same resource set the flat attribute map
-did. `PublishDNAUpdate`'s control-plane delta carries the same data between full
-syncs and is unaffected by this amendment.
+did.
+
+## Amendment 5 (2026-08-21) — Fragment-based control-plane delta (Issue #3330)
+
+**Status:** Accepted (2026-08-21, Issue #3330)
+
+`PublishDNAUpdate`'s lightweight change notification was re-homed from a flat
+`map[string]string` diff (attribute delta) to a fragment-based delta. The
+skip-when-unchanged gate now compares `[]*commonpb.Fragment` by `(FragmentId,
+FragmentHash)` pairs rather than flat key-value equality. When any fragment is
+added, removed, or has a changed hash, the steward sends **all current
+fragments** (not only changed ones) serialised as a protojson JSON array
+string in `Details["dna"]`; `handleDNAEvent` on the controller decodes them
+via `extractFragmentsFromDetails` and assigns them directly to `DNA.Fragments`.
+It does **not** populate `DNA.Attributes` on this path — only
+`DNA.AttributeCount`, derived from `FlattenDNAFragments` for re-registration
+change detection. Controller consumers that need the flat view (fleet
+inventory, attribute filters, the cluster hostname lookup) project it from
+`DNA.Fragments` themselves via `service.FlattenDNAFragments`. The integrity
+check (`checkDNAIntegrityWithTable`) is satisfied because the full current
+set — which always includes `host:os` (carrying `hostname` and `os`) — is
+transmitted on every delta publish.

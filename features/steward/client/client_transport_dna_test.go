@@ -53,6 +53,7 @@ import (
 type inMemoryDNACollector struct {
 	mu    sync.RWMutex
 	attrs map[string]string
+	frags []*commonpb.Fragment // optional; set at construction for fragment-delta tests
 	err   error
 }
 
@@ -69,13 +70,19 @@ func (s *inMemoryDNACollector) CollectAttributes(_ context.Context) (map[string]
 	return out, nil
 }
 
-// CollectFragments satisfies the DNACollector fragment surface (#2908). This
-// collector is attribute-only by design (see the type comment): the fragment
-// wire path is covered end to end in
-// features/controller/transport/dna_handler_test.go and
-// cmd/steward/dna_adapter_test.go against the real producers.
+// CollectFragments returns the configured fragment slice (Issue #3330). Tests
+// that exercise fragment-delta publishing set frags at construction; attribute-
+// only tests leave it nil so the fragment delta is always empty and publish is
+// suppressed, which accurately reflects production behaviour before #3332 lands.
 func (s *inMemoryDNACollector) CollectFragments(_ context.Context) []*commonpb.Fragment {
-	return nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.frags) == 0 {
+		return nil
+	}
+	out := make([]*commonpb.Fragment, len(s.frags))
+	copy(out, s.frags)
+	return out
 }
 
 func (s *inMemoryDNACollector) setAttrs(attrs map[string]string) {
@@ -171,71 +178,69 @@ func newTestLogger(t *testing.T) logging.Logger {
 }
 
 // ---------------------------------------------------------------------------
-// computeDelta
+// computeFragmentDelta (Issue #3330)
 // ---------------------------------------------------------------------------
 
-func TestComputeDelta_NilOld(t *testing.T) {
-	newAttrs := map[string]string{"a": "1", "b": "2"}
-	delta := computeDelta(nil, newAttrs)
-	require.NotNil(t, delta)
-	assert.Equal(t, newAttrs, delta,
-		"when no previous state exists all attributes are included in the delta")
+// mustTestFragment creates a Fragment for delta-computation tests.
+// Panics on error (test helper).
+func mustTestFragment(t *testing.T, id string, fields map[string]interface{}) *commonpb.Fragment {
+	t.Helper()
+	f, err := dna.NewFragment(id, "test", dna.MapState(fields))
+	require.NoError(t, err)
+	return f
 }
 
-func TestComputeDelta_EmptyOld(t *testing.T) {
-	newAttrs := map[string]string{"a": "1"}
-	delta := computeDelta(map[string]string{}, newAttrs)
-	assert.Equal(t, newAttrs, delta,
-		"when previous state is empty all attributes are included in the delta")
+func TestComputeFragmentDelta_NilOld(t *testing.T) {
+	fA := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	delta := computeFragmentDelta(nil, []*commonpb.Fragment{fA})
+	require.Len(t, delta, 1, "when no previous state exists all fragments are in the delta")
+	assert.Equal(t, "svc:A", delta[0].GetFragmentId())
 }
 
-func TestComputeDelta_NoChanges(t *testing.T) {
-	attrs := map[string]string{"a": "1", "b": "2"}
-	same := map[string]string{"a": "1", "b": "2"}
-	delta := computeDelta(attrs, same)
-	assert.Empty(t, delta, "identical attributes should produce an empty delta")
+func TestComputeFragmentDelta_EmptyOld(t *testing.T) {
+	fA := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	delta := computeFragmentDelta([]*commonpb.Fragment{}, []*commonpb.Fragment{fA})
+	require.Len(t, delta, 1, "when previous state is empty all fragments are in the delta")
 }
 
-func TestComputeDelta_ChangedValue(t *testing.T) {
-	old := map[string]string{"a": "1", "b": "old"}
-	new := map[string]string{"a": "1", "b": "new"}
-	delta := computeDelta(old, new)
-	assert.Equal(t, map[string]string{"b": "new"}, delta,
-		"only the changed attribute should appear in the delta")
+func TestComputeFragmentDelta_NoChanges(t *testing.T) {
+	fA := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	fB := mustTestFragment(t, "svc:B", map[string]interface{}{"status": "stopped"})
+	delta := computeFragmentDelta([]*commonpb.Fragment{fA, fB}, []*commonpb.Fragment{fA, fB})
+	assert.Empty(t, delta, "identical fragment sets must produce an empty delta")
 }
 
-func TestComputeDelta_AddedKey(t *testing.T) {
-	old := map[string]string{"a": "1"}
-	new := map[string]string{"a": "1", "b": "2"}
-	delta := computeDelta(old, new)
-	assert.Equal(t, map[string]string{"b": "2"}, delta,
-		"newly added keys should appear in the delta")
+func TestComputeFragmentDelta_ChangedHash(t *testing.T) {
+	old := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	updated := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "stopped"})
+	delta := computeFragmentDelta([]*commonpb.Fragment{old}, []*commonpb.Fragment{updated})
+	require.Len(t, delta, 1, "a changed fragment must appear in the delta")
+	assert.Equal(t, "svc:A", delta[0].GetFragmentId())
+	assert.NotEmpty(t, delta[0].GetFragmentHash())
 }
 
-func TestComputeDelta_MultipleChanges(t *testing.T) {
-	old := map[string]string{"a": "1", "b": "2", "c": "3"}
-	new := map[string]string{"a": "99", "b": "2", "c": "99"}
-	delta := computeDelta(old, new)
-	assert.Equal(t, map[string]string{"a": "99", "c": "99"}, delta)
+func TestComputeFragmentDelta_AddedFragment(t *testing.T) {
+	fA := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	fB := mustTestFragment(t, "svc:B", map[string]interface{}{"status": "running"})
+	delta := computeFragmentDelta([]*commonpb.Fragment{fA}, []*commonpb.Fragment{fA, fB})
+	require.Len(t, delta, 1, "newly added fragment must appear in the delta")
+	assert.Equal(t, "svc:B", delta[0].GetFragmentId())
 }
 
-func TestComputeDelta_RemovedKey(t *testing.T) {
-	old := map[string]string{"a": "1", "b": "2", "c": "3"}
-	new := map[string]string{"a": "1", "c": "99"} // "b" was removed
-	delta := computeDelta(old, new)
-	// "b" must appear with empty-string sentinel so the controller can unset it.
-	assert.Equal(t, map[string]string{"b": "", "c": "99"}, delta,
-		"deleted keys must appear in the delta with an empty-string sentinel value")
+func TestComputeFragmentDelta_RemovedFragment(t *testing.T) {
+	fA := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	fB := mustTestFragment(t, "svc:B", map[string]interface{}{"status": "running"})
+	// fB removed from current
+	delta := computeFragmentDelta([]*commonpb.Fragment{fA, fB}, []*commonpb.Fragment{fA})
+	require.Len(t, delta, 1, "removed fragment must appear as sentinel in the delta")
+	assert.Equal(t, "svc:B", delta[0].GetFragmentId(), "sentinel carries the removed fragment's ID")
+	// Sentinel has no canonical bytes or hash — just the ID.
+	assert.Empty(t, delta[0].GetCanonicalBytes(), "removal sentinel must have no canonical bytes")
 }
 
-func TestComputeDelta_IsolatesNewMap(t *testing.T) {
-	old := map[string]string{}
-	new := map[string]string{"k": "v"}
-	delta := computeDelta(old, new)
-	// Mutating delta must not affect new
-	delta["extra"] = "injected"
-	assert.NotContains(t, new, "extra",
-		"delta should be an independent copy, not the same map reference")
+func TestComputeFragmentDelta_BothNil(t *testing.T) {
+	delta := computeFragmentDelta(nil, nil)
+	assert.Empty(t, delta, "nil vs nil must produce an empty delta")
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +286,14 @@ func newMinimalClient(t *testing.T) *TransportClient {
 
 func TestPublishDNAUpdate_ErrorNotRegistered(t *testing.T) {
 	c := newMinimalClient(t)
-	// stewardID is empty — not registered
+	// stewardID is empty — not registered.
+	// Seed a fragment change so the empty-delta guard does not fire first.
+	frag := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	c.dnaMu.Lock()
+	c.currentDNAFragments = []*commonpb.Fragment{frag}
+	// lastPublishedFragments left nil so fragment delta is non-empty.
+	c.dnaMu.Unlock()
+
 	err := c.PublishDNAUpdate(context.TODO(), map[string]string{"k": "v"}, "", "")
 	if err == nil {
 		t.Fatal("expected error when steward is not registered")
@@ -295,7 +307,13 @@ func TestPublishDNAUpdate_ErrorControlPlaneNil(t *testing.T) {
 	c := newMinimalClient(t)
 	c.stewardID = "steward-1"
 	c.tenantID = "tenant-1"
-	// controlPlane is nil and no offline queue — should error
+	// Seed a fragment change so the empty-delta guard does not fire first;
+	// controlPlane is nil and no offline queue — should error at the publish step.
+	frag := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
+	c.dnaMu.Lock()
+	c.currentDNAFragments = []*commonpb.Fragment{frag}
+	c.dnaMu.Unlock()
+
 	err := c.PublishDNAUpdate(context.TODO(), map[string]string{"k": "v"}, "", "")
 	if err == nil {
 		t.Fatal("expected error when control plane and offline queue are unavailable")
@@ -306,22 +324,51 @@ func TestPublishDNAUpdate_NoDeltaSkipsPublish(t *testing.T) {
 	c := newMinimalClient(t)
 	c.stewardID = "steward-1"
 	c.tenantID = "tenant-1"
-	// Seed state so delta is empty on second call.
-	// Include steward.version because PublishDNAUpdate always enriches the
-	// incoming attrs with the running version before computing the delta.
+	// Seed lastPublishedFragments with the same fragments that currentDNAFragments
+	// holds so the fragment delta is empty and the publish is skipped.
+	frag := mustTestFragment(t, "svc:A", map[string]interface{}{"status": "running"})
 	c.dnaMu.Lock()
-	c.lastPublishedDNA = map[string]string{"k": "v", "steward.version": version.Short()}
-	c.currentDNAHash = "some-hash"
+	c.currentDNAFragments = []*commonpb.Fragment{frag}
+	c.lastPublishedFragments = []*commonpb.Fragment{frag} // same hash → empty delta
 	c.dnaMu.Unlock()
 
-	// controlPlane is nil but delta should be empty, so we never reach the publish call.
-	// The function returns nil (not an error) when no delta is detected.
+	// controlPlane is nil but fragment delta should be empty, so we never reach
+	// the publish call. The function returns nil when no delta is detected.
 	err := c.PublishDNAUpdate(context.TODO(), map[string]string{"k": "v"}, "", "")
-	// We do NOT reach the "control plane not connected" error because the early
-	// return for empty delta fires first.
 	if err != nil {
-		t.Fatalf("expected nil error when delta is empty, got: %v", err)
+		t.Fatalf("expected nil error when fragment delta is empty, got: %v", err)
 	}
+}
+
+// TestPublishDNAUpdate_ConfigApplyPublishesDespiteEmptyDelta verifies that a
+// config-apply call (configHash != "") always publishes, even when the
+// fragment delta is empty — the controller must still record the applied
+// config hash. (Issue #3330 review finding #4: this branch was untested.)
+func TestPublishDNAUpdate_ConfigApplyPublishesDespiteEmptyDelta(t *testing.T) {
+	c, q := newClientWithOfflineQueue(t)
+
+	// Seed lastPublishedFragments identical to currentDNAFragments so the
+	// fragment delta is empty.
+	frag := mustTestFragment(t, "host:os", map[string]interface{}{"os": "linux", "hostname": "host-a"})
+	c.dnaMu.Lock()
+	c.currentDNAFragments = []*commonpb.Fragment{frag}
+	c.lastPublishedFragments = []*commonpb.Fragment{frag} // same hash → empty delta
+	c.dnaMu.Unlock()
+
+	err := c.PublishDNAUpdate(context.TODO(), map[string]string{"k": "v"}, "cfg-hash-123", "")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, q.Len(),
+		"a config-apply call must publish even when the fragment delta is empty")
+
+	var captured *cpTypes.Event
+	q.Drain(func(ev *cpTypes.Event) error {
+		captured = ev
+		return nil
+	})
+	require.NotNil(t, captured)
+	assert.Equal(t, "cfg-hash-123", captured.Details["config_hash"],
+		"the applied config hash must reach the controller despite the empty fragment delta")
 }
 
 // ---------------------------------------------------------------------------
@@ -772,20 +819,23 @@ func TestSyncDNAHandler_EmptyCurrentAttrs_CollectorReturnsEmpty(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestDNARefreshLoop_NoDeltaSkipsPublish verifies that when the collector
-// returns the same attributes as the last-published snapshot, the refresh
-// loop does not enqueue any event.
+// returns the same fragments as the last-published snapshot, the refresh loop
+// does not enqueue any event. (Issue #3330: fragment-based delta replaces flat-map diff)
 func TestDNARefreshLoop_NoDeltaSkipsPublish(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
-	// Seed last-published DNA so the collector returns the same snapshot.
-	// Include steward.version because PublishDNAUpdate enriches incoming attrs
-	// with the running version; the seed must match to produce an empty delta.
-	attrs := map[string]string{"hostname": "host-a", "os": "linux", "steward.version": version.Short()}
+	// Build a fragment and seed it as both "current" and "last published" so
+	// the fragment delta is empty on every tick.
+	frag := mustTestFragment(t, "host:os", map[string]interface{}{"os": "linux", "hostname": "host-a"})
+
 	c.dnaMu.Lock()
-	c.lastPublishedDNA = copyStringMap(attrs)
+	c.lastPublishedFragments = []*commonpb.Fragment{frag}
 	c.dnaMu.Unlock()
 
-	collector := &inMemoryDNACollector{attrs: attrs}
+	collector := &inMemoryDNACollector{
+		attrs: map[string]string{"hostname": "host-a", "os": "linux"},
+		frags: []*commonpb.Fragment{frag}, // same fragment → no delta
+	}
 	c.mu.Lock()
 	c.dnaCollector = collector
 	c.mu.Unlock()
@@ -795,31 +845,38 @@ func TestDNARefreshLoop_NoDeltaSkipsPublish(t *testing.T) {
 
 	done := c.StartDNARefreshLoop(ctx)
 
-	// Wait for three fully-processed ticks; each is a no-delta skip, so none
-	// enqueues an event. Receiving proves the tick ran — no timing guess.
+	// Wait for three fully-processed ticks; each is a no-fragment-delta skip, so
+	// none enqueues an event. Receiving proves the tick ran — no timing guess.
 	for i := 0; i < 3; i++ {
 		<-c.dnaRefreshTick
 	}
 	assert.Equal(t, 0, q.Len(),
-		"no event must be queued when the DNA delta is empty")
+		"no event must be queued when the fragment delta is empty")
 
 	cancel()
 	<-done // confirm the loop goroutine has exited
 }
 
-// TestDNARefreshLoop_ChangedAttributePublishesOne verifies that when the collector
-// returns a single changed attribute, the refresh loop enqueues exactly one
-// EventDNAChanged event carrying only that changed attribute in the delta.
-func TestDNARefreshLoop_ChangedAttributePublishesOne(t *testing.T) {
+// TestDNARefreshLoop_ChangedFragmentPublishesOne verifies that when the collector
+// returns a changed fragment, the refresh loop enqueues exactly one EventDNAChanged
+// event whose "dna" detail carries the full current fragment set as a protojson
+// JSON array. (Issue #3330: fragment-based delta replaces flat-map diff)
+func TestDNARefreshLoop_ChangedFragmentPublishesOne(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
-	// Seed a prior snapshot; collector will return a single changed value.
-	// Include steward.version so only the hostname change produces a delta.
+	// Build initial and updated fragments — same ID, different hash (status changed).
+	fragOld := mustTestFragment(t, "host:os", map[string]interface{}{"os": "linux", "hostname": "host-a"})
+	fragNew := mustTestFragment(t, "host:os", map[string]interface{}{"os": "linux", "hostname": "host-b"})
+
+	// Seed lastPublishedFragments with the OLD fragment so the FIRST tick sees a change.
 	c.dnaMu.Lock()
-	c.lastPublishedDNA = map[string]string{"hostname": "host-a", "os": "linux", "steward.version": version.Short()}
+	c.lastPublishedFragments = []*commonpb.Fragment{fragOld}
 	c.dnaMu.Unlock()
 
-	collector := &inMemoryDNACollector{attrs: map[string]string{"hostname": "host-b", "os": "linux"}}
+	collector := &inMemoryDNACollector{
+		attrs: map[string]string{"hostname": "host-b", "os": "linux"},
+		frags: []*commonpb.Fragment{fragNew}, // changed hash → non-empty delta
+	}
 	c.mu.Lock()
 	c.dnaCollector = collector
 	c.mu.Unlock()
@@ -829,13 +886,12 @@ func TestDNARefreshLoop_ChangedAttributePublishesOne(t *testing.T) {
 
 	done := c.StartDNARefreshLoop(ctx)
 
-	// One fully-processed tick collects the changed attribute and enqueues the
-	// event before signalling; waiting on the tick is deterministic.
+	// One fully-processed tick detects the changed fragment and enqueues the event.
 	<-c.dnaRefreshTick
 	cancel()
 	<-done // confirm the loop goroutine has exited before inspecting the queue
 
-	require.Equal(t, 1, q.Len(), "exactly one DNA event must be queued after a single attribute change")
+	require.Equal(t, 1, q.Len(), "exactly one DNA event must be queued after a fragment change")
 
 	// Drain the queue and inspect the event.
 	var captured *cpTypes.Event
@@ -846,10 +902,23 @@ func TestDNARefreshLoop_ChangedAttributePublishesOne(t *testing.T) {
 	require.NotNil(t, captured)
 	assert.Equal(t, cpTypes.EventDNAChanged, captured.Type)
 
-	delta, ok := captured.Details["dna"].(map[string]string)
-	require.True(t, ok, "event details must contain a string-string delta map")
-	assert.Equal(t, map[string]string{"hostname": "host-b"}, delta,
-		"delta must contain only the changed attribute with its new value")
+	// Details["dna"] is the protojson JSON array string produced by marshalFragmentsToJSONString.
+	// The event travels through the in-memory offline queue without transport encoding,
+	// so the value is the plain string we set — parse it to verify fragment content.
+	dnaPayload, ok := captured.Details["dna"].(string)
+	require.True(t, ok, "event details must contain a JSON string for the fragment payload")
+	require.NotEmpty(t, dnaPayload, "fragment payload must be non-empty")
+
+	// Decode the JSON array and verify it contains the updated fragment.
+	var rawElems []json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(dnaPayload), &rawElems),
+		"fragment payload must be a valid JSON array")
+	require.Len(t, rawElems, 1, "payload must contain exactly one fragment (the current set)")
+
+	// Verify the fragment ID is the one we set.
+	var fragObj map[string]interface{}
+	require.NoError(t, json.Unmarshal(rawElems[0], &fragObj))
+	assert.Equal(t, "host:os", fragObj["fragmentId"], "fragment ID must match the updated fragment")
 }
 
 // TestDNARefreshLoop_StopsOnContextCancel verifies that cancelling the context
@@ -857,14 +926,10 @@ func TestDNARefreshLoop_ChangedAttributePublishesOne(t *testing.T) {
 func TestDNARefreshLoop_StopsOnContextCancel(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
-	// Seed prior state so the first tick produces no event (stable baseline).
-	// Include steward.version to match what PublishDNAUpdate enriches the attrs with.
-	initial := map[string]string{"os": "linux", "steward.version": version.Short()}
-	c.dnaMu.Lock()
-	c.lastPublishedDNA = copyStringMap(initial)
-	c.dnaMu.Unlock()
-
-	collector := &inMemoryDNACollector{attrs: copyStringMap(initial)}
+	// Collector returns attrs only, no fragments. Since fragment delta drives the
+	// publish decision (Issue #3330), nil frags → nil delta → no event queued,
+	// so the queue stays empty for every tick while the loop is running.
+	collector := &inMemoryDNACollector{attrs: map[string]string{"os": "linux"}}
 	c.mu.Lock()
 	c.dnaCollector = collector
 	c.mu.Unlock()
@@ -893,14 +958,10 @@ func TestDNARefreshLoop_StopsOnContextCancel(t *testing.T) {
 func TestDNARefreshLoop_StopsOnDNARefreshStop(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
-	// Seed prior state so the first tick produces no event (stable baseline).
-	// Include steward.version to match what PublishDNAUpdate enriches the attrs with.
-	initial := map[string]string{"os": "linux", "steward.version": version.Short()}
-	c.dnaMu.Lock()
-	c.lastPublishedDNA = copyStringMap(initial)
-	c.dnaMu.Unlock()
-
-	collector := &inMemoryDNACollector{attrs: copyStringMap(initial)}
+	// Collector returns attrs only, no fragments. Since fragment delta drives the
+	// publish decision (Issue #3330), nil frags → nil delta → no event queued,
+	// so the queue stays empty for every tick while the loop is running.
+	collector := &inMemoryDNACollector{attrs: map[string]string{"os": "linux"}}
 	c.mu.Lock()
 	c.dnaCollector = collector
 	c.mu.Unlock()
@@ -947,8 +1008,14 @@ func TestDNARefreshLoop_CollectorErrorSkipsTick(t *testing.T) {
 	}
 	assert.Equal(t, 0, q.Len(), "collection errors must not enqueue events")
 
-	// Now swap to a collector that produces a real change (no prior snapshot).
-	goodCollector := &inMemoryDNACollector{attrs: map[string]string{"os": "linux"}}
+	// Swap to a collector that returns a fragment. Since fragment delta drives the
+	// publish decision (Issue #3330), a non-nil fragment with no prior snapshot
+	// produces a non-empty delta → event queued.
+	goodFrag := mustTestFragment(t, "host:os", map[string]interface{}{"os": "linux"})
+	goodCollector := &inMemoryDNACollector{
+		attrs: map[string]string{"os": "linux"},
+		frags: []*commonpb.Fragment{goodFrag},
+	}
 	c.mu.Lock()
 	c.dnaCollector = goodCollector
 	c.mu.Unlock()
@@ -963,7 +1030,7 @@ func TestDNARefreshLoop_CollectorErrorSkipsTick(t *testing.T) {
 	<-done
 
 	assert.Equal(t, 1, q.Len(),
-		"loop must continue after a collection error and publish when a change is detected")
+		"loop must continue after a collection error and publish when a fragment change is detected")
 }
 
 // ---------------------------------------------------------------------------
@@ -1867,14 +1934,18 @@ func TestDNARefreshLoop_EmptyAttrsButFragments_UpdatesFragmentState(t *testing.T
 func TestDNARefreshLoop_AttrsAndFragments_UpdatesFragmentStatePerTick(t *testing.T) {
 	c, q := newClientWithOfflineQueue(t)
 
-	// Seed the publish cache so a stable attribute map produces no delta event;
-	// the assertions below are about DNA state, not publish behaviour.
+	// Seed lastPublishedFragments with the first fragment set so that tick 1
+	// produces an empty fragment delta and no event. The primary assertions are
+	// about DNA state (currentDNAAggregateRoot, currentDNAFragments), not about
+	// the publish path. Tick 2 onwards will see the swapped secondFrags and fire
+	// exactly one event (two new fragment IDs). (Issue #3330: fragment delta drives publish)
 	attrs := map[string]string{"hostname": "host-a", "os": "linux"}
+	firstFrags, firstRoot := makeClientFragments(t, 2)
+
 	c.dnaMu.Lock()
-	c.lastPublishedDNA = map[string]string{"hostname": "host-a", "os": "linux", "steward.version": version.Short()}
+	c.lastPublishedFragments = firstFrags
 	c.dnaMu.Unlock()
 
-	firstFrags, firstRoot := makeClientFragments(t, 2)
 	collector := &mutableFragmentAttrCollector{attrs: attrs, fragments: firstFrags}
 	c.mu.Lock()
 	c.dnaCollector = collector
@@ -1918,6 +1989,10 @@ func TestDNARefreshLoop_AttrsAndFragments_UpdatesFragmentStatePerTick(t *testing
 
 	assert.Equal(t, secondRoot, latestRoot,
 		"each refresh tick must re-record the fragment state, not only the first")
-	assert.Equal(t, 0, q.Len(),
-		"an unchanged attribute map must not publish a delta")
+	// Fragment delta drives the publish decision (Issue #3330): swapping from
+	// firstFrags (2 entries) to secondFrags (4 entries) adds 2 new fragment IDs,
+	// producing a non-empty delta and exactly one event on the first tick that
+	// observes the new set.
+	assert.Equal(t, 1, q.Len(),
+		"a changed fragment set must publish exactly one delta event")
 }
