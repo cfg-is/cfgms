@@ -17,7 +17,7 @@ gh api repos/cfg-is/cfgms/rulesets/11647684 \
 |---|---|
 | `unit-tests` | `test-suite.yml` (PR/merge_group) or `documentation.yml` stub |
 | `integration-tests` | `test-suite.yml` (PR/merge_group) or `documentation.yml` stub |
-| `Build Gate` | `cross-platform-build.yml` or `documentation.yml` stub |
+| `Build Gate` | `cross-platform-build.yml` (queue) / `cross-platform-build-pr.yml` (PR) or `documentation.yml` stub |
 | `security-deployment-gate` | `production-gates.yml` or `documentation.yml` stub |
 | `Controller Integration Tests (Linux)` | `production-gates.yml` or `documentation.yml` stub |
 | `zizmor` | `zizmor.yml` — no stub |
@@ -33,6 +33,13 @@ still triggers on `merge_group`, but each stub job skips there, so in the queue 
 real job is the sole poster of its context. Do not add `merge_group` back to a stub
 — a stub that posts green in the queue lets a PR merge before the real job it stands
 in for has finished.
+
+An event-gated stub is weaker than it looks: a job whose `if:` is false still posts
+a check run with conclusion `skipped`, and GitHub accepts that as satisfying a
+required check. `Build Gate` is therefore split across two files by **trigger**
+rather than by `if:` — `cross-platform-build-pr.yml` (`pull_request` only) and
+`cross-platform-build.yml` (`merge_group` only). Neither may gain the other's
+trigger. See CLAUDE.md → Stub exclusivity for the measured evidence.
 
 The other three contexts — `zizmor`, `CLA signature check` and `frontend-checks` —
 carry no path filter and no stub: their real job runs on every `pull_request` and
@@ -59,12 +66,20 @@ that never creates a check run blocks the merge queue indefinitely.
 
 ---
 
-#### `cross-platform-build.yml` — Cross-Platform Build Validation
+#### `cross-platform-build-pr.yml` — Cross-Platform Build Validation (PR)
 
-**Triggers**: Pull Requests to main/develop, Merge Group, Manual dispatch
+**Triggers**: Pull Requests to main/develop **only** — deliberately no `merge_group`,
+so it can post nothing in the queue, not even a skipped run.
 
 **Jobs**:
 - `cross-compile-check` — `make build-cross-validate` for all targets (Linux/macOS/Windows AMD64+ARM64)
+- `build-gate-pr-stub` — emits the PR-side `Build Gate` context from the compile check
+
+#### `cross-platform-build.yml` — Cross-Platform Build Validation
+
+**Triggers**: Merge Group, Manual dispatch — deliberately no `pull_request`.
+
+**Jobs**:
 - `native-builds` — matrix: Linux (ubuntu-latest), macOS (macos-latest), Windows (windows-latest); each runs `make build` + unit tests with `-race` on Linux/macOS; emits `Controller Integration Tests (Linux)` context via the Linux leg
 - `integration-tests` — Docker-infrastructure integration tests; Linux only
 
@@ -269,7 +284,8 @@ security workflow guide for the full per-check gap list).
 | Workflow | push main/develop | pull_request | merge_group | Schedule | Manual |
 |---|---|---|---|---|---|
 | `test-suite.yml` | push main only | ✅ | ✅ | ❌ | ✅ |
-| `cross-platform-build.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
+| `cross-platform-build-pr.yml` | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `cross-platform-build.yml` | ❌ | ❌ | ✅ | ❌ | ✅ |
 | `fleet-e2e.yml` | ❌ | ❌ | ✅ | ❌ | ❌ |
 | `security-scan.yml` | ✅ | ✅ | ✅ | Daily 3 AM UTC | ❌ |
 | `codeql-analysis.yml` | ✅ | ✅ (Go/CodeQL/web paths) | ✅ | Weekly | ❌ |

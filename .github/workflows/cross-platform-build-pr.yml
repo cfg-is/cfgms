@@ -1,0 +1,127 @@
+name: Cross-Platform Build Validation (PR)
+
+# PR-side half of the Build Gate, split out of cross-platform-build.yml.
+#
+# This file exists to make the split STRUCTURAL rather than conditional. The
+# `Build Gate` stub used to live in cross-platform-build.yml behind
+# `if: github.event_name == 'pull_request'`, but a job whose `if` is false still
+# posts a check run with conclusion `skipped`, and GitHub accepts a `skipped` run
+# as satisfying a required status check. Because the real `build-gate` job is
+# `needs: [native-builds, integration-tests]`, its check run does not exist while
+# the native builds are still running — so the queue saw only the stub's skipped
+# `Build Gate`, considered the context satisfied, and merged.
+#
+# Measured on queue commit 9fcc3315: `Build Gate` had two `skipped` runs and no
+# successful one; PR #3500 merged at 18:02:06Z; `Native Build (Windows)` then
+# FAILED at 18:03:51Z and the real `Build Gate` failed at 18:05:00Z. A failing
+# build merged. The same shape merged the Windows failures at cf404eff.
+#
+# A workflow with no `merge_group` trigger cannot post anything in the queue —
+# not even a skipped run. That is an invariant of the trigger list, not of an
+# `if:` expression a later edit can weaken.
+#
+# DO NOT add `merge_group:` to this file. The queue-side `Build Gate` must be
+# posted only by cross-platform-build.yml's `build-gate` job.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # Build validation runs if ANY code changes are present
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.26.6'
+
+permissions: {}
+
+jobs:
+  # Fast cross-compilation check (single runner, all platforms)
+  # PR-REAL (#2595): fast single-runner compile check across all targets — cheap
+  # and deterministic on the diff. Native per-platform builds and Docker
+  # integration tests are queue-only (cross-platform-build.yml); this job alone
+  # backs the PR-time Build Gate stub below.
+  cross-compile-check:
+    name: Cross-Platform Compilation Check
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Validate Cross-Platform Compilation
+      run: make build-cross-validate
+
+    - name: Build Summary
+      run: |
+        echo "## Cross-Platform Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "All target platforms compile successfully:" >> $GITHUB_STEP_SUMMARY
+        echo "- Linux (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
+        echo "- macOS (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
+        echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
+
+  # PR-side `Build Gate` context. Native builds and Docker integration tests are
+  # deferred to the merge queue, where cross-platform-build.yml's `build-gate`
+  # job posts the authoritative result for this same context.
+  build-gate-pr-stub:
+    name: Build Gate
+    permissions: {}
+    needs: [cross-compile-check]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Check PR-time Build Results
+      env:
+        CROSS_COMPILE_RESULT: ${{ needs.cross-compile-check.result }}
+      run: |
+        echo "## Build Gate Results (PR)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        cross_compile="$CROSS_COMPILE_RESULT"
+
+        echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Cross-Compile Check | $cross_compile |" >> $GITHUB_STEP_SUMMARY
+        echo "| Native Builds + Docker Integration | deferred to merge queue |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [[ "$cross_compile" == "success" ]]; then
+          echo "### BUILD GATE PASSED (PR stub)" >> $GITHUB_STEP_SUMMARY
+          echo "Cross-compilation validated. Native builds and Docker integration tests run for real in the merge queue (#2595)." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### BUILD GATE FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "Cross-compilation check failed." >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
