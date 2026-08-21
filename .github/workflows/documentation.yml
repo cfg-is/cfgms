@@ -198,11 +198,15 @@ jobs:
   # These provide the required check names so docs-only PRs can merge
   # without waiting for code validation workflows that won't run
 
+  # QUEUE-REAL context (#3189): on merge_group the `unit-tests` context is posted by
+  # test-suite.yml's `unit-tests-mq-stub` (`if: github.event_name == 'merge_group'`),
+  # which is the sole queue-side poster. This stub covers only docs-only pull requests,
+  # where test-suite.yml is paths-ignored. It must NOT fire on merge_group.
   unit-tests:
     name: unit-tests
     permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Docs-only PR validation
         run: |
@@ -227,11 +231,16 @@ jobs:
           echo "   Skipping security scans (no code changes)"
           echo "   No security vulnerabilities possible in docs-only changes"
 
+  # QUEUE-REAL context (#3189): on merge_group the `Build Gate` context is posted by
+  # cross-platform-build.yml's `build-gate` job
+  # (`if: always() && (merge_group || workflow_dispatch)`, no path filter on its bare
+  # `merge_group:` trigger), which is the sole queue-side poster. This stub covers only
+  # docs-only pull requests. It must NOT fire on merge_group.
   build-gate:
     name: Build Gate
     permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Docs-only build validation
         run: |
@@ -239,11 +248,16 @@ jobs:
           echo "   Skipping build validation (no code changes)"
           echo "   No compilation required for documentation updates"
 
+  # QUEUE-REAL context (#3189): on merge_group the `integration-tests` context is posted
+  # by test-suite.yml's `integration-tests` job
+  # (`if: always() && (workflow_dispatch || merge_group || refs/heads/main)`, no path
+  # filter on its bare `merge_group:` trigger), which is the sole queue-side poster. This
+  # stub covers only docs-only pull requests. It must NOT fire on merge_group.
   integration-tests:
     name: integration-tests
     permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Docs-only integration test validation
         run: |
@@ -251,11 +265,16 @@ jobs:
           echo "   Skipping integration tests (no code changes)"
           echo "   No integration test validation required for docs-only changes"
 
+  # QUEUE-REAL context (#3189): on merge_group the `Controller Integration Tests (Linux)`
+  # context is posted by production-gates.yml's `integration-tests-controller` job
+  # (`if: merge_group || refs/heads/main || workflow_dispatch`, no path filter on its bare
+  # `merge_group:` trigger), which is the sole queue-side poster. This stub covers only
+  # docs-only pull requests. It must NOT fire on merge_group.
   integration-tests-controller:
     name: Controller Integration Tests (Linux)
     permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Docs-only controller integration test validation
         run: |

@@ -184,17 +184,25 @@ failing real job. Not every pair here meets that bar today.
 **Path-gated pairs overlap when a PR touches both sides.** `paths` fires when
 *any* changed file matches and `paths-ignore` fires when *any* changed file does
 not, so a PR touching both a `.go` file and a `.md` file triggers the real job
-and its stub.
+and its stub. This is the one known overlap that remains.
 
-**Four `documentation.yml` stubs also fire in the merge queue,** where they guard
-nothing: `unit-tests`, `integration-tests`, `Build Gate` and `Controller
-Integration Tests (Linux)` are gated `pull_request || merge_group`, and
-`documentation.yml` carries no `paths` filter on `merge_group`. Measured on queue
-commit `c9ac1917`: `documentation.yml` posted all four green while the real
-`Build Gate`, `integration-tests` and `Controller Integration Tests (Linux)` ran
-in parallel. (`unit-tests` is harmless — both its queue-side posters are stubs.)
-The `security-deployment-gate`, `trivy-scan` and `security-validation` stubs are
-correctly `pull_request`-only.
+**Every `documentation.yml` stub is `pull_request`-only,** so the merge queue has
+exactly one poster per required context: the real job. `unit-tests`,
+`integration-tests`, `Build Gate`, `Controller Integration Tests (Linux)`,
+`security-deployment-gate`, `trivy-scan` and `security-validation` are all gated
+`if: github.event_name == 'pull_request'`. Removing the queue-side stubs cannot
+leave a required context without a check run, because each real poster is
+conditioned on `merge_group` behind a bare `merge_group:` trigger that carries no
+path filter — `cross-platform-build.yml`'s `build-gate`, `test-suite.yml`'s
+`integration-tests` and `unit-tests-mq-stub`, and `production-gates.yml`'s
+`integration-tests-controller`.
+
+The first four of those were gated `pull_request || merge_group` until #3189 and
+fired on every merge-queue run beside the real job. Measured on queue commit
+`c9ac1917`: `documentation.yml` posted all four green while the real `Build Gate`,
+`integration-tests` and `Controller Integration Tests (Linux)` ran in parallel.
+That is the overlap #3189 removed — recorded here as the reason for the fix, not
+as current behaviour.
 
 Whether GitHub resolves a shared context to the failing run or the passing one is
 not established. Do not rely on a stub being exclusive until it is — and when a
