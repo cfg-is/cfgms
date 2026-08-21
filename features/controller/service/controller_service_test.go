@@ -19,7 +19,10 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // newTestFleetStorage creates a real SQLite storage manager for controller service tests.
@@ -1253,4 +1256,282 @@ func TestUpdateStewardTenant_OfflineStewardPersistsMapping(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "tenant-b", info.TenantID,
 		"an offline steward moved between tenants must not revert on reconnect")
+}
+
+// TestLoadFromStorage_EnrolledNeverConnected: AC1 — a steward that received its
+// cert via the quarantine→approve→claim path (StewardStore has a "registered"
+// record) but never sent a gRPC check-in must appear in the registry after a
+// controller restart. LoadFromStorage must enumerate StewardStore in addition to
+// DNA storage so that enrolled-but-never-connected stewards survive the restart.
+// Covers the cfg-lab incident where 3 HV-host stewards were invisible after the
+// 2026-08-05 Postgres cutover (Issue #3403).
+func TestLoadFromStorage_EnrolledNeverConnected(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	ss := sm.GetStewardStore()
+	require.NotNil(t, ss)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, ss.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-enrolled",
+		TenantID:     "tenant-a",
+		Status:       business.StewardStatusRegistered,
+		RegisteredAt: now,
+	}))
+
+	// Simulate controller restart: fresh service, no DNA storage, same StewardStore.
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(ss)
+	require.NoError(t, svc.LoadFromStorage(ctx))
+
+	assert.Equal(t, 1, svc.GetStewardCount(),
+		"enrolled steward must appear in registry after restart even without DNA history")
+
+	info, ok := svc.GetStewardInfo("dev-enrolled")
+	require.True(t, ok, "enrolled steward must be retrievable by ID after restart")
+	assert.Equal(t, "tenant-a", info.TenantID)
+	assert.Equal(t, string(business.StewardStatusRegistered), info.Status,
+		"status must remain 'registered' until first check-in")
+}
+
+// TestEnsureSteward_FirstCheckin_PromotesRegisteredSteward: AC2 — when a steward
+// enrolled via any creation path (direct approval or claim) makes its first gRPC
+// check-in, EnsureSteward must promote its status from "registered" to "active"
+// in both the in-memory registry and the durable StewardStore, without creating
+// a duplicate record (Issue #3403).
+func TestEnsureSteward_FirstCheckin_PromotesRegisteredSteward(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	ss := sm.GetStewardStore()
+	require.NotNil(t, ss)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, ss.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-checkin",
+		TenantID:     "tenant-a",
+		Status:       business.StewardStatusRegistered,
+		RegisteredAt: now,
+	}))
+
+	// Warm-load so the steward is in the in-memory registry (as after a restart).
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(ss)
+	require.NoError(t, svc.LoadFromStorage(ctx))
+	require.Equal(t, 1, svc.GetStewardCount(), "precondition: steward loaded from StewardStore")
+
+	// First check-in via EnsureSteward (mirrors the gRPC connect hook path).
+	svc.EnsureSteward("dev-checkin", "", "active")
+
+	// In-memory registry must show "active".
+	info, ok := svc.GetStewardInfo("dev-checkin")
+	require.True(t, ok)
+	assert.Equal(t, "active", info.Status, "in-memory status must be 'active' after first check-in")
+
+	// Durable store must also reflect the promotion without a round-trip restart.
+	rec, err := ss.GetSteward(ctx, "dev-checkin")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusActive, rec.Status,
+		"StewardStore must be updated to 'active' on first check-in")
+
+	// Exactly one record — no duplicate created by EnsureSteward.
+	all, err := ss.ListStewards(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 1, "first check-in must not create a duplicate StewardStore entry")
+}
+
+// TestLoadFromStorage_UnapprovedStewardNotIncluded: AC3 — a steward whose
+// registration is pending (quarantined, awaiting operator approval) must NOT
+// appear in the in-memory registry. Only the claim step (buildClaimResponse)
+// writes a StewardStore record; until the steward claims its cert it is absent
+// from StewardStore and therefore absent from the registry after LoadFromStorage.
+// A pending steward cannot receive config pushes or participate in convergence.
+// (Issue #3403)
+func TestLoadFromStorage_UnapprovedStewardNotIncluded(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	ss := sm.GetStewardStore()
+	require.NotNil(t, ss)
+
+	// StewardStore is empty: the pending entry exists only in PendingRegistrationStore
+	// (not modeled here) and the claim step has not yet run.
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(ss)
+	require.NoError(t, svc.LoadFromStorage(ctx))
+
+	assert.Equal(t, 0, svc.GetStewardCount(),
+		"unapproved (pending) steward must not appear in the registry or be eligible for convergence")
+}
+
+// TestLoadFromStorage_TenantScopingPreserved: AC4 — stewards from different
+// tenants must each be loaded with their correct TenantID. Cross-tenant records
+// must not be mixed or attributed to the wrong tenant during warm-load.
+// (Issue #3403)
+func TestLoadFromStorage_TenantScopingPreserved(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	ss := sm.GetStewardStore()
+	require.NotNil(t, ss)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, ss.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-tenant-a",
+		TenantID:     "tenant-a",
+		Status:       business.StewardStatusRegistered,
+		RegisteredAt: now,
+	}))
+	require.NoError(t, ss.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-tenant-b",
+		TenantID:     "tenant-b",
+		Status:       business.StewardStatusRegistered,
+		RegisteredAt: now,
+	}))
+
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(ss)
+	require.NoError(t, svc.LoadFromStorage(ctx))
+
+	assert.Equal(t, 2, svc.GetStewardCount(), "both enrolled stewards must load")
+
+	infoA, okA := svc.GetStewardInfo("dev-tenant-a")
+	require.True(t, okA)
+	assert.Equal(t, "tenant-a", infoA.TenantID,
+		"dev-tenant-a must be attributed to tenant-a, not tenant-b")
+
+	infoB, okB := svc.GetStewardInfo("dev-tenant-b")
+	require.True(t, okB)
+	assert.Equal(t, "tenant-b", infoB.TenantID,
+		"dev-tenant-b must be attributed to tenant-b, not tenant-a")
+
+	// Cross-tenant negative: the durable record for dev-tenant-a must not be
+	// attributed to tenant-b (verifies buildClaimResponse set the correct TenantID).
+	recA, err := ss.GetSteward(ctx, "dev-tenant-a")
+	require.NoError(t, err)
+	assert.NotEqual(t, "tenant-b", recA.TenantID,
+		"durable record for dev-tenant-a must not be attributed to tenant-b")
+}
+
+// newReconnectService builds a service backed by real fleet storage plus a real
+// durable StewardStore, which is the wiring AcceptRegistration's reconnection
+// fallback depends on (Issue #3403).
+func newReconnectService(t *testing.T) (*ControllerService, business.StewardStore) {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	ss := sm.GetStewardStore()
+	require.NotNil(t, ss)
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), newTestFleetStorage(t))
+	svc.SetStewardStore(ss)
+	return svc, ss
+}
+
+// TestAcceptRegistration_ReconnectionResolvesFromStewardStore is the positive
+// case of the durable fallback: an in-tenant steward whose in-memory entry was
+// lost (controller restart after a backend migration that wiped DNA storage)
+// keeps its original ID instead of being issued a fresh one.
+func TestAcceptRegistration_ReconnectionResolvesFromStewardStore(t *testing.T) {
+	ctx := context.Background()
+	svc, ss := newReconnectService(t)
+
+	require.NoError(t, ss.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-reconnect",
+		TenantID:     "tenant-a",
+		Status:       business.StewardStatusActive,
+		RegisteredAt: time.Now().UTC().Truncate(time.Second),
+	}))
+
+	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+	resp, err := svc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
+		IsReconnection: true,
+		InitialDna:     &commonpb.DNA{Id: "dev-reconnect"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "dev-reconnect", resp.StewardId,
+		"an in-tenant, admissible steward must keep its durable ID across the restart")
+}
+
+// TestAcceptRegistration_ReconnectionRejectsNonAdmissibleStatus proves the
+// lifecycle gate: GetSteward returns records in every state, so a caller
+// asserting the ID of a revoked ("permanently denied re-entry", ADR-010 §3) or
+// otherwise terminal steward must not be rehydrated into the live registry with
+// a fresh access token. Such a request falls through to a brand-new
+// registration, exactly as an unknown ID does.
+func TestAcceptRegistration_ReconnectionRejectsNonAdmissibleStatus(t *testing.T) {
+	ctx := context.Background()
+
+	for _, status := range []business.StewardStatus{
+		business.StewardStatusRevoked,
+		business.StewardStatusDeregistered,
+		business.StewardStatusArchived,
+		business.StewardStatusDormant,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			svc, ss := newReconnectService(t)
+
+			require.NoError(t, ss.RegisterSteward(ctx, &business.StewardRecord{
+				ID:           "dev-terminal",
+				TenantID:     "tenant-a",
+				Status:       business.StewardStatusRegistered,
+				RegisteredAt: time.Now().UTC().Truncate(time.Second),
+			}))
+			require.NoError(t, ss.UpdateStewardStatus(ctx, "dev-terminal", status))
+
+			tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+			resp, err := svc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
+				IsReconnection: true,
+				InitialDna:     &commonpb.DNA{Id: "dev-terminal"},
+			})
+			require.NoError(t, err)
+			assert.NotEqual(t, "dev-terminal", resp.StewardId,
+				"a %s steward must not be re-admitted under its own ID", status)
+
+			_, inRegistry := svc.GetStewardInfo("dev-terminal")
+			assert.False(t, inRegistry,
+				"a %s steward must not be rehydrated into the live registry", status)
+
+			rec, getErr := ss.GetSteward(ctx, "dev-terminal")
+			require.NoError(t, getErr)
+			assert.Equal(t, status, rec.Status,
+				"the durable record must be left untouched by the refused reconnection")
+		})
+	}
+}
+
+// TestAcceptRegistration_ReconnectionRejectsCrossTenantID proves the tenant
+// gate. AcceptRegistration writes the CALLER's context tenant into both the
+// in-memory StewardInfo and the durable device_tenant mapping, so adopting a
+// caller-asserted ID from another tenant would rebind that steward to the
+// caller's tenant. The request must instead be treated as a new registration.
+func TestAcceptRegistration_ReconnectionRejectsCrossTenantID(t *testing.T) {
+	ctx := context.Background()
+	svc, ss := newReconnectService(t)
+
+	require.NoError(t, ss.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-of-tenant-b",
+		TenantID:     "tenant-b",
+		Status:       business.StewardStatusActive,
+		RegisteredAt: time.Now().UTC().Truncate(time.Second),
+	}))
+
+	attackerCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+	resp, err := svc.AcceptRegistration(attackerCtx, &controllerpb.RegisterRequest{
+		IsReconnection: true,
+		InitialDna:     &commonpb.DNA{Id: "dev-of-tenant-b"},
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, "dev-of-tenant-b", resp.StewardId,
+		"a caller in tenant-a must not adopt a tenant-b steward ID")
+
+	info, inRegistry := svc.GetStewardInfo("dev-of-tenant-b")
+	assert.False(t, inRegistry, "the tenant-b steward must not be rehydrated by a tenant-a caller: %+v", info)
+
+	rec, getErr := ss.GetSteward(ctx, "dev-of-tenant-b")
+	require.NoError(t, getErr)
+	assert.Equal(t, "tenant-b", rec.TenantID,
+		"the durable record must still belong to tenant-b after the refused reconnection")
+
+	// The durable device_tenant mapping must not have been rebound either.
+	mappedTenant, found, mapErr := svc.dnaStorage.GetDeviceTenant(ctx, "dev-of-tenant-b")
+	require.NoError(t, mapErr)
+	assert.False(t, found,
+		"the refused reconnection must not write a device_tenant mapping for the foreign ID (got %q)", mappedTenant)
 }

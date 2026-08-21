@@ -827,22 +827,43 @@ func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.D
 
 // CreatePendingRegistrationsTable creates the cfgms_pending_registrations table (Issue #1696).
 // No cert bundle columns are included — generate-on-claim issues certs in memory only.
+// Device identity columns added by Issue #3403 so the claim step can write a complete
+// StewardRecord without re-contacting the steward.
 func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_pending_registrations (
-			pending_id    TEXT PRIMARY KEY,
-			steward_id    TEXT NOT NULL DEFAULT '',
-			tenant_id     TEXT NOT NULL,
-			token_str     TEXT NOT NULL,
-			source_ip     TEXT NOT NULL DEFAULT '',
-			registered_at TIMESTAMP WITH TIME ZONE NOT NULL,
-			expires_at    TIMESTAMP WITH TIME ZONE NOT NULL,
-			claimed_at    TIMESTAMP WITH TIME ZONE,
-			status        TEXT NOT NULL DEFAULT 'pending'
+			pending_id           TEXT PRIMARY KEY,
+			steward_id           TEXT NOT NULL DEFAULT '',
+			tenant_id            TEXT NOT NULL,
+			token_str            TEXT NOT NULL,
+			source_ip            TEXT NOT NULL DEFAULT '',
+			registered_at        TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at           TIMESTAMP WITH TIME ZONE NOT NULL,
+			claimed_at           TIMESTAMP WITH TIME ZONE,
+			status               TEXT NOT NULL DEFAULT 'pending',
+			device_id            TEXT NOT NULL DEFAULT '',
+			identity_key_pub     BYTEA NOT NULL DEFAULT '',
+			key_protection_level TEXT NOT NULL DEFAULT '',
+			hostname             TEXT NOT NULL DEFAULT '',
+			platform             TEXT NOT NULL DEFAULT ''
 		);
 	`
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create cfgms_pending_registrations table: %w", err)
+	}
+
+	// Idempotent migrations for existing deployments (Issue #3403).
+	alterations := []string{
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS device_id            TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS identity_key_pub     BYTEA NOT NULL DEFAULT ''`,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS key_protection_level TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS hostname             TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS platform             TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, alt := range alterations {
+		if _, err := db.ExecContext(ctx, alt); err != nil {
+			return fmt.Errorf("failed to apply cfgms_pending_registrations alteration: %w", err)
+		}
 	}
 
 	indexes := []string{

@@ -418,15 +418,42 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		}
 	}
 
-	// Promote steward to registered in the fleet registry.
-	if err := s.controllerService.UpdateStewardStatus(entry.StewardID, "registered"); err != nil {
+	// Promote steward to registered in the fleet registry and persist the status
+	// to durable DNA storage so LoadFromStorage warm-loads it after a restart
+	// (Issue #3403).
+	if err := s.controllerService.UpdateStewardStatusDurable(entry.StewardID, entry.TenantID, "registered"); err != nil {
 		s.logger.Warn("Failed to update steward status to registered after claim",
-			"steward_id", entry.StewardID, "error", err)
+			"steward_id", logging.SanitizeLogValue(entry.StewardID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	// Durably record the steward in the fleet store at enrollment — before any
+	// gRPC check-in (Issue #3403). A steward in this state is fully described
+	// (identity, tenant, enrollment timestamp) and distinguishable from a steward
+	// that has connected (status: "active") or gone silent (status: "lost").
+	// ErrStewardAlreadyExists is benign: a concurrent claim poll already wrote it.
+	if s.stewardStore != nil {
+		now := time.Now().UTC()
+		if storeErr := s.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+			ID:                 entry.StewardID,
+			TenantID:           entry.TenantID,
+			Hostname:           entry.Hostname,
+			Platform:           entry.Platform,
+			Status:             business.StewardStatusRegistered,
+			RegisteredAt:       entry.RegisteredAt,
+			LastSeen:           now,
+			DeviceID:           entry.DeviceID,
+			IdentityKeyPub:     entry.IdentityKeyPub,
+			KeyProtectionLevel: entry.KeyProtectionLevel,
+		}); storeErr != nil && storeErr != business.ErrStewardAlreadyExists {
+			s.logger.Error("Failed to persist steward record to fleet store at enrollment",
+				"steward_id", logging.SanitizeLogValue(entry.StewardID),
+				"error", logging.SanitizeLogValue(storeErr.Error()))
+		}
 	}
 
 	s.logger.Info("Generated client certificate for claimed registration",
-		"pending_id", entry.PendingID,
-		"steward_id", entry.StewardID,
+		"pending_id", logging.SanitizeLogValue(entry.PendingID),
+		"steward_id", logging.SanitizeLogValue(entry.StewardID),
 		"validity_days", validityDays)
 
 	return resp, nil
@@ -824,14 +851,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			}
 
 			pendingEntry := &business.PendingRegistrationEntry{
-				PendingID:    pendingID,
-				StewardID:    stewardID,
-				TenantID:     token.TenantID,
-				TokenStr:     req.Token,
-				SourceIP:     extractSourceIP(r, s.trustedProxies),
-				RegisteredAt: time.Now().UTC(),
-				ExpiresAt:    time.Now().UTC().Add(5 * 24 * time.Hour),
-				Status:       business.PendingRegistrationStatusPending,
+				PendingID:          pendingID,
+				StewardID:          stewardID,
+				TenantID:           token.TenantID,
+				TokenStr:           req.Token,
+				SourceIP:           extractSourceIP(r, s.trustedProxies),
+				RegisteredAt:       time.Now().UTC(),
+				ExpiresAt:          time.Now().UTC().Add(5 * 24 * time.Hour),
+				Status:             business.PendingRegistrationStatusPending,
+				DeviceID:           req.DeviceID,
+				IdentityKeyPub:     identityKeyBytes,
+				KeyProtectionLevel: req.KeyProtectionLevel,
+				Hostname:           req.Hostname,
+				Platform:           req.OS,
 			}
 			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
 				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {

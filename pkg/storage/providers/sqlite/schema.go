@@ -262,6 +262,44 @@ func migrateRegistrationTokenClaimKey(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillCfgmsPendingRegistrationColumns adds the five device-identity columns
+// introduced by Issue #3403 to a pre-existing cfgms_pending_registrations table
+// that was created before those columns existed. Fresh databases (table absent
+// or already carrying all columns) are skipped. Column-existence is checked via
+// PRAGMA before each ALTER TABLE so the pass is fully idempotent.
+func backfillCfgmsPendingRegistrationColumns(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "cfgms_pending_registrations")
+	if err != nil {
+		return fmt.Errorf("sqlite: cfgms_pending_registrations back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"device_id", `ALTER TABLE cfgms_pending_registrations ADD COLUMN device_id            TEXT NOT NULL DEFAULT ''`},
+		{"identity_key_pub", `ALTER TABLE cfgms_pending_registrations ADD COLUMN identity_key_pub     BLOB NOT NULL DEFAULT ''`},
+		{"key_protection_level", `ALTER TABLE cfgms_pending_registrations ADD COLUMN key_protection_level TEXT NOT NULL DEFAULT ''`},
+		{"hostname", `ALTER TABLE cfgms_pending_registrations ADD COLUMN hostname             TEXT NOT NULL DEFAULT ''`},
+		{"platform", `ALTER TABLE cfgms_pending_registrations ADD COLUMN platform             TEXT NOT NULL DEFAULT ''`},
+	} {
+		present, err := columnExists(ctx, db, "cfgms_pending_registrations", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: cfgms_pending_registrations back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: cfgms_pending_registrations back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	return nil
+}
+
 // backfillTenantLifecycle adds the ADR-027 Decision 2 suspension provenance
 // columns to a pre-existing tenants table that was created without them (migration
 // 008). Fresh databases (table absent) are skipped. Column-existence is checked
@@ -318,6 +356,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillTenantLifecycle(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillCfgmsPendingRegistrationColumns(ctx, db); err != nil {
 		return err
 	}
 
@@ -659,16 +700,23 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		// Generate-on-claim pending registrations (Issue #1696)
 		// Replaces the in-memory sync.Map registrationQueue with a durable store.
 		// No cert bundle is ever stored here — cert generation happens in memory on first approved poll.
+		// Device identity columns added by Issue #3403 so the claim step can write a
+		// complete StewardRecord without re-contacting the steward.
 		`CREATE TABLE IF NOT EXISTS cfgms_pending_registrations (
-			pending_id    TEXT PRIMARY KEY,
-			steward_id    TEXT NOT NULL DEFAULT '',
-			tenant_id     TEXT NOT NULL,
-			token_str     TEXT NOT NULL,
-			source_ip     TEXT NOT NULL DEFAULT '',
-			registered_at TEXT NOT NULL,
-			expires_at    TEXT NOT NULL,
-			claimed_at    TEXT,
-			status        TEXT NOT NULL DEFAULT 'pending'
+			pending_id           TEXT PRIMARY KEY,
+			steward_id           TEXT NOT NULL DEFAULT '',
+			tenant_id            TEXT NOT NULL,
+			token_str            TEXT NOT NULL,
+			source_ip            TEXT NOT NULL DEFAULT '',
+			registered_at        TEXT NOT NULL,
+			expires_at           TEXT NOT NULL,
+			claimed_at           TEXT,
+			status               TEXT NOT NULL DEFAULT 'pending',
+			device_id            TEXT NOT NULL DEFAULT '',
+			identity_key_pub     BLOB NOT NULL DEFAULT '',
+			key_protection_level TEXT NOT NULL DEFAULT '',
+			hostname             TEXT NOT NULL DEFAULT '',
+			platform             TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_tenant_id    ON cfgms_pending_registrations(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_cfgms_pending_registrations_status       ON cfgms_pending_registrations(status)`,

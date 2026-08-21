@@ -2447,3 +2447,97 @@ func TestHandleRegistrationStatus_ClaimLeaderGate(t *testing.T) {
 		assert.Equal(t, "pending", body.Status)
 	})
 }
+
+// TestHandleRegister_ClaimPath_WritesDurableRecordAndSurvivesRestart: AC1 + AC2 —
+// the quarantine→approve→claim flow must write a StewardRecord to the durable
+// StewardStore at claim time (buildClaimResponse), and that record must be visible
+// in the registry after a simulated controller restart (new ControllerService +
+// LoadFromStorage from the same StewardStore), even though the steward never sent
+// a gRPC check-in. Issue #3403.
+func TestHandleRegister_ClaimPath_WritesDurableRecordAndSurvivesRestart(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	// Use a separate pending store (the default one from newHandleRegisterServer is
+	// replaced here so the claim poll hits the same store as the approve step).
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_claim_durable_ac1"
+	const tenantID = "tenant-claim-ac1"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	deviceID := "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4"
+	identityKeyPub := base64.StdEncoding.EncodeToString([]byte(pub))
+
+	// Step 1: Register → quarantine (HTTP 202).
+	rec1 := postRegisterWithBody(server, RegistrationRequest{
+		Token:          regToken,
+		DeviceID:       deviceID,
+		IdentityKeyPub: identityKeyPub,
+	})
+	require.Equal(t, http.StatusAccepted, rec1.Code, "quarantine must return 202")
+	var qResp RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &qResp))
+	require.NotEmpty(t, qResp.PendingID, "quarantine response must include a pending_id")
+
+	// Step 2: Operator approves.
+	require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+		qResp.PendingID, business.PendingRegistrationStatusApproved))
+
+	// Step 3: Steward polls → claim (cert issued, StewardStore written by buildClaimResponse).
+	pollReq, err := http.NewRequestWithContext(context.Background(), "GET",
+		ts.URL+"/api/v1/registration/status/"+qResp.PendingID, nil)
+	require.NoError(t, err)
+	pollReq.Header.Set("Authorization", "Bearer "+regToken)
+	pollResp, err := ts.Client().Do(pollReq)
+	require.NoError(t, err)
+	defer func() { _ = pollResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, pollResp.StatusCode, "claim poll must return 200")
+
+	var claimBody RegistrationStatusResponse
+	require.NoError(t, json.NewDecoder(pollResp.Body).Decode(&claimBody))
+	require.Equal(t, business.PendingRegistrationStatusClaimed, claimBody.Status,
+		"status must be 'claimed' after successful cert issuance")
+	require.NotEmpty(t, claimBody.StewardID, "claim response must include steward_id")
+
+	// StewardStore must have a durable "registered" record immediately after claim
+	// (before any gRPC check-in).
+	stored, storeErr := stewardSt.GetSteward(context.Background(), claimBody.StewardID)
+	require.NoError(t, storeErr,
+		"StewardStore must contain a record for the steward immediately after cert claim")
+	assert.Equal(t, business.StewardStatusRegistered, stored.Status,
+		"durable status must be 'registered' at enrollment: cert issued, no check-in yet")
+	assert.Equal(t, tenantID, stored.TenantID,
+		"durable record must be scoped to the correct tenant (AC4)")
+	assert.Equal(t, deviceID, stored.DeviceID,
+		"durable record must include the DeviceID from the pending entry (AC2 identity fields)")
+	assert.Equal(t, []byte(pub), stored.IdentityKeyPub,
+		"durable record must include the IdentityKeyPub from the pending entry")
+
+	// Simulate controller restart: fresh ControllerService with no DNA storage,
+	// backed by the same StewardStore. The steward has never sent a gRPC check-in.
+	restarted := service.NewControllerService(logging.NewNoopLogger())
+	restarted.SetStewardStore(stewardSt)
+	require.NoError(t, restarted.LoadFromStorage(context.Background()))
+
+	assert.Equal(t, 1, restarted.GetStewardCount(),
+		"enrolled steward must appear in the new controller's registry after restart (AC1)")
+	info, ok := restarted.GetStewardInfo(claimBody.StewardID)
+	require.True(t, ok, "enrolled steward must be retrievable by ID after restart")
+	assert.Equal(t, tenantID, info.TenantID)
+	assert.Equal(t, string(business.StewardStatusRegistered), info.Status,
+		"status must remain 'registered' in the restarted controller (never connected)")
+}

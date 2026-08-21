@@ -57,6 +57,27 @@ type PendingRegistrationEntry struct {
 
 	// Status is the current lifecycle state: pending | approved | claimed | denied | expired.
 	Status string
+
+	// Device identity fields — carried forward from the original HTTP registration
+	// request so the claim step (Issue #3403) can write a complete StewardRecord
+	// to the durable fleet store without re-contacting the steward.
+
+	// DeviceID is the 64-character lowercase hex SHA-256 fingerprint of the
+	// steward's Ed25519 identity key (ADR-010 §1).
+	DeviceID string
+
+	// IdentityKeyPub is the raw 32-byte Ed25519 public key for this steward.
+	IdentityKeyPub []byte
+
+	// KeyProtectionLevel is "file" or "tpm", describing how the private key is
+	// protected on the steward host.
+	KeyProtectionLevel string
+
+	// Hostname is the best-effort DNS hostname hint seeded from registration.
+	Hostname string
+
+	// Platform is the best-effort OS hint seeded from registration (e.g. "linux").
+	Platform string
 }
 
 // PendingRegistrationStore defines the storage interface for durable persistence of
