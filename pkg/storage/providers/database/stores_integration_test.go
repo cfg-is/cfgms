@@ -694,3 +694,56 @@ func TestDatabaseProvider_CreateCommandStore(t *testing.T) {
 		_ = s.Close()
 	}
 }
+
+// TestDatabaseStewardStore_DeviceIDUniquePerTenant is the PostgreSQL half of the
+// database-level backstop for the tenant-scoped duplicate-device_id guard (Issue #3403).
+// It mirrors TestSQLiteStewardStore_DeviceIDUniquePerTenant case for case so both
+// providers are held to the same contract — the guard in
+// features/controller/api/handlers_registration.go is check-then-act, and only the
+// partial unique index on (tenant_id, device_id) decides a winner when two claims
+// assert one device_id concurrently.
+func TestDatabaseStewardStore_DeviceIDUniquePerTenant(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	deviceID := fmt.Sprintf("device-shared-%d", time.Now().UnixNano())
+	const tenantA = "tenant-dup-a"
+	const tenantB = "tenant-dup-b"
+
+	first := makeSampleSteward("steward-dup-a", tenantA)
+	first.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, first))
+
+	// A different steward asserting the same device_id in the same tenant.
+	second := makeSampleSteward("steward-dup-b", tenantA)
+	second.DeviceID = deviceID
+	err := store.RegisterSteward(ctx, second)
+	require.Error(t, err, "a second steward must not take a device_id already held in the tenant")
+	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict,
+		"the conflict must be reported as ErrStewardDeviceIDConflict, not the benign ErrStewardAlreadyExists")
+
+	// Cross-tenant is a separate namespace and must still be allowed.
+	other := makeSampleSteward("steward-dup-c", tenantB)
+	other.DeviceID = deviceID
+	assert.NoError(t, store.RegisterSteward(ctx, other),
+		"the same device_id under a different tenant is a distinct namespace")
+
+	// Empty device_id means "not asserted" and must not collide with itself.
+	blankA := makeSampleSteward("steward-blank-a", tenantA)
+	blankA.DeviceID = ""
+	blankB := makeSampleSteward("steward-blank-b", tenantA)
+	blankB.DeviceID = ""
+	require.NoError(t, store.RegisterSteward(ctx, blankA))
+	assert.NoError(t, store.RegisterSteward(ctx, blankB),
+		"rows with no device_id must be excluded from the unique index")
+
+	// Re-registering the SAME steward stays the benign duplicate. This is the case
+	// that keeps an idempotent claim retry working: it violates both the primary key
+	// and the device index, and must not be reported as a device_id conflict.
+	dupSelf := makeSampleSteward("steward-dup-a", tenantA)
+	dupSelf.DeviceID = deviceID
+	selfErr := store.RegisterSteward(ctx, dupSelf)
+	require.Error(t, selfErr)
+	assert.ErrorIs(t, selfErr, business.ErrStewardAlreadyExists,
+		"the same steward written twice stays ErrStewardAlreadyExists so idempotent retries remain benign")
+}

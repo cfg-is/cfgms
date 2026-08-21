@@ -126,7 +126,23 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		record.Hidden,
 	)
 	if err != nil {
+		// Issue #3403: disambiguate the two unique violations by primary key rather
+		// than by which index Postgres happened to report. Re-registering the SAME
+		// steward violates both the primary key and uq_steward_records_tenant_device,
+		// and that case must stay ErrStewardAlreadyExists so an idempotent claim retry
+		// remains benign. Only a violation with no row under this ID is a genuine
+		// device_id conflict with a DIFFERENT steward. The tx is aborted at this point,
+		// so the probe runs on the pool.
 		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique") {
+			var exists int
+			probeErr := s.db.QueryRowContext(ctx,
+				`SELECT 1 FROM steward_records WHERE id = $1`, record.ID).Scan(&exists)
+			if probeErr == nil {
+				return business.ErrStewardAlreadyExists
+			}
+			if strings.Contains(err.Error(), "uq_steward_records_tenant_device") {
+				return business.ErrStewardDeviceIDConflict
+			}
 			return business.ErrStewardAlreadyExists
 		}
 		return fmt.Errorf("database: failed to register steward %s: %w", record.ID, err)

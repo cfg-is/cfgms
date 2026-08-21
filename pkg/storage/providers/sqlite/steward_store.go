@@ -83,7 +83,22 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 		return e
 	})
 	if err != nil {
+		// Issue #3403: disambiguate by primary key, not by the columns SQLite names.
+		// Re-registering the SAME steward violates both stewards.id and
+		// uq_stewards_tenant_device, and SQLite reports whichever it checks first —
+		// so keying off "stewards.device_id" alone would turn a benign idempotent
+		// claim retry into a rejection. Only a violation with no row under this ID is
+		// a genuine device_id conflict with a DIFFERENT steward.
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			var exists int
+			probeErr := s.db.QueryRowContext(ctx,
+				`SELECT 1 FROM stewards WHERE id = ?`, record.ID).Scan(&exists)
+			if probeErr == nil {
+				return business.ErrStewardAlreadyExists
+			}
+			if strings.Contains(err.Error(), "stewards.device_id") {
+				return business.ErrStewardDeviceIDConflict
+			}
 			return business.ErrStewardAlreadyExists
 		}
 		return fmt.Errorf("sqlite: failed to register steward %s: %w", record.ID, err)

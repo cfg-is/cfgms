@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -321,6 +322,12 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		}
 		resp, err := s.buildClaimResponse(r.Context(), entry, tokenStr)
 		if err != nil {
+			if errors.Is(err, errClaimDeviceIDConflict) {
+				// The entry stays "claimed": the colliding enrollment is burned
+				// rather than left retryable, and no certificate was minted.
+				http.Error(w, "device_id already registered in this tenant", http.StatusConflict)
+				return
+			}
 			s.logger.Error("Failed to generate cert for claimed registration",
 				"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", logging.SanitizeLogValue(entry.StewardID), "error", logging.SanitizeLogValue(err.Error()))
 			// Entry is already "claimed" — steward must re-register if cert was not received.
@@ -351,11 +358,96 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// errClaimDeviceIDConflict is returned by buildClaimResponse when the claimed
+// pending entry asserts a device_id already held by a different steward in the
+// same tenant. Surfaced as HTTP 409 by handleRegistrationStatus.
+var errClaimDeviceIDConflict = errors.New("device_id already registered in this tenant")
+
 // buildClaimResponse generates the cert and builds the RegistrationStatusResponse.
 // Mirrors the approved path in handleRegister (lines ~286–365).
 func (s *Server) buildClaimResponse(ctx context.Context, entry *business.PendingRegistrationEntry, tokenStr string) (*RegistrationStatusResponse, error) {
 	if s.certManager == nil {
 		return nil, fmt.Errorf("certificate manager not initialized")
+	}
+
+	// Tenant-scoped duplicate-device_id guard for the quarantine→approve→claim
+	// route (ADR-010 §1). handleRegister gates its direct-approval write with the
+	// same lookup, but that check cannot cover this route: no StewardRecord exists
+	// at register time, so two enrollments asserting one device_id both pass it and
+	// both reach a write here. Their pending IDs differ — pendingRegistrationID
+	// hashes the token together with the device identity — and neither the
+	// non-unique device_id index nor RegisterSteward (which reports only a primary
+	// key collision) rejects the second record. Two records sharing a device_id
+	// break GetStewardByDeviceID, the single lookup feeding the revocation gate in
+	// handlers_registration_refresh.go: a record still in "registered" state
+	// alongside a revoked sibling lets the revoked holder pass that gate. Run the
+	// check before the certificate is minted so a colliding claim gets no
+	// credential either.
+	if s.stewardStore != nil && entry.DeviceID != "" {
+		existing, lookupErr := s.stewardStore.GetStewardByDeviceID(ctx, entry.DeviceID)
+		if lookupErr == nil && existing != nil &&
+			existing.TenantID == entry.TenantID && existing.ID != entry.StewardID {
+			s.logger.Warn("Duplicate DeviceID at registration claim within tenant",
+				"pending_id", logging.SanitizeLogValue(entry.PendingID),
+				"steward_id", logging.SanitizeLogValue(entry.StewardID),
+				"device_id", logging.SanitizeLogValue(entry.DeviceID),
+				"tenant_id", logging.SanitizeLogValue(entry.TenantID))
+			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+			s.emitRegistrationAudit(ctx, tokenStr, entry.TenantID, entry.StewardID,
+				business.AuditEventSecurityEvent, "registration_rejected",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{"rejection_reason": "duplicate device_id in tenant"})
+			return nil, errClaimDeviceIDConflict
+		}
+	}
+
+	// Durably record the steward in the fleet store at enrollment — before any
+	// gRPC check-in (Issue #3403). A steward in this state is fully described
+	// (identity, tenant, enrollment timestamp) and distinguishable from a steward
+	// that has connected (status: "active") or gone silent (status: "lost").
+	//
+	// This write is deliberately ordered BEFORE the certificate is minted. The
+	// lookup above is check-then-act and two concurrent claims asserting one
+	// device_id can both pass it; only the unique index on (tenant_id, device_id)
+	// decides a winner. Writing first means the loser is rejected while it still
+	// has no credential — minting first would hand out a certificate and then
+	// discard it, leaving an issued cert with no steward record behind it.
+	//
+	// ErrStewardAlreadyExists is benign: the same steward was written twice by a
+	// concurrent poll of one pending entry. ErrStewardDeviceIDConflict is not — it
+	// is a different steward holding this device_id, and it fails the claim.
+	if s.stewardStore != nil {
+		now := time.Now().UTC()
+		storeErr := s.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+			ID:                 entry.StewardID,
+			TenantID:           entry.TenantID,
+			Hostname:           entry.Hostname,
+			Platform:           entry.Platform,
+			Status:             business.StewardStatusRegistered,
+			RegisteredAt:       entry.RegisteredAt,
+			LastSeen:           now,
+			DeviceID:           entry.DeviceID,
+			IdentityKeyPub:     entry.IdentityKeyPub,
+			KeyProtectionLevel: entry.KeyProtectionLevel,
+		})
+		switch {
+		case errors.Is(storeErr, business.ErrStewardDeviceIDConflict):
+			s.logger.Warn("Duplicate DeviceID rejected by unique index at registration claim",
+				"pending_id", logging.SanitizeLogValue(entry.PendingID),
+				"steward_id", logging.SanitizeLogValue(entry.StewardID),
+				"device_id", logging.SanitizeLogValue(entry.DeviceID),
+				"tenant_id", logging.SanitizeLogValue(entry.TenantID))
+			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+			s.emitRegistrationAudit(ctx, tokenStr, entry.TenantID, entry.StewardID,
+				business.AuditEventSecurityEvent, "registration_rejected",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{"rejection_reason": "duplicate device_id in tenant"})
+			return nil, errClaimDeviceIDConflict
+		case storeErr != nil && !errors.Is(storeErr, business.ErrStewardAlreadyExists):
+			s.logger.Error("Failed to persist steward record to fleet store at enrollment",
+				"steward_id", logging.SanitizeLogValue(entry.StewardID),
+				"error", logging.SanitizeLogValue(storeErr.Error()))
+		}
 	}
 
 	// Re-fetch the token to obtain Group and ControllerURL.
@@ -418,15 +510,17 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		}
 	}
 
-	// Promote steward to registered in the fleet registry.
-	if err := s.controllerService.UpdateStewardStatus(entry.StewardID, "registered"); err != nil {
+	// Promote steward to registered in the fleet registry and persist the status
+	// to durable DNA storage so LoadFromStorage warm-loads it after a restart
+	// (Issue #3403).
+	if err := s.controllerService.UpdateStewardStatusDurable(entry.StewardID, entry.TenantID, "registered"); err != nil {
 		s.logger.Warn("Failed to update steward status to registered after claim",
-			"steward_id", entry.StewardID, "error", err)
+			"steward_id", logging.SanitizeLogValue(entry.StewardID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	s.logger.Info("Generated client certificate for claimed registration",
-		"pending_id", entry.PendingID,
-		"steward_id", entry.StewardID,
+		"pending_id", logging.SanitizeLogValue(entry.PendingID),
+		"steward_id", logging.SanitizeLogValue(entry.StewardID),
 		"validity_days", validityDays)
 
 	return resp, nil
@@ -824,14 +918,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			}
 
 			pendingEntry := &business.PendingRegistrationEntry{
-				PendingID:    pendingID,
-				StewardID:    stewardID,
-				TenantID:     token.TenantID,
-				TokenStr:     req.Token,
-				SourceIP:     extractSourceIP(r, s.trustedProxies),
-				RegisteredAt: time.Now().UTC(),
-				ExpiresAt:    time.Now().UTC().Add(5 * 24 * time.Hour),
-				Status:       business.PendingRegistrationStatusPending,
+				PendingID:          pendingID,
+				StewardID:          stewardID,
+				TenantID:           token.TenantID,
+				TokenStr:           req.Token,
+				SourceIP:           extractSourceIP(r, s.trustedProxies),
+				RegisteredAt:       time.Now().UTC(),
+				ExpiresAt:          time.Now().UTC().Add(5 * 24 * time.Hour),
+				Status:             business.PendingRegistrationStatusPending,
+				DeviceID:           req.DeviceID,
+				IdentityKeyPub:     identityKeyBytes,
+				KeyProtectionLevel: req.KeyProtectionLevel,
+				Hostname:           req.Hostname,
+				Platform:           req.OS,
 			}
 			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
 				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {

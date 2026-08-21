@@ -490,11 +490,23 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var controllerService *service.ControllerService
 	if dnaStorageManager != nil {
 		controllerService = service.NewControllerServiceWithStorage(logger, dnaStorageManager)
-		if loadErr := controllerService.LoadFromStorage(context.Background()); loadErr != nil {
-			logger.Warn("Failed to warm-load steward registry from DNA storage", "error", loadErr)
-		}
 	} else {
 		controllerService = service.NewControllerService(logger)
+	}
+	// Issue #3403: Wire the StewardStore before LoadFromStorage so the warm-load
+	// can enumerate enrolled-but-never-connected stewards from the fleet registry
+	// in addition to connected stewards tracked in DNA storage.
+	if ss := storageManager.GetStewardStore(); ss != nil {
+		controllerService.SetStewardStore(ss)
+	}
+	// LoadFromStorage is a no-op when neither DNA storage nor StewardStore is
+	// configured (controller_service.go:130). Call it unconditionally so a
+	// deployment without DNA storage still warms the registry from StewardStore.
+	if err := controllerService.LoadFromStorage(context.Background()); err != nil {
+		// Do not log the raw error: storage-driver errors embed the DSN (and
+		// therefore the DB password) in their message text. Log the fixed sentinel
+		// only; the storage layer already logs the underlying cause at its boundary.
+		logger.Warn("Failed to warm-load steward registry from DNA storage or fleet store")
 	}
 
 	// Wire deployment ring config into controller service (Issue #2271).

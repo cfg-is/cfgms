@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/tagstore"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -35,6 +36,11 @@ type ControllerService struct {
 	mu         sync.RWMutex
 	stewards   map[string]*StewardInfo
 	dnaStorage *fleetStorage.Manager
+
+	// stewardStore is the durable fleet registry (Issue #3403). Wired via
+	// SetStewardStore after construction. Nil when the storage backend does not
+	// provide one (e.g. in-memory-only test setups).
+	stewardStore business.StewardStore
 
 	ringMu     sync.RWMutex
 	ringConfig controllerconfig.DeploymentRingConfig
@@ -115,32 +121,66 @@ func NewControllerServiceWithStorage(logger logging.Logger, storage *fleetStorag
 // LoadFromStorage warms the in-memory steward registry by loading the latest
 // DNA record for every device persisted in the fleet storage backend. Call
 // this once during controller startup, after NewControllerServiceWithStorage.
+//
+// Issue #3403: also warm-loads enrolled stewards from the durable StewardStore
+// that have no DNA history yet (enrolled but never connected). This ensures a
+// steward that received its mTLS cert but never ran a gRPC check-in survives a
+// controller restart and remains visible in GET /api/v1/stewards.
 func (s *ControllerService) LoadFromStorage(ctx context.Context) error {
-	if s.dnaStorage == nil {
+	if s.dnaStorage == nil && s.stewardStore == nil {
 		return nil
 	}
 
 	// Tenant comes from the dedicated device_tenant mapping (Issue #3324),
 	// independent of dna_history, so tenant resolution survives retiring the
 	// flat DNARecord write path.
-	tenantMap, err := s.dnaStorage.ListDeviceTenants(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list device tenants from storage: %w", err)
+	var tenantMap map[string]string
+	var deviceIDs []string
+	if s.dnaStorage != nil {
+		var err error
+		tenantMap, err = s.dnaStorage.ListDeviceTenants(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list device tenants from storage: %w", err)
+		}
+
+		// Enumerate devices that have DNA history records.
+		deviceIDs, err = s.dnaStorage.ListAllDeviceIDs(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list device IDs from storage: %w", err)
+		}
 	}
 
-	// Enumerate devices that have DNA history records.
-	deviceIDs, err := s.dnaStorage.ListAllDeviceIDs(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list device IDs from storage: %w", err)
-	}
-
-	// Build union of all known devices from both sources.
+	// Build union of all known devices from DNA sources.
 	allDevices := make(map[string]struct{}, len(tenantMap)+len(deviceIDs))
 	for id := range tenantMap {
 		allDevices[id] = struct{}{}
 	}
 	for _, id := range deviceIDs {
 		allDevices[id] = struct{}{}
+	}
+
+	// Also include stewards that are in the durable fleet registry but have no
+	// DNA history yet — enrolled (cert issued) but never connected (Issue #3403).
+	// These are the stewards that caused the cfg-lab incident: visible in
+	// StewardStore but absent from DNA storage after a backend migration.
+	var stewardStoreRecords []*business.StewardRecord
+	if s.stewardStore != nil {
+		var listErr error
+		stewardStoreRecords, listErr = s.stewardStore.ListStewards(ctx)
+		if listErr != nil {
+			s.logger.Warn("Failed to list stewards from durable store during warm-load",
+				"error", logging.SanitizeLogValue(listErr.Error()))
+		} else {
+			for _, rec := range stewardStoreRecords {
+				allDevices[rec.ID] = struct{}{}
+			}
+		}
+	}
+
+	// Build a quick lookup for StewardStore records by ID.
+	stewardStoreByID := make(map[string]*business.StewardRecord, len(stewardStoreRecords))
+	for _, rec := range stewardStoreRecords {
+		stewardStoreByID[rec.ID] = rec
 	}
 
 	s.logger.Info("Loading steward registry from storage", "device_count", len(allDevices))
@@ -155,31 +195,54 @@ func (s *ControllerService) LoadFromStorage(ctx context.Context) error {
 		}
 
 		// Tenant from the dedicated mapping is the authoritative source (Issue #3324).
-		tenantID := tenantMap[deviceID]
+		var tenantID string
+		if tenantMap != nil {
+			tenantID = tenantMap[deviceID]
+		}
 
 		// DNA data is loaded from the flat store. GetLatestByDeviceID is used here
 		// for DNA only, not for tenant resolution (Issue #3324).
-		record, err := s.dnaStorage.GetLatestByDeviceID(ctx, deviceID)
-		if err != nil {
-			s.logger.Warn("Failed to load DNA for device from storage",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"error", logging.SanitizeLogValue(err.Error()))
-		}
-
 		var dna *common.DNA
 		var storedAt time.Time
 		var status string
-		if record != nil {
-			dna = record.DNA
-			storedAt = record.StoredAt
-			status = record.Status
-			// Fallback: devices registered before the device_tenant migration may
-			// have no mapping entry yet. The SQL migration seeds device_tenant from
-			// dna_history on first startup, so this path only applies during the
-			// narrow window between a dna_history write and a controller restart
-			// (e.g. SetDeviceTenant failed or the process crashed after Store).
+		if s.dnaStorage != nil {
+			record, err := s.dnaStorage.GetLatestByDeviceID(ctx, deviceID)
+			if err != nil {
+				s.logger.Warn("Failed to load DNA for device from storage",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+
+			if record != nil {
+				dna = record.DNA
+				storedAt = record.StoredAt
+				status = record.Status
+				// Fallback: devices registered before the device_tenant migration may
+				// have no mapping entry yet. The SQL migration seeds device_tenant from
+				// dna_history on first startup, so this path only applies during the
+				// narrow window between a dna_history write and a controller restart
+				// (e.g. SetDeviceTenant failed or the process crashed after Store).
+				if tenantID == "" {
+					tenantID = record.TenantID
+				}
+			}
+		}
+
+		// Merge StewardStore data for this device. StewardStore is the authoritative
+		// source for lifecycle status (Issue #3403): decommission only writes to
+		// StewardStore, not to DNA, so a DNA-derived status such as "active" can be
+		// stale after a deregister or revoke. Always prefer the StewardStore status
+		// when it is set. For enrolled-but-never-connected stewards it is the only
+		// source.
+		if sr, ok := stewardStoreByID[deviceID]; ok {
 			if tenantID == "" {
-				tenantID = record.TenantID
+				tenantID = sr.TenantID
+			}
+			if sr.Status != "" {
+				status = string(sr.Status)
+			}
+			if storedAt.IsZero() {
+				storedAt = sr.RegisteredAt
 			}
 		}
 
@@ -189,6 +252,10 @@ func (s *ControllerService) LoadFromStorage(ctx context.Context) error {
 			s.logger.Warn("Skipping device with unresolvable tenant during warm-load",
 				"device_id", logging.SanitizeLogValue(deviceID))
 			continue
+		}
+
+		if dna == nil {
+			dna = &common.DNA{Id: deviceID}
 		}
 
 		s.stewards[deviceID] = &StewardInfo{
@@ -224,6 +291,22 @@ func (s *ControllerService) StorageReady(ctx context.Context) error {
 	return nil
 }
 
+// reconnectionAdmissibleStatus reports whether a durable steward record in the
+// given lifecycle state may be adopted by a caller-asserted reconnection.
+// Terminal and out-of-band states are excluded: revoked is permanently denied
+// re-entry, deregistered records are retained for audit only, and
+// archived/dormant stewards must come back through the registration-refresh
+// flow (ADR-010 §3/§4) rather than through Register. Same admissible set as the
+// approval gate in pkg/controlplane/providers/grpc/approval.go.
+func reconnectionAdmissibleStatus(status business.StewardStatus) bool {
+	switch status {
+	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost:
+		return true
+	default:
+		return false
+	}
+}
+
 // AcceptRegistration handles steward registration requests
 func (s *ControllerService) AcceptRegistration(ctx context.Context, req *controller.RegisterRequest) (*controller.RegisterResponse, error) {
 	// Treat nil InitialDna as an empty snapshot so callers that omit it get a
@@ -244,6 +327,7 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	var stewardID string
 	var syncStatus *common.SyncStatus
 	var requiresDNAResync, requiresConfigResync bool
+	now := time.Now()
 
 	// Handle reconnection vs new registration
 	if req.IsReconnection {
@@ -255,9 +339,75 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 			// Verify sync status
 			syncStatus, requiresDNAResync, requiresConfigResync = s.verifySyncStatus(existingSteward, req)
 		} else {
-			s.logger.Warn("Reconnection claimed but no existing steward found", "dna_id", logging.SanitizeLogValue(req.InitialDna.Id))
-			// Treat as new registration
-			req.IsReconnection = false
+			// Not in the in-memory registry. Check the durable StewardStore before
+			// treating as a new registration and minting a fresh ID (Issue #3403).
+			// This covers the scenario where a controller restarted after a backend
+			// migration that wiped DNA storage but left StewardStore intact.
+			//
+			// req.InitialDna.Id is caller-asserted, so a record found under it may
+			// only be adopted after two gates — otherwise the writes further down
+			// (in-memory TenantID and the durable device_tenant mapping, both set
+			// from the CALLER's context tenant) would rebind someone else's steward:
+			//
+			//  1. Lifecycle. Only registered|active|lost may re-enter the fleet.
+			//     GetSteward returns records in every state, including revoked
+			//     ("permanently denied re-entry") and deregistered; the caller must
+			//     apply the revocation gate itself (ADR-010 §3, StewardStore docs).
+			//     Same admissible set as the reference gate in
+			//     pkg/controlplane/providers/grpc/approval.go.
+			//  2. Tenant. The record's tenant must equal the caller's context tenant,
+			//     so a caller in tenant A cannot assert a tenant-B steward ID.
+			//
+			// A failed gate falls through to req.IsReconnection = false: a fresh ID is
+			// minted by generateStewardID() and the named record is left untouched.
+			var resolved *business.StewardRecord
+			if s.stewardStore != nil {
+				sr, storeErr := s.stewardStore.GetSteward(ctx, req.InitialDna.Id)
+				switch {
+				case storeErr != nil || sr == nil:
+					// No durable record (or the store is unreachable): treat as new.
+				case !reconnectionAdmissibleStatus(sr.Status):
+					s.logger.Warn("Reconnection refused: steward lifecycle state forbids re-entry",
+						"dna_id", logging.SanitizeLogValue(req.InitialDna.Id),
+						"status", logging.SanitizeLogValue(string(sr.Status)))
+				case sr.TenantID != tenantID:
+					s.logger.Warn("Reconnection refused: steward belongs to a different tenant",
+						"dna_id", logging.SanitizeLogValue(req.InitialDna.Id),
+						"request_tenant_id", logging.SanitizeLogValue(tenantID))
+				default:
+					resolved = sr
+				}
+			}
+
+			if resolved != nil {
+				s.logger.Info("Reconnection: resolved steward from durable fleet store",
+					"steward_id", logging.SanitizeLogValue(resolved.ID))
+				stewardID = resolved.ID
+				// Rehydrate into memory so subsequent lookups succeed.
+				s.mu.Lock()
+				if _, ok := s.stewards[stewardID]; !ok {
+					dna := &common.DNA{Id: stewardID}
+					s.stewards[stewardID] = &StewardInfo{
+						ID:            stewardID,
+						TenantID:      resolved.TenantID,
+						DNA:           dna,
+						LastHeartbeat: now,
+						Status:        string(resolved.Status),
+						Metrics:       make(map[string]string),
+					}
+				}
+				s.mu.Unlock()
+				syncStatus = &common.SyncStatus{
+					LastSyncTime:    req.InitialDna.LastSyncTime,
+					SyncFingerprint: req.InitialDna.SyncFingerprint,
+					IsInSync:        true,
+					Reason:          "Reconnection after restart (StewardStore fallback)",
+				}
+			} else {
+				s.logger.Warn("Reconnection claimed but no existing steward found", "dna_id", logging.SanitizeLogValue(req.InitialDna.Id))
+				// Treat as new registration
+				req.IsReconnection = false
+			}
 		}
 	}
 
@@ -673,10 +823,21 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	s.mu.Lock()
 	if existing, ok := s.stewards[stewardID]; ok {
 		existing.LastHeartbeat = now
-		if existing.Status == "" || existing.Status == "registered" {
+		promoted := existing.Status == "" || existing.Status == "registered"
+		if promoted {
 			existing.Status = "active"
 		}
 		s.mu.Unlock()
+
+		// Persist the status promotion and last-seen to the durable fleet store so
+		// GET /api/v1/stewards shows "active" after a first connect (Issue #3403).
+		if promoted && s.stewardStore != nil {
+			if storeErr := s.stewardStore.UpdateStewardStatus(context.Background(), stewardID, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
+				s.logger.Warn("EnsureSteward: failed to persist status promotion to fleet store",
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"error", logging.SanitizeLogValue(storeErr.Error()))
+			}
+		}
 		return
 	}
 
@@ -710,6 +871,27 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	// devices that connected before their device_tenant row was written.
 	s.setDeviceTenant(context.Background(), stewardID, tenantID)
 	s.storeDNA(context.Background(), stewardID, tenantID, dna, status)
+
+	// Update the persistent fleet store status when this is a reconnect of a
+	// known enrolled steward (Issue #3403). Only promote from non-terminal states
+	// (registered, lost, active); terminal states (deregistered, revoked, archived,
+	// dormant) must not be overwritten even if the approval checker failed to block
+	// the connection — defence-in-depth. ErrStewardNotFound is benign.
+	if s.stewardStore != nil {
+		if sr, getErr := s.stewardStore.GetSteward(context.Background(), stewardID); getErr == nil {
+			switch sr.Status {
+			case business.StewardStatusDeregistered, business.StewardStatusRevoked,
+				business.StewardStatusArchived, business.StewardStatusDormant:
+				// Terminal: do not promote.
+			default:
+				if storeErr := s.stewardStore.UpdateStewardStatus(context.Background(), stewardID, business.StewardStatus(status)); storeErr != nil && storeErr != business.ErrStewardNotFound {
+					s.logger.Warn("EnsureSteward: failed to update fleet store status on reconnect",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"error", logging.SanitizeLogValue(storeErr.Error()))
+				}
+			}
+		}
+	}
 
 	s.logger.Info("Steward ensured in registry on authenticated connect",
 		"steward_id", logging.SanitizeLogValue(stewardID),
@@ -886,7 +1068,8 @@ func (s *ControllerService) SetStewardDNA(stewardID string, dna *common.DNA) boo
 	return true
 }
 
-// UpdateStewardStatus updates the status of a registered steward.
+// UpdateStewardStatus updates the status of a registered steward in the
+// in-memory registry only.
 // Returns an error if the steward is not found.
 func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error {
 	s.mu.Lock()
@@ -896,6 +1079,38 @@ func (s *ControllerService) UpdateStewardStatus(stewardID, status string) error 
 		return fmt.Errorf("steward %s not found", stewardID)
 	}
 	steward.Status = status
+	return nil
+}
+
+// UpdateStewardStatusDurable updates the steward's status in both the
+// in-memory registry and the durable DNA storage so a controller restart
+// warm-loads the correct status (Issue #3403). It is a best-effort call:
+// a missing in-memory entry is logged and the DNA write is skipped; a DNA
+// write failure is logged but does not fail the caller.
+func (s *ControllerService) UpdateStewardStatusDurable(stewardID, tenantID, status string) error {
+	s.mu.Lock()
+	steward, exists := s.stewards[stewardID]
+	var dna *common.DNA
+	if exists {
+		steward.Status = status
+		dna = cloneDNA(steward.DNA)
+	}
+	s.mu.Unlock()
+
+	if !exists {
+		s.logger.Warn("UpdateStewardStatusDurable: steward not in registry, skipping DNA update",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		return fmt.Errorf("steward %s not found in registry", stewardID)
+	}
+	if dna == nil {
+		// The in-memory DNA is nil when the steward registered via the direct-approval
+		// path with no initial attributes. A minimal placeholder is used here: it records
+		// the status transition without clobbering any earlier DNA. checkDNAIntegrity is
+		// intentionally skipped — the placeholder carries only the steward ID and status,
+		// which is sufficient for warm-load; the steward's real DNA arrives on first sync.
+		dna = &common.DNA{Id: stewardID}
+	}
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, status)
 	return nil
 }
 
@@ -952,6 +1167,18 @@ func (s *ControllerService) SetPostDNASyncHook(fn func(stewardID string, dna *co
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.postDNASyncHook = fn
+}
+
+// SetStewardStore wires the durable fleet registry store into the service
+// (Issue #3403). The store is used by LoadFromStorage to warm-load enrolled
+// stewards that have never connected, and by EnsureSteward to update the
+// persistent lifecycle status on reconnect. Nil until wired.
+//
+// Callers must call this before any goroutines that read s.stewardStore are
+// started; the field is not protected for concurrent access after the initial
+// wiring (server.go calls it once at startup before serving begins).
+func (s *ControllerService) SetStewardStore(store business.StewardStore) {
+	s.stewardStore = store
 }
 
 // SetTagStore wires the durable controller-side tag store into the service.

@@ -367,9 +367,19 @@ The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/st
 
 **Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
 
+**Enrollment at claim, not at check-in (Issue #3403)**: A steward's durable `StewardRecord` is written at cert-issuance time (the "claim" step), not lazily at the first gRPC check-in. Both registration paths write the record at the same point:
+- **Direct approval** (`handleRegister` with `AlwaysApproveHook`): `handleRegister` itself calls `StewardStore.RegisterSteward` with `StewardStatusRegistered` inline, before returning the cert bundle (pre-existing write, Issue #2095, unchanged by this story).
+- **Quarantine → approve → claim** (manual-review flow): the steward polls `/api/v1/registration/status/{id}` once the operator has approved the pending entry; `buildClaimResponse` calls `StewardStore.RegisterSteward` at that poll, before the cert is returned.
+
+Both paths enforce the same tenant-scoped `device_id` uniqueness rule before writing. `handleRegister` rejects a registration whose `device_id` is already held by another steward in the tenant (HTTP 409), and `buildClaimResponse` re-runs that check immediately before its own write: the register-time check cannot catch a collision between two enrollments that are both still pending, because neither has a `StewardRecord` yet. A colliding claim is refused with 409 and mints no certificate. Cross-tenant collisions remain allowed — each tenant namespace is independent. The rule keeps `GetStewardByDeviceID` unambiguous; it is the single lookup behind the registration-refresh revocation gate, so a second record sharing a `device_id` would let a revoked steward pass that gate against its sibling's identity key.
+
+In both cases, `status = registered` at enrollment and `status = active` after the first gRPC check-in. A steward that is enrolled (cert issued) but has never connected is present in `StewardStore` and therefore visible in the fleet registry after a controller restart via `LoadFromStorage` — it cannot silently disappear due to a backend migration or node replacement that clears in-memory state.
+
+An **unapproved** steward (pending entry in `PendingRegistrationStore`, operator has not yet acted) has no `StewardRecord` and is invisible to `LoadFromStorage`. It cannot receive config pushes or participate in convergence until its cert is claimed.
+
 **Implementation**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
 
-**After a restart**: On startup, the controller can call `ListStewards()` or `ListStewardsByStatus()` to enumerate the fleet without waiting for stewards to check in. The stored `last_seen` and `last_heartbeat_at` timestamps allow the controller to identify stewards that went silent before or during the restart.
+**After a restart**: `LoadFromStorage` warms the in-memory registry from two sources: DNA storage (connected stewards that have sent at least one check-in) and `StewardStore` (all enrolled stewards including those that have never connected). This union guarantees that a steward enrolled on one controller node is immediately visible after a failover or backend migration, without waiting for it to reconnect.
 
 ### Durable Device-Tenant Mapping (Issue #3324)
 
@@ -377,7 +387,13 @@ Tenant resolution for a steward is backed by a dedicated `device_tenant` table (
 
 `lookupDurableTenant` (`features/controller/service/controller_service.go`) reads exclusively from `device_tenant` via `GetDeviceTenant` — `ok=false` means "tenant unknown," and callers must decline to fabricate a tenant-scoped registry entry rather than fall back to DNA.
 
-**Controller-startup registry recovery** (`LoadFromStorage`) sources tenant from `ListDeviceTenants()` as the primary source; `GetLatestByDeviceID`'s `record.DNA` is loaded for the DNA payload only, never for tenant. The single fallback to `record.TenantID` covers the narrow window between a `dna_history` write and a controller restart where the corresponding `device_tenant` write did not complete (crash or a failed `SetDeviceTenant`) — migration v2 backfills `device_tenant` from `dna_history` (latest version per device) on upgrade, so this fallback is a transient gap, not a steady-state path. A device with no resolvable tenant from either source is skipped rather than warm-loaded with a fabricated tenant, per the Issue #2008 no-fabrication contract.
+**Controller-startup registry recovery** (`LoadFromStorage`) warms the in-memory steward registry from two sources:
+
+1. **DNA storage**: tenant from `ListDeviceTenants()` (primary); `GetLatestByDeviceID`'s `record.DNA` for the DNA payload only, never for tenant. The single fallback to `record.TenantID` covers the narrow window between a `dna_history` write and a controller restart where the corresponding `device_tenant` write did not complete — migration v2 backfills `device_tenant` from `dna_history` on upgrade, so this fallback is a transient gap, not a steady-state path.
+
+2. **StewardStore** (Issue #3403): `ListStewards()` is called after the DNA enumeration. Any steward present in `StewardStore` but absent from DNA storage (enrolled but never connected) is added to the in-memory registry using the tenant and status from its `StewardRecord`. This source is the fix for the cfg-lab incident where 3 HV-host stewards enrolled on 2026-08-01, never reconnected, and became invisible after the 2026-08-05 Postgres cutover that wiped DNA storage.
+
+A device with no resolvable tenant from either source is skipped rather than warm-loaded with a fabricated tenant, per the Issue #2008 no-fabrication contract.
 
 ### Controller-Side Tag Store (Issue #2542)
 

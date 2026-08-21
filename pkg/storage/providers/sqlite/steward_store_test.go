@@ -445,3 +445,67 @@ func TestSQLiteStewardStore_BackfillTenantID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "post-migration-tenant", got2.TenantID)
 }
+
+// TestSQLiteStewardStore_DeviceIDUniquePerTenant covers the database-level backstop
+// for the tenant-scoped duplicate-device_id guard (Issue #3403).
+//
+// The guard in features/controller/api/handlers_registration.go is check-then-act:
+// it reads GetStewardByDeviceID, then writes RegisterSteward. Two claims can both
+// complete the read before either writes, and the writes key on distinct steward
+// IDs so nothing makes them collide at the row level. The partial unique index on
+// (tenant_id, device_id) is what actually decides a winner, and this test exercises
+// it directly rather than through the handler — a handler-level race is timing
+// dependent and passes with or without the index, so it cannot prove the backstop.
+func TestSQLiteStewardStore_DeviceIDUniquePerTenant(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	const deviceID = "device-shared-1"
+
+	first := testStewardRec("steward-dup-a")
+	first.TenantID = "tenant-1"
+	first.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, first))
+
+	// A different steward asserting the same device_id in the same tenant.
+	second := testStewardRec("steward-dup-b")
+	second.TenantID = "tenant-1"
+	second.DeviceID = deviceID
+	err := store.RegisterSteward(ctx, second)
+	require.Error(t, err, "a second steward must not take a device_id already held in the tenant")
+	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict,
+		"the conflict must be reported as ErrStewardDeviceIDConflict, not the benign ErrStewardAlreadyExists")
+
+	// Cross-tenant is a separate namespace and must still be allowed.
+	other := testStewardRec("steward-dup-c")
+	other.TenantID = "tenant-2"
+	other.DeviceID = deviceID
+	assert.NoError(t, store.RegisterSteward(ctx, other),
+		"the same device_id under a different tenant is a distinct namespace")
+
+	// Empty device_id means "not asserted" and must not collide with itself.
+	blankA := testStewardRec("steward-blank-a")
+	blankA.TenantID = "tenant-1"
+	blankA.DeviceID = ""
+	blankB := testStewardRec("steward-blank-b")
+	blankB.TenantID = "tenant-1"
+	blankB.DeviceID = ""
+	require.NoError(t, store.RegisterSteward(ctx, blankA))
+	assert.NoError(t, store.RegisterSteward(ctx, blankB),
+		"rows with no device_id must be excluded from the unique index")
+
+	// Re-registering the SAME steward is still the benign duplicate, not a device conflict.
+	dupSelf := testStewardRec("steward-dup-a")
+	dupSelf.TenantID = "tenant-1"
+	dupSelf.DeviceID = deviceID
+	selfErr := store.RegisterSteward(ctx, dupSelf)
+	require.Error(t, selfErr)
+	assert.ErrorIs(t, selfErr, business.ErrStewardAlreadyExists,
+		"the same steward written twice stays ErrStewardAlreadyExists so idempotent retries remain benign")
+
+	// GetStewardByDeviceID stays unambiguous within the tenant — the property the
+	// revocation gate in handlers_registration_refresh.go depends on.
+	got, getErr := store.GetStewardByDeviceID(ctx, deviceID)
+	require.NoError(t, getErr)
+	require.NotNil(t, got)
+}

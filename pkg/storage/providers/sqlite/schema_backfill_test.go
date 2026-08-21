@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -658,6 +659,202 @@ func TestBackfillTenantLifecycle_FreshDB(t *testing.T) {
 
 	assert.True(t, hasColumn(t, db, "tenants", "directly_suspended"), "directly_suspended present on fresh DB")
 	assert.True(t, hasColumn(t, db, "tenants", "cascade_suspended_from"), "cascade_suspended_from present on fresh DB")
+}
+
+// legacyCfgmsPendingRegistrationsSchema is the cfgms_pending_registrations DDL as
+// shipped by Issue #1696, before Issue #3403 added the five device-identity
+// columns that let the claim step write a complete StewardRecord.
+const legacyCfgmsPendingRegistrationsSchema = `CREATE TABLE IF NOT EXISTS cfgms_pending_registrations (
+	pending_id    TEXT PRIMARY KEY,
+	steward_id    TEXT NOT NULL DEFAULT '',
+	tenant_id     TEXT NOT NULL,
+	token_str     TEXT NOT NULL,
+	source_ip     TEXT NOT NULL DEFAULT '',
+	registered_at TEXT NOT NULL,
+	expires_at    TEXT NOT NULL,
+	claimed_at    TEXT,
+	status        TEXT NOT NULL DEFAULT 'pending'
+)`
+
+// cfgmsPendingDeviceIdentityColumns are the five columns added by Issue #3403.
+var cfgmsPendingDeviceIdentityColumns = []string{
+	"device_id", "identity_key_pub", "key_protection_level", "hostname", "platform",
+}
+
+// TestBackfillCfgmsPendingRegistrationColumns_LegacyTable verifies that
+// initializeSchema adds the five device-identity columns to a pre-existing
+// cfgms_pending_registrations table created before Issue #3403. CREATE TABLE IF
+// NOT EXISTS cannot add columns, so without the back-fill every upgrading
+// deployment would fail its next AddPending with "no such column: device_id".
+func TestBackfillCfgmsPendingRegistrationColumns_LegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCfgmsPendingRegistrationsSchema)
+	require.NoError(t, err, "seed legacy cfgms_pending_registrations schema")
+
+	for _, col := range cfgmsPendingDeviceIdentityColumns {
+		require.False(t, hasColumn(t, db, "cfgms_pending_registrations", col),
+			"pre-condition: %s absent before back-fill", col)
+	}
+
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	for _, col := range cfgmsPendingDeviceIdentityColumns {
+		assert.True(t, hasColumn(t, db, "cfgms_pending_registrations", col),
+			"%s present after back-fill", col)
+	}
+
+	// The migrated table must actually be usable by the store that reads and
+	// writes those columns — a column that exists but has the wrong affinity or
+	// a NOT NULL without a default would still break the live path.
+	store := &SQLitePendingRegistrationStore{db: db}
+	entry := &business.PendingRegistrationEntry{
+		PendingID:          "pend-legacy",
+		TenantID:           "tenant-a",
+		TokenStr:           "tok-legacy",
+		RegisteredAt:       time.Now().UTC().Truncate(time.Second),
+		ExpiresAt:          time.Now().UTC().Add(time.Hour).Truncate(time.Second),
+		DeviceID:           "dev-legacy",
+		IdentityKeyPub:     []byte{0x01, 0x02, 0x03},
+		KeyProtectionLevel: "tpm",
+		Hostname:           "host-legacy",
+		Platform:           "linux",
+	}
+	require.NoError(t, store.AddPending(ctx, entry), "back-filled table must accept a full entry")
+
+	got, err := store.GetPendingByID(ctx, "pend-legacy")
+	require.NoError(t, err)
+	assert.Equal(t, "dev-legacy", got.DeviceID)
+	assert.Equal(t, []byte{0x01, 0x02, 0x03}, got.IdentityKeyPub)
+	assert.Equal(t, "tpm", got.KeyProtectionLevel)
+	assert.Equal(t, "host-legacy", got.Hostname)
+	assert.Equal(t, "linux", got.Platform)
+}
+
+// TestBackfillCfgmsPendingRegistrationColumns_Idempotent verifies that a second
+// initializeSchema pass over an already-migrated table succeeds (the PRAGMA
+// column probe suppresses the duplicate ALTER) and that rows written between
+// the two passes survive.
+func TestBackfillCfgmsPendingRegistrationColumns_Idempotent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCfgmsPendingRegistrationsSchema)
+	require.NoError(t, err, "seed legacy cfgms_pending_registrations schema")
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO cfgms_pending_registrations
+			(pending_id, tenant_id, token_str, registered_at, expires_at, device_id, hostname, platform)
+		 VALUES ('pend-survive', 'tenant-a', 'tok-survive', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 'dev-survive', 'host-survive', 'linux')`)
+	require.NoError(t, err, "insert test row")
+
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+
+	for _, col := range cfgmsPendingDeviceIdentityColumns {
+		assert.True(t, hasColumn(t, db, "cfgms_pending_registrations", col),
+			"%s still present after second pass", col)
+	}
+
+	var deviceID, hostname string
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT device_id, hostname FROM cfgms_pending_registrations WHERE pending_id = 'pend-survive'`).
+		Scan(&deviceID, &hostname))
+	assert.Equal(t, "dev-survive", deviceID, "row must survive second initializeSchema")
+	assert.Equal(t, "host-survive", hostname, "back-filled values must survive second initializeSchema")
+}
+
+// TestBackfillCfgmsPendingRegistrationColumns_PartialLegacyTable covers the
+// interrupted-upgrade case: a deployment whose ALTER sequence died part-way
+// through leaves some of the five columns present. The per-column PRAGMA probe
+// must add only the missing ones rather than failing on a duplicate column.
+func TestBackfillCfgmsPendingRegistrationColumns_PartialLegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCfgmsPendingRegistrationsSchema)
+	require.NoError(t, err, "seed legacy cfgms_pending_registrations schema")
+	_, err = db.ExecContext(ctx,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN device_id TEXT NOT NULL DEFAULT ''`)
+	require.NoError(t, err, "seed a partially migrated table")
+
+	require.NoError(t, backfillCfgmsPendingRegistrationColumns(ctx, db),
+		"a half-migrated table must not fail the back-fill")
+
+	for _, col := range cfgmsPendingDeviceIdentityColumns {
+		assert.True(t, hasColumn(t, db, "cfgms_pending_registrations", col),
+			"%s present after back-fill over a partially migrated table", col)
+	}
+}
+
+// TestBackfillCfgmsPendingRegistrationColumns_FreshDB verifies that a fresh
+// database carries all five columns from CREATE TABLE, so the back-fill is a
+// no-op on new deployments.
+func TestBackfillCfgmsPendingRegistrationColumns_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+
+	for _, col := range cfgmsPendingDeviceIdentityColumns {
+		assert.True(t, hasColumn(t, db, "cfgms_pending_registrations", col),
+			"%s present on fresh DB", col)
+	}
+}
+
+// TestBackfillCfgmsPendingRegistrationColumns_TableAbsent verifies the
+// table-absent short-circuit: a database that has never carried the table must
+// be left untouched rather than erroring on the PRAGMA/ALTER.
+func TestBackfillCfgmsPendingRegistrationColumns_TableAbsent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, backfillCfgmsPendingRegistrationColumns(ctx, db),
+		"absent table must be a no-op, not an error")
+
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cfgms_pending_registrations'`).Scan(&count))
+	assert.Equal(t, 0, count, "back-fill must not create the table itself")
+}
+
+// TestBackfillCfgmsPendingRegistrationColumns_ProbeFailure verifies that a
+// tableExists failure propagates instead of silently reporting success — the
+// back-fill runs on every database open, so a swallowed probe error would let
+// the controller start against an un-migrated table.
+func TestBackfillCfgmsPendingRegistrationColumns_ProbeFailure(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := openDB(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	err = backfillCfgmsPendingRegistrationColumns(ctx, db)
+	require.Error(t, err, "closed DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill probe failed", "error must identify the probe stage")
+}
+
+// TestBackfillCfgmsPendingRegistrationColumns_AlterFailure verifies that an
+// ALTER TABLE failure propagates rather than leaving a half-migrated table
+// behind a successful startup.
+func TestBackfillCfgmsPendingRegistrationColumns_AlterFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "readonly-pending.db")
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(context.Background(), legacyCfgmsPendingRegistrationsSchema)
+	require.NoError(t, err)
+	require.NoError(t, setup.Close())
+
+	roDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = roDB.Close() })
+	require.NoError(t, roDB.Ping())
+
+	err = backfillCfgmsPendingRegistrationColumns(context.Background(), roDB)
+	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill failed", "error must identify the back-fill stage")
 }
 
 // legacySingleDeviceClaimSchema is the registration_token_claims DDL as first

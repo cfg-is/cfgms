@@ -80,13 +80,19 @@ func (s *DatabasePendingRegistrationStore) AddPending(ctx context.Context, entry
 		status = business.PendingRegistrationStatusPending
 	}
 	tokenLookupKey := business.RegistrationTokenLookupKey(entry.TokenStr)
+	keyPub := entry.IdentityKeyPub
+	if keyPub == nil {
+		keyPub = []byte{}
+	}
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO cfgms_pending_registrations
-			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			 device_id, identity_key_pub, key_protection_level, hostname, platform)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		entry.PendingID, entry.StewardID, entry.TenantID, tokenLookupKey, entry.SourceIP,
 		registeredAt, entry.ExpiresAt, entry.ClaimedAt, status,
+		entry.DeviceID, keyPub, entry.KeyProtectionLevel, entry.Hostname, entry.Platform,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique_violation") {
@@ -100,7 +106,8 @@ func (s *DatabasePendingRegistrationStore) AddPending(ctx context.Context, entry
 // GetPendingByID retrieves the entry for the given pending_id.
 func (s *DatabasePendingRegistrationStore) GetPendingByID(ctx context.Context, pendingID string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+		       device_id, identity_key_pub, key_protection_level, hostname, platform
 		FROM cfgms_pending_registrations WHERE pending_id = $1`, pendingID)
 	return scanDBPendingEntry(row)
 }
@@ -109,7 +116,8 @@ func (s *DatabasePendingRegistrationStore) GetPendingByID(ctx context.Context, p
 // token. The plaintext branch is read-only migration compatibility.
 func (s *DatabasePendingRegistrationStore) GetPendingByToken(ctx context.Context, tokenStr string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+		       device_id, identity_key_pub, key_protection_level, hostname, platform
 		FROM cfgms_pending_registrations WHERE token_str IN ($1, $2) LIMIT 1`,
 		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	return scanDBPendingEntry(row)
@@ -156,12 +164,14 @@ func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tena
 	)
 	if tenantID == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, hostname, platform
 			FROM cfgms_pending_registrations WHERE status = $1 ORDER BY registered_at ASC`,
 			business.PendingRegistrationStatusPending)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, hostname, platform
 			FROM cfgms_pending_registrations WHERE tenant_id = $1 AND status = $2 ORDER BY registered_at ASC`,
 			tenantID, business.PendingRegistrationStatusPending)
 	}
@@ -172,17 +182,9 @@ func (s *DatabasePendingRegistrationStore) ListPending(ctx context.Context, tena
 
 	var entries []*business.PendingRegistrationEntry
 	for rows.Next() {
-		e := &business.PendingRegistrationEntry{}
-		var claimedAt sql.NullTime
-		if err := rows.Scan(
-			&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
-			&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
-		); err != nil {
+		e, err := scanDBPendingRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("database: failed to scan pending registration: %w", err)
-		}
-		if claimedAt.Valid {
-			t := claimedAt.Time.UTC()
-			e.ClaimedAt = &t
 		}
 		entries = append(entries, e)
 	}
@@ -198,11 +200,13 @@ func (s *DatabasePendingRegistrationStore) ListAll(ctx context.Context, tenantID
 	)
 	if tenantID == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, hostname, platform
 			FROM cfgms_pending_registrations ORDER BY registered_at ASC`)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, hostname, platform
 			FROM cfgms_pending_registrations WHERE tenant_id = $1 ORDER BY registered_at ASC`,
 			tenantID)
 	}
@@ -213,17 +217,9 @@ func (s *DatabasePendingRegistrationStore) ListAll(ctx context.Context, tenantID
 
 	var entries []*business.PendingRegistrationEntry
 	for rows.Next() {
-		e := &business.PendingRegistrationEntry{}
-		var claimedAt sql.NullTime
-		if err := rows.Scan(
-			&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
-			&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
-		); err != nil {
+		e, err := scanDBPendingRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("database: failed to scan pending registration: %w", err)
-		}
-		if claimedAt.Valid {
-			t := claimedAt.Time.UTC()
-			e.ClaimedAt = &t
 		}
 		entries = append(entries, e)
 	}
@@ -258,9 +254,11 @@ func (s *DatabasePendingRegistrationStore) Close() error {
 func scanDBPendingEntry(row *sql.Row) (*business.PendingRegistrationEntry, error) {
 	e := &business.PendingRegistrationEntry{}
 	var claimedAt sql.NullTime
+	var keyPub []byte
 	err := row.Scan(
 		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
 		&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.Hostname, &e.Platform,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrPendingRegistrationNotFound
@@ -271,6 +269,32 @@ func scanDBPendingEntry(row *sql.Row) (*business.PendingRegistrationEntry, error
 	if claimedAt.Valid {
 		t := claimedAt.Time.UTC()
 		e.ClaimedAt = &t
+	}
+	if len(keyPub) > 0 {
+		e.IdentityKeyPub = keyPub
+	}
+	e.RegisteredAt = e.RegisteredAt.UTC()
+	e.ExpiresAt = e.ExpiresAt.UTC()
+	return e, nil
+}
+
+func scanDBPendingRow(rows *sql.Rows) (*business.PendingRegistrationEntry, error) {
+	e := &business.PendingRegistrationEntry{}
+	var claimedAt sql.NullTime
+	var keyPub []byte
+	if err := rows.Scan(
+		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
+		&e.RegisteredAt, &e.ExpiresAt, &claimedAt, &e.Status,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.Hostname, &e.Platform,
+	); err != nil {
+		return nil, err
+	}
+	if claimedAt.Valid {
+		t := claimedAt.Time.UTC()
+		e.ClaimedAt = &t
+	}
+	if len(keyPub) > 0 {
+		e.IdentityKeyPub = keyPub
 	}
 	e.RegisteredAt = e.RegisteredAt.UTC()
 	e.ExpiresAt = e.ExpiresAt.UTC()
