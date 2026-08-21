@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -321,6 +322,12 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		}
 		resp, err := s.buildClaimResponse(r.Context(), entry, tokenStr)
 		if err != nil {
+			if errors.Is(err, errClaimDeviceIDConflict) {
+				// The entry stays "claimed": the colliding enrollment is burned
+				// rather than left retryable, and no certificate was minted.
+				http.Error(w, "device_id already registered in this tenant", http.StatusConflict)
+				return
+			}
 			s.logger.Error("Failed to generate cert for claimed registration",
 				"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", logging.SanitizeLogValue(entry.StewardID), "error", logging.SanitizeLogValue(err.Error()))
 			// Entry is already "claimed" — steward must re-register if cert was not received.
@@ -351,11 +358,47 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// errClaimDeviceIDConflict is returned by buildClaimResponse when the claimed
+// pending entry asserts a device_id already held by a different steward in the
+// same tenant. Surfaced as HTTP 409 by handleRegistrationStatus.
+var errClaimDeviceIDConflict = errors.New("device_id already registered in this tenant")
+
 // buildClaimResponse generates the cert and builds the RegistrationStatusResponse.
 // Mirrors the approved path in handleRegister (lines ~286–365).
 func (s *Server) buildClaimResponse(ctx context.Context, entry *business.PendingRegistrationEntry, tokenStr string) (*RegistrationStatusResponse, error) {
 	if s.certManager == nil {
 		return nil, fmt.Errorf("certificate manager not initialized")
+	}
+
+	// Tenant-scoped duplicate-device_id guard for the quarantine→approve→claim
+	// route (ADR-010 §1). handleRegister gates its direct-approval write with the
+	// same lookup, but that check cannot cover this route: no StewardRecord exists
+	// at register time, so two enrollments asserting one device_id both pass it and
+	// both reach a write here. Their pending IDs differ — pendingRegistrationID
+	// hashes the token together with the device identity — and neither the
+	// non-unique device_id index nor RegisterSteward (which reports only a primary
+	// key collision) rejects the second record. Two records sharing a device_id
+	// break GetStewardByDeviceID, the single lookup feeding the revocation gate in
+	// handlers_registration_refresh.go: a record still in "registered" state
+	// alongside a revoked sibling lets the revoked holder pass that gate. Run the
+	// check before the certificate is minted so a colliding claim gets no
+	// credential either.
+	if s.stewardStore != nil && entry.DeviceID != "" {
+		existing, lookupErr := s.stewardStore.GetStewardByDeviceID(ctx, entry.DeviceID)
+		if lookupErr == nil && existing != nil &&
+			existing.TenantID == entry.TenantID && existing.ID != entry.StewardID {
+			s.logger.Warn("Duplicate DeviceID at registration claim within tenant",
+				"pending_id", logging.SanitizeLogValue(entry.PendingID),
+				"steward_id", logging.SanitizeLogValue(entry.StewardID),
+				"device_id", logging.SanitizeLogValue(entry.DeviceID),
+				"tenant_id", logging.SanitizeLogValue(entry.TenantID))
+			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+			s.emitRegistrationAudit(ctx, tokenStr, entry.TenantID, entry.StewardID,
+				business.AuditEventSecurityEvent, "registration_rejected",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{"rejection_reason": "duplicate device_id in tenant"})
+			return nil, errClaimDeviceIDConflict
+		}
 	}
 
 	// Re-fetch the token to obtain Group and ControllerURL.

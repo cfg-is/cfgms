@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2540,4 +2541,199 @@ func TestHandleRegister_ClaimPath_WritesDurableRecordAndSurvivesRestart(t *testi
 	assert.Equal(t, tenantID, info.TenantID)
 	assert.Equal(t, string(business.StewardStatusRegistered), info.Status,
 		"status must remain 'registered' in the restarted controller (never connected)")
+}
+
+// TestHandleRegistrationStatus_ClaimRejectsDuplicateDeviceIDInTenant verifies that the
+// quarantine→approve→claim route enforces the same tenant-scoped duplicate-device_id
+// guard handleRegister applies to its direct-approval write. Two enrollments asserting
+// one device_id with different identity keys get distinct pending IDs (pendingRegistrationID
+// hashes the token with the device identity), so both pass the register-time 409 gate —
+// no StewardRecord exists yet at that point. The second claim must be refused with 409 and
+// must not mint a certificate or write a sibling StewardRecord, because two records sharing
+// a device_id break GetStewardByDeviceID, the single lookup feeding the refresh revocation
+// gate (ADR-010 §1, §3).
+func TestHandleRegistrationStatus_ClaimRejectsDuplicateDeviceIDInTenant(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_claim_dup_device"
+	const tenantID = "tenant-claim-dup"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	// One device_id, two different identity keys — isValidDeviceID never verifies
+	// device_id == SHA-256(identity_key_pub), so this is reachable from the wire.
+	deviceID := "c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5"
+	pubA, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pubB, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	quarantine := func(identityKeyPub string) string {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          regToken,
+			DeviceID:       deviceID,
+			IdentityKeyPub: identityKeyPub,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "quarantine must return 202")
+		var qResp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &qResp))
+		require.NotEmpty(t, qResp.PendingID)
+		return qResp.PendingID
+	}
+
+	// Both registrations happen before either claim, so no StewardRecord exists to
+	// trip the register-time duplicate gate.
+	pendingA := quarantine(base64.StdEncoding.EncodeToString([]byte(pubA)))
+	pendingB := quarantine(base64.StdEncoding.EncodeToString([]byte(pubB)))
+	require.NotEqual(t, pendingA, pendingB,
+		"distinct identity keys must yield distinct pending entries for the same device_id")
+
+	for _, id := range []string{pendingA, pendingB} {
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+			id, business.PendingRegistrationStatusApproved))
+	}
+
+	claim := func(pendingID string) *http.Response {
+		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet,
+			ts.URL+"/api/v1/registration/status/"+pendingID, nil)
+		require.NoError(t, reqErr)
+		req.Header.Set("Authorization", "Bearer "+regToken)
+		resp, doErr := ts.Client().Do(req)
+		require.NoError(t, doErr)
+		return resp
+	}
+
+	// First claim succeeds and writes the durable record.
+	respA := claim(pendingA)
+	require.Equal(t, http.StatusOK, respA.StatusCode, "first claim must succeed")
+	var claimA RegistrationStatusResponse
+	require.NoError(t, json.NewDecoder(respA.Body).Decode(&claimA))
+	require.NoError(t, respA.Body.Close())
+	require.NotEmpty(t, claimA.StewardID)
+
+	// Second claim asserts the same device_id in the same tenant: refused.
+	respB := claim(pendingB)
+	body, readErr := io.ReadAll(respB.Body)
+	require.NoError(t, readErr)
+	require.NoError(t, respB.Body.Close())
+	assert.Equal(t, http.StatusConflict, respB.StatusCode,
+		"a claim asserting a device_id already held in the tenant must be refused")
+	assert.NotContains(t, string(body), "BEGIN CERTIFICATE",
+		"a refused claim must not mint a client certificate")
+
+	// Exactly one steward record carries the device_id, so GetStewardByDeviceID
+	// remains unambiguous for the revocation gate.
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	matching := make([]string, 0, len(all))
+	for _, rec := range all {
+		if rec.DeviceID == deviceID && rec.TenantID == tenantID {
+			matching = append(matching, rec.ID)
+		}
+	}
+	assert.Equal(t, []string{claimA.StewardID}, matching,
+		"only the first claim may hold a StewardRecord for this device_id")
+}
+
+// TestBuildClaimResponse_DuplicateDeviceIDAcrossTenantsAllowed verifies the guard is
+// tenant-scoped: the same device_id enrolled under a different tenant is a distinct
+// namespace and must still be able to claim, matching handleRegister's register-time
+// behaviour (cross-tenant collision allowed).
+func TestBuildClaimResponse_DuplicateDeviceIDAcrossTenantsAllowed(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+
+	const regToken = "cfgms_reg_claim_xtenant"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "tenant-claim-x2",
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	deviceID := "e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7"
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	// An existing record in a *different* tenant holds the same device_id.
+	require.NoError(t, stewardSt.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-other-tenant",
+		TenantID: "tenant-claim-x1",
+		Status:   business.StewardStatusRegistered,
+		DeviceID: deviceID,
+	}))
+
+	resp, err := server.buildClaimResponse(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:      "pend-xtenant",
+		StewardID:      "steward-claim-x2",
+		TenantID:       "tenant-claim-x2",
+		DeviceID:       deviceID,
+		IdentityKeyPub: []byte(pub),
+		RegisteredAt:   time.Now().UTC(),
+	}, regToken)
+	require.NoError(t, err, "a device_id held in another tenant must not block this claim")
+	require.NotNil(t, resp)
+	assert.Contains(t, resp.ClientCert, "BEGIN CERTIFICATE")
+
+	stored, lookupErr := stewardSt.GetSteward(context.Background(), "steward-claim-x2")
+	require.NoError(t, lookupErr, "the cross-tenant claim must still persist its own record")
+	assert.Equal(t, deviceID, stored.DeviceID)
+}
+
+// TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict verifies the guard keys on
+// the steward ID: a concurrent or retried claim poll for the *same* steward re-runs the
+// write path and must not be mistaken for a duplicate-device enrollment.
+func TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+
+	const regToken = "cfgms_reg_claim_reclaim"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "tenant-reclaim",
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	deviceID := "f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8"
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	entry := &business.PendingRegistrationEntry{
+		PendingID:      "pend-reclaim",
+		StewardID:      "steward-reclaim",
+		TenantID:       "tenant-reclaim",
+		DeviceID:       deviceID,
+		IdentityKeyPub: []byte(pub),
+		RegisteredAt:   time.Now().UTC(),
+	}
+
+	_, err = server.buildClaimResponse(context.Background(), entry, regToken)
+	require.NoError(t, err)
+
+	// Second pass over the same entry: the existing record belongs to this steward.
+	_, err = server.buildClaimResponse(context.Background(), entry, regToken)
+	require.NoError(t, err, "re-running the claim for the same steward must not conflict")
+
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	count := 0
+	for _, rec := range all {
+		if rec.DeviceID == deviceID {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "the retried claim must not create a second record")
 }
