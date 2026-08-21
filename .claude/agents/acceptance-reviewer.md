@@ -123,7 +123,24 @@ All required CI checks must pass before reviewing code:
 | `unit-tests` | YES |
 | `integration-tests` | YES |
 | `Build Gate` | YES |
+| `Controller Integration Tests (Linux)` | YES |
 | `security-deployment-gate` | YES |
+| `trivy-scan` | YES |
+| `CodeQL` | YES |
+| `zizmor` | YES |
+| `frontend-checks` | YES |
+| `CLA signature check` | YES |
+
+Ten contexts. The ruleset is the authority, not this table:
+
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647684 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
+
+- ANY MISSING (a required context with no check run at all — `MISSING_COUNT` greater
+  than `0` from `./.claude/scripts/pr-review-helper.sh pr-checks <NUM>`) → verdict is
+  WAIT, stop here. Name the missing contexts. A missing context is **not** a pass.
 
 - ALL PASSING → continue to Phase 2.1
 - ANY FAILING → verdict is FAIL, stop here. Report which checks failed.
