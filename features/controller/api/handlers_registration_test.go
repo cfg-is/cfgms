@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -2102,5 +2103,347 @@ func TestHandleListPendingRegistrations_ClusterMode_Returns200Not503(t *testing.
 		assert.Equal(t, "steward-"+pendingID, found.StewardID)
 		assert.Equal(t, "default", found.TenantID)
 		assert.Equal(t, "10.20.30.40", found.SourceIP)
+	})
+}
+
+// stubRegistrationLeaderStatus is a minimal test double for the registrationLeaderStatus
+// interface. It is NOT a mock: it has no expectations and carries only a fixed boolean.
+// Defined here (package api test) and shared with handlers_registration_tokens_test.go.
+type stubRegistrationLeaderStatus struct{ hasLeadership bool }
+
+func (s *stubRegistrationLeaderStatus) HasLeadership() bool { return s.hasLeadership }
+
+// TestRegistrationHandlerLeaderGate verifies that all seven mutating
+// registration/token handlers return 503 when HasLeadership() is false
+// (Raft leader flag set, lease expired — the partition scenario in ADR-029).
+// One table covers all handlers per the acceptance criteria for Issue #3471.
+func TestRegistrationHandlerLeaderGate(t *testing.T) {
+	// follower is the stub used for "Raft leader but lease expired" cases.
+	follower := &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	// newFollowerServer returns a minimal server with the registration leader
+	// status set to the follower stub and nil stores (the leadership check runs
+	// before any store access for all seven handlers).
+	newFollowerServer := func(t *testing.T) *Server {
+		t.Helper()
+		tokenStore := newTestRegistrationStore(t)
+		s, _ := newHandleRegisterServer(t, tokenStore, nil)
+		s.registrationLeaderStatus = follower
+		return s
+	}
+
+	// approveReq wraps a request with a mux "id" variable for approve endpoints.
+	approveReq := func(method, url, id string) *http.Request {
+		r := httptest.NewRequest(method, url, nil)
+		return mux.SetURLVars(r, map[string]string{"id": id})
+	}
+
+	tests := []struct {
+		name    string
+		handler func(s *Server) (http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "handleApproveRegistration rejects follower",
+			handler: func(s *Server) (http.ResponseWriter, *http.Request) {
+				w := httptest.NewRecorder()
+				r := approveReq(http.MethodPost, "/api/v1/registration/reg-1/approve", "reg-1")
+				s.handleApproveRegistration(w, r)
+				return w, r
+			},
+		},
+		{
+			name: "handleApproveAllRegistrations rejects follower",
+			handler: func(s *Server) (http.ResponseWriter, *http.Request) {
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-all", nil)
+				s.handleApproveAllRegistrations(w, r)
+				return w, r
+			},
+		},
+		{
+			name: "handleApproveByCIDR rejects follower",
+			handler: func(s *Server) (http.ResponseWriter, *http.Request) {
+				w := httptest.NewRecorder()
+				body := strings.NewReader(`{"cidr":"10.0.0.0/8"}`)
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr", body)
+				r.Header.Set("Content-Type", "application/json")
+				s.handleApproveByCIDR(w, r)
+				return w, r
+			},
+		},
+		{
+			name: "handleCreateRegistrationToken rejects follower",
+			handler: func(s *Server) (http.ResponseWriter, *http.Request) {
+				w := httptest.NewRecorder()
+				body := strings.NewReader(`{"tenant_id":"t1","controller_url":"grpc://x:7443"}`)
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/tokens", body)
+				r.Header.Set("Content-Type", "application/json")
+				s.handleCreateRegistrationToken(w, r)
+				return w, r
+			},
+		},
+		{
+			name: "handleDeleteRegistrationToken rejects follower",
+			handler: func(s *Server) (http.ResponseWriter, *http.Request) {
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest(http.MethodDelete, "/api/v1/registration/tokens/tok1", nil)
+				r = mux.SetURLVars(r, map[string]string{"token": "tok1"})
+				s.handleDeleteRegistrationToken(w, r)
+				return w, r
+			},
+		},
+		{
+			name: "handleRevokeRegistrationToken rejects follower",
+			handler: func(s *Server) (http.ResponseWriter, *http.Request) {
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/tokens/tok1/revoke", nil)
+				r = mux.SetURLVars(r, map[string]string{"token": "tok1"})
+				s.handleRevokeRegistrationToken(w, r)
+				return w, r
+			},
+		},
+		{
+			name: "handleRotateRegistrationToken rejects follower",
+			handler: func(s *Server) (http.ResponseWriter, *http.Request) {
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/tokens/t1/rotate", nil)
+				r = mux.SetURLVars(r, map[string]string{"tenant_id": "t1"})
+				s.handleRotateRegistrationToken(w, r)
+				return w, r
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newFollowerServer(t)
+			w, _ := tc.handler(s)
+			rec := w.(*httptest.ResponseRecorder)
+
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+				"follower must return 503")
+
+			// AC: response body must not name or imply which node holds leadership.
+			body := rec.Body.String()
+			assert.NotContains(t, body, "node", "503 body must not name a node")
+			assert.NotContains(t, body, "leader", "503 body must not imply which node holds leadership")
+		})
+	}
+}
+
+// TestRegistrationHandlerLeaderGate_SingleServerMode verifies that a nil
+// registrationLeaderStatus (OSS single-server deployment) never rejects
+// registration or token operations — no new rejection path for single-node.
+func TestRegistrationHandlerLeaderGate_SingleServerMode(t *testing.T) {
+	// newSingleServerServer returns a server with nil registrationLeaderStatus
+	// (the default from New() when haManager is nil).
+	newSingleServerServer := func(t *testing.T) *Server {
+		t.Helper()
+		tokenStore := newTestRegistrationStore(t)
+		s, _ := newHandleRegisterServer(t, tokenStore, nil)
+		// registrationLeaderStatus is nil by default (nil haManager path).
+		return s
+	}
+
+	t.Run("handleApproveAllRegistrations passes gate with nil checker", func(t *testing.T) {
+		s := newSingleServerServer(t)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-all", nil)
+		s.handleApproveAllRegistrations(w, r)
+		// nil pendingStore returns 503 "registration store unavailable" — but NOT from the leader gate.
+		// The gate itself must NOT have fired: body must differ from the gate's message.
+		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
+			"single-server mode must not be rejected by the leader gate")
+	})
+
+	t.Run("handleCreateRegistrationToken passes gate with nil checker", func(t *testing.T) {
+		s := newSingleServerServer(t)
+		w := httptest.NewRecorder()
+		body := strings.NewReader(`{"tenant_id":"t1","controller_url":"grpc://x:7443"}`)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/tokens", body)
+		r.Header.Set("Content-Type", "application/json")
+		s.handleCreateRegistrationToken(w, r)
+		// nil tokenStore → 500 "Registration service unavailable"; gate must not have fired.
+		assert.NotEqual(t, http.StatusServiceUnavailable, w.Code,
+			"single-server mode must not be rejected by the leader gate")
+	})
+}
+
+// TestHandleRegister_LeaderGate covers AC #4 of Issue #3471: enrollment itself —
+// not only the approve/token endpoints — must be rejected by a controller that
+// holds the raw Raft leader flag but has lost its lease. Gating token creation
+// alone does not close the path, because an already-issued (perennial) token
+// stays usable, so a stale leader could still enroll a steward or complete a
+// re-enrollment that clears that steward's fencing ratchet (#3390-B).
+func TestHandleRegister_LeaderGate(t *testing.T) {
+	const regToken = "cfgms_reg_leader_gate_tok"
+
+	seedToken := func(t *testing.T, tokenStore registration.Store) {
+		t.Helper()
+		require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+			Token:         regToken,
+			TenantID:      "test-tenant",
+			ControllerURL: "grpc://controller:7443",
+			Group:         "prod",
+		}))
+	}
+
+	t.Run("follower rejects enrollment with 503 and grants no trust", func(t *testing.T) {
+		tokenStore := newTestRegistrationStore(t)
+		// A real cert manager is wired so the test proves the gate stops the
+		// request before certificate issuance, not that issuance was impossible.
+		server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+		// Approve, so the request would reach inline certificate issuance if the
+		// gate did not stop it first.
+		server.SetApprovalHook(&AlwaysApproveHook{})
+		seedToken(t, tokenStore)
+		server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+
+		rec := postRegister(server, regToken)
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"enrollment against a non-authoritative controller must be rejected")
+
+		var resp RegistrationResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		assert.Empty(t, resp.ClientCert, "no client certificate may be issued by a follower")
+		assert.Empty(t, resp.ClientKey, "no client key may be issued by a follower")
+
+		// The 503 must not name or imply which node holds leadership.
+		body := rec.Body.String()
+		assert.NotContains(t, body, "node", "503 body must not name a node")
+		assert.NotContains(t, body, "leader", "503 body must not imply which node holds leadership")
+
+		// The token must remain unclaimed: a rejected enrollment must leave no
+		// durable side effect for the authoritative controller to trip over.
+		keyBytes, err := base64.StdEncoding.DecodeString(testValidIdentityKeyPub)
+		require.NoError(t, err)
+		created, err := tokenStore.ClaimToken(context.Background(), regToken,
+			registrationClaimID(testValidDeviceID, keyBytes))
+		require.NoError(t, err)
+		assert.True(t, created,
+			"rejected enrollment must not have claimed the registration token")
+	})
+
+	t.Run("single-server mode enrolls unconditionally", func(t *testing.T) {
+		tokenStore := newTestRegistrationStore(t)
+		server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+		server.SetApprovalHook(&AlwaysApproveHook{})
+		seedToken(t, tokenStore)
+		// registrationLeaderStatus stays nil: no lease, no expiry, no new rejection.
+
+		rec := postRegister(server, regToken)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"single-server mode must not be rejected by the leader gate")
+		var resp RegistrationResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.NotEmpty(t, resp.ClientCert, "single-server enrollment must still issue a cert")
+	})
+}
+
+// TestHandleRegistrationStatus_ClaimLeaderGate covers the second half of the
+// enrollment path. Issue #3471 excluded handleRegistrationStatus as "read-only"
+// and asked for that judgment to be confirmed at implementation time: it does
+// not hold for the approved branch, which transitions the entry to "claimed" and
+// mints a client certificate. Only that branch is gated — status polling itself
+// stays available on a non-authoritative controller.
+func TestHandleRegistrationStatus_ClaimLeaderGate(t *testing.T) {
+	const regToken = "cfgms_reg_claim_gate_tok"
+	const tenantID = "test-tenant"
+	const pendingID = "pending-claim-gate-1"
+
+	// newStatusServer wires a real token store, pending store and cert manager,
+	// seeds an approved pending entry, and applies the given leadership state.
+	newStatusServer := func(t *testing.T, checker registrationLeaderStatus) *Server {
+		t.Helper()
+		tokenStore := newTestRegistrationStore(t)
+		server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+		pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+		require.NotNil(t, pendingStore)
+		server.SetPendingStore(pendingStore)
+		if checker != nil {
+			server.registrationLeaderStatus = checker
+		}
+
+		require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+			Token:         regToken,
+			TenantID:      tenantID,
+			ControllerURL: "grpc://controller:7443",
+			Group:         "prod",
+		}))
+
+		now := time.Now().UTC()
+		require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+			PendingID:    pendingID,
+			StewardID:    "steward-claim-gate-1",
+			TenantID:     tenantID,
+			TokenStr:     regToken,
+			SourceIP:     "10.0.0.1",
+			RegisteredAt: now,
+			ExpiresAt:    now.Add(5 * 24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID,
+			business.PendingRegistrationStatusApproved))
+		return server
+	}
+
+	pollStatus := func(server *Server, id string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/registration/status/"+id, nil)
+		r.Header.Set("Authorization", "Bearer "+regToken)
+		r = mux.SetURLVars(r, map[string]string{"pending_id": id})
+		rec := httptest.NewRecorder()
+		server.handleRegistrationStatus(rec, r)
+		return rec
+	}
+
+	t.Run("follower does not mint a cert for an approved entry", func(t *testing.T) {
+		server := newStatusServer(t, &stubRegistrationLeaderStatus{hasLeadership: false})
+
+		rec := pollStatus(server, pendingID)
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"claiming a cert from a non-authoritative controller must be rejected")
+		var body RegistrationStatusResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		assert.Empty(t, body.ClientCert, "no client certificate may be issued by a follower")
+		assert.Empty(t, body.ClientKey, "no client key may be issued by a follower")
+		assert.NotContains(t, rec.Body.String(), "node", "503 body must not name a node")
+		assert.NotContains(t, rec.Body.String(), "leader",
+			"503 body must not imply which node holds leadership")
+
+		// The entry must stay "approved" so the authoritative controller can
+		// serve the claim once the steward retries.
+		got, err := server.pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status,
+			"a rejected claim must not consume the approval")
+	})
+
+	t.Run("leader serves the claim", func(t *testing.T) {
+		server := newStatusServer(t, &stubRegistrationLeaderStatus{hasLeadership: true})
+
+		rec := pollStatus(server, pendingID)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body RegistrationStatusResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, body.Status)
+		assert.NotEmpty(t, body.ClientCert, "an authoritative controller must still serve the claim")
+	})
+
+	t.Run("follower still answers a pending status poll", func(t *testing.T) {
+		server := newStatusServer(t, &stubRegistrationLeaderStatus{hasLeadership: false})
+		require.NoError(t, server.pendingStore.UpdateStatus(context.Background(), pendingID,
+			business.PendingRegistrationStatusPending))
+
+		rec := pollStatus(server, pendingID)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"read-only status polling must stay available on a non-authoritative controller")
+		var body RegistrationStatusResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "pending", body.Status)
 	})
 }

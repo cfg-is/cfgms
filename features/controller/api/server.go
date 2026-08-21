@@ -104,6 +104,7 @@ type Server struct {
 	scriptRepo                     script.ScriptRepository               // Issue #1670: git-backed script library
 	privilegeStore                 cfgconfig.ConfigStore                 // Issue #1670: controller-side script privilege metadata
 	pushLeaderStatus               leaderStatus                          // Issue #1318: leader check for config push (nil = leader)
+	registrationLeaderStatus       registrationLeaderStatus              // Issue #3471: leader check for registration/token endpoints (nil = always leader)
 	commandPublisher               *commands.Publisher                   // Issue #1319: fan-out config push to active stewards
 	pushStore                      business.PushStore                    // Issue #1320: durable push-state persistence for HA failover
 	registry                       registry.Registry                     // Issue #1323: active steward connection registry
@@ -292,6 +293,12 @@ func New(
 	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
 	if haManager != nil {
 		server.pushLeaderStatus = haManager
+	}
+
+	// Issue #3471: wire lease-backed leader-check for registration and token endpoints;
+	// nil haManager = OSS single-node = always authoritative (Decision 4, ADR-029).
+	if haManager != nil {
+		server.registrationLeaderStatus = haManager
 	}
 
 	// Story #380: Initialize three-tier auth defense system
