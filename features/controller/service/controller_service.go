@@ -827,7 +827,6 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 		if promoted {
 			existing.Status = "active"
 		}
-		existingTenant := existing.TenantID
 		s.mu.Unlock()
 
 		// Persist the status promotion and last-seen to the durable fleet store so
@@ -839,7 +838,6 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 					"error", logging.SanitizeLogValue(storeErr.Error()))
 			}
 		}
-		_ = existingTenant
 		return
 	}
 
