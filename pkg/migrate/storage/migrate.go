@@ -26,6 +26,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/migrate"
@@ -81,53 +83,96 @@ func openBackend(name string) (*interfaces.StorageManager, error) {
 	}
 }
 
+// Option configures a StorageMigrator.
+type Option func(*StorageMigrator)
+
+// WithSkippedKinds marks the named record kinds as operator-acknowledged data-loss
+// skips. A migration that would otherwise fail because the destination cannot accept
+// these kinds proceeds without error, and the skipped counts appear in the returned
+// MigrationReport.SkippedKinds map. The caller is responsible for explicitly naming
+// every abandoned kind; any kind that has source records, is unsupported by the
+// destination, and is not listed here fails the migration by default.
+func WithSkippedKinds(kinds ...string) Option {
+	return func(m *StorageMigrator) {
+		for _, k := range kinds {
+			m.skipKinds[k] = true
+		}
+	}
+}
+
 // StorageMigrator moves all controller storage data between two StorageManager
 // backends using the pkg/storage/interfaces contracts. Both Plan and Run are
 // idempotent; Run adds a post-import integrity check.
 type StorageMigrator struct {
-	src *interfaces.StorageManager
-	dst *interfaces.StorageManager
+	src       *interfaces.StorageManager
+	dst       *interfaces.StorageManager
+	skipKinds map[string]bool // operator-acknowledged data-loss skips
 }
 
 // NewStorageMigrator returns a StorageMigrator that copies data from src to dst.
 // Both managers must be non-nil; the caller is responsible for closing them.
-func NewStorageMigrator(src, dst *interfaces.StorageManager) *StorageMigrator {
+// Use WithSkippedKinds to explicitly acknowledge kinds the destination cannot accept.
+func NewStorageMigrator(src, dst *interfaces.StorageManager, opts ...Option) *StorageMigrator {
 	if src == nil {
 		panic("storage.NewStorageMigrator: src must not be nil")
 	}
 	if dst == nil {
 		panic("storage.NewStorageMigrator: dst must not be nil")
 	}
-	return &StorageMigrator{src: src, dst: dst}
+	m := &StorageMigrator{src: src, dst: dst, skipKinds: make(map[string]bool)}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
-// Plan exports all records from the source and returns per-kind counts.
-// No writes to the target are performed.
+// Plan exports all records from the source, validates that the destination can
+// accept every kind present in the source (or that the operator has explicitly
+// acknowledged the skip via WithSkippedKinds), and returns per-kind counts.
+// No writes to the target are performed. Plan and Run apply identical capability
+// checks, so an operator can learn about unmigratable kinds from the dry run
+// rather than from a post-mortem.
 func (m *StorageMigrator) Plan(ctx context.Context) (migrate.MigrationReport, error) {
 	records, err := exportAll(ctx, m.src)
 	if err != nil {
 		return migrate.MigrationReport{}, fmt.Errorf("storage plan: export failed: %w", err)
 	}
 	counts := countByKind(records)
-	return migrate.MigrationReport{Counts: counts, Errors: make(map[string]error)}, nil
+	if err := m.checkDestinationCapability(counts); err != nil {
+		return migrate.MigrationReport{}, err
+	}
+	return migrate.MigrationReport{
+		Counts:       counts,
+		Errors:       make(map[string]error),
+		SkippedKinds: m.countSkippedKinds(counts),
+	}, nil
 }
 
-// Run exports all records from the source, imports them into the target with
-// upsert semantics, and then verifies that per-kind counts match. A count
-// mismatch returns a non-nil error that lists all mismatched kinds.
+// Run exports all records from the source, applies the same destination-capability
+// pre-flight check as Plan, imports supported records into the target with upsert
+// semantics, and then verifies that per-kind counts match. A count mismatch or a
+// capability pre-flight failure returns a non-nil error.
 func (m *StorageMigrator) Run(ctx context.Context) (migrate.MigrationReport, error) {
 	records, err := exportAll(ctx, m.src)
 	if err != nil {
 		return migrate.MigrationReport{}, fmt.Errorf("storage run: export failed: %w", err)
 	}
 
-	if err := importAll(ctx, m.dst, records); err != nil {
+	srcCounts := countByKind(records)
+
+	// Pre-flight: fail loudly if the destination cannot accept any kind that the
+	// source carries and that the operator has not explicitly acknowledged as a skip.
+	if err := m.checkDestinationCapability(srcCounts); err != nil {
+		return migrate.MigrationReport{}, err
+	}
+
+	toImport := filterSkippedKinds(records, m.skipKinds)
+	if err := importAll(ctx, m.dst, toImport); err != nil {
 		return migrate.MigrationReport{}, fmt.Errorf("storage run: import failed: %w", err)
 	}
 
-	srcCounts := countByKind(records)
-
-	// Integrity check: re-export from target and compare counts.
+	// Integrity check: re-export from target and compare counts for all kinds
+	// that the destination supports and that were not explicitly skipped.
 	dstRecords, err := exportAll(ctx, m.dst)
 	if err != nil {
 		return migrate.MigrationReport{}, fmt.Errorf("storage run: integrity check export failed: %w", err)
@@ -138,8 +183,7 @@ func (m *StorageMigrator) Run(ctx context.Context) (migrate.MigrationReport, err
 
 	var mismatch []string
 	for kind, srcN := range srcCounts {
-		if !dstSupported[kind] {
-			// Destination backend does not support this store; data skip is expected.
+		if !dstSupported[kind] || m.skipKinds[kind] {
 			continue
 		}
 		if dstN := dstCounts[kind]; dstN != srcN {
@@ -147,11 +191,16 @@ func (m *StorageMigrator) Run(ctx context.Context) (migrate.MigrationReport, err
 		}
 	}
 	if len(mismatch) > 0 {
+		sort.Strings(mismatch)
 		return migrate.MigrationReport{Counts: srcCounts, Errors: make(map[string]error)},
 			fmt.Errorf("storage migration integrity check failed: %v", mismatch)
 	}
 
-	return migrate.MigrationReport{Counts: srcCounts, Errors: make(map[string]error)}, nil
+	return migrate.MigrationReport{
+		Counts:       srcCounts,
+		Errors:       make(map[string]error),
+		SkippedKinds: m.countSkippedKinds(srcCounts),
+	}, nil
 }
 
 // ─── kind constants ─────────────────────────────────────────────────────────
@@ -831,8 +880,17 @@ func importRBACPermission(ctx context.Context, mgr *interfaces.StorageManager, r
 	if err := json.Unmarshal(rec.Data, &perm); err != nil {
 		return fmt.Errorf("unmarshal permission: %w", err)
 	}
+	// Upsert by probing for the record first. Using a failed Store as the
+	// existence probe would report the follow-up Update's error and hide why
+	// the insert failed.
+	if existing, err := store.GetPermission(ctx, perm.Id); err == nil && existing != nil {
+		if err := store.UpdatePermission(ctx, &perm); err != nil {
+			return fmt.Errorf("update permission %s: %w", perm.Id, err)
+		}
+		return nil
+	}
 	if err := store.StorePermission(ctx, &perm); err != nil {
-		return store.UpdatePermission(ctx, &perm)
+		return fmt.Errorf("store permission %s: %w", perm.Id, err)
 	}
 	return nil
 }
@@ -851,8 +909,15 @@ func importRBACRole(ctx context.Context, mgr *interfaces.StorageManager, rec mig
 	if err := json.Unmarshal(rec.Data, &role); err != nil {
 		return fmt.Errorf("unmarshal role: %w", err)
 	}
+	// Upsert by probing for the record first (see importRBACPermission).
+	if existing, err := store.GetRole(ctx, role.Id); err == nil && existing != nil {
+		if err := store.UpdateRole(ctx, &role); err != nil {
+			return fmt.Errorf("update role %s: %w", role.Id, err)
+		}
+		return nil
+	}
 	if err := store.StoreRole(ctx, &role); err != nil {
-		return store.UpdateRole(ctx, &role)
+		return fmt.Errorf("store role %s: %w", role.Id, err)
 	}
 	return nil
 }
@@ -871,8 +936,15 @@ func importRBACSubject(ctx context.Context, mgr *interfaces.StorageManager, rec 
 	if err := json.Unmarshal(rec.Data, &subj); err != nil {
 		return fmt.Errorf("unmarshal subject: %w", err)
 	}
+	// Upsert by probing for the record first (see importRBACPermission).
+	if existing, err := store.GetSubject(ctx, subj.Id); err == nil && existing != nil {
+		if err := store.UpdateSubject(ctx, &subj); err != nil {
+			return fmt.Errorf("update subject %s: %w", subj.Id, err)
+		}
+		return nil
+	}
 	if err := store.StoreSubject(ctx, &subj); err != nil {
-		return store.UpdateSubject(ctx, &subj)
+		return fmt.Errorf("store subject %s: %w", subj.Id, err)
 	}
 	return nil
 }
@@ -1022,7 +1094,7 @@ func importCommand(ctx context.Context, mgr *interfaces.StorageManager, rec migr
 func importTrigger(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetTriggerStore()
 	if store == nil {
-		return nil // backend does not support trigger records — skip silently
+		return fmt.Errorf("trigger store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindTrigger)
 	}
 	var tr business.TriggerRecord
 	if err := json.Unmarshal(rec.Data, &tr); err != nil {
@@ -1034,7 +1106,7 @@ func importTrigger(ctx context.Context, mgr *interfaces.StorageManager, rec migr
 func importPush(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetPushStore()
 	if store == nil {
-		return nil // backend does not support push records — skip silently
+		return fmt.Errorf("push store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindPush)
 	}
 	var p business.PushRecord
 	if err := json.Unmarshal(rec.Data, &p); err != nil {
@@ -1078,7 +1150,7 @@ func importIPTrust(ctx context.Context, mgr *interfaces.StorageManager, rec migr
 func importRefreshPolicy(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetRefreshPolicyStore()
 	if store == nil {
-		return nil // backend does not support refresh policies — skip silently
+		return fmt.Errorf("refresh policy store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindRefreshPolicy)
 	}
 	var policy business.RefreshPolicy
 	if err := json.Unmarshal(rec.Data, &policy); err != nil {
@@ -1090,7 +1162,7 @@ func importRefreshPolicy(ctx context.Context, mgr *interfaces.StorageManager, re
 func importPendingRefresh(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetPendingRefreshStore()
 	if store == nil {
-		return nil // backend does not support pending refresh — skip silently
+		return fmt.Errorf("pending refresh store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindPendingRefresh)
 	}
 	var entry business.PendingRefreshEntry
 	if err := json.Unmarshal(rec.Data, &entry); err != nil {
@@ -1106,7 +1178,7 @@ func importPendingRefresh(ctx context.Context, mgr *interfaces.StorageManager, r
 func importPendingRegistration(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetPendingRegistrationStore()
 	if store == nil {
-		return nil // backend does not support pending registrations — skip silently
+		return fmt.Errorf("pending registration store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindPendingRegistration)
 	}
 	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
 		if err := init.Initialize(ctx); err != nil {
@@ -1209,6 +1281,91 @@ func countByKind(records []migrate.Record) map[string]int {
 		counts[r.Kind]++
 	}
 	return counts
+}
+
+// checkDestinationCapability returns an error if any source record kind with a
+// non-zero count is unsupported by the destination and is not in the
+// operator-acknowledged skip list. It also rejects skip acknowledgements for
+// kinds the destination DOES support: skipping a supported kind would silently
+// drop records that the destination could have received, which contradicts the
+// explicit-acknowledgement contract. The error names each unsupported kind, its
+// source count, and the destination provider so the operator has actionable
+// information without needing to inspect the migration log.
+func (m *StorageMigrator) checkDestinationCapability(counts map[string]int) error {
+	supported := supportedKindsByManager(m.dst)
+	dstProvider := m.dst.GetProviderName()
+	var missing []string
+	var superfluousSkips []string
+	for kind, n := range counts {
+		if n == 0 {
+			continue
+		}
+		if supported[kind] {
+			if m.skipKinds[kind] {
+				// Skipping a kind the destination supports would silently drop
+				// records that the destination could have received. Reject this
+				// to prevent accidental loss of security-relevant data.
+				superfluousSkips = append(superfluousSkips, kind)
+			}
+			continue
+		}
+		if m.skipKinds[kind] {
+			continue
+		}
+		missing = append(missing, fmt.Sprintf("%s (%d record(s))", kind, n))
+	}
+	if len(superfluousSkips) > 0 {
+		sort.Strings(superfluousSkips)
+		return fmt.Errorf(
+			"storage migration: WithSkippedKinds lists kind(s) [%s] that destination provider %q supports — "+
+				"skipping a supported kind would silently drop migratable records; remove these kinds from the skip list",
+			strings.Join(superfluousSkips, ", "), dstProvider)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf(
+		"storage migration: destination provider %q cannot accept %d record kind(s) "+
+			"that the source contains: %s; "+
+			"acknowledge the data loss by creating the migrator with WithSkippedKinds(...) "+
+			"naming each abandoned kind",
+		dstProvider, len(missing), strings.Join(missing, ", "))
+}
+
+// countSkippedKinds returns the per-kind source counts for kinds that are
+// explicitly in the skip list, are not supported by the destination, and have
+// at least one source record. Returns nil when no kinds are skipped.
+func (m *StorageMigrator) countSkippedKinds(counts map[string]int) map[string]int {
+	if len(m.skipKinds) == 0 {
+		return nil
+	}
+	supported := supportedKindsByManager(m.dst)
+	skipped := make(map[string]int)
+	for kind, n := range counts {
+		if n > 0 && m.skipKinds[kind] && !supported[kind] {
+			skipped[kind] = n
+		}
+	}
+	if len(skipped) == 0 {
+		return nil
+	}
+	return skipped
+}
+
+// filterSkippedKinds returns a slice of records with all records of skipped kinds
+// removed. Returns the original slice when skip is empty.
+func filterSkippedKinds(records []migrate.Record, skip map[string]bool) []migrate.Record {
+	if len(skip) == 0 {
+		return records
+	}
+	out := make([]migrate.Record, 0, len(records))
+	for _, r := range records {
+		if !skip[r.Kind] {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // supportedKindsByManager returns the set of record kinds the manager's stores

@@ -67,11 +67,12 @@ cfg storage migrate --from <source-backend> --to <target-backend> [--dry-run]
 
 - Reads all records from the source backend.
 - Counts records per store kind.
+- Checks whether the destination can accept every kind the source contains.
 - Writes nothing to the target backend.
 - Prints the same per-store count report as a live run.
 
-Use it to confirm record counts before scheduling a maintenance window, and to
-rehearse the migration against a copy of production data.
+Use it to confirm record counts and destination compatibility before scheduling a
+maintenance window, and to rehearse the migration against a copy of production data.
 
 ```bash
 # Preview what would be migrated (cfg storage migrate cannot target database — see above)
@@ -83,6 +84,42 @@ cfg migrate --provider storage --from oss --to database
 
 A `--dry-run` count that differs from the live run count indicates the source
 backend changed between the two invocations — always migrate with the controller stopped.
+
+**Dry-run and live run apply the same capability check.** An operator learns about an
+unmigratable kind from the dry run output, not from a post-mortem on the live migration.
+
+### Unmigratable record kinds
+
+If the source carries records of a kind the destination backend does not support, the
+migration fails with an error naming the kind, the number of affected records, and the
+destination provider. No data is written; the migration does not silently drop records
+and report success.
+
+**Example:** migrating OSS → Postgres when the OSS source has `trigger` or `push` records:
+
+```
+storage migration: destination provider "database" cannot accept 2 record kind(s)
+that the source contains: push (3 record(s)), trigger (1 record(s));
+acknowledge the data loss by creating the migrator with WithSkippedKinds(...)
+naming each abandoned kind
+```
+
+**Acknowledged skip.** When the data loss is deliberate and the operator accepts it,
+create the migrator with `WithSkippedKinds` explicitly naming each abandoned kind. The
+`cfg migrate` CLI does not yet expose a `--skip-kinds` flag; this is a Go API used by
+operator tooling that calls the migrator directly:
+
+```go
+m := storage.NewStorageMigrator(src, dst,
+    storage.WithSkippedKinds("trigger", "push"))
+report, err := m.Run(ctx)
+// report.SkippedKinds["trigger"] == <source count>
+// report.SkippedKinds["push"] == <source count>
+```
+
+The acknowledged kinds and their source counts appear in `MigrationReport.SkippedKinds`.
+The default path (without the option) always fails when the destination cannot accept a
+kind — there is no way to reach a silent drop accidentally.
 
 ### Environment variables
 

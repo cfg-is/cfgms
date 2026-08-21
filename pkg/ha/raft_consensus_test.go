@@ -598,7 +598,7 @@ func TestRaftConsensus_IsRaftLeader_MatchesRaftProtocolState(t *testing.T) {
 	peers := []raft.Peer{{ID: 1}}
 	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
-	defer rc.Stop() //nolint:errcheck
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
 	// Before election: must not report itself as leader.
 	// (Not asserted because the node might win immediately; just start timing.)
@@ -630,7 +630,7 @@ func TestRaftConsensus_GetTerm_ReturnsNonZeroAfterElection(t *testing.T) {
 	peers := []raft.Peer{{ID: 1}}
 	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, newTestClusterCfg(), "", logging.GetLogger())
 	require.NoError(t, err)
-	defer rc.Stop() //nolint:errcheck
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
 	require.Eventually(t, func() bool {
 		return rc.IsRaftLeader()
@@ -662,7 +662,7 @@ func TestRaftConsensus_HasLeadership_DivergesFromIsRaftLeader_OnLeaseExpiry(t *t
 	peers := []raft.Peer{{ID: 1}}
 	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
 	require.NoError(t, err)
-	defer rc.Stop() //nolint:errcheck
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
 	// leaseDuration = 0.8 × ElectionTimeout (FastElectionConfig: 0.8 × 200ms = 160ms).
 	leaseDuration := time.Duration(float64(cfg.ElectionTimeout) * 0.8)
@@ -703,7 +703,7 @@ func TestRaftConsensus_HasLeadership_ConcurrentReads_NoDataRace(t *testing.T) {
 	peers := []raft.Peer{{ID: 1}}
 	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
 	require.NoError(t, err)
-	defer rc.Stop() //nolint:errcheck
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
 	require.Eventually(t, func() bool {
 		return rc.IsRaftLeader()
@@ -737,7 +737,7 @@ func TestRaftConsensus_LeaseRefreshes_WhileActiveLeader(t *testing.T) {
 	peers := []raft.Peer{{ID: 1}}
 	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, peers, &cfg, "", logging.GetLogger())
 	require.NoError(t, err)
-	defer rc.Stop() //nolint:errcheck
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
 	// Wait for leadership and initial lease.
 	require.Eventually(t, func() bool {

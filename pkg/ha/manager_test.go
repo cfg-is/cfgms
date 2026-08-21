@@ -1550,14 +1550,18 @@ func TestManager_HasLeadership_ClusterMode_DelegatesAndExpires(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		if manager.raftConsensus != nil {
-			manager.raftConsensus.Stop() //nolint:errcheck
+			manager.raftConsensus.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 		}
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, manager.Start(ctx))
-	defer manager.Stop(context.Background()) //nolint:errcheck
+	// Manager.Stop aggregates component shutdown errors, so it is asserted rather
+	// than discarded: a failure to shut the cluster down cleanly is a real defect.
+	defer func() {
+		assert.NoError(t, manager.Stop(context.Background()))
+	}()
 
 	// Wait for leadership.
 	require.Eventually(t, func() bool {

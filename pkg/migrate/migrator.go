@@ -23,9 +23,10 @@ type Record struct {
 // MigrationReport carries per-kind record counts, optional byte totals, and non-fatal errors.
 // Bytes is nil for migrators that do not track byte sizes (e.g. storage, secrets).
 type MigrationReport struct {
-	Counts map[string]int
-	Bytes  map[string]int64 // per-namespace byte totals; nil when not tracked
-	Errors map[string]error
+	Counts       map[string]int
+	Bytes        map[string]int64 // per-namespace byte totals; nil when not tracked
+	Errors       map[string]error
+	SkippedKinds map[string]int // per-kind counts for operator-acknowledged data-loss skips; nil when no skips
 }
 
 // Exporter reads all records from the source backend.
