@@ -1604,11 +1604,15 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 
 // PublishDNAUpdate publishes DNA changes to the controller via the gRPC control plane provider.
 //
-// Only changed attributes (delta) are sent over the control plane — unchanged
-// attributes are suppressed to minimise bandwidth. On the first call after
-// connection there is no previous state, so all attributes are treated as new.
-// Full DNA is never sent here; full syncs are triggered by CommandSyncDNA over
-// the data plane.
+// Whether to publish is decided by a fragment delta: c.currentDNAFragments is
+// compared against c.lastPublishedFragments by (FragmentId, FragmentHash), and
+// an empty delta suppresses the publish to minimise bandwidth (Issue #3330).
+// On the first call after connection there is no previous state, so the delta
+// is non-empty and a publish occurs. When a publish does occur, the payload is
+// the full current fragment set, not just the changed fragments — the
+// integrity check on the controller side requires seeing the complete picture
+// on every delta publish. A non-empty configHash (config was applied) always
+// triggers a publish regardless of fragment delta.
 // If the controller is unreachable the event is queued locally and delivered on reconnect (Issue #419).
 func (c *TransportClient) PublishDNAUpdate(ctx context.Context, dnaAttrs map[string]string, configHash, syncFingerprint string) error {
 	// Always inject the running binary version so the controller fleet view is

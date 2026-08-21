@@ -2677,7 +2677,7 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 			if fragErr != nil {
 				s.logger.Warn("Failed to extract fragment list from DNA event; skipping DNA field",
 					"steward_id", event.StewardID,
-					"error", fragErr)
+					"error", logging.SanitizeLogValue(fragErr.Error()))
 			} else {
 				dna.Fragments = frags
 				// Fragments are the sole DNA payload this path builds (Issue #3330).

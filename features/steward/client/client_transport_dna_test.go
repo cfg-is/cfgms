@@ -340,6 +340,37 @@ func TestPublishDNAUpdate_NoDeltaSkipsPublish(t *testing.T) {
 	}
 }
 
+// TestPublishDNAUpdate_ConfigApplyPublishesDespiteEmptyDelta verifies that a
+// config-apply call (configHash != "") always publishes, even when the
+// fragment delta is empty — the controller must still record the applied
+// config hash. (Issue #3330 review finding #4: this branch was untested.)
+func TestPublishDNAUpdate_ConfigApplyPublishesDespiteEmptyDelta(t *testing.T) {
+	c, q := newClientWithOfflineQueue(t)
+
+	// Seed lastPublishedFragments identical to currentDNAFragments so the
+	// fragment delta is empty.
+	frag := mustTestFragment(t, "host:os", map[string]interface{}{"os": "linux", "hostname": "host-a"})
+	c.dnaMu.Lock()
+	c.currentDNAFragments = []*commonpb.Fragment{frag}
+	c.lastPublishedFragments = []*commonpb.Fragment{frag} // same hash → empty delta
+	c.dnaMu.Unlock()
+
+	err := c.PublishDNAUpdate(context.TODO(), map[string]string{"k": "v"}, "cfg-hash-123", "")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, q.Len(),
+		"a config-apply call must publish even when the fragment delta is empty")
+
+	var captured *cpTypes.Event
+	q.Drain(func(ev *cpTypes.Event) error {
+		captured = ev
+		return nil
+	})
+	require.NotNil(t, captured)
+	assert.Equal(t, "cfg-hash-123", captured.Details["config_hash"],
+		"the applied config hash must reach the controller despite the empty fragment delta")
+}
+
 // ---------------------------------------------------------------------------
 // Heartbeat.DNAHash field contract
 // ---------------------------------------------------------------------------
