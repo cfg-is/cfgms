@@ -786,6 +786,25 @@ func isWindows() bool {
 	return os.PathSeparator == '\\' && os.PathListSeparator == ';'
 }
 
+// isRootedPath reports whether p is already anchored to a filesystem root, and so must
+// not be joined to the directory holding the config file.
+//
+// filepath.IsAbs alone is not sufficient here. It answers for the running platform only:
+// on Windows a path needs a volume name, so IsAbs("/var/lib/cfgms/certs") is false. A
+// controller config is a reviewed, hand-authored artefact that uses POSIX paths and is
+// parsed on every platform the controller builds for, including by the deployment
+// contract tests. Deciding rootedness with IsAbs alone silently rewrote such a path to
+// <config dir>/var/lib/cfgms/certs on Windows.
+//
+// A leading slash of either flavour therefore counts as rooted everywhere. Genuinely
+// relative paths ("certs/", "./certs") still fall through to the #3197 anchoring.
+func isRootedPath(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)
+}
+
 // LoadWithPath loads the configuration from the specified file path (or searches for it)
 // and applies environment variable overrides.
 //
@@ -829,7 +848,7 @@ func LoadWithPath(configPath string) (*Config, error) {
 		// Resolve cert_path to absolute relative to the config file directory.
 		// A relative cert_path is CWD-dependent at runtime; anchoring it to the
 		// config file removes that dependency (Issue #3197).
-		if !filepath.IsAbs(cfg.CertPath) {
+		if !isRootedPath(cfg.CertPath) {
 			cfg.CertPath = filepath.Join(filepath.Dir(foundPath), cfg.CertPath)
 		}
 

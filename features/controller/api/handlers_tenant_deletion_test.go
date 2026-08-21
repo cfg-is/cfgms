@@ -98,15 +98,43 @@ func setupTenantDeletionServer(t *testing.T) (*Server, business.TenantStore) {
 	return server, tenantStore
 }
 
-// setInstantHold configures a 1ns hold period so a deletion requested through the API
-// is immediately eligible for approval. The value is non-zero on purpose:
-// GetDeleteHoldPeriod treats zero as "unset" and substitutes the 30-day default.
-// This exercises the real config knob rather than seeding storage behind the handler.
-func setInstantHold(t *testing.T, s *Server, requireDualControl bool) {
+// setMinimalHold configures the shortest hold period the config knob accepts, so a
+// deletion requested through the API becomes eligible for approval almost at once. The
+// value is non-zero on purpose: GetDeleteHoldPeriod treats zero as "unset" and
+// substitutes the 30-day default. This exercises the real config knob rather than
+// seeding storage behind the handler.
+//
+// "Almost at once" is not "at once". Call waitUntilHoldElapsed after requesting the
+// deletion and before approving it.
+func setMinimalHold(t *testing.T, s *Server, requireDualControl bool) {
 	t.Helper()
 	s.cfg.TenantAdmin = &config.TenantAdminConfig{
 		DeleteHoldPeriod:          config.Duration(time.Nanosecond),
 		DeleteRequiresDualControl: &requireDualControl,
+	}
+}
+
+// waitUntilHoldElapsed blocks until the wall clock has passed the pending deletion's
+// EligibleAt, so the approval issued next reaches the dual-control and membership checks
+// instead of being refused with HOLD_NOT_ELAPSED.
+//
+// A 1ns hold is far below the resolution of the system wall clock on Windows (~0.5-15ms),
+// so the time.Now() taken when the deletion is approved routinely returns the very same
+// instant as the one taken when it was requested. EligibleAt = RequestedAt+1ns is then
+// still in the future and the store refuses the approval. Waiting for the clock to tick
+// makes these tests platform-independent without weakening the hold semantics they cover.
+// On Linux the loop exits on its first check.
+func waitUntilHoldElapsed(t *testing.T, s *Server, tenantID string) {
+	t.Helper()
+	pending, err := s.tenantManager.GetPendingDeletion(context.Background(), tenantID)
+	require.NoError(t, err, "a pending deletion must exist before waiting on its hold")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(pending.EligibleAt) {
+		if time.Now().After(deadline) {
+			t.Fatalf("wall clock did not advance past EligibleAt %s within 5s", pending.EligibleAt)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -414,11 +442,12 @@ func TestHandleApproveTenantDeletion_HoldNotElapsed409(t *testing.T) {
 func TestHandleApproveTenantDeletion_SameApprover403(t *testing.T) {
 	server, _ := setupTenantDeletionServer(t)
 	ctx := context.Background()
-	setInstantHold(t, server, true)
+	setMinimalHold(t, server, true)
 	createSuspendedTenant(t, server, "del-dual-root")
 
 	alice := &Principal{ID: "alice", TenantID: "del-dual-root"}
 	require.Equal(t, http.StatusAccepted, requestDeletionAs(server, alice, "del-dual-root").Code)
+	waitUntilHoldElapsed(t, server, "del-dual-root")
 
 	rec := approveDeletionAs(server, alice, "del-dual-root")
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
@@ -438,7 +467,7 @@ func TestHandleApproveTenantDeletion_SameApprover403(t *testing.T) {
 func TestHandleApproveTenantDeletion_SecondApproverSucceeds(t *testing.T) {
 	server, _ := setupTenantDeletionServer(t)
 	ctx := context.Background()
-	setInstantHold(t, server, true)
+	setMinimalHold(t, server, true)
 
 	// A two-tenant subtree proves the whole subtree is removed, not just the root.
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-ok-root"})
@@ -450,6 +479,7 @@ func TestHandleApproveTenantDeletion_SecondApproverSucceeds(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted,
 		requestDeletionAs(server, &Principal{ID: "alice", TenantID: "del-ok-root"}, "del-ok-root").Code)
+	waitUntilHoldElapsed(t, server, "del-ok-root")
 
 	rec := approveDeletionAs(server, &Principal{ID: "bob", TenantID: "del-ok-root"}, "del-ok-root")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -472,11 +502,12 @@ func TestHandleApproveTenantDeletion_SecondApproverSucceeds(t *testing.T) {
 func TestHandleApproveTenantDeletion_MembershipChanged409(t *testing.T) {
 	server, store := setupTenantDeletionServer(t)
 	ctx := context.Background()
-	setInstantHold(t, server, true)
+	setMinimalHold(t, server, true)
 	createSuspendedTenant(t, server, "del-drift-root")
 
 	require.Equal(t, http.StatusAccepted,
 		requestDeletionAs(server, &Principal{ID: "alice", TenantID: "del-drift-root"}, "del-drift-root").Code)
+	waitUntilHoldElapsed(t, server, "del-drift-root")
 
 	// Insert a child directly: the manager refuses to create one under a parent with a
 	// pending deletion, which is exactly the defence this guard backstops.
@@ -533,13 +564,14 @@ func TestHandleApproveTenantDeletion_MissingTenantID400(t *testing.T) {
 func TestHandleApproveTenantDeletion_RouterRequiresPresenceToken(t *testing.T) {
 	server, _ := setupTenantDeletionServer(t)
 	ctx := context.Background()
-	setInstantHold(t, server, false)
+	setMinimalHold(t, server, false)
 	createSuspendedTenant(t, server, "del-presence-root")
 
 	post := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/del-presence-root/delete", nil)
 	wPost := httptest.NewRecorder()
 	server.router.ServeHTTP(wPost, post)
 	require.Equal(t, http.StatusAccepted, wPost.Code, wPost.Body.String())
+	waitUntilHoldElapsed(t, server, "del-presence-root")
 
 	// Without a presence token the route must challenge, not delete.
 	noPresence := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/del-presence-root/delete/approve", nil)
@@ -599,7 +631,7 @@ func TestTenantDeletionHandlers_CrossTenantReturns404(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server, _ := setupTenantDeletionServer(t)
 			ctx := context.Background()
-			setInstantHold(t, server, true)
+			setMinimalHold(t, server, true)
 			createSuspendedTenant(t, server, "del-x-victim")
 
 			// The outsider's own tenant is real, so the guard is exercised on the
