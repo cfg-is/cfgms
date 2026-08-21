@@ -847,7 +847,7 @@ Six defects were found live. Two were small enough to fix inside this story
 | F1 — ip-trust API dead wiring | **fixed in this story** |
 | F2 — no PendingRegistrationStore on Postgres | **already fixed** by #3401 (merged 2026-08-20, after this story's live run) |
 | F3 — RLS unscoped read returns nothing | filed as **#3478** |
-| F4 — fleet view is node-local | filed as **#3480** |
+| F4 — fleet view is node-local | **fixed** by #3480 |
 | F5 — missing record reported as service outage | **fixed in this story** |
 | F6 — refused steward reconnects at ~1 Hz forever | filed as **#3481** |
 | Cluster-restart hazard — Raft ConfState not restored | filed as **#3479** |
@@ -951,8 +951,18 @@ records this per-node split as a log line rather than an assertion, so it does n
 block on a known gap.
 
 So while a steward's *connection* survives failover cleanly, the new leader has
-no knowledge of it. Filed as **#3480**, which depends on #3478: reading the fleet from the shared
-`StewardStore` returns nothing until the RLS branch is fixed.
+no knowledge of it.
+
+**FIXED by #3480**, which composes the two sources rather than swapping one for
+the other: the durable `StewardStore` is authoritative for existence, identity
+and last-known status cluster-wide, while the node-local registry stays
+authoritative for live connection state on the serving node. A steward attached
+to a peer therefore appears with its durable facts and no fabricated liveness.
+Tenant scoping was added to the unfiltered list path at the same time — it was
+previously safe to omit only because the in-process map was node-local, and
+reading the shared store without it would have handed a tenant-scoped caller the
+whole cluster's fleet. Note this fix only returns rows once #3478 is applied:
+before that, an unscoped store read is filtered to nothing by RLS.
 
 #### F5 (FIXED HERE) — a missing steward record was reported as an approval-service outage
 

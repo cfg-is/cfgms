@@ -226,16 +226,16 @@ func TestRealClusterStewardContinuity_LeaderFailover(t *testing.T) {
 	t.Logf("CONTINUITY OK: heartbeat at %s landed %v after the leader was killed (re-election took %v)",
 		latest.LastSeen.Format(time.RFC3339), latest.LastSeen.Sub(killedAt).Round(time.Second), electionTime)
 
-	// Record the node-local fleet-view split (finding 2) as measured evidence
-	// rather than an assertion about intended behaviour: this is a defect the
-	// story documents, so failing here would block on a known gap. When it is
-	// fixed, this log turns into the signal that it was.
+	// The fleet view must now agree across the cluster. This was a recorded
+	// observation rather than an assertion while the list was node-local: a
+	// steward heartbeating through one node was invisible on its peers,
+	// including the leader (runbook §6 finding F4). Issue #3480 made the list
+	// read the shared store, so every node is expected to see it.
 	for _, n := range nodes {
-		if _, present := haStewardOn(ctx, client, n, steward.ID); present {
-			t.Logf("fleet view: %s SEES steward %s", n.sshHost, steward.ID)
-		} else {
-			t.Logf("fleet view: %s does NOT see steward %s (node-local fleet state — runbook §6 finding F4)", n.sshHost, steward.ID)
-		}
+		_, present := haStewardOn(ctx, client, n, steward.ID)
+		assert.Truef(t, present,
+			"%s does not see steward %s — the fleet view is node-local again (Issue #3480)",
+			n.sshHost, steward.ID)
 	}
 
 	haRestoreQuorum(t, nodes, leaderIdx, func() {
