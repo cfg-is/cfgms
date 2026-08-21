@@ -838,10 +838,19 @@ restart (F3).
 
 ### Findings
 
-Five defects were found live. Two were small enough to fix inside this story
-(F1, F5); the other three are recorded here with file/line pointers and a
-recommended follow-up, per the epic's "document, don't fix" Non-Goal. **Filing
-the issues is the PO's call** — no issue numbers are invented below.
+Six defects were found live. Two were small enough to fix inside this story
+(F1, F5); the rest are recorded here with file/line pointers, per the epic's
+"document, don't fix" Non-Goal, and have since been filed as follow-up stories:
+
+| Finding | Status |
+|---|---|
+| F1 — ip-trust API dead wiring | **fixed in this story** |
+| F2 — no PendingRegistrationStore on Postgres | **already fixed** by #3401 (merged 2026-08-20, after this story's live run) |
+| F3 — RLS unscoped read returns nothing | filed as **#3478** |
+| F4 — fleet view is node-local | filed as **#3480** |
+| F5 — missing record reported as service outage | **fixed in this story** |
+| F6 — refused steward reconnects at ~1 Hz forever | filed as **#3481** |
+| Cluster-restart hazard — Raft ConfState not restored | filed as **#3479** |
 
 #### F1 (FIXED HERE) — the IP-trust operator API was dead wiring on every deployment
 
@@ -876,11 +885,14 @@ quarantine registration fails at `handlers_registration.go` with
 Every `/api/v1/registration/*` admin endpoint 503s for the same reason.
 
 Because Postgres is the only backend a multi-node cluster can share, the
-quarantine/approval workflow is **unavailable in cluster mode by construction**.
-Only the ip-trust auto-approve path (F1) can enrol anything. *Recommended
-follow-up: implement `PendingRegistrationStore` for the database provider.* This
-is a missing implementation, not a bug in existing behaviour, so it is documented
-rather than built here.
+quarantine/approval workflow was **unavailable in cluster mode by construction**,
+and only the ip-trust auto-approve path (F1) could enrol anything.
+
+**Since fixed by #3401** (PR #3463, merged 2026-08-20 — a few hours after this
+story's live run, which was therefore measured against a controller that still
+had the gap). The observations above describe the pre-#3401 behaviour and are
+retained because they are what forced the ip-trust enrolment route this story
+documents; re-verify against a current build before treating the 503s as live.
 
 #### F3 (documented — highest impact) — RLS hides steward records from the controller's own DB role
 
@@ -921,8 +933,8 @@ steward, so **every** steward is denied admission and the fleet cannot recover.
 The same policy shape is applied to `sessions`, `steward_records`,
 `command_records` and `command_transitions`.
 
-*Recommended follow-up: wrap the unscoped branch in `coalesce(...)`, e.g.*
-`coalesce(current_setting('app.current_tenant', true), '') = ''`*, in a new
+Filed as **#3478**. *Recommended fix: wrap the unscoped branch in `coalesce(...)`,
+e.g.* `coalesce(current_setting('app.current_tenant', true), '') = ''`*, in a new
 migration across all four tables.* Deliberately **not** fixed inside this story:
 it is a tenant-isolation control, and changing RLS semantics warrants its own
 story and security review rather than riding along in a failover-continuity PR.
@@ -939,8 +951,8 @@ records this per-node split as a log line rather than an assertion, so it does n
 block on a known gap.
 
 So while a steward's *connection* survives failover cleanly, the new leader has
-no knowledge of it. *Recommended follow-up: read the fleet list from the shared
-`StewardStore` (which requires F3 first, or the read returns nothing).*
+no knowledge of it. Filed as **#3480**, which depends on #3478: reading the fleet from the shared
+`StewardStore` returns nothing until the RLS branch is fixed.
 
 #### F5 (FIXED HERE) — a missing steward record was reported as an approval-service outage
 
@@ -972,9 +984,9 @@ rejected, and re-enters the loop at the initial interval. Observed live at
 into a log flood, and it will do the same for any persistently-rejected steward
 regardless of status code.
 
-*Recommended follow-up: persist backoff across reconnect cycles, and/or treat a
-stream rejected before its first message as a failed attempt rather than a
-successful connect.* Not fixed here: it changes reconnect timing in the shared
+Filed as **#3481**. *Recommended fix: persist backoff across reconnect cycles,
+and/or treat a stream rejected before its first message as a failed attempt
+rather than a successful connect.* Not fixed here: it changes reconnect timing in the shared
 control-plane client, which is the very thing this story measures.
 
 ### Cluster-restart hazard found while running this story (F1 of §4's concern, new)
@@ -1010,8 +1022,8 @@ sudo find /var/lib/cfgms -name raft.db -delete
 sudo systemctl start cfgms-controller.service
 ```
 
-Quorum re-forms in seconds via the `StartNode` bootstrap path. *Recommended
-follow-up: persist and restore the ConfState (or re-apply the bootstrap
-ConfChanges on restart) so a cluster can restart without discarding its log.*
+Quorum re-forms in seconds via the `StartNode` bootstrap path. Filed as **#3479**. *Recommended fix: persist and restore the ConfState (or
+re-apply the bootstrap ConfChanges on restart) so a cluster can restart without
+discarding its log.*
 This supersedes the "Raft state is entirely in-memory" note in §3/§4 — that was
 true before #3284 and is why those stories' stop-all/start-all drills worked.
