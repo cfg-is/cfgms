@@ -191,8 +191,8 @@ The `cfg migrate --provider storage` pathway covers the following store kinds. E
 | `session` | ✓ | ✓ | Admin sessions |
 | `steward` | ✓ | ✓ | Steward fleet records |
 | `command` | ✓ | ✓ | Command records |
-| `trigger` | ✓ | — | OSS only; Postgres backend does not expose a `TriggerStore` (Issue #3404) |
-| `push` | ✓ | — | OSS only; Postgres backend does not expose a `PushStore` (Issue #3404) |
+| `trigger` | ✓ | ✓ | Workflow trigger records; PostgreSQL store added in Issue #3402 |
+| `push` | ✓ | ✓ | Push-state records for failover replay; PostgreSQL store added in Issue #3402 — enables `resumePendingPushes` in cluster mode |
 | `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
 | `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
 | `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |
@@ -204,19 +204,21 @@ themselves when no test database is reachable. `make test-integration-setup && m
 test-integration-db` is their run path; no CI workflow provisions PostgreSQL, so a green
 CI run is not evidence that any of them executed.
 
-**Fail-loud on unmigratable kinds (Issue #3404).** Kinds marked `—` cause the migration to
-**fail** when the source has records of that kind and the destination backend does not
-support the store. The migration does not silently drop records and report success. This
-applies to both `Plan` (dry-run) and `Run` — the dry run surfaces unmigratable kinds
-before any writes are attempted, so an operator learns about a destination gap before
-committing to a maintenance window.
+**Fail-loud on unmigratable kinds (Issue #3404).** Kinds marked `—` in the table above would
+cause the migration to **fail** when the source has records of that kind and the destination
+backend does not support the store — the migration does not silently drop records and report
+success. This applies to both `Plan` (dry-run) and `Run` — the dry run surfaces unmigratable
+kinds before any writes are attempted, so an operator learns about a destination gap before
+committing to a maintenance window. As of Issue #3402, `trigger` and `push` are fully
+supported on both OSS and PostgreSQL, so no kind currently triggers this path — but the
+mechanism remains in place for any future kind that is backend-specific.
 
-To migrate from a backend that has `trigger` or `push` records to one that does not (e.g.
-OSS → Postgres), pass `WithSkippedKinds` to explicitly acknowledge the data loss:
+To acknowledge data loss for a kind the destination genuinely does not support, pass
+`WithSkippedKinds` explicitly:
 
 ```go
 m := storage.NewStorageMigrator(src, dst,
-    storage.WithSkippedKinds("trigger", "push"))
+    storage.WithSkippedKinds("some_kind"))
 ```
 
 The acknowledged kinds and their source counts appear in

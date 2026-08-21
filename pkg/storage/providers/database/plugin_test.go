@@ -89,10 +89,11 @@ func setupTestDatabase(t *testing.T) *sql.DB {
 	schemas := NewDatabaseSchemas()
 	ctx := context.Background()
 
-	if err := schemas.DropAllTables(ctx, db); err != nil {
-		// Ignore errors on cleanup
-		_ = err
-	}
+	// Every statement in DropAllTables uses IF EXISTS, so an absent table is not
+	// an error. Any failure here (locks, permissions, lost connection) leaves the
+	// database dirty and makes every later test fail with a misleading
+	// "already exists"; surface it as the real root cause instead.
+	require.NoError(t, schemas.DropAllTables(ctx, db), "failed to drop existing test tables")
 
 	return db
 }
@@ -466,6 +467,12 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 	_, err = provider.CreatePendingRegistrationStore(invalidConfig)
 	assert.Error(t, err, "CreatePendingRegistrationStore must propagate DSN errors")
 
+	_, err = provider.CreateTriggerStore(invalidConfig)
+	assert.Error(t, err, "CreateTriggerStore must propagate DSN errors")
+
+	_, err = provider.CreatePushStore(invalidConfig)
+	assert.Error(t, err, "CreatePushStore must propagate DSN errors")
+
 	// Test missing password
 	missingPasswordConfig := map[string]interface{}{
 		"host":     "localhost",
@@ -478,6 +485,14 @@ func TestDatabaseProvider_ErrorHandling(t *testing.T) {
 
 	_, err = provider.CreatePendingRegistrationStore(missingPasswordConfig)
 	assert.Error(t, err, "CreatePendingRegistrationStore must propagate missing-password errors")
+	assert.Contains(t, err.Error(), "password is required")
+
+	_, err = provider.CreateTriggerStore(missingPasswordConfig)
+	assert.Error(t, err, "CreateTriggerStore must propagate missing-password errors")
+	assert.Contains(t, err.Error(), "password is required")
+
+	_, err = provider.CreatePushStore(missingPasswordConfig)
+	assert.Error(t, err, "CreatePushStore must propagate missing-password errors")
 	assert.Contains(t, err.Error(), "password is required")
 }
 

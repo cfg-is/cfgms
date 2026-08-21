@@ -31,7 +31,8 @@ func TestStorageProvidersImplementTriggerStore(t *testing.T) {
 // ---- factory tests ---------------------------------------------------------
 
 // TestCreateTriggerStorePerProvider verifies each provider's CreateTriggerStore behaviour:
-// - flatfile and database return ErrNotSupported
+// - flatfile returns ErrNotSupported (no trigger persistence in the flat-file tier)
+// - database returns a real store or a connection error — never ErrNotSupported (Issue #3402)
 // - SQLite returns a real *SQLiteTriggerStore
 func TestCreateTriggerStorePerProvider(t *testing.T) {
 	t.Run("flatfile returns ErrNotSupported", func(t *testing.T) {
@@ -42,11 +43,18 @@ func TestCreateTriggerStorePerProvider(t *testing.T) {
 		assert.ErrorIs(t, err, flatfile.ErrNotSupported)
 	})
 
-	t.Run("database returns ErrNotSupported", func(t *testing.T) {
+	t.Run("database does not return ErrNotSupported", func(t *testing.T) {
+		// Issue #3402: DatabaseProvider now exposes a real TriggerStore.
+		// Without Postgres credentials the constructor returns a connection error,
+		// but it must never return business.ErrNotSupported.
 		p := &database.DatabaseProvider{}
 		_, err := p.CreateTriggerStore(map[string]interface{}{})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, business.ErrNotSupported)
+		// Either succeeds (if Postgres is reachable) or fails with a connection/config
+		// error — ErrNotSupported is the only result that would be a regression here.
+		if err != nil {
+			assert.NotErrorIs(t, err, business.ErrNotSupported,
+				"DatabaseProvider.CreateTriggerStore must not return ErrNotSupported after Issue #3402")
+		}
 	})
 
 	t.Run("sqlite returns real TriggerStore", func(t *testing.T) {
