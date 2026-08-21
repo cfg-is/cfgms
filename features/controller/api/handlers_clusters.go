@@ -15,6 +15,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
+	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -122,17 +123,24 @@ func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData
 // ClusterEntry.RoleOwners verbatim — so resolving owner liveness requires a
 // hostname → steward mapping.
 //
-// No ADR-017 fragment carries hostname: features/steward/dna/fragments.go's
-// hostFactFragmentSpecs cover host:cpu, host:memory, host:os and host:bios only,
-// none of which include the hostname key. The flat attribute is therefore the only
-// controller-side source of a steward's hostname, and this function is the single
-// place the cluster read endpoints read it from — the one line to change when epic
-// #2911 gives hostname a fragment home.
+// The fragment set is authoritative: features/steward/dna/fragments.go carries the
+// observed hostname in the host:os fragment (Issue #3358), so the value is projected
+// out of DNA.Fragments here. This is the single place the cluster read endpoints read
+// a hostname from.
+//
+// DNA.Attributes is consulted only as a fallback, because the control-plane
+// EventDNAChanged path no longer populates it (Issue #3330) while the data-plane
+// full-sync path (features/controller/transport/dna_handler.go reassembleDNA) still
+// does for the not-yet-re-homed consumers listed there. The fallback drops out with
+// that projection.
 func dnaHostname(dna *commonpb.DNA) string {
 	if dna == nil {
 		return ""
 	}
-	return dna.Attributes["hostname"]
+	if hostname := service.FlattenDNAFragments(dna.GetFragments())["hostname"]; hostname != "" {
+		return hostname
+	}
+	return dna.GetAttributes()["hostname"]
 }
 
 // handleListClusters handles GET /api/v1/clusters.

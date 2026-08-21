@@ -53,7 +53,7 @@ import (
 type inMemoryDNACollector struct {
 	mu    sync.RWMutex
 	attrs map[string]string
-	frags []*commonpb.Fragment // optional; set via setFrags for fragment-delta tests
+	frags []*commonpb.Fragment // optional; set at construction for fragment-delta tests
 	err   error
 }
 
@@ -71,7 +71,7 @@ func (s *inMemoryDNACollector) CollectAttributes(_ context.Context) (map[string]
 }
 
 // CollectFragments returns the configured fragment slice (Issue #3330). Tests
-// that exercise fragment-delta publishing configure this via setFrags; attribute-
+// that exercise fragment-delta publishing set frags at construction; attribute-
 // only tests leave it nil so the fragment delta is always empty and publish is
 // suppressed, which accurately reflects production behaviour before #3332 lands.
 func (s *inMemoryDNACollector) CollectFragments(_ context.Context) []*commonpb.Fragment {
@@ -89,12 +89,6 @@ func (s *inMemoryDNACollector) setAttrs(attrs map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attrs = attrs
-}
-
-func (s *inMemoryDNACollector) setFrags(frags []*commonpb.Fragment) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.frags = frags
 }
 
 // newClientWithOfflineQueue returns a minimal TransportClient wired with an

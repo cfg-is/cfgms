@@ -19,7 +19,9 @@ import (
 // pkg/controlplane/providers/grpc/approval_test.go's approvalTestStore).
 type stubIPTrustStore struct{ business.IPTrustStore }
 
-type stubPendingStore struct{ business.PendingRegistrationStore }
+type stubPendingStore struct {
+	business.PendingRegistrationStore
+}
 
 // TestWireRegistrationAPIStores_WiresIPTrustStore is the regression guard for the
 // story #3096 finding: api.Server.SetIPTrustStore existed (Issue #1698), the

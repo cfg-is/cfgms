@@ -2680,13 +2680,18 @@ func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Ev
 					"error", fragErr)
 			} else {
 				dna.Fragments = frags
-				// Derive flat attributes from fragments for not-yet-re-homed consumers
-				// (fleet inventory, attribute filters, DNA fingerprint). Mirrors reassembleDNA.
-				attrs := service.FlattenDNAFragments(frags)
-				dna.Attributes = attrs
-				if len(attrs) <= math.MaxInt32 {
+				// Fragments are the sole DNA payload this path builds (Issue #3330).
+				// The flat attribute map is deliberately NOT rebuilt here: every
+				// controller consumer of this record projects it from the fragments
+				// themselves via service.FlattenDNAFragments (fleet inventory and
+				// attribute filters in features/controller/api, the cluster hostname
+				// lookup in handlers_clusters.go, and the DNA fingerprint below).
+				// AttributeCount is still derived because re-registration change
+				// detection compares it (features/controller/service).
+				attrCount := len(service.FlattenDNAFragments(frags))
+				if attrCount <= math.MaxInt32 {
 					// #nosec G115 -- explicitly bounded above
-					dna.AttributeCount = int32(len(attrs))
+					dna.AttributeCount = int32(attrCount)
 				}
 			}
 		}

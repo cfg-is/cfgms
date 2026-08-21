@@ -625,3 +625,56 @@ func TestHandleClusters_RoutedViaAPIKey(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// dnaHostname — fragment-sourced hostname (Issue #3330)
+// ---------------------------------------------------------------------------
+
+// TestDNAHostname_ReadsFromFragmentsWithoutAttributes is the regression guard for
+// Issue #3330: the control-plane EventDNAChanged path (Server.handleDNAEvent) no
+// longer writes DNA.Attributes, so a steward record can carry fragments and an
+// empty flat map. Cluster owner-liveness resolution must still find the hostname.
+func TestDNAHostname_ReadsFromFragmentsWithoutAttributes(t *testing.T) {
+	// A real host:os fragment built by the production constructor — the same shape
+	// features/steward/dna emits and handleDNAEvent stores.
+	frag, err := sdna.NewFragment("host:os", "gatherer",
+		sdna.MapState{"os": "linux", "hostname": "node-frag-1"})
+	require.NoError(t, err)
+
+	got := dnaHostname(&commonpb.DNA{
+		Id:        "steward-frag-only",
+		Fragments: []*commonpb.Fragment{frag},
+		// Attributes deliberately absent — this is what handleDNAEvent now produces.
+	})
+	assert.Equal(t, "node-frag-1", got,
+		"hostname must be projected from the host:os fragment when Attributes is empty")
+}
+
+// TestDNAHostname_FragmentWinsOverStaleAttribute verifies the fragment set is
+// authoritative when both sources are present (the data-plane full-sync path still
+// derives Attributes from the same fragments, so they normally agree).
+func TestDNAHostname_FragmentWinsOverStaleAttribute(t *testing.T) {
+	frag, err := sdna.NewFragment("host:os", "gatherer",
+		sdna.MapState{"os": "linux", "hostname": "node-current"})
+	require.NoError(t, err)
+
+	got := dnaHostname(&commonpb.DNA{
+		Id:         "steward-both",
+		Fragments:  []*commonpb.Fragment{frag},
+		Attributes: map[string]string{"hostname": "node-stale"},
+	})
+	assert.Equal(t, "node-current", got, "the fragment projection must win")
+}
+
+// TestDNAHostname_FallsBackToAttributes covers records produced by the data-plane
+// path before any host:os fragment exists, and the nil-DNA guard.
+func TestDNAHostname_FallsBackToAttributes(t *testing.T) {
+	got := dnaHostname(&commonpb.DNA{
+		Id:         "steward-attrs-only",
+		Attributes: map[string]string{"hostname": "node-attrs"},
+	})
+	assert.Equal(t, "node-attrs", got, "records with no fragments still resolve via Attributes")
+
+	assert.Empty(t, dnaHostname(nil), "a nil DNA must resolve to an empty hostname")
+	assert.Empty(t, dnaHostname(&commonpb.DNA{Id: "empty"}), "an empty DNA must resolve to an empty hostname")
+}

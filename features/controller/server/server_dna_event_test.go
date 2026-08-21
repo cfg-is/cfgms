@@ -112,8 +112,8 @@ func TestExtractFragmentsFromDetails_MultipleFragments(t *testing.T) {
 // to blank the valid fragment set by injecting one bad entry. (Issue #3330)
 func TestExtractFragmentsFromDetails_MalformedElementSkipped(t *testing.T) {
 	goodFrag := &commonpb.Fragment{
-		FragmentId: "host:os",
-		Authority:  "gatherer",
+		FragmentId:   "host:os",
+		Authority:    "gatherer",
 		FragmentHash: "goodhash",
 	}
 	opts := protojson.MarshalOptions{EmitUnpopulated: false}
@@ -206,7 +206,7 @@ func TestHandleDNAEvent_WireFormatRoundTripBuildsFragments(t *testing.T) {
 		TenantID:  "root",
 		Timestamp: time.Now(),
 		Details: map[string]interface{}{
-			"dna":      raw,      // decoded fragment array — same shape stringMapToInterfaceMap produces
+			"dna":      raw, // decoded fragment array — same shape stringMapToInterfaceMap produces
 			"dna_hash": "testhash",
 			"is_delta": true,
 		},
@@ -225,4 +225,16 @@ func TestHandleDNAEvent_WireFormatRoundTripBuildsFragments(t *testing.T) {
 	assert.Equal(t, "gatherer", info.DNA.Fragments[0].GetAuthority())
 	assert.Equal(t, frag.GetFragmentHash(), info.DNA.Fragments[0].GetFragmentHash(),
 		"fragment hash must survive the full protojson round-trip")
+
+	// AC #2/#3: handleDNAEvent builds Fragments, not Attributes. The flat map must
+	// stay empty on this path — consumers project it from Fragments themselves.
+	assert.Empty(t, info.DNA.GetAttributes(),
+		"handleDNAEvent must not populate DNA.Attributes (Issue #3330)")
+	assert.Equal(t, int32(2), info.DNA.GetAttributeCount(),
+		"AttributeCount must still be derived from the fragment projection (os + hostname)")
+
+	// The re-homed consumer path: the hostname the cluster endpoints resolve must
+	// come out of the fragment set with no flat attribute map present.
+	assert.Equal(t, "host-e2e-3330", service.FlattenDNAFragments(info.DNA.GetFragments())["hostname"],
+		"hostname must be projectable from DNA.Fragments alone")
 }
