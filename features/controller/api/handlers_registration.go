@@ -401,6 +401,55 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		}
 	}
 
+	// Durably record the steward in the fleet store at enrollment — before any
+	// gRPC check-in (Issue #3403). A steward in this state is fully described
+	// (identity, tenant, enrollment timestamp) and distinguishable from a steward
+	// that has connected (status: "active") or gone silent (status: "lost").
+	//
+	// This write is deliberately ordered BEFORE the certificate is minted. The
+	// lookup above is check-then-act and two concurrent claims asserting one
+	// device_id can both pass it; only the unique index on (tenant_id, device_id)
+	// decides a winner. Writing first means the loser is rejected while it still
+	// has no credential — minting first would hand out a certificate and then
+	// discard it, leaving an issued cert with no steward record behind it.
+	//
+	// ErrStewardAlreadyExists is benign: the same steward was written twice by a
+	// concurrent poll of one pending entry. ErrStewardDeviceIDConflict is not — it
+	// is a different steward holding this device_id, and it fails the claim.
+	if s.stewardStore != nil {
+		now := time.Now().UTC()
+		storeErr := s.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+			ID:                 entry.StewardID,
+			TenantID:           entry.TenantID,
+			Hostname:           entry.Hostname,
+			Platform:           entry.Platform,
+			Status:             business.StewardStatusRegistered,
+			RegisteredAt:       entry.RegisteredAt,
+			LastSeen:           now,
+			DeviceID:           entry.DeviceID,
+			IdentityKeyPub:     entry.IdentityKeyPub,
+			KeyProtectionLevel: entry.KeyProtectionLevel,
+		})
+		switch {
+		case errors.Is(storeErr, business.ErrStewardDeviceIDConflict):
+			s.logger.Warn("Duplicate DeviceID rejected by unique index at registration claim",
+				"pending_id", logging.SanitizeLogValue(entry.PendingID),
+				"steward_id", logging.SanitizeLogValue(entry.StewardID),
+				"device_id", logging.SanitizeLogValue(entry.DeviceID),
+				"tenant_id", logging.SanitizeLogValue(entry.TenantID))
+			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+			s.emitRegistrationAudit(ctx, tokenStr, entry.TenantID, entry.StewardID,
+				business.AuditEventSecurityEvent, "registration_rejected",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{"rejection_reason": "duplicate device_id in tenant"})
+			return nil, errClaimDeviceIDConflict
+		case storeErr != nil && !errors.Is(storeErr, business.ErrStewardAlreadyExists):
+			s.logger.Error("Failed to persist steward record to fleet store at enrollment",
+				"steward_id", logging.SanitizeLogValue(entry.StewardID),
+				"error", logging.SanitizeLogValue(storeErr.Error()))
+		}
+	}
+
 	// Re-fetch the token to obtain Group and ControllerURL.
 	tok, err := s.registrationTokenStore.GetToken(ctx, tokenStr)
 	if err != nil {
@@ -467,31 +516,6 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 	if err := s.controllerService.UpdateStewardStatusDurable(entry.StewardID, entry.TenantID, "registered"); err != nil {
 		s.logger.Warn("Failed to update steward status to registered after claim",
 			"steward_id", logging.SanitizeLogValue(entry.StewardID), "error", logging.SanitizeLogValue(err.Error()))
-	}
-
-	// Durably record the steward in the fleet store at enrollment — before any
-	// gRPC check-in (Issue #3403). A steward in this state is fully described
-	// (identity, tenant, enrollment timestamp) and distinguishable from a steward
-	// that has connected (status: "active") or gone silent (status: "lost").
-	// ErrStewardAlreadyExists is benign: a concurrent claim poll already wrote it.
-	if s.stewardStore != nil {
-		now := time.Now().UTC()
-		if storeErr := s.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
-			ID:                 entry.StewardID,
-			TenantID:           entry.TenantID,
-			Hostname:           entry.Hostname,
-			Platform:           entry.Platform,
-			Status:             business.StewardStatusRegistered,
-			RegisteredAt:       entry.RegisteredAt,
-			LastSeen:           now,
-			DeviceID:           entry.DeviceID,
-			IdentityKeyPub:     entry.IdentityKeyPub,
-			KeyProtectionLevel: entry.KeyProtectionLevel,
-		}); storeErr != nil && storeErr != business.ErrStewardAlreadyExists {
-			s.logger.Error("Failed to persist steward record to fleet store at enrollment",
-				"steward_id", logging.SanitizeLogValue(entry.StewardID),
-				"error", logging.SanitizeLogValue(storeErr.Error()))
-		}
 	}
 
 	s.logger.Info("Generated client certificate for claimed registration",

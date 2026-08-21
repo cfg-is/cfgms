@@ -2737,3 +2737,136 @@ func TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict(t *testing.T) {
 	}
 	assert.Equal(t, 1, count, "the retried claim must not create a second record")
 }
+
+// TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord is the
+// concurrency case the sequential duplicate-device_id test cannot reach (Issue #3403).
+//
+// The handler's guard is check-then-act: it reads GetStewardByDeviceID, then writes
+// RegisterSteward. Two approved pending entries asserting one device_id, claimed at
+// the same moment, can both complete the read before either commits — the writes key
+// on distinct steward IDs, so nothing makes them conflict at the row level.
+//
+// Exactly one claim must win. Two StewardRecords sharing a device_id would make
+// GetStewardByDeviceID ambiguous, and that lookup is the revocation gate in
+// handlers_registration_refresh.go (ADR-010 §1, §3).
+//
+// Scope note, measured rather than assumed: this test still passes with the
+// (tenant_id, device_id) unique index removed, because the two requests do not
+// reliably interleave between the guard's read and its write. It asserts the
+// end-to-end outcome, NOT the database backstop. The backstop's negative control is
+// TestSQLiteStewardStore_DeviceIDUniquePerTenant in pkg/storage/providers/sqlite,
+// which fails when the index is dropped.
+func TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_claim_race_device"
+	const tenantID = "tenant-claim-race"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	deviceID := "f1e2d3c4b5a6978869504132231405f6e7d8c9b0a1928374655463728190abcd"
+	pubA, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pubB, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	quarantine := func(identityKeyPub string) string {
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          regToken,
+			DeviceID:       deviceID,
+			IdentityKeyPub: identityKeyPub,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "quarantine must return 202")
+		var qResp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &qResp))
+		require.NotEmpty(t, qResp.PendingID)
+		return qResp.PendingID
+	}
+
+	pendingA := quarantine(base64.StdEncoding.EncodeToString([]byte(pubA)))
+	pendingB := quarantine(base64.StdEncoding.EncodeToString([]byte(pubB)))
+	require.NotEqual(t, pendingA, pendingB)
+
+	for _, id := range []string{pendingA, pendingB} {
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+			id, business.PendingRegistrationStatusApproved))
+	}
+
+	// Release both claims from a single barrier so their reads interleave ahead of
+	// either write — sequencing them would exercise the check-then-act path only.
+	type claimResult struct {
+		status int
+		body   string
+	}
+	start := make(chan struct{})
+	results := make(chan claimResult, 2)
+	var wg sync.WaitGroup
+	for _, pendingID := range []string{pendingA, pendingB} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			<-start
+			req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet,
+				ts.URL+"/api/v1/registration/status/"+id, nil)
+			if reqErr != nil {
+				results <- claimResult{status: -1, body: reqErr.Error()}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+regToken)
+			resp, doErr := ts.Client().Do(req)
+			if doErr != nil {
+				results <- claimResult{status: -1, body: doErr.Error()}
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, _ := io.ReadAll(resp.Body)
+			results <- claimResult{status: resp.StatusCode, body: string(body)}
+		}(pendingID)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	okCount, conflictCount := 0, 0
+	for res := range results {
+		switch res.status {
+		case http.StatusOK:
+			okCount++
+			assert.Contains(t, res.body, "BEGIN CERTIFICATE",
+				"the winning claim must receive a client certificate")
+		case http.StatusConflict:
+			conflictCount++
+			assert.NotContains(t, res.body, "BEGIN CERTIFICATE",
+				"a refused claim must not mint a client certificate")
+		default:
+			t.Errorf("unexpected claim status %d: %s", res.status, res.body)
+		}
+	}
+	assert.Equal(t, 1, okCount, "exactly one concurrent claim may succeed")
+	assert.Equal(t, 1, conflictCount, "the losing concurrent claim must be refused with 409")
+
+	// The durable state is the real assertion: one device_id, one record.
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	matching := make([]string, 0, len(all))
+	for _, rec := range all {
+		if rec.DeviceID == deviceID && rec.TenantID == tenantID {
+			matching = append(matching, rec.ID)
+		}
+	}
+	assert.Len(t, matching, 1,
+		"exactly one StewardRecord may hold this device_id, or GetStewardByDeviceID becomes ambiguous")
+}

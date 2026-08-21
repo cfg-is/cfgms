@@ -15,6 +15,18 @@ var ErrStewardNotFound = errors.New("steward not found")
 // ErrStewardAlreadyExists is returned when attempting to register an already-registered steward.
 var ErrStewardAlreadyExists = errors.New("steward already exists")
 
+// ErrStewardDeviceIDConflict is returned when a steward record cannot be written
+// because a DIFFERENT steward in the same tenant already holds its device_id.
+// It is distinct from ErrStewardAlreadyExists, which reports the same steward
+// being registered twice and is benign for an idempotent retry. A device_id
+// collision is not benign: two records sharing one device_id break
+// GetStewardByDeviceID, the single lookup feeding the revocation gate, so a
+// record still in "registered" state alongside a revoked sibling would let the
+// revoked holder pass that gate. Providers enforce this with a unique index on
+// (tenant_id, device_id) restricted to non-empty device_id, which is what makes
+// the guard hold under concurrent claims rather than only in sequence (Issue #3403).
+var ErrStewardDeviceIDConflict = errors.New("device_id already registered by another steward in this tenant")
+
 // ErrStewardRevoked is returned by callers of GetStewardByDeviceID when the
 // returned record has Status == StewardStatusRevoked. The gate handler must
 // check for revocation before verifying the proof-of-possession signature

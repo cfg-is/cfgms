@@ -605,6 +605,11 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_stewards_status    ON stewards(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_last_seen ON stewards(last_seen)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_device_id ON stewards(device_id)`,
+		// Issue #3403: backstop for the tenant-scoped duplicate-device_id guard. The
+		// plain index above cannot serialize two concurrent claims asserting one
+		// device_id; this partial unique index can. Empty device_id means "not
+		// asserted" and is excluded so those rows do not collide with each other.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_stewards_tenant_device ON stewards(tenant_id, device_id) WHERE device_id <> ''`,
 
 		// Commands — durable command dispatch state (ADR-003 §1 Deficiency #5, Issue #665)
 		// Records are append-only for audit purposes; PurgeExpiredRecords removes
