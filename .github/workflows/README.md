@@ -27,11 +27,17 @@ gh api repos/cfg-is/cfgms/rulesets/11647684 \
 | `CodeQL` | `codeql-analysis.yml` or `codeql-stub.yml` |
 
 Docs-only PRs are served by stub jobs in `documentation.yml` (paths-filtered to
-`docs/**`, `*.md`, `.claude/**`) for the seven contexts that have one. The other
-three — `zizmor`, `CLA signature check` and `frontend-checks` — carry no path
-filter and no stub: their real job runs on every `pull_request` and every
-`merge_group`. `frontend-ci.yml` deliberately has no workflow-level paths filter
-and detects `web/**` changes inside the job instead, because a required check
+`docs/**`, `*.md`, `.claude/**`) for the seven contexts that have one. Every one of
+those stubs is gated `if: github.event_name == 'pull_request'` (#3189): the workflow
+still triggers on `merge_group`, but each stub job skips there, so in the queue the
+real job is the sole poster of its context. Do not add `merge_group` back to a stub
+— a stub that posts green in the queue lets a PR merge before the real job it stands
+in for has finished.
+
+The other three contexts — `zizmor`, `CLA signature check` and `frontend-checks` —
+carry no path filter and no stub: their real job runs on every `pull_request` and
+every `merge_group`. `frontend-ci.yml` deliberately has no workflow-level paths
+filter and detects `web/**` changes inside the job instead, because a required check
 that never creates a check run blocks the merge queue indefinitely.
 
 ---
