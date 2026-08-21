@@ -30,6 +30,7 @@ import (
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -124,8 +125,7 @@ type QueryOptions struct {
 	TimeRange   *TimeRange `json:"time_range,omitempty"`
 	Limit       int        `json:"limit,omitempty"`
 	Offset      int        `json:"offset,omitempty"`
-	IncludeData bool       `json:"include_data"`         // Include full DNA data or just metadata
-	Attributes  []string   `json:"attributes,omitempty"` // Filter to specific attributes
+	IncludeData bool       `json:"include_data"` // Include full DNA data or just metadata
 }
 
 // HistoryResult contains the results of a historical query
@@ -310,7 +310,7 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA,
 	duration := time.Since(startTime)
 	m.logger.Debug("DNA stored successfully",
 		"device_id", deviceID,
-		"content_hash", contentHash[:16],
+		"content_hash", shortHash(contentHash),
 		"original_size", originalSize,
 		"compressed_size", compressedSize,
 		"compression_ratio", compressionRatio,
@@ -359,9 +359,6 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 					continue
 				}
 			}
-			if len(options.Attributes) > 0 && record.DNA != nil {
-				record.DNA = m.filterAttributes(record.DNA, options.Attributes)
-			}
 			records = append(records, record)
 			bytesProcessed += record.OriginalSize
 			compressionSavings += (record.OriginalSize - record.CompressedSize)
@@ -389,9 +386,6 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 					m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", ref.ContentHash)
 					continue
 				}
-			}
-			if len(options.Attributes) > 0 && record.DNA != nil {
-				record.DNA = m.filterAttributes(record.DNA, options.Attributes)
 			}
 			records = append(records, record)
 			bytesProcessed += record.OriginalSize
@@ -509,34 +503,75 @@ func DefaultConfig() *Config {
 
 // Helper methods
 
+// generateContentHash returns a deterministic identifier for DNA content used
+// for deduplication (Issue #3329). See ContentHash for the precedence rules and
+// for why a steward-supplied aggregate root is never trusted unvalidated.
 func (m *Manager) generateContentHash(dna *commonpb.DNA) (string, error) {
-	// Create deterministic hash of DNA content for deduplication
-	hasher := sha256.New()
+	return ContentHash(dna)
+}
 
-	// Hash DNA ID and attributes in deterministic order
-	hasher.Write([]byte(dna.Id))
-
-	// Sort attributes for consistent hashing
-	keys := make([]string, 0, len(dna.Attributes))
-	for k := range dna.Attributes {
-		keys = append(keys, k)
-	}
-
-	// Simple sort for deterministic ordering
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
+// ContentHash returns a deterministic identifier for DNA content (Issue #3329).
+// It is the aggregate-root-first hash exported so callers outside this package
+// (e.g. controller/server's expected-DNA-hash wiring) can compute the same
+// identity without duplicating the fallback logic.
+//
+// The returned value is always a 64-character lowercase hex digest. It is used
+// as a content-address: a log field, a database key, and — for the file backend
+// — a filesystem path component. DNA.aggregate_root is an arbitrary,
+// unbounded, steward-supplied string on the registration path
+// (RegisterSteward -> storeDNA -> Manager.Store), where no equivalent of the
+// heartbeat path's sdna.IsValidAggregateRoot check runs, so the field is never
+// returned unless it has exactly the shape sdna.AggregateRoot produces.
+// Precedence, strongest first:
+//
+//  1. The root recomputed server-side from the manifest — self-supplied data,
+//     independent of what the steward claimed the root to be.
+//  2. The claimed aggregate root, when it is a well-formed digest.
+//  3. A hash of the stable identity fields (ID, ConfigHash, SyncFingerprint)
+//     that exclude timestamps and the retired flat attributes map, for DNA that
+//     has not yet been migrated to the fragment model — and for any DNA whose
+//     claimed root is malformed.
+func ContentHash(dna *commonpb.DNA) (string, error) {
+	if manifest := dna.GetManifest(); len(manifest) > 0 {
+		root, err := sdna.AggregateRoot(manifest)
+		if err != nil {
+			return "", fmt.Errorf("failed to compute aggregate root from manifest: %w", err)
 		}
+		return root, nil
 	}
-
-	for _, key := range keys {
-		hasher.Write([]byte(key))
-		hasher.Write([]byte(dna.Attributes[key]))
+	if root := dna.GetAggregateRoot(); sdna.IsValidAggregateRoot(root) {
+		return root, nil
 	}
-
+	// Fallback for DNA that has not yet been migrated to the fragment model, and
+	// for a malformed claimed root.
+	hasher := sha256.New()
+	hasher.Write([]byte(dna.GetId()))
+	hasher.Write([]byte(dna.GetConfigHash()))
+	hasher.Write([]byte(dna.GetSyncFingerprint()))
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// hashPrefixLen is the number of leading characters of a content hash emitted
+// in log fields — enough to correlate records without logging the full address.
+const hashPrefixLen = 16
+
+// shortHash returns at most the first hashPrefixLen characters of contentHash.
+//
+// Slicing a hash unconditionally (contentHash[:16]) panics on any shorter value,
+// and the slice expression is evaluated eagerly at the call site regardless of
+// log level — so a single short hash crashes the controller process even with
+// debug logging off. ContentHash now guarantees a 64-hex digest, but hashes read
+// back from a backend or written by an older process are not re-validated, so
+// every log site goes through here.
+//
+// The prefix is routed through logging.SanitizeLogValue because a content hash
+// reaching this helper is not necessarily validated: hashes read back from a
+// backend, or written by an older process, skip validateHashPathComponent. That
+// also makes the result a CodeQL-recognised sanitised value at every call site —
+// go/log-injection hardcodes its sanitiser list and ignores the repository's
+// Models-as-Data pack, so a barrier entry there would be inert (Issue #3329).
+func shortHash(contentHash string) string {
+	return logging.SanitizeLogValue(contentHash[:min(hashPrefixLen, len(contentHash))])
 }
 
 func (m *Manager) getShardID(deviceID string, timestamp time.Time) string {
@@ -605,7 +640,7 @@ func (m *Manager) storeReference(ctx context.Context, deviceID, contentHash stri
 	duration := time.Since(startTime)
 	m.logger.Debug("DNA reference stored (deduplicated)",
 		"device_id", deviceID,
-		"content_hash", contentHash[:16],
+		"content_hash", shortHash(contentHash),
 		"version", version,
 		"duration", duration)
 
@@ -615,30 +650,6 @@ func (m *Manager) storeReference(ctx context.Context, deviceID, contentHash stri
 func (m *Manager) decompressRecord(record *DNARecord) error {
 	// Design decision: storage backend selection is handled at construction; this method stub exists to satisfy the interface for backend types that implement a subset of operations.
 	return nil
-}
-
-func (m *Manager) filterAttributes(dna *commonpb.DNA, attributes []string) *commonpb.DNA {
-	if len(attributes) == 0 {
-		return dna
-	}
-
-	filtered := &commonpb.DNA{
-		Id:              dna.Id,
-		Attributes:      make(map[string]string),
-		LastUpdated:     dna.LastUpdated,
-		ConfigHash:      dna.ConfigHash,
-		LastSyncTime:    dna.LastSyncTime,
-		AttributeCount:  dna.AttributeCount,
-		SyncFingerprint: dna.SyncFingerprint,
-	}
-
-	for _, attr := range attributes {
-		if value, exists := dna.Attributes[attr]; exists {
-			filtered.Attributes[attr] = value
-		}
-	}
-
-	return filtered
 }
 
 func (m *Manager) startMaintenanceTasks() {

@@ -6,11 +6,14 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -66,6 +69,251 @@ func TestStorageManager(t *testing.T) {
 	t.Run("StorageStats", func(t *testing.T) {
 		testStorageStats(t, manager)
 	})
+}
+
+// validAggregateRoot returns a well-formed (64 lowercase hex) aggregate root
+// built from seed, so tests exercise the accepted shape rather than the
+// arbitrary strings a steward could also put in DNA.aggregate_root.
+func validAggregateRoot(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+// TestContentHash_PrefersAggregateRoot is the REQUIRED TEST for the #2906
+// aggregate-root-first branch of generateContentHash/ContentHash (Issue #3329):
+// when DNA.AggregateRoot is set to a well-formed digest, it must be returned
+// verbatim rather than falling back to the ID+ConfigHash+SyncFingerprint hash.
+// Before this test, every existing case in this file left AggregateRoot unset,
+// so only the fallback branch was ever exercised.
+func TestContentHash_PrefersAggregateRoot(t *testing.T) {
+	root := validAggregateRoot("aggregate-root-value")
+	dna := &commonpb.DNA{
+		Id:              "device-1",
+		ConfigHash:      "cfg-hash",
+		SyncFingerprint: "fp",
+		AggregateRoot:   root,
+	}
+
+	hash, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash != root {
+		t.Errorf("ContentHash must return AggregateRoot verbatim when set, got %q", hash)
+	}
+
+	// Changing the fallback-only fields must not change the result while
+	// AggregateRoot is set — proving the branch takes priority, not just that
+	// it happens to agree with the fallback.
+	dna.ConfigHash = "different-cfg-hash"
+	dna.SyncFingerprint = "different-fp"
+	hash2, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash2 != root {
+		t.Errorf("ContentHash must ignore ConfigHash/SyncFingerprint once AggregateRoot is set, got %q", hash2)
+	}
+}
+
+// TestContentHash_RejectsMalformedAggregateRoot pins the boundary validation
+// added for the Story #396 finding: DNA.aggregate_root arrives from the steward
+// as an arbitrary string (common.proto field 10) and reaches ContentHash
+// unvalidated via RegisterSteward -> storeDNA -> Manager.Store. Anything that is
+// not the exact shape sdna.AggregateRoot produces must be discarded in favour of
+// the derived digest, because the return value becomes a log field, a database
+// key and a filesystem path component.
+func TestContentHash_RejectsMalformedAggregateRoot(t *testing.T) {
+	malformed := map[string]string{
+		"too short (panics the log slice)": "abc",
+		"path traversal":                   "../../../../etc/cron.d/x",
+		"uppercase hex":                    strings.ToUpper(validAggregateRoot("upper")),
+		"non-hex characters":               strings.Repeat("g", 64),
+		"one char short":                   validAggregateRoot("short")[:63],
+		"one char long":                    validAggregateRoot("long") + "a",
+		"log injection":                    strings.Repeat("a", 62) + "\r\n",
+		"nul byte":                         strings.Repeat("a", 63) + "\x00",
+	}
+
+	fallback, err := ContentHash(&commonpb.DNA{
+		Id:              "device-1",
+		ConfigHash:      "cfg-hash",
+		SyncFingerprint: "fp",
+	})
+	if err != nil {
+		t.Fatalf("ContentHash returned error for fallback baseline: %v", err)
+	}
+
+	for name, root := range malformed {
+		t.Run(name, func(t *testing.T) {
+			hash, err := ContentHash(&commonpb.DNA{
+				Id:              "device-1",
+				ConfigHash:      "cfg-hash",
+				SyncFingerprint: "fp",
+				AggregateRoot:   root,
+			})
+			if err != nil {
+				t.Fatalf("ContentHash returned error: %v", err)
+			}
+			if hash == root {
+				t.Errorf("ContentHash returned malformed steward-supplied root %q verbatim", root)
+			}
+			if hash != fallback {
+				t.Errorf("ContentHash must fall back to the derived digest, got %q want %q", hash, fallback)
+			}
+			if len(hash) != 64 {
+				t.Errorf("ContentHash must always return a 64-character digest, got %d characters", len(hash))
+			}
+		})
+	}
+}
+
+// TestContentHash_RecomputesRootFromManifest proves the strongest branch: when
+// the DNA carries a manifest, the content address is derived server-side from
+// that manifest, so a steward claiming a different (but well-formed) root cannot
+// steer its record onto another steward's content address.
+func TestContentHash_RecomputesRootFromManifest(t *testing.T) {
+	manifest := []*commonpb.ManifestEntry{
+		{FragmentId: "service:sshd", FragmentHash: validAggregateRoot("sshd")},
+		{FragmentId: "host:cpu", FragmentHash: validAggregateRoot("cpu")},
+	}
+	computed, err := sdna.AggregateRoot(manifest)
+	if err != nil {
+		t.Fatalf("sdna.AggregateRoot returned error: %v", err)
+	}
+
+	lying := validAggregateRoot("someone-elses-content")
+	hash, err := ContentHash(&commonpb.DNA{
+		Id:            "device-1",
+		AggregateRoot: lying,
+		Manifest:      manifest,
+	})
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash == lying {
+		t.Error("ContentHash used the claimed aggregate root instead of recomputing from the manifest")
+	}
+	if hash != computed {
+		t.Errorf("ContentHash must recompute the root from the manifest, got %q want %q", hash, computed)
+	}
+}
+
+// TestStore_ShortAggregateRootDoesNotPanic reproduces the remote-DoS finding
+// against the real manager: before the fix, Store's eager "content_hash",
+// contentHash[:16] log argument was evaluated regardless of log level, so a
+// steward registering with a three-character aggregate_root crashed the
+// controller process (no gRPC panic-recovery interceptor exists on the control
+// plane).
+func TestStore_ShortAggregateRootDoesNotPanic(t *testing.T) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create storage manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	for _, root := range []string{"abc", "", "..", strings.Repeat("a", 15)} {
+		dna := &commonpb.DNA{Id: "steward-1", AggregateRoot: root}
+		if err := manager.Store(context.Background(), "steward-1", dna, nil); err != nil {
+			t.Fatalf("Store failed for aggregate_root %q: %v", root, err)
+		}
+	}
+}
+
+// TestContentHash_FallsBackWithoutAggregateRoot verifies the deterministic
+// fallback path used for DNA that has not been migrated to the fragment model.
+func TestContentHash_FallsBackWithoutAggregateRoot(t *testing.T) {
+	dna := &commonpb.DNA{
+		Id:              "device-1",
+		ConfigHash:      "cfg-hash",
+		SyncFingerprint: "fp",
+	}
+
+	hash, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("ContentHash fallback must not return an empty string")
+	}
+
+	hash2, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash != hash2 {
+		t.Errorf("ContentHash fallback must be deterministic for identical input, got %q then %q", hash, hash2)
+	}
+
+	dna.ConfigHash = "different-cfg-hash"
+	hash3, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash3 == hash {
+		t.Error("ContentHash fallback must change when ConfigHash changes")
+	}
+}
+
+// TestDeduplication_UsesAggregateRoot proves Store()'s deduplication keys off
+// AggregateRoot when present, not just the ID+ConfigHash+SyncFingerprint
+// fallback: two DNA records with the same AggregateRoot but otherwise
+// different identity fields must still dedup together.
+func TestDeduplication_UsesAggregateRoot(t *testing.T) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+	config.EnableDeduplication = true
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create dedup-enabled manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	ctx := context.Background()
+	device1ID := "aggroot-device-001"
+	device2ID := "aggroot-device-002"
+
+	sharedRoot := validAggregateRoot("shared-aggregate-root")
+	dna1 := &commonpb.DNA{
+		Id:              "system-a",
+		ConfigHash:      "config-hash-a",
+		SyncFingerprint: "sync-fingerprint-a",
+		AggregateRoot:   sharedRoot,
+	}
+	// Differs in every fallback-only field, but shares AggregateRoot.
+	dna2 := &commonpb.DNA{
+		Id:              "system-b",
+		ConfigHash:      "config-hash-b",
+		SyncFingerprint: "sync-fingerprint-b",
+		AggregateRoot:   sharedRoot,
+	}
+
+	if err := manager.Store(ctx, device1ID, dna1, nil); err != nil {
+		t.Fatalf("Failed to store DNA for device 1: %v", err)
+	}
+	if err := manager.Store(ctx, device2ID, dna2, nil); err != nil {
+		t.Fatalf("Failed to store DNA for device 2: %v", err)
+	}
+
+	sqlBackend := manager.storage.(*SQLiteBackend)
+	sqlBackend.mutex.RLock()
+	var refCount int
+	if err := sqlBackend.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dna_references WHERE device_id = ?`, device2ID,
+	).Scan(&refCount); err != nil {
+		sqlBackend.mutex.RUnlock()
+		t.Fatalf("failed to count dna_references for device2: %v", err)
+	}
+	sqlBackend.mutex.RUnlock()
+
+	if refCount != 1 {
+		t.Errorf("deduplication by AggregateRoot failed: expected device2 to have 1 row in "+
+			"dna_references (content hash keyed off shared AggregateRoot), got %d", refCount)
+	}
 }
 
 // TestStore_RetentionPolicyGoroutine verifies that Store's fire-and-forget
@@ -593,10 +841,13 @@ func testStorageBackend(t *testing.T, backendType BackendType, config *Config, l
 	}
 
 	record := &DNARecord{
-		DeviceID:         "backend-test-device",
-		DNA:              dna,
-		StoredAt:         time.Now(),
-		ContentHash:      "test-hash-123",
+		DeviceID: "backend-test-device",
+		DNA:      dna,
+		StoredAt: time.Now(),
+		// A content hash is always a 64-character lowercase hex digest
+		// (ContentHash guarantees the shape, and FileBackend rejects anything
+		// else before interpolating it into a filesystem path).
+		ContentHash:      validAggregateRoot("backend-test-device"),
 		CompressedSize:   1000,
 		OriginalSize:     2000,
 		CompressionRatio: 0.5,

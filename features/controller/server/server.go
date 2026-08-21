@@ -58,7 +58,6 @@ import (
 	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/features/workflow"
@@ -1040,9 +1039,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #2524: Wire post-DNA-sync hook so each successful full sync
 		// updates the expected hash in the heartbeat service, suppressing
 		// repeated mismatch triggers once the steward's DNA is in sync.
+		// Issue #3329: uses the aggregate-root-first dnaStorage.ContentHash in
+		// place of the retired stewarddna.ComputeHash(dna.Attributes) — the
+		// mismatch-detection wiring above depends on expectedDNAHash actually
+		// being set, or it can never fire (see dna_handler.go HandleHeartbeatRoot).
 		if controllerService != nil && heartbeatService != nil {
 			controllerService.SetPostDNASyncHook(func(stewardID string, dna *common.DNA) {
-				heartbeatService.SetExpectedDNAHash(stewardID, stewarddna.ComputeHash(dna.Attributes))
+				hash, hashErr := dnaStorage.ContentHash(dna)
+				if hashErr != nil {
+					logger.Warn("Failed to compute DNA content hash for expected-hash wiring",
+						"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(hashErr.Error()))
+					return
+				}
+				heartbeatService.SetExpectedDNAHash(stewardID, hash)
 			})
 			logger.Info("Post-DNA-sync hook wired (Issue #2524)")
 		}
@@ -1057,7 +1066,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			warmed := 0
 			for _, steward := range controllerService.GetAllStewards() {
 				if steward.DNA != nil {
-					hash := stewarddna.ComputeHash(steward.DNA.Attributes)
+					hash, hashErr := dnaStorage.ContentHash(steward.DNA)
+					if hashErr != nil {
+						logger.Warn("Failed to compute DNA content hash while warming expected hashes",
+							"steward_id", logging.SanitizeLogValue(steward.ID), "error", logging.SanitizeLogValue(hashErr.Error()))
+						continue
+					}
 					if hash != "" {
 						heartbeatService.SetExpectedDNAHash(steward.ID, hash)
 						warmed++
@@ -1066,6 +1080,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			}
 			logger.Info("Expected DNA hashes warmed from durable storage (Issue #2524)", "warmed", warmed)
 		}
+
 	} else {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
 	}
@@ -1896,6 +1911,16 @@ func (s *Server) Start() error {
 
 		tenantQueue := controllerTransport.NewTenantQueue()
 		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
+
+		// Wire fragment-root partial-sync detection (Issue #3329). The DNA handler
+		// compares the steward-claimed aggregate root against the stored manifest root
+		// and requests only changed fragments on mismatch (ADR-017 §7). Must be wired
+		// before the heartbeat service starts so no heartbeats are missed.
+		if s.heartbeatService != nil {
+			s.heartbeatService.SetOnFragmentRoot(dnaHandler.HandleHeartbeatRoot)
+			s.logger.Info("Fragment-root partial-sync detection wired (Issue #3329)")
+		}
+
 		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
 		logStreamHandler := controllerTransport.NewLogStreamHandler(
 			s.stewardEventManager,

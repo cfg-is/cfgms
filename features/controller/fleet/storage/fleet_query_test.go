@@ -74,41 +74,10 @@ func TestFleetQuery_FilterByTenantID(t *testing.T) {
 	}
 }
 
-func TestFleetQuery_FilterByOS(t *testing.T) {
-	mgr := newTestFleetStorage(t)
-	ctx := context.Background()
-
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux", "architecture": "amd64"})
-	dna2 := makeTestDNA("dev-2", map[string]string{"os": "windows", "architecture": "amd64"})
-	dna3 := makeTestDNA("dev-3", map[string]string{"os": "linux", "architecture": "arm64"})
-
-	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "t1", Status: "online"}))
-	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "t1", Status: "online"}))
-	require.NoError(t, mgr.Store(ctx, "dev-3", dna3, &StoreOptions{TenantID: "t1", Status: "online"}))
-
-	result, err := mgr.QueryFleet(ctx, &FleetFilter{OS: "linux"})
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), result.TotalCount)
-	for _, rec := range result.Records {
-		assert.Equal(t, "linux", rec.OS)
-	}
-}
-
-func TestFleetQuery_FilterByArchitecture(t *testing.T) {
-	mgr := newTestFleetStorage(t)
-	ctx := context.Background()
-
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux", "architecture": "amd64"})
-	dna2 := makeTestDNA("dev-2", map[string]string{"os": "linux", "architecture": "arm64"})
-
-	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "t1", Status: "online"}))
-	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "t1", Status: "online"}))
-
-	result, err := mgr.QueryFleet(ctx, &FleetFilter{Architecture: "arm64"})
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), result.TotalCount)
-	assert.Equal(t, "dev-2", result.Records[0].DeviceID)
-}
+// TestFleetQuery_FilterByOS and TestFleetQuery_FilterByArchitecture are retired:
+// the os/architecture SQLite columns are no longer populated from flat DNA attributes
+// after Issue #3329. Fleet filtering by OS/arch will be re-enabled via the fragment
+// model in a future story.
 
 func TestFleetQuery_FilterByStatus(t *testing.T) {
 	mgr := newTestFleetStorage(t)
@@ -148,19 +117,18 @@ func TestFleetQuery_CombinedFilters(t *testing.T) {
 	mgr := newTestFleetStorage(t)
 	ctx := context.Background()
 
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux", "architecture": "amd64"})
-	dna2 := makeTestDNA("dev-2", map[string]string{"os": "linux", "architecture": "arm64"})
-	dna3 := makeTestDNA("dev-3", map[string]string{"os": "windows", "architecture": "amd64"})
+	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux"})
+	dna2 := makeTestDNA("dev-2", map[string]string{"os": "linux"})
+	dna3 := makeTestDNA("dev-3", map[string]string{"os": "linux"})
 
 	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "tenant-a", Status: "online"}))
-	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "tenant-a", Status: "online"}))
-	require.NoError(t, mgr.Store(ctx, "dev-3", dna3, &StoreOptions{TenantID: "tenant-a", Status: "online"}))
+	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "tenant-a", Status: "offline"}))
+	require.NoError(t, mgr.Store(ctx, "dev-3", dna3, &StoreOptions{TenantID: "tenant-b", Status: "online"}))
 
-	// linux + amd64 in tenant-a: only dev-1
+	// tenant-a + online: only dev-1
 	result, err := mgr.QueryFleet(ctx, &FleetFilter{
-		TenantID:     "tenant-a",
-		OS:           "linux",
-		Architecture: "amd64",
+		TenantID: "tenant-a",
+		Status:   "online",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), result.TotalCount)
@@ -253,16 +221,19 @@ func TestStore_WithOptions(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify via fleet query that stored fields are queryable
+	// Verify via fleet query that stored indexable fields (TenantID, Status) are queryable.
+	// OS/architecture/hostname SQLite columns are no longer populated from flat DNA attributes
+	// (Issue #3329); the full DNA (including attributes) is still preserved in dna_json.
 	result, err := mgr.QueryFleet(ctx, &FleetFilter{TenantID: "my-tenant", Status: "online"})
 	require.NoError(t, err)
 	require.Len(t, result.Records, 1)
 	assert.Equal(t, "dev-x", result.Records[0].DeviceID)
 	assert.Equal(t, "my-tenant", result.Records[0].TenantID)
-	assert.Equal(t, "linux", result.Records[0].OS)
-	assert.Equal(t, "amd64", result.Records[0].Architecture)
-	assert.Equal(t, "host-x", result.Records[0].Hostname)
 	assert.Equal(t, "online", result.Records[0].Status)
+	// DNA attributes are preserved in dna_json and accessible on the returned record.
+	require.NotNil(t, result.Records[0].DNA)
+	assert.Equal(t, "linux", result.Records[0].DNA.Attributes["os"])
+	assert.Equal(t, "amd64", result.Records[0].DNA.Attributes["architecture"])
 }
 
 func TestQueryFleet_NonSQLiteBackendReturnsError(t *testing.T) {

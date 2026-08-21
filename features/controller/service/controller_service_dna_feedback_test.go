@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -71,9 +71,18 @@ func (p *testFeedbackControlPlane) injectHeartbeat(ctx context.Context, hb *cont
 }
 
 // TestDNASyncFeedbackLoop_SuppressesSubsequentMismatch is the REQUIRED TEST for
-// AC6 (Issue #2524): after SyncDNA fires the postDNASyncHook and
-// heartbeatService.SetExpectedDNAHash is updated to the newly-synced hash, a
-// subsequent heartbeat carrying that hash must NOT trigger a mismatch.
+// the Issue #3329 restoration of the Issue #2524 feedback loop: after SyncDNA
+// fires the postDNASyncHook and heartbeatService.SetExpectedDNAHash is updated
+// to the newly-synced hash (now computed via fleetStorage.ContentHash, the
+// aggregate-root-first hash — Issue #2906 — rather than the retired
+// stewarddna.ComputeHash(dna.Attributes)), a subsequent heartbeat carrying that
+// hash must NOT trigger a mismatch.
+//
+// This closes the gap left when the PR that retired ComputeHash(dna.Attributes)
+// deleted this file's predecessor without restoring production wiring: with no
+// call site setting expectedDNAHash, heartbeat.Service's mismatch detection
+// (and the SetOnDNAHashMismatch → commandPublisher.TriggerDNASync path server.go
+// wires at startup) was permanently inert.
 func TestDNASyncFeedbackLoop_SuppressesSubsequentMismatch(t *testing.T) {
 	ctx := context.Background()
 	cp := &testFeedbackControlPlane{}
@@ -101,16 +110,20 @@ func TestDNASyncFeedbackLoop_SuppressesSubsequentMismatch(t *testing.T) {
 	controllerSvc := NewControllerServiceWithStorage(logging.NewNoopLogger(), newTestFleetStorage(t))
 	require.NoError(t, controllerSvc.RegisterSteward("dev-feedback", "tenant-fb", "", "active"))
 
-	// Wire the post-DNA-sync hook using the same closure as server.go:851-855 so
-	// every SyncDNA call updates the expected hash in the heartbeat service.
+	// Wire the post-DNA-sync hook using the same closure as server.go's
+	// SetPostDNASyncHook wiring so every SyncDNA call updates the expected hash
+	// in the heartbeat service.
 	controllerSvc.SetPostDNASyncHook(func(stewardID string, dna *commonpb.DNA) {
-		heartbeatSvc.SetExpectedDNAHash(stewardID, stewarddna.ComputeHash(dna.Attributes))
+		hash, hashErr := fleetStorage.ContentHash(dna)
+		require.NoError(t, hashErr)
+		heartbeatSvc.SetExpectedDNAHash(stewardID, hash)
 	})
 
 	// Define the DNA that will be synced. Fragments are required by Issue #3319.
 	attrs := map[string]string{"os": "linux", "hostname": "fb-host", "version": "1.0"}
 	dna := makeTestDNA("dev-feedback", attrs)
-	syncedHash := stewarddna.ComputeHash(attrs)
+	syncedHash, err := fleetStorage.ContentHash(dna)
+	require.NoError(t, err)
 
 	// Set a diverged expected hash to confirm the hook actually updates it.
 	heartbeatSvc.SetExpectedDNAHash("dev-feedback", "old-stale-hash")
