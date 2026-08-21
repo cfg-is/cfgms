@@ -279,9 +279,22 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	includeHidden := r.URL.Query().Get("include_hidden") == "true"
 	stewards := s.controllerService.GetAllStewards()
 
+	// The in-process map only holds stewards THIS node handled, so on a cluster
+	// it is a fraction of the fleet. Start from the durable store — authoritative
+	// for existence cluster-wide — and let the local entries below overlay it
+	// with live DNA/metrics for the stewards actually attached here (Issue #3480).
+	durable, haveDurable := s.fleetRecords(r.Context(), tenantID)
+	seen := make(map[string]bool, len(stewards))
+
 	stewardList := make([]StewardInfo, 0, len(stewards))
 
 	for _, steward := range stewards {
+		// A tenant-scoped caller must not see other tenants' stewards. The
+		// node-local map is unscoped, so this filter applies to it too.
+		if !isWithinTenantScope(tenantID, steward.TenantID) {
+			continue
+		}
+		seen[steward.ID] = true
 		if !includeDeregistered && steward.Status == string(business.StewardStatusDeregistered) {
 			continue
 		}
@@ -321,6 +334,34 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		stewardList = append(stewardList, info)
+	}
+
+	// Add stewards this node has never handled — the ones attached to peer nodes.
+	// They carry their durable facts and deliberately no liveness fields: this
+	// node has no heartbeat from them and must not invent one (Issue #3480).
+	if haveDurable {
+		for id, rec := range durable {
+			if seen[id] {
+				continue
+			}
+			if !includeDeregistered && rec.Status == business.StewardStatusDeregistered {
+				continue
+			}
+			if !includeQuarantined && string(rec.Status) == "quarantined" {
+				continue
+			}
+			if !includeHidden && rec.Hidden {
+				continue
+			}
+			stewardList = append(stewardList, StewardInfo{
+				ID:       rec.ID,
+				TenantID: rec.TenantID,
+				Version:  rec.Version,
+				Status:   string(rec.Status),
+				LastSeen: rec.LastSeen,
+				Hidden:   rec.Hidden,
+			})
+		}
 	}
 
 	if paginated {
@@ -399,6 +440,15 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	// Get steward from controller service using GetStewardInfo
 	stewardInfo, exists := s.controllerService.GetStewardInfo(stewardID)
 	if !exists {
+		// Not attached to THIS node. In a cluster that says nothing about whether
+		// the steward exists — the in-process map only holds what this node
+		// handled — so fall back to the durable store before declaring 404
+		// (Issue #3480). Liveness below correctly reports "disconnected": the
+		// registry is per-node and this steward is attached elsewhere.
+		if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil {
+			s.writeStewardFromDurableRecord(w, r, rec)
+			return
+		}
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return
 	}
