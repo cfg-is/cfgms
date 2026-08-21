@@ -563,8 +563,15 @@ const hashPrefixLen = 16
 // debug logging off. ContentHash now guarantees a 64-hex digest, but hashes read
 // back from a backend or written by an older process are not re-validated, so
 // every log site goes through here.
+//
+// The prefix is routed through logging.SanitizeLogValue because a content hash
+// reaching this helper is not necessarily validated: hashes read back from a
+// backend, or written by an older process, skip validateHashPathComponent. That
+// also makes the result a CodeQL-recognised sanitised value at every call site —
+// go/log-injection hardcodes its sanitiser list and ignores the repository's
+// Models-as-Data pack, so a barrier entry there would be inert (Issue #3329).
 func shortHash(contentHash string) string {
-	return contentHash[:min(hashPrefixLen, len(contentHash))]
+	return logging.SanitizeLogValue(contentHash[:min(hashPrefixLen, len(contentHash))])
 }
 
 func (m *Manager) getShardID(deviceID string, timestamp time.Time) string {

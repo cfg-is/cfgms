@@ -1048,7 +1048,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				hash, hashErr := dnaStorage.ContentHash(dna)
 				if hashErr != nil {
 					logger.Warn("Failed to compute DNA content hash for expected-hash wiring",
-						"steward_id", logging.SanitizeLogValue(stewardID), "error", hashErr)
+						"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(hashErr.Error()))
 					return
 				}
 				heartbeatService.SetExpectedDNAHash(stewardID, hash)
@@ -1069,7 +1069,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 					hash, hashErr := dnaStorage.ContentHash(steward.DNA)
 					if hashErr != nil {
 						logger.Warn("Failed to compute DNA content hash while warming expected hashes",
-							"steward_id", logging.SanitizeLogValue(steward.ID), "error", hashErr)
+							"steward_id", logging.SanitizeLogValue(steward.ID), "error", logging.SanitizeLogValue(hashErr.Error()))
 						continue
 					}
 					if hash != "" {
