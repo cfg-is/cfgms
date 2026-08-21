@@ -857,7 +857,7 @@ Six defects were found live. Two were small enough to fix inside this story
 | F4 — fleet view is node-local | **fixed** by #3480 |
 | F5 — missing record reported as service outage | **fixed in this story** |
 | F6 — refused steward reconnects at ~1 Hz forever | **fixed by #3481** (PR #3497) |
-| Cluster-restart hazard — Raft ConfState not restored | filed as **#3479** |
+| Cluster-restart hazard — Raft ConfState not restored | **fixed** by #3479 |
 
 #### F1 (FIXED HERE) — the IP-trust operator API was dead wiring on every deployment
 
@@ -1045,9 +1045,20 @@ sudo find /var/lib/cfgms -name raft.db -delete
 sudo systemctl start cfgms-controller.service
 ```
 
-Quorum re-forms in seconds via the `StartNode` bootstrap path. Filed as **#3479**. *Recommended fix: persist and restore the ConfState (or
-re-apply the bootstrap ConfChanges on restart) so a cluster can restart without
-discarding its log.*
+Quorum re-forms in seconds via the `StartNode` bootstrap path.
+
+**FIXED by #3479.** The Raft `ConfState` is now persisted whenever a ConfChange
+is applied, and restored on restart by seeding storage with a synthetic snapshot
+carrying it — placed at the recovered applied index, with entries above that
+index re-appended so committed-but-unapplied work is not lost. A store written
+*before* the fix has a full log and no `ConfState`; those heal in place from the
+configured peer list, so **no manual `raft.db` deletion is required when
+upgrading past this fix**. The recovery procedure above is retained only for
+nodes still running a pre-#3479 binary.
+
+`haRestoreQuorum` in `test/e2e/ha/leader_election_real_test.go` no longer wipes
+the WAL: that workaround destroyed the very log #3284 added, and would now mask
+a regression in the restore path rather than working around a known defect.
 This supersedes the "Raft state is entirely in-memory" note in §3/§4 — that was
 true before #3284 and is why those stories' stop-all/start-all drills worked.
 
