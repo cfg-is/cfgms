@@ -278,21 +278,24 @@ func (t *raftTransport) HandleMessage(w http.ResponseWriter, r *http.Request) {
 
 // raftStatusResponse is returned by the status endpoint
 type raftStatusResponse struct {
-	NodeID   uint64 `json:"node_id"`
-	IsLeader bool   `json:"is_leader"`
-	Leader   uint64 `json:"leader"`
-	Term     uint64 `json:"term"`
-	Nodes    int    `json:"nodes"`
+	NodeID       uint64 `json:"node_id"`
+	IsLeader     bool   `json:"is_leader"`
+	RaftIsLeader bool   `json:"raft_is_leader"`
+	Leader       uint64 `json:"leader"`
+	Term         uint64 `json:"term"`
+	Nodes        int    `json:"nodes"`
 }
 
 // HandleStatus returns Raft status (HTTP handler)
 func (t *raftTransport) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	status := raftStatusResponse{
 		NodeID:   t.nodeID,
-		IsLeader: t.consensus.IsLeader(),
-		Leader:   t.consensus.GetLeader(),
-		Term:     t.consensus.node.Status().GetTerm(),
-		Nodes:    len(t.consensus.GetClusterNodes()),
+		IsLeader: t.consensus.HasLeadership(),
+		// IsRaftLeader: raw Raft replication-protocol state — observational only, not an admission primitive.
+		RaftIsLeader: t.consensus.IsRaftLeader(),
+		Leader:       t.consensus.GetLeader(),
+		Term:         t.consensus.node.Status().GetTerm(),
+		Nodes:        len(t.consensus.GetClusterNodes()),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

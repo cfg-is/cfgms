@@ -12,10 +12,11 @@ import (
 
 // HAStatusResponse represents the response for HA status endpoint
 type HAStatusResponse struct {
-	NodeID   string `json:"node_id"`
-	IsLeader bool   `json:"is_leader"`
-	Mode     string `json:"mode"`
-	Health   string `json:"health"`
+	NodeID       string `json:"node_id"`
+	IsLeader     bool   `json:"is_leader"`
+	RaftIsLeader bool   `json:"raft_is_leader"`
+	Mode         string `json:"mode"`
+	Health       string `json:"health"`
 }
 
 // HAClusterResponse represents the response for HA cluster endpoint
@@ -54,7 +55,9 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 		nodeID = localNode.ID
 	}
 
-	isLeader := haManager.IsLeader()
+	isLeader := haManager.HasLeadership()
+	// IsRaftLeader: raw Raft replication-protocol state — observational only, not an admission primitive.
+	raftIsLeader := haManager.IsRaftLeader()
 	mode := haManager.GetDeploymentMode().String()
 	health := "healthy"
 
@@ -65,10 +68,11 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := HAStatusResponse{
-		NodeID:   nodeID,
-		IsLeader: isLeader,
-		Mode:     mode,
-		Health:   health,
+		NodeID:       nodeID,
+		IsLeader:     isLeader,
+		RaftIsLeader: raftIsLeader,
+		Mode:         mode,
+		Health:       health,
 	}
 
 	s.respondJSON(w, http.StatusOK, response)
