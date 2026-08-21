@@ -179,26 +179,38 @@ context for that case.
 
 **A stub must be mutually exclusive with the job it stands in for.** Two check
 runs sharing one context name is a false-green risk: a passing stub alongside a
-failing real job. Not every pair here meets that bar today.
+real job that has not finished, or has failed.
 
-**Path-gated pairs overlap when a PR touches both sides.** `paths` fires when
+**Every `documentation.yml` stub is now `pull_request`-only** (#3189). All seven —
+`unit-tests`, `integration-tests`, `Build Gate`, `Controller Integration Tests
+(Linux)`, `security-deployment-gate`, `trivy-scan` and `security-validation` — are
+gated `if: github.event_name == 'pull_request'`, and each carries a comment naming
+the real job that is the sole queue-side poster for its context. In the merge queue
+the real jobs post those contexts and nothing else does.
+
+Why that mattered, and why it is not a hypothetical: on queue commit `3d7ccb0c`,
+`documentation.yml` (run `32495175837`) posted a green `Build Gate` at 14:59:55,
+and PR #3490 **merged at 15:10:25** — while `Native Build (Windows)` was still
+running. The real `Build Gate` (`cross-platform-build.yml`, run `32495175938`) did
+not finish until 15:12:31, over two minutes after the merge. The queue did not
+merge *despite* a failing real job; it merged *without waiting for it at all*. The
+earlier `c9ac1917` measurement recorded the same overlap before the consequence
+was understood. Both are history now, retained as the reason for the fix.
+
+**Path-gated pairs still overlap when a PR touches both sides.** `paths` fires when
 *any* changed file matches and `paths-ignore` fires when *any* changed file does
 not, so a PR touching both a `.go` file and a `.md` file triggers the real job
-and its stub.
+and its stub. That case is unfixed and out of scope for #3189.
 
-**Four `documentation.yml` stubs also fire in the merge queue,** where they guard
-nothing: `unit-tests`, `integration-tests`, `Build Gate` and `Controller
-Integration Tests (Linux)` are gated `pull_request || merge_group`, and
-`documentation.yml` carries no `paths` filter on `merge_group`. Measured on queue
-commit `c9ac1917`: `documentation.yml` posted all four green while the real
-`Build Gate`, `integration-tests` and `Controller Integration Tests (Linux)` ran
-in parallel. (`unit-tests` is harmless — both its queue-side posters are stubs.)
-The `security-deployment-gate`, `trivy-scan` and `security-validation` stubs are
-correctly `pull_request`-only.
-
-Whether GitHub resolves a shared context to the failing run or the passing one is
-not established. Do not rely on a stub being exclusive until it is — and when a
-queue-real check goes green, confirm the *real* job posted it.
+**A PR-side stub still posts a `skipped` check run in the queue.** Jobs gated
+`if: github.event_name == 'pull_request'` in `cross-platform-build.yml`,
+`test-suite.yml`, `production-gates.yml` and `security-scan.yml` appear on every
+merge-queue commit with conclusion `skipped`, sharing the context name with the
+real job. Whether GitHub resolves such a context to the `skipped` run or waits for
+the real one is **not established** — so when a queue-real check goes green,
+confirm the *real* job posted it
+(`gh api repos/cfg-is/cfgms/commits/<sha>/check-runs`), and never read a merge as
+proof that a queue-real job ran.
 
 Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 
