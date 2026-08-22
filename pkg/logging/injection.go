@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
@@ -275,16 +276,44 @@ func configuredLoggerConfig(serviceName, component string) *Config {
 	return cfg
 }
 
-// Global factory instance for convenience
-var globalLoggerFactory *LoggerFactory
+// Global factory instance for convenience.
+//
+// factoryMutex guards it. Every exported convenience function in this file
+// (ForModule, ForComponent, GetLogger) funnels through GetGlobalLoggerFactory, which
+// lazily initialises the global on first use — so two goroutines constructing loggers
+// concurrently raced on the nil check and the assignment. This is the same guard
+// GetGlobalLoggingManager already applies to globalManager (manager.go:122); the
+// factory was the one global here left unprotected.
+var (
+	factoryMutex        sync.RWMutex
+	globalLoggerFactory *LoggerFactory
+)
 
 // InitializeGlobalLoggerFactory initializes the global logger factory
 func InitializeGlobalLoggerFactory(serviceName, component string) {
-	globalLoggerFactory = NewLoggerFactory(serviceName, component)
+	// Construct outside the lock: NewLoggerFactory reads configuration and must not
+	// run while writers are blocked behind it.
+	factory := NewLoggerFactory(serviceName, component)
+
+	factoryMutex.Lock()
+	defer factoryMutex.Unlock()
+	globalLoggerFactory = factory
 }
 
-// GetGlobalLoggerFactory returns the global logger factory
+// GetGlobalLoggerFactory returns the global logger factory, creating a default one on
+// first use. Safe for concurrent use.
 func GetGlobalLoggerFactory() *LoggerFactory {
+	factoryMutex.RLock()
+	factory := globalLoggerFactory
+	factoryMutex.RUnlock()
+	if factory != nil {
+		return factory
+	}
+
+	factoryMutex.Lock()
+	defer factoryMutex.Unlock()
+	// Re-check: another goroutine may have initialised it between the read unlock and
+	// the write lock.
 	if globalLoggerFactory == nil {
 		// Create default factory if none exists
 		globalLoggerFactory = NewLoggerFactory("cfgms", "unknown")
