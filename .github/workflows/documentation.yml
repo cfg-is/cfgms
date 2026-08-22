@@ -24,7 +24,29 @@ on:
       - '.editorconfig'
       - 'LICENSE'
       - '.github/workflows/*.yml'
-  merge_group:
+  # NO merge_group trigger, deliberately.
+  #
+  # Every job below is either `pull_request`/`push`-gated or a docs-only stub for a
+  # required check context. A job whose `if:` is false still posts a check run with
+  # conclusion `skipped`, and GitHub accepts a `skipped` run as satisfying a required
+  # status check. While this workflow triggered on merge_group, its skipped `Build
+  # Gate` stub was the sole poster of that context during the window when the real
+  # `build-gate` job (needs: [native-builds, integration-tests]) had not created a
+  # check run yet — so the queue merged before the real gate ever reported.
+  #
+  # Measured on queue commit 5b0518ab: `Build Gate` had exactly one check run, this
+  # workflow's `skipped` one; PR #3501 merged at 00:15:21Z; `Native Build (Linux)`
+  # FAILED at 00:15:31Z with the native builds still running. Removing the trigger
+  # leaves the context unreported until the real gate posts, which is what makes the
+  # queue wait.
+  #
+  # Nothing here is needed in the queue: every required context has a real queue-side
+  # poster (test-suite.yml, production-gates.yml, cross-platform-build.yml,
+  # security-scan.yml, codeql-analysis.yml, zizmor.yml, frontend-ci.yml,
+  # cla-check.yml), each under a bare `merge_group:` trigger with no paths filter, so
+  # even a docs-only queue entry is fully covered.
+  #
+  # DO NOT add `merge_group:` here.
   workflow_dispatch:
 
 permissions: {}
