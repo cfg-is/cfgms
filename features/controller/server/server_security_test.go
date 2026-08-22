@@ -627,6 +627,38 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 	}
 }
 
+// TestConcurrentStorageConfigs_GetDistinctEntityGraphDirectories guards the isolation
+// TestServer_ConcurrentSecurity_And_RaceConditions depends on.
+//
+// The entity graph provider takes no configured path. It derives one as
+// filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "entitygraph.db")
+// (server.go:3432), so two configs that differ only in SQLite *filename* still share a
+// single entitygraph.db. Concurrent opens of one SQLite file fail with SQLITE_BUSY.
+//
+// This asserts on the derived directory rather than on live concurrency, so it fails
+// against the old same-directory layout on every platform. The SQLITE_BUSY itself only
+// surfaced on Windows, which is why the defect survived on Linux and macOS.
+func TestConcurrentStorageConfigs_GetDistinctEntityGraphDirectories(t *testing.T) {
+	tempDir := t.TempDir()
+	const numConcurrent = 10
+
+	seen := make(map[string]int, numConcurrent)
+	for i := 0; i < numConcurrent; i++ {
+		dir := filepath.Join(tempDir, fmt.Sprintf("concurrent-%d", i))
+		cfg := createTestStorageConfig(dir, "server")
+
+		// Mirrors server.go:3432 exactly.
+		egDir := filepath.Dir(cfg.SQLitePath)
+		if prev, dup := seen[egDir]; dup {
+			t.Fatalf("goroutines %d and %d would share entity graph directory %s — "+
+				"concurrent opens of one entitygraph.db fail with SQLITE_BUSY", prev, i, egDir)
+		}
+		seen[egDir] = i
+	}
+	require.Len(t, seen, numConcurrent,
+		"every concurrent server must derive its own entity graph directory")
+}
+
 func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
@@ -650,21 +682,43 @@ func TestServer_ConcurrentSecurity_And_RaceConditions(t *testing.T) {
 		timeout = 60 * time.Second
 	}
 
+	// Each goroutine needs its own storage DIRECTORY, not merely its own filenames.
+	// The entity graph provider does not read a configured path: it derives one as
+	// filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "entitygraph.db")
+	// (server.go:3432). Configs that differ only in filename therefore still resolve
+	// to a single shared entitygraph.db, and N concurrent opens of one SQLite file
+	// fail with "database is locked (5) (SQLITE_BUSY)" — measured on the Windows leg
+	// of queue commit e8ee121d, where this test reported
+	// "failed to initialize entity graph provider ... ping
+	// C:\...\concurrent_test*\entitygraph.db: database is locked".
+	//
+	// The directories are created here, on the test goroutine, for two reasons: the
+	// SQLite providers do not create parent directories, and require/t.Fatalf must
+	// never be called from a spawned goroutine.
+	goroutineDirs := make([]string, numConcurrent)
+	for i := range goroutineDirs {
+		dir := filepath.Join(tempDir, fmt.Sprintf("concurrent-%d", i))
+		require.NoError(t, os.MkdirAll(dir, 0o750),
+			"per-goroutine storage directory must be created before the race starts")
+		goroutineDirs[i] = dir
+	}
+
 	// Test concurrent server creation (should be thread-safe)
 	results := make(chan *Server, numConcurrent)
 	errors := make(chan error, numConcurrent)
 
 	for i := 0; i < numConcurrent; i++ {
 		go func(index int) {
-			// Each goroutine gets its own unique storage configuration to avoid Git conflicts
+			// Each goroutine gets its own unique storage configuration to avoid Git
+			// conflicts, and its own directory so the derived entity graph database
+			// is unique too.
 			uniqueConfig := &config.Config{
 				ListenAddr: "127.0.0.1:0",
 				Certificate: &config.CertificateConfig{
 					EnableCertManagement: false,
 				},
 				// Epic 6: Storage configuration required for all server creation
-				// Use unique storage path per goroutine to prevent Git repository conflicts
-				Storage: createTestStorageConfig(tempDir, fmt.Sprintf("concurrent-%d", index)),
+				Storage: createTestStorageConfig(goroutineDirs[index], "server"),
 			}
 			server, err := New(uniqueConfig, logger)
 			if err != nil {
