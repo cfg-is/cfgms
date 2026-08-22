@@ -1084,7 +1084,7 @@ func (s DatabaseSchemas) CreateSessionsTable(ctx context.Context, db *sql.DB) er
 		`DROP POLICY IF EXISTS rls_delete ON sessions;`,
 		// SELECT: permissive when no tenant context (auth lookups), filtered when context is set.
 		`CREATE POLICY rls_read ON sessions FOR SELECT USING (
-			current_setting('app.current_tenant', true) = ''
+			coalesce(current_setting('app.current_tenant', true), '') = ''
 			OR tenant_id = current_setting('app.current_tenant', true)
 		);`,
 		// INSERT: tenant must be set in the transaction before inserting.
@@ -1160,7 +1160,7 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		`DROP POLICY IF EXISTS rls_delete ON steward_records;`,
 		// SELECT: permissive when no tenant context (fleet management), filtered when context is set.
 		`CREATE POLICY rls_read ON steward_records FOR SELECT USING (
-			current_setting('app.current_tenant', true) = ''
+			coalesce(current_setting('app.current_tenant', true), '') = ''
 			OR tenant_id = current_setting('app.current_tenant', true)
 		);`,
 		// INSERT: tenant must be set in the transaction before inserting.
@@ -1220,7 +1220,7 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 		`DROP POLICY IF EXISTS rls_delete ON command_records;`,
 		// SELECT: permissive when no tenant context, filtered when context is set.
 		`CREATE POLICY rls_read ON command_records FOR SELECT USING (
-			current_setting('app.current_tenant', true) = ''
+			coalesce(current_setting('app.current_tenant', true), '') = ''
 			OR tenant_id = current_setting('app.current_tenant', true)
 		);`,
 		// INSERT: tenant must be set in the transaction before inserting.
@@ -1308,7 +1308,7 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 		`DROP POLICY IF EXISTS rls_update ON session_token_store;`,
 		`DROP POLICY IF EXISTS rls_delete ON session_token_store;`,
 		`CREATE POLICY rls_read ON session_token_store FOR SELECT USING (
-			current_setting('app.current_tenant', true) = ''
+			coalesce(current_setting('app.current_tenant', true), '') = ''
 			OR tenant_id = current_setting('app.current_tenant', true)
 		);`,
 		`CREATE POLICY rls_write ON session_token_store FOR INSERT WITH CHECK (
