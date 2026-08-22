@@ -890,6 +890,52 @@ func TestGetTrendData_UnsupportedMetric_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown_metric")
 }
 
+// trendFixtureStep returns the spacing used to lay out newTrendFixture's four
+// records behind now, such that all of them land inside now's own UTC day.
+//
+// The fixture buckets on UTC midnight and asserts that yesterday's bucket is
+// empty, so every record must sit at or after midnight. Fixed offsets (-20m, -15m,
+// -10m, -5m) violated that for the first 20 minutes of each UTC day. Scaling the
+// step by the elapsed part of the day keeps the furthest record (now-4*step) at or
+// after midnight for every possible now, while capping at 5 minutes preserves the
+// original spacing for the other 23h40m.
+func trendFixtureStep(now time.Time) time.Duration {
+	elapsed := now.Sub(now.Truncate(24 * time.Hour))
+	if step := elapsed / 5; step < 5*time.Minute {
+		return step
+	}
+	return 5 * time.Minute
+}
+
+// TestTrendFixtureStep_KeepsEveryRecordInsideTodaysBucket walks a full UTC day and
+// asserts the placement rule holds at every minute — including the ~20-minute window
+// after midnight where the previous fixed-offset layout put records in yesterday's
+// bucket. It fails against that old layout at those offsets regardless of when the
+// suite actually runs, so the regression is caught at any time of day.
+func TestTrendFixtureStep_KeepsEveryRecordInsideTodaysBucket(t *testing.T) {
+	day := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+
+	for minute := 0; minute < 24*60; minute++ {
+		now := day.Add(time.Duration(minute) * time.Minute)
+		midnight := now.Truncate(24 * time.Hour)
+		step := trendFixtureStep(now)
+
+		require.False(t, now.Add(-4*step).Before(midnight),
+			"at %s the earliest record (now-4*step, step=%s) fell into yesterday's bucket",
+			now.Format(time.RFC3339), step)
+		require.False(t, now.Add(-1*step).After(now),
+			"at %s the latest record was in the future", now.Format(time.RFC3339))
+	}
+}
+
+// TestTrendFixtureStep_UsesOriginalSpacingAwayFromMidnight pins the cap, so a change
+// that shrank every record into a degenerate cluster could not pass the walk above.
+func TestTrendFixtureStep_UsesOriginalSpacingAwayFromMidnight(t *testing.T) {
+	noon := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	assert.Equal(t, 5*time.Minute, trendFixtureStep(noon),
+		"away from midnight the fixture keeps its original 5-minute spacing")
+}
+
 // newTrendFixture seeds the entity graph with two devices (device-a and device-b)
 // and returns a provider plus a query spanning exactly two daily buckets.
 //
@@ -905,23 +951,36 @@ func newTrendFixture(t *testing.T) (*DataProvider, interfaces.DataQuery) {
 
 	egp := newTestEGProvider(t)
 	now := time.Now().UTC()
+	midnightUTC := now.Truncate(24 * time.Hour)
+
+	// Space the fixture's four records across the part of today's bucket that has
+	// already elapsed, rather than at fixed offsets before `now`.
+	//
+	// Fixed offsets put records in *yesterday's* bucket whenever the test ran within
+	// 20 minutes of UTC midnight, which made "no records were stored yesterday" false
+	// — a deterministic ~20-minute failure window every day, not a flake. Measured:
+	// CI Native Build (Linux) failed at 00:15:31Z on queue commit 5b0518ab, the same
+	// assertion reproduced locally at 00:20Z, and it passed again at 00:21:31Z once
+	// now-20m had crossed back into today.
+	//
+	// See trendFixtureStep for the placement rule.
+	step := trendFixtureStep(now)
 
 	// device-a: two observations + one drift event (hostname change)
-	storeHostEntity(t, egp, "device-a", now.Add(-20*time.Minute))
-	storeHostEntity(t, egp, "device-a", now.Add(-10*time.Minute))
-	storeDriftState(t, egp, "device-a", "host:hostname", now.Add(-5*time.Minute), []interface{}{
+	storeHostEntity(t, egp, "device-a", now.Add(-4*step))
+	storeHostEntity(t, egp, "device-a", now.Add(-2*step))
+	storeDriftState(t, egp, "device-a", "host:hostname", now.Add(-1*step), []interface{}{
 		map[string]interface{}{"attribute": "hostname", "desired": "host-before", "actual": "host-after", "matching": false},
 	})
 
 	// device-b: one observation, no drift
-	storeHostEntity(t, egp, "device-b", now.Add(-15*time.Minute))
+	storeHostEntity(t, egp, "device-b", now.Add(-3*step))
 
 	p := &DataProvider{
 		egProvider: egp,
 		logger:     logging.NewNoopLogger(),
 	}
 
-	midnightUTC := now.Truncate(24 * time.Hour)
 	query := interfaces.DataQuery{
 		TimeRange: interfaces.TimeRange{
 			Start: midnightUTC.Add(-24 * time.Hour),
