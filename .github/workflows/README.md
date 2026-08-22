@@ -36,10 +36,15 @@ in for has finished.
 
 An event-gated stub is weaker than it looks: a job whose `if:` is false still posts
 a check run with conclusion `skipped`, and GitHub accepts that as satisfying a
-required check. `Build Gate` is therefore split across two files by **trigger**
-rather than by `if:` — `cross-platform-build-pr.yml` (`pull_request` only) and
-`cross-platform-build.yml` (`merge_group` only). Neither may gain the other's
-trigger. See CLAUDE.md → Stub exclusivity for the measured evidence.
+required check. Exclusivity is therefore enforced by **trigger**, not by `if:`:
+
+- `cross-platform-build-pr.yml` — `pull_request` only
+- `cross-platform-build.yml` — `merge_group` / `workflow_dispatch` only
+- `documentation.yml` — **no `merge_group` trigger at all**
+
+None of these three may gain the trigger it currently lacks; each carries a comment
+saying so. See CLAUDE.md → Stub exclusivity for the four measured queue commits that
+established this.
 
 The other three contexts — `zizmor`, `CLA signature check` and `frontend-checks` —
 carry no path filter and no stub: their real job runs on every `pull_request` and
@@ -255,7 +260,7 @@ security workflow guide for the full per-check gap list).
 
 #### `documentation.yml` — Documentation Validation
 
-**Triggers**: Pull Requests touching `docs/**`, `*.md`, `.claude/**` (and a few other non-code paths); push to main (same paths); Merge Group; Manual dispatch
+**Triggers**: Pull Requests touching `docs/**`, `*.md`, `.claude/**` (and a few other non-code paths); push to main (same paths); Manual dispatch. **Deliberately no Merge Group** — its docs-only stubs would otherwise post `skipped` runs that satisfy required contexts in the queue.
 
 **Jobs**:
 - `validate-claude-md` — verifies CLAUDE.md contains required structural concepts and that all internal file references resolve; runs on `pull_request` and `push` (blocking)
@@ -300,7 +305,7 @@ security workflow guide for the full per-check gap list).
 | `license-check.yml` | ✅ | ✅ | ❌ | ❌ | ❌ |
 | `cla-check.yml` | ❌ | pull_request_target | ✅ | ❌ | ❌ |
 | `label-decommission-gate.yml` | ❌ | ✅ | ❌ | ❌ | ❌ |
-| `documentation.yml` | push main (paths) | ✅ (paths) | ✅ | ❌ | ✅ |
+| `documentation.yml` | push main (paths) | ✅ (paths) | ❌ (deliberate) | ❌ | ✅ |
 | `develop-sanity.yml` | push develop only | ❌ | ❌ | ❌ | ❌ |
 | `frontend-ci.yml` | ❌ | ✅ | ✅ | ❌ | ✅ |
 

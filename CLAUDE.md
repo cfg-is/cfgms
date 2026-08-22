@@ -185,52 +185,58 @@ context for that case.
 runs sharing one context name is a false-green risk: a passing stub alongside a
 real job that has not finished, or has failed.
 
-**Every `documentation.yml` stub is now `pull_request`-only** (#3189). All seven —
-`unit-tests`, `integration-tests`, `Build Gate`, `Controller Integration Tests
-(Linux)`, `security-deployment-gate`, `trivy-scan` and `security-validation` — are
-gated `if: github.event_name == 'pull_request'`, and each carries a comment naming
-the real job that is the sole queue-side poster for its context. In the merge queue
-the real jobs post those contexts and nothing else does.
+**Exclusivity is enforced by trigger, not by `if:`.** Two workflows now hold the
+`Build Gate` context and neither can fire on the other's event:
+`cross-platform-build-pr.yml` triggers only on `pull_request`;
+`cross-platform-build.yml` only on `merge_group` / `workflow_dispatch`.
+`documentation.yml` — which owns the docs-only stub for all seven stubbed contexts —
+has **no `merge_group` trigger at all**. A workflow that does not trigger posts
+nothing, skipped or otherwise. Each of these three files carries a comment
+forbidding the trigger it must never gain.
 
-Why that mattered, and why it is not a hypothetical: on queue commit `3d7ccb0c`,
-`documentation.yml` (run `32495175837`) posted a green `Build Gate` at 14:59:55,
-and PR #3490 **merged at 15:10:25** — while `Native Build (Windows)` was still
-running. The real `Build Gate` (`cross-platform-build.yml`, run `32495175938`) did
-not finish until 15:12:31, over two minutes after the merge. The queue did not
-merge *despite* a failing real job; it merged *without waiting for it at all*. The
-earlier `c9ac1917` measurement recorded the same overlap before the consequence
-was understood. Both are history now, retained as the reason for the fix.
+This took three attempts because an event-gated `if:` looks sufficient and is not.
+The history, in order:
+
+- Queue commit `c9ac1917`: `documentation.yml`'s stubs fire on `merge_group`
+  alongside the real jobs. Recorded as an overlap; consequence not yet understood.
+- Queue commit `3d7ccb0c`: `documentation.yml` posts a **green** `Build Gate` at
+  14:59:55; PR #3490 merges at 15:10:25; the real gate does not finish until
+  15:12:31. The queue did not merge despite a failing job — it merged without
+  waiting for the real job at all. Fixed by #3189, which gated those stubs
+  `if: pull_request`.
+- Queue commit `9fcc3315`: the stub now **skips** instead of passing, and the merge
+  still happens — `Build Gate` had two `skipped` runs and no successful one, PR
+  #3500 merged at 18:02:06Z, `Native Build (Windows)` FAILED at 18:03:51Z. This is
+  where "a `skipped` run satisfies a required check" was established.
+- Queue commit `5b0518ab`: after the `cross-platform-build-pr.yml` split, exactly
+  **one** `Build Gate` run remained — `documentation.yml`'s skipped one. PR #3501
+  merged at 00:15:21Z; `Native Build (Linux)` FAILED at 00:15:31Z. Removing
+  `merge_group` from `documentation.yml` closed the last poster.
 
 **Path-gated pairs still overlap when a PR touches both sides.** `paths` fires when
 *any* changed file matches and `paths-ignore` fires when *any* changed file does
 not, so a PR touching both a `.go` file and a `.md` file triggers the real job
 and its stub. That case is unfixed and out of scope for #3189.
 
-**A `skipped` check run satisfies a required status check.** This is established,
-not suspected. Jobs gated `if: github.event_name == 'pull_request'` still post a
-check run with conclusion `skipped` in the merge queue, under the same context
-name as the real job. On queue commit `9fcc3315` the `Build Gate` context had two
-`skipped` runs and **no** successful one; PR #3500 merged at 18:02:06Z anyway;
-`Native Build (Windows)` then FAILED at 18:03:51Z and the real `Build Gate` failed
-at 18:05:00Z. A failing build merged.
+**A `skipped` check run satisfies a required status check.** This is the mechanism
+behind all of the above, and it is established, not suspected: a job whose `if:` is
+false still posts a check run, with conclusion `skipped`, under the same context
+name as the real job — and GitHub accepts it.
 
-The reason `Build Gate` was uniquely exposed is that the real `build-gate` job is
+**Why `Build Gate` was uniquely exposed.** The real `build-gate` job is
 `needs: [native-builds, integration-tests]`, so its check run does not exist at all
-while the native builds run — leaving the skipped stub as the only poster. Contexts
-whose real job starts immediately (e.g. `Controller Integration Tests (Linux)`)
-create a pending run that does block the queue.
-
-**The fix is structural: an event-gated `if:` is not enough.** `Build Gate`'s
-PR-side stub was moved into `cross-platform-build-pr.yml`, which has **no**
-`merge_group` trigger, and `cross-platform-build.yml` lost its `pull_request`
-trigger. A workflow that does not trigger cannot post anything — not even a skipped
-run. Neither file may gain the other's trigger; both carry a comment saying so.
+while the native builds run — leaving a skipped stub as the only poster of the
+context. Contexts whose real job starts without a `needs:` barrier (e.g.
+`Controller Integration Tests (Linux)`) create a *pending* run immediately, and a
+pending run does block the queue. Absence of any run also blocks. The failure needs
+both halves: a `needs:`-delayed real job **and** a skipped run standing in for it.
 
 `test-suite.yml`, `production-gates.yml` and `security-scan.yml` still use
-event-gated `*-pr-stub` jobs, so their skipped runs remain. Those contexts are not
-currently exposed, because each real job starts without a `needs:` barrier — but
-that is a property of their job graph, not a guarantee. **When a queue-real check
-goes green, confirm the *real* job posted it**
+event-gated `*-pr-stub` jobs, so their skipped runs remain on every queue commit.
+Those contexts are not exposed today only because their real jobs start without a
+`needs:` barrier — a property of their job graphs, not a guarantee. **Adding a
+`needs:` to any of those real jobs would reopen this hole.** When a queue-real check
+goes green, confirm the *real* job posted it
 (`gh api repos/cfg-is/cfgms/commits/<sha>/check-runs`), and never read a merge as
 proof that a queue-real job ran.
 
