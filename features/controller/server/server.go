@@ -407,6 +407,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}()
 	openedStores = append(openedStores, storageManager.Close)
 
+	// Validate that the constructed StorageManager supplies every store required by
+	// the enabled subsystems. A missing required store fails closed here — at startup,
+	// before anything tries to use the store — rather than silently producing a nil
+	// that causes a 503 at request time (issue #3400 regression guard).
+	// Issue #3461 wires the real subsystem declarations; for now the set is empty and
+	// every deployment shape passes cleanly.
+	if reqErr := interfaces.ValidateStorageRequirements(storageManager, collectActiveStorageRequirements(cfg)); reqErr != nil {
+		return nil, reqErr
+	}
+
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
 	clientTenantStore := storageManager.GetClientTenantStore()
@@ -3717,13 +3727,28 @@ func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]
 	return merged
 }
 
+// collectActiveStorageRequirements returns the union of store requirements from all
+// subsystems that are enabled in this deployment. Requirements are collected from
+// each subsystem's own declaration (adjacent to the code that uses the store), then
+// gated here on whether the subsystem is active — so a deployment that does not run
+// a subsystem cannot be blocked by its requirements.
+//
+// Issue #3461 wires the real subsystem packages (registration, push, workflow-trigger)
+// into this function. Until then the set is empty and every deployment shape passes
+// ValidateStorageRequirements cleanly.
+func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequirement {
+	_ = cfg // cfg gates subsystem enablement; used by #3461 when real subsystems are added
+	return nil
+}
+
 // assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
 // or written. Called immediately after CreateClusterStorageManager in New(), still inside
 // the cfg.HA.IsClusterMode() block, so callers need not re-check the mode.
 //
 // Gates (in order):
 //  1. Storage provider must be cluster-capable (shared state across controller nodes).
-//  2. CFGMS_S3_INSTALLER_BUCKET must be set (S3-compatible blob store for installer artifacts).
+//  2. CFGMS_S3_INSTALLER_BUCKET must be set (S3-compatible blob store for installer
+//     artifacts).
 func assertClusterBackendsReady(cfg *config.Config, storageManager *interfaces.StorageManager) error {
 	if p := storageManager.GetProvider(); p != nil && !p.ClusterCapable() {
 		return fmt.Errorf("cluster mode requires a cluster-capable storage backend; provider %q does not support cluster coordination", storageManager.GetProviderName())
