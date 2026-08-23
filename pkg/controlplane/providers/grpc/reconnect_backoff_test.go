@@ -151,8 +151,36 @@ func TestReconnectBackoff_DefaultsWhenNoOverride(t *testing.T) {
 // state transitions produced by reconnectLoop/clientReceiveLoop/
 // dialAndOpenStream against a live rejectAll server, using the same
 // newTestCA/on_state_change harness as reconnect_test.go.
+//
+// Measurement note: the gap between two StateReconnecting callbacks is the
+// backoff the loop waited *plus* a full QUIC/mTLS dial, stream open and refusal
+// round-trip. That overhead is neither small nor constant — measured at ~260 ms
+// on one cycle and ~130 ms on the next during a loaded `-race` package run — so
+// comparing adjacent gaps to each other cannot distinguish escalation from
+// overhead noise when the backoff step is of the same order (a 40 ms → 80 ms
+// step produced gaps of 303 ms then 210 ms and a false failure). Overhead is
+// strictly additive, though, so each gap has the backoff it followed as a hard
+// lower bound. Asserting that lower bound per cycle is immune to the noise and
+// is still a strict pre-fix detector: the rebuilt-per-invocation backoff never
+// exceeded its initial interval, which is an order of magnitude below the
+// bounds checked here.
 func TestReconnectBackoff_EscalatesThroughRealReconnectPath(t *testing.T) {
 	t.Parallel()
+
+	// Escalation ladder driven end-to-end: 100, 200, 400, 800, then saturated at
+	// the 1.6 s ceiling. Kept well clear of dial overhead so each expected wait
+	// remains a meaningful lower bound.
+	const (
+		initialWait = 100 * time.Millisecond
+		maxWait     = 1600 * time.Millisecond
+	)
+	expectedWaits := []time.Duration{
+		initialWait,
+		2 * initialWait,
+		4 * initialWait,
+		8 * initialWait,
+		maxWait,
+	}
 
 	tc := newTestCA(t)
 	reg := registry.NewRegistry()
@@ -173,11 +201,11 @@ func TestReconnectBackoff_EscalatesThroughRealReconnectPath(t *testing.T) {
 
 	client := New(ModeClient,
 		withBackoff(&backoff{
-			initial:    40 * time.Millisecond,
-			max:        320 * time.Millisecond,
+			initial:    initialWait,
+			max:        maxWait,
 			multiplier: 2.0,
-			// No jitter: this test asserts on the ordering of successive
-			// measured gaps, and jitter would make adjacent gaps overlap.
+			// No jitter: the assertions below use each cycle's configured wait as
+			// an exact lower bound, and negative jitter would undercut it.
 			jitter: 0,
 		}),
 		withQUICConfig(&quicgo.Config{
@@ -206,8 +234,8 @@ func TestReconnectBackoff_EscalatesThroughRealReconnectPath(t *testing.T) {
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(reconnectingAt) >= 6
-	}, 15*time.Second, 20*time.Millisecond, "a refused steward must keep re-entering reconnectLoop")
+		return len(reconnectingAt) >= len(expectedWaits)+1
+	}, 30*time.Second, 20*time.Millisecond, "a refused steward must keep re-entering reconnectLoop")
 
 	// It must never actually be admitted — the approval checker rejects every
 	// attempt, so the stream is refused on first Recv every cycle.
@@ -222,21 +250,26 @@ func TestReconnectBackoff_EscalatesThroughRealReconnectPath(t *testing.T) {
 	for i := 1; i < len(timestamps); i++ {
 		gaps = append(gaps, timestamps[i].Sub(timestamps[i-1]))
 	}
-	require.GreaterOrEqual(t, len(gaps), 5)
+	require.GreaterOrEqual(t, len(gaps), len(expectedWaits))
 
-	// Each gap is the previous cycle's backoff wait plus a small, roughly
-	// constant dial/refusal overhead, so successive gaps must grow along with
-	// the escalating backoff — exactly the live symptom's inverse. Against the
-	// pre-fix per-invocation rebuild every gap would hover around the initial
-	// interval instead of climbing.
-	assert.Greater(t, gaps[1], gaps[0],
-		"reconnect interval must grow from attempt 1 to attempt 2 for a persistently refused steward")
-	assert.Greater(t, gaps[2], gaps[1],
-		"reconnect interval must grow from attempt 2 to attempt 3 for a persistently refused steward")
+	// Every reconnect cycle draws exactly one backoff step and then waits it out
+	// before dialing, so gap i is expectedWaits[i] plus dial/refusal overhead —
+	// never less. A cycle that comes back sooner than its configured wait can
+	// only mean the escalation state was lost between reconnectLoop entries,
+	// which is Issue #3481 exactly. The slack absorbs timer/clock granularity
+	// only; it is three orders of magnitude below the escalation being measured.
+	const timerSlack = 5 * time.Millisecond
+	for i, want := range expectedWaits {
+		assert.GreaterOrEqual(t, gaps[i], want-timerSlack,
+			"cycle %d of a persistently refused steward must wait at least its escalated backoff (%v), "+
+				"measured gap %v; a shorter gap means the backoff restarted at its initial interval (Issue #3481)",
+			i+1, want, gaps[i])
+	}
 
-	// The tail must have caught up to (approximately) the configured ceiling
-	// rather than either stopping or growing without bound.
+	// The tail must have saturated at the ceiling and still be retrying, rather
+	// than stopping or collapsing back to one attempt per initial interval.
 	last := gaps[len(gaps)-1]
-	assert.Greater(t, last, gaps[0],
-		"the tail reconnect interval must be well above the initial interval, not flat at ~1 attempt/interval forever")
+	assert.GreaterOrEqual(t, last, maxWait-timerSlack,
+		"the tail reconnect interval must sit at the configured ceiling (%v), measured %v — "+
+			"not flat at ~1 attempt per initial interval forever", maxWait, last)
 }

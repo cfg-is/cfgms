@@ -4,8 +4,10 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite" // registers the "sqlite" driver used by dropDeviceTenantTable
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
@@ -1534,4 +1537,585 @@ func TestAcceptRegistration_ReconnectionRejectsCrossTenantID(t *testing.T) {
 	require.NoError(t, mapErr)
 	assert.False(t, found,
 		"the refused reconnection must not write a device_tenant mapping for the foreign ID (got %q)", mappedTenant)
+}
+
+// ---------------------------------------------------------------------------
+// GetAllStewardsCluster tests (Issue #3494)
+// ---------------------------------------------------------------------------
+
+// callCountingStewardStore is a pass-through decorator around a real StewardStore
+// that tallies calls to the read operations used by the cluster refresh.
+// It is NOT a mock — every call is delegated to the embedded real store.
+// Used to verify that GetAllStewardsCluster performs zero per-call durable-store I/O.
+type callCountingStewardStore struct {
+	business.StewardStore
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *callCountingStewardStore) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func (c *callCountingStewardStore) ListStewards(ctx context.Context) ([]*business.StewardRecord, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return c.StewardStore.ListStewards(ctx)
+}
+
+// TestGetAllStewardsCluster_CrossInstance is the primary AC test (REQUIRED TEST 1):
+// a steward record written on one controller instance is returned by
+// GetAllStewardsCluster on a second instance sharing the same backend, without
+// restarting the second instance. Must fail against pre-story code (the method
+// doesn't exist yet). Measured live 2026-08-20 (story #3096): peer nodes returned
+// empty/404 for stewards active on the other node — this test captures that failure.
+func TestGetAllStewardsCluster_CrossInstance(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	// Instance 1: register a steward and persist to the shared backend.
+	mgr1 := openFleetStorageAt(t, dataDir)
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr1)
+	require.NoError(t, svc1.RegisterSteward("dev-peer", "tenant-a", "addr-1", "active"))
+	require.NoError(t, mgr1.Close())
+
+	// Instance 2: fresh Manager on the same data dir, simulating a peer controller
+	// node that has NOT warm-loaded and has NOT seen any registration traffic.
+	mgr2 := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr2.Close() })
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr2)
+
+	// The node-local method must NOT return the steward from the peer — it only knows
+	// stewards that registered or reconnected through this node.
+	require.Empty(t, svc2.GetAllStewards(),
+		"steward registered on a peer must not appear in the node-local GetAllStewards")
+
+	// Trigger a cluster refresh on instance 2 (no restart required).
+	svc2.refreshClusterInventory(ctx)
+
+	// After the refresh, GetAllStewardsCluster must include the peer's steward.
+	cluster := svc2.GetAllStewardsCluster(ctx)
+	ids := make(map[string]bool)
+	for _, s := range cluster {
+		ids[s.ID] = true
+	}
+	require.True(t, ids["dev-peer"],
+		"steward from peer node must be visible via GetAllStewardsCluster after a refresh")
+}
+
+// TestGetAllStewardsCluster_ZeroPerCallStorageIO is the second REQUIRED TEST:
+// verifies that GetAllStewardsCluster performs no direct durable-store call in its
+// own call path by instrumenting a real StewardStore implementation with a
+// call-counting pass-through decorator. The decorator tallies calls and delegates
+// to the real store — it is NOT a mock.
+func TestGetAllStewardsCluster_ZeroPerCallStorageIO(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	realStore := sm.GetStewardStore()
+	require.NotNil(t, realStore)
+
+	counting := &callCountingStewardStore{StewardStore: realStore}
+
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(counting)
+
+	// Seed one registered steward so the refresh has something to process.
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, realStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-io",
+		TenantID:     "tenant-a",
+		Status:       business.StewardStatusActive,
+		RegisteredAt: now,
+	}))
+
+	// Run one background refresh (this WILL call ListStewards).
+	svc.refreshClusterInventory(ctx)
+	callsAfterRefresh := counting.callCount()
+	require.Greater(t, callsAfterRefresh, 0, "refresh must have called the durable store at least once")
+
+	// Now call GetAllStewardsCluster multiple times.
+	_ = svc.GetAllStewardsCluster(ctx)
+	_ = svc.GetAllStewardsCluster(ctx)
+	_ = svc.GetAllStewardsCluster(ctx)
+
+	// The call count must NOT have increased — GetAllStewardsCluster reads from cache.
+	assert.Equal(t, callsAfterRefresh, counting.callCount(),
+		"GetAllStewardsCluster must not call the durable store in its own call path")
+}
+
+// TestGetAllStewardsCluster_LiveStewardTakesPrecedence verifies that a steward
+// actively connected to this node is never overwritten by a possibly stale durable
+// read for the same ID. The live entry (in-memory registry) wins.
+func TestGetAllStewardsCluster_LiveStewardTakesPrecedence(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	// Seed a stale durable record.
+	staleDNA := makeTestDNA("dev-live", map[string]string{"os": "linux", "hostname": "stale-host"})
+	require.NoError(t, storage.Store(ctx, "dev-live", staleDNA,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "registered"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-live", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+
+	// Upsert a live entry with a fresher status.
+	svc.mu.Lock()
+	svc.stewards["dev-live"] = &StewardInfo{
+		ID:       "dev-live",
+		TenantID: "tenant-a",
+		DNA:      makeTestDNA("dev-live", map[string]string{"os": "linux", "hostname": "live-host"}),
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	svc.refreshClusterInventory(ctx)
+
+	cluster := svc.GetAllStewardsCluster(ctx)
+	require.Len(t, cluster, 1)
+	assert.Equal(t, "active", cluster[0].Status,
+		"live status must win over stale durable record")
+	require.NotNil(t, cluster[0].DNA)
+	assert.Equal(t, "live-host", cluster[0].DNA.Attributes["hostname"],
+		"live DNA must win over stale durable record")
+}
+
+// TestGetAllStewardsCluster_TenantScoping verifies that an unscoped (admin)
+// caller sees the whole fleet, while a tenant-scoped caller sees only stewards
+// within their subtree.
+func TestGetAllStewardsCluster_TenantScoping(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	for _, pair := range []struct{ id, tenant string }{
+		{"dev-root", "root"},
+		{"dev-child", "root/child-a"},
+		{"dev-other", "other-tenant"},
+	} {
+		dna := makeTestDNA(pair.id, map[string]string{"os": "linux", "hostname": pair.id})
+		require.NoError(t, storage.Store(ctx, pair.id, dna,
+			&fleetStorage.StoreOptions{TenantID: pair.tenant, Status: "active"}))
+		require.NoError(t, storage.SetDeviceTenant(ctx, pair.id, pair.tenant))
+	}
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	svc.refreshClusterInventory(ctx)
+
+	// Admin (no tenant in context) sees all three stewards.
+	adminCtx := context.Background()
+	all := svc.GetAllStewardsCluster(adminCtx)
+	assert.Len(t, all, 3, "admin must see the whole fleet")
+
+	// root-tenant caller sees root + child, not other-tenant.
+	rootCtx := context.WithValue(ctx, ctxkeys.TenantID, "root")
+	rootResult := svc.GetAllStewardsCluster(rootCtx)
+	rootIDs := make(map[string]bool)
+	for _, s := range rootResult {
+		rootIDs[s.ID] = true
+	}
+	assert.True(t, rootIDs["dev-root"], "root tenant must see dev-root")
+	assert.True(t, rootIDs["dev-child"], "root tenant must see its child subtree")
+	assert.False(t, rootIDs["dev-other"], "root tenant must not see other-tenant stewards")
+}
+
+// TestGetAllStewardsCluster_IncludesTags verifies that controller-assigned tags
+// (from the tagStore) are populated in the cluster inventory.
+func TestGetAllStewardsCluster_IncludesTags(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	dna := makeTestDNA("dev-tags", map[string]string{"os": "linux", "hostname": "tag-host"})
+	require.NoError(t, storage.Store(ctx, "dev-tags", dna,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-tags", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+
+	tagStore := newTagStoreForTest(t)
+	svc.SetTagStore(tagStore)
+	require.NoError(t, tagStore.Set(ctx, "dev-tags", []string{"prod", "eu-west"}))
+
+	svc.refreshClusterInventory(ctx)
+
+	cluster := svc.GetAllStewardsCluster(ctx)
+	require.Len(t, cluster, 1)
+	assert.Equal(t, []string{"prod", "eu-west"}, cluster[0].Tags,
+		"controller-assigned tags must appear in cluster inventory")
+
+	// GetAllStewards (node-local) must NOT expose tags — no behavior change.
+	local := svc.GetAllStewards()
+	require.Len(t, local, 0, "dev-tags is only in durable storage, not in live registry")
+}
+
+// TestGetAllStewardsCluster_DegradationPreservesEntry verifies that a per-device
+// DNA lookup failure during a background refresh degrades gracefully: the steward
+// remains in the cluster-aware view with its previously-known state rather than
+// being dropped.
+func TestGetAllStewardsCluster_DegradationPreservesEntry(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx := context.Background()
+
+	dna := makeTestDNA("dev-degrade", map[string]string{"os": "linux", "hostname": "degrade-host"})
+	require.NoError(t, storage.Store(ctx, "dev-degrade", dna,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-degrade", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+
+	// First refresh: populate the cluster inventory.
+	svc.refreshClusterInventory(ctx)
+	first := svc.GetAllStewardsCluster(ctx)
+	require.Len(t, first, 1, "first refresh must return the steward")
+
+	// Close the storage to force DNA lookup failures on the next refresh.
+	require.NoError(t, storage.Close())
+
+	// Second refresh with closed storage: must degrade gracefully.
+	svc.refreshClusterInventory(ctx)
+
+	// The steward must still be present — degraded to previously-known state.
+	second := svc.GetAllStewardsCluster(ctx)
+	require.Len(t, second, 1, "steward must survive a refresh with storage I/O failure")
+	assert.Equal(t, "dev-degrade", second[0].ID)
+}
+
+// TestGetAllStewardsCluster_NilStorageHandled verifies that GetAllStewardsCluster
+// handles nil dnaStorage and stewardStore without panicking, returning an empty
+// result before any refresh has run.
+func TestGetAllStewardsCluster_NilStorageHandled(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	// No storage, no refresh — must return nil/empty, not panic.
+	result := svc.GetAllStewardsCluster(context.Background())
+	assert.Nil(t, result, "GetAllStewardsCluster before any refresh must return nil")
+
+	// Refresh with nil storage must be a no-op (no panic).
+	svc.refreshClusterInventory(context.Background())
+
+	// After refresh with nil storage, live stewards (if any) are still visible.
+	svc.mu.Lock()
+	svc.stewards["dev-live"] = &StewardInfo{
+		ID: "dev-live", TenantID: "tenant-a", Status: "active",
+		Metrics: make(map[string]string),
+	}
+	svc.mu.Unlock()
+	svc.refreshClusterInventory(context.Background())
+
+	result = svc.GetAllStewardsCluster(context.Background())
+	require.Len(t, result, 1, "live stewards must appear in cluster inventory even with nil storage")
+	assert.Equal(t, "dev-live", result[0].ID)
+}
+
+// TestGetAllStewardsCluster_ConcurrentRefreshAndRead verifies that concurrent
+// refreshClusterInventory writes and GetAllStewardsCluster reads do not produce
+// a data race. Run with -race.
+func TestGetAllStewardsCluster_ConcurrentRefreshAndRead(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	ctx := context.Background()
+
+	svc.mu.Lock()
+	svc.stewards["dev-race"] = &StewardInfo{
+		ID: "dev-race", TenantID: "tenant-a", Status: "active",
+		Metrics: make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			svc.refreshClusterInventory(ctx)
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_ = svc.GetAllStewardsCluster(ctx)
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestGetAllStewards_TagsFieldEmpty verifies that the existing GetAllStewards()
+// method does NOT populate the Tags field — the new field is harmless for existing
+// callers but must not silently add per-call tag store I/O to the node-local path.
+func TestGetAllStewards_TagsFieldEmpty(t *testing.T) {
+	svc := NewControllerService(logging.NewNoopLogger())
+	tagStore := newTagStoreForTest(t)
+	svc.SetTagStore(tagStore)
+	ctx := context.Background()
+	require.NoError(t, tagStore.Set(ctx, "dev-notagleak", []string{"should-not-appear"}))
+
+	require.NoError(t, svc.RegisterSteward("dev-notagleak", "tenant-a", "", "active"))
+
+	all := svc.GetAllStewards()
+	require.Len(t, all, 1)
+	assert.Nil(t, all[0].Tags, "GetAllStewards must not populate Tags — no tag store I/O in node-local path")
+}
+
+// ---------------------------------------------------------------------------
+// StartClusterRefresh goroutine lifecycle tests (Issue #3494)
+// ---------------------------------------------------------------------------
+
+// clusterRefreshGoroutines counts the live goroutines started by
+// StartClusterRefresh by name. The runtime stack dump names the launched closure
+// "…(*ControllerService).StartClusterRefresh.func1"; the "created by …" line of
+// the same dump names StartClusterRefresh without the ".func1" suffix, so the
+// count is exactly one per live refresh goroutine. This is a direct leak check:
+// a ticker loop that outlives its context keeps that frame on the stack.
+func clusterRefreshGoroutines() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "StartClusterRefresh.func1")
+}
+
+// TestStartClusterRefresh_RunsInitialRefreshBeforeFirstTick pins the immediate
+// refresh that StartClusterRefresh performs before entering its ticker loop.
+// The interval is an hour, so no tick can fire during the test: any populated
+// inventory has to come from the pre-loop call. Without it a controller would
+// serve an empty cluster view for a full interval after startup.
+func TestStartClusterRefresh_RunsInitialRefreshBeforeFirstTick(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dna := makeTestDNA("dev-initial", map[string]string{"os": "linux", "hostname": "initial-host"})
+	require.NoError(t, storage.Store(ctx, "dev-initial", dna,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-initial", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	require.Empty(t, svc.GetAllStewardsCluster(ctx),
+		"precondition: nothing is in the cluster inventory before the refresh starts")
+
+	svc.StartClusterRefresh(ctx, time.Hour)
+
+	require.Eventually(t, func() bool {
+		return len(svc.GetAllStewardsCluster(ctx)) == 1
+	}, 10*time.Second, 10*time.Millisecond,
+		"StartClusterRefresh must run one refresh immediately; with a 1h interval no tick can have fired")
+
+	cancel()
+	require.Eventually(t, func() bool { return clusterRefreshGoroutines() == 0 }, 10*time.Second, 10*time.Millisecond,
+		"the refresh goroutine must exit when its context is cancelled")
+}
+
+// TestStartClusterRefresh_TickerDrivesSubsequentRefreshes pins the ticker half of
+// the loop: a steward that lands in durable storage after the initial refresh has
+// already completed must become visible without any further call, which can only
+// happen if the ticker fires and drives another refreshClusterInventory.
+func TestStartClusterRefresh_TickerDrivesSubsequentRefreshes(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	first := makeTestDNA("dev-tick-1", map[string]string{"os": "linux", "hostname": "tick-host-1"})
+	require.NoError(t, storage.Store(ctx, "dev-tick-1", first,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-tick-1", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	svc.StartClusterRefresh(ctx, 25*time.Millisecond)
+
+	clusterHas := func(id string) bool {
+		for _, s := range svc.GetAllStewardsCluster(ctx) {
+			if s.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	require.Eventually(t, func() bool { return clusterHas("dev-tick-1") }, 10*time.Second, 10*time.Millisecond,
+		"the initial refresh must publish the steward that was already in storage")
+
+	// Written only after the initial refresh has demonstrably completed, so the
+	// initial call cannot be what surfaces it.
+	second := makeTestDNA("dev-tick-2", map[string]string{"os": "linux", "hostname": "tick-host-2"})
+	require.NoError(t, storage.Store(ctx, "dev-tick-2", second,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-tick-2", "tenant-a"))
+
+	require.Eventually(t, func() bool { return clusterHas("dev-tick-2") }, 10*time.Second, 10*time.Millisecond,
+		"a steward registered on a peer after startup must appear within one refresh interval, which requires the ticker to fire")
+
+	cancel()
+	require.Eventually(t, func() bool { return clusterRefreshGoroutines() == 0 }, 10*time.Second, 10*time.Millisecond,
+		"the refresh goroutine must exit when its context is cancelled")
+}
+
+// TestStartClusterRefresh_ContextCancellationStopsGoroutine is the leak guard:
+// on controller shutdown the refresh goroutine must be gone, not merely idle. It
+// asserts on the live goroutine stacks, so a ticker loop that ignores ctx.Done
+// fails here rather than accumulating one goroutine per controller lifetime.
+func TestStartClusterRefresh_ContextCancellationStopsGoroutine(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	dna := makeTestDNA("dev-cancel", map[string]string{"os": "linux", "hostname": "cancel-host"})
+	require.NoError(t, storage.Store(ctx, "dev-cancel", dna,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-cancel", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	require.Equal(t, 0, clusterRefreshGoroutines(),
+		"precondition: no refresh goroutine is running before StartClusterRefresh")
+
+	svc.StartClusterRefresh(ctx, 20*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		return clusterRefreshGoroutines() == 1 && len(svc.GetAllStewardsCluster(ctx)) == 1
+	}, 10*time.Second, 10*time.Millisecond,
+		"exactly one refresh goroutine must be running and refreshing after StartClusterRefresh")
+
+	cancel()
+
+	require.Eventually(t, func() bool { return clusterRefreshGoroutines() == 0 }, 10*time.Second, 10*time.Millisecond,
+		"cancelling the context must terminate the refresh goroutine; a surviving ticker loop leaks a goroutine per controller shutdown")
+}
+
+// ---------------------------------------------------------------------------
+// Cluster refresh tenant-authority tests (Issue #3494 security review)
+// ---------------------------------------------------------------------------
+
+// dropDeviceTenantTable removes the device_tenant table from the manager's real
+// SQLite file, which makes ListDeviceTenants fail while dna_history reads keep
+// working. That is the exact shape of a device_tenant read failure in
+// production (and the permanent state of the file fleet backend, whose
+// ListDeviceTenants returns an error unconditionally), produced here against the
+// real storage backend rather than by substituting one.
+func dropDeviceTenantTable(t *testing.T, dataDir string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "dna.db"))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	_, err = db.Exec("DROP TABLE device_tenant")
+	require.NoError(t, err)
+}
+
+// TestRefreshClusterInventory_TenantMapUnavailableUsesFleetRegistryTenant is the
+// cross-tenant disclosure guard. dna_history is never rewritten on a tenant move
+// — UpdateStewardTenant writes device_tenant plus the live registry, and the API
+// handler writes the fleet registry — so a steward that moved from tenant-a to
+// tenant-b still carries tenant-a on its DNA history records forever. When the
+// authoritative device_tenant mapping cannot be read, deriving the tenant from
+// dna_history would hand that steward's ID, DNA attributes, status and tags back
+// to a tenant-a-scoped caller while hiding it from its real tenant.
+func TestRefreshClusterInventory_TenantMapUnavailableUsesFleetRegistryTenant(t *testing.T) {
+	dataDir := t.TempDir()
+	mgr := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr.Close() })
+	ctx := context.Background()
+
+	// DNA history was written while the steward belonged to tenant-a.
+	dna := makeTestDNA("dev-moved", map[string]string{"os": "linux", "hostname": "moved-host"})
+	require.NoError(t, mgr.Store(ctx, "dev-moved", dna,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, mgr.SetDeviceTenant(ctx, "dev-moved", "tenant-a"))
+
+	// The move: device_tenant and the durable fleet registry are rewritten to
+	// tenant-b. The steward is offline, so nothing updates the live registry.
+	require.NoError(t, mgr.SetDeviceTenant(ctx, "dev-moved", "tenant-b"))
+	sm := pkgtesting.SetupTestStorage(t)
+	stewardStore := sm.GetStewardStore()
+	require.NotNil(t, stewardStore)
+	require.NoError(t, stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-moved",
+		TenantID:     "tenant-b",
+		Status:       business.StewardStatusActive,
+		RegisteredAt: time.Now().UTC().Truncate(time.Second),
+	}))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr)
+	svc.SetStewardStore(stewardStore)
+
+	// The authoritative mapping becomes unreadable.
+	dropDeviceTenantTable(t, dataDir)
+	_, listErr := mgr.ListDeviceTenants(ctx)
+	require.Error(t, listErr, "precondition: the device_tenant mapping must be unreadable for this test")
+
+	svc.refreshClusterInventory(ctx)
+
+	tenantACtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+	for _, s := range svc.GetAllStewardsCluster(tenantACtx) {
+		assert.NotEqual(t, "dev-moved", s.ID,
+			"a steward moved to tenant-b must never be disclosed to tenant-a from a stale dna_history tenant")
+	}
+
+	tenantBCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-b")
+	foundInB := false
+	for _, s := range svc.GetAllStewardsCluster(tenantBCtx) {
+		if s.ID == "dev-moved" {
+			foundInB = true
+		}
+	}
+	assert.True(t, foundInB,
+		"the fleet registry tenant is rewritten on a move, so it must still resolve the steward to tenant-b")
+}
+
+// TestRefreshClusterInventory_TenantMapUnavailableSkipsDNAOnlyDevice covers the
+// same failure with no fleet registry record to fall back on: with every
+// move-aware tenant source unreadable there is no authoritative tenant, so the
+// device must be left out of the cluster view entirely rather than published
+// under whichever tenant its DNA history happens to name.
+func TestRefreshClusterInventory_TenantMapUnavailableSkipsDNAOnlyDevice(t *testing.T) {
+	dataDir := t.TempDir()
+	mgr := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr.Close() })
+	ctx := context.Background()
+
+	dna := makeTestDNA("dev-dnaonly", map[string]string{"os": "linux", "hostname": "dnaonly-host"})
+	require.NoError(t, mgr.Store(ctx, "dev-dnaonly", dna,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, mgr.SetDeviceTenant(ctx, "dev-dnaonly", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr)
+
+	dropDeviceTenantTable(t, dataDir)
+	svc.refreshClusterInventory(ctx)
+
+	assert.Empty(t, svc.GetAllStewardsCluster(ctx),
+		"with the authoritative device_tenant mapping unreadable and no fleet registry record, "+
+			"the dna_history tenant must not be used to publish the device")
+}
+
+// TestRefreshClusterInventory_TenantMapLossRetainsPreviousEntry pins the other
+// half of that rule: refusing the dna_history tenant must not drop known fleet
+// members on a transient device_tenant outage. The entry established by the last
+// refresh that could read an authoritative source is retained instead.
+func TestRefreshClusterInventory_TenantMapLossRetainsPreviousEntry(t *testing.T) {
+	dataDir := t.TempDir()
+	mgr := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = mgr.Close() })
+	ctx := context.Background()
+
+	dna := makeTestDNA("dev-retained", map[string]string{"os": "linux", "hostname": "retained-host"})
+	require.NoError(t, mgr.Store(ctx, "dev-retained", dna,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, mgr.SetDeviceTenant(ctx, "dev-retained", "tenant-a"))
+
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr)
+
+	svc.refreshClusterInventory(ctx)
+	first := svc.GetAllStewardsCluster(ctx)
+	require.Len(t, first, 1, "precondition: the device resolves while device_tenant is readable")
+	require.Equal(t, "tenant-a", first[0].TenantID)
+
+	dropDeviceTenantTable(t, dataDir)
+	svc.refreshClusterInventory(ctx)
+
+	second := svc.GetAllStewardsCluster(ctx)
+	require.Len(t, second, 1,
+		"a device_tenant read failure must not drop a device whose tenant was already established")
+	assert.Equal(t, "dev-retained", second[0].ID)
+	assert.Equal(t, "tenant-a", second[0].TenantID,
+		"the retained entry keeps the tenant from the last authoritative resolution")
 }
