@@ -563,16 +563,13 @@ func TestNew_ClusterModeRequiresClusterCapableProviders(t *testing.T) {
 // promise. That mismatch shipped a response where Provider and Consequence named
 // two different things for the same capability.
 //
-// This runs the exact functions New() calls at composition time —
-// collectActiveStorageRequirements(cfg), storageProviderName(cfg), and
-// interfaces.CollectAbsentOptionalCapabilities — rather than hand-constructing an
-// AbsentCapability. It cannot drive this through a real CreateOSSStorageManager
-// StorageManager: today that manager's SQLite bundle always supplies PushStore, so
-// nothing is ever actually absent on that path. A NewStorageManagerFromStores
-// manager with a nil PushStore stands in for a provider that has not yet supplied
-// it (the motivating case named in Issue #3409, e.g. before #3402 lands for a
-// different backend), which is sufficient to exercise the Provider/Consequence
-// pairing this finding was about.
+// Push (interfaces.StoreNamePush) is declared RequirementRequired in
+// collectActiveStorageRequirements as of Issue #3492 — every deployment shape
+// guarantees it, so it can no longer stand in for an absent-optional capability.
+// This test instead hand-constructs an optional StoreRequirement, mirroring
+// pkg/storage/interfaces/requirements_test.go, to exercise storageProviderName(cfg)
+// feeding interfaces.CollectAbsentOptionalCapabilities exactly as New() wires it at
+// composition time — rather than hand-constructing an AbsentCapability directly.
 func TestAbsentCapabilities_ProviderMatchesStorageProviderName(t *testing.T) {
 	cfg := &config.Config{
 		Storage: &config.StorageConfig{
@@ -581,8 +578,14 @@ func TestAbsentCapabilities_ProviderMatchesStorageProviderName(t *testing.T) {
 		},
 	}
 
-	reqs := collectActiveStorageRequirements(cfg)
-	require.NotEmpty(t, reqs, "push subsystem must declare its optional PushStore requirement")
+	reqs := []interfaces.StoreRequirement{
+		{
+			Subsystem:   "example",
+			Store:       interfaces.StoreNameTrigger,
+			Severity:    interfaces.RequirementOptional,
+			Consequence: "Example capability is degraded (provider: flatfile)",
+		},
+	}
 
 	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.Equal(t, "composite", sm.GetProviderName(),
@@ -591,7 +594,7 @@ func TestAbsentCapabilities_ProviderMatchesStorageProviderName(t *testing.T) {
 	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs, storageProviderName(cfg))
 
 	require.Len(t, absent, 1)
-	assert.Equal(t, string(interfaces.StoreNamePush), absent[0].Capability)
+	assert.Equal(t, string(interfaces.StoreNameTrigger), absent[0].Capability)
 	assert.Equal(t, "flatfile", absent[0].Provider,
 		"Provider must be the operator-facing storageProviderName(cfg) label")
 	assert.Contains(t, absent[0].Consequence, "flatfile",

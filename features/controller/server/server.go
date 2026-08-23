@@ -3808,6 +3808,28 @@ func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequ
 	return reqs
 }
 
+// storageProviderName returns a short, human-readable name for the storage
+// provider in cfg. Used as the operator-facing provider label passed to
+// interfaces.CollectAbsentOptionalCapabilities — distinct from
+// StorageManager.GetProviderName(), which reports the internal composition name
+// ("composite") for the OSS composite shape rather than a backend an operator can
+// actually switch to.
+func storageProviderName(cfg *config.Config) string {
+	if cfg == nil || cfg.Storage == nil {
+		return "unknown"
+	}
+	if cfg.HA.IsClusterMode() {
+		return "database"
+	}
+	if cfg.Storage.FlatfileRoot != "" {
+		return "flatfile"
+	}
+	if cfg.Storage.Provider != "" {
+		return cfg.Storage.Provider
+	}
+	return "unknown"
+}
+
 // assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
 // or written. Called immediately after CreateClusterStorageManager in New(), still inside
 // the cfg.HA.IsClusterMode() block, so callers need not re-check the mode.
