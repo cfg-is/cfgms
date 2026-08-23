@@ -23,6 +23,12 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// TermSource provides the current Raft term for command fencing (#3390, ADR-029 Decision 5).
+// Accepted as an interface so the commands package does not import pkg/ha directly.
+type TermSource interface {
+	GetTerm() uint64
+}
+
 // Publisher publishes commands to stewards via the ControlPlaneProvider.
 type Publisher struct {
 	mu sync.RWMutex
@@ -33,6 +39,10 @@ type Publisher struct {
 	// signer signs commands before transmission (Story #919).
 	// When nil commands are sent without a signature (unsecured/transitional mode).
 	signer signature.Signer
+
+	// termSource stamps the current Raft term onto outbound commands (#3390).
+	// When nil the term field is zero (pre-fencing behaviour).
+	termSource TermSource
 
 	// Command tracking
 	pending map[string]*pendingCommand
@@ -62,6 +72,10 @@ type Config struct {
 	// When nil, commands are sent unsigned.
 	Signer signature.Signer
 
+	// TermSource stamps the current Raft term onto every outbound command (#3390).
+	// When nil the term field is zero (pre-fencing behaviour).
+	TermSource TermSource
+
 	// Logger for command logging
 	Logger logging.Logger
 }
@@ -78,9 +92,18 @@ func New(cfg *Config) (*Publisher, error) {
 	return &Publisher{
 		controlPlane: cfg.ControlPlane,
 		signer:       cfg.Signer,
+		termSource:   cfg.TermSource,
 		pending:      make(map[string]*pendingCommand),
 		logger:       cfg.Logger,
 	}, nil
+}
+
+// currentTerm returns the Raft term from the configured TermSource, or 0 when none is set.
+func (p *Publisher) currentTerm() uint64 {
+	if p.termSource == nil {
+		return 0
+	}
+	return p.termSource.GetTerm()
 }
 
 // signCommandWith wraps cmd in a SignedCommand, signing with the provided signer when non-nil.
@@ -122,6 +145,7 @@ func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID stri
 		StewardID: stewardID,
 		Timestamp: time.Now(),
 		Params:    params,
+		Term:      p.currentTerm(),
 	}
 
 	sc, err := p.signCommandWith(cmd, signer)
@@ -154,6 +178,7 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 		StewardID: stewardID,
 		Timestamp: time.Now(),
 		Params:    params,
+		Term:      p.currentTerm(),
 	}
 
 	sc, err := p.signCommand(cmd)

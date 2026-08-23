@@ -439,6 +439,7 @@ type Command struct {
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	Params        map[string]string      `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Priority      int32                  `protobuf:"varint,7,opt,name=priority,proto3" json:"priority,omitempty"`
+	Term          uint64                 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -518,6 +519,13 @@ func (x *Command) GetParams() map[string]string {
 func (x *Command) GetPriority() int32 {
 	if x != nil {
 		return x.Priority
+	}
+	return 0
+}
+
+func (x *Command) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
 	}
 	return 0
 }
@@ -827,7 +835,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x05event\x18\x02 \x01(\v2\x16.cfgms.transport.EventH\x00R\x05event\x12:\n" +
 	"\theartbeat\x18\x03 \x01(\v2\x1a.cfgms.transport.HeartbeatH\x00R\theartbeat\x127\n" +
 	"\bresponse\x18\x04 \x01(\v2\x19.cfgms.transport.ResponseH\x00R\bresponseB\t\n" +
-	"\apayload\"\xd6\x02\n" +
+	"\apayload\"\xea\x02\n" +
 	"\aCommand\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x1c.cfgms.transport.CommandTypeR\x04type\x12\x1d\n" +
@@ -836,7 +844,8 @@ const file_transport_control_proto_rawDesc = "" +
 	"\ttenant_id\x18\x04 \x01(\tR\btenantId\x128\n" +
 	"\ttimestamp\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12<\n" +
 	"\x06params\x18\x06 \x03(\v2$.cfgms.transport.Command.ParamsEntryR\x06params\x12\x1a\n" +
-	"\bpriority\x18\a \x01(\x05R\bpriority\x1a9\n" +
+	"\bpriority\x18\a \x01(\x05R\bpriority\x12\x12\n" +
+	"\x04term\x18\b \x01(\x04R\x04term\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x03\n" +

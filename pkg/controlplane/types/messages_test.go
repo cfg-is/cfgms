@@ -4,8 +4,10 @@ package types
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUpgradeConstants(t *testing.T) {
@@ -147,4 +149,38 @@ func TestEventFilter_Match(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestCommandSigningBytes_TermIsNotSigned pins the recorded #3390 trade-off: the
+// fencing term is transport-trusted, not signature-authenticated. Signing bytes must
+// be byte-identical regardless of Command.Term so that stewards predating #3436 —
+// which compute signing bytes without the field — keep verifying commands from a
+// term-stamping controller during a rolling upgrade.
+//
+// If a future story puts the term under the signature (behind a negotiated
+// signing-payload version), this test is the thing that must change with it, together
+// with the hazard note on commandSigningPayload.
+func TestCommandSigningBytes_TermIsNotSigned(t *testing.T) {
+	base := Command{
+		ID:        "cmd-1",
+		Type:      CommandSyncConfig,
+		StewardID: "steward-1",
+		TenantID:  "tenant-1",
+		Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+
+	zeroTerm := base
+	withTerm := base
+	withTerm.Term = 99
+
+	zeroBytes, err := CommandSigningBytes(&zeroTerm, nil)
+	require.NoError(t, err)
+
+	termBytes, err := CommandSigningBytes(&withTerm, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, string(zeroBytes), string(termBytes),
+		"Command.Term must not affect signing bytes — it is transport-trusted only (#3390)")
+	assert.NotContains(t, string(termBytes), "term",
+		"signing payload must not carry a term field")
 }
