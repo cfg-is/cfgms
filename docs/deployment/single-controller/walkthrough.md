@@ -84,10 +84,24 @@ sudo chown cfgms:cfgms /etc/cfgms
 sudo chown -R cfgms:cfgms /var/lib/cfgms /var/log/cfgms
 sudo chmod 0750 /etc/cfgms /var/lib/cfgms /var/log/cfgms
 
-# Generate the external secret-encryption key. Keep it separate from controller
-# data and backups; never put the key bytes in an environment variable.
-sudo -u cfgms sh -c 'umask 077; openssl rand -out /etc/cfgms/secrets.key 32'
+# Generate the external secret-encryption key and seal it to this host's TPM2 in
+# a single pipeline. The plaintext key exists only inside the pipe: it is never
+# written to a file, so there is no cleartext key on disk and nothing to shred.
+sudo sh -c 'umask 077; openssl rand 32 | systemd-creds encrypt \
+  --name=cfgms-secrets-key --with-key=tpm2 - /etc/cfgms/secrets.key.cred'
+sudo chmod 0400 /etc/cfgms/secrets.key.cred
 ```
+
+Check the host has a usable TPM2 first with `systemd-analyze has-tpm2`. If it does
+not, and you accept the consequence, substitute `--with-key=host`: the key is then
+sealed to `/var/lib/systemd/credential.secret` on this host's own disk, so a stolen
+disk image or VM snapshot yields the plaintext. Do **not** use `--with-key=auto` —
+it silently falls back to the host key when no TPM2 is present, leaving nothing on
+the resulting system to distinguish a TPM-bound host from a disk-bound one.
+
+`scripts/tier1-bootstrap.sh` performs all of this (including the TPM2 check and the
+`--allow-host-key` opt-in) if you would rather not do it by hand. See
+[ADR-030](../../architecture/decisions/030-controller-secret-material-at-rest.md).
 
 ### Copy and configure controller.cfg
 
@@ -128,9 +142,23 @@ sudo systemctl daemon-reload
 
 This is a one-time operation that creates the CA, server certificates, storage backend, and admin credential bundle:
 
+`--init` runs outside systemd, so it has no credential directory of its own.
+Unseal the key into a directory on tmpfs for the duration of the run and remove it
+afterwards — `/run` is tmpfs on a systemd host, whereas `/tmp` is a directory on
+the root filesystem on Debian and Ubuntu, and `shred` cannot reliably undo a write
+there:
+
 ```bash
-sudo -u cfgms env CFGMS_SECRETS_KEY_FILE=/etc/cfgms/secrets.key \
-  cfgms-controller --init --config /etc/cfgms/controller.cfg
+sudo sh -c '
+  set -e
+  test "$(findmnt -no FSTYPE --target /run)" = tmpfs
+  d=$(mktemp -d /run/cfgms-init-creds-XXXXXX)
+  trap "rm -rf $d" EXIT
+  systemd-creds decrypt --name=cfgms-secrets-key /etc/cfgms/secrets.key.cred "$d/key"
+  chown -R cfgms:cfgms "$d"
+  runuser --user cfgms -- env CFGMS_SECRETS_KEY_FILE="$d/key" \
+    cfgms-controller --init --config /etc/cfgms/controller.cfg
+'
 ```
 
 You should see:
@@ -148,12 +176,33 @@ Save the CA fingerprint — stewards verify it during registration. Detailed ini
 logs (CA creation, storage setup, RBAC, bundle issuance) are written to
 `/var/log/cfgms/cfgms.log`.
 
-Back up `/etc/cfgms/secrets.key` separately from `/var/lib/cfgms`, using
-encryption and access controls at least as strong as the admin credential
-bundle. Losing this key makes stored secrets unrecoverable; exposing it
-compromises every secret encrypted with it. The systemd unit copies it into the
-service credential directory at runtime and makes the source path inaccessible
-inside the service sandbox.
+Losing the secret-encryption key makes stored secrets unrecoverable; exposing it
+compromises every secret encrypted with it. The systemd unit unseals it into the
+service credential directory at runtime and makes the sealed source path
+inaccessible inside the service sandbox.
+
+**Backing it up needs care, because the sealed blob is host-bound.**
+`/etc/cfgms/secrets.key.cred` can only be decrypted by the TPM2 (or host key) of
+the machine that sealed it, so copying that file elsewhere protects you against
+losing the file — not against losing the machine. If the host is rebuilt, its TPM
+is reset, or its vTPM is removed, the blob is permanently unreadable and so is
+every secret encrypted under the key.
+
+For a recoverable backup, export the key while it is unsealed and store it under
+encryption and access controls at least as strong as the admin credential bundle
+— an offline password manager or an operator keychain, never an unencrypted file
+alongside `/var/lib/cfgms`:
+
+```bash
+sudo systemd-creds decrypt --name=cfgms-secrets-key /etc/cfgms/secrets.key.cred - | base64
+```
+
+To restore onto a rebuilt host, seal the saved value again on that host:
+
+```bash
+sudo sh -c 'printf %s "<base64 from backup>" | base64 -d | systemd-creds encrypt \
+  --name=cfgms-secrets-key --with-key=tpm2 - /etc/cfgms/secrets.key.cred'
+```
 
 ### Admin credential bundle
 

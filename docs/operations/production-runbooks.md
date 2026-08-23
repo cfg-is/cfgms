@@ -350,7 +350,10 @@ CFGMS does not currently expose online `cfg backup` or `cfg restore` commands.
 Use the supported systemd cold-backup and cold-restore procedures in
 [`tier1-controller-bringup.md`](tier1-controller-bringup.md#recovery).
 They capture `/var/lib/cfgms`, `/etc/cfgms/controller.cfg`, and the external
-`/etc/cfgms/secrets.key` at one stopped-service consistency point.
+secret-encryption key at one stopped-service consistency point. The key is a
+`systemd-creds`-sealed blob at `/etc/cfgms/secrets.key.cred` (ADR-030), so the
+procedure unseals it for escrow and re-seals it on the target host — copying the
+blob alone survives losing the file, not losing the machine.
 
 Backups must be encrypted and access-controlled off-host. Restore-test them on
 an isolated host at the same release, including audit-chain verification,

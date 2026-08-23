@@ -1216,3 +1216,145 @@ Per this story's Out of Scope, defects belong to sibling stories:
 - **Every controller restart still needs a manual `raft.db` wipe** to re-form
   quorum, because #3479's ConfState fix is not yet on `develop`. Both restarts in
   this story used the §6 recovery procedure. Once #3479 lands, drop the wipe.
+
+---
+
+## 8. Sealed-credential migration (story #3462)
+
+Removing `EnvironmentFile=` secret delivery from the cluster nodes, per
+[ADR-030](../architecture/decisions/030-controller-secret-material-at-rest.md).
+Exercised on the live 3-node cluster on 2026-08-22, not only on a fresh install.
+
+### What changed on each node
+
+Before, `cfgms-ha-node2` and `cfgms-ha-node3` carried
+`EnvironmentFile=/etc/cfgms/ha-secrets.env` — three secrets in cleartext on disk
+and in the service environment, where `/proc/<pid>/environ` exposes them to root
+and every child process inherits them. `cfgms-ctrl-01` was worse: it kept the
+same shape in `/etc/cfgms/storage-secrets.env` *and* read the root key straight
+from the cleartext `/etc/cfgms/secrets.key` with no credential wiring at all.
+
+After, all three carry four `LoadCredentialEncrypted=` lines and no
+`EnvironmentFile=`, and no cleartext secret file remains anywhere under
+`/etc/cfgms`.
+
+### Node binding: `key_mode: host`, not `tpm2`
+
+None of the three lab VMs presents a usable TPM2 — `systemd-analyze has-tpm2`
+reports `partial` (rc 19: no firmware, driver or `libtss2-*` libraries) and there
+is no `/dev/tpm*`. The bootstrap therefore **refuses** to provision them by
+default rather than silently sealing to the disk-resident host key, and the
+migration was run with the explicit `--allow-host-key` opt-in. Each node records
+`key_mode: host` in `/etc/cfgms/.bootstrap-record`.
+
+That is a real, recorded weakening for this lab: the unsealing key
+(`/var/lib/systemd/credential.secret`) sits on the same virtual disk as the
+blobs, so a stolen VHDX of a node yields that node's plaintext secrets. It does
+not yield *another* node's — the blobs are still per-machine — but the cluster's
+at-rest guarantee is its weakest node's, which is why the mode is written down
+per node instead of inferred. Enabling vTPM on these VMs and re-running the
+bootstrap (after deleting the `.cred` files) would move them to `key_mode: tpm2`.
+
+### Procedure
+
+The credential-sealing and unit rewrite are non-disruptive: the running service
+keeps its already-loaded environment, and the new unit takes effect at the next
+start. Only the final restart is an outage.
+
+```bash
+# 1. On each of cfgms-ha-node2 / cfgms-ha-node3, with the cluster still serving:
+#    source the node's own existing values, then re-run the updated bootstrap.
+sudo bash -c '
+  set -a; . /etc/cfgms/ha-secrets.env; set +a
+  export CFGMS_SECRETS_KEY_B64="$(base64 -w0 < /etc/cfgms/secrets.key)"
+  CFGMS_BOOTSTRAP_ALLOW_HOST_KEY=1 bash ha-cluster-node-bootstrap.sh \
+    --hostname=<fqdn> --node-id=<node-id> \
+    --cluster-nodes=<same list as the running unit> \
+    --postgres-host=... --s3-endpoint=... \
+    --vault-address=... --vault-key-path=root/cluster-ca --skip-smoke
+'
+
+# 2. cfgms-ctrl-01's unit was hand-written during the §3 cutover, not generated
+#    by either script. Change only its secret-delivery lines: seal the three
+#    values from storage-secrets.env plus the root key, replace
+#    EnvironmentFile= with the four LoadCredentialEncrypted= lines and their
+#    *_FILE Environment= lines, then remove the two cleartext files.
+
+# 3. Deploy a controller build that understands the *_FILE variables (below),
+#    then restart all three together.
+```
+
+**The controller binary must be updated in the same window.** Only
+`CFGMS_SECRETS_KEY_FILE` existed before; `CFGMS_STORAGE_DB_PASSWORD_FILE`,
+`CFGMS_SESSION_HMAC_KEY_FILE` and `OPENBAO_TOKEN_FILE` are #3462 additions. A
+pre-#3462 binary started against a migrated unit fails config validation with
+`missing required environment variables: [CFGMS_STORAGE_DB_PASSWORD ...]`.
+
+### Restart hazard (pre-existing, #3479)
+
+The coordinated stop/start hit the known ConfState-recovery defect documented in
+§6 above: all three nodes came back with `"leader":0` and an empty voter set.
+This is **not** related to credential delivery — it reproduces on any
+stop-all/start-all since #3284. Its documented recovery (stop all three, `find
+/var/lib/cfgms -name raft.db -delete`, start all three) restored quorum in
+seconds.
+
+### Evidence (2026-08-22)
+
+Quorum, identical to the pre-migration baseline (term 2, leader
+`11522188196814600707` = `cfgms-ctrl-01`):
+
+```
+cfgms-ctrl-01  {"node_id":11522188196814600707,"is_leader":true, "leader":11522188196814600707,"term":2,"nodes":3}
+cfgms-ha-node2 {"node_id":11522193694372741762,"is_leader":false,"leader":11522188196814600707,"term":2,"nodes":3}
+cfgms-ha-node3 {"node_id":11522191495349485340,"is_leader":false,"leader":11522188196814600707,"term":2,"nodes":3}
+```
+
+`GET /api/v1/health` reported `"status":"healthy"` on all three.
+
+No secret in the service environment on any node — `/proc/<MainPID>/environ`
+carries only paths:
+
+```
+CFGMS_SECRETS_KEY_FILE=/run/credentials/cfgms-controller.service/cfgms-secrets-key
+CFGMS_STORAGE_DB_PASSWORD_FILE=/run/credentials/cfgms-controller.service/cfgms-db-password
+CFGMS_SESSION_HMAC_KEY_FILE=/run/credentials/cfgms-controller.service/cfgms-session-hmac-key
+OPENBAO_TOKEN_FILE=/run/credentials/cfgms-controller.service/cfgms-openbao-token
+```
+
+Credentials present and correctly scoped (`0440` with a per-invocation ACL where
+the unit drops to `User=cfgms`; `0400` on `cfgms-ctrl-01`, which still runs as
+root):
+
+```
+-r--r-----+ 1 root root 32 cfgms-db-password
+-r--r-----+ 1 root root 26 cfgms-openbao-token
+-r--r-----+ 1 root root 32 cfgms-secrets-key
+-r--r-----+ 1 root root 64 cfgms-session-hmac-key
+```
+
+`/etc/cfgms` holds no `secrets.key`, `ha-secrets.env` or `storage-secrets.env` on
+any node.
+
+Fail-loudly, verified on `cfgms-ha-node3` with a transient unit rather than the
+cluster service: a sealed blob with one byte flipped makes systemd refuse to
+start the unit with `status=243/CREDENTIALS`, and nothing generates a
+replacement key.
+
+### Two defects this live run caught
+
+**Binary key truncated through a shell variable.** `provision_secrets_key`
+originally decoded `CFGMS_SECRETS_KEY_B64` into a shell variable. A real 32-byte
+random key contains NUL bytes, and bash command substitution discards them — the
+first live migration attempt reported the cluster's actual key as *31 bytes* and
+refused to proceed. Had the length check not been there, it would have compared
+unequal against the node's existing key and, without the mismatch guard, sealed a
+truncated root of trust. The key is now only ever a byte stream; `test7d` in
+`ha-cluster-node-bootstrap_test.sh` pins it with a NUL-containing fixture.
+
+**The pre-flight port check made the in-place upgrade impossible.** The script
+refused to run whenever port 9080 was in use, which on a live node is always —
+so the "idempotent, re-run safe" script could not actually be re-run without
+taking the node down first, forcing a cluster-wide outage before any preparation
+could happen. It now distinguishes its own running `cfgms-controller` from a
+foreign listener.

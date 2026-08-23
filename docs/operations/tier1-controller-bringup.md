@@ -277,12 +277,21 @@ Tier 1 has no online backup command. A complete recoverable copy consists of:
 
 - `/var/lib/cfgms/` — SQLite, flat-file data, CA, server certificate, and audit data
 - `/etc/cfgms/controller.cfg` — deployment configuration
-- `/etc/cfgms/secrets.key` — the external encryption key
+- the external encryption key
 
 The key must be backed up at the same consistency point but escrowed separately
 from the state archive under equivalent or stronger access control. Loss of it
 makes encrypted data unrecoverable; disclosure compromises every secret
 protected by it.
+
+**The key is a sealed blob, so it must be exported, not copied.** Since ADR-030
+the key lives at `/etc/cfgms/secrets.key.cred`, sealed by `systemd-creds` to this
+host's TPM2 (or, under the `--allow-host-key` opt-in, to this host's disk-resident
+host key). Archiving that file protects against losing the *file*, not against
+losing the *machine*: a rebuilt host, a reset TPM, or a removed vTPM makes the
+blob permanently unreadable. The backup below therefore unseals the key and
+escrows the plaintext, and the restore re-seals it on the target host. Check
+`/etc/cfgms/.bootstrap-record` to see which binding a given host used.
 
 ### Cold backup
 
@@ -304,7 +313,8 @@ tar --create --gzip --acls --xattrs --numeric-owner \
   --directory / \
   var/lib/cfgms \
   etc/cfgms/controller.cfg
-install -m 0600 /etc/cfgms/secrets.key "${key_file}.tmp"
+systemd-creds decrypt --name=cfgms-secrets-key /etc/cfgms/secrets.key.cred "${key_file}.tmp"
+chmod 0600 "${key_file}.tmp"
 mv "${state_file}.tmp" "${state_file}"
 mv "${key_file}.tmp" "${key_file}"
 sha256sum "${state_file}" "${key_file}" > "${backup_base}.sha256"
@@ -334,14 +344,17 @@ tar --list --gzip --file controller-YYYYMMDDTHHMMSSZ.state.tar.gz
 sudo tar --extract --gzip --acls --xattrs --numeric-owner \
   --file controller-YYYYMMDDTHHMMSSZ.state.tar.gz \
   --directory /
-sudo install -o cfgms -g cfgms -m 0600 \
+# Re-seal the escrowed key to THIS host. The blob from the old host cannot be
+# unsealed here — that is precisely what sealing it buys.
+sudo systemd-creds encrypt --name=cfgms-secrets-key --with-key=tpm2 \
   controller-YYYYMMDDTHHMMSSZ.secrets.key \
-  /etc/cfgms/secrets.key
+  /etc/cfgms/secrets.key.cred
 sudo chown -R cfgms:cfgms /var/lib/cfgms
 sudo chown cfgms:cfgms /etc/cfgms/controller.cfg
 sudo chmod 0750 /var/lib/cfgms /etc/cfgms
 sudo chmod 0640 /etc/cfgms/controller.cfg
-sudo chmod 0600 /etc/cfgms/secrets.key
+sudo chown root:root /etc/cfgms/secrets.key.cred
+sudo chmod 0400 /etc/cfgms/secrets.key.cred
 
 sudo systemctl start cfgms-controller
 source scripts/cfgms-bundle-load

@@ -121,15 +121,90 @@ MOCK
     chmod +x "${bin_dir}/cfg"
 }
 
+# ── systemd-creds stand-in ────────────────────────────────────────────────────
+
+# The real `systemd-creds` needs systemd and a TPM2 or host key, none of which
+# exists on a developer workstation or in a CI container, so the sealing path
+# would otherwise be untestable. This stand-in models the two properties the
+# bootstrap depends on: the plaintext is consumed from stdin (or a source file)
+# and never appears in the blob, and the credential name embedded at encrypt
+# time must match the name it is decrypted under.
+FAKE_CREDS=""
+make_fake_systemd_creds() {
+    local dir="$1"
+    mkdir -p "$dir"
+    FAKE_CREDS="${dir}/systemd-creds"
+
+    cat > "$FAKE_CREDS" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cmd="${1:-}"; shift || true
+NAME=""; WITH_KEY=""
+positional=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name=*)     NAME="${1#*=}"; shift ;;
+        --with-key=*) WITH_KEY="${1#*=}"; shift ;;
+        *)            positional+=("$1"); shift ;;
+    esac
+done
+
+src="${positional[0]:-}"
+dest="${positional[1]:-}"
+
+case "$cmd" in
+    encrypt)
+        if [[ "$src" == "-" ]]; then payload="$(cat | base64 | tr -d '\n')"
+        else payload="$(base64 < "$src" | tr -d '\n')"; fi
+        {
+            echo "FAKE-SEALED-CREDENTIAL"
+            echo "name=${NAME}"
+            echo "with-key=${WITH_KEY}"
+            echo "payload-b64=${payload}"
+        } > "$dest"
+        ;;
+    decrypt)
+        embedded="$(sed -n 's/^name=//p' "$src")"
+        if [[ -n "$NAME" && "$embedded" != "$NAME" ]]; then
+            echo "fake systemd-creds: credential name mismatch (blob=${embedded} requested=${NAME})" >&2
+            exit 1
+        fi
+        sed -n 's/^payload-b64=//p' "$src" | base64 -d > "$dest"
+        ;;
+    *)
+        echo "fake systemd-creds: unsupported command '${cmd}'" >&2
+        exit 64
+        ;;
+esac
+FAKE
+    chmod +x "$FAKE_CREDS"
+}
+
+sealed_payload() {
+    sed -n 's/^payload-b64=//p' "$1" | base64 -d
+}
+
+FAKE_CREDS_DIR="$(mktemp -d)"
+make_fake_systemd_creds "$FAKE_CREDS_DIR"
+trap 'rm -rf "$FAKE_CREDS_DIR"' EXIT
+
 # run_bootstrap executes tier1-bootstrap.sh with CFGMS_INSTALL_PREFIX=PREFIX.
 # Additional arguments are forwarded. Sets LAST_EXIT and LAST_OUTPUT.
+#
+# TPM2 detection is pinned to "present" so the happy path exercises the default
+# binding rather than depending on the test host's hardware; the tests that care
+# about a missing TPM2 override it.
 LAST_EXIT=0
 LAST_OUTPUT=""
 run_bootstrap() {
     local prefix="$1"
     shift
     LAST_EXIT=0
-    LAST_OUTPUT="$(CFGMS_INSTALL_PREFIX="$prefix" bash "$BOOTSTRAP_SH" "$@" 2>&1)" \
+    LAST_OUTPUT="$(CFGMS_INSTALL_PREFIX="$prefix" \
+        CFGMS_SYSTEMD_CREDS_BIN="$FAKE_CREDS" \
+        CFGMS_BOOTSTRAP_TPM2_PROBE="true" \
+        bash "$BOOTSTRAP_SH" "$@" 2>&1)" \
         || LAST_EXIT=$?
 }
 
@@ -197,13 +272,38 @@ else
         PASS_THIS=false
     fi
 
-    # External secret-encryption key created with no group/other access.
+    # The external secret-encryption key exists ONLY as a sealed credential
+    # (#3462): the plaintext is piped straight from `openssl rand` into
+    # `systemd-creds encrypt` and is never written to a file.
     SECRETS_KEY="${T2_PREFIX}/etc/cfgms/secrets.key"
-    if [[ ! -f "$SECRETS_KEY" ]]; then
-        fail "test2: external secret-encryption key not created"
+    SECRETS_KEY_CRED="${T2_PREFIX}/etc/cfgms/secrets.key.cred"
+    if [[ -f "$SECRETS_KEY" ]]; then
+        fail "test2: cleartext secrets.key written at $SECRETS_KEY"
         PASS_THIS=false
-    elif [[ "$(stat -c '%a' "$SECRETS_KEY")" != "600" ]]; then
-        fail "test2: external secret-encryption key mode is not 0600"
+    fi
+    if [[ ! -f "$SECRETS_KEY_CRED" ]]; then
+        fail "test2: sealed secret-encryption key not created"
+        PASS_THIS=false
+    else
+        if ! grep -Fxq 'with-key=tpm2' "$SECRETS_KEY_CRED"; then
+            fail "test2: root key was not sealed with --with-key=tpm2 by default"
+            PASS_THIS=false
+        fi
+        if [[ "$(sealed_payload "$SECRETS_KEY_CRED" | wc -c | tr -d '[:space:]')" != "32" ]]; then
+            fail "test2: sealed root key is not 32 bytes"
+            PASS_THIS=false
+        fi
+    fi
+
+    BOOTSTRAP_RECORD="${T2_PREFIX}/etc/cfgms/.bootstrap-record"
+    if [[ ! -f "$BOOTSTRAP_RECORD" ]] || ! grep -Fxq 'key_mode: tpm2' "$BOOTSTRAP_RECORD"; then
+        fail "test2: bootstrap record does not record key_mode: tpm2"
+        PASS_THIS=false
+    fi
+
+    # Nothing may be left on tmpfs after --init returns.
+    if [[ -e "${T2_PREFIX}/run/cfgms-init-creds" ]]; then
+        fail "test2: unsealed init credential directory was not removed"
         PASS_THIS=false
     fi
 
@@ -428,6 +528,103 @@ else
 fi
 rm -rf "$T8_PREFIX"
 rm -f "$T8_BIN"
+
+# ── Test 9: TPM2 absent — refuse, unless the operator opts in explicitly ──────
+#
+# Sealing must not silently fall back to the disk-resident host key: that voids
+# the "a stolen disk image yields nothing" property with no signal to the
+# operator, and a host provisioned that way is indistinguishable afterwards from
+# a TPM-bound one.
+
+T9_PREFIX="$(mktemp -d)"
+make_mock_controller "$T9_PREFIX"
+make_mock_cfg "$T9_PREFIX"
+LAST_EXIT=0
+LAST_OUTPUT="$(CFGMS_INSTALL_PREFIX="$T9_PREFIX" \
+    CFGMS_SYSTEMD_CREDS_BIN="$FAKE_CREDS" \
+    CFGMS_BOOTSTRAP_TPM2_PROBE="false" \
+    bash "$BOOTSTRAP_SH" --hostname=ctrl.test.lab --skip-smoke 2>&1)" || LAST_EXIT=$?
+
+if [[ $LAST_EXIT -ne 0 ]] && echo "$LAST_OUTPUT" | grep -q "allow-host-key"; then
+    if [[ -e "${T9_PREFIX}/etc/cfgms/secrets.key" || -e "${T9_PREFIX}/etc/cfgms/secrets.key.cred" ]]; then
+        fail "test9: exited on the missing TPM2 but left key material behind"
+    else
+        pass "test9: a host with no usable TPM2 refuses to provision and names --allow-host-key"
+    fi
+else
+    fail "test9: expected a non-zero exit naming --allow-host-key (exit=${LAST_EXIT} output='${LAST_OUTPUT}')"
+fi
+rm -rf "$T9_PREFIX"
+
+# ── Test 10: --allow-host-key provisions, warns, and records the binding ──────
+
+T10_PREFIX="$(mktemp -d)"
+make_mock_controller "$T10_PREFIX"
+make_mock_cfg "$T10_PREFIX"
+LAST_EXIT=0
+LAST_OUTPUT="$(CFGMS_INSTALL_PREFIX="$T10_PREFIX" \
+    CFGMS_SYSTEMD_CREDS_BIN="$FAKE_CREDS" \
+    CFGMS_BOOTSTRAP_TPM2_PROBE="false" \
+    bash "$BOOTSTRAP_SH" --hostname=ctrl.test.lab --allow-host-key --skip-smoke 2>&1)" || LAST_EXIT=$?
+
+T10_PASS=true
+if [[ $LAST_EXIT -ne 0 ]]; then
+    fail "test10: --allow-host-key run exited ${LAST_EXIT} (expected 0); output='${LAST_OUTPUT}'"
+    T10_PASS=false
+else
+    if ! echo "$LAST_OUTPUT" | grep -q "stolen disk image"; then
+        fail "test10: --allow-host-key did not warn about the consequence"
+        T10_PASS=false
+    fi
+    if ! grep -Fxq 'key_mode: host' "${T10_PREFIX}/etc/cfgms/.bootstrap-record" 2>/dev/null; then
+        fail "test10: bootstrap record does not record key_mode: host"
+        T10_PASS=false
+    fi
+    if ! grep -Fxq 'with-key=host' "${T10_PREFIX}/etc/cfgms/secrets.key.cred" 2>/dev/null; then
+        fail "test10: root key was not sealed with --with-key=host"
+        T10_PASS=false
+    fi
+    if grep -q 'with-key=auto' "${T10_PREFIX}/etc/cfgms/secrets.key.cred" 2>/dev/null; then
+        fail "test10: root key was sealed with --with-key=auto, which downgrades silently"
+        T10_PASS=false
+    fi
+fi
+[[ "$T10_PASS" == "true" ]] && pass "test10: --allow-host-key provisions with a loud warning and records key_mode: host"
+rm -rf "$T10_PREFIX"
+
+# ── Test 11: upgrade path — an existing cleartext key migrates in place ───────
+#
+# A controller provisioned before ADR-030 holds /etc/cfgms/secrets.key in
+# cleartext. Re-running must seal THAT key — generating a new one would leave a
+# controller that starts cleanly and cannot decrypt its own stored secrets.
+
+T11_PREFIX="$(mktemp -d)"
+make_mock_controller "$T11_PREFIX"
+make_mock_cfg "$T11_PREFIX"
+mkdir -p "${T11_PREFIX}/etc/cfgms"
+printf 'pre-existing-root-key-32-bytes!!' > "${T11_PREFIX}/etc/cfgms/secrets.key"
+
+run_bootstrap "$T11_PREFIX" --hostname=ctrl.test.lab --skip-smoke
+
+T11_PASS=true
+if [[ $LAST_EXIT -ne 0 ]]; then
+    fail "test11: migration run exited ${LAST_EXIT} (expected 0); output='${LAST_OUTPUT}'"
+    T11_PASS=false
+else
+    if [[ -e "${T11_PREFIX}/etc/cfgms/secrets.key" ]]; then
+        fail "test11: legacy cleartext secrets.key survived the migration"
+        T11_PASS=false
+    fi
+    if [[ ! -f "${T11_PREFIX}/etc/cfgms/secrets.key.cred" ]]; then
+        fail "test11: migration did not produce a sealed root key"
+        T11_PASS=false
+    elif [[ "$(sealed_payload "${T11_PREFIX}/etc/cfgms/secrets.key.cred")" != "pre-existing-root-key-32-bytes!!" ]]; then
+        fail "test11: migration sealed a NEW root key instead of the host's existing one"
+        T11_PASS=false
+    fi
+fi
+[[ "$T11_PASS" == "true" ]] && pass "test11: an existing cleartext root key migrates into a sealed credential unchanged"
+rm -rf "$T11_PREFIX"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
