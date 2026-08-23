@@ -4,16 +4,25 @@ package registration_test
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // --- in-memory PendingRegistrationStore for testing ---
@@ -203,3 +212,115 @@ func TestPendingExpiry_ExpireStaleError(t *testing.T) {
 type errPendingTest string
 
 func (e errPendingTest) Error() string { return string(e) }
+
+// --- PendingExpiryJob: store requirements (#3491) ---
+
+// buildPendingExpiryPostgresDSN constructs a Postgres DSN from the same env
+// vars used by the cluster storage tests.
+func buildPendingExpiryPostgresDSN() string {
+	pw := testutil.GetTestDBPassword()
+	port := 5432
+	if p := os.Getenv("CFGMS_TEST_DB_PORT"); p != "" {
+		if pi, err := strconv.Atoi(p); err == nil {
+			port = pi
+		}
+	}
+	dbName := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_NAME"); v != "" {
+		dbName = v
+	}
+	dbUser := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_USER"); v != "" {
+		dbUser = v
+	}
+	return fmt.Sprintf("host=localhost port=%d dbname=%s user=%s password=%s sslmode=disable",
+		port, dbName, dbUser, pw)
+}
+
+// skipPendingExpiryTestIfNoPostgres skips the test when Postgres is unreachable.
+func skipPendingExpiryTestIfNoPostgres(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Postgres test in short mode")
+	}
+	dsn := buildPendingExpiryPostgresDSN()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Skip("Postgres not available:", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Ping(); err != nil {
+		t.Skip("Postgres not reachable:", err)
+	}
+	return dsn
+}
+
+// TestPendingExpiryJobStoreRequirements_DeclarationShape verifies that
+// registration.StoreRequirements declares exactly one requirement:
+// PendingRegistrationStore as required for the "registration" subsystem.
+func TestPendingExpiryJobStoreRequirements_DeclarationShape(t *testing.T) {
+	reqs := registration.StoreRequirements
+	require.Len(t, reqs, 1, "PendingExpiryJob must declare exactly one required store")
+	assert.Equal(t, "registration", reqs[0].Subsystem,
+		"subsystem must be named 'registration' so startup errors are operator-readable")
+	assert.Equal(t, interfaces.StoreNamePendingRegistration, reqs[0].Store,
+		"declaration must reference PendingRegistrationStore")
+	assert.Equal(t, interfaces.RequirementRequired, reqs[0].Severity,
+		"expiry job cannot function without this store: severity must be Required")
+}
+
+// TestPendingExpiryJobStoreRequirements_OSSCompositionPassesValidation verifies that a
+// controller composed with the OSS (flatfile+SQLite) storage manager satisfies
+// registration.StoreRequirements — the OSS clean-start acceptance criterion.
+func TestPendingExpiryJobStoreRequirements_OSSCompositionPassesValidation(t *testing.T) {
+	sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "test.db"))
+	require.NoError(t, err)
+	defer func() { _ = sm.Close() }()
+
+	err = interfaces.ValidateStorageRequirements(sm, registration.StoreRequirements)
+	require.NoError(t, err,
+		"OSS composite storage manager must satisfy PendingExpiryJob store requirements")
+}
+
+// TestPendingExpiryJobStoreRequirements_ClusterCompositionPassesValidation verifies that a
+// controller composed with the database-provider storage manager satisfies
+// registration.StoreRequirements — the cluster clean-start acceptance criterion.
+// Skipped when Postgres is unreachable.
+func TestPendingExpiryJobStoreRequirements_ClusterCompositionPassesValidation(t *testing.T) {
+	pgDSN := skipPendingExpiryTestIfNoPostgres(t)
+
+	sm, err := interfaces.CreateClusterStorageManager(pgDSN, "test-hmac-key-32-bytes-padding--", nil)
+	require.NoError(t, err)
+	defer func() { _ = sm.Close() }()
+
+	err = interfaces.ValidateStorageRequirements(sm, registration.StoreRequirements)
+	require.NoError(t, err,
+		"cluster storage manager must satisfy PendingExpiryJob store requirements")
+}
+
+// TestPendingExpiryJobStoreRequirements_DecliningProviderFailsStartup verifies that
+// when the backing provider declines PendingRegistrationStore, ValidateStorageRequirements
+// returns an error that names the "registration" subsystem. This guards against the #3400
+// condition — a provider gap that previously surfaced as a 503 at request time rather than
+// a startup failure.
+//
+// The test reproduces the condition against a real database provider implementation
+// that overrides only CreatePendingRegistrationStore (via
+// pkgtesting.SetupDecliningPendingRegistrationClusterStorage), composed through the
+// real CreateClusterStorageManager path — not a hand-built store-less StorageManager.
+// Skipped when Postgres is unreachable.
+func TestPendingExpiryJobStoreRequirements_DecliningProviderFailsStartup(t *testing.T) {
+	pgDSN := skipPendingExpiryTestIfNoPostgres(t)
+
+	sm := pkgtesting.SetupDecliningPendingRegistrationClusterStorage(t, pgDSN)
+	require.False(t, sm.HasStore(interfaces.StoreNamePendingRegistration),
+		"a declining provider must leave PendingRegistrationStore absent from the composed manager")
+
+	err := interfaces.ValidateStorageRequirements(sm, registration.StoreRequirements)
+	require.Error(t, err,
+		"a real provider declining PendingRegistrationStore must block startup via ValidateStorageRequirements")
+	assert.Contains(t, err.Error(), "registration",
+		"startup error must name the registration subsystem so operators can diagnose the gap")
+	assert.Contains(t, err.Error(), string(interfaces.StoreNamePendingRegistration),
+		"startup error must name the missing store")
+}

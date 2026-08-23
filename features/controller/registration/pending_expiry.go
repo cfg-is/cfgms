@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -15,6 +16,23 @@ const (
 	defaultPendingTimeout       = 5 * 24 * time.Hour
 	defaultPendingCheckInterval = time.Hour
 )
+
+// StoreRequirements declares the stores that the pending-registration expiry
+// subsystem requires at composition time. It is collected by the controller's
+// collectActiveStorageRequirements (features/controller/server/server.go) whenever
+// the effective registration.workflow is "manual-review" — the only workflow that
+// produces the pending records this job sweeps — and passed with the other enabled
+// subsystems' requirements to interfaces.ValidateStorageRequirements immediately
+// after the StorageManager is composed. A provider gap therefore fails at startup
+// rather than surfacing as a nil dereference in expireStale's background goroutine
+// (guards against the #3400 condition).
+var StoreRequirements = []interfaces.StoreRequirement{
+	{
+		Subsystem: "registration",
+		Store:     interfaces.StoreNamePendingRegistration,
+		Severity:  interfaces.RequirementRequired,
+	},
+}
 
 // PendingExpiryConfig holds construction parameters for PendingExpiryJob.
 type PendingExpiryConfig struct {

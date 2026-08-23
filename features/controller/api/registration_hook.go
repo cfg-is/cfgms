@@ -13,6 +13,7 @@ import (
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -258,6 +259,21 @@ func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationI
 // defaultManualReviewTimeout is the default period after which a pending registration
 // is automatically rejected if no operator action is taken.
 const defaultManualReviewTimeout = 24 * time.Hour
+
+// ManualReviewApprovalHookStoreRequirements declares the stores that the manual-review
+// registration subsystem requires at composition time. It is collected by the
+// controller's collectActiveStorageRequirements (features/controller/server/server.go)
+// whenever the effective registration.workflow is "manual-review", and passed with the
+// other enabled subsystems' requirements to interfaces.ValidateStorageRequirements
+// immediately after the StorageManager is composed — so a provider gap fails at startup
+// rather than silently at request time (guards against the #3400 condition).
+var ManualReviewApprovalHookStoreRequirements = []interfaces.StoreRequirement{
+	{
+		Subsystem: "registration",
+		Store:     interfaces.StoreNamePendingRegistration,
+		Severity:  interfaces.RequirementRequired,
+	},
+}
 
 // ManualReviewApprovalHook stores incoming registration requests in the durable
 // PendingRegistrationStore and returns DecisionQuarantine so the steward is held
