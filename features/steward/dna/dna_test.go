@@ -31,7 +31,12 @@ func TestCollect(t *testing.T) {
 
 	// Test basic structure
 	assert.NotEmpty(t, dna.Id)
-	assert.Nil(t, dna.Attributes, "Collect must not populate the legacy Attributes field (Issue #3332)")
+	// Host facts travel only as fragments: the flat attributes field was removed
+	// from the DNA schema outright (Issue #3331), so there is nothing left for
+	// Collect to populate. Asserted against the descriptor rather than a Go
+	// field so a reintroduced field 2 fails here instead of silently returning.
+	assert.Nil(t, dna.ProtoReflect().Descriptor().Fields().ByName("attributes"),
+		"DNA must not carry a flat attributes field — host facts are fragments (Issue #3331)")
 	assert.NotNil(t, dna.LastUpdated)
 
 	// Test timestamp is recent

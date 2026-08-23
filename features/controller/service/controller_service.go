@@ -17,6 +17,7 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -1026,15 +1027,29 @@ func (s *ControllerService) RegisterSteward(stewardID, tenantID, transportAddr, 
 	return s.RegisterStewardWithAttributes(stewardID, tenantID, transportAddr, status, nil)
 }
 
-// RegisterStewardWithAttributes is like RegisterSteward but seeds initial DNA attributes
-// (e.g. hostname, os) so the controller is not identity-blind before the first DNA sync
-// (Issue #2640). Pass nil initialAttrs to get identical behaviour to RegisterSteward.
+// RegisterStewardWithAttributes is like RegisterSteward but seeds an initial host:os
+// fragment carrying hostname and os so the controller is not identity-blind before
+// the first DNA sync (Issue #2640). The fragment uses authority "registration" to
+// distinguish it from module- or osquery-sourced fragments; the first real DNA sync
+// replaces it wholesale. Pass nil initialAttrs to get identical behaviour to
+// RegisterSteward. DNA.Attributes (field 2) is retired; the identity hint is now
+// seeded via DNA.Fragments (Issue #3331).
 func (s *ControllerService) RegisterStewardWithAttributes(stewardID, tenantID, transportAddr, status string, initialAttrs map[string]string) error {
 	dna := &common.DNA{Id: stewardID}
 	if len(initialAttrs) > 0 {
-		dna.Attributes = make(map[string]string, len(initialAttrs))
+		state := make(sdna.MapState, len(initialAttrs))
 		for k, v := range initialAttrs {
-			dna.Attributes[k] = v
+			state[k] = v
+		}
+		frag, err := sdna.NewFragment("host:os", "registration", state)
+		if err != nil {
+			// Harmless if the identity hint is briefly absent — the first DNA sync
+			// will supply the real host:os fragment.
+			s.logger.Warn("RegisterStewardWithAttributes: could not build pre-sync host:os fragment",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			dna.Fragments = append(dna.Fragments, frag)
 		}
 	}
 

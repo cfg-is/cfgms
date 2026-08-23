@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -36,11 +35,8 @@ func registerTestConnection(t *testing.T, reg *registry.InMemoryRegistry, stewar
 func registerStewardUnderTenant(t *testing.T, server *Server, tenantID, hostname string) string {
 	t.Helper()
 	req := &controller.RegisterRequest{
-		Version: "v1.0",
-		InitialDna: &common.DNA{
-			Id:         "dna-" + hostname,
-			Attributes: map[string]string{"hostname": hostname, "os": "linux"},
-		},
+		Version:    "v1.0",
+		InitialDna: testRegistrationDNA(t, map[string]string{"hostname": hostname, "os": "linux"}),
 	}
 	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 	resp, err := server.controllerService.AcceptRegistration(ctx, req)

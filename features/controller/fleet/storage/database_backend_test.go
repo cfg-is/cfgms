@@ -106,20 +106,19 @@ func TestDatabaseBackend_TwoManagersShareState(t *testing.T) {
 
 	t.Run("NodeA_StoresDNA_NodeB_Retrieves", func(t *testing.T) {
 		deviceID := "shared-device-001"
-		dna := &commonpb.DNA{
-			Id: deviceID,
-			Attributes: map[string]string{
-				"os":           "linux",
-				"architecture": "amd64",
-				"hostname":     "node-a-host",
-				"version":      "1.2.3",
-			},
+		dna := attachTestFragment(t, &commonpb.DNA{
+			Id:              deviceID,
 			LastUpdated:     timestamppb.New(time.Now()),
 			ConfigHash:      "hash-abc",
 			LastSyncTime:    timestamppb.New(time.Now()),
 			AttributeCount:  4,
 			SyncFingerprint: "fp-001",
-		}
+		}, map[string]string{
+			"os":           "linux",
+			"architecture": "amd64",
+			"hostname":     "node-a-host",
+			"version":      "1.2.3",
+		})
 
 		// Node A stores the DNA record.
 		require.NoError(t, mgr1.Store(ctx, deviceID, dna, nil))
@@ -131,21 +130,21 @@ func TestDatabaseBackend_TwoManagersShareState(t *testing.T) {
 
 		assert.Equal(t, deviceID, record.DeviceID)
 		require.NotNil(t, record.DNA)
-		assert.Equal(t, "linux", record.DNA.Attributes["os"])
-		assert.Equal(t, "amd64", record.DNA.Attributes["architecture"])
-		assert.Equal(t, "node-a-host", record.DNA.Attributes["hostname"])
+		recordAttrs := dnaAttrs(record.DNA)
+		assert.Equal(t, "linux", recordAttrs["os"])
+		assert.Equal(t, "amd64", recordAttrs["architecture"])
+		assert.Equal(t, "node-a-host", recordAttrs["hostname"])
 	})
 
 	t.Run("ListAllDeviceIDs_CrossNode", func(t *testing.T) {
 		devices := []string{"fleet-device-101", "fleet-device-102", "fleet-device-103"}
 		for _, id := range devices {
-			dna := &commonpb.DNA{
+			dna := attachTestFragment(t, &commonpb.DNA{
 				Id:              id,
-				Attributes:      map[string]string{"os": "linux", "hostname": id},
 				LastUpdated:     timestamppb.New(time.Now()),
 				AttributeCount:  2,
 				SyncFingerprint: "fp-" + id,
-			}
+			}, map[string]string{"os": "linux", "hostname": id})
 			require.NoError(t, mgr1.Store(ctx, id, dna, nil), "node A failed to store %s", id)
 		}
 
@@ -169,17 +168,16 @@ func TestDatabaseBackend_TwoManagersShareState(t *testing.T) {
 
 	t.Run("StoreWithTenantAndStatus", func(t *testing.T) {
 		deviceID := "tenant-device-001"
-		dna := &commonpb.DNA{
-			Id: deviceID,
-			Attributes: map[string]string{
-				"os":           "windows",
-				"architecture": "amd64",
-				"hostname":     "win-host-01",
-			},
+		dna := attachTestFragment(t, &commonpb.DNA{
+			Id:              deviceID,
 			LastUpdated:     timestamppb.New(time.Now()),
 			AttributeCount:  3,
 			SyncFingerprint: "fp-tenant-001",
-		}
+		}, map[string]string{
+			"os":           "windows",
+			"architecture": "amd64",
+			"hostname":     "win-host-01",
+		})
 		opts := &StoreOptions{TenantID: "tenant-alpha", Status: "online"}
 		require.NoError(t, mgr1.Store(ctx, deviceID, dna, opts))
 
@@ -211,17 +209,16 @@ func TestDatabaseBackend_StoreAndRetrieve(t *testing.T) {
 
 	ctx := context.Background()
 	deviceID := "db-test-device"
-	dna := &commonpb.DNA{
-		Id: deviceID,
-		Attributes: map[string]string{
-			"os":           "darwin",
-			"architecture": "arm64",
-			"hostname":     "mac-host",
-		},
+	dna := attachTestFragment(t, &commonpb.DNA{
+		Id:              deviceID,
 		LastUpdated:     timestamppb.New(time.Now()),
 		AttributeCount:  3,
 		SyncFingerprint: "fp-db",
-	}
+	}, map[string]string{
+		"os":           "darwin",
+		"architecture": "arm64",
+		"hostname":     "mac-host",
+	})
 
 	require.NoError(t, mgr.Store(ctx, deviceID, dna, nil))
 
@@ -230,8 +227,9 @@ func TestDatabaseBackend_StoreAndRetrieve(t *testing.T) {
 	require.NotNil(t, record)
 	assert.Equal(t, deviceID, record.DeviceID)
 	require.NotNil(t, record.DNA)
-	assert.Equal(t, "darwin", record.DNA.Attributes["os"])
-	assert.Equal(t, "arm64", record.DNA.Attributes["architecture"])
+	recordAttrs := dnaAttrs(record.DNA)
+	assert.Equal(t, "darwin", recordAttrs["os"])
+	assert.Equal(t, "arm64", recordAttrs["architecture"])
 }
 
 // TestDatabaseBackend_QueryFleet verifies that QueryFleet against the Postgres
@@ -265,7 +263,7 @@ func TestDatabaseBackend_QueryFleet(t *testing.T) {
 		{"dev-windows-1", map[string]string{"os": "windows", "architecture": "amd64", "hostname": "h3"}, "t2", "online"},
 	}
 	for _, s := range seed {
-		dna := &commonpb.DNA{Id: s.id, Attributes: s.attrs, SyncFingerprint: "fp-" + s.id}
+		dna := attachTestFragment(t, &commonpb.DNA{Id: s.id, SyncFingerprint: "fp-" + s.id}, s.attrs)
 		require.NoError(t, mgr.Store(ctx, s.id, dna, &StoreOptions{TenantID: s.tenant, Status: s.status}))
 	}
 

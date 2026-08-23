@@ -226,10 +226,10 @@ func TestHandleDNAEvent_WireFormatRoundTripBuildsFragments(t *testing.T) {
 	assert.Equal(t, frag.GetFragmentHash(), info.DNA.Fragments[0].GetFragmentHash(),
 		"fragment hash must survive the full protojson round-trip")
 
-	// AC #2/#3: handleDNAEvent builds Fragments, not Attributes. The flat map must
-	// stay empty on this path — consumers project it from Fragments themselves.
-	assert.Empty(t, info.DNA.GetAttributes(),
-		"handleDNAEvent must not populate DNA.Attributes (Issue #3330)")
+	// AC #2/#3: handleDNAEvent builds Fragments only. The flat attribute map it
+	// could once have populated no longer exists on DNA (field 2 removed in
+	// Issue #3331), so consumers project the flat view from Fragments — asserted
+	// directly below.
 	assert.Equal(t, int32(2), info.DNA.GetAttributeCount(),
 		"AttributeCount must still be derived from the fragment projection (os + hostname)")
 

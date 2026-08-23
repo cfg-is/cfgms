@@ -58,22 +58,21 @@ func TestDNAStorageIntegration(t *testing.T) {
 		deviceID := "integration-test-device"
 
 		// Create test DNA
-		dna := &commonpb.DNA{
-			Id: deviceID,
-			Attributes: map[string]string{
-				"os":           "linux",
-				"arch":         "amd64",
-				"hostname":     "test-host",
-				"cpu_count":    "8",
-				"memory_total": "16GB",
-				"disk_total":   "500GB",
-			},
+		dna := attachTestFragment(t, &commonpb.DNA{
+			Id:              deviceID,
 			LastUpdated:     timestamppb.New(time.Now()),
 			ConfigHash:      "test-config-hash",
 			LastSyncTime:    timestamppb.New(time.Now()),
 			AttributeCount:  6,
 			SyncFingerprint: "test-sync-fingerprint",
-		}
+		}, map[string]string{
+			"os":           "linux",
+			"arch":         "amd64",
+			"hostname":     "test-host",
+			"cpu_count":    "8",
+			"memory_total": "16GB",
+			"disk_total":   "500GB",
+		})
 
 		// Store DNA
 		err := manager.Store(ctx, deviceID, dna, nil)
@@ -97,15 +96,17 @@ func TestDNAStorageIntegration(t *testing.T) {
 		}
 
 		// Verify all attributes
-		for key, expectedValue := range dna.Attributes {
-			if actualValue, exists := current.DNA.Attributes[key]; !exists {
+		storedAttrs := dnaAttrs(dna)
+		currentAttrs := dnaAttrs(current.DNA)
+		for key, expectedValue := range storedAttrs {
+			if actualValue, exists := currentAttrs[key]; !exists {
 				t.Errorf("Missing attribute %s", key)
 			} else if actualValue != expectedValue {
 				t.Errorf("Attribute %s: expected %s, got %s", key, expectedValue, actualValue)
 			}
 		}
 
-		t.Logf("✅ Successfully stored and retrieved DNA with %d attributes", len(dna.Attributes))
+		t.Logf("✅ Successfully stored and retrieved DNA with %d attributes", len(storedAttrs))
 	})
 
 	t.Run("CompressionEfficiency", func(t *testing.T) {
@@ -123,15 +124,14 @@ func TestDNAStorageIntegration(t *testing.T) {
 			attributes[key] = value
 		}
 
-		dna := &commonpb.DNA{
+		dna := attachTestFragment(t, &commonpb.DNA{
 			Id:              deviceID,
-			Attributes:      attributes,
 			LastUpdated:     timestamppb.New(time.Now()),
 			ConfigHash:      "compression-config-hash",
 			LastSyncTime:    timestamppb.New(time.Now()),
 			AttributeCount:  int32(len(attributes)),
 			SyncFingerprint: "compression-sync-fingerprint",
-		}
+		}, attributes)
 
 		// Store DNA
 		err := manager.Store(ctx, deviceID, dna, nil)
@@ -158,9 +158,9 @@ func TestDNAStorageIntegration(t *testing.T) {
 			t.Fatalf("Failed to retrieve compressed DNA: %v", err)
 		}
 
-		if len(retrieved.DNA.Attributes) != len(attributes) {
+		if retrievedAttrs := dnaAttrs(retrieved.DNA); len(retrievedAttrs) != len(attributes) {
 			t.Errorf("Attribute count mismatch after compression: expected %d, got %d",
-				len(attributes), len(retrieved.DNA.Attributes))
+				len(attributes), len(retrievedAttrs))
 		}
 	})
 
@@ -177,15 +177,14 @@ func TestDNAStorageIntegration(t *testing.T) {
 				"uptime":  fmt.Sprintf("%d hours", i*24),
 			}
 
-			dna := &commonpb.DNA{
+			dna := attachTestFragment(t, &commonpb.DNA{
 				Id:              deviceID,
-				Attributes:      attributes,
 				LastUpdated:     timestamppb.New(time.Now().Add(time.Duration(i) * time.Minute)),
 				ConfigHash:      fmt.Sprintf("config-hash-v%d", i+1),
 				LastSyncTime:    timestamppb.New(time.Now().Add(time.Duration(i) * time.Minute)),
 				AttributeCount:  int32(len(attributes)),
 				SyncFingerprint: fmt.Sprintf("sync-fp-v%d", i+1),
-			}
+			}, attributes)
 
 			err := manager.Store(ctx, deviceID, dna, nil)
 			if err != nil {
@@ -222,7 +221,7 @@ func TestDNAStorageIntegration(t *testing.T) {
 		// Verify records are properly ordered and contain correct data
 		for i, record := range history.Records {
 			expectedVersion := fmt.Sprintf("1.%d.0", versions-1-i) // Newest first
-			if actualVersion := record.DNA.Attributes["version"]; actualVersion != expectedVersion {
+			if actualVersion := dnaAttrs(record.DNA)["version"]; actualVersion != expectedVersion {
 				t.Errorf("Record %d: expected version %s, got %s", i, expectedVersion, actualVersion)
 			}
 		}
@@ -314,15 +313,14 @@ func testCompressionPerformance(t *testing.T, algorithm string, level int) {
 		attributes[key] = value
 	}
 
-	dna := &commonpb.DNA{
+	dna := attachTestFragment(t, &commonpb.DNA{
 		Id:              "benchmark-device",
-		Attributes:      attributes,
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "benchmark-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(attributes)),
 		SyncFingerprint: "benchmark-sync-fingerprint",
-	}
+	}, attributes)
 
 	// Perform compression benchmark
 	iterations := 100

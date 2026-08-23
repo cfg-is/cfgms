@@ -19,33 +19,19 @@ func TestDNA_Validation(t *testing.T) {
 		{
 			name: "valid DNA",
 			dna: &DNA{
-				Id: "test-id",
-				Attributes: map[string]string{
-					"os":      "linux",
-					"version": "1.0.0",
-				},
+				Id:          "test-id",
 				LastUpdated: timestamppb.New(time.Now()),
 			},
 			wantErr: false,
 		},
 		{
-			name: "missing ID",
-			dna: &DNA{
-				Attributes: map[string]string{
-					"os": "linux",
-				},
-				LastUpdated: timestamppb.New(time.Now()),
-			},
+			name:    "missing ID",
+			dna:     &DNA{LastUpdated: timestamppb.New(time.Now())},
 			wantErr: true,
 		},
 		{
-			name: "missing timestamp",
-			dna: &DNA{
-				Id: "test-id",
-				Attributes: map[string]string{
-					"os": "linux",
-				},
-			},
+			name:    "missing timestamp",
+			dna:     &DNA{Id: "test-id"},
 			wantErr: true,
 		},
 	}

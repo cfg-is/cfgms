@@ -338,7 +338,7 @@ func TestStore_RetentionPolicyGoroutine(t *testing.T) {
 
 	// Store 4 records — double the cap.
 	for i := 1; i <= 4; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"version": fmt.Sprintf("v%d", i),
 		})
 		if err := manager.Store(ctx, deviceID, dna, nil); err != nil {
@@ -364,9 +364,8 @@ func TestStore_RetentionPolicyGoroutine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrent after enforceRetentionPolicy failed: %v", err)
 	}
-	if current.DNA.Attributes["version"] != "v4" {
-		t.Errorf("expected most recent version v4 to survive pruning, got %q",
-			current.DNA.Attributes["version"])
+	if got := dnaAttrs(current.DNA)["version"]; got != "v4" {
+		t.Errorf("expected most recent version v4 to survive pruning, got %q", got)
 	}
 }
 
@@ -375,7 +374,7 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 	deviceID := "test-device-001"
 
 	// Create test DNA
-	dna := createTestDNA(deviceID, map[string]string{
+	dna := createTestDNA(t, deviceID, map[string]string{
 		"os":           "linux",
 		"arch":         "amd64",
 		"hostname":     "test-host",
@@ -404,13 +403,16 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 		t.Errorf("Expected DNA ID %s, got %s", dna.Id, current.DNA.Id)
 	}
 
-	if len(current.DNA.Attributes) != len(dna.Attributes) {
-		t.Errorf("Expected %d attributes, got %d", len(dna.Attributes), len(current.DNA.Attributes))
+	storedAttrs := dnaAttrs(dna)
+	currentAttrs := dnaAttrs(current.DNA)
+
+	if len(currentAttrs) != len(storedAttrs) {
+		t.Errorf("Expected %d attributes, got %d", len(storedAttrs), len(currentAttrs))
 	}
 
 	// Verify specific attributes
-	for key, expectedValue := range dna.Attributes {
-		if actualValue, exists := current.DNA.Attributes[key]; !exists {
+	for key, expectedValue := range storedAttrs {
+		if actualValue, exists := currentAttrs[key]; !exists {
 			t.Errorf("Missing attribute %s", key)
 		} else if actualValue != expectedValue {
 			t.Errorf("Expected attribute %s=%s, got %s", key, expectedValue, actualValue)
@@ -444,24 +446,22 @@ func testDeduplication(t *testing.T, _ *Manager) {
 		"hostname":  "shared-config",
 		"cpu_count": "8",
 	}
-	dna1 := &commonpb.DNA{
+	dna1 := attachTestFragment(t, &commonpb.DNA{
 		Id:              "shared-system-id",
-		Attributes:      sharedDNAAttributes,
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "shared-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(sharedDNAAttributes)),
 		SyncFingerprint: "shared-sync-fingerprint",
-	}
-	dna2 := &commonpb.DNA{
+	}, sharedDNAAttributes)
+	dna2 := attachTestFragment(t, &commonpb.DNA{
 		Id:              "shared-system-id",
-		Attributes:      sharedDNAAttributes,
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "shared-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(sharedDNAAttributes)),
 		SyncFingerprint: "shared-sync-fingerprint",
-	}
+	}, sharedDNAAttributes)
 
 	// Store device1 — full record lands in dna_history (no prior content exists).
 	if err := manager.Store(ctx, device1ID, dna1, nil); err != nil {
@@ -530,7 +530,7 @@ func testHistoricalQueries(t *testing.T, manager *Manager) {
 			"version":      fmt.Sprintf("v%d", i+1),
 		}
 
-		dna := createTestDNA(deviceID, attributes)
+		dna := createTestDNA(t, deviceID, attributes)
 		// Simulate time progression
 		dna.LastUpdated = timestamppb.New(baseTime.Add(time.Duration(i) * time.Hour))
 
@@ -608,7 +608,7 @@ func testCompression(t *testing.T, manager *Manager) {
 		largeAttributes[key] = value
 	}
 
-	dna := createTestDNA(deviceID, largeAttributes)
+	dna := createTestDNA(t, deviceID, largeAttributes)
 
 	// Store DNA
 	err := manager.Store(ctx, deviceID, dna, nil)
@@ -642,8 +642,9 @@ func testCompression(t *testing.T, manager *Manager) {
 	}
 
 	// Verify all large attributes are intact
+	currentAttrs := dnaAttrs(current.DNA)
 	for key, expectedValue := range largeAttributes {
-		if actualValue, exists := current.DNA.Attributes[key]; !exists {
+		if actualValue, exists := currentAttrs[key]; !exists {
 			t.Errorf("Missing large attribute %s after compression/decompression", key)
 		} else if actualValue != expectedValue {
 			t.Errorf("Large attribute %s corrupted during compression/decompression", key)
@@ -665,7 +666,7 @@ func testStorageStats(t *testing.T, manager *Manager) {
 			"device_id": deviceID,
 		}
 
-		dna := createTestDNA(deviceID, attributes)
+		dna := createTestDNA(t, deviceID, attributes)
 		err := manager.Store(ctx, deviceID, dna, nil)
 		if err != nil {
 			t.Fatalf("Failed to store DNA for device %s: %v", deviceID, err)
@@ -740,7 +741,7 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 		attributes[key] = value
 	}
 
-	dna := createTestDNA("test-device", attributes)
+	dna := createTestDNA(t, "test-device", attributes)
 
 	// Test compression
 	compressed, originalSize, err := compressor.Compress(dna)
@@ -770,13 +771,16 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 		t.Errorf("Decompressed DNA ID mismatch: expected %s, got %s", dna.Id, decompressed.Id)
 	}
 
-	if len(decompressed.Attributes) != len(dna.Attributes) {
+	originalAttrs := dnaAttrs(dna)
+	decompressedAttrs := dnaAttrs(decompressed)
+
+	if len(decompressedAttrs) != len(originalAttrs) {
 		t.Errorf("Decompressed attributes count mismatch: expected %d, got %d",
-			len(dna.Attributes), len(decompressed.Attributes))
+			len(originalAttrs), len(decompressedAttrs))
 	}
 
-	for key, expectedValue := range dna.Attributes {
-		if actualValue, exists := decompressed.Attributes[key]; !exists {
+	for key, expectedValue := range originalAttrs {
+		if actualValue, exists := decompressedAttrs[key]; !exists {
 			t.Errorf("Missing attribute %s after %s decompression", key, algorithm)
 		} else if actualValue != expectedValue {
 			t.Errorf("Attribute %s corrupted during %s compression/decompression", key, algorithm)
@@ -828,7 +832,7 @@ func testStorageBackend(t *testing.T, backendType BackendType, config *Config, l
 	ctx := context.Background()
 
 	// Create test record
-	dna := createTestDNA("backend-test-device", map[string]string{
+	dna := createTestDNA(t, "backend-test-device", map[string]string{
 		"os":   "linux",
 		"arch": "amd64",
 		"test": "backend_" + string(backendType),
@@ -944,7 +948,7 @@ func testIndexAndQuery(t *testing.T, indexer Indexer, ctx context.Context) {
 
 	// Create and index multiple records
 	for i := 0; i < 5; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":      "linux",
 			"version": fmt.Sprintf("v%d", i+1),
 			"seq":     fmt.Sprintf("%d", i),
@@ -1046,7 +1050,7 @@ func testDeviceStats(t *testing.T, indexer Indexer, ctx context.Context) {
 	totalSize := int64(0)
 
 	for i := 0; i < 3; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":    "linux",
 			"index": fmt.Sprintf("%d", i),
 		})
@@ -1105,16 +1109,68 @@ func testDeviceStats(t *testing.T, indexer Indexer, ctx context.Context) {
 
 // Helper functions
 
-func createTestDNA(deviceID string, attributes map[string]string) *commonpb.DNA {
-	return &commonpb.DNA{
+// testFragmentID and testFragmentAuthority identify the single fragment that
+// test fixtures use to carry their attribute set.
+const (
+	testFragmentID        = "host:test"
+	testFragmentAuthority = "test"
+)
+
+// newTestFragment builds an ADR-017 fragment whose canonical state is attrs.
+// DNA carries attributes as fragments since the flat DNA.Attributes map was
+// removed (Issue #3331), so every fixture that used to set Attributes sets a
+// fragment instead.
+func newTestFragment(tb testing.TB, attrs map[string]string) *commonpb.Fragment {
+	tb.Helper()
+
+	state := make(sdna.MapState, len(attrs))
+	for k, v := range attrs {
+		state[k] = v
+	}
+
+	frag, err := sdna.NewFragment(testFragmentID, testFragmentAuthority, state)
+	if err != nil {
+		tb.Fatalf("sdna.NewFragment(%q) failed: %v", testFragmentID, err)
+	}
+	return frag
+}
+
+// attachTestFragment appends attrs to dna as a single fragment and returns dna.
+// An empty attribute set attaches no fragment, matching the previous behaviour
+// of an empty Attributes map: the flattened projection is empty either way.
+func attachTestFragment(tb testing.TB, dna *commonpb.DNA, attrs map[string]string) *commonpb.DNA {
+	tb.Helper()
+
+	if len(attrs) == 0 {
+		return dna
+	}
+	dna.Fragments = append(dna.Fragments, newTestFragment(tb, attrs))
+	return dna
+}
+
+// dnaAttrs returns the flat attribute projection of a DNA's fragments — the
+// read path that replaced DNA.Attributes (Issue #3331).
+//
+// This delegates to the same sdna.FlattenFragments that
+// service.FlattenDNAFragments wraps. The service wrapper cannot be called from
+// here: features/controller/service imports this package, so importing it back
+// into these in-package tests would be an import cycle.
+func dnaAttrs(dna *commonpb.DNA) map[string]string {
+	return sdna.FlattenFragments(dna.GetFragments())
+}
+
+func createTestDNA(tb testing.TB, deviceID string, attributes map[string]string) *commonpb.DNA {
+	tb.Helper()
+
+	dna := &commonpb.DNA{
 		Id:              deviceID,
-		Attributes:      attributes,
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "test-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(attributes)),
 		SyncFingerprint: "test-sync-fingerprint",
 	}
+	return attachTestFragment(tb, dna, attributes)
 }
 
 // Benchmark tests
@@ -1139,7 +1195,7 @@ func BenchmarkDNAStorage(b *testing.B) {
 	// Pre-create DNA records for benchmarking
 	dnas := make([]*commonpb.DNA, b.N)
 	for i := 0; i < b.N; i++ {
-		dnas[i] = createTestDNA(fmt.Sprintf("bench-device-%d", i), map[string]string{
+		dnas[i] = createTestDNA(b, fmt.Sprintf("bench-device-%d", i), map[string]string{
 			"os":     "linux",
 			"arch":   "amd64",
 			"seq":    fmt.Sprintf("%d", i),
@@ -1180,7 +1236,7 @@ func BenchmarkDNARetrieval(b *testing.B) {
 	numDevices := 1000
 	for i := 0; i < numDevices; i++ {
 		deviceID := fmt.Sprintf("bench-device-%d", i)
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(b, deviceID, map[string]string{
 			"os":   "linux",
 			"arch": "amd64",
 			"seq":  fmt.Sprintf("%d", i),
@@ -1216,7 +1272,7 @@ func BenchmarkCompression(b *testing.B) {
 	}()
 
 	// Create test DNA with varying sizes
-	dna := createTestDNA("bench-device", map[string]string{
+	dna := createTestDNA(b, "bench-device", map[string]string{
 		"os":          "linux",
 		"arch":        "amd64",
 		"large_field": string(make([]byte, 10000)), // 10KB field

@@ -400,7 +400,7 @@ A device with no resolvable tenant from either source is skipped rather than war
 The tag store (`features/controller/tagstore`) provides a durable store of operator-assigned tags keyed by steward ID.
 
 **Why a separate store — not DNA attributes:**
-The controller replaces a steward's DNA wholesale on every `DNARefreshLoop` cycle (`SyncDNA` in `controller_service.go`). Any tag written into `DNA.Attributes` would be clobbered on the next refresh. The tag store is the clobber-proof source of truth for controller-owned metadata.
+The controller replaces a steward's DNA wholesale on every `DNARefreshLoop` cycle (`SyncDNA` in `controller_service.go`). Any tag written into the DNA record would be clobbered on the next refresh. The tag store is the clobber-proof source of truth for controller-owned metadata. (`DNA.Attributes` — the legacy flat map that was the prior candidate for in-band tag storage — was retired in Issue #3331; DNA now carries only `DNA.Fragments`.)
 
 **Invariant:** Admin sets tags here; DNA refresh never touches this store. Tags survive controller restarts and DNA refreshes.
 

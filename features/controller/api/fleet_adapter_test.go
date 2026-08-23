@@ -24,8 +24,8 @@ func mustAPIFrag(t *testing.T, kind string, fields map[string]interface{}) *comm
 }
 
 // TestControllerServiceAdapter_GetAllStewards verifies that the adapter builds
-// DNAAttributes from DNA.Fragments via FlattenDNAFragments, not from the
-// legacy DNA.Attributes field.
+// DNAAttributes from DNA.Fragments via FlattenDNAFragments — the only carrier of
+// host facts since the flat DNA.Attributes field was removed (Issue #3331).
 func TestControllerServiceAdapter_GetAllStewards(t *testing.T) {
 	svc := service.NewControllerService(logging.NewNoopLogger())
 
@@ -65,23 +65,21 @@ func TestControllerServiceAdapter_GetAllStewards(t *testing.T) {
 	assert.Nil(t, sNil.DNAFragments)
 }
 
-// TestControllerServiceAdapter_GetAllStewards_FragmentsNotAttributes verifies that
-// DNAAttributes is sourced from Fragments, not from the legacy DNA.Attributes field.
-// A steward whose DNA sets Attributes but no Fragments must yield empty DNAAttributes.
-func TestControllerServiceAdapter_GetAllStewards_FragmentsNotAttributes(t *testing.T) {
+// TestControllerServiceAdapter_GetAllStewards_NoFragmentsYieldsNoAttributes verifies
+// that DNAAttributes is sourced from Fragments alone (Issue #3331 removed the flat
+// DNA.Attributes field). A steward whose DNA carries no fragments must yield empty
+// DNAAttributes rather than a fabricated map.
+func TestControllerServiceAdapter_GetAllStewards_NoFragmentsYieldsNoAttributes(t *testing.T) {
 	svc := service.NewControllerService(logging.NewNoopLogger())
 
 	require.NoError(t, svc.RegisterSteward("s1", "tenant-a", "addr-1", "online"))
-	// Set only the legacy Attributes field — no Fragments.
-	require.True(t, svc.SetStewardDNA("s1", &commonpb.DNA{
-		Id:         "s1",
-		Attributes: map[string]string{"os": "linux"},
-	}))
+	// DNA with an ID and nothing else — no fragments to project from.
+	require.True(t, svc.SetStewardDNA("s1", &commonpb.DNA{Id: "s1"}))
 
 	adapter := &controllerServiceAdapter{svc: svc}
 	stewards := adapter.GetAllStewards()
 
 	require.Len(t, stewards, 1)
 	assert.Empty(t, stewards[0].DNAAttributes,
-		"DNAAttributes must come from Fragments only; legacy Attributes field must be ignored")
+		"DNAAttributes must come from Fragments only; a fragment-less DNA must project nothing")
 }

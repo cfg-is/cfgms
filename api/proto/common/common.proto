@@ -13,11 +13,10 @@ import "google/protobuf/timestamp.proto";
 message DNA {
   string id = 1;
 
-  // Deprecated: use fragments, envelopes, aggregate_root, and manifest per
-  // ADR-017 / Epic #2852.  This flat map is retained for wire
-  // backward-compatibility only; all new code must use the fragment fields
-  // below (fields 8-11).
-  map<string, string> attributes = 2;
+  // Field 2 (attributes) retired: ADR-017 / Epic #2852 / Issue #3331.
+  // All consumers re-homed onto DNA.fragments (field 8).
+  reserved 2;
+  reserved "attributes";
 
   google.protobuf.Timestamp last_updated = 3;
 

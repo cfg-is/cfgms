@@ -38,7 +38,7 @@ func TestSQLiteBackend_DuplicateVersionUpserts(t *testing.T) {
 	mk := func(hash string) *DNARecord {
 		return &DNARecord{
 			DeviceID:         device,
-			DNA:              createTestDNA(device, map[string]string{"os": "linux", "hostname": "h-" + hash}),
+			DNA:              createTestDNA(t, device, map[string]string{"os": "linux", "hostname": "h-" + hash}),
 			StoredAt:         time.Now(),
 			ContentHash:      hash,
 			CompressedSize:   100,
@@ -90,7 +90,7 @@ func TestSQLiteBackend_DuplicateReferenceVersionUpserts(t *testing.T) {
 	ref := func(hash string) *DNARecord {
 		return &DNARecord{
 			DeviceID:    device,
-			DNA:         createTestDNA(device, map[string]string{"os": "linux"}),
+			DNA:         createTestDNA(t, device, map[string]string{"os": "linux"}),
 			StoredAt:    time.Now(),
 			ContentHash: hash,
 			Version:     1, // identical version — the racing/duplicate dedup publish

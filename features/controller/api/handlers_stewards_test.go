@@ -572,11 +572,22 @@ func TestHandleListStewards_FleetQueryError_Returns500(t *testing.T) {
 // AcceptRegistration applies reads the flattened fragment set (Issue #3319), so a
 // fragment-less snapshot is rejected as degenerate and the steward is stored with
 // a nil DNA, which the list filters below would then have nothing to match on.
-// All display-DTO consumers read from fragments after Issue #3327, so attrs used
-// by handlers are carried in fragment payloads rather than in Attributes.
+// All display-DTO consumers read from fragments after Issue #3327, and the flat
+// DNA.Attributes field is gone entirely (Issue #3331), so every attr a handler
+// needs is carried in a fragment payload. Keys with no dedicated fragment below
+// land in a catch-all host:test fragment so nothing a caller passes is silently
+// dropped from the projection.
 func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
 	t.Helper()
 	var frags []*common.Fragment
+	// Keys with a dedicated fragment below; everything else goes to host:test.
+	handled := map[string]bool{
+		"hostname":        true,
+		"os":              true,
+		"arch":            true,
+		"modules.loaded":  true,
+		"steward.version": true,
+	}
 	if hostname := attrs["hostname"]; hostname != "" {
 		frag, err := sdna.NewFragment("hostname", "test", sdna.MapState(map[string]interface{}{"hostname": hostname}))
 		require.NoError(t, err)
@@ -602,10 +613,21 @@ func testRegistrationDNA(t *testing.T, attrs map[string]string) *common.DNA {
 		require.NoError(t, err)
 		frags = append(frags, frag)
 	}
+	other := map[string]interface{}{}
+	for k, v := range attrs {
+		if handled[k] {
+			continue
+		}
+		other[k] = v
+	}
+	if len(other) > 0 {
+		frag, err := sdna.NewFragment("host:test", "test", sdna.MapState(other))
+		require.NoError(t, err)
+		frags = append(frags, frag)
+	}
 	return &common.DNA{
-		Id:         "dna-" + attrs["hostname"],
-		Attributes: attrs,
-		Fragments:  frags,
+		Id:        "dna-" + attrs["hostname"],
+		Fragments: frags,
 	}
 }
 
@@ -2338,11 +2360,8 @@ func TestGetStewardLogs_CrossTenantBlocked(t *testing.T) {
 	// Register steward in "tenant-b" (different from the caller's tenant).
 	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-b")
 	resp, err := server.controllerService.AcceptRegistration(ctx, &controller.RegisterRequest{
-		Version: "v1.0",
-		InitialDna: &common.DNA{
-			Id:         "dna-cross-tenant",
-			Attributes: map[string]string{"hostname": "cross-tenant-host", "os": "linux"},
-		},
+		Version:    "v1.0",
+		InitialDna: testRegistrationDNA(t, map[string]string{"hostname": "cross-tenant-host", "os": "linux"}),
 	})
 	require.NoError(t, err)
 	stewardID := resp.StewardId
@@ -3361,6 +3380,48 @@ func TestHandleListStewards_UnfilteredPath_TenantIDPopulated(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "registered steward must appear in unfiltered list")
+}
+
+// TestHandleListStewards_PreSyncRegistrationFragment_ShowsHostnameAndOS is the
+// [REQUIRED TEST] for Issue #3331: a steward that registered via
+// RegisterStewardWithAttributes but has not yet completed a full SyncDNA must
+// expose its hostname and OS in GET /api/v1/stewards. The registration-time
+// host:os fragment (authority "registration") is the sole source — DNA.Attributes
+// no longer exists, so there is no fallback; the fragment must be present.
+func TestHandleListStewards_PreSyncRegistrationFragment_ShowsHostnameAndOS(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Registration only — no SyncDNA or SetStewardDNA call follows.
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-pre-sync", "tenant-z", "addr-1", "registered",
+		map[string]string{"hostname": "pre-sync-host", "os": "windows"},
+	))
+
+	// Unfiltered (admin) path: empty TenantID in context → GetAllStewards branch.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req = withTenant(req, "")
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var found *StewardInfo
+	for i := range resp.Data {
+		if resp.Data[i].ID == "s-pre-sync" {
+			found = &resp.Data[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "pre-sync registered steward must appear in list")
+	require.NotNil(t, found.DNA, "DNA must be present from the registration-time fragment")
+	assert.Equal(t, "pre-sync-host", found.DNA.Hostname,
+		"hostname must be visible before SyncDNA via the host:os registration fragment")
+	assert.Equal(t, "windows", found.DNA.OS,
+		"os must be visible before SyncDNA via the host:os registration fragment")
 }
 
 // TestHandleGetSteward_TenantIDPopulated verifies that GET /api/v1/stewards/{id}

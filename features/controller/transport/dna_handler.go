@@ -916,30 +916,15 @@ func reassembleDNATransfer(chunks []*transportpb.DNAChunk, stewardID string) (*d
 // a common.DNA. The wire protocol is Fragments-only: the Attributes field of
 // DNATransfer is no longer populated by stewards and is never read here — a
 // transfer that carries an Attributes blob anyway has it ignored entirely
-// (Issue #3322).
+// (Issue #3322). DNA.Attributes (field 2) was retired in Issue #3331.
 //
-// # Why the returned DNA still carries a flat attribute map
+// # Why AttributeCount is still computed
 //
-// The returned common.DNA is not just a decode of the wire: it is the controller's
-// canonical steward record. ControllerService.SyncDNA assigns it wholesale
-// (steward.DNA = dna), so any field left unset here is *erased* from the record on
-// the steward's first full sync. Several controller subsystems still read
-// DNA.Attributes and have not yet been re-homed onto DNA.Fragments:
-//
-//   - fleet inventory, attribute filters and the module list
-//     (features/controller/api/handlers_stewards.go);
-//   - the DNA fingerprint, attribute projection and attribute index
-//     (features/controller/fleet/storage/), which os/platform-scoped patch and
-//     vulnerability targeting resolve through;
-//   - re-registration change detection, which compares AttributeCount
-//     (features/controller/service/controller_service.go).
-//
-// So the flat map is rebuilt here *from the fragments themselves* via
-// sdna.FlattenFragments — the same projection the required-field integrity check
-// uses (features/controller/service/dna_integrity.go). The wire stays
-// Fragments-only, the fragments stay authoritative, and no consumer goes blank
-// mid-migration. When those consumers read fragments directly, this projection and
-// the Attributes/AttributeCount fields go away together.
+// re-registration change detection (features/controller/service/controller_service.go)
+// compares AttributeCount to detect whether the steward's identity has changed since
+// the last registration. The count is derived from the flat fragment projection (same
+// as before) so its meaning is preserved; the flat map itself is no longer stored on
+// the returned DNA.
 //
 // The steward-identity check (firstChunk.GetStewardId() != peerID) is enforced in
 // HandleGRPC before this function is called; reassembleDNA receives an
@@ -976,8 +961,8 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 		frags = append(frags, frag)
 	}
 
-	// Flat projection of the fragments, for the not-yet-re-homed consumers listed
-	// above. Derived from decoded fragment state — never from transfer.Attributes.
+	// Flat projection of the fragments for AttributeCount (used by re-registration
+	// change detection). DNA.Attributes (field 2) is retired per Issue #3331.
 	attrs := sdna.FlattenFragments(frags)
 	if len(attrs) > math.MaxInt32 {
 		return nil, 0, fmt.Errorf("DNA attribute count exceeds int32 limit")
@@ -995,7 +980,6 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 	return &common.DNA{
 		Id:             stewardID,
 		Fragments:      frags,
-		Attributes:     attrs,
 		AttributeCount: int32(len(attrs)),
 		DriftDiffs:     driftDiffs,
 	}, driftRejected, nil

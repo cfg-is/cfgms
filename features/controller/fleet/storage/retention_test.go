@@ -33,7 +33,7 @@ func TestRetention_MaxRecordsPerDevice(t *testing.T) {
 	// avoid races with the goroutine that Store fires after every write.
 	sqlBackend := manager.storage.(*SQLiteBackend)
 	for i := 1; i <= 5; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":      "linux",
 			"version": fmt.Sprintf("v%d", i),
 		})
@@ -71,8 +71,8 @@ func TestRetention_MaxRecordsPerDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrent after prune failed: %v", err)
 	}
-	if current.DNA.Attributes["version"] != "v5" {
-		t.Errorf("expected newest version v5 after prune, got %q", current.DNA.Attributes["version"])
+	if got := dnaAttrs(current.DNA)["version"]; got != "v5" {
+		t.Errorf("expected newest version v5 after prune, got %q", got)
 	}
 
 	// Oldest versions (1, 2) must have been pruned; newest (3, 4, 5) kept.
@@ -116,7 +116,7 @@ func TestRetention_AgeBasedPruning(t *testing.T) {
 	oldTime := time.Now().Add(-1 * time.Hour)
 
 	for i := 1; i <= 2; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":      "linux",
 			"version": fmt.Sprintf("old-v%d", i),
 		})
@@ -142,7 +142,7 @@ func TestRetention_AgeBasedPruning(t *testing.T) {
 	// backdated records (stored at -1h, cutoff at -30m) before the pre-prune count
 	// assertion at line 145 runs. Bypassing manager.Store keeps the goroutine out of
 	// the picture entirely and makes the pre-prune count deterministic.
-	recentDNA := createTestDNA(deviceID, map[string]string{
+	recentDNA := createTestDNA(t, deviceID, map[string]string{
 		"os":      "linux",
 		"version": "recent-v3",
 	})
@@ -183,7 +183,7 @@ func TestRetention_AgeBasedPruning(t *testing.T) {
 		t.Errorf("expected 1 record after age pruning, got %d", len(history.Records))
 	}
 	if len(history.Records) > 0 {
-		if got := history.Records[0].DNA.Attributes["version"]; got != "recent-v3" {
+		if got := dnaAttrs(history.Records[0].DNA)["version"]; got != "recent-v3" {
 			t.Errorf("expected remaining record to be recent-v3, got %q", got)
 		}
 	}
@@ -193,8 +193,8 @@ func TestRetention_AgeBasedPruning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrent after age prune failed: %v", err)
 	}
-	if current.DNA.Attributes["version"] != "recent-v3" {
-		t.Errorf("expected GetCurrent to return recent-v3, got %q", current.DNA.Attributes["version"])
+	if got := dnaAttrs(current.DNA)["version"]; got != "recent-v3" {
+		t.Errorf("expected GetCurrent to return recent-v3, got %q", got)
 	}
 }
 
@@ -236,7 +236,7 @@ func TestRetention_DedupSafeAlgorithm(t *testing.T) {
 	// Device A stores its DNA — creates a dna_history row.
 	recA := &DNARecord{
 		DeviceID:         deviceA,
-		DNA:              createTestDNA(deviceA, map[string]string{"version": "shared-v1"}),
+		DNA:              createTestDNA(t, deviceA, map[string]string{"version": "shared-v1"}),
 		StoredAt:         oldTime,
 		ContentHash:      sharedHash,
 		CompressedSize:   100,
@@ -374,7 +374,7 @@ func TestRetention_GlobalSweep(t *testing.T) {
 	devices := []string{"global-device-1", "global-device-2", "global-device-3"}
 	for _, deviceID := range devices {
 		for i := 1; i <= 4; i++ {
-			dna := createTestDNA(deviceID, map[string]string{
+			dna := createTestDNA(t, deviceID, map[string]string{
 				"device":  deviceID,
 				"version": fmt.Sprintf("v%d", i),
 			})
@@ -404,8 +404,8 @@ func TestRetention_GlobalSweep(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetCurrent for %s after global sweep failed: %v", deviceID, err)
 		}
-		if current.DNA.Attributes["version"] != "v4" {
-			t.Errorf("device %s: expected newest version v4, got %q", deviceID, current.DNA.Attributes["version"])
+		if got := dnaAttrs(current.DNA)["version"]; got != "v4" {
+			t.Errorf("device %s: expected newest version v4, got %q", deviceID, got)
 		}
 	}
 }

@@ -33,7 +33,7 @@ func TestControllerRestart_DurableQueryPath(t *testing.T) {
 	}
 
 	for i := 1; i <= 3; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":      "linux",
 			"version": fmt.Sprintf("v%d", i),
 		})
@@ -123,13 +123,13 @@ func TestControllerRestart_DurableQueryPath(t *testing.T) {
 		if current.DNA == nil {
 			t.Fatal("expected non-nil DNA on current record")
 		}
-		if got := current.DNA.Attributes["version"]; got != "v3" {
+		if got := dnaAttrs(current.DNA)["version"]; got != "v3" {
 			t.Errorf("expected version attribute=v3, got %q", got)
 		}
 	})
 
 	t.Run("Store after restart increments version without collision or reset", func(t *testing.T) {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":      "linux",
 			"version": "v4",
 		})
@@ -146,7 +146,7 @@ func TestControllerRestart_DurableQueryPath(t *testing.T) {
 			t.Errorf("expected version=4 after post-restart Store, got %d (reset or collision)",
 				current.Version)
 		}
-		if got := current.DNA.Attributes["version"]; got != "v4" {
+		if got := dnaAttrs(current.DNA)["version"]; got != "v4" {
 			t.Errorf("expected version attribute=v4 on post-restart record, got %q", got)
 		}
 	})

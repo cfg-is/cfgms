@@ -411,8 +411,7 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	// Initial convergence has run; previousDNA is now the real system DNA.
 	// Inject a sentinel so we can detect when detectUnmanagedDNADrift is called again.
 	steward.SetPreviousDNA(s, &commonpb.DNA{
-		Id:         "sentinel-id-dna-refresh-test",
-		Attributes: map[string]string{},
+		Id: "sentinel-id-dna-refresh-test",
 	})
 
 	testMon.ResetTracking()
