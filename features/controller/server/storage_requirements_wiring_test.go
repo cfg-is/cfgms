@@ -102,7 +102,16 @@ func TestCollectActiveStorageRequirements_ManualReviewDeclaresPendingStore(t *te
 		require.NotEmpty(t, reqs,
 			"manual-review must declare its store requirements, else startup validation is a no-op")
 
+		var registrationReqs []interfaces.StoreRequirement
 		for _, req := range reqs {
+			if req.Subsystem == "registration" {
+				registrationReqs = append(registrationReqs, req)
+			}
+		}
+		require.NotEmpty(t, registrationReqs,
+			"manual-review must contribute its own requirements alongside push's unconditional one")
+
+		for _, req := range registrationReqs {
 			assert.Equal(t, interfaces.StoreNamePendingRegistration, req.Store)
 			assert.Equal(t, interfaces.RequirementRequired, req.Severity,
 				"manual-review cannot function without PendingRegistrationStore")
@@ -115,7 +124,8 @@ func TestCollectActiveStorageRequirements_ManualReviewDeclaresPendingStore(t *te
 // TestCollectActiveStorageRequirements_InactiveWorkflowsDeclareNothing verifies the
 // gate: a deployment that does not run the manual-review subsystem must not be
 // blocked by its requirements. ip-trust and auto-approve never touch
-// PendingRegistrationStore, so a provider that declines it must still start.
+// PendingRegistrationStore, so a provider that declines it must still start. Push's
+// requirement is unconditional, so it is still present regardless of workflow.
 func TestCollectActiveStorageRequirements_InactiveWorkflowsDeclareNothing(t *testing.T) {
 	for _, cfg := range []*config.Config{
 		nil,
@@ -125,8 +135,10 @@ func TestCollectActiveStorageRequirements_InactiveWorkflowsDeclareNothing(t *tes
 		{Registration: &config.RegistrationConfig{Workflow: "auto-approve"}},
 		{Registration: &config.RegistrationConfig{Workflow: "bogus"}},
 	} {
-		assert.Empty(t, collectActiveStorageRequirements(cfg),
-			"only manual-review requires PendingRegistrationStore")
+		for _, req := range collectActiveStorageRequirements(cfg) {
+			assert.NotEqual(t, "registration", req.Subsystem,
+				"only manual-review requires PendingRegistrationStore")
+		}
 	}
 }
 
@@ -235,8 +247,10 @@ func TestServer_New_IPTrustStartupRequiresNoPendingStore(t *testing.T) {
 	require.NotNil(t, srv)
 	t.Cleanup(func() { _ = srv.Stop() })
 
-	assert.Empty(t, collectActiveStorageRequirements(cfg),
-		"ip-trust must impose no store requirement on the deployment")
+	for _, req := range collectActiveStorageRequirements(cfg) {
+		assert.NotEqual(t, "registration", req.Subsystem,
+			"ip-trust must impose no registration store requirement on the deployment")
+	}
 	assert.Nil(t, srv.manualReviewHook,
 		"ip-trust must not install the manual-review hook")
 }
