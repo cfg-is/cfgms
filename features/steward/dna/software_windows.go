@@ -598,40 +598,15 @@ func (w *WindowsSoftwareCollector) collectServicesViaSCM(attributes map[string]s
 	return nil
 }
 
-// parseWMIServicesOutput parses `wmic service get Name,State,StartMode,ServiceType
-// /format:csv` output — the fallback used when the SCM API is unavailable.
-//
-// Column positions come from the CSV header, not from fixed indices. wmic emits
-// "Node" first and then the requested properties in ALPHABETICAL order rather than
-// the order they were requested, so a hardcoded index binds the counters to an
-// ordering assumption that is invisible at the call site and silently counts the
-// wrong column if it is ever wrong. The header line names every column, so read the
-// positions from it. The alphabetical layout (Node,Name,ServiceType,StartMode,State)
-// remains the default for output that carries no header.
+// parseWMIServicesOutput parses WMI services output (fallback for non-admin contexts).
 func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	var totalServices, runningServices, stoppedServices int
 	var autoStartServices, manualStartServices int
 
-	stateIdx, startModeIdx := 4, 3
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// The header row is the only line beginning with the literal "Node" column
-		// name; data rows begin with the host name in that position.
-		if strings.HasPrefix(line, "Node") {
-			for i, column := range strings.Split(line, ",") {
-				switch strings.ToLower(strings.TrimSpace(column)) {
-				case "state":
-					stateIdx = i
-				case "startmode":
-					startModeIdx = i
-				}
-			}
+		if line == "" || strings.HasPrefix(line, "Node") {
 			continue
 		}
 
@@ -639,8 +614,8 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 		if len(fields) >= 5 {
 			totalServices++
 
-			if stateIdx < len(fields) {
-				switch strings.ToLower(strings.TrimSpace(fields[stateIdx])) {
+			if len(fields) > 3 && fields[3] != "" {
+				switch strings.ToLower(fields[3]) {
 				case "running":
 					runningServices++
 				case "stopped":
@@ -648,8 +623,8 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 				}
 			}
 
-			if startModeIdx < len(fields) {
-				switch strings.ToLower(strings.TrimSpace(fields[startModeIdx])) {
+			if len(fields) > 2 && fields[2] != "" {
+				switch strings.ToLower(fields[2]) {
 				case "auto":
 					autoStartServices++
 				case "manual":

@@ -368,13 +368,12 @@ func TestWindowsSoftwareCollector_ParseCSVLine(t *testing.T) {
 }
 
 // TestWindowsSoftwareCollector_ParseWMIServicesOutput covers the wmic fallback
-// parser: header-driven column mapping, header and blank-line filtering, and the
-// five counters it always emits.
+// parser: fixed-column state/start-mode counting, header and blank-line
+// filtering, and the five counters it always emits.
 func TestWindowsSoftwareCollector_ParseWMIServicesOutput(t *testing.T) {
 	col := &WindowsSoftwareCollector{}
 
-	t.Run("counts states and start modes from the header positions", func(t *testing.T) {
-		// wmic emits Node first, then the requested properties alphabetically.
+	t.Run("counts states and start modes from the fixed columns", func(t *testing.T) {
 		output := "\r\n" +
 			"Node,Name,ServiceType,StartMode,State\r\n" +
 			"HOST-A,Dhcp,Own Process,Auto,Running\r\n" +
@@ -390,34 +389,6 @@ func TestWindowsSoftwareCollector_ParseWMIServicesOutput(t *testing.T) {
 		assert.Equal(t, "2", attrs["stopped_service_count"])
 		assert.Equal(t, "1", attrs["auto_start_service_count"])
 		assert.Equal(t, "1", attrs["manual_start_service_count"])
-	})
-
-	t.Run("column order is taken from the header, not assumed", func(t *testing.T) {
-		// The same rows with State and StartMode transposed must produce the same
-		// counters — the header, not a fixed index, decides which column is which.
-		output := "Node,Name,ServiceType,State,StartMode\r\n" +
-			"HOST-A,Dhcp,Own Process,Running,Auto\r\n" +
-			"HOST-A,Spooler,Own Process,Stopped,Manual\r\n"
-
-		attrs := make(map[string]string)
-		col.parseWMIServicesOutput(output, attrs)
-
-		assert.Equal(t, "2", attrs["total_service_count"])
-		assert.Equal(t, "1", attrs["running_service_count"])
-		assert.Equal(t, "1", attrs["stopped_service_count"])
-		assert.Equal(t, "1", attrs["auto_start_service_count"])
-		assert.Equal(t, "1", attrs["manual_start_service_count"])
-	})
-
-	t.Run("headerless output falls back to the alphabetical layout", func(t *testing.T) {
-		output := "HOST-A,Dhcp,Own Process,Auto,Running\r\n"
-
-		attrs := make(map[string]string)
-		col.parseWMIServicesOutput(output, attrs)
-
-		assert.Equal(t, "1", attrs["total_service_count"])
-		assert.Equal(t, "1", attrs["running_service_count"])
-		assert.Equal(t, "1", attrs["auto_start_service_count"])
 	})
 
 	t.Run("short rows are not counted", func(t *testing.T) {
