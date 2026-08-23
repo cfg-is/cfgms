@@ -90,17 +90,6 @@ type Supervisor struct {
 // cadence would leave a deleted registration undetected for that entire span.
 const defaultServiceRepairInterval = 10 * time.Second
 
-// errChildNeverStarted marks an execOnce failure in which no child process was
-// ever created because ctx was already cancelled by the time exec reached
-// Start. exec.Cmd.Start returns ctx.Err() verbatim in that case, so without
-// this marker the supervise loop cannot tell "the steward crashed instantly"
-// (ranFor ≈ 0, non-nil error) from "we never launched the steward at all"
-// (ranFor ≈ 0, non-nil error). The two demand opposite responses: the first is
-// a failed upgrade that must roll back, the second is an ordinary shutdown that
-// must not — rolling a version back because the service manager stopped us is a
-// silent, unattended downgrade of a perfectly healthy install.
-var errChildNeverStarted = errors.New("launcher: child never started (context cancelled before exec)")
-
 type clock interface {
 	Now() time.Time
 	Since(time.Time) time.Duration
@@ -175,19 +164,6 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 
 	rollbacksRemaining := s.MaxRollbackCycles
 	for {
-		// Never begin (or re-begin) a child launch once shutdown has been
-		// requested. Every `continue` below re-enters this loop, and a cancel
-		// that lands between a child's exit and the next iteration would
-		// otherwise exec a doomed child: exec.Cmd.Start refuses to fork on a
-		// cancelled ctx, returning ctx.Err() after a few microseconds, which
-		// the classifier below reads as "the steward died inside its startup
-		// window" and answers with a rollback. Stopping here makes shutdown
-		// the only outcome of a cancel, which is what the service manager
-		// asked for.
-		if ctx.Err() != nil {
-			return nil
-		}
-
 		current, err := s.Layout.ReadCurrent()
 		if err != nil {
 			return fmt.Errorf("launcher: read current version: %w", err)
@@ -246,13 +222,6 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 		//       that exited inside the window with a non-zero code
 		//       gets the failure surfaced even on cancel.
 		if ctx.Err() != nil {
-			// The guard at the top of the loop is a check-then-act, so a
-			// cancel can still land in the window between it and Start. When
-			// it does, no child process was created, so there is no child
-			// outcome to classify — this is purely a shutdown.
-			if errors.Is(exitErr, errChildNeverStarted) {
-				return nil
-			}
 			failedStartupOnCancel := ranFor < s.StartupWindow && exitErr != nil
 			if !failedStartupOnCancel {
 				return nil
@@ -388,14 +357,6 @@ func (s *Supervisor) execOnce(ctx context.Context, exe string) error {
 	// self-exit. (Issue #2003)
 	cmd.Env = append(os.Environ(), version.EnvStewardLauncherManaged+"=1")
 	if err := cmd.Start(); err != nil {
-		// exec.Cmd.Start declines to fork when ctx is already done and returns
-		// ctx.Err() unchanged. Tag that case so the supervise loop can tell it
-		// apart from a genuine start failure (missing/corrupt binary, denied
-		// exec permission), which still means the current version is broken
-		// and must roll back.
-		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-			return fmt.Errorf("%w: %w", errChildNeverStarted, err)
-		}
 		return err
 	}
 	if err := attachChildToJobObject(cmd); err != nil {
