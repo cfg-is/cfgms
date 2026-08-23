@@ -164,7 +164,7 @@ func (w *WindowsSoftwareCollector) collectOSVersion(attributes map[string]string
 	if err != nil {
 		return
 	}
-	defer key.Close()
+	defer func() { _ = key.Close() }()
 
 	if product, _, err := key.GetStringValue("ProductName"); err == nil {
 		attributes["windows_caption"] = product
@@ -211,7 +211,7 @@ func (w *WindowsSoftwareCollector) collectOSVersion(attributes map[string]string
 				attributes["windows_os_architecture"] = arch
 			}
 		}
-		envKey.Close()
+		_ = envKey.Close()
 	}
 
 	// Last boot time derived from system uptime via kernel32.GetTickCount64
@@ -235,7 +235,7 @@ func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]s
 	}
 
 	subkeys, err := ndpKey.ReadSubKeyNames(-1)
-	ndpKey.Close()
+	_ = ndpKey.Close()
 	if err != nil {
 		return
 	}
@@ -255,13 +255,13 @@ func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]s
 		// Try to read Version directly from this key (v2.x, v3.x)
 		if ver, _, err := sk.GetStringValue("Version"); err == nil && ver != "" {
 			versions = append(versions, name+" "+ver)
-			sk.Close()
+			_ = sk.Close()
 			continue
 		}
 
 		// Check Full/Client subkeys (v4+)
 		childKeys, _ := sk.ReadSubKeyNames(-1)
-		sk.Close()
+		_ = sk.Close()
 
 		for _, child := range childKeys {
 			if child != "Full" && child != "Client" {
@@ -274,7 +274,7 @@ func (w *WindowsSoftwareCollector) collectDotNetVersions(attributes map[string]s
 			if ver, _, err := childKey.GetStringValue("Version"); err == nil && ver != "" {
 				versions = append(versions, name+"/"+child+" "+ver)
 			}
-			childKey.Close()
+			_ = childKey.Close()
 		}
 	}
 
@@ -303,7 +303,7 @@ func (w *WindowsSoftwareCollector) collectInstalledPrograms(attributes map[strin
 		}
 
 		subkeys, err := key.ReadSubKeyNames(-1)
-		key.Close()
+		_ = key.Close()
 		if err != nil {
 			continue
 		}
@@ -316,7 +316,7 @@ func (w *WindowsSoftwareCollector) collectInstalledPrograms(attributes map[strin
 
 			displayName, _, err := sk.GetStringValue("DisplayName")
 			if err != nil || displayName == "" {
-				sk.Close()
+				_ = sk.Close()
 				continue
 			}
 
@@ -328,7 +328,7 @@ func (w *WindowsSoftwareCollector) collectInstalledPrograms(attributes map[strin
 				}
 				programs = append(programs, programInfo)
 			}
-			sk.Close()
+			_ = sk.Close()
 		}
 	}
 
@@ -347,7 +347,7 @@ func (w *WindowsSoftwareCollector) collectInstalledUpdates(attributes map[string
 	if err != nil {
 		return
 	}
-	defer key.Close()
+	defer func() { _ = key.Close() }()
 
 	subkeys, err := key.ReadSubKeyNames(-1)
 	if err != nil {
@@ -551,7 +551,7 @@ func (w *WindowsSoftwareCollector) collectServicesViaSCM(attributes map[string]s
 	if err != nil {
 		return err
 	}
-	defer m.Disconnect()
+	defer func() { _ = m.Disconnect() }()
 
 	serviceNames, err := m.ListServices()
 	if err != nil {
@@ -587,7 +587,7 @@ func (w *WindowsSoftwareCollector) collectServicesViaSCM(attributes map[string]s
 			}
 		}
 
-		s.Close()
+		_ = s.Close()
 	}
 
 	attributes["total_service_count"] = fmt.Sprintf("%d", totalServices)
@@ -598,15 +598,40 @@ func (w *WindowsSoftwareCollector) collectServicesViaSCM(attributes map[string]s
 	return nil
 }
 
-// parseWMIServicesOutput parses WMI services output (fallback for non-admin contexts).
+// parseWMIServicesOutput parses `wmic service get Name,State,StartMode,ServiceType
+// /format:csv` output — the fallback used when the SCM API is unavailable.
+//
+// Column positions come from the CSV header, not from fixed indices. wmic emits
+// "Node" first and then the requested properties in ALPHABETICAL order rather than
+// the order they were requested, so a hardcoded index binds the counters to an
+// ordering assumption that is invisible at the call site and silently counts the
+// wrong column if it is ever wrong. The header line names every column, so read the
+// positions from it. The alphabetical layout (Node,Name,ServiceType,StartMode,State)
+// remains the default for output that carries no header.
 func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attributes map[string]string) {
 	lines := strings.Split(output, "\n")
 	var totalServices, runningServices, stoppedServices int
 	var autoStartServices, manualStartServices int
 
+	stateIdx, startModeIdx := 4, 3
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Node") {
+		if line == "" {
+			continue
+		}
+
+		// The header row is the only line beginning with the literal "Node" column
+		// name; data rows begin with the host name in that position.
+		if strings.HasPrefix(line, "Node") {
+			for i, column := range strings.Split(line, ",") {
+				switch strings.ToLower(strings.TrimSpace(column)) {
+				case "state":
+					stateIdx = i
+				case "startmode":
+					startModeIdx = i
+				}
+			}
 			continue
 		}
 
@@ -614,8 +639,8 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 		if len(fields) >= 5 {
 			totalServices++
 
-			if len(fields) > 3 && fields[3] != "" {
-				switch strings.ToLower(fields[3]) {
+			if stateIdx < len(fields) {
+				switch strings.ToLower(strings.TrimSpace(fields[stateIdx])) {
 				case "running":
 					runningServices++
 				case "stopped":
@@ -623,8 +648,8 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 				}
 			}
 
-			if len(fields) > 2 && fields[2] != "" {
-				switch strings.ToLower(fields[2]) {
+			if startModeIdx < len(fields) {
+				switch strings.ToLower(strings.TrimSpace(fields[startModeIdx])) {
 				case "auto":
 					autoStartServices++
 				case "manual":
@@ -662,7 +687,7 @@ func (w *WindowsSoftwareCollector) collectStartupPrograms(attributes map[string]
 					startupPrograms = append(startupPrograms, name)
 				}
 			}
-			key.Close()
+			_ = key.Close()
 		}
 
 		// User-level
@@ -674,7 +699,7 @@ func (w *WindowsSoftwareCollector) collectStartupPrograms(attributes map[string]
 					startupPrograms = append(startupPrograms, name)
 				}
 			}
-			key.Close()
+			_ = key.Close()
 		}
 	}
 
@@ -692,7 +717,7 @@ func countProcesses() int {
 	if err != nil {
 		return 0
 	}
-	defer windows.CloseHandle(snapshot)
+	defer func() { _ = windows.CloseHandle(snapshot) }()
 
 	var entry windows.ProcessEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
@@ -714,7 +739,7 @@ func (w *WindowsSoftwareCollector) collectProcessSnapshot(attributes map[string]
 	if err != nil {
 		return
 	}
-	defer windows.CloseHandle(snapshot)
+	defer func() { _ = windows.CloseHandle(snapshot) }()
 
 	var entry windows.ProcessEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
@@ -775,13 +800,13 @@ func lookupProcessOwner(pid uint32, cache map[string]string) string {
 	if err != nil {
 		return ""
 	}
-	defer windows.CloseHandle(handle)
+	defer func() { _ = windows.CloseHandle(handle) }()
 
 	var token windows.Token
 	if err := windows.OpenProcessToken(handle, windows.TOKEN_QUERY, &token); err != nil {
 		return ""
 	}
-	defer token.Close()
+	defer func() { _ = token.Close() }()
 
 	tokenUser, err := token.GetTokenUser()
 	if err != nil {

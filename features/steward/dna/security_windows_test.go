@@ -27,7 +27,7 @@ func isWorkstationSKU() bool {
 	if err != nil {
 		return false
 	}
-	defer key.Close()
+	defer func() { _ = key.Close() }()
 
 	productType, _, err := key.GetStringValue("ProductType")
 	if err != nil {

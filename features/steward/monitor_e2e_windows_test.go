@@ -52,6 +52,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+
 	// Blank import registers the "steward" secret provider via its init(). The
 	// hyperv module's Configure requires an injected secret store; this makes the
 	// provider available to CreateSecretStoreFromConfig in the test binary.

@@ -319,7 +319,7 @@ func (c *Collector) probeETW(_ context.Context, p etwProvider) ReachabilityResul
 			Error:     "StartTrace: " + startErr.Error(),
 		}
 	}
-	defer stopNamedTrace(handle, probeName)
+	defer func() { _ = stopNamedTrace(handle, probeName) }()
 
 	ret, _, callErr := procEnableTraceEx2.Call(
 		handle,
@@ -443,7 +443,7 @@ func (c *Collector) probeWMI(p wmiProvider) ReachabilityResult {
 			Error:     "ExecQuery: " + err.Error(),
 		}
 	}
-	defer resultRaw.Clear()
+	defer func() { _ = resultRaw.Clear() }()
 
 	result := resultRaw.ToIDispatch()
 	countRaw, err := oleutil.GetProperty(result, "Count")
@@ -457,7 +457,7 @@ func (c *Collector) probeWMI(p wmiProvider) ReachabilityResult {
 			Error:     "Count property: " + err.Error(),
 		}
 	}
-	defer countRaw.Clear()
+	defer func() { _ = countRaw.Clear() }()
 
 	return ReachabilityResult{
 		Class:     p.class,
@@ -642,7 +642,7 @@ func (c *Collector) queryWMIProvider(p wmiProvider) []map[string]any {
 	if err != nil {
 		return nil
 	}
-	defer resultRaw.Clear()
+	defer func() { _ = resultRaw.Clear() }()
 
 	result := resultRaw.ToIDispatch()
 	countRaw, err := oleutil.GetProperty(result, "Count")
@@ -650,7 +650,7 @@ func (c *Collector) queryWMIProvider(p wmiProvider) []map[string]any {
 		return nil
 	}
 	count, ok := countRaw.Value().(int32)
-	countRaw.Clear()
+	_ = countRaw.Clear()
 	if !ok || count == 0 {
 		return nil
 	}
@@ -676,24 +676,24 @@ func (c *Collector) extractWMIFields(item *ole.IDispatch, p wmiProvider) map[str
 	case SignalSMART:
 		if v, err := oleutil.GetProperty(item, "InstanceName"); err == nil {
 			fields["instance"] = v.ToString()
-			v.Clear()
+			_ = v.Clear()
 		}
 		if v, err := oleutil.GetProperty(item, "PredictFailure"); err == nil {
 			fields["predict_failure"] = v.Value()
-			v.Clear()
+			_ = v.Clear()
 		}
 
 	case SignalThermal:
 		if v, err := oleutil.GetProperty(item, "InstanceName"); err == nil {
 			fields["instance"] = v.ToString()
-			v.Clear()
+			_ = v.Clear()
 		}
 		// Temperature is in tenths of a Kelvin; convert to Celsius for readability.
 		if v, err := oleutil.GetProperty(item, "CurrentTemperature"); err == nil {
 			if deciK, ok := v.Value().(int32); ok {
 				fields["temp_celsius"] = (float64(deciK) / 10.0) - 273.15
 			}
-			v.Clear()
+			_ = v.Clear()
 		}
 	}
 
@@ -705,11 +705,11 @@ func (c *Collector) extractWMIFields(item *ole.IDispatch, p wmiProvider) map[str
 // processTimesNs returns the sum of kernel + user CPU time consumed by the
 // current process since its start, in nanoseconds.
 func processTimesNs() (uint64, error) {
-	handle, err := windows.OpenProcess(processQueryLimitedInformation, false, uint32(windows.GetCurrentProcessId()))
+	handle, err := windows.OpenProcess(processQueryLimitedInformation, false, windows.GetCurrentProcessId())
 	if err != nil {
 		return 0, err
 	}
-	defer windows.CloseHandle(handle)
+	defer func() { _ = windows.CloseHandle(handle) }()
 
 	var creation, exit, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(handle, &creation, &exit, &kernel, &user); err != nil {
