@@ -467,28 +467,35 @@ func TestPushStoreRequirement_OSSCompositeStartsCleanly(t *testing.T) {
 		"OSS composite must supply a non-nil push store via SQLite")
 }
 
-// TestPushStoreRequirement_DatabaseProviderShapePassesValidation verifies that
-// the push requirements are satisfied when a StorageManager supplies PushStore,
-// as the database provider does after Issue #3402. The SQLite provider is
-// already registered as a side effect of server.go's import and supplies a
-// real PushStore here without requiring a live Postgres connection.
+// TestPushStoreRequirement_DatabaseProviderShapePassesValidation verifies that a
+// controller composed in the database-provider shape starts cleanly, exercising
+// the real DatabaseProvider.CreatePushStore (Issue #3402) end-to-end through
+// New() rather than substituting a different provider's store. Docker-gated like
+// TestServer_StorageProviderValidation in server_security_test.go: skips cleanly
+// when the Docker-backed Postgres test infrastructure is not available.
 func TestPushStoreRequirement_DatabaseProviderShapePassesValidation(t *testing.T) {
-	// The sqlite provider is registered via server.go's side-effect import.
-	// Use its CreatePushStore (nil config → :memory: SQLite) to obtain a real
-	// PushStore, then compose a StorageManager and validate push requirements.
-	sqProv, err := interfaces.GetStorageProvider("sqlite")
-	require.NoError(t, err, "sqlite provider must be registered (server.go side-effect import)")
+	if !isDockerTestEnvironment() {
+		t.Skip("database-provider shape requires Docker test infrastructure " +
+			"(CFGMS_TEST_DB_HOST/CFGMS_TEST_DB_PASSWORD, postgres-test on 5433) - " +
+			"run 'make test-integration-setup'")
+	}
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
 
-	pushStore, err := sqProv.CreatePushStore(nil)
-	require.NoError(t, err)
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: createDockerTestStorageConfig(t, "database"),
+		DataDir: t.TempDir(),
+	}
 
-	sm := interfaces.NewStorageManagerFromStores(
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, pushStore,
-	)
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err, "database-provider shape must satisfy push store requirements")
+	t.Cleanup(func() { _ = srv.Stop() })
 
-	validationErr := interfaces.ValidateStorageRequirements(sm, collectActiveStorageRequirements(nil))
-	assert.NoError(t, validationErr,
-		"a StorageManager with PushStore available must satisfy push requirements")
+	assert.NotNil(t, srv.storageManager.GetPushStore(),
+		"database-provider shape must supply a non-nil push store via DatabaseProvider.CreatePushStore")
 }
 
 // TestPushStoreRequirement_ProviderDecliningStoreBlocksStartup verifies that
