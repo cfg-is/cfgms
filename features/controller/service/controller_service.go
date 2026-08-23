@@ -1437,15 +1437,25 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 	listSucceeded := s.dnaStorage == nil && s.stewardStore == nil
 
 	// Load all device IDs and tenant mappings from DNA storage.
+	//
+	// tenantMapReadable records whether the authoritative device_tenant mapping
+	// was actually read. It gates the dna_history tenant fallback below: that
+	// fallback is only sound as a "device predates the device_tenant migration"
+	// patch, which requires a readable mapping to establish. When the mapping
+	// cannot be read at all, a dna_history tenant is not evidence of anything —
+	// dna_history is never rewritten on a tenant move, so it names the device's
+	// old tenant forever (Issue #3494 security review).
 	var tenantMap map[string]string
+	tenantMapReadable := false
 	var deviceIDs []string
 	if s.dnaStorage != nil {
 		tm, tenantErr := s.dnaStorage.ListDeviceTenants(ctx)
 		if tenantErr != nil {
-			s.logger.Warn("Cluster refresh: failed to list device tenants",
+			s.logger.Warn("Cluster refresh: failed to list device tenants; durable tenant resolution limited to the fleet registry",
 				"error", logging.SanitizeLogValue(tenantErr.Error()))
 		} else {
 			tenantMap = tm
+			tenantMapReadable = true
 			listSucceeded = true
 		}
 
@@ -1512,13 +1522,14 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 		// Not live: resolve from durable sources. Tenant from the dedicated
 		// device_tenant mapping is authoritative (Issue #3324).
 		var tenantID string
-		if tenantMap != nil {
+		if tenantMapReadable {
 			tenantID = tenantMap[deviceID]
 		}
 
 		var dna *common.DNA
 		var storedAt time.Time
 		var status string
+		var dnaRecordTenant string
 		dnaFailed := false
 
 		if s.dnaStorage != nil {
@@ -1532,14 +1543,14 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 				dna = record.DNA
 				storedAt = record.StoredAt
 				status = record.Status
-				if tenantID == "" {
-					tenantID = record.TenantID
-				}
+				dnaRecordTenant = record.TenantID
 			}
 		}
 
 		// Merge StewardStore data: lifecycle status and tenant are authoritative
-		// sources for enrolled stewards (Issue #3403).
+		// sources for enrolled stewards (Issue #3403). The fleet registry is
+		// rewritten on a tenant move (StewardStore.UpdateStewardTenant), so it
+		// ranks ahead of dna_history for tenant resolution.
 		if sr, ok := stewardByID[deviceID]; ok {
 			if tenantID == "" {
 				tenantID = sr.TenantID
@@ -1552,10 +1563,24 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 			}
 		}
 
-		// If the DNA lookup failed and we still cannot resolve the tenant, fall
-		// back to the previous inventory entry so the device is not dropped on a
-		// transient error.
-		if dnaFailed && tenantID == "" {
+		// Last resort: the tenant recorded on the DNA history record. This covers
+		// devices that predate the device_tenant migration and have no fleet
+		// registry record — but only when the device_tenant mapping was readable
+		// and simply had no entry for this device. dna_history is never rewritten
+		// on a tenant move, so treating it as a tenant source while the
+		// authoritative mapping is unavailable would publish every moved steward
+		// under the tenant it left (Issue #3494 security review).
+		if tenantID == "" && tenantMapReadable {
+			tenantID = dnaRecordTenant
+		}
+
+		// No authoritative tenant. Fall back to the previous inventory entry so a
+		// transient failure of either authoritative source (per-device DNA read,
+		// or the device_tenant list) does not drop the device from the cluster
+		// view. The retained entry carries the tenant established by the last
+		// refresh that could read an authoritative source; it is never a tenant
+		// guessed from dna_history during this refresh.
+		if tenantID == "" && (dnaFailed || !tenantMapReadable) {
 			if prevEntry, ok := prev[deviceID]; ok {
 				prevCopy := *prevEntry
 				prevCopy.DNA = cloneDNA(prevEntry.DNA)
