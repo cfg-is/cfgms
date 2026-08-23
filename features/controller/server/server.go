@@ -411,8 +411,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// the enabled subsystems. A missing required store fails closed here — at startup,
 	// before anything tries to use the store — rather than silently producing a nil
 	// that causes a 503 at request time (issue #3400 regression guard).
-	// Issue #3461 wires the real subsystem declarations; for now the set is empty and
-	// every deployment shape passes cleanly.
+	// Deferred: tracked in #3491, #3492, #3493 — registration, push, and
+	// workflow-trigger declarations under epic #3406. Until those land the
+	// collected set is empty and every deployment shape passes cleanly.
 	if reqErr := interfaces.ValidateStorageRequirements(storageManager, collectActiveStorageRequirements(cfg)); reqErr != nil {
 		return nil, reqErr
 	}
@@ -3733,11 +3734,12 @@ func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]
 // gated here on whether the subsystem is active — so a deployment that does not run
 // a subsystem cannot be blocked by its requirements.
 //
-// Issue #3461 wires the real subsystem packages (registration, push, workflow-trigger)
-// into this function. Until then the set is empty and every deployment shape passes
-// ValidateStorageRequirements cleanly.
+// Deferred: tracked in #3491 (registration), #3492 (push), #3493 (workflow-trigger)
+// — the three subsystem-adoption stories under epic #3406 that wire real
+// declarations into this function. Until they land the set is empty and every
+// deployment shape passes ValidateStorageRequirements cleanly.
 func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequirement {
-	_ = cfg // cfg gates subsystem enablement; used by #3461 when real subsystems are added
+	_ = cfg // cfg gates subsystem enablement; wired by #3491/#3492/#3493 when real subsystems are added
 	return nil
 }
 
