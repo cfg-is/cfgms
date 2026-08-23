@@ -21,7 +21,9 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
 // recordingControlPlane is a minimal ControlPlaneProvider for server-level tests.
@@ -377,4 +379,134 @@ func TestLeaderResumePendingPushes_DeliveryFailureMarkedFailed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.PushStatusFailed, updated.Status,
 		"push record must be marked failed when all stewards fail delivery during resume")
+}
+
+// testNoPushStoreProvider is a purpose-built test implementation of
+// interfaces.StorageProvider that deliberately declines CreatePushStore. Used to
+// verify that the push requirement declaration fails closed when a provider does
+// not supply PushStore.
+type testNoPushStoreProvider struct{}
+
+var _ interfaces.StorageProvider = (*testNoPushStoreProvider)(nil)
+
+func (p *testNoPushStoreProvider) Name() string             { return "test-no-push-store" }
+func (p *testNoPushStoreProvider) Description() string      { return "test-only: declines push store" }
+func (p *testNoPushStoreProvider) GetVersion() string       { return "0.0.1-test" }
+func (p *testNoPushStoreProvider) Available() (bool, error) { return true, nil }
+func (p *testNoPushStoreProvider) ClusterCapable() bool     { return false }
+func (p *testNoPushStoreProvider) GetCapabilities() interfaces.ProviderCapabilities {
+	return interfaces.ProviderCapabilities{}
+}
+func (p *testNoPushStoreProvider) CreateClientTenantStore(_ map[string]interface{}) (business.ClientTenantStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateConfigStore(_ map[string]interface{}) (cfgconfig.ConfigStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateAuditStore(_ map[string]interface{}) (business.AuditStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateRBACStore(_ map[string]interface{}) (business.RBACStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateTenantStore(_ map[string]interface{}) (business.TenantStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateRegistrationTokenStore(_ map[string]interface{}) (business.RegistrationTokenStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateSessionStore(_ map[string]interface{}) (business.SessionStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateStewardStore(_ map[string]interface{}) (business.StewardStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateCommandStore(_ map[string]interface{}) (business.CommandStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreatePendingRegistrationStore(_ map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
+	return nil, business.ErrNotSupported
+}
+func (p *testNoPushStoreProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+// TestPushStoreRequirement_OSSCompositeStartsCleanly verifies that the push
+// store requirement does not block startup in the OSS composite (flatfile+SQLite)
+// deployment shape, where SQLite supplies a non-nil PushStore.
+func TestPushStoreRequirement_OSSCompositeStartsCleanly(t *testing.T) {
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: false,
+		},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: tempDir + "/flatfile",
+			SQLitePath:   tempDir + "/cfgms.db",
+		},
+	}
+
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err, "OSS composite (flatfile+SQLite) must satisfy push store requirements")
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	assert.NotNil(t, srv.storageManager.GetPushStore(),
+		"OSS composite must supply a non-nil push store via SQLite")
+}
+
+// TestPushStoreRequirement_DatabaseProviderShapePassesValidation verifies that
+// the push requirements are satisfied when a StorageManager supplies PushStore,
+// as the database provider does after Issue #3402. The SQLite provider is
+// already registered as a side effect of server.go's import and supplies a
+// real PushStore here without requiring a live Postgres connection.
+func TestPushStoreRequirement_DatabaseProviderShapePassesValidation(t *testing.T) {
+	// The sqlite provider is registered via server.go's side-effect import.
+	// Use its CreatePushStore (nil config → :memory: SQLite) to obtain a real
+	// PushStore, then compose a StorageManager and validate push requirements.
+	sqProv, err := interfaces.GetStorageProvider("sqlite")
+	require.NoError(t, err, "sqlite provider must be registered (server.go side-effect import)")
+
+	pushStore, err := sqProv.CreatePushStore(nil)
+	require.NoError(t, err)
+
+	sm := interfaces.NewStorageManagerFromStores(
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, pushStore,
+	)
+
+	validationErr := interfaces.ValidateStorageRequirements(sm, collectActiveStorageRequirements(nil))
+	assert.NoError(t, validationErr,
+		"a StorageManager with PushStore available must satisfy push requirements")
+}
+
+// TestPushStoreRequirement_ProviderDecliningStoreBlocksStartup verifies that
+// when a storage provider does not supply PushStore, ValidateStorageRequirements
+// fails with an error that names the push subsystem — converting the previous
+// silent skip (resumePendingPushes nil-guard) into a loud startup failure.
+func TestPushStoreRequirement_ProviderDecliningStoreBlocksStartup(t *testing.T) {
+	provider := &testNoPushStoreProvider{}
+	interfaces.RegisterStorageProvider(provider)
+	t.Cleanup(func() { interfaces.UnregisterStorageProvider("test-no-push-store") })
+
+	//nolint:staticcheck // CreateAllStoresFromConfig is retained for single-provider and test use
+	sm, err := interfaces.CreateAllStoresFromConfig("test-no-push-store", nil)
+	require.NoError(t, err, "provider registration must succeed before validation")
+
+	validationErr := interfaces.ValidateStorageRequirements(sm, collectActiveStorageRequirements(nil))
+	require.Error(t, validationErr,
+		"a provider that declines PushStore must cause startup to fail closed")
+	assert.Contains(t, validationErr.Error(), "push",
+		"error must name the push subsystem so operators can diagnose the failure")
 }
