@@ -6,6 +6,7 @@ package ha
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -249,11 +250,49 @@ func NewRaftConsensus(ctx context.Context, nodeID uint64, nodeInfo *NodeInfo, pe
 			_ = logStore.Close()
 			return nil, fmt.Errorf("replay snapshot into memory storage: %w", err)
 		}
+	} else if logStore != nil {
+		// No real snapshot — this cluster has never taken one. raft.RestartNode
+		// reads its voter set from Storage.InitialState(), which serves the
+		// snapshot's ConfState, so without this the node restarts with no voters
+		// and can never elect ("newRaft <id> [peers: [], ...]" then leader 0
+		// forever). config.Applied below also suppresses re-delivery of the
+		// ConfChange entries that would otherwise rebuild membership, so the log
+		// alone cannot repair it. Issue #3479.
+		//
+		// Seed a synthetic snapshot carrying only the persisted ConfState. It is
+		// placed at the recovered applied index because MemoryStorage.ApplySnapshot
+		// requires a positive index and discards entries up to it — everything at
+		// or below applied has, by definition, already been applied, so nothing is
+		// lost. Entries ABOVE applied are re-appended immediately below, which is
+		// what keeps committed-but-unapplied entries intact.
+		seeded, seedErr := seedConfStateSnapshot(storage, logStore, peers, recoveredEntries, recoveredHS, recoveredApplied)
+		if seedErr != nil {
+			_ = logStore.Close()
+			return nil, fmt.Errorf("restore raft conf state: %w", seedErr)
+		}
+		if seeded {
+			logger.Info("Restored Raft membership from persisted conf state",
+				"node_id", nodeID, "applied", recoveredApplied)
+		}
 	}
 	if len(recoveredEntries) > 0 {
-		if err := storage.Append(recoveredEntries); err != nil {
-			_ = logStore.Close()
-			return nil, fmt.Errorf("replay log entries into memory storage: %w", err)
+		// Only entries the storage does not already account for. After a ConfState
+		// seed the snapshot covers everything up to recoveredApplied, and appending
+		// an entry at or below the snapshot index is rejected by MemoryStorage.
+		toAppend := recoveredEntries
+		if first, ferr := storage.FirstIndex(); ferr == nil {
+			toAppend = toAppend[:0]
+			for _, e := range recoveredEntries {
+				if e.GetIndex() >= first {
+					toAppend = append(toAppend, e)
+				}
+			}
+		}
+		if len(toAppend) > 0 {
+			if err := storage.Append(toAppend); err != nil {
+				_ = logStore.Close()
+				return nil, fmt.Errorf("replay log entries into memory storage: %w", err)
+			}
 		}
 	}
 	if recoveredHS != nil && !raft.IsEmptyHardState(recoveredHS) {
@@ -673,7 +712,20 @@ func (rc *RaftConsensus) publishEntries(entries []*raftpb.Entry) {
 			}
 
 			// &cc satisfies raftpb.ConfChangeI: AsV1 has a pointer receiver in v3.7.0.
-			rc.node.ApplyConfChange(&cc)
+			//
+			// The returned ConfState is the authoritative voter set after this
+			// change, and it must be persisted: it is the only thing that lets a
+			// restarted node rebuild its membership. Discarding it (as this did
+			// before Issue #3479) left every restarted node with "peers: []" and
+			// no way to elect a leader.
+			confState := rc.node.ApplyConfChange(&cc)
+			if rc.logStore != nil && confState != nil {
+				if err := rc.logStore.SaveConfState(confState); err != nil {
+					rc.logger.Error("Failed to persist Raft conf state; this node will not "+
+						"recover its membership if it restarts",
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+			}
 
 			switch cc.GetType() {
 			case raftpb.ConfChangeAddNode:
@@ -1316,4 +1368,93 @@ func (l *raftLogger) Panic(v ...interface{}) {
 func (l *raftLogger) Panicf(format string, v ...interface{}) {
 	l.logger.Error(fmt.Sprintf(format, v...))
 	panic(fmt.Sprintf(format, v...))
+}
+
+// seedConfStateSnapshot injects the persisted Raft voter set into storage when
+// the node is restarting from a log that has no snapshot of its own.
+//
+// raft.RestartNode takes its membership from Storage.InitialState(), which
+// returns the snapshot's ConfState. A cluster that has never snapshotted has no
+// ConfState to return, so every node restarts with an empty voter set and the
+// cluster never elects a leader — reproduced deterministically on the real
+// cfg-lab cluster across two full restarts (Issue #3479).
+//
+// Returns false (with no error) when there is nothing to seed: no persisted
+// ConfState, an empty voter set, or a zero applied index. Those are the
+// legitimate "fresh cluster" cases, where StartNode bootstraps membership from
+// the configured peer list instead.
+func seedConfStateSnapshot(
+	storage *raft.MemoryStorage,
+	logStore *RaftLogStore,
+	peers []raft.Peer,
+	recoveredEntries []*raftpb.Entry,
+	recoveredHS *raftpb.HardState,
+	recoveredApplied uint64,
+) (bool, error) {
+	confState, err := logStore.LoadConfState()
+	if err != nil {
+		return false, fmt.Errorf("load persisted conf state: %w", err)
+	}
+
+	// Fall back to the configured peer list when nothing was persisted. This is
+	// what heals a store written before Issue #3479 added the confstate bucket:
+	// such a node has a full log and no ConfState, which is exactly the wedged
+	// state found on the lab cluster. Without this it would need a manual
+	// raft.db deletion to ever elect again.
+	//
+	// The configured peers are the authoritative membership for this deployment:
+	// the cluster is bootstrapped from CFGMS_HA_CLUSTER_NODES and StartNode
+	// appends one ConfChangeAddNode per configured peer, so config and ConfState
+	// agree by construction. Once this node applies any ConfChange, the persisted
+	// ConfState takes over and this branch stops being consulted.
+	if confState == nil || len(confState.GetVoters()) == 0 {
+		if len(peers) == 0 {
+			return false, nil
+		}
+		voters := make([]uint64, 0, len(peers))
+		for _, p := range peers {
+			voters = append(voters, p.ID)
+		}
+		confState = &raftpb.ConfState{Voters: voters}
+	}
+
+	if recoveredApplied == 0 {
+		return false, nil
+	}
+
+	// The snapshot's term must match the log at that index, or raft will reject
+	// the log as inconsistent. Prefer the entry actually at the applied index;
+	// fall back to the recovered HardState term when the log has been compacted
+	// past it.
+	term := uint64(0)
+	for _, e := range recoveredEntries {
+		if e.GetIndex() == recoveredApplied {
+			term = e.GetTerm()
+			break
+		}
+	}
+	if term == 0 && recoveredHS != nil {
+		term = recoveredHS.GetTerm()
+	}
+	if term == 0 {
+		// Nothing credible to anchor the snapshot to; leave storage alone rather
+		// than fabricating a term that could contradict the log.
+		return false, nil
+	}
+
+	snap := &raftpb.Snapshot{
+		Metadata: &raftpb.SnapshotMetadata{
+			Index:     proto.Uint64(recoveredApplied),
+			Term:      proto.Uint64(term),
+			ConfState: confState,
+		},
+	}
+	if err := storage.ApplySnapshot(snap); err != nil {
+		// Already covered by a newer snapshot: nothing to do, not a failure.
+		if errors.Is(err, raft.ErrSnapOutOfDate) {
+			return false, nil
+		}
+		return false, fmt.Errorf("seed conf-state snapshot: %w", err)
+	}
+	return true, nil
 }
