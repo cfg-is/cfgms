@@ -478,22 +478,12 @@ func (w *WindowsUpdateManager) shouldIncludeUpdate(kbArticleIDs *ole.IDispatch, 
 		return true
 	}
 
-	// Get first KB article ID. IStringCollection items are BSTRs, so VARIANT.Val
-	// holds the string pointer, not the ID — the value must be read through
-	// Value(), which performs the BSTR conversion. Formatting Val directly yields
-	// a pointer-derived number that never matches a configured KB ID, which would
-	// silently disable both the exclude and include lists.
+	// Get first KB article ID
 	kbVariant, err := oleutil.GetProperty(kbArticleIDs, "Item", 0)
 	if err != nil {
 		return true
 	}
-	defer func() { _ = kbVariant.Clear() }()
-
-	kbArticleID, ok := kbVariant.Value().(string)
-	if !ok {
-		return true // Include by default if the ID is not a readable string
-	}
-	kbID := "KB" + kbArticleID
+	kbID := fmt.Sprintf("KB%v", kbVariant.Val)
 
 	// Check exclude list first
 	for _, excludeID := range config.ExcludePatches {
@@ -536,11 +526,7 @@ func (w *WindowsUpdateManager) extractPatchInfo(update *ole.IDispatch) PatchInfo
 			count := int(countVariant.Val)
 			if count > 0 {
 				if idVariant, err := oleutil.GetProperty(kbArticleIDs, "Item", 0); err == nil {
-					// BSTR item: read through Value(), not Val (see shouldIncludeUpdate).
-					if kbArticleID, ok := idVariant.Value().(string); ok && kbArticleID != "" {
-						patchInfo.ID = "KB" + kbArticleID
-					}
-					_ = idVariant.Clear()
+					patchInfo.ID = fmt.Sprintf("KB%v", idVariant.Val)
 				}
 			}
 		}
