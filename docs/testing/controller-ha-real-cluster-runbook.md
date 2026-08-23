@@ -800,6 +800,13 @@ health-gate on `is_leader`; a plain liveness gate on `GET /api/v1/health`
 suffices. That is a meaningfully cheaper answer than the leader-only LB the story
 brief hypothesised, and it falls out of the no-forwarding finding above.
 
+> **Superseded for the registration path (2026-08-22).** #3473 subsequently gated
+> the registration and token endpoints on `HasLeadership()`, so a follower now
+> answers `503` to an enrolment attempt. An LB used for *enrolment* **must**
+> health-gate on leadership after all. The conclusion above still holds for the
+> ControlChannel path this section actually measured — steady-state steward
+> traffic is still served by any node. See §7.
+
 ### Reproduction
 
 ```bash
@@ -1037,3 +1044,158 @@ re-apply the bootstrap ConfChanges on restart) so a cluster can restart without
 discarding its log.*
 This supersedes the "Raft state is entirely in-memory" note in §3/§4 — that was
 true before #3284 and is why those stories' stop-all/start-all drills worked.
+
+## 7. Fleet enrollment against the cluster (story #3405)
+
+Executed 2026-08-22 against the 3-node cluster. This is the section to follow to
+rebuild the cfg-lab fleet from scratch.
+
+### Outcome
+
+All three Hyper-V hosts (`CFG-70-02`, `CFG-AB-02`, `CFG-C3-02`) are enrolled
+against the cluster and were proven end to end:
+
+| Check | Result |
+|---|---|
+| Enrolled and present in `GET /api/v1/stewards` | 3 stewards, tenant `infra-hyperv` |
+| Visible from **all three** nodes, consistent identity/tenant/status | yes |
+| Converging — proven by a real config delivery, not presence | `successful:1 failed:0`, marker file written on the endpoint |
+| Survives a controller restart, **including a steward that never reconnected** | 3/3 still fully described on all nodes |
+| Survives a leader failover, no steward lost or duplicated | `count=3 unique=3` on both survivors, term 2 → 3 |
+
+This is the first fleet this epic has had. Every "live steward fleet is
+undisrupted" criterion in epic #3090 previously measured against **0 stewards**
+and passed vacuously.
+
+### Prerequisite: the controller binary must be current
+
+Deploy a build containing #3401, #3403, #3478 and #3480 to **all three** nodes
+before enrolling. This is not optional housekeeping:
+
+`pkg/storage/providers/database/steward_store.go:61` calls
+`CreateStewardRecordsTable` on every store construction, and that function does
+`DROP POLICY IF EXISTS rls_read` + `CREATE POLICY`. **A controller startup
+rewrites the RLS policies from whatever is compiled into the running binary.** A
+node still on a pre-#3478 build therefore silently reverts migration 010 the next
+time it restarts, and the fleet becomes unreadable again with no error anywhere.
+Verify after deploying:
+
+```sql
+SELECT CASE WHEN qual LIKE '%COALESCE%' THEN 'FIXED' ELSE 'BROKEN' END
+FROM pg_policies WHERE tablename='steward_records' AND cmd='SELECT';
+```
+
+### Registration is leader-only — this is the trap
+
+Since **#3473** the registration and token endpoints are gated on
+`HasLeadership()`. A follower answers `503 service unavailable`, and the steward
+surfaces it as:
+
+```
+HTTP registration failed: registration failed with status 503: service unavailable
+```
+
+which reads as an outage rather than "you are talking to a follower". Measured
+on the live cluster: follower `.103` → 503, leader `.106` → 202. **Point the
+steward's `--controller-url` at the current leader for enrolment.**
+
+The gRPC ControlChannel is *not* leader-gated, so steady-state steward traffic
+is genuinely any-node; only the enrolment REST call must reach the leader.
+
+> **This corrects §6.** That section concluded an LB fronting the cluster "does
+> not need an `is_leader` health gate — a plain liveness gate suffices." That was
+> measured before #3473 and is no longer true for registration: an LB used for
+> enrolment **must** health-gate on leadership (`GET /api/v1/raft/status` →
+> `is_leader`). §6's conclusion still holds for the ControlChannel path it was
+> actually measuring.
+
+Find the leader before enrolling:
+
+```bash
+for ip in 103 104 106; do curl -s --cert admin.crt --key admin.key --cacert ca.crt \
+  https://192.168.234.$ip:9080/api/v1/raft/status; done   # pick is_leader:true
+```
+
+### Procedure (per host)
+
+1. **Mint a token against the leader.** The default lifetime is 15 minutes,
+   which is too short for a multi-host rollout — set `expires_in`:
+   ```
+   POST https://<leader>:9080/api/v1/registration/tokens
+   {"tenant_id":"infra-hyperv","controller_url":"192.168.234.103:4433","expires_in":"24h"}
+   ```
+2. **Stop the steward and clear its identity** so it re-registers rather than
+   presenting a certificate the cluster has no record of:
+   ```powershell
+   Stop-Service CFGMSSteward -Force
+   $certs = "$env:ProgramData\cfgms\steward\certs"
+   Copy-Item -Recurse $certs "$certs.pre-enrol"; Remove-Item -Recurse -Force -LiteralPath $certs
+   ```
+3. **Repoint the service at the leader.** `sc.exe config binPath=` is unreliable
+   through PowerShell remoting — the quoting is mangled and the change silently
+   does not apply (observed live). Set the registry value instead, and read it
+   back:
+   ```powershell
+   $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\CFGMSSteward'
+   $exe = '"C:\Program Files\CFGMS\cfgms-steward.exe"'
+   Set-ItemProperty $key ImagePath "$exe --regtoken <TOKEN> --controller-url https://<leader>:9080"
+   (Get-ItemProperty $key).ImagePath      # verify — do not assume
+   ```
+4. **Start the service**, then approve the quarantined registration. Approval
+   takes the **`pending_id`**, not the steward ID:
+   ```
+   GET  https://<leader>:9080/api/v1/registration/pending
+   POST https://<leader>:9080/api/v1/registration/<pending_id>/approve
+   ```
+
+`CFG-70-02` hosts the non-admin operator session, so steps 2–4 there need an
+elevated shell run by the maintainer; `CFG-AB-02` and `CFG-C3-02` are reachable
+via `Invoke-Command` with an elevated token from the same account.
+
+### Verification
+
+```
+GET /api/v1/stewards        # on EACH of .103 / .104 / .106 — all three must agree
+```
+A steward visible on only one node means the cluster-wide fleet read (#3480) is
+not in the running build. Then prove convergence with a real delivery rather than
+trusting presence:
+
+```
+PUT /api/v1/stewards/<steward_id>/config
+```
+with a `file` resource, restart the steward, and confirm the file exists on the
+endpoint and the log reports `Configuration execution completed … successful:1
+failed:0`. Note the `file` module **requires** `allowed_base_path` (an absolute
+path constraining all operations); omitting it fails the resource with
+`AllowedBasePath is required`, while the config still deploys — so the delivery
+looks successful and the resource does not apply.
+
+### Recovery — steward does not appear
+
+- **`503 service unavailable` on register** — the URL points at a follower. Not
+  an outage. Repoint at the leader.
+- **`401 Invalid or expired registration token`** — tokens default to 15 minutes.
+- **Steward loops `PermissionDenied: steward reconnect not approved`** — it holds
+  a certificate for which the cluster has no record. Clear its identity
+  (step 2) and re-enrol. Until #3481 lands this retries at ~1 Hz indefinitely and
+  will flood both logs.
+- **`Access is denied` writing the CA cert** — the Windows **ReadOnly** attribute
+  on pre-existing files under `C:\ProgramData\cfgms`; clear `IsReadOnly` first.
+  ACL grants do not fix it.
+
+### Findings recorded, not fixed here
+
+Per this story's Out of Scope, defects belong to sibling stories:
+
+- **A stopped steward still reports `status: active`.** C3-02's steward was down
+  across the whole controller restart and remained `active` in the fleet list on
+  all three nodes. Correct for AC4 ("still fully described"), but liveness is not
+  being aged — an operator cannot distinguish a live steward from a stopped one
+  by status alone.
+- **DNA `hostname`/`os` are empty in the fleet list** for all three stewards
+  despite the steward publishing DNA successfully. Registration seeds
+  identity hints (#2640); they are not surfacing in `GET /api/v1/stewards`.
+- **Every controller restart still needs a manual `raft.db` wipe** to re-form
+  quorum, because #3479's ConfState fix is not yet on `develop`. Both restarts in
+  this story used the §6 recovery procedure. Once #3479 lands, drop the wipe.
