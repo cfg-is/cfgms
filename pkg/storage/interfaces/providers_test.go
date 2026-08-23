@@ -44,7 +44,30 @@ func (d *decliningRegistrationDatabaseProvider) CreatePendingRegistrationStore(_
 
 // newDecliningRegistrationDatabaseProvider returns a database-backed StorageProvider
 // identical to the real one except that it declines PendingRegistrationStore, for
-// the #3400 regression test in requirements_test.go.
+// the #3400 regression test in requirements_test.go and the #3401 regression test
+// in contract_test.go.
 func newDecliningRegistrationDatabaseProvider() interfaces.StorageProvider {
 	return &decliningRegistrationDatabaseProvider{DatabaseProvider: &database.DatabaseProvider{}}
+}
+
+// decliningTriggerPushDatabaseProvider wraps the real database provider and
+// declines TriggerStore and PushStore, reproducing the #3402 condition (the
+// database provider returning business.ErrNotSupported for those stores).
+type decliningTriggerPushDatabaseProvider struct {
+	*database.DatabaseProvider
+}
+
+func (d *decliningTriggerPushDatabaseProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (d *decliningTriggerPushDatabaseProvider) CreatePushStore(_ map[string]interface{}) (business.PushStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+// newDecliningTriggerPushDatabaseProvider returns a database-backed StorageProvider
+// identical to the real one except that it declines TriggerStore and PushStore, for
+// the #3402 regression test in contract_test.go.
+func newDecliningTriggerPushDatabaseProvider() interfaces.StorageProvider {
+	return &decliningTriggerPushDatabaseProvider{DatabaseProvider: &database.DatabaseProvider{}}
 }
