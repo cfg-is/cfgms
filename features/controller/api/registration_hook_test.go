@@ -767,15 +767,21 @@ func TestManualReviewApprovalHookStoreRequirements_ClusterCompositionPassesValid
 // condition — a provider gap that previously surfaced as a 503 at request time rather than
 // a startup failure.
 //
-// The test constructs a StorageManager via NewStorageManagerFromStores with no stores,
-// modelling the result of a provider that declined to supply PendingRegistrationStore
-// (exactly as the database provider did before #3401 fixed it).
+// The test reproduces the condition against a real database provider implementation
+// that overrides only CreatePendingRegistrationStore (via
+// pkgtesting.SetupDecliningPendingRegistrationClusterStorage), composed through the
+// real CreateClusterStorageManager path — not a hand-built store-less StorageManager.
+// Skipped when Postgres is unreachable.
 func TestManualReviewApprovalHookStoreRequirements_DecliningProviderFailsStartup(t *testing.T) {
-	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	pgDSN := skipRegistrationHookTestIfNoPostgres(t)
+
+	sm := pkgtesting.SetupDecliningPendingRegistrationClusterStorage(t, pgDSN)
+	require.False(t, sm.HasStore(interfaces.StoreNamePendingRegistration),
+		"a declining provider must leave PendingRegistrationStore absent from the composed manager")
 
 	err := interfaces.ValidateStorageRequirements(sm, ManualReviewApprovalHookStoreRequirements)
 	require.Error(t, err,
-		"a provider declining PendingRegistrationStore must block startup via ValidateStorageRequirements")
+		"a real provider declining PendingRegistrationStore must block startup via ValidateStorageRequirements")
 	assert.Contains(t, err.Error(), "registration",
 		"startup error must name the registration subsystem so operators can diagnose the gap")
 	assert.Contains(t, err.Error(), string(interfaces.StoreNamePendingRegistration),

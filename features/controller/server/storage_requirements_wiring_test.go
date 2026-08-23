@@ -3,8 +3,13 @@
 package server
 
 import (
+	"database/sql"
+	"fmt"
+	"os"
+	"strconv"
 	"testing"
 
+	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -12,7 +17,49 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
+
+// buildStorageRequirementsWiringPostgresDSN constructs a Postgres DSN from the
+// same env vars used by the cluster storage tests.
+func buildStorageRequirementsWiringPostgresDSN() string {
+	pw := testutil.GetTestDBPassword()
+	port := 5432
+	if p := os.Getenv("CFGMS_TEST_DB_PORT"); p != "" {
+		if pi, err := strconv.Atoi(p); err == nil {
+			port = pi
+		}
+	}
+	dbName := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_NAME"); v != "" {
+		dbName = v
+	}
+	dbUser := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_USER"); v != "" {
+		dbUser = v
+	}
+	return fmt.Sprintf("host=localhost port=%d dbname=%s user=%s password=%s sslmode=disable",
+		port, dbName, dbUser, pw)
+}
+
+// skipStorageRequirementsWiringTestIfNoPostgres skips the test when Postgres is unreachable.
+func skipStorageRequirementsWiringTestIfNoPostgres(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Postgres test in short mode")
+	}
+	dsn := buildStorageRequirementsWiringPostgresDSN()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Skip("Postgres not available:", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Ping(); err != nil {
+		t.Skip("Postgres not reachable:", err)
+	}
+	return dsn
+}
 
 // TestResolveRegistrationWorkflow_MatchesHookSelection pins the workflow resolution
 // that both New's hook switch and collectActiveStorageRequirements read. If these
@@ -84,13 +131,19 @@ func TestCollectActiveStorageRequirements_InactiveWorkflowsDeclareNothing(t *tes
 }
 
 // TestCollectActiveStorageRequirements_DecliningProviderBlocksManualReviewStartup
-// exercises the wired set — not a hand-composed declaration — against a
-// StorageManager whose provider declined PendingRegistrationStore. This is the
-// #3400 condition: before #3491 the collected set was empty, so
-// ValidateStorageRequirements returned nil and the controller started with a
-// substituted approval policy.
+// exercises the wired set — not a hand-composed declaration — against a real
+// cluster StorageManager whose "database" provider declined PendingRegistrationStore
+// (via pkgtesting.SetupDecliningPendingRegistrationClusterStorage, composed through
+// the real CreateClusterStorageManager path). This is the #3400 condition: before
+// #3491 the collected set was empty, so ValidateStorageRequirements returned nil and
+// the controller started with a substituted approval policy. Skipped when Postgres
+// is unreachable.
 func TestCollectActiveStorageRequirements_DecliningProviderBlocksManualReviewStartup(t *testing.T) {
-	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	pgDSN := skipStorageRequirementsWiringTestIfNoPostgres(t)
+
+	sm := pkgtesting.SetupDecliningPendingRegistrationClusterStorage(t, pgDSN)
+	require.False(t, sm.HasStore(interfaces.StoreNamePendingRegistration),
+		"a declining provider must leave PendingRegistrationStore absent from the composed manager")
 
 	manualReview := &config.Config{Registration: &config.RegistrationConfig{Workflow: "manual-review"}}
 	err := interfaces.ValidateStorageRequirements(sm, collectActiveStorageRequirements(manualReview))
