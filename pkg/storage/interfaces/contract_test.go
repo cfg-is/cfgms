@@ -295,11 +295,16 @@ func TestCapabilityCompleteness_ClusterRegression_Issue3402(t *testing.T) {
 	assert.Contains(t, joined, string(shapeCluster), "error must name the deployment shape")
 }
 
-// TestCapabilityMatrix_AllShapesCovered verifies that the capability matrix
-// contains entries for every known StoreName constant. A store constant added to
-// requirements.go without a corresponding matrix entry for at least one shape
-// fails here, forcing the author to make an explicit decision about where the
-// store is required rather than silently defaulting to untested.
+// TestCapabilityMatrix_AllShapesCovered verifies that every store listed in
+// allStores has at least one entry in shapeCapabilityMatrix. A store in
+// allStores that has no matrix entry fails here, forcing the author to make an
+// explicit decision about where the store is required.
+//
+// allStores must be kept in sync with the StoreName constants in
+// requirements.go. Go has no runtime enum reflection, so this is a two-place
+// update: when adding a new StoreName to requirements.go, also add it to
+// allStores below. The comment here states the required action explicitly so
+// that a missed update is visible as soon as the reader looks at the test.
 func TestCapabilityMatrix_AllShapesCovered(t *testing.T) {
 	allStores := []interfaces.StoreName{
 		interfaces.StoreNameClientTenant,
