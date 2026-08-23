@@ -1,24 +1,19 @@
 name: golangci-lint
 
-# ADVISORY (Issue #3385). This job reports golangci-lint findings for both build
-# configurations but never blocks a PR or a merge: `continue-on-error: true` is
-# set at the job level, so even an infrastructure failure cannot gate a merge.
-# It is deliberately NOT in the branch ruleset's required-check list.
+# BLOCKING (Issue #3442, formerly advisory per #3385). This job reports
+# golangci-lint findings for both build configurations and fails the workflow
+# run when findings are present. `continue-on-error` was removed by #3442 once
+# the 139-finding backlog (tracked by #3439–#3442) was fully cleared.
 #
-# Why advisory: `develop` carries 139 pre-existing findings today (all of them on
-# the GOOS=windows side — see the cross-GOOS note below), tracked by #3439 through
-# #3441. Making the job blocking on day one would paint every PR red. #3442 flips
-# it to blocking once that backlog is clear.
+# Note: this job is CI-level blocking (workflow run fails on findings) but is
+# NOT yet in the branch ruleset's required-status-checks list. Promoting it to
+# a required context is a separate epic-#3175 decision and is NOT done by #3442.
 #
-# Why it lands ahead of that cleanup: CI has never run golangci-lint, so Windows
-# build-configuration lint debt has been accumulating with no signal at all. This
-# job creates the signal immediately rather than only after the cleanup finishes.
-#
-# No PR/merge-queue stub job exists here, and none is needed. Stubs exist only to
-# satisfy *required* contexts across the #2595 PR/merge-queue split; an advisory
-# check has no context to satisfy, so a skipped run is simply absent. That also
-# keeps this workflow clear of the stub-exclusivity hazard documented in
-# CLAUDE.md — there is only ever one run posting this check name.
+# No PR/merge-queue stub job exists here, and none is needed. Stubs exist only
+# to satisfy *required* contexts across the #2595 PR/merge-queue split; this
+# job is not a required context, so no stub is needed and there is only ever
+# one run posting this check name — keeping it clear of the stub-exclusivity
+# hazard documented in CLAUDE.md.
 
 on:
   pull_request:
@@ -55,9 +50,6 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    # Advisory posture (Issue #3385). Job-level, so neither a finding nor a
-    # toolchain failure can ever block a PR or the merge queue.
-    continue-on-error: true
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -125,7 +117,7 @@ jobs:
           set -e
 
           {
-            echo "## golangci-lint — GOOS=${GOOS} (advisory)"
+            echo "## golangci-lint — GOOS=${GOOS}"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -135,13 +127,10 @@ jobs:
               echo "No findings." >> "$GITHUB_STEP_SUMMARY"
               ;;
             1)
-              # Findings. Advisory by design — report, do not fail.
-              echo "⚠️  golangci-lint reported findings for GOOS=${GOOS}."
-              echo "This job is advisory (Issue #3385); findings do not block this PR."
-              echo "Backlog: #3439 (cmd/), #3440 (features/steward/), #3441 (features/modules/),"
-              echo "#3442 (pkg/ and test/, then flips this job to blocking)."
+              # Findings. Blocking by design (Issue #3442) — fail the step.
+              echo "❌ golangci-lint reported findings for GOOS=${GOOS}."
               {
-                echo "Findings reported — advisory, not blocking (Issue #3385)."
+                echo "Findings reported — blocking (Issue #3442)."
                 echo ""
                 # Indented code block, not a fenced one. Lint output echoes source
                 # text that a fork PR controls, and a backtick fence in that text
@@ -149,12 +138,12 @@ jobs:
                 # summary. An indented block has no terminator to forge.
                 tail -n 40 lint-output.txt | sed 's/^/    /'
               } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
               ;;
             *)
               # Not a findings result: config error (3), typechecking error (7),
               # timeout, or a missing toolchain. "0 issues." on one of these is a
-              # false clean, so surface it loudly. The job still cannot block a
-              # merge — continue-on-error is set at the job level.
+              # false clean, so surface it loudly.
               echo "❌ golangci-lint could not complete for GOOS=${GOOS} (exit ${rc})."
               echo "This is a tooling/configuration failure, not a lint result."
               {
