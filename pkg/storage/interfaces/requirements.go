@@ -180,10 +180,17 @@ func ValidateStorageRequirements(sm *StorageManager, reqs []StoreRequirement) er
 // optional store in reqs that is absent in sm. Required stores are ignored — their
 // absence is already a fatal startup error caught by ValidateStorageRequirements.
 //
+// providerName is the operator-facing provider label (e.g. "flatfile", "database")
+// reported in each entry's Provider field, so an operator can tell which backend
+// to switch to for the capability. Callers must not substitute
+// sm.GetProviderName(): that returns the internal composition name — "composite"
+// for the OSS flatfile+SQLite backend — which names no backend an operator can
+// actually choose between and would silently diverge from the provider named in
+// each requirement's own operator-facing Consequence text.
+//
 // Call this once at composition time alongside ValidateStorageRequirements and pass
 // the result to the administrative status surface. Never call it per request.
-func CollectAbsentOptionalCapabilities(sm *StorageManager, reqs []StoreRequirement) []AbsentCapability {
-	provider := sm.GetProviderName()
+func CollectAbsentOptionalCapabilities(sm *StorageManager, reqs []StoreRequirement, providerName string) []AbsentCapability {
 	var absent []AbsentCapability
 	for _, req := range reqs {
 		if req.Severity != RequirementOptional {
@@ -194,7 +201,7 @@ func CollectAbsentOptionalCapabilities(sm *StorageManager, reqs []StoreRequireme
 				Capability:  string(req.Store),
 				Subsystem:   req.Subsystem,
 				Consequence: req.Consequence,
-				Provider:    provider,
+				Provider:    providerName,
 			})
 		}
 	}

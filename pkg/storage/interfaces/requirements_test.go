@@ -228,13 +228,45 @@ func TestCollectAbsentOptionalCapabilities_MissingOptionalReported(t *testing.T)
 		},
 	}
 
-	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs, "flatfile")
 
 	require.Len(t, absent, 1, "one absent optional capability must be reported")
 	assert.Equal(t, string(interfaces.StoreNamePush), absent[0].Capability)
 	assert.Equal(t, "push", absent[0].Subsystem)
 	assert.Equal(t, "Push-state is not persisted — in-flight config pushes may not resume after a controller restart", absent[0].Consequence)
-	assert.Equal(t, "composite", absent[0].Provider, "provider must be named so the operator knows what to change")
+	assert.Equal(t, "flatfile", absent[0].Provider,
+		"provider must be the caller-supplied operator-facing label, not sm's internal composition name")
+}
+
+// TestCollectAbsentOptionalCapabilities_UsesCallerProvidedProviderNotInternalName
+// verifies that the Provider field always reflects the providerName argument, even
+// when it differs from sm.GetProviderName() — the OSS composite StorageManager
+// always reports "composite" internally, which is not one of the backends
+// ("flatfile"/"database") an operator can actually choose between. This is the
+// regression guard for the mismatch found in PR #3523 review: the internal
+// composition name leaking into the operator-facing Provider field while the
+// Consequence text named a different, more specific provider.
+func TestCollectAbsentOptionalCapabilities_UsesCallerProvidedProviderNotInternalName(t *testing.T) {
+	sm := newEmptySM()
+	require.Equal(t, "composite", sm.GetProviderName(),
+		"precondition: NewStorageManagerFromStores always reports the internal composition name")
+
+	reqs := []interfaces.StoreRequirement{
+		{
+			Subsystem:   "push",
+			Store:       interfaces.StoreNamePush,
+			Severity:    interfaces.RequirementOptional,
+			Consequence: "Push-state is not persisted (provider: flatfile)",
+		},
+	}
+
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs, "flatfile")
+
+	require.Len(t, absent, 1)
+	assert.Equal(t, "flatfile", absent[0].Provider,
+		"Provider must match the granular label passed by the caller, not sm.GetProviderName()'s \"composite\"")
+	assert.Contains(t, absent[0].Consequence, "flatfile",
+		"Consequence and Provider must name the same provider so the response is internally consistent")
 }
 
 // TestCollectAbsentOptionalCapabilities_PresentOptionalNotReported verifies that an
@@ -255,7 +287,7 @@ func TestCollectAbsentOptionalCapabilities_PresentOptionalNotReported(t *testing
 		},
 	}
 
-	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs, "flatfile")
 
 	require.Empty(t, absent, "a present optional capability must not appear in the absent list")
 }
@@ -275,7 +307,7 @@ func TestCollectAbsentOptionalCapabilities_RequiredIgnored(t *testing.T) {
 		},
 	}
 
-	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs, "flatfile")
 
 	require.Empty(t, absent,
 		"required stores must be ignored by CollectAbsentOptionalCapabilities — they are already caught by ValidateStorageRequirements")
@@ -287,8 +319,8 @@ func TestCollectAbsentOptionalCapabilities_RequiredIgnored(t *testing.T) {
 func TestCollectAbsentOptionalCapabilities_EmptyReqs(t *testing.T) {
 	sm := newEmptySM()
 
-	assert.Empty(t, interfaces.CollectAbsentOptionalCapabilities(sm, nil))
-	assert.Empty(t, interfaces.CollectAbsentOptionalCapabilities(sm, []interfaces.StoreRequirement{}))
+	assert.Empty(t, interfaces.CollectAbsentOptionalCapabilities(sm, nil, "flatfile"))
+	assert.Empty(t, interfaces.CollectAbsentOptionalCapabilities(sm, []interfaces.StoreRequirement{}, "flatfile"))
 }
 
 // TestCollectAbsentOptionalCapabilities_MultipleAbsent verifies that all absent
@@ -311,7 +343,7 @@ func TestCollectAbsentOptionalCapabilities_MultipleAbsent(t *testing.T) {
 		},
 	}
 
-	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs, "flatfile")
 
 	require.Len(t, absent, 2, "all absent optional capabilities must be reported")
 	subsystems := []string{absent[0].Subsystem, absent[1].Subsystem}

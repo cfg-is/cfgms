@@ -421,7 +421,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Collect declared-optional capabilities that are absent in this deployment.
 	// Computed once at composition (Issue #3409): the capability set is fixed at
 	// startup and served verbatim by GET /api/v1/ha/status — no per-request recompute.
-	absentCaps := interfaces.CollectAbsentOptionalCapabilities(storageManager, activeReqs)
+	absentCaps := interfaces.CollectAbsentOptionalCapabilities(storageManager, activeReqs, storageProviderName(cfg))
 	if len(absentCaps) > 0 {
 		for _, cap := range absentCaps {
 			logger.Warn("Optional storage capability absent — deployment running in degraded mode",
