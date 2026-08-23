@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // HAStatusResponse represents the response for HA status endpoint
@@ -17,6 +18,11 @@ type HAStatusResponse struct {
 	RaftIsLeader bool   `json:"raft_is_leader"`
 	Mode         string `json:"mode"`
 	Health       string `json:"health"`
+	// AbsentCapabilities lists declared-optional storage capabilities that are
+	// absent in this deployment. An empty slice means all declared capabilities
+	// are present. Each entry names the capability, the subsystem that declared
+	// it, the functional consequence of the absence, and the running provider.
+	AbsentCapabilities []interfaces.AbsentCapability `json:"absent_capabilities,omitempty"`
 }
 
 // HAClusterResponse represents the response for HA cluster endpoint
@@ -67,12 +73,17 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 		health = healthStatus.Overall.String()
 	}
 
+	s.mu.RLock()
+	absentCaps := s.absentCapabilities
+	s.mu.RUnlock()
+
 	response := HAStatusResponse{
-		NodeID:       nodeID,
-		IsLeader:     isLeader,
-		RaftIsLeader: raftIsLeader,
-		Mode:         mode,
-		Health:       health,
+		NodeID:             nodeID,
+		IsLeader:           isLeader,
+		RaftIsLeader:       raftIsLeader,
+		Mode:               mode,
+		Health:             health,
+		AbsentCapabilities: absentCaps,
 	}
 
 	s.respondJSON(w, http.StatusOK, response)

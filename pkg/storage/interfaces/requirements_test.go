@@ -213,6 +213,112 @@ func TestValidateStorageRequirements_MultipleErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "PushStore")
 }
 
+// TestCollectAbsentOptionalCapabilities_MissingOptionalReported verifies that a
+// deployment missing an optional capability reports it with subsystem, consequence,
+// and provider — the three fields an operator needs to understand the gap and act.
+func TestCollectAbsentOptionalCapabilities_MissingOptionalReported(t *testing.T) {
+	sm := newEmptySM()
+
+	reqs := []interfaces.StoreRequirement{
+		{
+			Subsystem:   "push",
+			Store:       interfaces.StoreNamePush,
+			Severity:    interfaces.RequirementOptional,
+			Consequence: "Push-state is not persisted — in-flight config pushes may not resume after a controller restart",
+		},
+	}
+
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+
+	require.Len(t, absent, 1, "one absent optional capability must be reported")
+	assert.Equal(t, string(interfaces.StoreNamePush), absent[0].Capability)
+	assert.Equal(t, "push", absent[0].Subsystem)
+	assert.Equal(t, "Push-state is not persisted — in-flight config pushes may not resume after a controller restart", absent[0].Consequence)
+	assert.Equal(t, "composite", absent[0].Provider, "provider must be named so the operator knows what to change")
+}
+
+// TestCollectAbsentOptionalCapabilities_PresentOptionalNotReported verifies that an
+// optional capability that IS present is not included in the absent list.
+func TestCollectAbsentOptionalCapabilities_PresentOptionalNotReported(t *testing.T) {
+	ffCfg, sqCfg := ossConfigs(t)
+	sm, err := interfaces.CreateOSSStorageManager(ffCfg["root"].(string), sqCfg["path"].(string))
+	require.NoError(t, err)
+	defer func() { _ = sm.Close() }()
+
+	// StewardStore is always present in the OSS composite provider.
+	reqs := []interfaces.StoreRequirement{
+		{
+			Subsystem:   "fleet",
+			Store:       interfaces.StoreNameSteward,
+			Severity:    interfaces.RequirementOptional,
+			Consequence: "Fleet registry is unavailable",
+		},
+	}
+
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+
+	require.Empty(t, absent, "a present optional capability must not appear in the absent list")
+}
+
+// TestCollectAbsentOptionalCapabilities_RequiredIgnored verifies that required
+// stores are not collected by CollectAbsentOptionalCapabilities even when absent —
+// their absence is already surfaced as a fatal startup error by
+// ValidateStorageRequirements.
+func TestCollectAbsentOptionalCapabilities_RequiredIgnored(t *testing.T) {
+	sm := newEmptySM()
+
+	reqs := []interfaces.StoreRequirement{
+		{
+			Subsystem: "registration",
+			Store:     interfaces.StoreNamePendingRegistration,
+			Severity:  interfaces.RequirementRequired,
+		},
+	}
+
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+
+	require.Empty(t, absent,
+		"required stores must be ignored by CollectAbsentOptionalCapabilities — they are already caught by ValidateStorageRequirements")
+}
+
+// TestCollectAbsentOptionalCapabilities_EmptyReqs verifies that a nil or empty
+// requirements slice returns an empty (not nil) result to avoid nil-pointer
+// surprises in callers that range over the result.
+func TestCollectAbsentOptionalCapabilities_EmptyReqs(t *testing.T) {
+	sm := newEmptySM()
+
+	assert.Empty(t, interfaces.CollectAbsentOptionalCapabilities(sm, nil))
+	assert.Empty(t, interfaces.CollectAbsentOptionalCapabilities(sm, []interfaces.StoreRequirement{}))
+}
+
+// TestCollectAbsentOptionalCapabilities_MultipleAbsent verifies that all absent
+// optional capabilities are collected, not just the first one.
+func TestCollectAbsentOptionalCapabilities_MultipleAbsent(t *testing.T) {
+	sm := newEmptySM()
+
+	reqs := []interfaces.StoreRequirement{
+		{
+			Subsystem:   "push",
+			Store:       interfaces.StoreNamePush,
+			Severity:    interfaces.RequirementOptional,
+			Consequence: "Push-state is not persisted",
+		},
+		{
+			Subsystem:   "workflow",
+			Store:       interfaces.StoreNameTrigger,
+			Severity:    interfaces.RequirementOptional,
+			Consequence: "Workflow triggers are not persisted",
+		},
+	}
+
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs)
+
+	require.Len(t, absent, 2, "all absent optional capabilities must be reported")
+	subsystems := []string{absent[0].Subsystem, absent[1].Subsystem}
+	assert.Contains(t, subsystems, "push")
+	assert.Contains(t, subsystems, "workflow")
+}
+
 // TestStorageManager_HasStore verifies HasStore for every known StoreName constant
 // against a manager with no stores (all should return false) and spot-checks a few
 // stores against the real OSS provider (should return true when the provider

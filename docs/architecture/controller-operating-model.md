@@ -83,6 +83,48 @@ After initialization, the controller starts normally. If required infrastructure
 - Storage schema mismatch → error with migration instructions
 - Transport address conflict → error with port details and resolution steps
 
+### Degraded-Mode Visibility
+
+A deployment may run with declared-optional storage capabilities absent. Optionality is a legitimate design choice — a subsystem can declare a store as optional (`interfaces.RequirementOptional`) when it degrades gracefully without it, rather than failing composition. Silence about such gaps is not: every declared-optional store that composes absent is surfaced, not left for an operator to discover at request time.
+
+As of this writing, every subsystem-declared store requirement in the controller (including push-resumption's `PushStore`, guaranteed across all deployment shapes since Issue #3402) is `RequirementRequired`, so no capability is currently absent-by-design. The mechanism below is exercised by future subsystems (registration, workflow-trigger — epic #3406) that may declare optional dependencies; the example fields are illustrative.
+
+**At startup**, every absent optional capability is logged once at `WARN` level with four fields:
+
+| Field | Example |
+|-------|---------|
+| `capability` | `ExampleStore` |
+| `subsystem` | `example` |
+| `provider` | `flatfile` |
+| `consequence` | `Example feature is degraded — <functional impact> (provider: flatfile)` |
+
+An operator who watches the startup log can see exactly which features are degraded and why, without querying an endpoint.
+
+**At runtime**, the same information is available through `GET /api/v1/ha/status` (requires the `ha:read-status` permission). The response includes an `absent_capabilities` array: empty when all declared optional capabilities are present, or one entry per absent capability otherwise. Each entry carries the same four fields logged at startup.
+
+```json
+{
+  "node_id": "ctrl-01",
+  "is_leader": true,
+  "mode": "single_server",
+  "health": "healthy",
+  "absent_capabilities": [
+    {
+      "capability": "ExampleStore",
+      "subsystem": "example",
+      "consequence": "Example feature is degraded — <functional impact> (provider: flatfile)",
+      "provider": "flatfile"
+    }
+  ]
+}
+```
+
+**Fixable vs. by-design absence**: every entry names the running `provider`. If the consequence is unacceptable, the operator can switch to a provider that supplies the capability. If the absence is intentional for this deployment shape, the entry is informational only — it does not affect the `health` field or block any operation.
+
+**Computation**: the capability set is evaluated once at composition time (`features/controller/server/server.go:New`), not per request. The result is stored in the API server and served verbatim.
+
+**Access control**: `absent_capabilities` is part of the administrative status surface. Unauthenticated callers and callers without `ha:read-status` receive `401` before the handler runs; the capability detail is never included in error responses.
+
 ### Node Management
 
 The controller is a self-sufficient application — it creates its own directories, certificates, and storage during `--init` and runs without external dependencies beyond the OS. For quick-start and development, no steward is needed.

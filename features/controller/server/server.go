@@ -413,8 +413,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// that causes a 503 at request time (issue #3400 regression guard).
 	// Registration's declarations are wired (#3491) and push (#3492) is wired;
 	// workflow-trigger (#3493) is still pending under epic #3406.
-	if reqErr := interfaces.ValidateStorageRequirements(storageManager, collectActiveStorageRequirements(cfg)); reqErr != nil {
+	activeReqs := collectActiveStorageRequirements(cfg)
+	if reqErr := interfaces.ValidateStorageRequirements(storageManager, activeReqs); reqErr != nil {
 		return nil, reqErr
+	}
+
+	// Collect declared-optional capabilities that are absent in this deployment.
+	// Computed once at composition (Issue #3409): the capability set is fixed at
+	// startup and served verbatim by GET /api/v1/ha/status — no per-request recompute.
+	absentCaps := interfaces.CollectAbsentOptionalCapabilities(storageManager, activeReqs)
+	if len(absentCaps) > 0 {
+		for _, cap := range absentCaps {
+			logger.Warn("Optional storage capability absent — deployment running in degraded mode",
+				"capability", cap.Capability,
+				"subsystem", cap.Subsystem,
+				"provider", cap.Provider,
+				"consequence", cap.Consequence,
+			)
+		}
 	}
 
 	// Initialize RBAC system with pluggable storage only
@@ -1261,6 +1277,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	logger.Info("HTTP API server initialized successfully")
+
+	// Issue #3409: Wire absent optional capabilities so GET /api/v1/ha/status
+	// reports them. Computed once above at composition; never recomputed per request.
+	if len(absentCaps) > 0 {
+		httpServer.SetAbsentCapabilities(absentCaps)
+	}
 
 	// Issue #2545: Wire the durable tag store into the HTTP API server too. The
 	// service layer was wired above (line ~371) so the selector engine / role
