@@ -35,6 +35,14 @@ func extractTenantFromContext(ctx context.Context) string {
 	return ""
 }
 
+// StoreRequirements declares the storage stores required by the workflow-trigger subsystem.
+// Collected by collectActiveStorageRequirements in features/controller/server and validated
+// at startup via interfaces.ValidateStorageRequirements — a missing TriggerStore fails
+// closed rather than silently degrading trigger persistence when a provider cannot supply it.
+var StoreRequirements = []interfaces.StoreRequirement{
+	{Subsystem: "workflow-trigger", Store: interfaces.StoreNameTrigger, Severity: interfaces.RequirementRequired},
+}
+
 // TriggerManagerImpl implements the TriggerManager interface
 type TriggerManagerImpl struct {
 	logger          *logging.ModuleLogger
