@@ -46,6 +46,13 @@ import (
 // In every one of these events %1 is the VM name and %2 the VM ID, so the
 // emitted ChangeEvent.ResourceID is "vm:<name>".
 
+// Windows handle releases in this file (CloseHandle, SetEvent, EvtClose) drop
+// their error returns via an explicit _ = or _, _, _ = assignment. Every such
+// call runs in a teardown or error-return path where the operation's outcome is
+// already decided; the Windows API offers no remedy for a failed handle release
+// beyond leaking the handle until process exit, so the error is deliberately
+// dropped rather than handled or logged.
+
 // wevtapi.dll bindings. NewLazySystemDLL resolves from %SystemRoot%\System32,
 // so this is not susceptible to working-directory DLL planting.
 var (
@@ -126,7 +133,7 @@ func realEvtEstablish(m *hypervModule) error {
 
 	query, err := windows.UTF16PtrFromString(monitorSubscriptionQuery())
 	if err != nil {
-		windows.CloseHandle(signal)
+		_ = windows.CloseHandle(signal)
 		return fmt.Errorf("hyperv monitor: encode query: %w", err)
 	}
 
@@ -141,7 +148,7 @@ func realEvtEstablish(m *hypervModule) error {
 		uintptr(evtSubscribeToFutureEvents),
 	)
 	if sub == 0 {
-		windows.CloseHandle(signal)
+		_ = windows.CloseHandle(signal)
 		return fmt.Errorf("hyperv monitor: EvtSubscribe failed: %w", callErr)
 	}
 
@@ -158,10 +165,10 @@ func realEvtEstablish(m *hypervModule) error {
 		close(stop)
 		// Closing the subscription unblocks EvtNext; setting the signal unblocks
 		// the wait. Then wait for the goroutine to return before closing handles.
-		windows.SetEvent(signal)
+		_ = windows.SetEvent(signal)
 		wg.Wait()
-		procEvtClose.Call(sub)
-		windows.CloseHandle(signal)
+		_, _, _ = procEvtClose.Call(sub)
+		_ = windows.CloseHandle(signal)
 		return nil
 	}
 	return nil
@@ -198,7 +205,7 @@ func (m *hypervModule) pump(sub uintptr, signal windows.Handle, stop <-chan stru
 				if xmlStr, err := renderEventXML(events[i]); err == nil {
 					m.dispatchXML(xmlStr)
 				}
-				procEvtClose.Call(events[i])
+				_, _, _ = procEvtClose.Call(events[i])
 			}
 		}
 	}

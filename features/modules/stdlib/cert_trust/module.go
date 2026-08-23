@@ -324,6 +324,8 @@ func certFingerprint(certDER []byte) string {
 }
 
 // certEntryFromDER parses a DER-encoded certificate and returns a certEntry.
+//
+//nolint:unused // cross-platform: used by executor_linux.go and executor_darwin.go, invisible to a GOOS=windows lint run
 func certEntryFromDER(certDER []byte) (certEntry, error) {
 	cert, err := x509.ParseCertificate(certDER)
 	if err != nil {

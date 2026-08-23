@@ -92,7 +92,7 @@ func querySessionUsername(sessionID uint32) (string, error) {
 
 	// bytesReturned includes the UTF-16 null terminator; charCount includes it.
 	charCount := int(bytesReturned / 2)
-	//nolint:gosec // unsafe.Pointer is required to interpret the WTS-allocated buffer
+	//nolint:govet,gosec // uintptr→unsafe.Pointer converts a Windows API–assigned buffer; pBuffer is a WTS-allocated raw pointer, not a Go heap object, so the GC cannot move it
 	utf16 := (*[1 << 14]uint16)(unsafe.Pointer(pBuffer))[:charCount:charCount]
 	username := windows.UTF16ToString(utf16)
 
