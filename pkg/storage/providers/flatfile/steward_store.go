@@ -105,6 +105,21 @@ func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *busine
 		return business.ErrStewardAlreadyExists
 	}
 
+	// Tenant-scoped device_id uniqueness: a non-empty device_id must not already
+	// be held by a different steward in the same tenant. Empty device_id is exempt
+	// (optional field on stewards registered before ADR-010 was implemented).
+	if record.DeviceID != "" {
+		all, err := s.readAllStewards()
+		if err != nil {
+			return fmt.Errorf("flatfile: failed to scan for device_id conflict: %w", err)
+		}
+		for _, r := range all {
+			if r.TenantID == record.TenantID && r.DeviceID == record.DeviceID && r.ID != record.ID {
+				return business.ErrStewardDeviceIDConflict
+			}
+		}
+	}
+
 	now := time.Now().UTC()
 	r := *record
 	r.RegisteredAt = now
