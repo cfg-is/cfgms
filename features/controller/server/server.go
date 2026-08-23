@@ -411,9 +411,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// the enabled subsystems. A missing required store fails closed here — at startup,
 	// before anything tries to use the store — rather than silently producing a nil
 	// that causes a 503 at request time (issue #3400 regression guard).
-	// Deferred: tracked in #3491, #3492, #3493 — registration, push, and
-	// workflow-trigger declarations under epic #3406. Until those land the
-	// collected set is empty and every deployment shape passes cleanly.
+	// Deferred: tracked in #3491, #3493 — registration and workflow-trigger declarations
+	// under epic #3406. Push (#3492) is wired.
 	if reqErr := interfaces.ValidateStorageRequirements(storageManager, collectActiveStorageRequirements(cfg)); reqErr != nil {
 		return nil, reqErr
 	}
@@ -2375,6 +2374,13 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// pushStoreRequirements declares the storage dependency for the push-resumption
+// subsystem. Push resumption re-delivers interrupted push operations on leader
+// startup and cannot query or update delivery records without a durable store.
+var pushStoreRequirements = []interfaces.StoreRequirement{
+	{Subsystem: "push", Store: interfaces.StoreNamePush, Severity: interfaces.RequirementRequired},
+}
+
 // resumePendingPushes is called on leader startup to re-deliver any push
 // operations that were recorded as in_progress before the previous leader
 // stopped. It unmarshals the stored StewardConfiguration blob and calls
@@ -3734,13 +3740,13 @@ func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]
 // gated here on whether the subsystem is active — so a deployment that does not run
 // a subsystem cannot be blocked by its requirements.
 //
-// Deferred: tracked in #3491 (registration), #3492 (push), #3493 (workflow-trigger)
-// — the three subsystem-adoption stories under epic #3406 that wire real
-// declarations into this function. Until they land the set is empty and every
-// deployment shape passes ValidateStorageRequirements cleanly.
+// Deferred: tracked in #3491 (registration), #3493 (workflow-trigger)
+// — remaining subsystem-adoption stories under epic #3406.
 func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequirement {
-	_ = cfg // cfg gates subsystem enablement; wired by #3491/#3492/#3493 when real subsystems are added
-	return nil
+	_ = cfg // reserved for per-subsystem enablement gates; #3491/#3493 will use it
+	var reqs []interfaces.StoreRequirement
+	reqs = append(reqs, pushStoreRequirements...)
+	return reqs
 }
 
 // assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
