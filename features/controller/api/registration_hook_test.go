@@ -5,26 +5,33 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // testIPTrustStore is a minimal in-memory IPTrustStore for hook unit tests.
@@ -667,4 +674,110 @@ func TestBoundRejectionReason(t *testing.T) {
 	t.Run("empty stays empty", func(t *testing.T) {
 		assert.Equal(t, "", boundRejectionReason(""))
 	})
+}
+
+// --- ManualReviewApprovalHook: store requirements (#3491) ---
+
+// buildRegistrationHookPostgresDSN constructs a Postgres DSN from the same env
+// vars used by the cluster storage tests.
+func buildRegistrationHookPostgresDSN() string {
+	pw := testutil.GetTestDBPassword()
+	port := 5432
+	if p := os.Getenv("CFGMS_TEST_DB_PORT"); p != "" {
+		if pi, err := strconv.Atoi(p); err == nil {
+			port = pi
+		}
+	}
+	dbName := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_NAME"); v != "" {
+		dbName = v
+	}
+	dbUser := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_USER"); v != "" {
+		dbUser = v
+	}
+	return fmt.Sprintf("host=localhost port=%d dbname=%s user=%s password=%s sslmode=disable",
+		port, dbName, dbUser, pw)
+}
+
+// skipRegistrationHookTestIfNoPostgres skips the test when Postgres is unreachable.
+func skipRegistrationHookTestIfNoPostgres(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Postgres test in short mode")
+	}
+	dsn := buildRegistrationHookPostgresDSN()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Skip("Postgres not available:", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Ping(); err != nil {
+		t.Skip("Postgres not reachable:", err)
+	}
+	return dsn
+}
+
+// TestManualReviewApprovalHookStoreRequirements_DeclarationShape verifies that
+// ManualReviewApprovalHookStoreRequirements declares exactly one requirement:
+// PendingRegistrationStore as required for the "registration" subsystem.
+func TestManualReviewApprovalHookStoreRequirements_DeclarationShape(t *testing.T) {
+	reqs := ManualReviewApprovalHookStoreRequirements
+	require.Len(t, reqs, 1, "ManualReviewApprovalHook must declare exactly one required store")
+	assert.Equal(t, "registration", reqs[0].Subsystem,
+		"subsystem must be named 'registration' so startup errors are operator-readable")
+	assert.Equal(t, interfaces.StoreNamePendingRegistration, reqs[0].Store,
+		"declaration must reference PendingRegistrationStore")
+	assert.Equal(t, interfaces.RequirementRequired, reqs[0].Severity,
+		"registration admission cannot function without this store: severity must be Required")
+}
+
+// TestManualReviewApprovalHookStoreRequirements_OSSCompositionPassesValidation verifies
+// that a controller composed with the OSS (flatfile+SQLite) storage manager satisfies
+// ManualReviewApprovalHookStoreRequirements — the OSS clean-start acceptance criterion.
+func TestManualReviewApprovalHookStoreRequirements_OSSCompositionPassesValidation(t *testing.T) {
+	sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "test.db"))
+	require.NoError(t, err)
+	defer func() { _ = sm.Close() }()
+
+	err = interfaces.ValidateStorageRequirements(sm, ManualReviewApprovalHookStoreRequirements)
+	require.NoError(t, err,
+		"OSS composite storage manager must satisfy ManualReviewApprovalHook store requirements")
+}
+
+// TestManualReviewApprovalHookStoreRequirements_ClusterCompositionPassesValidation verifies
+// that a controller composed with the database-provider storage manager satisfies
+// ManualReviewApprovalHookStoreRequirements — the cluster clean-start acceptance criterion.
+// Skipped when Postgres is unreachable.
+func TestManualReviewApprovalHookStoreRequirements_ClusterCompositionPassesValidation(t *testing.T) {
+	pgDSN := skipRegistrationHookTestIfNoPostgres(t)
+
+	sm, err := interfaces.CreateClusterStorageManager(pgDSN, "test-hmac-key-32-bytes-padding--", nil)
+	require.NoError(t, err)
+	defer func() { _ = sm.Close() }()
+
+	err = interfaces.ValidateStorageRequirements(sm, ManualReviewApprovalHookStoreRequirements)
+	require.NoError(t, err,
+		"cluster storage manager must satisfy ManualReviewApprovalHook store requirements")
+}
+
+// TestManualReviewApprovalHookStoreRequirements_DecliningProviderFailsStartup verifies
+// that when the backing provider declines PendingRegistrationStore, ValidateStorageRequirements
+// returns an error that names the "registration" subsystem. This guards against the #3400
+// condition — a provider gap that previously surfaced as a 503 at request time rather than
+// a startup failure.
+//
+// The test constructs a StorageManager via NewStorageManagerFromStores with no stores,
+// modelling the result of a provider that declined to supply PendingRegistrationStore
+// (exactly as the database provider did before #3401 fixed it).
+func TestManualReviewApprovalHookStoreRequirements_DecliningProviderFailsStartup(t *testing.T) {
+	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	err := interfaces.ValidateStorageRequirements(sm, ManualReviewApprovalHookStoreRequirements)
+	require.Error(t, err,
+		"a provider declining PendingRegistrationStore must block startup via ValidateStorageRequirements")
+	assert.Contains(t, err.Error(), "registration",
+		"startup error must name the registration subsystem so operators can diagnose the gap")
+	assert.Contains(t, err.Error(), string(interfaces.StoreNamePendingRegistration),
+		"startup error must name the missing store")
 }
