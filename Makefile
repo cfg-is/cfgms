@@ -1930,19 +1930,39 @@ test-e2e-ci:
 	@$(MAKE) test-transport-setup
 	@echo ""
 	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
+# `-e HOME=/tmp` below is load-bearing — do not remove it as redundant.
+# Dockerfile.test-runner creates exactly one passwd entry, uid 1001 (testuser). The
+# `--user $$(id -u):$$(id -g)` flag on the docker run passes the *invoking* uid, so any
+# developer whose uid is not 1001 runs with no passwd entry and HOME falls back to `/`,
+# which a non-root user cannot write. The docker CLI then dies initialising its config
+# directory (`ERROR: mkdir /.docker: permission denied`), killing every test that builds
+# an image. `/home/testuser` is not a substitute: it is owned by uid 1001. Dropping
+# `--user` is not a substitute either: the repository is a bind mount owned by the
+# invoker, and the container would write root-owned artifacts into the working tree.
+#
+# The repository is mounted at `$(PWD)` — its host path — rather than at a fixed
+# `/workspace`, and that is load-bearing too. The tests drive `docker compose` over the
+# mounted host socket, so bind-mount paths in `docker-compose.test.yml` are resolved by
+# the *host* daemon, not inside this container. Under a `/workspace` mount, compose sent
+# the daemon `/workspace/test/fixtures/ha/controller-ha.cfg`, which does not exist on the
+# host; the daemon then created it as an empty directory, and every HA test died on
+# `read /etc/cfgms/controller.cfg: is a directory` (16 tests in test/integration/ha) while
+# littering root-owned `/workspace/...` stubs on the host. Mounting at the identical
+# absolute path makes container-side and host-side paths agree.
 	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
 	DOCKER_GID=$$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --entrypoint stat cfgms-test-runner -c '%g' /var/run/docker.sock) && \
 	docker run --rm \
 		--user $$(id -u):$$(id -g) \
 		--network cfgms-test \
 		--group-add $$DOCKER_GID \
-		-v "$(PWD):/workspace" \
+		-v "$(PWD):$(PWD)" \
 		-v /var/run/docker.sock:/var/run/docker.sock \
-		-w /workspace \
+		-w "$(PWD)" \
+		-e HOME=/tmp \
 		-e CFGMS_TEST_INTEGRATION=1 \
 		-e GITHUB_ACTIONS=true \
-		-e GOCACHE=/workspace/.cache/go-build \
-		-e GOMODCACHE=/workspace/.cache/go-mod \
+		-e GOCACHE=$(PWD)/.cache/go-build \
+		-e GOMODCACHE=$(PWD)/.cache/go-mod \
 		cfgms-test-runner \
 		sh -c ' \
 			echo "📦 Installing Go dependencies..." && \
