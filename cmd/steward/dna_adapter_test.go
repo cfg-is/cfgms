@@ -231,18 +231,33 @@ func TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource(t *testing.
 	adapter := newDNACollectorAdapter(logger, nil)
 	adapter.setModuleDNASource(src)
 
-	var frags []*commonpb.Fragment
+	// Wait on the MODULE SOURCE, then call the adapter exactly once (Issue #3483).
+	//
+	// The only asynchronous step here is the module source publishing the change
+	// event through its debounce window; `setModuleDNASource` is synchronous, and
+	// `CollectModuleFragments` reads the same snapshot stores as
+	// `CollectModuleDNAAttributes`. Polling `adapter.CollectFragments` instead put
+	// the real `dna.Collector` host collection inside the retry loop, and on
+	// Windows that collection alone costs more than the entire timeout: measured
+	// 6.29s for the first call on a Windows dev host (6.5s of it hardware facts
+	// via WMI/DISM), against a 2s budget — so the condition could not be evaluated
+	// even once before `Eventually` gave up. On Linux the same collection is
+	// milliseconds, which is why this only ever failed on Windows.
+	//
+	// Asserting on a single call is also strictly stronger: the fragment must be
+	// there the first time the adapter is asked, not merely within two seconds.
 	require.Eventually(t, func() bool {
-		frags = adapter.CollectFragments(ctx)
-		// After #3332, the union includes both host:* and cluster:* fragments.
-		for _, f := range frags {
+		for _, f := range src.CollectModuleFragments(ctx) {
 			if f.GetFragmentId() == "cluster:cfg-lab" {
 				return true
 			}
 		}
 		return false
 	}, 2*time.Second, 10*time.Millisecond,
-		"adapter.CollectFragments must surface the wired source's cluster fragment")
+		"module DNA source must publish the cluster fragment before the adapter is asked")
+
+	// After #3332, the union includes both host:* and cluster:* fragments.
+	frags := adapter.CollectFragments(ctx)
 
 	var got *commonpb.Fragment
 	for _, f := range frags {
@@ -442,26 +457,32 @@ func TestDNACollectorAdapter_CollectFragments_UnionsHostAndModuleFragments(t *te
 	adapter := newDNACollectorAdapter(logger, nil)
 	adapter.setModuleDNASource(src)
 
+	// Wait on the module source, then call the adapter once — see the comment in
+	// TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource for why
+	// polling adapter.CollectFragments cannot work on Windows (Issue #3483).
+	require.Eventually(t, func() bool {
+		for _, f := range src.CollectModuleFragments(ctx) {
+			if strings.HasPrefix(f.GetFragmentId(), "cluster:") {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 50*time.Millisecond,
+		"module DNA source must publish a cluster fragment before the adapter is asked")
+
 	var (
-		allFrags   []*commonpb.Fragment
 		hasHost    bool
 		hasCluster bool
 	)
-	require.Eventually(t, func() bool {
-		allFrags = adapter.CollectFragments(ctx)
-		hasHost = false
-		hasCluster = false
-		for _, f := range allFrags {
-			if strings.HasPrefix(f.GetFragmentId(), "host:") {
-				hasHost = true
-			}
-			if strings.HasPrefix(f.GetFragmentId(), "cluster:") {
-				hasCluster = true
-			}
+	allFrags := adapter.CollectFragments(ctx)
+	for _, f := range allFrags {
+		if strings.HasPrefix(f.GetFragmentId(), "host:") {
+			hasHost = true
 		}
-		return hasHost && hasCluster
-	}, 3*time.Second, 50*time.Millisecond,
-		"wired adapter must return both host:* and cluster:* fragments")
+		if strings.HasPrefix(f.GetFragmentId(), "cluster:") {
+			hasCluster = true
+		}
+	}
 
 	assert.True(t, hasHost, "must include host:* fragments")
 	assert.True(t, hasCluster, "must include cluster:* fragments")
