@@ -856,7 +856,7 @@ Six defects were found live. Two were small enough to fix inside this story
 | F3 — RLS unscoped read returns nothing | filed as **#3478** |
 | F4 — fleet view is node-local | **fixed** by #3480 |
 | F5 — missing record reported as service outage | **fixed in this story** |
-| F6 — refused steward reconnects at ~1 Hz forever | filed as **#3481** |
+| F6 — refused steward reconnects at ~1 Hz forever | **fixed by #3481** (PR #3497) |
 | Cluster-restart hazard — Raft ConfState not restored | filed as **#3479** |
 
 #### F1 (FIXED HERE) — the IP-trust operator API was dead wiring on every deployment
@@ -990,7 +990,7 @@ approved`.
 
 **This does not stop the retry loop**, which is a separate defect, below.
 
-#### F6 (documented) — rejected stewards reconnect at ~1 Hz forever; backoff never grows
+#### F6 (fixed by #3481) — rejected stewards reconnect at ~1 Hz forever; backoff never grows
 
 `Provider.reconnectLoop` (`pkg/controlplane/providers/grpc/provider.go`)
 constructs a **fresh** backoff on every entry, and `dialAndOpenStream()` succeeds
@@ -1001,10 +1001,16 @@ rejected, and re-enters the loop at the initial interval. Observed live at
 into a log flood, and it will do the same for any persistently-rejected steward
 regardless of status code.
 
-Filed as **#3481**. *Recommended fix: persist backoff across reconnect cycles,
-and/or treat a stream rejected before its first message as a failed attempt
-rather than a successful connect.* Not fixed here: it changes reconnect timing in the shared
-control-plane client, which is the very thing this story measures.
+Filed as **#3481**, not fixed here at the time: it changes reconnect timing in
+the shared control-plane client, which is the very thing this story measures.
+
+**Fixed in #3481** (PR #3497). The backoff now lives on the `Provider` and
+persists across `reconnectLoop` invocations instead of being rebuilt per call,
+and the reset moved from stream-open to the first successful `Recv` — a stream
+that opens and is refused before delivering anything no longer counts as a
+success. A persistently-refused steward now escalates to the configured ceiling
+and keeps retrying there, while an ordinary transport-drop reconnect (which does
+receive messages before breaking) still reconnects promptly.
 
 ### Cluster-restart hazard found while running this story (F1 of §4's concern, new)
 
