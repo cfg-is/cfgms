@@ -2753,9 +2753,10 @@ func TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict(t *testing.T) {
 // Scope note, measured rather than assumed: this test still passes with the
 // (tenant_id, device_id) unique index removed, because the two requests do not
 // reliably interleave between the guard's read and its write. It asserts the
-// end-to-end outcome, NOT the database backstop. The backstop's negative control is
-// TestSQLiteStewardStore_DeviceIDUniquePerTenant in pkg/storage/providers/sqlite,
-// which fails when the index is dropped.
+// end-to-end outcome, NOT the provider-level backstop. The backstop is exercised
+// by TestStewardStoreContract_DeviceIDUniquePerTenant in
+// pkg/storage/interfaces/business/providers_test.go, which covers flatfile, sqlite
+// and database and fails when any provider's enforcement is removed (Issue #3508).
 func TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord(t *testing.T) {
 	tokenStore := newTestRegistrationStore(t)
 	certMgr := newTestCertManager(t)
