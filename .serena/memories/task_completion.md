@@ -18,7 +18,7 @@ Run before declaring any coding task done. Identical validation in both executio
 - Storage imports use `pkg/storage/interfaces` only.
 
 ## Required CI checks (all must pass before merge to develop)
-`unit-tests`, `integration-tests`, `Build Gate`, `security-deployment-gate`. Docs-only PRs get stub-green fast path.
+`unit-tests`, `integration-tests`, `Build Gate`, `Controller Integration Tests (Linux)`, `security-deployment-gate`, `trivy-scan`, `CodeQL`, `zizmor`, `frontend-checks`, `CLA signature check` — ten contexts; read the live set with `gh api repos/cfg-is/cfgms/rulesets/11647684 --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'`. Docs-only PRs get stub-green fast path.
 
 ## Failure handling
 After 3 fix iterations, open a DRAFT PR with error output. Never force-merge, force-push, `reset --hard`, delete branches, or skip validation.

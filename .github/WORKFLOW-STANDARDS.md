@@ -28,7 +28,20 @@ This document defines standards and best practices for GitHub Actions workflows 
 - `unit-tests` - Core functionality validation (~3-5 min)
 - `integration-tests` - Fast comprehensive + production-critical tests (~5-10 min)
 - `Build Gate` - Cross-platform compilation (~3-5 min)
+- `Controller Integration Tests (Linux)` - Controller integration suite
 - `security-deployment-gate` - Security vulnerability blocking (~6-10 min)
+- `trivy-scan` - Filesystem vulnerabilities, secrets, misconfiguration
+- `CodeQL` - Semantic code analysis
+- `zizmor` - Workflow security (action pins, cache poisoning, injection)
+- `frontend-checks` - `web/` typecheck, lint and tests
+- `CLA signature check` - Contributor licence agreement
+
+Read the set from the ruleset rather than trusting this page:
+
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647684 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
 
 **Configuration**:
 - No review requirements (solo-friendly)

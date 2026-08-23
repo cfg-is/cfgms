@@ -246,7 +246,8 @@ git push -u origin release/vX.Y.Z
 gh pr create --base main --title "Release vX.Y.Z" --body "Release description"
 
 # 5. Wait for all CI checks to pass
-# Required: unit-tests, integration-tests, security-deployment-gate, Build Gate
+# Required on main (4): unit-tests, integration-tests, security-deployment-gate, Build Gate
+# (develop requires ten — see docs/development/branch-protection-rules.md)
 
 # 6. Merge PR using MERGE COMMIT (enforced by branch protection)
 # GitHub UI will only show "Create a merge commit" option
@@ -296,7 +297,7 @@ All branch protection is enforced via GitHub rulesets.
 | Branch | Merge Method | Required Checks | Notes |
 |--------|-------------|-----------------|-------|
 | `main` | Merge commit only | unit-tests, integration-tests, security-deployment-gate, Build Gate | No squash/rebase allowed |
-| `develop` | Squash only | unit-tests, Build Gate, security-deployment-gate | Cannot be deleted |
+| `develop` | Squash only | ten contexts — unit-tests, integration-tests, Build Gate, Controller Integration Tests (Linux), security-deployment-gate, trivy-scan, CodeQL, zizmor, frontend-checks, CLA signature check | Cannot be deleted |
 | `release/*` | N/A (no PRs into release branches) | None | Non-fast-forward only; main handles merge checks |
 
 ### Hotfix Workflow
