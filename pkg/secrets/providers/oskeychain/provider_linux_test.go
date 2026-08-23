@@ -14,6 +14,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestUnavailableBackendRejectsOperations exercises the backend
+// platformNewBackend really selects on a Linux host with neither a Secret
+// Service nor a usable kernel keyring. It must report itself unavailable and
+// fail every operation with a wrapped error, so a caller that ignores
+// Provider.Available and stores anyway is told the token was not persisted
+// rather than silently losing it.
+func TestUnavailableBackendRejectsOperations(t *testing.T) {
+	b := unavailableBackend{}
+	assert.False(t, b.available(), "no-backend host must report unavailable")
+	assert.Equal(t, "none", b.name())
+
+	store := newStore(b)
+	ctx := context.Background()
+	key := "cfgms/session/unavailable-" + randHex(t, 6)
+
+	err := store.StoreSecret(ctx, &interfaces.SecretRequest{Key: key, Value: "tok"})
+	require.Error(t, err, "StoreSecret must fail with no usable keychain")
+	assert.Contains(t, err.Error(), "oskeychain")
+
+	_, err = store.GetSecret(ctx, key)
+	require.Error(t, err, "GetSecret must fail with no usable keychain")
+	assert.NotErrorIs(t, err, interfaces.ErrSecretNotFound,
+		"a missing backend is a failure, not a missing secret")
+
+	require.Error(t, store.DeleteSecret(ctx, key), "DeleteSecret must fail with no usable keychain")
+}
+
 // TestLinuxKeyringFallback is the [REQUIRED TEST]: with the Secret Service
 // unavailable, the provider must store/load via the kernel session keyring and
 // still round-trip.

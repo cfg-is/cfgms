@@ -10,7 +10,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -24,49 +23,18 @@ var (
 	_ interfaces.SecretStore    = (*Store)(nil)
 )
 
-// fakeBackend is an in-memory backend for deterministic, platform-independent
-// tests of the Store/Provider logic.
-type fakeBackend struct {
-	mu    sync.Mutex
-	m     map[string][]byte
-	avail bool
-	nm    string
+// platformBackend returns the real backend this host selects: Windows
+// Credential Manager, macOS Keychain, Linux Secret Service or kernel session
+// keyring, or the Linux unavailableBackend when the host offers neither. Every
+// platform constructor yields a usable value, so tests always run against the
+// production backend — CFGMS forbids substituting a stand-in for it.
+func platformBackend(t *testing.T) backend {
+	t.Helper()
+	b, err := platformNewBackend()
+	require.NoError(t, err)
+	require.NotNil(t, b, "platformNewBackend must always return a backend")
+	return b
 }
-
-func newFakeBackend(avail bool) *fakeBackend {
-	return &fakeBackend{m: make(map[string][]byte), avail: avail, nm: "fake"}
-}
-
-func (f *fakeBackend) set(key string, value []byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cp := make([]byte, len(value))
-	copy(cp, value)
-	f.m[key] = cp
-	return nil
-}
-
-func (f *fakeBackend) get(key string) ([]byte, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	v, ok := f.m[key]
-	if !ok {
-		return nil, errSecretNotFound
-	}
-	cp := make([]byte, len(v))
-	copy(cp, v)
-	return cp, nil
-}
-
-func (f *fakeBackend) del(key string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.m, key)
-	return nil
-}
-
-func (f *fakeBackend) available() bool { return f.avail }
-func (f *fakeBackend) name() string    { return f.nm }
 
 func TestProviderMetadata(t *testing.T) {
 	p := &Provider{}
@@ -86,28 +54,12 @@ func TestProviderRegistered(t *testing.T) {
 	assert.Contains(t, names, "oskeychain", "provider should auto-register via init()")
 }
 
-func TestStoreCoreOps(t *testing.T) {
-	store := newStore(newFakeBackend(true))
-	ctx := context.Background()
-	key := "cfgms/session/test-conn"
-	token := "session-token-abc123"
-
-	require.NoError(t, store.StoreSecret(ctx, &interfaces.SecretRequest{Key: key, Value: token}))
-
-	got, err := store.GetSecret(ctx, key)
-	require.NoError(t, err)
-	assert.Equal(t, token, got.Value)
-	assert.Equal(t, key, got.Key)
-
-	require.NoError(t, store.DeleteSecret(ctx, key))
-
-	_, err = store.GetSecret(ctx, key)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, interfaces.ErrSecretNotFound)
-}
-
+// TestStoreValidation covers the request rejections StoreSecret performs before
+// it reaches the keychain. It runs against the real platform backend on every
+// host — including hosts with no usable keychain — because a rejected request
+// never touches the backend.
 func TestStoreValidation(t *testing.T) {
-	store := newStore(newFakeBackend(true))
+	store := newStore(platformBackend(t))
 	ctx := context.Background()
 
 	assert.Error(t, store.StoreSecret(ctx, nil), "nil request")
@@ -127,8 +79,11 @@ func TestStoreValidation(t *testing.T) {
 	assert.Error(t, store.StoreSecret(ctx, &interfaces.SecretRequest{Key: "k", Value: string(bigVal)}), "oversized value")
 }
 
+// TestUnsupportedOps covers the contract methods the provider deliberately does
+// not implement. Like the validation test it runs on every host: each of these
+// returns before reaching the keychain.
 func TestUnsupportedOps(t *testing.T) {
-	store := newStore(newFakeBackend(true))
+	store := newStore(platformBackend(t))
 	ctx := context.Background()
 
 	_, err := store.ListSecrets(ctx, nil)
@@ -151,47 +106,39 @@ func TestUnsupportedOps(t *testing.T) {
 	assert.NoError(t, store.Close())
 }
 
-// TestAvailableReportsNoBackend verifies Available() returns (false, nil) — not
-// an error — when no platform backend is usable, so callers fall back to the
-// one-shot --bundle path rather than failing hard.
-func TestAvailableReportsNoBackend(t *testing.T) {
-	orig := newBackend
-	t.Cleanup(func() { newBackend = orig })
-
-	newBackend = func() (backend, error) { return newFakeBackend(false), nil }
-
-	p := &Provider{}
-	ok, err := p.Available()
-	assert.NoError(t, err, "Available must not error when no backend exists")
-	assert.False(t, ok)
-
-	_, err = p.CreateSecretStore(nil)
-	assert.Error(t, err, "CreateSecretStore must fail when no backend is available")
-}
-
-func TestAvailableReportsBackendPresent(t *testing.T) {
-	orig := newBackend
-	t.Cleanup(func() { newBackend = orig })
-
-	newBackend = func() (backend, error) { return newFakeBackend(true), nil }
+// TestAvailableTracksPlatformBackend verifies Available() against the real
+// backend this host selects. Two contract points hold on every host: Available
+// never returns an error (callers fall back to the one-shot --bundle path
+// rather than failing hard), and its answer matches the backend's own
+// availability. CreateSecretStore must then succeed exactly when Available says
+// it will — the unavailable half of that branch is additionally exercised
+// directly against unavailableBackend in provider_linux_test.go.
+func TestAvailableTracksPlatformBackend(t *testing.T) {
+	b := platformBackend(t)
+	t.Logf("platform backend: %s (available=%v)", b.name(), b.available())
 
 	p := &Provider{}
 	ok, err := p.Available()
-	require.NoError(t, err)
-	assert.True(t, ok)
+	require.NoError(t, err, "Available must never error, even with no usable backend")
+	assert.Equal(t, b.available(), ok, "Available must report the platform backend's availability")
 
 	store, err := p.CreateSecretStore(nil)
-	require.NoError(t, err)
-	assert.NotNil(t, store)
+	if ok {
+		require.NoError(t, err)
+		assert.NotNil(t, store)
+		return
+	}
+	assert.Error(t, err, "CreateSecretStore must fail when no backend is available")
+	assert.Nil(t, store)
 }
 
-// TestRealBackendRoundTrip exercises the actual OS keychain on the build
-// platform (live Credential Manager on Windows, Keychain on macOS, Secret
-// Service / keyring on Linux). Skips when no backend is usable (e.g. a headless
-// Linux host with neither Secret Service nor a kernel keyring).
+// TestRealBackendRoundTrip is the core store/get/delete test. It exercises the
+// actual OS keychain on the build platform (live Credential Manager on Windows,
+// Keychain on macOS, Secret Service / keyring on Linux). Skips when no backend
+// is usable (e.g. a headless Linux host with neither Secret Service nor a
+// kernel keyring).
 func TestRealBackendRoundTrip(t *testing.T) {
-	b, err := newBackend()
-	require.NoError(t, err)
+	b := platformBackend(t)
 	if !b.available() {
 		t.Skipf("no OS keychain backend available on this host (%s); nothing to round-trip", b.name())
 	}
@@ -220,8 +167,7 @@ func TestRealBackendRoundTrip(t *testing.T) {
 // tree contains a file holding the token value — the secret lives only in the
 // OS store / keyring.
 func TestNoCleartextOnDisk(t *testing.T) {
-	b, err := newBackend()
-	require.NoError(t, err)
+	b := platformBackend(t)
 	if !b.available() {
 		t.Skipf("no OS keychain backend available on this host (%s); cannot prove no-disk behavior", b.name())
 	}
