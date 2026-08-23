@@ -614,8 +614,9 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 		if len(fields) >= 5 {
 			totalServices++
 
-			if len(fields) > 3 && fields[3] != "" {
-				switch strings.ToLower(fields[3]) {
+			// Node,Name,ServiceType,StartMode,State
+			if len(fields) > 4 && fields[4] != "" {
+				switch strings.ToLower(fields[4]) {
 				case "running":
 					runningServices++
 				case "stopped":
@@ -623,8 +624,8 @@ func (w *WindowsSoftwareCollector) parseWMIServicesOutput(output string, attribu
 				}
 			}
 
-			if len(fields) > 2 && fields[2] != "" {
-				switch strings.ToLower(fields[2]) {
+			if len(fields) > 3 && fields[3] != "" {
+				switch strings.ToLower(fields[3]) {
 				case "auto":
 					autoStartServices++
 				case "manual":
