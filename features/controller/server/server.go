@@ -1017,10 +1017,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		// Issue #1844: commandSigner is a DynamicSigner — see block above.
+		// Issue #3390: haManager is passed as TermSource so every outbound command
+		// carries the current Raft term for steward-side fencing (#3436).
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
 			ControlPlane: controlPlane,
 			Signer:       commandSigner,
+			TermSource:   haManager,
 			Logger:       logger,
 		})
 		if err != nil {
