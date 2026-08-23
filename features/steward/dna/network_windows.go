@@ -106,7 +106,7 @@ func (w *WindowsNetworkCollector) collectDNSServersFromRegistry(attributes map[s
 	if err != nil {
 		return
 	}
-	defer ifaceKey.Close()
+	defer func() { _ = ifaceKey.Close() }()
 
 	subkeys, err := ifaceKey.ReadSubKeyNames(-1)
 	if err != nil {
@@ -138,7 +138,7 @@ func (w *WindowsNetworkCollector) collectDNSFromAdapter(
 	if err != nil {
 		return
 	}
-	defer adapterKey.Close()
+	defer func() { _ = adapterKey.Close() }()
 
 	for _, valueName := range []string{"DhcpNameServer", "NameServer"} {
 		val, _, err := adapterKey.GetStringValue(valueName)
@@ -167,7 +167,7 @@ func (w *WindowsNetworkCollector) collectDNSDomainFromRegistry(attributes map[st
 	if err != nil {
 		return
 	}
-	defer key.Close()
+	defer func() { _ = key.Close() }()
 
 	for _, valueName := range []string{"Domain", "DhcpDomain"} {
 		val, _, err := key.GetStringValue(valueName)

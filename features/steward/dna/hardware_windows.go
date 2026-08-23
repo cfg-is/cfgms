@@ -489,7 +489,7 @@ func (w *WindowsHardwareCollector) parseWMILogicalDiskOutput(output string, attr
 		fields := strings.Split(line, ",")
 		if len(fields) >= 6 && fields[1] != "" {
 			driveCount++
-			prefix := fmt.Sprintf("logical_drive_%s", strings.Replace(fields[1], ":", "", -1))
+			prefix := fmt.Sprintf("logical_drive_%s", strings.ReplaceAll(fields[1], ":", ""))
 
 			attributes[prefix+"_device"] = fields[1]
 			if fields[2] != "" {
@@ -530,7 +530,7 @@ func (w *WindowsHardwareCollector) parsePowerShellDiskUsageOutput(output string,
 
 		fields := w.parseCSVLine(line)
 		if len(fields) >= 4 && fields[0] != "" {
-			prefix := fmt.Sprintf("ps_drive_%s", strings.Replace(fields[0], ":", "", -1))
+			prefix := fmt.Sprintf("ps_drive_%s", strings.ReplaceAll(fields[0], ":", ""))
 
 			if fields[1] != "" {
 				attributes[prefix+"_filesystem"] = fields[1]
@@ -646,7 +646,7 @@ func (w *WindowsHardwareCollector) collectOSVersionFromRegistry(attributes map[s
 	if err != nil {
 		return
 	}
-	defer key.Close()
+	defer func() { _ = key.Close() }()
 
 	if product, _, err := key.GetStringValue("ProductName"); err == nil {
 		attributes["windows_caption"] = product
