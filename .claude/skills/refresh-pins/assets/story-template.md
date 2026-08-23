@@ -16,7 +16,7 @@ Bump `{{NAME}}` from `{{FROM}}` to `{{TO}}`.
 2. **Verification — old version absent**: `grep -rE "{{FROM_PATTERN}}" {{SCOPE_PATHS}}` returns **0 matches**.
 3. **Verification — new version present**: `grep -rE "{{TO_PATTERN}}" {{SCOPE_PATHS}}` returns **{{LOCATION_COUNT}} matches**.
 4. `make test` passes locally before the PR is opened.
-5. CI required checks all pass (unit-tests, integration-tests, Build Gate, security-deployment-gate).
+5. CI required checks all pass — all ten contexts required by the `develop` ruleset, not just `unit-tests`, `integration-tests`, `Build Gate` and `security-deployment-gate`. Read the full set from the ruleset rather than trusting a copy of it: `gh api repos/cfg-is/cfgms/rulesets/11647684 --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'`.
 6. If this pin appears in any Docker image (FROM golang:..., FROM ...), the rebuilt image's Trivy scan reports the new version, not the old. The acceptance reviewer must verify by fetching the latest docker-security workflow run for this PR and grepping the Trivy SARIF for `"Installed Version"` lines.
 
 ## Cooldown decision
