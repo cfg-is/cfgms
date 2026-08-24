@@ -13,14 +13,39 @@
 #   --version TAG           Release tag to install (default: latest tagged release)
 #   --binary-path PATH      Local binary path instead of downloading (air-gapped)
 #   --config PATH           Alternate controller.cfg template (default: generated)
+#   --allow-host-key        Seal the root key to this node's disk-resident host
+#                           key instead of its TPM2. Explicit opt-in; warns loudly.
 #   --skip-tenant-seed      Skip tenant tree seeding (step 7)
 #   --skip-smoke            Skip smoke test (step 8)
+#
+# Root key at rest (ADR-030, story #3462):
+#   The SOPS root key is generated and sealed in a single pipeline —
+#   `openssl rand 32 | systemd-creds encrypt --with-key=tpm2 - secrets.key.cred`
+#   — so the plaintext exists only in that pipe and is never written to a file,
+#   temporary or otherwise. The unit loads the sealed blob with
+#   LoadCredentialEncrypted=, and systemd exposes the decrypted key on a
+#   per-invocation tmpfs under /run/credentials/ before privilege drop.
+#
+#   No temporary file is used, on tmpfs or anywhere else: /tmp is a directory on
+#   the root filesystem on Debian and Ubuntu, and `shred` does not reliably
+#   destroy overwritten data on ext4/XFS/btrfs or on wear-levelled and
+#   thin-provisioned disks — so "write then shred" would put the root key on
+#   persistent storage with no dependable way to remove it.
+#
+#   A node with no usable TPM2 fails provisioning unless the operator opts in
+#   with --allow-host-key (env: CFGMS_BOOTSTRAP_ALLOW_HOST_KEY=1).
+#   `--with-key=auto` is never used: it downgrades to the disk-resident host key
+#   with no signal to the operator. Re-running the script MIGRATES an existing
+#   controller by sealing its current cleartext /etc/cfgms/secrets.key and then
+#   removing it.
 #
 # Test isolation:
 #   CFGMS_INSTALL_PREFIX=/tmp/test bash tier1-bootstrap.sh --hostname=test-host
 #   All write paths are prefixed. Binary must be pre-populated at
 #   $CFGMS_INSTALL_PREFIX/usr/local/bin/cfgms-controller (and cfg).
 #   System calls (apt, useradd, chown, systemctl) are skipped.
+#   CFGMS_SYSTEMD_CREDS_BIN overrides the `systemd-creds` executable and
+#   CFGMS_BOOTSTRAP_TPM2_PROBE overrides the TPM2 detection command.
 #
 # See: docs/operations/tier1-controller-bringup.md
 
@@ -37,6 +62,9 @@ BINARY_PATH=""
 CONFIG_OVERRIDE=""
 SKIP_TENANT_SEED=false
 SKIP_SMOKE=false
+ALLOW_HOST_KEY="${CFGMS_BOOTSTRAP_ALLOW_HOST_KEY:-0}"
+SYSTEMD_CREDS_BIN="${CFGMS_SYSTEMD_CREDS_BIN:-systemd-creds}"
+TPM2_PROBE="${CFGMS_BOOTSTRAP_TPM2_PROBE:-systemd-analyze has-tpm2 -q}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --binary-path)      BINARY_PATH="$2"; shift 2 ;;
         --config=*)         CONFIG_OVERRIDE="${1#*=}"; shift ;;
         --config)           CONFIG_OVERRIDE="$2"; shift 2 ;;
+        --allow-host-key)   ALLOW_HOST_KEY=1; shift ;;
         --skip-tenant-seed) SKIP_TENANT_SEED=true; shift ;;
         --skip-smoke)       SKIP_SMOKE=true; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -61,6 +90,7 @@ if [[ -z "$HOSTNAME_FLAG" ]]; then
     echo "  --version TAG           Release tag (default: latest tagged release)" >&2
     echo "  --binary-path PATH      Local binary path (air-gapped install)" >&2
     echo "  --config PATH           Alternate controller.cfg template" >&2
+    echo "  --allow-host-key        Seal the root key to disk instead of the TPM2" >&2
     echo "  --skip-tenant-seed      Skip tenant tree seeding" >&2
     echo "  --skip-smoke            Skip smoke test" >&2
     exit 1
@@ -80,9 +110,114 @@ CONTROLLER_CFG="${CFGMS_ETC_DIR}/controller.cfg"
 CONTROLLER_SERVICE="${CFGMS_SYSTEMD_DIR}/cfgms-controller.service"
 ADMIN_BUNDLE="${CFGMS_ETC_DIR}/admin.bundle.yaml"
 INIT_MARKER="${CFGMS_ETC_DIR}/.admin-bundle-issued"
-SECRETS_KEY_FILE="${CFGMS_ETC_DIR}/secrets.key"
+BOOTSTRAP_RECORD="${CFGMS_ETC_DIR}/.bootstrap-record"
+
+# Legacy cleartext path. Read (to migrate it) and then removed. Never written.
+LEGACY_SECRETS_KEY_FILE="${CFGMS_ETC_DIR}/secrets.key"
+
+# Sealed root key. `systemd-creds encrypt` output, decryptable only by this
+# node's TPM2 (or, under --allow-host-key, its host key).
+SECRETS_KEY_CRED="${CFGMS_ETC_DIR}/secrets.key.cred"
+SECRETS_KEY_CRED_ID="cfgms-secrets-key"
 
 log() { echo "[bootstrap] $*"; }
+warn() { echo "[bootstrap] WARNING: $*" >&2; }
+die() { echo "[bootstrap] Error: $*" >&2; exit 1; }
+
+# ── Credential sealing ────────────────────────────────────────────────────────
+
+# select_key_mode decides what `systemd-creds encrypt --with-key=` is given, and
+# fails provisioning rather than silently downgrading. `--with-key=auto` is
+# never used: it falls back to the host key in
+# /var/lib/systemd/credential.secret whenever no TPM2 is present, with no signal
+# to the operator — and that file sits on the same disk as the sealed blob, so a
+# stolen image yields both halves (ADR-030, Decision 1).
+KEY_MODE=""
+select_key_mode() {
+    if [[ "$ALLOW_HOST_KEY" == "1" ]]; then
+        KEY_MODE="host"
+        warn "--allow-host-key: sealing the root key with the HOST KEY, not a TPM."
+        warn "  The unsealing key is /var/lib/systemd/credential.secret on this host's own"
+        warn "  disk, so a stolen disk image or VM snapshot yields the plaintext root key."
+        warn "  Recorded as key_mode: host in ${BOOTSTRAP_RECORD}."
+        return 0
+    fi
+
+    if $TPM2_PROBE >/dev/null 2>&1; then
+        KEY_MODE="tpm2"
+        return 0
+    fi
+
+    die "no usable TPM2 on this host — refusing to seal the root key to disk silently.
+  The SOPS root key is sealed to the TPM2 by default so a stolen disk image or
+  VM snapshot cannot yield it. This host reports no usable TPM2
+  (probe: ${TPM2_PROBE}).
+  Either enable a TPM2, or accept disk-bound sealing explicitly by re-running
+  with --allow-host-key (env: CFGMS_BOOTSTRAP_ALLOW_HOST_KEY=1).
+  See docs/architecture/decisions/030-controller-secret-material-at-rest.md"
+}
+
+# provision_secrets_key generates and seals the SOPS root key in a single
+# pipeline, or migrates an existing cleartext key into a sealed blob.
+#
+# The generated plaintext exists ONLY in the pipe between openssl and
+# systemd-creds — there is deliberately no intermediate file to shred. A node
+# that cannot seal its key fails here, loudly, leaving no key material behind
+# for a later run to adopt as if it were valid.
+provision_secrets_key() {
+    if [[ -f "$SECRETS_KEY_CRED" ]]; then
+        log "Root key already sealed at ${SECRETS_KEY_CRED} — skipping."
+        return 0
+    fi
+
+    if [[ -f "$LEGACY_SECRETS_KEY_FILE" ]]; then
+        # Migration. The existing key must be preserved exactly: this controller's
+        # stored secrets are already encrypted under it, and generating a new one
+        # would leave a node that starts cleanly and cannot read its own data.
+        if ! (umask 077 && "$SYSTEMD_CREDS_BIN" encrypt --name="$SECRETS_KEY_CRED_ID" \
+                --with-key="$KEY_MODE" "$LEGACY_SECRETS_KEY_FILE" "$SECRETS_KEY_CRED"); then
+            rm -f "$SECRETS_KEY_CRED"
+            die "failed to seal the existing root key with --with-key=${KEY_MODE}; nothing was changed."
+        fi
+        log "Migrated the existing root key from ${LEGACY_SECRETS_KEY_FILE} to a sealed credential."
+    else
+        if ! (umask 077 && openssl rand 32 | "$SYSTEMD_CREDS_BIN" encrypt \
+                --name="$SECRETS_KEY_CRED_ID" --with-key="$KEY_MODE" - "$SECRETS_KEY_CRED"); then
+            rm -f "$SECRETS_KEY_CRED"
+            die "failed to generate and seal the root key with --with-key=${KEY_MODE}."
+        fi
+        log "Generated and sealed the external secret-encryption key (key_mode=${KEY_MODE})."
+    fi
+
+    chmod 0400 "$SECRETS_KEY_CRED"
+    if [[ -z "$INSTALL_PREFIX" ]]; then
+        chown root:root "$SECRETS_KEY_CRED"
+    fi
+
+    {
+        echo "# Written by tier1-bootstrap.sh — do not edit."
+        echo "hostname: ${HOSTNAME_FLAG}"
+        echo "key_mode: ${KEY_MODE}"
+        echo "sealed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$BOOTSTRAP_RECORD"
+    chmod 0640 "$BOOTSTRAP_RECORD"
+
+    if [[ -f "$LEGACY_SECRETS_KEY_FILE" ]]; then
+        rm -f "$LEGACY_SECRETS_KEY_FILE"
+        log "Removed legacy cleartext ${LEGACY_SECRETS_KEY_FILE} (superseded by the sealed credential)."
+    fi
+}
+
+# unseal_secrets_key decrypts the sealed root key for the one-shot `--init` run,
+# which happens outside systemd and so has no credentials directory of its own.
+unseal_secrets_key() {
+    local dest="$1"
+    if ! (umask 077 && "$SYSTEMD_CREDS_BIN" decrypt --name="$SECRETS_KEY_CRED_ID" "$SECRETS_KEY_CRED" "$dest"); then
+        rm -f "$dest"
+        die "failed to unseal the root key from ${SECRETS_KEY_CRED}."
+    fi
+    chmod 0400 "$dest"
+}
 
 # ── Step 1: Pre-flight ────────────────────────────────────────────────────────
 
@@ -145,14 +280,8 @@ fi
 
 log "Directory layout ready."
 
-if [[ ! -f "$SECRETS_KEY_FILE" ]]; then
-    (umask 077 && openssl rand -out "$SECRETS_KEY_FILE" 32)
-    log "Generated external secret-encryption key."
-fi
-chmod 0600 "$SECRETS_KEY_FILE"
-if [[ -z "$INSTALL_PREFIX" ]]; then
-    chown cfgms:cfgms "$SECRETS_KEY_FILE"
-fi
+select_key_mode
+provision_secrets_key
 
 # ── Step 3: Binary fetch ──────────────────────────────────────────────────────
 
@@ -333,13 +462,38 @@ log "Step 5: Controller init"
 if [[ -f "$INIT_MARKER" ]]; then
     log "Init marker found at $INIT_MARKER — controller already initialized, skipping."
 else
+    # `--init` runs from this script, outside systemd, so it has no credentials
+    # directory. The sealed key is unsealed into a short-lived directory on
+    # tmpfs — asserted to be tmpfs, never assumed, because /tmp is a directory
+    # on the root filesystem on Debian and Ubuntu and `shred` cannot reliably
+    # undo a write there (ADR-030).
     if [[ -z "$INSTALL_PREFIX" ]]; then
-        runuser --user cfgms -- env CFGMS_SECRETS_KEY_FILE="$SECRETS_KEY_FILE" \
+        RUNTIME_FSTYPE="$(findmnt -no FSTYPE --target /run 2>/dev/null || true)"
+        if [[ "$RUNTIME_FSTYPE" != "tmpfs" ]]; then
+            die "/run is ${RUNTIME_FSTYPE:-unknown}, not tmpfs — refusing to unseal the root key onto persistent storage."
+        fi
+        INIT_CRED_DIR="$(mktemp -d /run/cfgms-init-creds-XXXXXX)"
+    else
+        INIT_CRED_DIR="${INSTALL_PREFIX}/run/cfgms-init-creds"
+        mkdir -p "$INIT_CRED_DIR"
+    fi
+    chmod 0700 "$INIT_CRED_DIR"
+    cleanup_init_creds() { rm -rf "$INIT_CRED_DIR"; }
+    trap cleanup_init_creds EXIT INT TERM
+
+    unseal_secrets_key "${INIT_CRED_DIR}/${SECRETS_KEY_CRED_ID}"
+
+    if [[ -z "$INSTALL_PREFIX" ]]; then
+        chown -R cfgms:cfgms "$INIT_CRED_DIR"
+        runuser --user cfgms -- env "CFGMS_SECRETS_KEY_FILE=${INIT_CRED_DIR}/${SECRETS_KEY_CRED_ID}" \
             "$CONTROLLER_BIN" --init --config "$CONTROLLER_CFG"
     else
-        CFGMS_SECRETS_KEY_FILE="$SECRETS_KEY_FILE" \
+        CFGMS_SECRETS_KEY_FILE="${INIT_CRED_DIR}/${SECRETS_KEY_CRED_ID}" \
             "$CONTROLLER_BIN" --init --config "$CONTROLLER_CFG"
     fi
+
+    cleanup_init_creds
+    trap - EXIT INT TERM
 fi
 
 # ── Step 6: Systemd ───────────────────────────────────────────────────────────
@@ -355,7 +509,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/cfgms-controller --config /etc/cfgms/controller.cfg
-LoadCredential=cfgms-secrets-key:/etc/cfgms/secrets.key
+LoadCredentialEncrypted=cfgms-secrets-key:/etc/cfgms/secrets.key.cred
 Environment=CFGMS_SECRETS_KEY_FILE=%d/cfgms-secrets-key
 Environment=CFGMS_SECURITY_PROFILE=public-beta
 Environment=CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC=true
@@ -378,7 +532,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-InaccessiblePaths=/etc/cfgms/secrets.key
+InaccessiblePaths=/etc/cfgms/secrets.key.cred
 ProtectHostname=true
 ProtectClock=true
 ProtectKernelTunables=true

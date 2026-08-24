@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -110,9 +111,81 @@ func ValidateDeploymentRingConfig(rc DeploymentRingConfig) error {
 // envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
 var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
 
+// EnvFileSuffix is appended to an environment variable's name to name the
+// companion variable that holds a *path* to the value instead of the value
+// itself: ${CFGMS_STORAGE_DB_PASSWORD} resolves from CFGMS_STORAGE_DB_PASSWORD
+// when that is set, and otherwise from the file named by
+// CFGMS_STORAGE_DB_PASSWORD_FILE.
+//
+// This is what lets a secret reach the controller without ever entering the
+// process environment. systemd's LoadCredentialEncrypted= decrypts a sealed
+// blob into a per-invocation tmpfs under /run/credentials/<unit>/ and the unit
+// carries only Environment=<VAR>_FILE=%d/<credential-name> — a path, not a
+// secret. The environment of a running process is readable through
+// /proc/<pid>/environ and is inherited by every child it spawns; the
+// credentials directory is neither (ADR-030).
+const EnvFileSuffix = "_FILE"
+
+// resolveEnvValue returns the value of the named environment variable,
+// falling back to the contents of the file named by <name>_FILE.
+//
+// The direct variable wins when both are set, so an operator can always
+// override a file-delivered value. A trailing newline is stripped: writing a
+// secret with `echo` is common enough that carrying the newline into a
+// password or HMAC key would be a confusing failure.
+func resolveEnvValue(name string) (string, bool, error) {
+	if value, exists := os.LookupEnv(name); exists {
+		return value, true, nil
+	}
+
+	path, exists := os.LookupEnv(name + EnvFileSuffix)
+	if !exists || strings.TrimSpace(path) == "" {
+		return "", false, nil
+	}
+
+	// #nosec G703 -- this path is a process-start configuration value supplied
+	// by the operator's systemd unit (Environment=<VAR>_FILE=%d/...), the same
+	// trust class as the config file path itself; it is not request data. The
+	// checks immediately below constrain what may be read through it.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", false, fmt.Errorf("%s%s references %s: %w", name, EnvFileSuffix, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", false, fmt.Errorf("%s%s references %s: symlinks are not accepted for secret material", name, EnvFileSuffix, path)
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, fmt.Errorf("%s%s references %s: not a regular file", name, EnvFileSuffix, path)
+	}
+	// Group read is expected — systemd exposes credentials at mode 0440 with a
+	// POSIX ACL scoping access to the single unit invocation. World access
+	// never is. Windows is exempt for the same reason pkg/secrets/providers/sops
+	// exempts it: the POSIX permission bits Go reports there are synthesised
+	// from the read-only attribute and say nothing about the real ACL.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o007 != 0 {
+		return "", false, fmt.Errorf("%s%s references %s: file is world-accessible (mode %04o); secret files must not be readable by other users",
+			name, EnvFileSuffix, path, info.Mode().Perm())
+	}
+
+	// #nosec G304,G703 -- path comes from the operator-controlled unit
+	// environment, the documented delivery channel for credential material, and
+	// has just been lstat-validated as a private, regular, non-symlink file.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, fmt.Errorf("%s%s references %s: %w", name, EnvFileSuffix, path, err)
+	}
+
+	return strings.TrimRight(string(data), "\r\n"), true, nil
+}
+
 // validateEnvVars checks that all referenced environment variables (without defaults) are set.
 // This provides fail-safe behavior: if a config references ${VAR} and VAR is not set,
 // the application fails fast instead of silently using an empty value.
+//
+// A variable is "set" when either the variable itself or its <VAR>_FILE
+// companion resolves (see resolveEnvValue). An unreadable or world-accessible
+// <VAR>_FILE is an error rather than a miss — silently falling through to
+// "missing" would hide a misconfigured credential behind a confusing message.
 func validateEnvVars(content string) error {
 	matches := envVarPattern.FindAllStringSubmatch(content, -1)
 	var missing []string
@@ -122,21 +195,36 @@ func validateEnvVars(content string) error {
 			continue
 		}
 		varName := match[1]
-		if _, exists := os.LookupEnv(varName); !exists {
+		_, exists, err := resolveEnvValue(varName)
+		if err != nil {
+			return err
+		}
+		if !exists {
 			missing = append(missing, varName)
 		}
 	}
 
 	if len(missing) > 0 {
-		return fmt.Errorf("missing required environment variables: %v (use ${VAR:-default} syntax to provide defaults)", missing)
+		return fmt.Errorf("missing required environment variables: %v (use ${VAR:-default} syntax to provide defaults, or deliver the value via <VAR>%s)", missing, EnvFileSuffix)
 	}
 
 	return nil
 }
 
 // expandEnvWithDefaults expands environment variables with support for ${VAR:-default} syntax.
-// This extends Go's os.ExpandEnv to support shell-style defaults.
-func expandEnvWithDefaults(content string) string {
+// This extends Go's os.ExpandEnv to support shell-style defaults and <VAR>_FILE
+// indirection.
+func expandEnvWithDefaults(content string) (string, error) {
+	var resolveErr error
+
+	resolve := func(varName string) (string, bool) {
+		value, exists, err := resolveEnvValue(varName)
+		if err != nil && resolveErr == nil {
+			resolveErr = err
+		}
+		return value, exists
+	}
+
 	// First, expand ${VAR:-default} patterns
 	result := envVarWithDefaultPattern.ReplaceAllStringFunc(content, func(match string) string {
 		parts := envVarWithDefaultPattern.FindStringSubmatch(match)
@@ -145,14 +233,23 @@ func expandEnvWithDefaults(content string) string {
 		}
 		varName := parts[1]
 		defaultValue := parts[2]
-		if value, exists := os.LookupEnv(varName); exists {
+		if value, exists := resolve(varName); exists {
 			return value
 		}
 		return defaultValue
 	})
 
-	// Then expand remaining ${VAR} patterns using os.ExpandEnv
-	return os.ExpandEnv(result)
+	// Then expand remaining ${VAR} and $VAR patterns, matching os.ExpandEnv's
+	// syntax but resolving through <VAR>_FILE as well.
+	expanded := os.Expand(result, func(varName string) string {
+		value, _ := resolve(varName)
+		return value
+	})
+
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	return expanded, nil
 }
 
 // BlobStorageConfig holds configuration for the blob storage backend (Issue #1702).
@@ -838,7 +935,10 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 		// Expand environment variables in the configuration content
 		// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
-		expandedData := expandEnvWithDefaults(content)
+		expandedData, err := expandEnvWithDefaults(content)
+		if err != nil {
+			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
+		}
 		expandedBytes := []byte(expandedData)
 
 		if err := yaml.Unmarshal(expandedBytes, cfg); err != nil {

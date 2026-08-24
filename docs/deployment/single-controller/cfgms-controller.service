@@ -15,7 +15,12 @@ Type=simple
 ExecStart=/usr/local/bin/cfgms-controller --config /etc/cfgms/controller.cfg
 # controller.cfg must set metrics_listen_addr to an explicit loopback/private
 # numeric address. The canonical single-node config uses 127.0.0.1:9090.
-LoadCredential=cfgms-secrets-key:/etc/cfgms/secrets.key
+# The secret-encryption key is a systemd-creds-sealed blob, not a cleartext file:
+# LoadCredentialEncrypted= unseals it as root before privilege drop and exposes
+# the plaintext on a per-invocation tmpfs under /run/credentials/, destroyed on
+# stop. LoadCredential= would NOT decrypt it — it copies the file through
+# verbatim. See ADR-030.
+LoadCredentialEncrypted=cfgms-secrets-key:/etc/cfgms/secrets.key.cred
 Environment=CFGMS_SECRETS_KEY_FILE=%d/cfgms-secrets-key
 Environment=CFGMS_SECURITY_PROFILE=public-beta
 Environment=CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC=true
@@ -42,7 +47,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-InaccessiblePaths=/etc/cfgms/secrets.key
+InaccessiblePaths=/etc/cfgms/secrets.key.cred
 ProtectHostname=true
 ProtectClock=true
 ProtectKernelTunables=true

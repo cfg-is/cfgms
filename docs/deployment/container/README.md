@@ -33,6 +33,19 @@ the host path and mounts that file read-only at
 `/run/secrets/cfgms-secrets-key`. Loss of the key makes stored secrets
 unrecoverable; disclosure compromises every secret encrypted with it.
 
+**Why this shape differs from the systemd deployments.**
+[ADR-030](../../architecture/decisions/030-controller-secret-material-at-rest.md)
+seals the key with `systemd-creds` and delivers it through
+`LoadCredentialEncrypted=`, which is a systemd facility and has no equivalent
+inside a container runtime. The container path therefore keeps a key file on the
+*host* and mounts it in — the key never lands on the container's own filesystem
+or in its image, but it is not sealed to host hardware the way the single-node
+and cluster deployments are. Where your orchestrator provides a sealed or
+externally-managed secret (a Docker/Swarm secret, a Kubernetes secret backed by a
+KMS, a CSI secrets driver), mount that at `/run/secrets/cfgms-secrets-key`
+instead of a plain host file: the container reads a path either way, so nothing
+in the image changes.
+
 Edit `controller.cfg`, replacing the example hostname, certificate SANs,
 external address, and organization. Keep `localhost` in the certificate SANs
 so the in-container readiness check can verify the server certificate.

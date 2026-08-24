@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
+	"strings"
 	"time"
 
 	openbao "github.com/openbao/openbao/api/v2"
@@ -189,16 +191,74 @@ func parseOpenBaoConfig(config map[string]interface{}) (*OpenBaoConfig, error) {
 
 	// Fall back to environment variables when not set in config map.
 	if cfg.Token == "" {
-		cfg.Token = os.Getenv("OPENBAO_TOKEN")
-	}
-	if cfg.Token == "" {
-		cfg.Token = os.Getenv("BAO_TOKEN")
+		token, err := tokenFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		cfg.Token = token
 	}
 	if addrEnv := os.Getenv("OPENBAO_ADDR"); addrEnv != "" && cfg.Address == "http://127.0.0.1:8200" {
 		cfg.Address = addrEnv
 	}
 
 	return cfg, nil
+}
+
+// tokenEnvVars are the environment variables consulted for the vault token, in
+// precedence order. Each also has a "<VAR>_FILE" form naming a file that holds
+// the token instead of carrying it in the environment directly — the delivery
+// channel systemd's LoadCredentialEncrypted= uses, where the unit environment
+// holds only a path under /run/credentials/ (ADR-030). A token in the
+// environment is readable through /proc/<pid>/environ and inherited by every
+// child process; a token in the credentials directory is neither.
+var tokenEnvVars = []string{"OPENBAO_TOKEN", "BAO_TOKEN"}
+
+// tokenFromEnv resolves the vault token from the environment, preferring the
+// direct variable and falling back to its "_FILE" companion.
+func tokenFromEnv() (string, error) {
+	for _, name := range tokenEnvVars {
+		if token := os.Getenv(name); token != "" {
+			return token, nil
+		}
+
+		path := strings.TrimSpace(os.Getenv(name + "_FILE"))
+		if path == "" {
+			continue
+		}
+
+		// #nosec G703 -- this path is a process-start configuration value
+		// supplied by the operator's systemd unit
+		// (Environment=OPENBAO_TOKEN_FILE=%d/...), not request data. The checks
+		// immediately below constrain what may be read through it.
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", fmt.Errorf("%s_FILE references %s: %w", name, path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%s_FILE references %s: not a regular file", name, path)
+		}
+		// Group read is expected (systemd credentials are mode 0440, scoped by
+		// a per-invocation ACL). World access never is. Windows is exempt
+		// because the permission bits Go reports there are synthesised from the
+		// read-only attribute, not read from the real ACL.
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0o007 != 0 {
+			return "", fmt.Errorf("%s_FILE references %s: file is world-accessible (mode %04o); token files must not be readable by other users",
+				name, path, info.Mode().Perm())
+		}
+
+		// #nosec G304,G703 -- path comes from the operator-controlled unit
+		// environment, the documented delivery channel for credential material,
+		// and has just been lstat-validated as a private regular file.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("%s_FILE references %s: %w", name, path, err)
+		}
+		if token := strings.TrimRight(string(data), "\r\n"); token != "" {
+			return token, nil
+		}
+	}
+
+	return "", nil
 }
 
 // newOpenBaoClient builds a configured OpenBao API client.

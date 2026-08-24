@@ -104,10 +104,19 @@ is sealed to the local TPM2 at provisioning time using `systemd-creds encrypt --
 The sealed blob replaces the cleartext file on disk. The unit carries:
 
 ```systemd
-LoadCredential=cfgms-secrets-key:/etc/cfgms/secrets.key.cred
+LoadCredentialEncrypted=cfgms-secrets-key:/etc/cfgms/secrets.key.cred
 Environment=CFGMS_SECRETS_KEY_FILE=%d/cfgms-secrets-key
 InaccessiblePaths=/etc/cfgms/secrets.key.cred
 ```
+
+> **Correction (2026-08-22, applied while implementing #3462).** This snippet and the one in
+> Decision 2 originally read `LoadCredential=`. That directive does **not** decrypt: it copies the
+> file through verbatim, so the service would have received the sealed blob rather than the key.
+> The directive that unseals a `systemd-creds`-encrypted credential is
+> **`LoadCredentialEncrypted=`**, and it is what both bootstrap scripts emit. Verified live on
+> `cfgms-ha-node2`: with `LoadCredentialEncrypted=`, the plaintext appears at
+> `$CREDENTIALS_DIRECTORY/<id>` mode 0440; with a blob systemd cannot unseal, the unit refuses to
+> start with `status=243/CREDENTIALS`.
 
 `secrets.key.cred` is a `systemd-creds`-encrypted blob, decryptable only by the TPM2 on the host
 where it was sealed. It cannot be recovered from a stolen disk image or VM snapshot. The cleartext
@@ -137,7 +146,7 @@ and writes it to `/etc/cfgms/secrets.key`. #3462 updates it to:
    openssl rand 32 | systemd-creds encrypt --with-key=tpm2 - /etc/cfgms/secrets.key.cred
    ```
 
-2. Update the unit's `LoadCredential=` line to point at `.cred`.
+2. Replace the unit's `LoadCredential=` line with `LoadCredentialEncrypted=`, pointing at `.cred`.
 3. Remove the `InaccessiblePaths=` line for the now-absent cleartext file; add one for the `.cred`
    file.
 
@@ -191,8 +200,8 @@ At provisioning time each node:
    the binding strength of every node in the cluster is auditable after the fact rather than
    inferred.
 5. Stores each sealed blob at a fixed path alongside the unit configuration.
-6. The unit carries individual `LoadCredential=` lines pointing to those sealed blobs, and no
-   `EnvironmentFile=` lines.
+6. The unit carries individual `LoadCredentialEncrypted=` lines pointing to those sealed blobs,
+   and no `EnvironmentFile=` lines.
 
 **Why not `--with-key=auto`.** `auto` silently falls back to the host key in
 `/var/lib/systemd/credential.secret` when no TPM2 is available. That file sits on the same
@@ -267,7 +276,7 @@ re-seal with the new TPM. The node then restarts cleanly with the correct shared
    step confirms the paths match what #3462's updated bootstrap script expects.)
 2. Run the updated `ha-cluster-node-bootstrap.sh` (#3462) on each node. The script replaces
    `/etc/cfgms/ha-secrets.env` with per-secret sealed credential files and regenerates the unit
-   without `EnvironmentFile=`, adding individual `LoadCredential=` lines.
+   without `EnvironmentFile=`, adding individual `LoadCredentialEncrypted=` lines.
 3. Stop all three nodes together (coordinated shutdown is required because Raft state is
    in-memory — a node restarted alone while its peers are running re-bootstraps as a lone
    self-elected leader and diverges from its peers: `panic: tocommit(4) is out of range
@@ -361,11 +370,11 @@ material is sensitive in isolation.
 - `scripts/tier1-bootstrap.sh` generates `secrets.key` in cleartext today. #3462 updates it to
   generate and seal in a single pipeline (`openssl rand 32 | systemd-creds encrypt
   --with-key=tpm2 - …`) with no intermediate file to shred, and update the unit's
-  `LoadCredential=` path to the `.cred` blob.
+  `LoadCredentialEncrypted=` path to the `.cred` blob.
 - `scripts/ha-cluster-node-bootstrap.sh` writes four secrets to `/etc/cfgms/ha-secrets.env` and
   loads them via `EnvironmentFile=`. #3462 removes `ha-secrets.env`, seals each of the four
   secrets individually via `systemd-creds encrypt --with-key=tpm2` after pulling from OpenBao,
-  and replaces the `EnvironmentFile=` line with individual `LoadCredential=` lines. #3462 also
+  and replaces the `EnvironmentFile=` line with individual `LoadCredentialEncrypted=` lines. #3462 also
   implements the `--allow-host-key` opt-in (warning + `key_mode` in the init record) and fails
   provisioning on a TPM-less node without it; `--with-key=auto` appears in neither script.
 - `scripts/ha-cluster-node-bootstrap_test.sh`'s assertions against `ha-secrets.env` and
@@ -373,12 +382,34 @@ material is sensitive in isolation.
 - The upgrade path for the existing lab cluster (Decision 2's numbered steps) is executed as part
   of #3462's live-validation step.
 
+**Amendment (2026-08-22, #3462) — `<VAR>_FILE` indirection was required to implement Decision 2.**
+The decision assumed a credential could be handed to the controller purely by wiring the unit. That
+holds for `secrets.key`, which the controller already reads by *path*
+(`CFGMS_SECRETS_KEY_FILE`). It did not hold for the other three: `CFGMS_STORAGE_DB_PASSWORD` and
+`CFGMS_SESSION_HMAC_KEY` are expanded from `${VAR}` references in `controller.cfg` and
+`OPENBAO_TOKEN`/`BAO_TOKEN` are read directly from the environment by
+`pkg/secrets/providers/openbao`, so every one of them could only arrive *by value* in the process
+environment — exactly what this ADR removes. Delivering them as credentials therefore needed a
+by-path form, and #3462 added the conventional one:
+
+- `features/controller/config/config.go` resolves `${VAR}` from `<VAR>_FILE`'s contents when `VAR`
+  itself is unset. The direct variable still wins, so nothing about the existing environment
+  override behaviour changes.
+- `pkg/secrets/providers/openbao` resolves its token from `OPENBAO_TOKEN_FILE` / `BAO_TOKEN_FILE`
+  on the same terms.
+
+Both reject a world-accessible file and treat a declared-but-unreadable one as an error rather than
+as "unset" — a broken credential must not silently degrade into a missing variable or an empty
+token. `ClusterCAConfig`'s doc comment ("the vault token must be supplied via the `OPENBAO_TOKEN`
+or `BAO_TOKEN` environment variable — never in the configuration file") still holds: the token is
+still never in the config file, and now need not be in the environment either.
+
 ### Deferred
 
 - `pkg/secrets/providers/openbao`'s `Available()` reads only `OPENBAO_ADDR`, not the resolved
   `certificate.cluster_ca.vault_address` (surfaced as bug #2 in
   `docs/testing/controller-ha-real-cluster-runbook.md` §3, worked around operationally via
-  `OPENBAO_ADDR` in the unit environment). The `LoadCredential=`-based bootstrap path in #3462
+  `OPENBAO_ADDR` in the unit environment). The credential-based bootstrap path in #3462
   works around this gap but does not fix it. A targeted fix to the openbao provider is the correct
   resolution and should be filed as a follow-up story.
 - Cloud KMS integration (AWS KMS, Azure Key Vault, GCP KMS) is consistent with Decision 2's
@@ -391,9 +422,9 @@ material is sensitive in isolation.
 
 ### Non-decisions
 
-- The `LoadCredential=` + `InaccessiblePaths=` delivery pattern is retained unchanged across all
+- The systemd-credential + `InaccessiblePaths=` delivery pattern is retained unchanged across all
   shapes. This is already the correct architecture; the decisions above are about what sits behind
-  `LoadCredential=`, not about replacing it.
+  the credential (and about using the `Encrypted` form of the directive), not about replacing it.
 - `pkg/secrets/providers/sops`'s mode-0440 exception for `/run/credentials/` paths
   (`store.go:102-113`) is already correct and is not modified.
 - The `systemd-creds decrypt` step at service startup is handled by systemd before the service
