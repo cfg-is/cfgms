@@ -646,16 +646,18 @@ func TestCollectModuleFragments_ClusterFragmentRegressionUnchanged(t *testing.T)
 		Details:    execution.NewConfigState(clusterDetails),
 	})
 
-	// Wait for the fragment to appear.
+	// Wait for the debounced reconcile's Get to land in the steady-state cache.
+	// "cluster:cfg-lab.state" cannot come from monitorState — the ChangeEvent carries
+	// only name, cno_owner_node, member_nodes, found — so its presence in DNA attributes
+	// proves cacheModuleDNAState has run for this resource. Asserting on fragment
+	// existence alone would return before the reconcile lands, leaving the two-source
+	// union in an unsettled state and producing one of two stable hashes intermittently.
 	require.Eventually(t, func() bool {
-		for _, f := range e.CollectModuleFragments(context.Background()) {
-			if f.FragmentId == "cluster:cfg-lab" {
-				return true
-			}
-		}
-		return false
+		attrs := e.CollectModuleDNAAttributes(context.Background())
+		_, ok := attrs["cluster:cfg-lab.state"]
+		return ok
 	}, 2*time.Second, 10*time.Millisecond,
-		"cluster:cfg-lab fragment must appear after the ChangeEvent")
+		"cluster:cfg-lab.state must appear in DNA attributes — proves debounced reconcile landed")
 
 	// Verify fragment fields.
 	var clusterFrag *commonpb.Fragment
@@ -672,8 +674,16 @@ func TestCollectModuleFragments_ClusterFragmentRegressionUnchanged(t *testing.T)
 	assert.NotEmpty(t, clusterFrag.FragmentHash, "cluster fragment hash must be non-nil")
 
 	// Verify canonical bytes are deterministic: same state → same hash.
-	// Build an equivalent fragment independently and compare hashes.
-	expected, err := sdna.NewFragment("cluster:cfg-lab", "hyperv", sdna.MapState(clusterDetails))
+	// Build expected from the two-source union: clusterDetails from monitorState merged
+	// with {"state": "drifted"} from moduleDNA (the Get result cached by the debounced
+	// reconcile). Monitor fields win on collision (none here); steady-state supplies "state".
+	// We confirmed both sources are settled above before collecting clusterFrag.
+	mergedState := make(map[string]interface{}, len(clusterDetails)+1)
+	for k, v := range clusterDetails {
+		mergedState[k] = v
+	}
+	mergedState["state"] = "drifted"
+	expected, err := sdna.NewFragment("cluster:cfg-lab", "hyperv", sdna.MapState(mergedState))
 	require.NoError(t, err)
 	assert.Equal(t, expected.FragmentHash, clusterFrag.FragmentHash,
 		"fragment hash must match independently-constructed fragment for same state")
