@@ -1698,7 +1698,7 @@ func TestGetAllStewardsCluster_LiveStewardTakesPrecedence(t *testing.T) {
 	assert.Equal(t, "active", cluster[0].Status,
 		"live status must win over stale durable record")
 	require.NotNil(t, cluster[0].DNA)
-	assert.Equal(t, "live-host", cluster[0].DNA.Attributes["hostname"],
+	assert.Equal(t, "live-host", FlattenDNAFragments(cluster[0].DNA.GetFragments())["hostname"],
 		"live DNA must win over stale durable record")
 }
 
