@@ -292,14 +292,24 @@ func TestSupervise_ContextCancel_AfterHealthyChildStaysAlive(t *testing.T) {
 	// Child sleeps long; cancel fires mid-sleep. exec.CommandContext
 	// kills the child producing a non-zero exit. The supervisor must
 	// recognise this as a cancellation, not a child fault.
+	//
+	// The child touches a marker file as its first action, which is what
+	// sequences this test. A bare "sleep 300ms then cancel" assumes the
+	// supervise goroutine is scheduled and has forked a child within that
+	// window; under a loaded machine (the whole repo's test binaries running
+	// at once) that assumption fails, cancel lands before the child exists,
+	// and the test measures the wrong code path entirely.
+	const startupWindow = 20 * time.Millisecond
+	marker := filepath.Join(t.TempDir(), "child-started")
 	envForChild(t, map[string]string{
-		"FAKE_STEWARD_SLEEP_MS":  "60000",
-		"FAKE_STEWARD_EXIT_CODE": "0",
+		"FAKE_STEWARD_SLEEP_MS":    "60000",
+		"FAKE_STEWARD_EXIT_CODE":   "0",
+		"FAKE_STEWARD_MARKER_FILE": marker,
 	})
 
 	s := &Supervisor{
 		Layout:            l,
-		StartupWindow:     20 * time.Millisecond, // tiny window so the kill lands OUTSIDE it
+		StartupWindow:     startupWindow, // tiny window so the kill lands OUTSIDE it
 		MaxRollbackCycles: 0,
 		Stdout:            &bytes.Buffer{},
 		Stderr:            &bytes.Buffer{},
@@ -313,8 +323,17 @@ func TestSupervise_ContextCancel_AfterHealthyChildStaysAlive(t *testing.T) {
 		result = s.Supervise(ctx)
 		close(done)
 	}()
-	// Wait long enough that the child is well past StartupWindow.
-	time.Sleep(300 * time.Millisecond)
+	// The marker proves a child is running. The supervisor started its
+	// ranFor clock strictly before the marker was written, so sleeping one
+	// more startup window past the marker guarantees ranFor > StartupWindow
+	// when the cancel lands. Only a lower bound is needed — the child sleeps
+	// 60s, so overshooting under load is harmless.
+	if !waitForFile(marker, 30*time.Second) {
+		cancel()
+		<-done
+		t.Fatal("fake-steward never started — child marker file absent")
+	}
+	time.Sleep(2 * startupWindow)
 	cancel()
 	select {
 	case <-done:
@@ -323,6 +342,195 @@ func TestSupervise_ContextCancel_AfterHealthyChildStaysAlive(t *testing.T) {
 	}
 	if result != nil {
 		t.Errorf("Supervise returned %v on cancel after healthy child; want nil", result)
+	}
+}
+
+// stageTwoVersions installs v1 and v2 and points the layout at v2, leaving
+// v1 as the rollback target. Any spurious rollback is then observable as
+// current.txt flipping to "v1".
+func stageTwoVersions(t *testing.T) Layout {
+	t.Helper()
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatalf("WriteCurrent v1: %v", err)
+	}
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatalf("WriteCurrent v2: %v", err)
+	}
+	return l
+}
+
+// TestSupervise_CancelBeforeChildStarts_ExitsCleanWithoutRollback pins the
+// shutdown-versus-failure distinction at the point where no child process was
+// ever created.
+//
+// exec.Cmd.Start refuses to fork on an already-cancelled context and returns
+// ctx.Err() after a handful of microseconds. The supervise loop used to read
+// that as "the steward exited non-zero, well inside its startup window" — the
+// exact signature of a failed upgrade — and answered by rolling the install
+// back to the previous version. Stopping the service was therefore enough to
+// silently downgrade a healthy steward. It also made
+// TestSupervise_ContextCancel_AfterHealthyChildStaysAlive flaky: whenever the
+// supervise goroutine was starved past that test's pre-cancel sleep, Supervise
+// began on a cancelled context and returned this bogus failure.
+func TestSupervise_CancelBeforeChildStarts_ExitsCleanWithoutRollback(t *testing.T) {
+	l := stageTwoVersions(t)
+
+	marker := filepath.Join(t.TempDir(), "child-started")
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_SLEEP_MS":    "60000",
+		"FAKE_STEWARD_EXIT_CODE":   "0",
+		"FAKE_STEWARD_MARKER_FILE": marker,
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     20 * time.Millisecond,
+		MaxRollbackCycles: 1, // budget available: a spurious rollback would fire
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := s.Supervise(ctx); err != nil {
+		t.Errorf("Supervise on an already-cancelled context returned %v; want nil (clean shutdown)", err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("a child was launched despite shutdown having been requested before Supervise ran")
+	}
+	if cur, _ := l.ReadCurrent(); cur != "v2" {
+		t.Errorf("current = %q after cancel-only shutdown, want v2 — shutdown must never roll back", cur)
+	}
+}
+
+// lateCancelContext reports "live" to exactly the first Err() caller and
+// cancelled to every caller after it, closing Done() as it hands out that
+// first answer.
+//
+// That reproduces, deterministically, the check-then-act window the supervise
+// loop cannot close: its own top-of-loop cancellation guard sees a live
+// context, and the cancel lands before exec.Cmd.Start consults Done(). On real
+// hardware this window is a few microseconds wide and effectively untestable;
+// here it is the only behaviour. It is a stdlib-interface shim for controlling
+// timing — the same role fakeClock plays in this file — not a stand-in for a
+// CFGMS component.
+type lateCancelContext struct {
+	context.Context
+	done      chan struct{}
+	errCalls  atomic.Int32
+	closeOnce sync.Once
+}
+
+func newLateCancelContext() *lateCancelContext {
+	return &lateCancelContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *lateCancelContext) Done() <-chan struct{} { return c.done }
+
+func (c *lateCancelContext) Err() error {
+	if c.errCalls.Add(1) == 1 {
+		// Cancel now, but let this caller (the supervise-loop guard) past.
+		c.closeOnce.Do(func() { close(c.done) })
+		return nil
+	}
+	return context.Canceled
+}
+
+// TestSupervise_CancelRacingChildStart_ExitsCleanWithoutRollback covers the
+// residual window the loop guard cannot cover on its own: cancellation arriving
+// between the guard and exec.Cmd.Start. No child is created there either, so
+// the outcome must still be a clean shutdown with the installed version left
+// alone.
+func TestSupervise_CancelRacingChildStart_ExitsCleanWithoutRollback(t *testing.T) {
+	l := stageTwoVersions(t)
+
+	marker := filepath.Join(t.TempDir(), "child-started")
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_SLEEP_MS":    "60000",
+		"FAKE_STEWARD_EXIT_CODE":   "0",
+		"FAKE_STEWARD_MARKER_FILE": marker,
+	})
+
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     20 * time.Millisecond,
+		MaxRollbackCycles: 1,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx := newLateCancelContext()
+	done := make(chan error, 1)
+	go func() { done <- s.Supervise(ctx) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Supervise returned %v when cancel raced child start; want nil (clean shutdown)", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Supervise did not return after the racing cancel")
+	}
+
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("a child was launched even though Start was refused on a cancelled context")
+	}
+	if cur, _ := l.ReadCurrent(); cur != "v2" {
+		t.Errorf("current = %q after a cancel racing child start, want v2 — shutdown must never roll back", cur)
+	}
+}
+
+// TestExecOnce_CancelledContext_TagsChildNeverStarted pins the tagging that the
+// two tests above rely on: a Start refused because the context was already done
+// must be distinguishable from a Start that failed because the binary is
+// broken. Both surface as a non-nil error after ~zero runtime, and only the
+// second one justifies a rollback.
+func TestExecOnce_CancelledContext_TagsChildNeverStarted(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	marker := filepath.Join(t.TempDir(), "child-started")
+	envForChild(t, map[string]string{
+		"FAKE_STEWARD_SLEEP_MS":    "60000",
+		"FAKE_STEWARD_EXIT_CODE":   "0",
+		"FAKE_STEWARD_MARKER_FILE": marker,
+	})
+	exe, err := l.StewardExeFor("v1")
+	if err != nil {
+		t.Fatalf("StewardExeFor: %v", err)
+	}
+
+	s := &Supervisor{
+		Layout:    l,
+		Stdout:    &bytes.Buffer{},
+		Stderr:    &bytes.Buffer{},
+		ExtraArgs: []string{"-test.run=TestHelperProcess"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	execErr := s.execOnce(ctx, exe)
+	if !errors.Is(execErr, errChildNeverStarted) {
+		t.Errorf("execOnce on a cancelled context returned %v; want an error wrapping errChildNeverStarted", execErr)
+	}
+	if !errors.Is(execErr, context.Canceled) {
+		t.Errorf("execOnce error %v lost the underlying context.Canceled cause", execErr)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("child process ran despite Start being refused on a cancelled context")
+	}
+
+	// A genuine start failure on a live context must NOT carry the tag —
+	// otherwise a broken binary would be excused as a shutdown.
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	if realErr := s.execOnce(context.Background(), missing); errors.Is(realErr, errChildNeverStarted) {
+		t.Errorf("a genuine exec failure (%v) was tagged as a cancellation", realErr)
 	}
 }
 
@@ -335,15 +543,21 @@ func TestSupervise_ContextCancel_ExitsClean(t *testing.T) {
 
 	// Child sleeps far longer than the test will give it; cancelling the
 	// context should kill it and Supervise should return nil (clean
-	// shutdown, not failure).
+	// shutdown, not failure). Sequenced on the child's marker file for the
+	// same reason as TestSupervise_ContextCancel_AfterHealthyChildStaysAlive:
+	// a fixed pre-cancel sleep silently degrades into "cancel before any
+	// child existed" on a loaded machine.
+	const startupWindow = 50 * time.Millisecond
+	marker := filepath.Join(t.TempDir(), "child-started")
 	envForChild(t, map[string]string{
-		"FAKE_STEWARD_SLEEP_MS":  "60000",
-		"FAKE_STEWARD_EXIT_CODE": "0",
+		"FAKE_STEWARD_SLEEP_MS":    "60000",
+		"FAKE_STEWARD_EXIT_CODE":   "0",
+		"FAKE_STEWARD_MARKER_FILE": marker,
 	})
 
 	s := &Supervisor{
 		Layout:            l,
-		StartupWindow:     50 * time.Millisecond,
+		StartupWindow:     startupWindow,
 		MaxRollbackCycles: 1,
 		Stdout:            &bytes.Buffer{},
 		Stderr:            &bytes.Buffer{},
@@ -360,14 +574,21 @@ func TestSupervise_ContextCancel_ExitsClean(t *testing.T) {
 		defer wg.Done()
 		result = s.Supervise(ctx)
 	}()
-	time.Sleep(300 * time.Millisecond)
-	cancel()
 
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
+
+	if !waitForFile(marker, 30*time.Second) {
+		cancel()
+		<-done
+		t.Fatal("fake-steward never started — child marker file absent")
+	}
+	time.Sleep(2 * startupWindow)
+	cancel()
+
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
