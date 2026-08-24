@@ -470,9 +470,20 @@ func (rc *RaftConsensus) Stop() error {
 		if t != nil {
 			t.Stop()
 		}
-		rc.node.Stop()
+		// rc.node.Stop() is intentionally NOT called here. It must follow
+		// rc.wg.Wait() below so that runRaft has fully exited before the
+		// underlying raft node is torn down. If node.Stop() precedes wg.Wait(),
+		// a concurrent processReady call can reach updateLeadership →
+		// rc.node.Status() and dereference the nil *pb.HardState in the
+		// Status{} zero value that Status() returns for a stopped node
+		// (etcd/raft v3.7.0: BasicStatus embeds *pb.HardState as a pointer;
+		// Issue #3528).
 	})
-	rc.wg.Wait() // all callers block until runRaft has exited
+	// All callers block here until runRaft and its spawned goroutines exit.
+	// The raft node is stopped only after runRaft has returned so that no
+	// in-flight processReady call can access torn-down node state.
+	rc.wg.Wait()
+	rc.node.Stop()
 	if rc.logStore != nil {
 		if err := rc.logStore.Close(); err != nil {
 			rc.logger.Warn("Failed to close raft log store", "node_id", rc.nodeID, "error", err)
@@ -904,7 +915,7 @@ func (rc *RaftConsensus) updateLeadership(ss *raft.SoftState) {
 	isLeader := ss.Lead == rc.nodeID && ss.RaftState == raft.StateLeader
 
 	if !wasLeader && isLeader {
-		rc.logger.Info("Node became LEADER", "node_id", rc.nodeID, "term", rc.node.Status().Term)
+		rc.logger.Info("Node became LEADER", "node_id", rc.nodeID, "term", rc.node.Status().GetTerm())
 
 		// Capture departed leader's string ID before overwriting clusterState.Leader.
 		departedUint := rc.clusterState.Leader
