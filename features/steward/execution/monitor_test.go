@@ -646,16 +646,32 @@ func TestCollectModuleFragments_ClusterFragmentRegressionUnchanged(t *testing.T)
 		Details:    execution.NewConfigState(clusterDetails),
 	})
 
-	// Wait for the fragment to appear.
+	// Wait for the steady-state contribution to land before asserting the hash.
+	// "cluster:cfg-lab.state" can only appear in CollectModuleDNAAttributes via
+	// moduleDNA (the steady-state source written by cacheModuleDNAState). The
+	// ChangeEvent carries only name/cno_owner_node/member_nodes/found — not
+	// "state" — so its presence in the DNA attributes proves the debounced
+	// targeted reconcile's Get has run and cacheModuleDNAState has been called.
+	// Waiting for fragment existence alone is insufficient: the fragment ID
+	// appears from monitorState immediately (before the reconcile lands), which
+	// is the root cause of the intermittent hash mismatch this test guards.
 	require.Eventually(t, func() bool {
-		for _, f := range e.CollectModuleFragments(context.Background()) {
-			if f.FragmentId == "cluster:cfg-lab" {
-				return true
-			}
-		}
-		return false
+		attrs := e.CollectModuleDNAAttributes(context.Background())
+		_, ok := attrs["cluster:cfg-lab.state"]
+		return ok
 	}, 2*time.Second, 10*time.Millisecond,
-		"cluster:cfg-lab fragment must appear after the ChangeEvent")
+		"cluster:cfg-lab.state must appear in DNA attributes after the debounced reconcile lands")
+
+	// Build the expected fragment from the full two-source union that
+	// CollectModuleFragments produces. Steady-state (module Get) contributes
+	// {"state": "drifted"}; the monitor overlay (the ChangeEvent) contributes
+	// the four clusterDetails fields. Monitor wins on field collision.
+	mergedState := map[string]interface{}{
+		"state": "drifted", // steady-state contribution from module Get
+	}
+	for k, v := range clusterDetails {
+		mergedState[k] = v // monitor overlay
+	}
 
 	// Verify fragment fields.
 	var clusterFrag *commonpb.Fragment
@@ -672,8 +688,10 @@ func TestCollectModuleFragments_ClusterFragmentRegressionUnchanged(t *testing.T)
 	assert.NotEmpty(t, clusterFrag.FragmentHash, "cluster fragment hash must be non-nil")
 
 	// Verify canonical bytes are deterministic: same state → same hash.
-	// Build an equivalent fragment independently and compare hashes.
-	expected, err := sdna.NewFragment("cluster:cfg-lab", "hyperv", sdna.MapState(clusterDetails))
+	// Build an equivalent fragment independently from the settled union and
+	// compare hashes. This detects regressions in authority resolution or
+	// merged-state assembly inside CollectModuleFragments.
+	expected, err := sdna.NewFragment("cluster:cfg-lab", "hyperv", sdna.MapState(mergedState))
 	require.NoError(t, err)
 	assert.Equal(t, expected.FragmentHash, clusterFrag.FragmentHash,
 		"fragment hash must match independently-constructed fragment for same state")
