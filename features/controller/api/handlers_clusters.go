@@ -128,19 +128,13 @@ func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData
 // out of DNA.Fragments here. This is the single place the cluster read endpoints read
 // a hostname from.
 //
-// DNA.Attributes is consulted only as a fallback, because the control-plane
-// EventDNAChanged path no longer populates it (Issue #3330) while the data-plane
-// full-sync path (features/controller/transport/dna_handler.go reassembleDNA) still
-// does for the not-yet-re-homed consumers listed there. The fallback drops out with
-// that projection.
+// DNA.Attributes (field 2) was retired in Issue #3331; the fragment-only path is now
+// the sole source of truth.
 func dnaHostname(dna *commonpb.DNA) string {
 	if dna == nil {
 		return ""
 	}
-	if hostname := service.FlattenDNAFragments(dna.GetFragments())["hostname"]; hostname != "" {
-		return hostname
-	}
-	return dna.GetAttributes()["hostname"]
+	return service.FlattenDNAFragments(dna.GetFragments())["hostname"]
 }
 
 // handleListClusters handles GET /api/v1/clusters.

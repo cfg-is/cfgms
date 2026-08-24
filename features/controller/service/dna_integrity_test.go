@@ -64,17 +64,13 @@ func makeTestFragment(t *testing.T, kind string, fields map[string]interface{}) 
 }
 
 // makeValidDNA returns a DNA snapshot that satisfies the full-os-device required
-// set. Both Fragments (the authoritative check target per Issue #3319) and
-// Attributes (legacy — kept so integration-test assertions on info.DNA.Attributes
-// continue to hold) are populated.
+// set. Fragments are the sole carrier of host facts (Issue #3319 made them the
+// check target; Issue #3331 removed DNA.Attributes), so assertions read them back
+// through FlattenDNAFragments.
 func makeValidDNA(id string) *commonpb.DNA {
 	return &commonpb.DNA{
 		Id:              id,
 		SyncFingerprint: "fp-" + id,
-		Attributes: map[string]string{
-			"hostname": "host-" + id,
-			"os":       "linux",
-		},
 		Fragments: []*commonpb.Fragment{
 			mustFragment("hostname", map[string]interface{}{"hostname": "host-" + id}),
 			mustFragment("host:os", map[string]interface{}{"os": "linux"}),
@@ -331,15 +327,17 @@ func TestSyncDNA_RejectsDegenerateDNA_PriorSnapshotUnchanged(t *testing.T) {
 	require.NoError(t, storage.Store(ctx, "dev-1", goodDNA, &fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
 
 	// Sync degenerate snapshot (no fragments → missing hostname and os).
-	degenerateDNA := &commonpb.DNA{Id: "dev-1", Attributes: map[string]string{}}
+	degenerateDNA := &commonpb.DNA{Id: "dev-1"}
 	_, err := svc.SyncDNA(ctx, degenerateDNA)
 	require.NoError(t, err)
 
 	// In-memory DNA must still be the good snapshot.
 	info, ok := svc.GetStewardInfo("dev-1")
 	require.True(t, ok)
-	assert.Equal(t, goodDNA.Attributes["hostname"], info.DNA.Attributes["hostname"])
-	assert.Equal(t, goodDNA.Attributes["os"], info.DNA.Attributes["os"])
+	goodFlat := FlattenDNAFragments(goodDNA.GetFragments())
+	liveFlat := FlattenDNAFragments(info.DNA.GetFragments())
+	assert.Equal(t, goodFlat["hostname"], liveFlat["hostname"])
+	assert.Equal(t, goodFlat["os"], liveFlat["os"])
 
 	// History must have exactly one entry — degenerate not appended.
 	history, err := storage.GetHistory(ctx, "dev-1", &fleetStorage.QueryOptions{IncludeData: true})
@@ -372,14 +370,14 @@ func TestSyncDNA_RejectsNilAttributesDNA(t *testing.T) {
 	svc.mu.Unlock()
 	require.NoError(t, storage.Store(ctx, "dev-2", goodDNA, &fleetStorage.StoreOptions{TenantID: "tenant-b", Status: "active"}))
 
-	emptyDNA := &commonpb.DNA{Id: "dev-2"} // nil Attributes and nil Fragments
+	emptyDNA := &commonpb.DNA{Id: "dev-2"} // nil Fragments
 	_, err := svc.SyncDNA(ctx, emptyDNA)
 	require.NoError(t, err)
 
 	info, ok := svc.GetStewardInfo("dev-2")
 	require.True(t, ok)
 	assert.NotNil(t, info.DNA)
-	assert.Equal(t, "host-dev-2", info.DNA.Attributes["hostname"])
+	assert.Equal(t, "host-dev-2", FlattenDNAFragments(info.DNA.GetFragments())["hostname"])
 
 	history, err := storage.GetHistory(ctx, "dev-2", &fleetStorage.QueryOptions{IncludeData: true})
 	require.NoError(t, err)
@@ -405,8 +403,7 @@ func TestSyncDNA_AcceptsValidDNA(t *testing.T) {
 	require.NoError(t, storage.Store(ctx, "dev-3", firstDNA, &fleetStorage.StoreOptions{TenantID: "tenant-c", Status: "active"}))
 
 	secondDNA := &commonpb.DNA{
-		Id:         "dev-3",
-		Attributes: map[string]string{"hostname": "host-dev-3-renamed", "os": "linux"},
+		Id: "dev-3",
 		Fragments: []*commonpb.Fragment{
 			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "host-dev-3-renamed"}),
 			makeTestFragment(t, "host:os", map[string]interface{}{"os": "linux"}),
@@ -418,7 +415,7 @@ func TestSyncDNA_AcceptsValidDNA(t *testing.T) {
 
 	info, ok := svc.GetStewardInfo("dev-3")
 	require.True(t, ok)
-	assert.Equal(t, "host-dev-3-renamed", info.DNA.Attributes["hostname"])
+	assert.Equal(t, "host-dev-3-renamed", FlattenDNAFragments(info.DNA.GetFragments())["hostname"])
 
 	history, err := storage.GetHistory(ctx, "dev-3", &fleetStorage.QueryOptions{IncludeData: true})
 	require.NoError(t, err)
@@ -441,10 +438,6 @@ func TestSyncDNA_AcceptsValidDNA_OptionalFieldsAbsent(t *testing.T) {
 
 	dna := &commonpb.DNA{
 		Id: "dev-4",
-		Attributes: map[string]string{
-			"hostname": "myhost",
-			"os":       "macos",
-		},
 		Fragments: []*commonpb.Fragment{
 			makeTestFragment(t, "hostname", map[string]interface{}{"hostname": "myhost"}),
 			makeTestFragment(t, "host:os", map[string]interface{}{
@@ -459,7 +452,7 @@ func TestSyncDNA_AcceptsValidDNA_OptionalFieldsAbsent(t *testing.T) {
 
 	info, ok := svc.GetStewardInfo("dev-4")
 	require.True(t, ok)
-	assert.Equal(t, "macos", info.DNA.Attributes["os"])
+	assert.Equal(t, "macos", FlattenDNAFragments(info.DNA.GetFragments())["os"])
 }
 
 // TestSyncDNA_PostHookNotFiredOnRejection verifies that postDNASyncHook is not
@@ -483,7 +476,7 @@ func TestSyncDNA_PostHookNotFiredOnRejection(t *testing.T) {
 		hookFired = true
 	})
 
-	degenerateDNA := &commonpb.DNA{Id: "dev-5", Attributes: map[string]string{}}
+	degenerateDNA := &commonpb.DNA{Id: "dev-5"}
 	_, err := svc.SyncDNA(ctx, degenerateDNA)
 	require.NoError(t, err)
 	assert.False(t, hookFired, "postDNASyncHook must not fire on degenerate rejection")
@@ -545,7 +538,7 @@ func TestAcceptRegistration_RejectsDegenerateInitialDNA(t *testing.T) {
 
 	req := &controllerpb.RegisterRequest{
 		Version:        "1.0.0",
-		InitialDna:     &commonpb.DNA{Id: "dna-bad", Attributes: map[string]string{}},
+		InitialDna:     &commonpb.DNA{Id: "dna-bad"},
 		IsReconnection: false,
 	}
 	resp, err := svc.AcceptRegistration(ctx, req)
@@ -591,7 +584,7 @@ func TestAcceptRegistration_AcceptsValidInitialDNA(t *testing.T) {
 	info, ok := svc.GetStewardInfo(stewardID)
 	require.True(t, ok)
 	require.NotNil(t, info.DNA)
-	assert.Equal(t, "linux", info.DNA.Attributes["os"])
+	assert.Equal(t, "linux", FlattenDNAFragments(info.DNA.GetFragments())["os"])
 
 	record, err := storage.GetLatestByDeviceID(ctx, stewardID)
 	require.NoError(t, err)

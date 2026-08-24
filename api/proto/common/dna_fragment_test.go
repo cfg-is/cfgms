@@ -73,14 +73,13 @@ func TestManifestEntry_RoundTrip(t *testing.T) {
 	assert.Equal(t, original.FragmentHash, got.FragmentHash)
 }
 
-// TestDNA_FragmentFields_RoundTrip verifies the new ADR-017 fields on DNA
-// marshal and unmarshal correctly alongside the legacy attributes field.
+// TestDNA_FragmentFields_RoundTrip verifies the ADR-017 fields on DNA marshal
+// and unmarshal correctly. Host facts travel exclusively as fragments now that
+// the legacy flat attributes field has been removed (Issue #3331).
 func TestDNA_FragmentFields_RoundTrip(t *testing.T) {
 	ts := timestamppb.Now()
 	original := &DNA{
-		Id: "steward-01",
-		// legacy field intentionally populated to prove backward-compatible coexistence
-		Attributes:  map[string]string{"os": "linux"},
+		Id:          "steward-01",
 		LastUpdated: ts,
 		Fragments: []*Fragment{
 			{
@@ -111,7 +110,7 @@ func TestDNA_FragmentFields_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, original.Id, got.Id)
-	assert.Equal(t, original.Attributes, got.Attributes)
+	assert.Equal(t, original.LastUpdated.AsTime(), got.LastUpdated.AsTime())
 	require.Len(t, got.Fragments, 1)
 	assert.Equal(t, "service:sshd", got.Fragments[0].FragmentId)
 	assert.Equal(t, "service", got.Fragments[0].Authority)

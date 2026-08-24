@@ -22,17 +22,29 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// seedClusterSteward registers a steward and sets its DNA to carry the given flat
-// attributes plus the given ADR-017 fragments. Cluster membership and role ownership
-// live in cluster:<name> fragments (Issue #2908) — dnaAttrs carries only host facts
-// such as "hostname", which the reconciliation handler uses for owner liveness.
+// seedClusterSteward registers a steward and sets its DNA to carry the given host
+// facts plus the given ADR-017 fragments. Cluster membership and role ownership live
+// in cluster:<name> fragments (Issue #2908); dnaAttrs carries only host facts such as
+// "hostname", which the reconciliation handler uses for owner liveness. Those facts
+// are seeded as a host:os fragment — the shape the gatherer emits, and the only
+// carrier of host facts since DNA.Attributes was removed (Issue #3331).
 func seedClusterSteward(t *testing.T, server *Server, id, tenantID string, dnaAttrs map[string]string, frags ...*commonpb.Fragment) {
 	t.Helper()
 	require.NoError(t, server.controllerService.RegisterSteward(id, tenantID, "addr", "active"))
+	all := make([]*commonpb.Fragment, 0, len(frags)+1)
+	all = append(all, frags...)
+	if len(dnaAttrs) > 0 {
+		state := make(sdna.MapState, len(dnaAttrs))
+		for k, v := range dnaAttrs {
+			state[k] = v
+		}
+		hostFacts, err := sdna.NewFragment("host:os", "gatherer", state)
+		require.NoError(t, err)
+		all = append(all, hostFacts)
+	}
 	ok := server.controllerService.SetStewardDNA(id, &commonpb.DNA{
-		Id:         id,
-		Attributes: dnaAttrs,
-		Fragments:  frags,
+		Id:        id,
+		Fragments: all,
 	})
 	require.True(t, ok, "SetStewardDNA must return true for a registered steward")
 }
@@ -630,11 +642,10 @@ func TestHandleClusters_RoutedViaAPIKey(t *testing.T) {
 // dnaHostname — fragment-sourced hostname (Issue #3330)
 // ---------------------------------------------------------------------------
 
-// TestDNAHostname_ReadsFromFragmentsWithoutAttributes is the regression guard for
-// Issue #3330: the control-plane EventDNAChanged path (Server.handleDNAEvent) no
-// longer writes DNA.Attributes, so a steward record can carry fragments and an
-// empty flat map. Cluster owner-liveness resolution must still find the hostname.
-func TestDNAHostname_ReadsFromFragmentsWithoutAttributes(t *testing.T) {
+// TestDNAHostname_ReadsFromFragments is the regression guard for Issue #3330: the
+// control-plane EventDNAChanged path (Server.handleDNAEvent) writes fragments only.
+// Cluster owner-liveness resolution must find the hostname there.
+func TestDNAHostname_ReadsFromFragments(t *testing.T) {
 	// A real host:os fragment built by the production constructor — the same shape
 	// features/steward/dna emits and handleDNAEvent stores.
 	frag, err := sdna.NewFragment("host:os", "gatherer",
@@ -644,36 +655,18 @@ func TestDNAHostname_ReadsFromFragmentsWithoutAttributes(t *testing.T) {
 	got := dnaHostname(&commonpb.DNA{
 		Id:        "steward-frag-only",
 		Fragments: []*commonpb.Fragment{frag},
-		// Attributes deliberately absent — this is what handleDNAEvent now produces.
 	})
 	assert.Equal(t, "node-frag-1", got,
-		"hostname must be projected from the host:os fragment when Attributes is empty")
+		"hostname must be projected from the host:os fragment")
 }
 
-// TestDNAHostname_FragmentWinsOverStaleAttribute verifies the fragment set is
-// authoritative when both sources are present (the data-plane full-sync path still
-// derives Attributes from the same fragments, so they normally agree).
-func TestDNAHostname_FragmentWinsOverStaleAttribute(t *testing.T) {
-	frag, err := sdna.NewFragment("host:os", "gatherer",
-		sdna.MapState{"os": "linux", "hostname": "node-current"})
-	require.NoError(t, err)
-
-	got := dnaHostname(&commonpb.DNA{
-		Id:         "steward-both",
-		Fragments:  []*commonpb.Fragment{frag},
-		Attributes: map[string]string{"hostname": "node-stale"},
-	})
-	assert.Equal(t, "node-current", got, "the fragment projection must win")
-}
-
-// TestDNAHostname_FallsBackToAttributes covers records produced by the data-plane
-// path before any host:os fragment exists, and the nil-DNA guard.
-func TestDNAHostname_FallsBackToAttributes(t *testing.T) {
-	got := dnaHostname(&commonpb.DNA{
-		Id:         "steward-attrs-only",
-		Attributes: map[string]string{"hostname": "node-attrs"},
-	})
-	assert.Equal(t, "node-attrs", got, "records with no fragments still resolve via Attributes")
+// TestDNAHostname_NoFragmentsResolvesEmpty pins the Issue #3331 end state: fragments
+// are the only hostname source. A record carrying no fragments resolves to the empty
+// string — there is no flat attribute map left to fall back to, and dnaHostname must
+// not fabricate one. Also covers the nil-DNA guard.
+func TestDNAHostname_NoFragmentsResolvesEmpty(t *testing.T) {
+	assert.Empty(t, dnaHostname(&commonpb.DNA{Id: "steward-no-frags"}),
+		"a fragment-less record has no hostname to resolve")
 
 	assert.Empty(t, dnaHostname(nil), "a nil DNA must resolve to an empty hostname")
 	assert.Empty(t, dnaHostname(&commonpb.DNA{Id: "empty"}), "an empty DNA must resolve to an empty hostname")

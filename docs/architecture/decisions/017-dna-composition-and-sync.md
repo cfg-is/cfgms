@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-07-04
-**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority; 2026-08-15 — [Amendment 4](#amendment-4-2026-08-15--dnatransferattributes-retired-from-the-full-sync-wire-protocol): `DNATransfer.Attributes` retired from the full-sync wire protocol; 2026-08-21 — [Amendment 5](#amendment-5-2026-08-21--fragment-based-control-plane-delta-issue-3330): fragment-based control-plane delta
+**Amended:** 2026-07-07 — [Amendment 1](#amendment-1-2026-07-07--twindex-data-model-commitments): twin/DEX Tier-1 data-model commitments (provenance envelope, typed entity id, versioned history retention, shared entity identity for DEX); 2026-07-21 — [Amendment 2](#amendment-2-2026-07-21--fleet-global-addressing-is-the-eid-adr-022): fleet-global addressing is the `eid` (ADR-022); 2026-07-23 — [Amendment 3](#amendment-3-2026-07-23--existing-gatherers-are-the-interim-observe-only-host-fact-authority): existing gatherers as interim observe-only host-fact authority; 2026-08-15 — [Amendment 4](#amendment-4-2026-08-15--dnatransferattributes-retired-from-the-full-sync-wire-protocol): `DNATransfer.Attributes` retired from the full-sync wire protocol; 2026-08-21 — [Amendment 5](#amendment-5-2026-08-21--fragment-based-control-plane-delta-issue-3330): fragment-based control-plane delta; 2026-08-23 — [Amendment 6](#amendment-6-2026-08-23--commonpbdnaattributes-retired-issue-3331): `commonpb.DNA.attributes` proto field and Go struct field retired
 **Issue:** #2901
 **Epic:** #2852 — DNA composition — fragment model, authority resolver, partial sync, fragment history in the Entity Graph (ADR-017)
 
@@ -313,7 +313,8 @@ collection until its declared replacement exists, as Consequences→Negative #4
 already implied. Managed objects remain module-`Get`-sourced (clause 2a); the
 module-ownership exclusion filter keeps gatherer output from ever competing with a
 module-owned kind (clause 5 atomicity). The flat collector's full retirement and
-the `commonpb.DNA.attributes` removal are deferred to a follow-on clean-break epic
+the `commonpb.DNA.attributes` removal were deferred to a follow-on clean-break epic
+(now completed — see [Amendment 6](#amendment-6-2026-08-23--commonpbdnaattributes-retired-issue-3331))
 that also re-homes the Reports Engine off the flat `DNARecord` store.
 
 ## Amendment 4 (2026-08-15) — `DNATransfer.Attributes` retired from the full-sync wire protocol
@@ -338,12 +339,14 @@ ends.
 The delta-sync path was already Fragments-only (it has never populated
 `Attributes`) and is unaffected.
 
-**`commonpb.DNA.attributes` is not retired by this amendment — the wire field is.**
+**`commonpb.DNA.attributes` was not retired by this amendment — only the wire field was.**
+(See [Amendment 6](#amendment-6-2026-08-23--commonpbdnaattributes-retired-issue-3331) for the
+proto field and Go struct field removal.)
+
 The `common.DNA` that `reassembleDNA` returns is not merely a decode of the wire:
 `ControllerService.SyncDNA` assigns it wholesale (`steward.DNA = dna`), making it
-the controller's canonical steward record. Leaving its flat map unset would
-therefore *erase* attributes fleet-wide on each steward's first full sync, and
-these consumers have not yet been re-homed onto `DNA.Fragments`:
+the controller's canonical steward record. At the time of this amendment the following
+consumers had not yet been re-homed onto `DNA.Fragments`:
 
 | Consumer | Effect of a blank map |
 |---|---|
@@ -353,16 +356,15 @@ these consumers have not yet been re-homed onto `DNA.Fragments`:
 
 Each failure is fail-closed rather than fail-open, but silent and fleet-wide.
 
-So `reassembleDNA` **derives** `DNA.Attributes`/`DNA.AttributeCount` from the
-received fragments via `sdna.FlattenFragments` — the same projection the
-required-field integrity check uses (`features/controller/service/dna_integrity.go`).
-The wire stays Fragments-only, the fragments stay authoritative, and no wire-supplied
-attribute can enter the record: a transfer that still carries an `Attributes` blob
-has it ignored entirely (`TestReassembleDNA_IgnoresWireAttributes`). The projection
-merges fragments in ascending `fragment_id` order so the DNA fingerprint the
-controller hashes from it is stable across identical snapshots. The projection and
-the two `commonpb.DNA` fields are removed together once the consumers above read
-fragments directly (epic #2911).
+So `reassembleDNA` **derives** `DNA.AttributeCount` from the received fragments via
+`sdna.FlattenFragments` — the same projection the required-field integrity check
+uses (`features/controller/service/dna_integrity.go`). The wire stays Fragments-only,
+the fragments stay authoritative, and no wire-supplied attribute can enter the record:
+a transfer that still carries an `Attributes` blob has it ignored entirely
+(`TestReassembleDNA_IgnoresWireAttributes`). The projection merges fragments in
+ascending `fragment_id` order so the DNA fingerprint the controller hashes from it is
+stable across identical snapshots. All consumers were re-homed onto `DNA.Fragments`
+and the proto field removed in Amendment 6 (epic #2911).
 
 **Steward-identity security gate.** The `firstChunk.GetStewardId() != peerID`
 check in `HandleGRPC` gates all DNA ingest regardless of wire format; it precedes
@@ -395,3 +397,42 @@ inventory, attribute filters, the cluster hostname lookup) project it from
 check (`checkDNAIntegrityWithTable`) is satisfied because the full current
 set — which always includes `host:os` (carrying `hostname` and `os`) — is
 transmitted on every delta publish.
+
+## Amendment 6 (2026-08-23) — `commonpb.DNA.attributes` retired (Issue #3331)
+
+**Status:** Accepted (2026-08-23, Issue #3331)
+
+**Context.** Amendment 4 retired the `DNATransfer.Attributes` wire field but left the
+`commonpb.DNA.Attributes` Go struct field populated by `reassembleDNA` (via
+`sdna.FlattenFragments`) to bridge consumers that were not yet fragment-aware.
+Amendment 5 re-homed the delta-sync path. By this amendment all three remaining
+consumers identified in Amendment 4 have been re-homed onto `DNA.Fragments`:
+
+- `features/controller/api/handlers_stewards.go` — fleet inventory, attribute filter, and module
+  list now project attributes via `service.FlattenDNAFragments(dna.GetFragments())`.
+- `features/controller/fleet/storage/` — fingerprint, projection, and attribute index read
+  `DNA.Fragments` directly.
+- `features/controller/service/controller_service.go` (`RegisterStewardWithAttributes`) — the
+  pre-sync identity hint is seeded as a `host:os` fragment (authority `"registration"`) rather
+  than writing into `DNA.Attributes`.
+
+**Decision.** `commonpb.DNA.attributes` (proto field 2) is reserved in
+`api/proto/common/common.proto` (`reserved 2; reserved "attributes";`). The Go struct
+field `DNA.Attributes` and its accessor `GetAttributes()` are removed from
+`api/proto/common/common.pb.go`. `reassembleDNA` in `dna_handler.go` no longer
+populates `Attributes`; it only sets `Fragments` and `AttributeCount` (the latter
+derived from `sdna.FlattenFragments` for re-registration change detection).
+`DNATransfer.Attributes` in `pkg/dataplane/types/transfers.go` is a field on a
+different message and is **not** removed here: it has been wire-silent since
+Amendment 4, the steward stopped populating it in Issue #3322, and `reassembleDNA`
+never reads it. Retiring that residual field is left to a follow-up.
+
+The `host:os` pre-sync fragment written by `RegisterStewardWithAttributes` uses authority
+`"registration"` to distinguish it from the steward's own `"osquery"` or
+gatherer-sourced observations, which replace it on first full sync.
+
+**Consequences.** The `DNA.Attributes` field no longer exists in the canonical Go type.
+Any caller that compiled against `GetAttributes()` must project from `GetFragments()`
+via `service.FlattenDNAFragments` or `sdna.FlattenFragments`. The flat attribute map
+path through the controller is fully retired. ADR-017 fragment-only operation is now
+complete for all controller consumers.

@@ -13,6 +13,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	steward "github.com/cfgis/cfgms/features/steward"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -204,9 +205,11 @@ func TestDetectUnmanagedDNADrift_NilDriftDetector(t *testing.T) {
 	require.NotNil(t, s)
 
 	// Set a previous snapshot so we reach the driftDetector nil check.
+	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"test": "value"})
+	require.NoError(t, err)
 	steward.SetPreviousDNA(s, &commonpb.DNA{
-		Id:         "same-id",
-		Attributes: map[string]string{"test": "value"},
+		Id:        "same-id",
+		Fragments: []*commonpb.Fragment{prevFrag},
 	})
 
 	// Override drift detector with nil — DNA collector still runs but detection is skipped.
@@ -233,9 +236,11 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 	require.NotNil(t, s)
 
 	// Inject a previous DNA with a different ID than the real system DNA will produce.
+	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"fake": "previous"})
+	require.NoError(t, err)
 	steward.SetPreviousDNA(s, &commonpb.DNA{
-		Id:         "different-id-that-will-not-match-real-system",
-		Attributes: map[string]string{"fake": "previous"},
+		Id:        "different-id-that-will-not-match-real-system",
+		Fragments: []*commonpb.Fragment{prevFrag},
 	})
 
 	ctx := context.Background()
@@ -257,7 +262,7 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 // TestDetectUnmanagedDNADrift_ReportsHostFactChange is the functional regression
 // guard for Issue #3332 (host-fact fragments) and Issue #3320 (Fragment-aware
 // drift detection): the unmanaged-drift path must still SEE host facts, now
-// diffed via DNA.Fragments rather than the deprecated DNA.Attributes map.
+// diffed via DNA.Fragments, which replaced the removed flat attribute map.
 //
 // pkg/dna/drift compares Fragments by FragmentId/FragmentHash and has no
 // awareness of the flat attribute map, so if Collect() ever stopped writing

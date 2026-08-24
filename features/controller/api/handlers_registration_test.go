@@ -1979,9 +1979,10 @@ func TestHandleRegister_HostnameSeededBeforeDNASync(t *testing.T) {
 	info, ok := server.controllerService.GetStewardInfo(resp.StewardID)
 	require.True(t, ok, "registered steward must be present in controller service")
 	require.NotNil(t, info.DNA)
-	assert.Equal(t, "worker-node-42", info.DNA.Attributes["hostname"],
+	flat := service.FlattenDNAFragments(info.DNA.GetFragments())
+	assert.Equal(t, "worker-node-42", flat["hostname"],
 		"hostname must be visible in DNA immediately after registration, before any SyncDNA")
-	assert.Equal(t, "linux", info.DNA.Attributes["os"],
+	assert.Equal(t, "linux", flat["os"],
 		"os must be visible in DNA immediately after registration, before any SyncDNA")
 }
 
@@ -2010,8 +2011,8 @@ func TestHandleRegister_EmptyHostnameStillRegisters(t *testing.T) {
 	info, ok := server.controllerService.GetStewardInfo(resp.StewardID)
 	require.True(t, ok)
 	require.NotNil(t, info.DNA)
-	assert.Empty(t, info.DNA.Attributes["hostname"],
-		"no hostname attribute should be set when none was sent at registration")
+	assert.Empty(t, service.FlattenDNAFragments(info.DNA.GetFragments())["hostname"],
+		"no hostname fact should be set when none was sent at registration")
 }
 
 // TestHandleListPendingRegistrations_ClusterMode_Returns200Not503 is the REQUIRED TEST for

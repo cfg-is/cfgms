@@ -356,7 +356,7 @@ func (b *SQLiteBackend) GetHistoryByDeviceID(ctx context.Context, deviceID strin
 		if err := rows.Scan(
 			&rec.DeviceID,
 			&rec.TenantID,
-			new(string), // os — available in DNA.Attributes
+			new(string), // os — available via DNA fragments
 			new(string), // architecture
 			new(string), // hostname
 			&rec.Status,
@@ -410,7 +410,7 @@ func (b *SQLiteBackend) GetLatestByDeviceID(ctx context.Context, deviceID string
 	if err := row.Scan(
 		&rec.DeviceID,
 		&rec.TenantID,
-		new(string), // os — available in DNA.Attributes
+		new(string), // os — available via DNA fragments
 		new(string), // architecture
 		new(string), // hostname
 		&rec.Status,

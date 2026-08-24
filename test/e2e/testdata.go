@@ -12,6 +12,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/steward/config"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 )
 
 // TestDataGenerator provides lightweight test data generation optimized for CI environments
@@ -39,10 +40,16 @@ func (g *TestDataGenerator) cryptoRandInt(max int64) int64 {
 	return n.Int64()
 }
 
-// GenerateTestDNA creates realistic DNA data for testing
-func (g *TestDataGenerator) GenerateTestDNA(stewardID string) *common.DNA {
+// GenerateTestDNA creates realistic DNA data for testing.
+// Attributes are carried as a host:test fragment in DNA.Fragments per Issue #3331.
+//
+// It returns an error if the fixture fragment cannot be constructed, so a
+// fixture-construction failure surfaces at its origin rather than as a downstream
+// "no fragments" assertion. Callers run inside RunTest's goroutine, which cannot
+// call t.Fatal, so the failure is reported as a value.
+func (g *TestDataGenerator) GenerateTestDNA(stewardID string) (*common.DNA, error) {
 	// Base attributes that work across all platforms
-	attributes := map[string]string{
+	attributes := map[string]interface{}{
 		"hostname":    fmt.Sprintf("test-%s", stewardID),
 		"steward_id":  stewardID,
 		"version":     "test-1.0.0",
@@ -89,11 +96,19 @@ func (g *TestDataGenerator) GenerateTestDNA(stewardID string) *common.DNA {
 		}
 	}
 
-	return &common.DNA{
+	dna := &common.DNA{
 		Id:          stewardID,
-		Attributes:  attributes,
 		LastUpdated: timestamppb.Now(),
 	}
+
+	// Pack all test attributes into a single host:test fragment.
+	frag, err := sdna.NewFragment("host:test", "test", sdna.MapState(attributes))
+	if err != nil {
+		return nil, fmt.Errorf("build host:test fragment for steward %q: %w", stewardID, err)
+	}
+	dna.Fragments = append(dna.Fragments, frag)
+
+	return dna, nil
 }
 
 // GenerateStewardConfig creates realistic steward configuration for testing
@@ -457,20 +472,38 @@ resources:
 	}
 }
 
-// GenerateDNADriftScenario creates data for DNA + drift detection integration testing
-func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
+// GenerateDNADriftScenario creates data for DNA + drift detection integration testing.
+//
+// It returns an error if either DNA fixture or the drift fragment cannot be
+// constructed: a silently missing drift fragment would leave the drifted DNA
+// identical to the baseline, which makes a drift-detection test pass or fail for
+// the wrong reason.
+func (g *TestDataGenerator) GenerateDNADriftScenario() (*DNADriftScenario, error) {
 	stewardID := "dna-drift-test-steward"
 
 	// Generate baseline DNA
-	baselineDNA := g.GenerateTestDNA(stewardID)
+	baselineDNA, err := g.GenerateTestDNA(stewardID)
+	if err != nil {
+		return nil, fmt.Errorf("build baseline DNA: %w", err)
+	}
 
-	// Create modified DNA simulating system drift
-	driftedDNA := g.GenerateTestDNA(stewardID)
-	// Simulate critical changes that should trigger alerts
-	driftedDNA.Attributes["cpu_cores"] = "8"               // Changed from original
-	driftedDNA.Attributes["memory_mb"] = "8192"            // Changed from original
-	driftedDNA.Attributes["firewall_enabled"] = "false"    // Security-critical change
-	driftedDNA.Attributes["antivirus_status"] = "inactive" // Security-critical change
+	// Create modified DNA simulating system drift.
+	// Append a host:test-drift fragment that overrides specific keys for the drift scenario.
+	driftedDNA, err := g.GenerateTestDNA(stewardID)
+	if err != nil {
+		return nil, fmt.Errorf("build drifted DNA: %w", err)
+	}
+	driftAttrs := sdna.MapState{
+		"cpu_cores":        "8",        // Changed from original
+		"memory_mb":        "8192",     // Changed from original
+		"firewall_enabled": "false",    // Security-critical change
+		"antivirus_status": "inactive", // Security-critical change
+	}
+	driftFrag, err := sdna.NewFragment("host:test-drift", "test", driftAttrs)
+	if err != nil {
+		return nil, fmt.Errorf("build host:test-drift fragment: %w", err)
+	}
+	driftedDNA.Fragments = append(driftedDNA.Fragments, driftFrag)
 
 	// Create remediation workflow
 	remediationWorkflow := &WorkflowData{
@@ -532,7 +565,7 @@ func (g *TestDataGenerator) GenerateDNADriftScenario() *DNADriftScenario {
 		DriftedDNA:            driftedDNA,
 		RemediationWorkflow:   remediationWorkflow,
 		ExpectedDetectionTime: 5 * time.Minute, // SLA requirement
-	}
+	}, nil
 }
 
 // GenerateTemplateRollbackScenario creates data for template + rollback integration testing

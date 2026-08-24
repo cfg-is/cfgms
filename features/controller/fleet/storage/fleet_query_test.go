@@ -15,13 +15,14 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
-// makeTestDNA builds a DNA proto with the given attributes for testing.
-func makeTestDNA(id string, attrs map[string]string) *commonpb.DNA {
-	return &commonpb.DNA{
+// makeTestDNA builds a DNA proto carrying the given attributes as a fragment
+// (Issue #3331 — the flat DNA.Attributes map no longer exists).
+func makeTestDNA(t *testing.T, id string, attrs map[string]string) *commonpb.DNA {
+	t.Helper()
+	return attachTestFragment(t, &commonpb.DNA{
 		Id:              id,
-		Attributes:      attrs,
 		SyncFingerprint: "fp-" + id,
-	}
+	}, attrs)
 }
 
 // newTestFleetStorage creates an ephemeral SQLite storage manager for tests.
@@ -42,8 +43,8 @@ func TestFleetQuery_EmptyFilter(t *testing.T) {
 	ctx := context.Background()
 
 	// Store two devices
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux", "architecture": "amd64", "hostname": "host-1"})
-	dna2 := makeTestDNA("dev-2", map[string]string{"os": "windows", "architecture": "amd64", "hostname": "host-2"})
+	dna1 := makeTestDNA(t, "dev-1", map[string]string{"os": "linux", "architecture": "amd64", "hostname": "host-1"})
+	dna2 := makeTestDNA(t, "dev-2", map[string]string{"os": "windows", "architecture": "amd64", "hostname": "host-2"})
 
 	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "tenant-a", Status: "online"}))
 	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "tenant-b", Status: "offline"}))
@@ -58,9 +59,9 @@ func TestFleetQuery_FilterByTenantID(t *testing.T) {
 	mgr := newTestFleetStorage(t)
 	ctx := context.Background()
 
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux"})
-	dna2 := makeTestDNA("dev-2", map[string]string{"os": "linux"})
-	dna3 := makeTestDNA("dev-3", map[string]string{"os": "linux"})
+	dna1 := makeTestDNA(t, "dev-1", map[string]string{"os": "linux"})
+	dna2 := makeTestDNA(t, "dev-2", map[string]string{"os": "linux"})
+	dna3 := makeTestDNA(t, "dev-3", map[string]string{"os": "linux"})
 
 	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "tenant-a", Status: "online"}))
 	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "tenant-a", Status: "online"}))
@@ -83,8 +84,8 @@ func TestFleetQuery_FilterByStatus(t *testing.T) {
 	mgr := newTestFleetStorage(t)
 	ctx := context.Background()
 
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux"})
-	dna2 := makeTestDNA("dev-2", map[string]string{"os": "linux"})
+	dna1 := makeTestDNA(t, "dev-1", map[string]string{"os": "linux"})
+	dna2 := makeTestDNA(t, "dev-2", map[string]string{"os": "linux"})
 
 	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "t1", Status: "online"}))
 	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "t1", Status: "offline"}))
@@ -100,7 +101,7 @@ func TestFleetQuery_FilterByDeviceIDs(t *testing.T) {
 	ctx := context.Background()
 
 	for _, id := range []string{"dev-1", "dev-2", "dev-3"} {
-		dna := makeTestDNA(id, map[string]string{"os": "linux"})
+		dna := makeTestDNA(t, id, map[string]string{"os": "linux"})
 		require.NoError(t, mgr.Store(ctx, id, dna, &StoreOptions{TenantID: "t1", Status: "online"}))
 	}
 
@@ -117,9 +118,9 @@ func TestFleetQuery_CombinedFilters(t *testing.T) {
 	mgr := newTestFleetStorage(t)
 	ctx := context.Background()
 
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux"})
-	dna2 := makeTestDNA("dev-2", map[string]string{"os": "linux"})
-	dna3 := makeTestDNA("dev-3", map[string]string{"os": "linux"})
+	dna1 := makeTestDNA(t, "dev-1", map[string]string{"os": "linux"})
+	dna2 := makeTestDNA(t, "dev-2", map[string]string{"os": "linux"})
+	dna3 := makeTestDNA(t, "dev-3", map[string]string{"os": "linux"})
 
 	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "tenant-a", Status: "online"}))
 	require.NoError(t, mgr.Store(ctx, "dev-2", dna2, &StoreOptions{TenantID: "tenant-a", Status: "offline"}))
@@ -141,7 +142,7 @@ func TestFleetQuery_Pagination(t *testing.T) {
 
 	for i := 1; i <= 5; i++ {
 		id := "dev-" + string(rune('0'+i))
-		dna := makeTestDNA(id, map[string]string{"os": "linux"})
+		dna := makeTestDNA(t, id, map[string]string{"os": "linux"})
 		require.NoError(t, mgr.Store(ctx, id, dna, &StoreOptions{TenantID: "t1", Status: "online"}))
 	}
 
@@ -162,8 +163,8 @@ func TestFleetQuery_OnlyLatestVersionReturned(t *testing.T) {
 	ctx := context.Background()
 
 	// Store two versions for the same device
-	dna1 := makeTestDNA("dev-1", map[string]string{"os": "linux", "version": "1"})
-	dna2 := makeTestDNA("dev-1", map[string]string{"os": "linux", "version": "2"})
+	dna1 := makeTestDNA(t, "dev-1", map[string]string{"os": "linux", "version": "1"})
+	dna2 := makeTestDNA(t, "dev-1", map[string]string{"os": "linux", "version": "2"})
 
 	require.NoError(t, mgr.Store(ctx, "dev-1", dna1, &StoreOptions{TenantID: "t1", Status: "online"}))
 	require.NoError(t, mgr.Store(ctx, "dev-1", dna2, &StoreOptions{TenantID: "t1", Status: "online"}))
@@ -175,7 +176,7 @@ func TestFleetQuery_OnlyLatestVersionReturned(t *testing.T) {
 	assert.Len(t, result.Records, 1)
 	// Latest version should have "version": "2" in DNA attributes
 	require.NotNil(t, result.Records[0].DNA)
-	assert.Equal(t, "2", result.Records[0].DNA.Attributes["version"])
+	assert.Equal(t, "2", dnaAttrs(result.Records[0].DNA)["version"])
 }
 
 func TestListAllDeviceIDs(t *testing.T) {
@@ -183,7 +184,7 @@ func TestListAllDeviceIDs(t *testing.T) {
 	ctx := context.Background()
 
 	for _, id := range []string{"dev-a", "dev-b", "dev-c"} {
-		dna := makeTestDNA(id, map[string]string{"os": "linux"})
+		dna := makeTestDNA(t, id, map[string]string{"os": "linux"})
 		require.NoError(t, mgr.Store(ctx, id, dna, &StoreOptions{TenantID: "t1", Status: "online"}))
 	}
 
@@ -209,7 +210,7 @@ func TestStore_WithOptions(t *testing.T) {
 	mgr := newTestFleetStorage(t)
 	ctx := context.Background()
 
-	dna := makeTestDNA("dev-x", map[string]string{
+	dna := makeTestDNA(t, "dev-x", map[string]string{
 		"os":           "linux",
 		"architecture": "amd64",
 		"hostname":     "host-x",
@@ -232,8 +233,9 @@ func TestStore_WithOptions(t *testing.T) {
 	assert.Equal(t, "online", result.Records[0].Status)
 	// DNA attributes are preserved in dna_json and accessible on the returned record.
 	require.NotNil(t, result.Records[0].DNA)
-	assert.Equal(t, "linux", result.Records[0].DNA.Attributes["os"])
-	assert.Equal(t, "amd64", result.Records[0].DNA.Attributes["architecture"])
+	recordAttrs := dnaAttrs(result.Records[0].DNA)
+	assert.Equal(t, "linux", recordAttrs["os"])
+	assert.Equal(t, "amd64", recordAttrs["architecture"])
 }
 
 func TestQueryFleet_NonSQLiteBackendReturnsError(t *testing.T) {
@@ -317,7 +319,7 @@ func TestStore_WithNilOptions(t *testing.T) {
 	mgr := newTestFleetStorage(t)
 	ctx := context.Background()
 
-	dna := makeTestDNA("dev-y", map[string]string{"os": "linux"})
+	dna := makeTestDNA(t, "dev-y", map[string]string{"os": "linux"})
 	// nil opts should not panic
 	err := mgr.Store(ctx, "dev-y", dna, nil)
 	require.NoError(t, err)
@@ -335,7 +337,7 @@ func TestGetHistoryByDeviceID(t *testing.T) {
 
 	// Store 3 versions.
 	for i := 1; i <= 3; i++ {
-		dna := makeTestDNA(deviceID, map[string]string{"os": "linux", "v": fmt.Sprintf("%d", i)})
+		dna := makeTestDNA(t, deviceID, map[string]string{"os": "linux", "v": fmt.Sprintf("%d", i)})
 		require.NoError(t, mgr.Store(ctx, deviceID, dna, nil))
 	}
 

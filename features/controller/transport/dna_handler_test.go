@@ -154,13 +154,13 @@ func TestDNAHandler_PersistsReassembledDNA(t *testing.T) {
 	assert.Equal(t, "steward-persist", stored.GetId())
 	// Fragments are the authoritative DNA representation (Issue #3322).
 	assert.NotEmpty(t, stored.GetFragments(), "identity fragments from dnaChunksFor must survive reassembly")
-	// The stored record keeps a flat projection of those fragments so the
-	// not-yet-re-homed consumers (role-policy selectors, fleet inventory,
-	// attribute index) do not go blank on first full sync. cpu_count is absent
-	// because identityFragmentBytes emits no fragment for it — the projection
-	// reflects the fragments, not the caller's attrs map.
-	assert.Equal(t, map[string]string{"hostname": "cfg-70-02", "os": "windows"}, stored.GetAttributes(),
-		"Attributes must be the flat projection of the received fragments")
+	// The flat projection consumers read (role-policy selectors, fleet inventory,
+	// attribute index) is derived from those fragments on demand. cpu_count is
+	// absent because identityFragmentBytes emits no fragment for it — the
+	// projection reflects the fragments, not the caller's attrs map.
+	assert.Equal(t, map[string]string{"hostname": "cfg-70-02", "os": "windows"},
+		sdna.FlattenFragments(stored.GetFragments()),
+		"the flat projection must be exactly the received fragments' state")
 	assert.Equal(t, int32(2), stored.GetAttributeCount())
 }
 
@@ -420,7 +420,8 @@ func TestDNAHandler_MultiChunkReassembly(t *testing.T) {
 	// produced by dnaChunksFor survive multi-chunk out-of-order reassembly, and
 	// that their flat projection reaches the record intact.
 	assert.NotEmpty(t, stored.GetFragments(), "identity fragments must survive multi-chunk reassembly")
-	assert.Equal(t, map[string]string{"hostname": "cfg-ab-02", "os": "windows"}, stored.GetAttributes(),
+	assert.Equal(t, map[string]string{"hostname": "cfg-ab-02", "os": "windows"},
+		sdna.FlattenFragments(stored.GetFragments()),
 		"fragment-derived attributes must survive multi-chunk out-of-order reassembly")
 }
 
@@ -794,9 +795,9 @@ func TestSyncDNA_RoundTrip_StewardIDMismatch(t *testing.T) {
 // Attributes bytes on the wire. The transfer carries only FragmentBytes; the
 // controller must accept it and persist the fragments.
 //
-// The stored record still carries a flat attribute map, but it is derived from
-// the received fragments — TestReassembleDNA_IgnoresWireAttributes proves the
-// wire field itself is never read.
+// The flat attribute view consumers still read is projected from the received
+// fragments — TestReassembleDNA_IgnoresWireAttributes proves the wire field
+// itself is never read.
 //
 // This test also covers the steward-identity check: the mTLS peer must match the
 // StewardId in the first chunk; HandleGRPC enforces this before calling
@@ -831,10 +832,10 @@ func TestSyncDNA_FragmentsOnly_NoAttributesOnWire(t *testing.T) {
 	// Fragments are the authoritative DNA representation (Issue #3322).
 	assert.NotEmpty(t, stored.GetFragments(), "identity fragments must survive the full sync path")
 	// A fragments-only wire transfer must still leave the flat consumers fed:
-	// role-policy selectors, fleet inventory and the attribute index all read
-	// DNA.Attributes, and SyncDNA replaces the record wholesale.
-	assert.Equal(t, attrs, stored.GetAttributes(),
-		"a fragments-only sync must not blank the record's attribute map")
+	// role-policy selectors, fleet inventory and the attribute index all read the
+	// fragment projection, and SyncDNA replaces the record wholesale.
+	assert.Equal(t, attrs, sdna.FlattenFragments(stored.GetFragments()),
+		"a fragments-only sync must not blank the record's flat projection")
 	assert.Equal(t, int32(len(attrs)), stored.GetAttributeCount())
 }
 
@@ -860,9 +861,10 @@ func TestReassembleDNA_IgnoresWireAttributes(t *testing.T) {
 
 	dna, _, err := reassembleDNA(dnaChunksForTransfer(t, transfer, 1), "steward-wire-attrs")
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"hostname": "real-host", "os": "linux"}, dna.GetAttributes(),
+	flat := sdna.FlattenFragments(dna.GetFragments())
+	assert.Equal(t, map[string]string{"hostname": "real-host", "os": "linux"}, flat,
 		"attributes must come from fragments only; the wire blob must be ignored entirely")
-	assert.NotContains(t, dna.GetAttributes(), "role",
+	assert.NotContains(t, flat, "role",
 		"a key present only in the wire blob must never enter the record")
 	assert.Equal(t, int32(2), dna.GetAttributeCount())
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,9 @@ import (
 )
 
 func TestRegisterRequest_Validation(t *testing.T) {
+	osFragment, err := sdna.NewFragment("host:test", "test", sdna.MapState{"os": "linux"})
+	require.NoError(t, err)
+
 	tests := []struct {
 		name    string
 		req     *RegisterRequest
@@ -24,10 +28,8 @@ func TestRegisterRequest_Validation(t *testing.T) {
 			req: &RegisterRequest{
 				Version: "1.0.0",
 				InitialDna: &common.DNA{
-					Id: "550e8400-e29b-41d4-a716-446655440000",
-					Attributes: map[string]string{
-						"os": "linux",
-					},
+					Id:          "550e8400-e29b-41d4-a716-446655440000",
+					Fragments:   []*common.Fragment{osFragment},
 					LastUpdated: timestamppb.Now(),
 				},
 				Credentials: &common.Credentials{

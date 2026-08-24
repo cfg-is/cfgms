@@ -54,9 +54,11 @@ func openFleetStorageAt(t *testing.T, dataDir string) *fleetStorage.Manager {
 	return mgr
 }
 
-// makeTestDNA builds a DNA proto for testing. When attrs contains "hostname"
-// or "os", the equivalent fragment is also populated so DNA passes the
-// fragment-based integrity check (Issue #3319).
+// makeTestDNA builds a DNA proto for testing. Host facts travel exclusively as
+// ADR-017 fragments now that DNA.Attributes has been removed (Issue #3331):
+// "hostname" and "os" get their own fragments so the DNA passes the
+// fragment-based integrity check (Issue #3319), and every other attribute lands
+// in a host:test fragment so FlattenDNAFragments round-trips the whole input map.
 func makeTestDNA(id string, attrs map[string]string) *commonpb.DNA {
 	var frags []*commonpb.Fragment
 	if h := attrs["hostname"]; h != "" {
@@ -65,9 +67,18 @@ func makeTestDNA(id string, attrs map[string]string) *commonpb.DNA {
 	if o := attrs["os"]; o != "" {
 		frags = append(frags, mustFragment("host:os", map[string]interface{}{"os": o}))
 	}
+	other := make(map[string]interface{}, len(attrs))
+	for k, v := range attrs {
+		if k == "hostname" || k == "os" {
+			continue
+		}
+		other[k] = v
+	}
+	if len(other) > 0 {
+		frags = append(frags, mustFragment("host:test", other))
+	}
 	return &commonpb.DNA{
 		Id:              id,
-		Attributes:      attrs,
 		SyncFingerprint: "fp-" + id,
 		Fragments:       frags,
 	}
@@ -373,9 +384,10 @@ func TestDNASurvivesControllerRestart(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "tenant-persist", info.TenantID)
 	require.NotNil(t, info.DNA)
-	assert.Equal(t, "linux", info.DNA.Attributes["os"])
-	assert.Equal(t, "amd64", info.DNA.Attributes["architecture"])
-	assert.Equal(t, "persistent-host", info.DNA.Attributes["hostname"])
+	flat := FlattenDNAFragments(info.DNA.GetFragments())
+	assert.Equal(t, "linux", flat["os"])
+	assert.Equal(t, "amd64", flat["architecture"])
+	assert.Equal(t, "persistent-host", flat["hostname"])
 }
 
 // TestRegisterSteward_PersistsAcrossManagerRestart proves a steward registered
@@ -448,9 +460,10 @@ func TestDNASurvivesControllerRestart_FreshManager(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "tenant-persist", info.TenantID)
 	require.NotNil(t, info.DNA)
-	assert.Equal(t, "linux", info.DNA.Attributes["os"])
-	assert.Equal(t, "amd64", info.DNA.Attributes["architecture"])
-	assert.Equal(t, "persistent-host", info.DNA.Attributes["hostname"])
+	flat := FlattenDNAFragments(info.DNA.GetFragments())
+	assert.Equal(t, "linux", flat["os"])
+	assert.Equal(t, "amd64", flat["architecture"])
+	assert.Equal(t, "persistent-host", flat["hostname"])
 }
 
 func TestLoadFromStorage_NilStorage(t *testing.T) {
@@ -518,13 +531,14 @@ func TestRegisterStewardWithAttributes_SetsInitialDNA(t *testing.T) {
 	info, ok := svc.GetStewardInfo("s-attrs")
 	require.True(t, ok)
 	require.NotNil(t, info.DNA)
-	assert.Equal(t, "worker-01", info.DNA.Attributes["hostname"], "hostname must be visible before SyncDNA")
-	assert.Equal(t, "linux", info.DNA.Attributes["os"], "os must be visible before SyncDNA")
+	flat := FlattenDNAFragments(info.DNA.GetFragments())
+	assert.Equal(t, "worker-01", flat["hostname"], "hostname must be visible before SyncDNA")
+	assert.Equal(t, "linux", flat["os"], "os must be visible before SyncDNA")
 }
 
 // TestRegisterStewardWithAttributes_NilAttrsIsIdenticalToRegisterSteward proves the
 // existing callers are unaffected: nil initialAttrs yields the same result as the
-// original RegisterSteward (DNA with only the steward ID, no attributes).
+// original RegisterSteward (DNA with only the steward ID, no host facts).
 func TestRegisterStewardWithAttributes_NilAttrsIsIdenticalToRegisterSteward(t *testing.T) {
 	svc := NewControllerService(logging.NewNoopLogger())
 
@@ -533,7 +547,8 @@ func TestRegisterStewardWithAttributes_NilAttrsIsIdenticalToRegisterSteward(t *t
 	info, ok := svc.GetStewardInfo("s-nil")
 	require.True(t, ok)
 	require.NotNil(t, info.DNA)
-	assert.Empty(t, info.DNA.Attributes, "nil initialAttrs must not set any DNA attributes")
+	assert.Empty(t, info.DNA.GetFragments(), "nil initialAttrs must not seed any DNA fragment")
+	assert.Empty(t, FlattenDNAFragments(info.DNA.GetFragments()), "nil initialAttrs must not set any DNA host facts")
 }
 
 // --- Issue #2008: registry repopulation on cert-reuse reconnect / restart ---
@@ -789,7 +804,9 @@ func TestGetStewardInfo_ConcurrentSyncDNA_NoRace(t *testing.T) {
 			info, ok := svc.GetStewardInfo("dev-1")
 			if ok && info.DNA != nil {
 				_ = info.DNA.Id
-				_ = info.DNA.Attributes
+				// Reads every fragment's canonical bytes — the race detector
+				// needs the copy's payload touched, not just its slice header.
+				_ = FlattenDNAFragments(info.DNA.GetFragments())
 			}
 		}()
 	}
@@ -816,12 +833,14 @@ func TestGetAllStewards_ReturnsDNACopies(t *testing.T) {
 	all := svc.GetAllStewards()
 	require.Len(t, all, 1)
 
-	all[0].DNA.Attributes["os"] = "windows"
+	require.NotEmpty(t, all[0].DNA.GetFragments(), "copy must carry the host:os fragment")
+	all[0].DNA.Fragments[0].CanonicalBytes = []byte(`{"os":"windows"}`)
 	all[0].Metrics["cpu"] = "99"
 
 	info, ok := svc.GetStewardInfo("dev-1")
 	require.True(t, ok)
-	assert.Equal(t, "linux", info.DNA.Attributes["os"], "live DNA must not be affected by returned copy mutation")
+	assert.Equal(t, "linux", FlattenDNAFragments(info.DNA.GetFragments())["os"],
+		"live DNA must not be affected by returned copy mutation")
 	assert.Equal(t, "10", info.Metrics["cpu"], "live Metrics must not be affected by returned copy mutation")
 }
 
@@ -981,7 +1000,7 @@ func TestSetPostDNASyncHook_FiresAfterSyncDNA(t *testing.T) {
 
 	require.Len(t, calls, 1, "hook must be called exactly once after SyncDNA")
 	assert.Equal(t, "steward-hook", calls[0].stewardID)
-	assert.Equal(t, dna.Attributes, calls[0].dna.Attributes)
+	assert.Equal(t, FlattenDNAFragments(dna.GetFragments()), FlattenDNAFragments(calls[0].dna.GetFragments()))
 }
 
 // TestSetPostDNASyncHook_NotFiredForUnknownSteward verifies that the hook does
@@ -993,7 +1012,7 @@ func TestSetPostDNASyncHook_NotFiredForUnknownSteward(t *testing.T) {
 	hookCalled := false
 	svc.SetPostDNASyncHook(func(_ string, _ *commonpb.DNA) { hookCalled = true })
 
-	dna := &commonpb.DNA{Id: "unknown-steward", Attributes: map[string]string{"os": "linux"}}
+	dna := makeTestDNA("unknown-steward", map[string]string{"os": "linux"})
 	status, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err)
 	assert.Equal(t, commonpb.Status_NOT_FOUND, status.Code)
@@ -1008,7 +1027,7 @@ func TestSetPostDNASyncHook_NilHookIsNoop(t *testing.T) {
 
 	require.NoError(t, svc.RegisterSteward("steward-nil-hook", "tenant-1", "", "active"))
 
-	dna := &commonpb.DNA{Id: "steward-nil-hook", Attributes: map[string]string{"os": "windows"}}
+	dna := makeTestDNA("steward-nil-hook", map[string]string{"os": "windows"})
 	status, err := svc.SyncDNA(ctx, dna)
 	require.NoError(t, err, "nil postDNASyncHook must not cause a panic")
 	assert.Equal(t, commonpb.Status_OK, status.Code)
@@ -1031,7 +1050,7 @@ func TestSetPostDNASyncHook_HookReceivesDNACopy(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, hookDNA, "hook must receive non-nil DNA")
-	assert.Equal(t, attrs, hookDNA.Attributes, "hook DNA attributes must match the synced DNA")
+	assert.Equal(t, attrs, FlattenDNAFragments(hookDNA.GetFragments()), "hook DNA host facts must match the synced DNA")
 }
 
 // ---------------------------------------------------------------------------
@@ -1679,7 +1698,7 @@ func TestGetAllStewardsCluster_LiveStewardTakesPrecedence(t *testing.T) {
 	assert.Equal(t, "active", cluster[0].Status,
 		"live status must win over stale durable record")
 	require.NotNil(t, cluster[0].DNA)
-	assert.Equal(t, "live-host", cluster[0].DNA.Attributes["hostname"],
+	assert.Equal(t, "live-host", FlattenDNAFragments(cluster[0].DNA.GetFragments())["hostname"],
 		"live DNA must win over stale durable record")
 }
 

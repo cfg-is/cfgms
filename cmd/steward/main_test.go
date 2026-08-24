@@ -968,7 +968,7 @@ func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 		t.Logf("DNA collection error (expected on non-Windows): %v", dnaErr)
 	}
 	if result != nil {
-		t.Logf("DNA collected %d attribute(s)", len(result.Attributes))
+		t.Logf("DNA collected %d fragment(s)", len(result.GetFragments()))
 	}
 
 	// Now verify that runStewardInternal stays alive when the connect succeeds

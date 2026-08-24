@@ -336,10 +336,11 @@ Fragments are sourced by class:
 > (`host:cpu`, `host:memory`, `host:os`, `host:bios`) are currently sourced by the existing
 > per-platform gatherers (`features/steward/dna/{hardware,network,security}_*.go`) via a
 > partition step that reads the already-collected flat attribute map. The gatherers are reused
-> unmodified; the flat `attributes` surface and all legacy consumers (Reports Engine,
-> role-selector config-targeting) are unaffected. The osquery integration will later **swap
-> the source** of the same `host:*` fragment ids — a source change only, invisible to
-> fragment consumers, deferred to a follow-on epic.
+> unmodified. The `commonpb.DNA.attributes` proto field (the legacy flat surface) was retired in
+> Issue #3331; all controller consumers now project attributes from `DNA.Fragments` via
+> `service.FlattenDNAFragments`. The osquery integration will later **swap the source** of the
+> same `host:*` fragment ids — a source change only, invisible to fragment consumers, deferred
+> to a follow-on epic.
 
 Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
 1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX

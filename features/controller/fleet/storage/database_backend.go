@@ -55,7 +55,7 @@ func (b *DatabaseBackend) GetLatestByDeviceID(ctx context.Context, deviceID stri
 	if err := row.Scan(
 		&rec.DeviceID,
 		&rec.TenantID,
-		new(string), // os — available in DNA.Attributes
+		new(string), // os — available via DNA fragments
 		new(string), // architecture
 		new(string), // hostname
 		&rec.Status,

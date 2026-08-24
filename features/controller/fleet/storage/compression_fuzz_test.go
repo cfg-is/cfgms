@@ -23,33 +23,30 @@ func FuzzGzipDecompress(f *testing.F) {
 	}
 
 	seeds := []*commonpb.DNA{
-		{
+		attachTestFragment(f, &commonpb.DNA{
 			Id:              "device-seed-1",
 			ConfigHash:      "abc123",
 			AttributeCount:  3,
 			SyncFingerprint: "fp-seed-1",
 			LastUpdated:     &timestamppb.Timestamp{Seconds: 1700000000, Nanos: 123456789},
 			LastSyncTime:    &timestamppb.Timestamp{Seconds: 1700000100, Nanos: 987654321},
-			Attributes: map[string]string{
-				"os.name":    "Ubuntu",
-				"os.version": "22.04",
-				"os.arch":    "amd64",
-			},
-		},
+		}, map[string]string{
+			"os.name":    "Ubuntu",
+			"os.version": "22.04",
+			"os.arch":    "amd64",
+		}),
 		{
 			Id:         "device-seed-2",
 			ConfigHash: "def456",
-			Attributes: map[string]string{},
 		},
-		{
+		attachTestFragment(f, &commonpb.DNA{
 			Id:              "device-seed-3",
 			ConfigHash:      "ghi789",
 			AttributeCount:  1,
 			SyncFingerprint: "fp-seed-3",
-			Attributes: map[string]string{
-				"hardware.cpu": "AMD EPYC 7543",
-			},
-		},
+		}, map[string]string{
+			"hardware.cpu": "AMD EPYC 7543",
+		}),
 	}
 
 	for _, dna := range seeds {
@@ -89,18 +86,16 @@ func FuzzOptimizedDNADecompress(f *testing.F) {
 		{
 			Id:         "empty-device",
 			ConfigHash: "hash-empty",
-			Attributes: map[string]string{},
 		},
-		{
+		attachTestFragment(f, &commonpb.DNA{
 			Id:              "no-timestamps",
 			ConfigHash:      "cfg",
 			SyncFingerprint: "fp",
 			AttributeCount:  2,
-			Attributes: map[string]string{
-				"key1": "val1",
-				"key2": "val2",
-			},
-		},
+		}, map[string]string{
+			"key1": "val1",
+			"key2": "val2",
+		}),
 	}
 
 	for _, dna := range seeds {
