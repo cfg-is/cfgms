@@ -108,7 +108,26 @@ Check all changed `.go` files for violations:
 1. `unit-tests`
 2. `integration-tests`
 3. `Build Gate`
-4. `security-deployment-gate`
+4. `Controller Integration Tests (Linux)`
+5. `security-deployment-gate`
+6. `trivy-scan`
+7. `CodeQL`
+8. `zizmor`
+9. `frontend-checks`
+10. `CLA signature check`
+
+The ruleset is the authority, not this list:
+
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647684 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
+
+`./.claude/scripts/pr-review-helper.sh pr-checks <NUM>` prints `MISSING:<context>` for
+every required context that produced no check run, plus `MISSING_COUNT`. A required
+context that never ran is absent from the `gh pr checks` table entirely, so
+`MISSING_COUNT` greater than `0` **BLOCKS APPROVAL** even when every reported check is
+green.
 
 - ALL SUCCESS → PASS
 - ANY FAILURE → **BLOCKS APPROVAL** — report which checks failed

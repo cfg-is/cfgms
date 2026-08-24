@@ -455,23 +455,18 @@ func haKillProcess(t *testing.T, node haNode) {
 // The stop-all/start-all discipline is because a node that rejoins while its
 // peers keep running can diverge instead of catching up cleanly.
 //
-// The WAL wipe is newer and is what makes this function work at all today.
-// Raft state used to be memory-only (as the package doc comment describes),
-// so a cold start re-bootstrapped membership from the configured peer list.
-// Since Issue #3284 the log is persisted to <data>/raft-log/raft.db, and
-// NewRaftConsensus takes raft.RestartNode whenever that file has data — but
-// nothing restores the ConfState, and config.Applied is set to the recovered
-// applied index so the original ConfChange entries are never re-delivered
-// either. Every node therefore comes back with an empty voter set
-// ("newRaft <id> [peers: [], term: N, ...]") and no election ever happens:
-// GET /api/v1/raft/status reports leader 0 forever.
+// This helper used to also delete every node's persisted Raft WAL, because a
+// restarted node came back with an empty voter set ("newRaft <id> [peers: [],
+// term: N, ...]") and no election ever happened — GET /api/v1/raft/status
+// reported leader 0 forever. Reproduced deterministically on the real cfg-lab
+// cluster on 2026-08-20 (story #3096, runbook §6), twice, with terms diverging
+// between nodes.
 //
-// Reproduced deterministically on the real cfg-lab cluster on 2026-08-20
-// (story #3096, runbook §6 finding F1) — twice, across a full stop/start of
-// all three nodes, with terms diverging (t3/commit8 vs t2/commit7). Wiping the
-// WAL restores the StartNode path and quorum forms in seconds. Until that
-// defect is fixed, a restore that does not wipe leaves the lab cluster
-// leaderless, so this helper wipes rather than pretending the restart works.
+// Issue #3479 fixed that at the source: the Raft ConfState is now persisted and
+// restored, with the configured peer list healing stores written before the fix.
+// A restart re-forms quorum on its own, so the wipe has been removed — it
+// destroyed the very log #3284 added, and would now mask a regression in the
+// restore path rather than working around a known defect.
 func haRestoreQuorum(t *testing.T, allNodes []haNode, downIdx int, bringUp func()) {
 	t.Helper()
 	var up []haNode
@@ -481,18 +476,10 @@ func haRestoreQuorum(t *testing.T, allNodes []haNode, downIdx int, bringUp func(
 		}
 	}
 
-	t.Log("restoring 3-node quorum: stopping remaining peers, wiping persisted Raft WALs, bringing the downed node back, then starting all together")
+	t.Log("restoring 3-node quorum: stopping remaining peers, bringing the downed node back, then starting all together")
 	for _, n := range up {
 		_, err := haSSHRun(n.sshHost, "sudo -n systemctl stop cfgms-controller.service")
 		assert.NoError(t, err, "stop peer %s during quorum restore", n.sshHost)
-	}
-
-	// Wipe on every node, including the downed one — a partial wipe leaves the
-	// wiped nodes bootstrapping a fresh term while the un-wiped node sits at
-	// its old term with no voters, which does not converge either.
-	for _, n := range allNodes {
-		_, err := haSSHRun(n.sshHost, "sudo -n find /var/lib/cfgms -name raft.db -delete")
-		assert.NoError(t, err, "wipe persisted raft WAL on %s during quorum restore", n.sshHost)
 	}
 
 	bringUp()

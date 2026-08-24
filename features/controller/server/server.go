@@ -407,6 +407,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}()
 	openedStores = append(openedStores, storageManager.Close)
 
+	// Validate that the constructed StorageManager supplies every store required by
+	// the enabled subsystems. A missing required store fails closed here — at startup,
+	// before anything tries to use the store — rather than silently producing a nil
+	// that causes a 503 at request time (issue #3400 regression guard).
+	// Registration's declarations are wired (#3491) and push (#3492) is wired;
+	// workflow-trigger (#3493) is still pending under epic #3406.
+	if reqErr := interfaces.ValidateStorageRequirements(storageManager, collectActiveStorageRequirements(cfg)); reqErr != nil {
+		return nil, reqErr
+	}
+
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
 	clientTenantStore := storageManager.GetClientTenantStore()
@@ -1017,10 +1027,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		// Issue #1844: commandSigner is a DynamicSigner — see block above.
+		// Issue #3390: haManager is passed as TermSource so every outbound command
+		// carries the current Raft term for steward-side fencing (#3436).
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
 			ControlPlane: controlPlane,
 			Signer:       commandSigner,
+			TermSource:   haManager,
 			Logger:       logger,
 		})
 		if err != nil {
@@ -1492,21 +1505,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #1695: Wire the registration approval hook based on registration.workflow.
 	// ip-trust is the new default and does not require the workflow engine.
 	{
-		workflowName := ""
-		if cfg.Registration != nil {
-			workflowName = cfg.Registration.Workflow
-		}
-		// Legacy: if Workflow is empty but ApprovalMode is set, honour it.
-		if workflowName == "" && cfg.Registration != nil && cfg.Registration.ApprovalMode == "manual-review" {
-			workflowName = "manual-review"
-		}
-		// Default to ip-trust (Issue #1695).
-		if workflowName == "" {
-			workflowName = "ip-trust"
-		}
+		workflowName := resolveRegistrationWorkflow(cfg)
 
 		switch workflowName {
-		case "ip-trust":
+		case registrationWorkflowIPTrust:
 			// ip-trust hook is code-wired; seedBuiltinRegistrationWorkflow is a no-op for this path.
 			ipTrustStore := storageManager.GetIPTrustStore()
 			httpServer.SetApprovalHook(api.NewIPTrustApprovalHook(ipTrustStore, logger))
@@ -1514,7 +1516,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				logger.Info("IP-trust registration approval hook wired (Issue #1695)")
 			}
 
-		case "manual-review":
+		case registrationWorkflowManualReview:
 			// Issue #1527: Seed the manual-review workflow before wiring the hook.
 			if workflowHandler != nil {
 				seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
@@ -1522,19 +1524,22 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			// Issue #1599: Use ManualReviewApprovalHook which persists requests to
 			// PendingRegistrationStore for CLI approve/deny (#1522-B).
 			pendingStore := storageManager.GetPendingRegistrationStore()
-			if pendingStore != nil {
-				hook := api.NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logger)
-				httpServer.SetApprovalHook(hook)
-				srv.manualReviewHook = hook
-				logger.Info("Manual-review registration approval hook wired (Issue #1599)")
-			} else if workflowHandler != nil {
-				logger.Warn("manual-review requested but PendingRegistrationStore unavailable, falling back to workflow hook")
-				approvalHook := workflowHandler.NewRegistrationApprovalHook(logger)
-				httpServer.SetApprovalHook(approvalHook)
-				logger.Info("Registration approval hook wired (Issue #422, manual-review fallback)")
+			if pendingStore == nil {
+				// Unreachable in a correctly composed deployment: this workflow
+				// contributes ManualReviewApprovalHookStoreRequirements to
+				// collectActiveStorageRequirements, so ValidateStorageRequirements
+				// already rejected this StorageManager at startup (Issue #3491).
+				// Kept as a fail-closed backstop: substituting a different approval
+				// hook here would silently apply an admission policy the operator did
+				// not configure (#3400 condition).
+				return nil, fmt.Errorf("registration.workflow %q requires PendingRegistrationStore but provider %q does not supply it", workflowName, storageManager.GetProviderName())
 			}
+			hook := api.NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logger)
+			httpServer.SetApprovalHook(hook)
+			srv.manualReviewHook = hook
+			logger.Info("Manual-review registration approval hook wired (Issue #1599)")
 
-		case "auto-approve":
+		case registrationWorkflowAutoApprove:
 			// Deprecated: log a warning but continue to support dev environments.
 			logger.Warn("registration.workflow 'auto-approve' is deprecated; use 'ip-trust' (Issue #1695)")
 			if workflowHandler != nil {
@@ -2359,6 +2364,13 @@ func (s *Server) Stop() error {
 	}
 
 	return nil
+}
+
+// pushStoreRequirements declares the storage dependency for the push-resumption
+// subsystem. Push resumption re-delivers interrupted push operations on leader
+// startup and cannot query or update delivery records without a durable store.
+var pushStoreRequirements = []interfaces.StoreRequirement{
+	{Subsystem: "push", Store: interfaces.StoreNamePush, Severity: interfaces.RequirementRequired},
 }
 
 // resumePendingPushes is called on leader startup to re-deliver any push
@@ -3714,13 +3726,74 @@ func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]
 	return merged
 }
 
+// Registration approval workflow names accepted by registration.workflow (Issue #1695).
+const (
+	registrationWorkflowIPTrust      = "ip-trust"
+	registrationWorkflowManualReview = "manual-review"
+	registrationWorkflowAutoApprove  = "auto-approve"
+)
+
+// resolveRegistrationWorkflow returns the effective registration approval workflow
+// for cfg, applying the legacy approval_mode alias and the ip-trust default.
+//
+// New and collectActiveStorageRequirements must agree on this value: the former
+// decides which subsystems are constructed, the latter decides which store
+// requirements are enforced at startup. Deriving both from one function keeps a
+// subsystem from being built without its storage having been validated (#3491).
+func resolveRegistrationWorkflow(cfg *config.Config) string {
+	workflowName := ""
+	if cfg != nil && cfg.Registration != nil {
+		workflowName = cfg.Registration.Workflow
+		// Legacy: if Workflow is empty but ApprovalMode is set, honour it.
+		if workflowName == "" && cfg.Registration.ApprovalMode == registrationWorkflowManualReview {
+			workflowName = registrationWorkflowManualReview
+		}
+	}
+	// Default to ip-trust (Issue #1695).
+	if workflowName == "" {
+		workflowName = registrationWorkflowIPTrust
+	}
+	return workflowName
+}
+
+// collectActiveStorageRequirements returns the union of store requirements from all
+// subsystems that are enabled in this deployment. Requirements are collected from
+// each subsystem's own declaration (adjacent to the code that uses the store), then
+// gated here on whether the subsystem is active — so a deployment that does not run
+// a subsystem cannot be blocked by its requirements.
+//
+// Registration (#3491) is wired: the manual-review approval hook
+// (api.ManualReviewApprovalHookStoreRequirements) and the pending-registration
+// expiry job that sweeps the records it writes (registration.StoreRequirements)
+// both require PendingRegistrationStore, and both are active only when the
+// effective registration workflow is "manual-review". Under any other workflow
+// neither runs, so neither imposes a requirement. Push (#3492) is wired
+// unconditionally via pushStoreRequirements.
+//
+// Deferred: tracked in #3493 (workflow-trigger) — the remaining subsystem-adoption
+// story under epic #3406 that adds its declaration here.
+func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequirement {
+	var reqs []interfaces.StoreRequirement
+	reqs = append(reqs, pushStoreRequirements...)
+
+	if resolveRegistrationWorkflow(cfg) == registrationWorkflowManualReview {
+		// The approval hook persists incoming requests; the expiry job ages them out.
+		// Both are constructed in New when this workflow is selected.
+		reqs = append(reqs, api.ManualReviewApprovalHookStoreRequirements...)
+		reqs = append(reqs, controllerRegistration.StoreRequirements...)
+	}
+
+	return reqs
+}
+
 // assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
 // or written. Called immediately after CreateClusterStorageManager in New(), still inside
 // the cfg.HA.IsClusterMode() block, so callers need not re-check the mode.
 //
 // Gates (in order):
 //  1. Storage provider must be cluster-capable (shared state across controller nodes).
-//  2. CFGMS_S3_INSTALLER_BUCKET must be set (S3-compatible blob store for installer artifacts).
+//  2. CFGMS_S3_INSTALLER_BUCKET must be set (S3-compatible blob store for installer
+//     artifacts).
 func assertClusterBackendsReady(cfg *config.Config, storageManager *interfaces.StorageManager) error {
 	if p := storageManager.GetProvider(); p != nil && !p.ClusterCapable() {
 		return fmt.Errorf("cluster mode requires a cluster-capable storage backend; provider %q does not support cluster coordination", storageManager.GetProviderName())

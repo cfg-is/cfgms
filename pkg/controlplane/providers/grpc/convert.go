@@ -61,6 +61,7 @@ func commandToProto(cmd *types.Command) *transportpb.Command {
 		StewardId: cmd.StewardID,
 		TenantId:  cmd.TenantID,
 		Timestamp: timestamppb.New(cmd.Timestamp),
+		Term:      cmd.Term,
 	}
 	if len(cmd.Params) > 0 {
 		pb.Params = interfaceMapToStringMap(cmd.Params)
@@ -78,6 +79,7 @@ func commandFromProto(pb *transportpb.Command) *types.Command {
 		StewardID: pb.GetStewardId(),
 		TenantID:  pb.GetTenantId(),
 		Timestamp: protoTimestampToTime(pb.GetTimestamp()),
+		Term:      pb.GetTerm(),
 	}
 	if len(pb.GetParams()) > 0 {
 		cmd.Params = stringMapToInterfaceMap(pb.GetParams())
@@ -140,6 +142,7 @@ func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
 		TenantId:  pb.GetTenantId(),
 		Timestamp: pb.GetTimestamp(),
 		Params:    filteredParams,
+		Term:      pb.GetTerm(),
 	}
 	cmd := commandFromProto(pbClean)
 	if cmd == nil {

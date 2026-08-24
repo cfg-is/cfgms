@@ -29,9 +29,9 @@ func findPIDWin(procs []ProcessSnapshot, pid int) *ProcessSnapshot {
 // via GetProcessTimes — the Windows analogue of reading /proc/self/stat.
 func selfCPUSecondsWin(t *testing.T) float64 {
 	t.Helper()
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(windows.GetCurrentProcessId()))
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, windows.GetCurrentProcessId())
 	require.NoError(t, err)
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	var creation, exit, kernel, user windows.Filetime
 	require.NoError(t, windows.GetProcessTimes(h, &creation, &exit, &kernel, &user))
 	toSec := func(ft windows.Filetime) float64 {

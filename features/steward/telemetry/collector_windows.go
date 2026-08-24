@@ -105,10 +105,7 @@ func (c *windowsCollector) collectProcesses() ([]ProcessSnapshot, error) {
 
 	base := uintptr(unsafe.Pointer(&buf[0]))
 	offset := 0
-	for {
-		if offset+spiMinSize > len(buf) {
-			break
-		}
+	for offset+spiMinSize <= len(buf) {
 		entry := buf[offset:]
 
 		pid := int(binary.LittleEndian.Uint64(entry[spiUniqueProcessID:]))
@@ -219,7 +216,7 @@ func collectSCMServices() []ServiceSnapshot {
 		return nil
 	}
 	m := &mgr.Mgr{Handle: handle}
-	defer m.Disconnect()
+	defer func() { _ = m.Disconnect() }()
 
 	names, err := m.ListServices()
 	if err != nil {
@@ -251,7 +248,7 @@ func queryServiceState(scm windows.Handle, name string) string {
 		return "unknown"
 	}
 	s := &mgr.Service{Name: name, Handle: h}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	status, err := s.Query()
 	if err != nil {

@@ -90,6 +90,16 @@ type Command struct {
 
 	// Params contains command-specific parameters
 	Params map[string]interface{} `json:"params,omitempty"`
+
+	// Term is the Raft term at which this command was published (#3390, ADR-029 Decision 5).
+	// Zero means the term was not stamped: either the controller predates fencing, or the
+	// command was emitted by a path that bypasses commands.Publisher (see the controller
+	// operating model's "Outbound Command Contract" section for the exact list).
+	// Enforcement on the steward side is added in #3436.
+	//
+	// Not covered by the command signature — transport-trusted only. See
+	// commandSigningPayload for the trade-off and the tampering hazards it leaves open.
+	Term uint64 `json:"term,omitempty"`
 }
 
 // EventType defines the type of event being reported.
@@ -380,6 +390,29 @@ type SignedCommand struct {
 // commandSigningPayload is the stable canonical form used when signing/verifying commands.
 // Using map[string]string for Params avoids mutations from JSON-decoding proto string values,
 // and UTC normalisation avoids timezone-dependent JSON output.
+//
+// Command.Term is deliberately NOT a field here (#3390). The term is therefore
+// transport-trusted only — authenticated by the mTLS control channel, not by the
+// command signature. This is a recorded trade-off, not an oversight:
+//
+//   - Including Term would change the signing bytes for every non-zero-term command,
+//     so every steward predating #3436 (which computes signing bytes without the field)
+//     would fail verification on every command the moment a controller started stamping
+//     terms — a fleet-wide outage during a rolling upgrade. #3390's constraint is an
+//     additive, wire-compatible field with no steward-visible behaviour change.
+//   - Consequence, which #3436/#3437 must design around: any party able to modify a
+//     command between the signer and the steward — a future Outpost proxy cache, an
+//     mTLS-terminating hop, a non-leader controller node — can rewrite Term without
+//     invalidating the signature. Two concrete hazards: raising Term defeats the fence,
+//     and setting Term to MaxUint64 poisons the steward's high-water mark, wedging its
+//     command channel permanently once #3437 persists that mark across restarts.
+//   - Closing this requires the term to be covered by the signature behind a negotiated
+//     signing-payload version, so that a steward advertises which payload version it can
+//     verify before the controller signs with it. That negotiation does not exist yet and
+//     is out of scope for #3390; it is a prerequisite for treating the term as
+//     tamper-evident rather than merely transport-trusted.
+//
+// See docs/architecture/controller-operating-model.md — "Outbound Command Contract".
 type commandSigningPayload struct {
 	ID        string            `json:"id"`
 	Type      CommandType       `json:"type"`
@@ -420,6 +453,10 @@ func InterfaceParamsToStringMap(m map[string]interface{}) map[string]string {
 // InterfaceParamsToStringMap(cmd.Params) on the originating side. Using this canonical
 // form ensures that both the signer (controller) and verifier (steward) produce identical
 // bytes regardless of JSON-decode type coercions and timezone differences.
+//
+// The returned bytes do not cover cmd.Term — the fencing term is transport-trusted, not
+// signature-authenticated. See commandSigningPayload for the reasoning and the hazards
+// that #3436/#3437 must design around.
 func CommandSigningBytes(cmd *Command, rawParams map[string]string) ([]byte, error) {
 	payload := commandSigningPayload{
 		ID:        cmd.ID,

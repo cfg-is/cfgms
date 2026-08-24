@@ -17,6 +17,12 @@ import (
 	"github.com/go-ole/go-ole/oleutil"
 )
 
+// COM IDispatch.Clear() and VARIANT.Clear() calls throughout this file drop
+// their error return via an explicit _ = (or a deferred closure). Every such
+// release runs after the operation's outcome is already decided, and the COM
+// runtime offers no remedy for a failed VARIANT release beyond an internal leak
+// — the error is deliberately dropped rather than handled or logged.
+
 // WindowsUpdateManager implements PatchManager for Windows systems using COM API
 type WindowsUpdateManager struct {
 	session  *ole.IDispatch
@@ -26,7 +32,7 @@ type WindowsUpdateManager struct {
 // NewWindowsUpdateManager creates a new Windows Update manager using COM API
 func NewWindowsUpdateManager() (*WindowsUpdateManager, error) {
 	if runtime.GOOS != "windows" {
-		return nil, fmt.Errorf("Windows Update manager only available on Windows")
+		return nil, fmt.Errorf("not supported on %q: requires windows", runtime.GOOS)
 	}
 
 	// CoInitializeEx returns S_OK (0) on success and S_FALSE (1) when COM is already
@@ -85,7 +91,7 @@ func (w *WindowsUpdateManager) ListAvailablePatches(ctx context.Context, patchTy
 	if err != nil {
 		return nil, fmt.Errorf("failed to create update searcher: %w", err)
 	}
-	defer searcher.Clear()
+	defer func() { _ = searcher.Clear() }()
 
 	// Build search criteria based on patch type
 	criteria, err := w.buildSearchCriteria(patchType)
@@ -98,14 +104,14 @@ func (w *WindowsUpdateManager) ListAvailablePatches(ctx context.Context, patchTy
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for updates: %w", err)
 	}
-	defer searchResult.Clear()
+	defer func() { _ = searchResult.Clear() }()
 
 	// Get Updates collection
 	updatesCollection, err := oleutil.GetProperty(searchResult.ToIDispatch(), "Updates")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get updates collection: %w", err)
 	}
-	defer updatesCollection.Clear()
+	defer func() { _ = updatesCollection.Clear() }()
 
 	// Get update count
 	countVariant, err := oleutil.GetProperty(updatesCollection.ToIDispatch(), "Count")
@@ -140,7 +146,7 @@ func (w *WindowsUpdateManager) ListInstalledPatches(ctx context.Context) ([]Patc
 	if err != nil {
 		return nil, fmt.Errorf("failed to create update searcher: %w", err)
 	}
-	defer searcher.Clear()
+	defer func() { _ = searcher.Clear() }()
 
 	// Search for installed updates
 	criteria := "IsInstalled=1"
@@ -148,14 +154,14 @@ func (w *WindowsUpdateManager) ListInstalledPatches(ctx context.Context) ([]Patc
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for installed updates: %w", err)
 	}
-	defer searchResult.Clear()
+	defer func() { _ = searchResult.Clear() }()
 
 	// Get Updates collection
 	updatesCollection, err := oleutil.GetProperty(searchResult.ToIDispatch(), "Updates")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get updates collection: %w", err)
 	}
-	defer updatesCollection.Clear()
+	defer func() { _ = updatesCollection.Clear() }()
 
 	// Get update count
 	countVariant, err := oleutil.GetProperty(updatesCollection.ToIDispatch(), "Count")
@@ -191,7 +197,7 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 	if err != nil {
 		return fmt.Errorf("failed to create update searcher: %w", err)
 	}
-	defer searcher.Clear()
+	defer func() { _ = searcher.Clear() }()
 
 	// Build search criteria
 	criteria, err := w.buildSearchCriteria(config.PatchType)
@@ -204,14 +210,14 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 	if err != nil {
 		return fmt.Errorf("failed to search for updates: %w", err)
 	}
-	defer searchResult.Clear()
+	defer func() { _ = searchResult.Clear() }()
 
 	// Get Updates collection
 	updatesCollection, err := oleutil.GetProperty(searchResult.ToIDispatch(), "Updates")
 	if err != nil {
 		return fmt.Errorf("failed to get updates collection: %w", err)
 	}
-	defer updatesCollection.Clear()
+	defer func() { _ = updatesCollection.Clear() }()
 
 	// Filter updates based on include/exclude lists
 	updatesToInstall, err := w.filterUpdates(updatesCollection.ToIDispatch(), config)
@@ -236,7 +242,7 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 	if err != nil {
 		return fmt.Errorf("failed to create downloader: %w", err)
 	}
-	defer downloader.Clear()
+	defer func() { _ = downloader.Clear() }()
 
 	// Set updates to download
 	_, err = oleutil.PutProperty(downloader.ToIDispatch(), "Updates", updatesToInstall)
@@ -250,7 +256,7 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 		if err != nil {
 			return fmt.Errorf("failed to download updates: %w", err)
 		}
-		downloadResult.Clear()
+		_ = downloadResult.Clear()
 	}
 
 	// Create IUpdateInstaller
@@ -258,7 +264,7 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
-	defer installer.Clear()
+	defer func() { _ = installer.Clear() }()
 
 	// Set updates to install
 	_, err = oleutil.PutProperty(installer.ToIDispatch(), "Updates", updatesToInstall)
@@ -272,7 +278,7 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 		if err != nil {
 			return fmt.Errorf("failed to install updates: %w", err)
 		}
-		installResult.Clear()
+		_ = installResult.Clear()
 	}
 
 	return nil
@@ -311,14 +317,14 @@ func (w *WindowsUpdateManager) GetLastPatchDate(ctx context.Context) (time.Time,
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to create update searcher: %w", err)
 	}
-	defer searcher.Clear()
+	defer func() { _ = searcher.Clear() }()
 
 	// Query update history
 	historyVariant, err := oleutil.CallMethod(searcher.ToIDispatch(), "QueryHistory", 0, historyCount)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to query update history: %w", err)
 	}
-	defer historyVariant.Clear()
+	defer func() { _ = historyVariant.Clear() }()
 
 	history := historyVariant.ToIDispatch()
 
@@ -338,7 +344,7 @@ func (w *WindowsUpdateManager) GetLastPatchDate(ctx context.Context) (time.Time,
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to get history entry: %w", err)
 	}
-	defer entryVariant.Clear()
+	defer func() { _ = entryVariant.Clear() }()
 
 	entry := entryVariant.ToIDispatch()
 

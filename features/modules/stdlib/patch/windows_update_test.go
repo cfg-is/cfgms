@@ -36,7 +36,7 @@ func TestWindowsUpdateManager_ListAvailablePatches(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	// Use a timeout context to avoid hanging on slow Windows Update responses
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -64,7 +64,7 @@ func TestWindowsUpdateManager_ListAvailablePatches_SecurityOnly(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -89,7 +89,7 @@ func TestWindowsUpdateManager_ListInstalledPatches(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -118,7 +118,7 @@ func TestWindowsUpdateManager_CheckRebootRequired(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -139,7 +139,7 @@ func TestWindowsUpdateManager_GetLastPatchDate(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -165,7 +165,7 @@ func TestWindowsUpdateManager_FeatureUpdate_ReturnsExplicitError(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -193,7 +193,7 @@ func TestWindowsUpdateManager_InstallPatches_TestMode(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -235,7 +235,7 @@ func TestWindowsUpdateManager_BuildSearchCriteria(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			manager, err := patch.NewWindowsUpdateManager()
 			require.NoError(t, err)
-			defer manager.Close()
+			t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -268,7 +268,7 @@ func TestWindowsUpdateManager_MultipleOperations(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -302,7 +302,7 @@ func TestWindowsUpdateManager_FilterConfig(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -335,7 +335,7 @@ func TestWindowsUpdateManager_ConcurrentOperations(t *testing.T) {
 
 	manager, err := patch.NewWindowsUpdateManager()
 	require.NoError(t, err)
-	defer manager.Close()
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

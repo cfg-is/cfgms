@@ -513,6 +513,68 @@ The controller can send commands to stewards over the gRPC control plane service
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 
+#### Outbound Command Contract — Fencing Term (#3390, ADR-029 Decision 5)
+
+The `Command` proto message carries a `term` field (field 8, `uint64`). Commands
+published through `commands.Publisher` — `PublishCommand`,
+`PublishCommandWithCallback`, and `PublishCommandWithSigner`
+(`features/controller/commands/publisher.go`) — are stamped at publish time with the
+current Raft term, read from the `TermSource` wired at construction
+(`*ha.Manager`, whose `GetTerm()` delegates to `RaftConsensus.GetTerm()`). This is
+the **controller-side half** of the command fencing scheme defined in ADR-029:
+
+- **Wire-compatible additive field.** A steward that does not yet understand field
+  8 silently ignores it — unknown proto3 fields are preserved and forwarded, not
+  rejected. Older stewards continue to operate unchanged.
+- **Zero means not stamped, not "no fencing".** A `term` of zero means the command
+  was published either by a controller predating fencing, or by one of the emitters
+  listed under "Unstamped command paths" below. The steward-side enforcement —
+  rejecting commands whose term is lower than the highest seen — is added in story
+  #3436. Until that story ships, the field is informational only.
+- **The term is not covered by the command signature.** `CommandSigningBytes`
+  (`pkg/controlplane/types/messages.go`) deliberately omits `Term` from
+  `commandSigningPayload`, so a `SignedCommand` carries an authenticated body with a
+  transport-trusted (mTLS-authenticated, not signature-authenticated) term. Including
+  it would break signature verification on every steward predating #3436 the moment a
+  controller stamped a non-zero term. The consequence #3436/#3437 must design around:
+  anything able to modify a command between signer and steward — a future Outpost
+  proxy cache, an mTLS-terminating hop, a non-leader controller node — can rewrite
+  the term without invalidating the signature. It can raise the term to defeat the
+  fence, or set it to `MaxUint64` to poison the steward's high-water mark and wedge
+  its command channel — permanently, once #3437 persists that mark across restarts.
+  Making the term tamper-evident requires a negotiated signing-payload version, which
+  does not exist yet.
+- **Fence coverage is per-steward-determinable.** An operator can determine which
+  stewards are capable of enforcing the fence without any new mechanism. The
+  existing `GET /api/v1/stewards` endpoint (`handleListStewards`,
+  `features/controller/api/handlers_stewards.go`) returns a `StewardInfo` per
+  connected steward that includes the `version` field sourced from each steward's
+  `steward.version` DNA attribute. A steward running the release that includes
+  story #3436's enforcement is **capable** of enforcing the fence; full durability
+  across restarts requires story #3437 as well. No capability flag or new field is
+  introduced — binary version is the sufficient discriminant.
+
+**Unstamped command paths (known gap for #3436).** Three controller-side emitters
+build a `SignedCommand` directly instead of going through `commands.Publisher`, and
+therefore send `term = 0`:
+
+| Emitter | Command type | Location |
+|---------|--------------|----------|
+| Script dispatcher | `execute_script` | `features/controller/dispatcher/dispatcher.go:567` |
+| Relay handler | `relay_response` | `features/controller/api/relay_handler.go:210` |
+| HA manager, on leadership acquisition | `reconnect` | `pkg/ha/manager.go:556` |
+
+These are unfenced today, and `execute_script` is the highest-privilege command in
+the system: a deposed-but-still-running leader's dispatcher would land scripts on
+endpoints that #3436's fence could not reject on term grounds. The inverse also
+matters — under #3436's fail-closed downgrade rule (a steward that has observed a
+non-zero term rejects a subsequent unstamped command), these three paths would start
+being *rejected* by fence-enforcing stewards, breaking ad-hoc script execution and
+relay responses. #3436 must resolve both directions: either these emitters take a
+`TermSource` and stamp the term, or the enforcement rule exempts them explicitly.
+Stamping them is out of scope for #3390, which is confined to the schema, the
+publisher, and its wiring.
+
 ### Steward Auto-Upgrade via `desired_version` (Issue #2260)
 
 Operators pin the steward version fleet-wide or per-tenant via the `steward.upgrade` cfg block:

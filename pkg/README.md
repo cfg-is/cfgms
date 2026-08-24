@@ -97,3 +97,69 @@ Migration not required immediately, but when adding second implementation or dur
 - `/pr-review` - Validates compliance in Phase 2
 
 See `CLAUDE.md` Central Provider System section for the complete list of providers and rules.
+
+## Storage Capability Declaration (Issue #3407)
+
+Subsystems that depend on a non-universal store **declare** that dependency
+statically, adjacent to the code that uses the store. The composition site
+**collects** those declarations and **validates** them against the constructed
+`StorageManager` at startup — failing closed before any request is served.
+
+### Why this exists
+
+Before this mechanism, a provider returning `ErrNotSupported` for a store silently
+produced a nil in the `StorageManager`. The nil propagated through four layers of
+wiring before a 503 surfaced at request time, giving operators no information about
+which feature broke or why (#3400).
+
+### How to declare a requirement
+
+In your subsystem package, create a package-level variable:
+
+```go
+// In features/controller/registration/requirements.go
+var StoreRequirements = []interfaces.StoreRequirement{
+    {
+        Subsystem: "registration",
+        Store:     interfaces.StoreNamePendingRegistration,
+        Severity:  interfaces.RequirementRequired,
+    },
+}
+```
+
+`Subsystem` is used verbatim in startup error messages — choose a name that
+identifies the feature to an operator reading logs.
+
+Use `RequirementRequired` when the subsystem cannot function without the store.
+Use `RequirementOptional` when the subsystem degrades gracefully on absence.
+
+### How collection works
+
+`features/controller/server/server.go:collectActiveStorageRequirements` collects
+requirements from every enabled subsystem and calls
+`interfaces.ValidateStorageRequirements(storageManager, reqs)` immediately after
+the `StorageManager` is constructed. Collection is gated on whether the subsystem
+is enabled, so a deployment that does not run a subsystem is never blocked by its
+requirements.
+
+### What a startup failure looks like
+
+```
+storage composition failed — missing required stores:
+subsystem "registration" requires PendingRegistrationStore but provider "database" does not supply it
+```
+
+Each line names the subsystem, the store, and the provider — enough context to
+identify which feature broke and which provider must be fixed or replaced.
+
+### Invariants
+
+- **Declaration is adjacent to use**: the requirement lives in the same package as
+  the code that reads the store, not in a central table that drifts.
+- **Disabled subsystems impose no requirement**: a deployment without workflow
+  support is never forced to supply a trigger store.
+- **Existing nil-checks remain**: downstream nil-checks in subsystem code are
+  defence-in-depth and must not be removed — the mechanism makes them unreachable
+  under correct deployments, not redundant.
+- **Validation runs at startup, not at request time**: the check happens once,
+  immediately after construction, before any subsystem is initialised.

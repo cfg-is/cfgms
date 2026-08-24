@@ -100,7 +100,19 @@ type Provider struct {
 	startTime       time.Time
 
 	// Per-instance overrides injected via constructor options (test-only)
-	backoffOverride    *backoff
+	backoffOverride *backoff
+	// reconnectBackoff persists across reconnectLoop invocations so successive
+	// refused cycles keep escalating. It must NOT be rebuilt per call: a stream
+	// that opens and is then rejected on its first Recv re-enters reconnectLoop,
+	// so a per-call backoff restarts at the initial interval every cycle and
+	// never grows (Issue #3481).
+	//
+	// Guarded by its own backoffMu rather than reconnectMu, because reconnectMu
+	// is TryLock-ed to mean "a reconnect is already running": briefly holding it
+	// to reset the backoff would make a concurrent reconnectLoop see a false
+	// positive and skip reconnecting altogether.
+	backoffMu          sync.Mutex
+	reconnectBackoff   *backoff
 	quicConfigOverride *quicgo.Config
 
 	// approvalChecker gates reconnecting stewards on the ControlChannel path.
@@ -469,6 +481,14 @@ func (p *Provider) clientReceiveLoop() {
 
 	for {
 		msg, err := stream.Recv()
+		if err == nil {
+			// The stream has proven it can carry traffic, so this connection
+			// counts as a genuine success and the escalating backoff is cleared.
+			// Doing it here rather than at stream-open is what keeps a
+			// persistently-refused steward escalating while leaving an ordinary
+			// transport drop reconnecting promptly (Issue #3481).
+			p.resetReconnectBackoff()
+		}
 		if err != nil {
 			select {
 			case <-p.ctx.Done():
@@ -507,6 +527,42 @@ func (p *Provider) clientReceiveLoop() {
 	}
 }
 
+// nextReconnectBackoff returns the next reconnect delay and the attempt number
+// it corresponds to, lazily creating the provider-scoped backoff on first use.
+//
+// The backoff deliberately lives on the Provider: an admission refusal does not
+// fail dialAndOpenStream (the stream opens; the rejection surfaces on the first
+// Recv), so clientReceiveLoop re-enters reconnectLoop on every refusal. A backoff
+// built per reconnectLoop call therefore restarted at its initial interval every
+// cycle and never grew — measured live at "attempt 1, backoff 1s" indefinitely,
+// 78 MB of controller log in a day from three refused stewards (Issue #3481).
+func (p *Provider) nextReconnectBackoff() (time.Duration, int) {
+	p.backoffMu.Lock()
+	defer p.backoffMu.Unlock()
+	if p.reconnectBackoff == nil {
+		p.reconnectBackoff = defaultBackoff()
+		if p.backoffOverride != nil {
+			p.reconnectBackoff = &backoff{
+				initial:    p.backoffOverride.initial,
+				max:        p.backoffOverride.max,
+				multiplier: p.backoffOverride.multiplier,
+				jitter:     p.backoffOverride.jitter,
+			}
+		}
+	}
+	return p.reconnectBackoff.next(), p.reconnectBackoff.attempt
+}
+
+// resetReconnectBackoff clears the escalating reconnect backoff after a stream
+// has demonstrably carried a message.
+func (p *Provider) resetReconnectBackoff() {
+	p.backoffMu.Lock()
+	defer p.backoffMu.Unlock()
+	if p.reconnectBackoff != nil {
+		p.reconnectBackoff.reset()
+	}
+}
+
 // reconnectLoop attempts to re-establish the ControlChannel with exponential backoff.
 // It runs until either a connection is established or the provider context is cancelled.
 // TryLock ensures only one reconnectLoop is active at a time: when Reconnect() closes
@@ -517,16 +573,6 @@ func (p *Provider) reconnectLoop() {
 		return
 	}
 	defer p.reconnectMu.Unlock()
-
-	bo := defaultBackoff()
-	if p.backoffOverride != nil {
-		bo = &backoff{
-			initial:    p.backoffOverride.initial,
-			max:        p.backoffOverride.max,
-			multiplier: p.backoffOverride.multiplier,
-			jitter:     p.backoffOverride.jitter,
-		}
-	}
 
 	for {
 		select {
@@ -539,7 +585,7 @@ func (p *Provider) reconnectLoop() {
 		p.setState(StateReconnecting)
 		p.reconnectAttempts.Add(1)
 
-		wait := bo.next()
+		wait, attempt := p.nextReconnectBackoff()
 
 		// Read addr under sendMu — restartServerAndRepoint writes p.addr under sendMu,
 		// so reads outside sendMu are a data race (same pattern as dialAndOpenStream).
@@ -548,7 +594,7 @@ func (p *Provider) reconnectLoop() {
 		p.sendMu.Unlock()
 
 		p.logger.Info("reconnecting to controller",
-			"attempt", bo.attempt,
+			"attempt", attempt,
 			"backoff", wait,
 			"addr", logging.SanitizeLogValue(addr),
 		)
@@ -565,12 +611,16 @@ func (p *Provider) reconnectLoop() {
 
 		// Attempt to reconnect
 		if err := p.dialAndOpenStream(); err != nil {
-			p.logger.Warn("reconnection failed", "error", err, "attempt", bo.attempt)
+			p.logger.Warn("reconnection failed", "error", err, "attempt", attempt)
 			continue
 		}
 
-		// Success — reset backoff and restart receive loop
-		bo.reset()
+		// The stream is OPEN, which is not the same as usable: a server-side
+		// admission refusal is delivered on the first Recv, not by
+		// dialAndOpenStream. Resetting the backoff here therefore rewarded a
+		// connection that was about to be rejected. The reset now happens in
+		// clientReceiveLoop once a message has actually been received, so a
+		// stream that never carries one keeps escalating (Issue #3481).
 		p.setState(StateConnected)
 		p.mu.Lock()
 		p.lastConnectedAt = time.Now()
@@ -1166,7 +1216,8 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		admitted, checkErr := s.provider.approvalChecker.IsApproved(stream.Context(), stewardID)
 		if checkErr != nil {
 			s.provider.logger.Error("steward approval check error, rejecting (fail-closed)",
-				"steward_id", logging.SanitizeLogValue(stewardID), "error", checkErr)
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(checkErr.Error()))
 			return status.Error(codes.Unavailable, "steward approval service unavailable")
 		}
 		if !admitted {

@@ -340,6 +340,70 @@ func TestFlatFileStewardStore_SetStewardHidden_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
 }
 
+// TestFlatFileStewardStore_DeviceIDUniquePerTenant verifies that RegisterSteward
+// enforces tenant-scoped device_id uniqueness, matching the sqlite and database providers.
+// See Issue #3403 for the motivating CI failure and Issue #3506 for this fix.
+//
+// The check-then-act sequence in the registration handler means two concurrent claims can
+// both pass the handler's GetStewardByDeviceID lookup; only the store-level guard decides
+// the winner. This test exercises the guard directly.
+func TestFlatFileStewardStore_DeviceIDUniquePerTenant(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	const deviceID = "device-shared-1"
+
+	first := testStewardRecord("steward-dup-a")
+	first.TenantID = "tenant-1"
+	first.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, first))
+
+	// A different steward asserting the same device_id in the same tenant must be rejected.
+	second := testStewardRecord("steward-dup-b")
+	second.TenantID = "tenant-1"
+	second.DeviceID = deviceID
+	err = store.RegisterSteward(ctx, second)
+	require.Error(t, err, "a second steward must not take a device_id already held in the tenant")
+	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict,
+		"the conflict must be reported as ErrStewardDeviceIDConflict, not the benign ErrStewardAlreadyExists")
+
+	// Cross-tenant is a separate namespace and must still be allowed.
+	other := testStewardRecord("steward-dup-c")
+	other.TenantID = "tenant-2"
+	other.DeviceID = deviceID
+	assert.NoError(t, store.RegisterSteward(ctx, other),
+		"the same device_id under a different tenant is a distinct namespace")
+
+	// Empty device_id means "not asserted" and must not collide with itself.
+	blankA := testStewardRecord("steward-blank-a")
+	blankA.TenantID = "tenant-1"
+	blankA.DeviceID = ""
+	blankB := testStewardRecord("steward-blank-b")
+	blankB.TenantID = "tenant-1"
+	blankB.DeviceID = ""
+	require.NoError(t, store.RegisterSteward(ctx, blankA))
+	assert.NoError(t, store.RegisterSteward(ctx, blankB),
+		"rows with no device_id must be excluded from the uniqueness check")
+
+	// Re-registering the SAME steward is still the benign duplicate, not a device conflict.
+	dupSelf := testStewardRecord("steward-dup-a")
+	dupSelf.TenantID = "tenant-1"
+	dupSelf.DeviceID = deviceID
+	selfErr := store.RegisterSteward(ctx, dupSelf)
+	require.Error(t, selfErr)
+	assert.ErrorIs(t, selfErr, business.ErrStewardAlreadyExists,
+		"the same steward written twice stays ErrStewardAlreadyExists so idempotent retries remain benign")
+
+	// GetStewardByDeviceID stays unambiguous within the tenant — the property
+	// the revocation gate in handlers_registration_refresh.go depends on.
+	got, getErr := store.GetStewardByDeviceID(ctx, deviceID)
+	require.NoError(t, getErr)
+	require.NotNil(t, got)
+}
+
 func TestFlatFileStewardStore_UpdateStewardTenant_TenantPersistedInFile(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewFlatFileStewardStore(dir)

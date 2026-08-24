@@ -21,11 +21,13 @@ var (
 	bucketSnapshot     = []byte("snapshot")
 	bucketApplied      = []byte("applied")
 	bucketClusterState = []byte("clusterstate")
+	bucketConfState    = []byte("confstate")
 
 	keyHardState    = []byte("hs")
 	keySnapshot     = []byte("snap")
 	keyApplied      = []byte("idx")
 	keyClusterNodes = []byte("nodes")
+	keyConfState    = []byte("cs")
 )
 
 // RaftLogStore persists Raft log entries, HardState, and snapshots to a bbolt
@@ -38,6 +40,7 @@ var (
 //	entries/<idx> — serialised raftpb.Entry keyed by big-endian uint64 index
 //	snapshot/snap — serialised raftpb.Snapshot
 //	applied/idx   — last applied index (big-endian uint64)
+//	confstate/cs  — serialised raftpb.ConfState (the Raft voter set)
 //
 // One bbolt.Update transaction per Ready batch gives a single fsync and is
 // atomic: a crash leaves the previous committed state intact, not a torn write.
@@ -57,7 +60,7 @@ func OpenRaftLogStore(path string) (*RaftLogStore, error) {
 		return nil, fmt.Errorf("open raft log store at %s: %w", path, err)
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{bucketHardState, bucketEntries, bucketSnapshot, bucketApplied, bucketClusterState} {
+		for _, name := range [][]byte{bucketHardState, bucketEntries, bucketSnapshot, bucketApplied, bucketClusterState, bucketConfState} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -249,4 +252,62 @@ func encodeIndex(idx uint64) []byte {
 
 func decodeIndex(b []byte) uint64 {
 	return binary.BigEndian.Uint64(b)
+}
+
+// SaveConfState persists the Raft voter set (the ConfState returned by
+// Node.ApplyConfChange) so a restarting node can restore its own membership.
+//
+// Without this, a node that restarts from a persisted log comes back with an
+// empty voter set: nothing carries the ConfState, and config.Applied suppresses
+// re-delivery of the ConfChange entries that would rebuild it. The node then has
+// no voters and no way to acquire any, so no election ever happens and the whole
+// cluster stays leaderless (Issue #3479).
+func (s *RaftLogStore) SaveConfState(cs *raftpb.ConfState) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("raft log store is not open")
+	}
+	if cs == nil {
+		return nil
+	}
+	data, err := proto.Marshal(cs)
+	if err != nil {
+		return fmt.Errorf("marshal conf state: %w", err)
+	}
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketConfState)
+		if b == nil {
+			return fmt.Errorf("conf state bucket missing")
+		}
+		return b.Put(keyConfState, data)
+	})
+}
+
+// LoadConfState returns the persisted Raft voter set, or nil when none has been
+// recorded yet (a cluster that has never applied a ConfChange, or a store
+// written before Issue #3479 added this bucket).
+func (s *RaftLogStore) LoadConfState() (*raftpb.ConfState, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("raft log store is not open")
+	}
+	var cs *raftpb.ConfState
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketConfState)
+		if b == nil {
+			return nil
+		}
+		data := b.Get(keyConfState)
+		if len(data) == 0 {
+			return nil
+		}
+		var decoded raftpb.ConfState
+		if err := proto.Unmarshal(data, &decoded); err != nil {
+			return fmt.Errorf("unmarshal conf state: %w", err)
+		}
+		cs = &decoded
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cs, nil
 }
