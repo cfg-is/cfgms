@@ -1264,6 +1264,48 @@ The REST API is the admin interface to the controller. All operations are authen
 
 - **Backward compatibility:** requests without `limit`/`offset` return the existing payload shape unchanged — a plain JSON array of stewards — so `cfg` and existing API clients are unaffected.
 
+### Authority Gating for Mutating Admin API Actions
+
+Every state-mutating handler (POST/PUT/DELETE/PATCH) in `features/controller/api` that can affect fleet-wide state must call `HasLeadership()` on the `*ha.Manager` before performing any durable action. `HasLeadership()` is the lease-backed authority gate defined in ADR-029 (Decision 4); it is distinct from the deprecated `IsLeader()` Raft flag, which is not a safe authority check because it does not account for leadership lease expiry or fencing tokens.
+
+#### Why the gate matters
+
+Without an authority gate on mutating operations, a stale Raft leader that has lost its lease can still execute admin actions — approving registrations, applying cfg pushes, issuing certificates, initiating decommissions — and replicate those writes into the log before a new leader fences them. The result is a brief window of split-brain write authority. `HasLeadership()` bounds this window by refusing to act when the node has lost the leadership lease, regardless of what the raw Raft flag says.
+
+#### Surfaces gated by epic #3411
+
+The following handler groups were gated during epic #3411. Each story is noted beside its handlers.
+
+| Handler | Story | Surface |
+|---------|-------|---------|
+| `handleClusterNodeDrain`, `handleClusterNodeDecommission` | Story A (#3538) | Cluster node lifecycle |
+| `handleApproveModuleBundle`, `handleRejectModuleBundle` | Story B (#3539) | Bundle approval/rejection |
+| `handleStartRollout`, `handleHaltRollout` | Story C (#3540) | Version-ring rollout start/halt |
+| `handleProvisionCertificate`, `handleRotateSigningCert`, `handleRevokeCertificate` | Story D (#3541) | Certificate issuance/rotation/revocation |
+| `handleUploadInstallerArtifact`, `handleDeleteInstallerArtifact` | Story E (#3542) | Installer artifact management |
+| `handlePublishStewardBinary` | Story F (#3543) | Steward binary publication |
+| `handleDecommissionSteward`, `handleMoveSteward`, `handleUpdateStewardConfig`, `handleDeleteStewardConfig` | Story I (#3544) | Steward decommission/move/config write |
+
+**Story H finding (#3436) — batch-job and run-script dispatch:** the batch-job and run-script paths (`handleCreateJob`, `handlePostRunScript`, `handlePostRunCommand`) lack both an authority gate and term-stamping on the dispatch envelope. A stale leader can queue jobs that stewards accept until the leader's lease expires and the fencing token cuts it off at the steward side. The steward-side term-rejection mechanism is tracked under #3436; the handler-side `HasLeadership()` gate is left for a follow-up story so that the steward fix and the controller fix land together.
+
+#### Baseline ratchet
+
+`features/controller/api/architecture_test.go` enforces the gate via `TestNoUngatedMutatingHandler`. The test walks all non-test `.go` files in the package (receiver-agnostic, full-package scan — not scoped to `routes_*.go` or to `*Server` receiver methods), and for every mutating route registration it checks that the handler:
+
+1. Calls `HasLeadership()` in its own body, OR
+2. Appears in the in-file `ungatedHandlerBaseline` map with a classified bucket and a one-line reason, OR
+3. Carries an `//architecture:allow-nogate` annotation on its declaration.
+
+The baseline is a ratchet — entries can only be removed as handlers are gated, never added for new handlers. Three bucket values are recognised:
+
+- `excluded-by-epic-non-goals` — handler is explicitly out of scope for epic #3411 (RBAC CRUD, tenant management, web-account CRUD, API keys, session lifecycle, presentation state)
+- `gated-via-deprecated-primitive` — handler IS gated, but on the deprecated `IsLeader()` flag rather than `HasLeadership()`; migration tracked separately
+- `unclassified-pending-risk-review` — handler was inventoried during decomposition but not individually risk-reviewed; a follow-up story must either gate it or explicitly reassign its bucket
+
+The test `TestDetectionFiresOnViolation` (AC2) proves the rule fires on ungated handlers by confirming `handleConfigPush` is detected as ungated and that the baseline entry is the sole thing preventing a violation report. `TestDetectsInlineServerGoHandler` (AC3) proves the scan covers handlers registered directly in `server.go`, not just `routes_*.go` files. `TestDetectsNonServerReceiverHandler` (AC4) proves the scan covers handlers on non-`*Server` receiver types such as `*WorkflowHandler` and `*RollbackHandler`.
+
+The `check-architecture` Makefile target runs this test as its final gate.
+
 ---
 
 ## Module Cache and Approval Workflow
