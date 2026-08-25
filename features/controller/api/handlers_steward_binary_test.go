@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -22,6 +24,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
@@ -737,4 +741,93 @@ func TestGetStewardBinary_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, getRec.Code)
 	assert.Contains(t, getRec.Body.String(), "AUTHENTICATION_REQUIRED")
+}
+
+// ---- Leader-gate tests (Issue #3543) ----
+
+// newNonAuthoritativeHAManager returns a real *ha.Manager — the production component the
+// leader gate consults — in the state a partitioned controller is in: ClusterMode, holding
+// no lease, so the real HasLeadership() implementation (Manager.HasLeadership →
+// RaftConsensus.HasLeadership, the 0.8 × ElectionTimeout lease bound of ADR-029) reports
+// false. The manager is constructed but never Started, so this node never acquires the
+// Raft leader state or a quorum ack and the lease is permanently unheld — the same
+// condition a leader that has lost quorum reaches once its lease ages out.
+func newNonAuthoritativeHAManager(t *testing.T) *ha.Manager {
+	t.Helper()
+
+	certMgr := newTLSTestCertManager(t)
+	caPEM, err := certMgr.GetCACertificate()
+	require.NoError(t, err)
+	caPath := filepath.Join(t.TempDir(), "ha-ca.pem")
+	require.NoError(t, os.WriteFile(caPath, caPEM, 0o600))
+
+	manager := newClusterModeHAManager(t, caPath, certMgr)
+	require.False(t, manager.HasLeadership(),
+		"precondition: a cluster-mode node holding no lease must not claim leadership")
+	return manager
+}
+
+// newAuthoritativeHAManager returns a real *ha.Manager in SingleServerMode, where the real
+// HasLeadership() is unconditionally true (ADR-029 Decision 4: no quorum to lose, no peer
+// to overlap with, so no lease is needed). This is the deployment shape every OSS
+// single-controller install runs.
+func newAuthoritativeHAManager(t *testing.T) *ha.Manager {
+	t.Helper()
+
+	cfg := ha.DefaultConfig()
+	cfg.Mode = ha.SingleServerMode
+	// Empty raftLogDir: SingleServerMode starts no Raft node, so no WAL is needed.
+	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil, nil, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+	require.True(t, manager.HasLeadership(),
+		"precondition: a single-server node is always authoritative")
+	return manager
+}
+
+// TestPublishStewardBinary_LeaderGate_RejectsWith503WhenNotAuthoritative verifies that
+// handlePublishStewardBinary returns 503 and stores nothing when the serving node is not
+// the lease-backed leader — the partition scenario: a non-authoritative controller cannot
+// publish a new steward installer binary to the fleet (Issue #3543).
+func TestPublishStewardBinary_LeaderGate_RejectsWith503WhenNotAuthoritative(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	server.registrationLeaderStatus = newNonAuthoritativeHAManager(t)
+
+	content := []byte("binary that must not be stored")
+	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
+
+	rec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	// Confirm the blob store is empty — no signature verification or write occurred.
+	blobs, err := server.blobStore.ListBlobs(context.Background(), blob.BlobKey{
+		TenantID:  "test-tenant",
+		Namespace: "steward-binaries",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, blobs, "blob store must remain empty when the node is not authoritative")
+}
+
+// TestPublishStewardBinary_LeaderGate_AllowsWhenAuthoritative verifies that
+// handlePublishStewardBinary reaches the existing publish logic unchanged when:
+//   - registrationLeaderStatus is nil (OSS single-server / no HA configured)
+//   - registrationLeaderStatus.HasLeadership() returns true (current leader)
+func TestPublishStewardBinary_LeaderGate_AllowsWhenAuthoritative(t *testing.T) {
+	t.Run("nil checker reaches publish logic", func(t *testing.T) {
+		server, fix := setupStewardBinaryServer(t)
+		// registrationLeaderStatus is nil by default; nil means always-leader.
+		content := []byte("binary content for nil-checker path")
+		sigBase64 := fix.signContent(content, "v1.1.0", "linux", "amd64")
+		rec := doPublish(server, "v1.1.0", "linux", "amd64", "test-tenant", sigBase64, content)
+		assert.Equal(t, http.StatusOK, rec.Code, "nil checker must not block publish: %s", rec.Body.String())
+	})
+
+	t.Run("authoritative checker reaches publish logic", func(t *testing.T) {
+		server, fix := setupStewardBinaryServer(t)
+		server.registrationLeaderStatus = newAuthoritativeHAManager(t)
+		content := []byte("binary content for authoritative-checker path")
+		sigBase64 := fix.signContent(content, "v1.2.0", "linux", "amd64")
+		rec := doPublish(server, "v1.2.0", "linux", "amd64", "test-tenant", sigBase64, content)
+		assert.Equal(t, http.StatusOK, rec.Code, "authoritative checker must not block publish: %s", rec.Body.String())
+	})
 }
