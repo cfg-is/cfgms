@@ -2,13 +2,13 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * Web account fetch hooks (Issue #2733, #3133, #2974, #3134, #3132).
+ * Account fetch hooks (Issue #2733, #3133, #2974, #3134, #3132, #3574).
  *
  * Endpoints covered:
- *   GET    /api/v1/web/accounts                                → useWebAccountList
- *   POST   /api/v1/web/accounts                               → createWebAccount (step-up gated; mints enrollment link)
- *   PUT    /api/v1/web/accounts/{u}                           → updateWebAccount (Issue #3132; permissions/disabled/reset_credentials)
- *   POST   /api/v1/web/accounts/{u}/enrollment-link/revoke    → revokeEnrollmentLink
+ *   GET    /api/v1/accounts                                → useWebAccountList
+ *   POST   /api/v1/accounts                               → createWebAccount (step-up gated; mints enrollment link)
+ *   PUT    /api/v1/accounts/{u}                           → updateWebAccount (Issue #3132; permissions/disabled/reset_credentials)
+ *   POST   /api/v1/accounts/{u}/enrollment-link/revoke    → revokeEnrollmentLink
  *   GET    /api/v1/rbac/roles                                  → useRoleList
  *   GET    /api/v1/rbac/permissions                           → usePermissionList
  *   POST   /api/v1/rbac/roles                                 → createRole
@@ -62,7 +62,7 @@ export interface WebAccountInfo {
 }
 
 /**
- * Result of creating a new web account (POST /api/v1/web/accounts).
+ * Result of creating a new web account (POST /api/v1/accounts).
  * The enrollment_magic_link is the raw token shown ONCE to the admin for
  * out-of-band handoff. It is never returned in subsequent list or get responses.
  * No password is ever set — accounts are passkey-only (ADR-021 Amendment 1).
@@ -110,7 +110,7 @@ export function parseWebAccountInfo(value: unknown): WebAccountInfo | null {
 }
 
 /**
- * Parse a WebAccountCreateResult from POST /api/v1/web/accounts response data.
+ * Parse a WebAccountCreateResult from POST /api/v1/accounts response data.
  * The enrollment_magic_link is safe to display (hex-encoded, no injection risk).
  */
 export function parseWebAccountCreateResult(data: unknown): WebAccountCreateResult | null {
@@ -206,14 +206,14 @@ export function useWebAccountList(): UseWebAccountListResult {
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome<WebAccountInfo[]> | null>(null)
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
-  const key = `web-accounts:${attempt}`
+  const key = `accounts:${attempt}`
 
   useEffect(() => {
     let cancelled = false
-    apiFetch('/api/v1/web/accounts')
+    apiFetch('/api/v1/accounts')
       .then(async (response) => {
         if (!response.ok)
-          throw new Error(`GET /api/v1/web/accounts — ${response.status}`)
+          throw new Error(`GET /api/v1/accounts — ${response.status}`)
         const body: unknown = await response.json()
         const parsed = parseWebAccountList(
           (body as Record<string, unknown> | null)?.data,
@@ -228,7 +228,7 @@ export function useWebAccountList(): UseWebAccountListResult {
           error:
             cause instanceof Error && cause.message
               ? cause.message
-              : 'GET /api/v1/web/accounts — request failed',
+              : 'GET /api/v1/accounts — request failed',
           fetchedAtMs: Date.now(),
         })
       })
@@ -367,7 +367,7 @@ export async function createWebAccount(
   if (tenantId && tenantId.trim()) body.tenant_id = tenantId.trim()
   if (permissions && permissions.length > 0) body.permissions = permissions
 
-  const response = await apiFetch('/api/v1/web/accounts', {
+  const response = await apiFetch('/api/v1/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -391,7 +391,7 @@ export async function createWebAccount(
  */
 export async function revokeEnrollmentLink(username: string): Promise<void> {
   const response = await apiFetch(
-    `/api/v1/web/accounts/${encodeURIComponent(username)}/enrollment-link/revoke`,
+    `/api/v1/accounts/${encodeURIComponent(username)}/enrollment-link/revoke`,
     { method: 'POST' },
   )
   if (!response.ok) {
@@ -418,7 +418,7 @@ export interface WebAccountUpdateResult {
 }
 
 /**
- * Update a web-admin account (PUT /api/v1/web/accounts/{username}).
+ * Update a web-admin account (PUT /api/v1/accounts/{username}).
  *
  * All options are optional — omitted fields retain their current server-side
  * values. Set resetCredentials to true to revoke all passkeys and mint a fresh
@@ -435,7 +435,7 @@ export async function updateWebAccount(
   if (options.resetCredentials) body.reset_credentials = true
 
   const response = await apiFetch(
-    `/api/v1/web/accounts/${encodeURIComponent(username)}`,
+    `/api/v1/accounts/${encodeURIComponent(username)}`,
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

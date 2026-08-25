@@ -140,13 +140,13 @@ var knownPermissions = map[string]bool{
 	// tenantScopedTerminalWrapper covers tenant-scoped callers; the root-scoped ADR-025 gap
 	// ({steward_id} not in extractBoundaryTenantFromRequest) is closed inline there.
 	"terminal:create": true,
-	// Web account management (Issue #2733, #2974, #3126)
-	"web-account:list":                   true,
-	"web-account:create":                 true,
-	"web-account:get":                    true, // Issue #3126: get-one by username
-	"web-account:update":                 true, // Issue #3126: update permissions and/or disabled state
-	"web-account:delete":                 true,
-	"web-account:revoke-enrollment-link": true, // Issue #2974: revoke an outstanding enrollment magic link
+	// Account management (Issue #2733, #2974, #3126, #3574)
+	"account:list":                   true,
+	"account:create":                 true,
+	"account:get":                    true, // Issue #3126: get-one by username
+	"account:update":                 true, // Issue #3126: update permissions and/or disabled state
+	"account:delete":                 true,
+	"account:revoke-enrollment-link": true, // Issue #2974: revoke an outstanding enrollment magic link
 	// WebAuthn passkey / FIDO2 registration and credential management (Issue #2782, #2783)
 	"webauthn:register": true,
 	"webauthn:list":     true,

@@ -54,7 +54,7 @@ const (
 )
 
 // webUsernameRegex keeps usernames log- and path-safe (security A4.1): usernames
-// appear in DELETE /api/v1/web/accounts/{username} URL paths, which are logged.
+// appear in DELETE /api/v1/accounts/{username} URL paths, which are logged.
 // 3..64 characters, starting alphanumeric; then alphanumerics, '.', '_', '-'.
 var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 
@@ -92,7 +92,7 @@ type webAccount struct {
 	EnrollmentLinkRevoked   bool
 }
 
-// WebAccountRequest is the POST /api/v1/web/accounts body. The same endpoint
+// WebAccountRequest is the POST /api/v1/accounts body. The same endpoint
 // creates a new account or resets an existing one (upsert): on reset, omitted
 // tenant_id/permissions are retained from the existing record.
 //
@@ -129,7 +129,7 @@ type WebAccountInfo struct {
 	HasOutstandingEnrollmentLink bool      `json:"has_outstanding_enrollment_link"` // Issue #2974
 }
 
-// WebAccountUpdateRequest is the PUT /api/v1/web/accounts/{username} body (Issue #3126).
+// WebAccountUpdateRequest is the PUT /api/v1/accounts/{username} body (Issue #3126).
 // All fields are optional — omitted fields retain their current values, allowing
 // independent update of permissions, disabled state, and credentials without
 // requiring a full account record. A nil pointer means "not provided; keep
@@ -146,7 +146,7 @@ type WebAccountUpdateRequest struct {
 	ResetCredentials bool      `json:"reset_credentials,omitempty"`
 }
 
-// WebAccountUpdateResponse is returned by PUT /api/v1/web/accounts/{username}.
+// WebAccountUpdateResponse is returned by PUT /api/v1/accounts/{username}.
 // EnrollmentMagicLink is present only when reset_credentials was set to true —
 // the same single-use, TTL-bounded token minted by the create/reset path
 // (Issue #2974); absent for all other update shapes since no new link is minted.
@@ -155,7 +155,7 @@ type WebAccountUpdateResponse struct {
 	EnrollmentMagicLink string `json:"enrollment_magic_link,omitempty"`
 }
 
-// WebAccountCreateResponse is returned by POST /api/v1/web/accounts only.
+// WebAccountCreateResponse is returned by POST /api/v1/accounts only.
 // EnrollmentMagicLink is the single-use, TTL-bounded token shown exactly once
 // to the admin for out-of-band handoff (Issue #2974). It is never stored in
 // plaintext and is not present in list or subsequent responses. It is absent
@@ -567,7 +567,7 @@ func verifyEnrollmentToken(acct *webAccount, presentedRaw string) bool {
 
 // --- handlers (Tier-3: admin mTLS only; wired in setupRouter) ---
 
-// handleCreateWebAccount handles POST /api/v1/web/accounts (Tier-3). It creates a
+// handleCreateWebAccount handles POST /api/v1/accounts (Tier-3). It creates a
 // web-admin account, or resets an existing one (upsert): on reset, omitted
 // tenant_id/permissions are retained. Passkeys are registered separately via the
 // WebAuthn registration endpoints (Issue #2993).
@@ -780,7 +780,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleRevokeEnrollmentLink handles POST /api/v1/web/accounts/{username}/enrollment-link/revoke.
+// handleRevokeEnrollmentLink handles POST /api/v1/accounts/{username}/enrollment-link/revoke.
 // It invalidates an outstanding enrollment magic link before it is redeemed — for wrong
 // recipient, departed employee, or suspected token leak (Issue #2974).
 func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Request) {
@@ -855,7 +855,7 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// handleListWebAccounts handles GET /api/v1/web/accounts (requirePermission only,
+// handleListWebAccounts handles GET /api/v1/accounts (requirePermission only,
 // no Tier-3 wrapper — reads are categorically outside the Tier-3 surface; see
 // Implementation Notes in Issue #2733). The response uses WebAccountInfo: no
 // secret material is ever included.
@@ -994,7 +994,7 @@ func (s *Server) revokeWebSessionsForPrincipal(ctx context.Context, principalID 
 	return revoked
 }
 
-// handleGetWebAccount handles GET /api/v1/web/accounts/{username} (Issue #3126).
+// handleGetWebAccount handles GET /api/v1/accounts/{username} (Issue #3126).
 // Returns the account's identity and status — no secret material, no WebAuthn credentials.
 // A cross-tenant caller gets 404 to avoid disclosing account existence.
 func (s *Server) handleGetWebAccount(w http.ResponseWriter, r *http.Request) {
@@ -1036,7 +1036,7 @@ func (s *Server) handleGetWebAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUpdateWebAccount handles PUT /api/v1/web/accounts/{username} (Issue #3126, Tier-3).
+// handleUpdateWebAccount handles PUT /api/v1/accounts/{username} (Issue #3126, Tier-3).
 // All request fields are optional — omitted fields retain existing values.
 // A cross-tenant caller gets 404 to avoid disclosing account existence.
 func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) {
@@ -1214,7 +1214,7 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleDeleteWebAccount handles DELETE /api/v1/web/accounts/{username} (Tier-3).
+// handleDeleteWebAccount handles DELETE /api/v1/accounts/{username} (Tier-3).
 // It removes the account from the in-memory cache and the central secret store.
 func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]

@@ -25,7 +25,7 @@ import {
   JUSTIFICATION_MAX_LENGTH,
   type RoleInfo,
   type PermissionInfo,
-} from './useWebAccounts.ts'
+} from './useAccounts.ts'
 
 function LoadingRows() {
   return (

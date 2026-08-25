@@ -57,7 +57,7 @@ type WebAuthnCredentialInfo struct {
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"` // nil = never used after registration
 }
 
-// WebAuthnListResponse is returned by GET /api/v1/web/accounts/{username}/webauthn/credentials.
+// WebAuthnListResponse is returned by GET /api/v1/accounts/{username}/webauthn/credentials.
 type WebAuthnListResponse struct {
 	Username    string                   `json:"username"`
 	Credentials []WebAuthnCredentialInfo `json:"credentials"`

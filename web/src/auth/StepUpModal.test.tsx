@@ -380,7 +380,7 @@ describe('StepUpModal — retry', () => {
 // ── Elevation path (presenceRequired: false) ──────────────────────────────────
 
 const elevationRequest: StepUpRequest = {
-  path: '/api/v1/web/accounts/admin/delete',
+  path: '/api/v1/accounts/admin/delete',
   init: { method: 'DELETE' },
   presenceRequired: false,
 }

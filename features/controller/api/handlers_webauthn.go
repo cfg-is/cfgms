@@ -11,19 +11,19 @@
 //	        list:     webauthn:list permission, no assurance requirement;
 //	        revoke:   webauthn:revoke permission, AssuranceStrong):
 //
-//		POST /api/v1/web/accounts/{username}/webauthn/register/begin
+//		POST /api/v1/accounts/{username}/webauthn/register/begin
 //		     Returns PublicKeyCredentialCreationOptions (the WebAuthn challenge).
 //		     Cookie-auth principals are self-scoped to their own account.
 //
-//		POST /api/v1/web/accounts/{username}/webauthn/register/finish
+//		POST /api/v1/accounts/{username}/webauthn/register/finish
 //		     Verifies the authenticator response, persists the credential.
 //		     Cookie-auth principals are self-scoped to their own account.
 //
-//		GET  /api/v1/web/accounts/{username}/webauthn/credentials
+//		GET  /api/v1/accounts/{username}/webauthn/credentials
 //		     Lists registered credentials for the account (public metadata only).
 //		     Cookie-auth principals are self-scoped to their own account.
 //
-//		POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}
+//		POST /api/v1/accounts/{username}/webauthn/revoke/{credential_id}
 //		     Removes a specific credential. credential_id is base64url-encoded.
 //		     Cookie-auth principals are self-scoped and cannot remove their last credential.
 //
@@ -178,7 +178,7 @@ func (s *Server) resolveWebAccountForCredentials(w http.ResponseWriter, r *http.
 }
 
 // handleWebAuthnRegisterBegin handles
-// POST /api/v1/web/accounts/{username}/webauthn/register/begin.
+// POST /api/v1/accounts/{username}/webauthn/register/begin.
 //
 // Generates a WebAuthn challenge and returns PublicKeyCredentialCreationOptions.
 // The challenge is stored server-side (never trusted from the client); the
@@ -237,7 +237,7 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 }
 
 // handleWebAuthnRegisterFinish handles
-// POST /api/v1/web/accounts/{username}/webauthn/register/finish.
+// POST /api/v1/accounts/{username}/webauthn/register/finish.
 //
 // Verifies the authenticator response via the library (challenge match against
 // the server-stored value, origin match, RP-ID match, attestation/signature),
@@ -590,7 +590,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWebAuthnListCredentials handles
-// GET /api/v1/web/accounts/{username}/webauthn/credentials.
+// GET /api/v1/accounts/{username}/webauthn/credentials.
 //
 // Returns public metadata for all WebAuthn credentials registered to the account.
 // The public key bytes are omitted from the response — only the credential ID,
@@ -889,7 +889,7 @@ func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *webAccount, cred
 }
 
 // handleWebAuthnRevokeCredential handles
-// POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}.
+// POST /api/v1/accounts/{username}/webauthn/revoke/{credential_id}.
 //
 // Removes the named credential from the account. credential_id is the base64url-encoded
 // credential ID as returned by the list endpoint. Returns 404 when the credential is not

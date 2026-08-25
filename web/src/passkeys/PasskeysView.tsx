@@ -6,7 +6,7 @@
  * Accessible at /passkeys — linked from the user menu.
  *
  * Capabilities:
- *   List — fetches GET /api/v1/web/accounts/{username}/webauthn/credentials.
+ *   List — fetches GET /api/v1/accounts/{username}/webauthn/credentials.
  *   Add  — POST .../register/begin → navigator.credentials.create() → POST .../register/finish.
  *          Step-up gated: apiFetch fires StepUpModal automatically on 401 CFGMS-StepUp.
  *   Remove — POST .../webauthn/revoke/{credential_id}.
@@ -68,7 +68,7 @@ type CredentialListResult =
 // function reachable from an effect body that itself sets state).
 async function fetchCredentialList(username: string): Promise<CredentialListResult> {
   try {
-    const resp = await apiFetch(`/api/v1/web/accounts/${encodeURIComponent(username)}/webauthn/credentials`)
+    const resp = await apiFetch(`/api/v1/accounts/${encodeURIComponent(username)}/webauthn/credentials`)
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}))
       return {
@@ -231,7 +231,7 @@ export default function PasskeysView() {
     try {
       // Begin: server issues a creation challenge (step-up gated via apiFetch interceptor).
       const beginResp = await apiFetch(
-        `/api/v1/web/accounts/${encodeURIComponent(username)}/webauthn/register/begin`,
+        `/api/v1/accounts/${encodeURIComponent(username)}/webauthn/register/begin`,
         { method: 'POST' },
       )
       if (!beginResp.ok) {
@@ -290,7 +290,7 @@ export default function PasskeysView() {
       }
 
       const finishResp = await apiFetch(
-        `/api/v1/web/accounts/${encodeURIComponent(username)}/webauthn/register/finish`,
+        `/api/v1/accounts/${encodeURIComponent(username)}/webauthn/register/finish`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -323,7 +323,7 @@ export default function PasskeysView() {
     setLastCredAlert(false)
     try {
       const resp = await apiFetch(
-        `/api/v1/web/accounts/${encodeURIComponent(username)}/webauthn/revoke/${encodeURIComponent(credId)}`,
+        `/api/v1/accounts/${encodeURIComponent(username)}/webauthn/revoke/${encodeURIComponent(credId)}`,
         { method: 'POST' },
       )
       if (!resp.ok) {

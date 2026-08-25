@@ -22,7 +22,7 @@ import {
   revokeSubjectRole,
   updateWebAccount,
   EscalationError,
-} from './useWebAccounts.ts'
+} from './useAccounts.ts'
 
 describe('parseWebAccountInfo', () => {
   it('parses a valid account record', () => {
@@ -444,7 +444,7 @@ describe('createWebAccount', () => {
     vi.unstubAllGlobals()
   })
 
-  it('sends POST to /api/v1/web/accounts without a password field', async () => {
+  it('sends POST to /api/v1/accounts without a password field', async () => {
     await createWebAccount('new-admin', 'default')
     const call = fetchMock.mock.calls.at(-1)
     expect(call).toBeDefined()
@@ -504,7 +504,7 @@ describe('revokeEnrollmentLink', () => {
     await revokeEnrollmentLink('fleet-admin')
     const call = fetchMock.mock.calls.at(-1)
     expect(call).toBeDefined()
-    expect(call![0]).toContain('/api/v1/web/accounts/fleet-admin/enrollment-link/revoke')
+    expect(call![0]).toContain('/api/v1/accounts/fleet-admin/enrollment-link/revoke')
     expect((call![1] as RequestInit).method).toBe('POST')
   })
 
@@ -776,10 +776,10 @@ describe('updateWebAccount', () => {
     vi.unstubAllGlobals()
   })
 
-  it('sends PUT to /api/v1/web/accounts/{username}', async () => {
+  it('sends PUT to /api/v1/accounts/{username}', async () => {
     await updateWebAccount('fleet-admin', { permissions: ['steward:list'] })
     const call = fetchMock.mock.calls.at(-1)!
-    expect(call[0]).toContain('/api/v1/web/accounts/fleet-admin')
+    expect(call[0]).toContain('/api/v1/accounts/fleet-admin')
     expect((call[1] as RequestInit).method).toBe('PUT')
   })
 

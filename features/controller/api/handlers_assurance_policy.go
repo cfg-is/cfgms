@@ -226,7 +226,10 @@ func (s *Server) resolveAssuranceRequirementForPath(ctx context.Context, path []
 			return floor, found
 		}
 		for _, ov := range policy.Overrides {
-			if ov.PermissionID != permissionID {
+			// Same alias-aware match as resolveAssuranceRequirement: the ancestor bar used
+			// for tighten-only validation must include overrides stored under a pre-rename
+			// permission ID (Issue #3574).
+			if !overrideAppliesTo(ov.PermissionID, permissionID) {
 				continue
 			}
 			found = true
