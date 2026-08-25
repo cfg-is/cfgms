@@ -5,10 +5,14 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // managedSession tracks the rolling-token state for a single live session.
@@ -482,6 +486,61 @@ func (m *manager) GetByID(ctx context.Context, id string) (*Session, error) {
 	}
 	out := *stored
 	return &out, nil
+}
+
+// RevokeAllForPrincipal revokes every session belonging to principalID by querying
+// the durable store directly via Store.ListAll and Store.Delete. It never consults
+// the in-memory cache because the caller (offboarding, in a later story) needs a
+// correctness guarantee across a cluster deployment: sessions issued on other nodes
+// are only visible in the shared store, not in this node's in-memory map.
+//
+// Returns the count of sessions successfully deleted. Returns a non-nil error only
+// if the initial ListAll call fails. Delete failures on individual sessions are
+// logged and do not stop the remaining deletions (best-effort, matching the
+// precedent of revokeWebSessionsForPrincipal).
+func (m *manager) RevokeAllForPrincipal(ctx context.Context, principalID string) (int, error) {
+	all, err := m.store.ListAll(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("session: RevokeAllForPrincipal: ListAll: %w", err)
+	}
+
+	// Deduplicate by session ID: the store contract requires dedup but we guard
+	// defensively in case a store implementation returns multiple rows for the same
+	// session (e.g., current token hash + grace-window prior-token hash).
+	seen := make(map[string]struct{})
+	revoked := 0
+	for _, sess := range all {
+		if sess == nil || sess.PrincipalID != principalID {
+			continue
+		}
+		if _, dup := seen[sess.ID]; dup {
+			continue
+		}
+		seen[sess.ID] = struct{}{}
+
+		if delErr := m.store.Delete(ctx, sess.ID); delErr != nil {
+			if !errors.Is(delErr, ErrSessionNotFound) {
+				slog.WarnContext(ctx, "session: RevokeAllForPrincipal: delete failed",
+					"session_id", logging.SanitizeLogValue(sess.ID),
+					"error", logging.SanitizeLogValue(delErr.Error()))
+			}
+			continue
+		}
+
+		// Mirror revocation in this node's in-memory map so that concurrent
+		// in-flight requests on this node see the revocation immediately without
+		// waiting for the store-check in Validate.
+		m.mu.RLock()
+		ms := m.sessions[sess.ID]
+		m.mu.RUnlock()
+		if ms != nil {
+			ms.mu.Lock()
+			ms.revoked = true
+			ms.mu.Unlock()
+		}
+		revoked++
+	}
+	return revoked, nil
 }
 
 // Revoke immediately invalidates the session identified by id. Subsequent Validate
