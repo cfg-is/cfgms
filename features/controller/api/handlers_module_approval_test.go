@@ -403,6 +403,128 @@ func TestHandleRejectModuleBundle_NilReviewerReturns503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
+// TestModuleBundleApprovalHandlers_LeaderGate verifies that handleApproveModuleBundle
+// and handleRejectModuleBundle return 503 and do not invoke s.moduleBundleReviewer when
+// the lease-backed authority checker reports no leadership (the partition scenario,
+// ADR-029 Decision 4: a non-authoritative controller must not modify the fleet's
+// software supply chain).
+func TestModuleBundleApprovalHandlers_LeaderGate(t *testing.T) {
+	follower := &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	newFollowerServer := func(t *testing.T) (*Server, *cache.ModuleCache) {
+		t.Helper()
+		server, mc, _ := setupModuleApprovalServer(t)
+		server.registrationLeaderStatus = follower
+		return server, mc
+	}
+
+	t.Run("approve rejects with 503 and does not invoke reviewer", func(t *testing.T) {
+		server, mc := newFollowerServer(t)
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+		addressParam := formatModuleAddress(addr)
+
+		req := makeApproveRequest(t, server, addressParam, moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		server.handleApproveModuleBundle(rec, req)
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+		// Verify the reviewer was not invoked: status must still be pending.
+		status, err := mc.GetApprovalStatus(addr)
+		require.NoError(t, err)
+		assert.Equal(t, cache.ApprovalStatusPending, status,
+			"moduleBundleReviewer.Approve must not be called when node is not authoritative")
+	})
+
+	t.Run("reject rejects with 503 and does not invoke reviewer", func(t *testing.T) {
+		server, mc := newFollowerServer(t)
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+		addressParam := formatModuleAddress(addr)
+
+		req := makeRejectRequest(t, server, addressParam, moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		server.handleRejectModuleBundle(rec, req)
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+		// Verify the reviewer was not invoked: status must still be pending.
+		status, err := mc.GetApprovalStatus(addr)
+		require.NoError(t, err)
+		assert.Equal(t, cache.ApprovalStatusPending, status,
+			"moduleBundleReviewer.RejectPending must not be called when node is not authoritative")
+	})
+}
+
+// TestModuleBundleApprovalHandlers_LeaderGate_PassThrough verifies that both handlers
+// still reach the existing approve/reject logic when the leadership checker is nil
+// (single-server deployment) or reports leadership (authoritative node).
+func TestModuleBundleApprovalHandlers_LeaderGate_PassThrough(t *testing.T) {
+	t.Run("nil checker: approve still succeeds", func(t *testing.T) {
+		server, mc, _ := setupModuleApprovalServer(t)
+		// registrationLeaderStatus is nil by default (setupTestServer does not wire HA).
+
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+		addressParam := formatModuleAddress(addr)
+
+		req := makeApproveRequest(t, server, addressParam, moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("nil checker: reject still succeeds", func(t *testing.T) {
+		server, mc, _ := setupModuleApprovalServer(t)
+
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+		addressParam := formatModuleAddress(addr)
+
+		req := makeRejectRequest(t, server, addressParam, moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("authoritative checker: approve still succeeds", func(t *testing.T) {
+		server, mc, _ := setupModuleApprovalServer(t)
+		server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
+
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+		addressParam := formatModuleAddress(addr)
+
+		req := makeApproveRequest(t, server, addressParam, moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("authoritative checker: reject still succeeds", func(t *testing.T) {
+		server, mc, _ := setupModuleApprovalServer(t)
+		server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
+
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+		addressParam := formatModuleAddress(addr)
+
+		req := makeRejectRequest(t, server, addressParam, moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+}
+
 // TestFormatAndParseModuleAddress verifies round-trip encoding of ContentAddress.
 func TestFormatAndParseModuleAddress(t *testing.T) {
 	cases := []bundle.ContentAddress{
