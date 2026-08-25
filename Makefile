@@ -715,6 +715,9 @@ check-architecture:
 	@echo "📦 Checking storage provider import violations..."
 	@bash ./scripts/check-providers.sh
 	@echo "   Safe to commit - no secrets detected in staged files"
+	@echo ""
+	@echo "📦 Checking authority gating on new mutating controller API handlers..."
+	@go test ./features/controller/api/... -run TestNoUngatedMutatingHandler -count=1 -timeout 120s
 
 # License Header Verification
 # Ensures all source files have SPDX license headers
