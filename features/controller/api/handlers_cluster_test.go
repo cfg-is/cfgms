@@ -383,6 +383,100 @@ func TestHandleClusterNodeDecommission_NodeNotFound_Returns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestHandleClusterNodeDrain_NonLeader_Returns503 verifies the Issue #3538 leadership
+// gate: when registrationLeaderStatus is set and HasLeadership() returns false (the
+// partition scenario — minority node still holds the raw Raft leader flag but has lost
+// quorum), the handler returns 503 immediately without invoking cluster.Drain or
+// touching s.membershipStore.
+func TestHandleClusterNodeDrain_NonLeader_Returns503(t *testing.T) {
+	srv, store := setupClusterTestServer(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateActive,
+		RegisteredAt: time.Now(),
+	}))
+	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	req := injectAdminPrincipal(drainRequest("node-1"), "alice")
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDrain(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "non-leader must return 503")
+
+	// Verify cluster.Drain was not invoked: node state must remain unchanged.
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateActive, got.State, "drain must not have run on non-leader")
+	assert.False(t, srv.clusterDraining.Load(), "health gate must not be set on non-leader")
+}
+
+// TestHandleClusterNodeDecommission_NonLeader_Returns503 verifies the Issue #3538
+// leadership gate on the decommission handler: a minority node returns 503 without
+// invoking cluster.Decommission or touching s.membershipStore or s.registry.
+func TestHandleClusterNodeDecommission_NonLeader_Returns503(t *testing.T) {
+	srv, store := setupClusterTestServerWithRegistry(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateDraining,
+		RegisteredAt: time.Now(),
+	}))
+	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	req := injectAdminPrincipal(decommissionRequest("node-1"), "alice")
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDecommission(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "non-leader must return 503")
+
+	// Verify cluster.Decommission was not invoked: node state must remain unchanged.
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDraining, got.State, "decommission must not have run on non-leader")
+}
+
+// TestHandleClusterNodeDrain_NilLeaderChecker_ReachesExistingLogic verifies that
+// a nil registrationLeaderStatus (SingleServerMode / no HA) still reaches the
+// existing drain logic unchanged — the gate is a no-op when the checker is nil.
+func TestHandleClusterNodeDrain_NilLeaderChecker_ReachesExistingLogic(t *testing.T) {
+	srv, store := setupClusterTestServer(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateActive,
+		RegisteredAt: time.Now(),
+	}))
+	srv.registrationLeaderStatus = nil // explicit nil: no HA configured
+
+	req := injectAdminPrincipal(drainRequest("node-1"), "alice")
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDrain(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "nil checker must not block drain")
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDraining, got.State, "drain must have run with nil checker")
+}
+
+// TestHandleClusterNodeDecommission_NilLeaderChecker_ReachesExistingLogic verifies
+// that a nil registrationLeaderStatus still reaches the existing decommission logic.
+func TestHandleClusterNodeDecommission_NilLeaderChecker_ReachesExistingLogic(t *testing.T) {
+	srv, store := setupClusterTestServerWithRegistry(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateDraining,
+		RegisteredAt: time.Now(),
+	}))
+	srv.registrationLeaderStatus = nil // explicit nil: no HA configured
+
+	req := injectAdminPrincipal(decommissionRequest("node-1"), "alice")
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDecommission(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "nil checker must not block decommission")
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDecommissioned, got.State, "decommission must have run with nil checker")
+}
+
 // TestHandleClusterNodeDecommission_AdminDrainingNode_Returns200 verifies the
 // success path: admin principal + node in StateDraining with no active sessions
 // returns HTTP 200 with the decommissioned state.
