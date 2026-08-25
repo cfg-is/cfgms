@@ -580,17 +580,36 @@ func (e *Executor) runTargetedReconcile(ctx context.Context, stopCh <-chan struc
 		"resource_id", logging.SanitizeLogValue(resourceID))
 }
 
-// CollectModuleFragments returns ADR-017 fragments for every managed module
-// resource observed in either the shared moduleDNA snapshot (steady-state,
-// all convergence-touched resources) or the monitor change-event cache (fresher
-// overlay, Issues #2908 / #3333).
+// CollectModuleFragments returns ADR-017 fragments for module resources observed
+// in either the shared moduleDNA snapshot (steady-state, convergence-touched
+// resources) or the monitor change-event cache.
 //
-// Two sources are unioned, mirroring CollectModuleDNAAttributes:
-//   - moduleDNA: the convergence/targeted-reconcile Get result for every managed
-//     resource — the STEADY-STATE source, present for all resources whether or
-//     not they have an active monitor.
-//   - monitorState: the monitor change-event cache — a fresher per-change
-//     overlay. On field collision the monitor value wins.
+// Source semantics (deliberate divergence from CollectModuleDNAAttributes):
+//   - moduleDNA: the convergence/targeted-reconcile Get result — the STEADY-STATE
+//     source, present for every managed resource whether or not it has an active
+//     monitor.
+//   - monitorState: the monitor change-event cache — a fresher per-change overlay.
+//     On field collision the monitor value wins.
+//
+// One resource class is deliberately withheld: a resource that is DECLARED IN CFG
+// AND MONITORED but has no moduleDNA entry yet. For that resource a targeted
+// reconcile is pending (debounced, ~1.5s) whose module.Get will add fields the
+// change event never carried, so a fragment emitted now would carry a transient
+// hash that changes when the Get lands — a fragment-changed event the controller
+// would answer with a resync it did not need. ADR-017 clause 2a ("for a managed
+// object the fragment IS the module's Get output") and clause 5 ("identical
+// observed state ⇒ identical canonical_bytes") both make waiting the correct
+// behaviour. (Issue #3527)
+//
+// A resource seen ONLY through a change stream — one no cfg declares, such as the
+// cluster:<name> state a hyperv module reports while monitoring its VMs (#2908) —
+// is NOT withheld. runTargetedReconcile skips unmanaged resourceIDs, so no Get is
+// pending and none will ever run: the change-event snapshot is that object's
+// complete and final observed state, and withholding it would drop the fragment
+// permanently rather than briefly.
+//
+// Withheld resources remain visible through CollectModuleDNAAttributes, which
+// carries every monitor entry as best-available data for config targeting.
 //
 // Authority per fragment is resolved from:
 //  1. active monitorEntries (live, by resourceID match) — fresher source.
@@ -623,8 +642,16 @@ func (e *Executor) CollectModuleFragments(_ context.Context) []*commonpb.Fragmen
 		dnaSnaps, dnaAuthority = e.moduleDNA.collectAll()
 	}
 
-	// Step 3: build merged resourceID → state map, mirroring CollectModuleDNAAttributes:
-	// steady-state first, then monitor overlay (monitor wins on field collision).
+	// Step 3: build merged resourceID → state map: steady-state first, then the
+	// monitor overlay (monitor wins on field collision).
+	//
+	// The one exclusion is a resource that is both declared in cfg (present in
+	// monitorAuthority, which is keyed by the active monitorEntry resourceIDs) and
+	// absent from moduleDNA: its debounced targeted reconcile has not landed, so
+	// its Get is still pending and will change the fragment. Emitting now would
+	// publish a transient hash (Issue #3527). A resourceID with no monitorEntry
+	// has no reconcile pending — runTargetedReconcile skips unmanaged IDs — so its
+	// change-event snapshot is final and is emitted immediately (#2908).
 	merged := make(map[string]map[string]interface{}, len(dnaSnaps))
 	for id, snap := range dnaSnaps {
 		merged[id] = snap
@@ -632,19 +659,25 @@ func (e *Executor) CollectModuleFragments(_ context.Context) []*commonpb.Fragmen
 
 	e.monitorStateMu.Lock()
 	for id, monSnap := range e.monitorState {
-		if existing, ok := merged[id]; ok {
-			// Field-level merge: monitor fields overwrite steady-state fields.
-			mergedFields := make(map[string]interface{}, len(existing)+len(monSnap))
-			for k, v := range existing {
-				mergedFields[k] = v
+		existing, haveSteadyState := merged[id]
+		if !haveSteadyState {
+			if _, reconcilePending := monitorAuthority[id]; reconcilePending {
+				// Declared + monitored, first Get outstanding: withhold.
+				continue
 			}
-			for k, v := range monSnap {
-				mergedFields[k] = v
-			}
-			merged[id] = mergedFields
-		} else {
+			// Observed-only resource: no Get will ever run for it.
 			merged[id] = monSnap
+			continue
 		}
+		// Field-level merge: monitor fields overwrite steady-state fields.
+		mergedFields := make(map[string]interface{}, len(existing)+len(monSnap))
+		for k, v := range existing {
+			mergedFields[k] = v
+		}
+		for k, v := range monSnap {
+			mergedFields[k] = v
+		}
+		merged[id] = mergedFields
 	}
 	e.monitorStateMu.Unlock()
 

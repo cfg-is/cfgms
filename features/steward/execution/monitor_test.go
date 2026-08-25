@@ -689,6 +689,148 @@ func TestCollectModuleFragments_ClusterFragmentRegressionUnchanged(t *testing.T)
 		"fragment hash must match independently-constructed fragment for same state")
 }
 
+// TestCollectModuleFragments_OmitsFragmentBeforeFirstReconcile is the REQUIRED
+// TEST for Issue #3527 resolution (a): a fragment must not be emitted for a
+// resource that is declared in cfg and monitored while its first targeted
+// reconcile is still outstanding. Its module.Get is pending and will add fields
+// the ChangeEvent never carried, so a fragment emitted now carries a transient
+// hash that changes when the Get lands — causing the controller to request a
+// resync it did not need. Per ADR-017 clause 2a the fragment IS the module's Get
+// output; per clause 5 identical observed state must produce identical canonical
+// bytes. A fragment built from the ChangeEvent Details alone violates both.
+//
+// The test fails if the fix is reverted (the unconditional
+// "merged[id] = monSnap" re-added in Step 3 of CollectModuleFragments): with it,
+// monitorState alone introduces the resource into the merged map and the
+// "cluster:cfg-lab must not appear" assertion fails.
+//
+// The complementary case — a resourceID with NO cfg declaration, for which no
+// reconcile is pending or ever will be — is pinned by
+// TestCollectModuleFragments_EmitsObservedOnlyResourceImmediately.
+func TestCollectModuleFragments_OmitsFragmentBeforeFirstReconcile(t *testing.T) {
+	e := newMonitorExecutor(t)
+	// Long debounce so the targeted reconcile never fires during the test window.
+	e.SetMonitorDebounceWindow(10 * time.Second)
+
+	mod := newMonitorTestModule()
+	execution.ExecutorFactory(e).RegisterModule("hyperv", mod)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resources := []stewardconfig.ResourceConfig{{
+		Name:   "cluster:cfg-lab",
+		Module: "hyperv",
+		Config: map[string]interface{}{"state": "drifted"},
+	}}
+	require.NoError(t, e.StartMonitors(ctx, resources))
+	defer e.StopMonitors()
+
+	// Send a ChangeEvent: cacheMonitorState (called by the fan-in goroutine before
+	// the debounce) will populate monitorState, but cacheModuleDNAState (called
+	// only after the reconcile's module.Get) will never run — debounce is 10 s.
+	mod.SendChange(modules.ChangeEvent{
+		ResourceID: "cluster:cfg-lab",
+		ChangeType: modules.ChangeTypeModified,
+		Details: execution.NewConfigState(map[string]interface{}{
+			"name":           "cfg-lab",
+			"cno_owner_node": "CFG-70-02",
+			"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
+			"found":          true,
+		}),
+	})
+
+	// Wait for monitorState to be populated. CollectModuleDNAAttributes includes
+	// orphan monitorState entries (intentionally), so "cluster:cfg-lab.name"
+	// appearing there proves the fan-in goroutine has cached the event.
+	require.Eventually(t, func() bool {
+		attrs := e.CollectModuleDNAAttributes(context.Background())
+		_, ok := attrs["cluster:cfg-lab.name"]
+		return ok
+	}, 1*time.Second, 5*time.Millisecond,
+		"monitorState must be populated before asserting fragment absence")
+
+	// At this point: monitorState has 4 fields, moduleDNA is empty (no reconcile
+	// has run). CollectModuleFragments must NOT emit a fragment — the state is
+	// incomplete and would produce a transient hash.
+	for _, f := range e.CollectModuleFragments(context.Background()) {
+		assert.NotEqual(t, "cluster:cfg-lab", f.FragmentId,
+			"fragment must not be emitted before the first targeted reconcile (moduleDNA empty)")
+	}
+}
+
+// TestCollectModuleFragments_EmitsObservedOnlyResourceImmediately pins the other
+// side of the #3527 gate, and is the unit-level guard for the #2908 cluster path.
+//
+// A module monitoring "vm:web-01" also reports "cluster:cfg-lab" on its change
+// stream — an object no cfg declares. runTargetedReconcile skips unmanaged
+// resourceIDs, so no module.Get is pending for it and none ever will be: the
+// change-event snapshot is that object's complete and final observed state.
+// Gating it on a moduleDNA entry would withhold the fragment permanently, not
+// briefly, which is the regression this asserts against.
+//
+// Determinism (the property #3527 exists to protect) is asserted directly: the
+// emitted hash equals an independently-constructed fragment over the same state,
+// and repeated collection over unchanged state yields the same hash.
+func TestCollectModuleFragments_EmitsObservedOnlyResourceImmediately(t *testing.T) {
+	e := newMonitorExecutor(t)
+	// Long debounce: proves the fragment does not depend on any reconcile landing.
+	e.SetMonitorDebounceWindow(10 * time.Second)
+
+	mod := newMonitorTestModule()
+	execution.ExecutorFactory(e).RegisterModule("hyperv", mod)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Only vm:web-01 is declared; cluster:cfg-lab is observed, never managed.
+	resources := []stewardconfig.ResourceConfig{{
+		Name:   "vm:web-01",
+		Module: "hyperv",
+		Config: map[string]interface{}{"state": "drifted"},
+	}}
+	require.NoError(t, e.StartMonitors(ctx, resources))
+	defer e.StopMonitors()
+
+	clusterDetails := map[string]interface{}{
+		"name":           "cfg-lab",
+		"cno_owner_node": "CFG-70-02",
+		"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
+		"resource_owner": map[string]string{"web-01": "CFG-70-02"},
+		"found":          true,
+	}
+	mod.SendChange(modules.ChangeEvent{
+		ResourceID: "cluster:cfg-lab",
+		ChangeType: modules.ChangeTypeModified,
+		Details:    execution.NewConfigState(clusterDetails),
+	})
+
+	var clusterFrag *commonpb.Fragment
+	require.Eventually(t, func() bool {
+		for _, f := range e.CollectModuleFragments(context.Background()) {
+			if f.GetFragmentId() == "cluster:cfg-lab" {
+				clusterFrag = f
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond,
+		"an observed-only resource must emit a fragment without waiting for a reconcile")
+
+	expected, err := sdna.NewFragment("cluster:cfg-lab", clusterFrag.GetAuthority(), sdna.MapState(clusterDetails))
+	require.NoError(t, err)
+	assert.Equal(t, expected.FragmentHash, clusterFrag.FragmentHash,
+		"the observed-only fragment must hash the change-event snapshot exactly, with no partial merge")
+
+	// Unchanged state must not churn the hash across collections.
+	for _, f := range e.CollectModuleFragments(context.Background()) {
+		if f.GetFragmentId() == "cluster:cfg-lab" {
+			assert.Equal(t, clusterFrag.FragmentHash, f.FragmentHash,
+				"repeated collection over unchanged state must produce an identical hash")
+		}
+	}
+}
+
 // ─── CollectModuleFragments: steward-side emission bounds ────────────────────
 
 // TestCollectModuleFragments_DropsOverSizedFragmentAndKeepsRest covers the
