@@ -4166,3 +4166,145 @@ func TestHandleSetStewardVisibility_DurableStoreWriteFails(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got.Hidden, "record must remain visible when the durable write fails")
 }
+
+// ---- Leadership gate tests (Issue #3544) ----
+
+// TestStewardHandlerLeaderGate verifies that handleDecommissionSteward,
+// handleMoveSteward, handleUpdateStewardConfig, and handleDeleteStewardConfig
+// all return 503 and take no durable action when registrationLeaderStatus
+// reports no leadership — the partition scenario where a non-authoritative
+// controller must not execute fleet infrastructure operations (Issue #3544).
+func TestStewardHandlerLeaderGate(t *testing.T) {
+	follower := &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	newFollowerServer := func(t *testing.T) *Server {
+		t.Helper()
+		server := setupTestServer(t)
+		server.registrationLeaderStatus = follower
+		return server
+	}
+
+	tests := []struct {
+		name    string
+		handler func(s *Server) *httptest.ResponseRecorder
+	}{
+		{
+			name: "handleDecommissionSteward rejects follower",
+			handler: func(s *Server) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				r := withVars(
+					httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x", nil),
+					map[string]string{"id": "steward-x"},
+				)
+				s.handleDecommissionSteward(w, r)
+				return w
+			},
+		},
+		{
+			name: "handleMoveSteward rejects follower",
+			handler: func(s *Server) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				r := withVars(
+					httptest.NewRequest(http.MethodPost, "/api/v1/stewards/steward-x/move", nil),
+					map[string]string{"id": "steward-x"},
+				)
+				s.handleMoveSteward(w, r)
+				return w
+			},
+		},
+		{
+			name: "handleUpdateStewardConfig rejects follower",
+			handler: func(s *Server) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				r := withVars(
+					httptest.NewRequest(http.MethodPut, "/api/v1/stewards/steward-x/config", nil),
+					map[string]string{"id": "steward-x"},
+				)
+				s.handleUpdateStewardConfig(w, r)
+				return w
+			},
+		},
+		{
+			name: "handleDeleteStewardConfig rejects follower",
+			handler: func(s *Server) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				r := withVars(
+					httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x/config", nil),
+					map[string]string{"id": "steward-x"},
+				)
+				s.handleDeleteStewardConfig(w, r)
+				return w
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newFollowerServer(t)
+			rec := tc.handler(s)
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "follower must return 503")
+			body := rec.Body.String()
+			assert.NotContains(t, body, "node", "503 body must not name a node")
+			assert.NotContains(t, body, "leader", "503 body must not imply which node holds leadership")
+		})
+	}
+}
+
+// TestStewardHandlerLeaderGate_SingleServerMode verifies that a nil
+// registrationLeaderStatus (OSS single-server deployment) does not reject
+// any of the four gated endpoints — the gate must not fire in single-node mode.
+func TestStewardHandlerLeaderGate_SingleServerMode(t *testing.T) {
+	t.Run("handleDecommissionSteward passes gate with nil checker", func(t *testing.T) {
+		s := setupTestServer(t)
+		// registrationLeaderStatus is nil by default; stewardStore is also nil
+		// → handler returns 503 "Fleet store unavailable" (JSON body from writeErrorResponse),
+		// not "service unavailable\n" (plain text from the leader gate).
+		w := httptest.NewRecorder()
+		r := withVars(
+			httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x", nil),
+			map[string]string{"id": "steward-x"},
+		)
+		s.handleDecommissionSteward(w, r)
+		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
+			"single-server mode must not be rejected by the leader gate")
+	})
+
+	t.Run("handleMoveSteward passes gate with nil checker", func(t *testing.T) {
+		s := setupTestServer(t)
+		// Missing JSON body → 400 Bad Request — gate did not fire.
+		w := httptest.NewRecorder()
+		r := withVars(
+			httptest.NewRequest(http.MethodPost, "/api/v1/stewards/steward-x/move", nil),
+			map[string]string{"id": "steward-x"},
+		)
+		s.handleMoveSteward(w, r)
+		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
+			"single-server mode must not be rejected by the leader gate")
+	})
+
+	t.Run("handleUpdateStewardConfig passes gate with nil checker", func(t *testing.T) {
+		s := setupTestServer(t)
+		// Empty body → JSON decode error → 400 Bad Request — gate did not fire.
+		w := httptest.NewRecorder()
+		r := withVars(
+			httptest.NewRequest(http.MethodPut, "/api/v1/stewards/steward-x/config", nil),
+			map[string]string{"id": "steward-x"},
+		)
+		s.handleUpdateStewardConfig(w, r)
+		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
+			"single-server mode must not be rejected by the leader gate")
+	})
+
+	t.Run("handleDeleteStewardConfig passes gate with nil checker", func(t *testing.T) {
+		s := setupTestServer(t)
+		// configService.DeleteConfiguration → "not found" → 404 — gate did not fire.
+		w := httptest.NewRecorder()
+		r := withVars(
+			httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x/config", nil),
+			map[string]string{"id": "steward-x"},
+		)
+		s.handleDeleteStewardConfig(w, r)
+		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
+			"single-server mode must not be rejected by the leader gate")
+	})
+}
