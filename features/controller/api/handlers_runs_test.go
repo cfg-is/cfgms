@@ -105,7 +105,12 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 	queue := newTestRunQueue(t)
 
 	server.SetRunManager(manager, queue)
-	server.fleetQuery = &staticRunFleetQuery{results: stewards}
+	// Issue #3495: run synthesis uses clusterFleetQuery; enforceExecTenantScope uses
+	// fleetQuery (out-of-scope per issue spec). Both are overridden here so the static
+	// steward fixtures reach both code paths.
+	static := &staticRunFleetQuery{results: stewards}
+	server.clusterFleetQuery = static
+	server.fleetQuery = static
 
 	return server, manager, queue
 }

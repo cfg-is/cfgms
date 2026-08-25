@@ -3,7 +3,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -114,13 +116,29 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
-	// Build the set of steward IDs visible to the caller (mirrors deriveStewardDeploymentStatus).
-	allStewards := s.controllerService.GetAllStewards()
+	// Build the set of steward IDs visible to the caller using the cluster-aware source so
+	// stewards attached to peer nodes are included in tenant-scoping checks. The actual
+	// connection data still comes from this node's registry (reg.GetAll()), which is
+	// node-local by design. (Issue #3495: intended behavior change — peer-attached steward
+	// IDs now appear in allowedIDs, improving tenant-scoping correctness.)
+	clusterCtx := context.Background()
+	if callerTenant != "" {
+		clusterCtx = context.WithValue(clusterCtx, ctxkeys.TenantID, callerTenant)
+	}
+	allStewards := s.controllerService.GetAllStewardsCluster(clusterCtx)
+	if allStewards == nil {
+		// Cluster cache not yet populated; degrade to node-local (pre-StartClusterRefresh).
+		// Apply the same subtree-tenant filter that GetAllStewardsCluster does via context.
+		local := s.controllerService.GetAllStewards()
+		for _, st := range local {
+			if callerTenant == "" || st.TenantID == callerTenant || strings.HasPrefix(st.TenantID, callerTenant+"/") {
+				allStewards = append(allStewards, st)
+			}
+		}
+	}
 	allowedIDs := make(map[string]bool, len(allStewards))
 	for _, st := range allStewards {
-		if callerTenant == "" || st.TenantID == callerTenant {
-			allowedIDs[st.ID] = true
-		}
+		allowedIDs[st.ID] = true
 	}
 
 	allConns := reg.GetAll()

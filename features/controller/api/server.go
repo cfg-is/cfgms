@@ -96,7 +96,8 @@ type Server struct {
 	dataProvider                   reportinterfaces.DataProvider         // Issue #3265: drift-based compliance derivation
 	workflowHandler                *WorkflowHandler                      // Story #414: Workflow engine REST API
 	approvalHook                   RegistrationApprovalHook              // Issue #422: Registration approval hook
-	fleetQuery                     fleet.FleetQuery                      // Issue #603: Single query path for device filtering
+	fleetQuery                     fleet.FleetQuery                      // Issue #603: node-local (controllerServiceAdapter); dispatch-safe consumers only
+	clusterFleetQuery              fleet.FleetQuery                      // Issue #3495: cluster-wide (clusterServiceAdapter); individually-vetted consumers only
 	gitSyncWebhookHandler          http.Handler                          // Issue #666: git-sync webhook endpoint (optional)
 	auditManager                   *audit.Manager                        // Issue #775: registration audit events
 	scriptTracker                  script.ExecutionTracker               // Issue #708: durable execution audit records
@@ -419,8 +420,11 @@ func New(
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
 	// API keys must be explicitly created by administrators
 
-	// Issue #603: Initialize fleet query using the controller service as the steward provider
+	// Issue #603: node-local fleet query for dispatch-safe consumers.
 	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: controllerService})
+	// Issue #3495: cluster-wide fleet query for individually-vetted consumers only.
+	// New callers must independently verify delivery-path safety before using this field.
+	server.clusterFleetQuery = fleet.NewMemoryQuery(&clusterServiceAdapter{svc: controllerService})
 
 	// Issue #1521: register save=deploy fanout callback so every successful SetConfiguration
 	// automatically distributes to all active stewards of the affected tenant.
@@ -464,31 +468,112 @@ func New(
 }
 
 // controllerServiceAdapter adapts *service.ControllerService to fleet.StewardProvider.
+// Population source is deliberately node-local (GetAllStewards, dispatch-safe). Field
+// composition — tags merged, DNAFragments populated — must match serverFleetStewardProvider
+// for any steward both adapters can see; use buildStewardFleetData to keep them in sync.
+// (Issue #603, #3495)
 type controllerServiceAdapter struct {
 	svc *service.ControllerService
 }
 
 func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 	infos := a.svc.GetAllStewards()
+	tagStore := a.svc.TagStore()
 	result := make([]fleet.StewardData, 0, len(infos))
 	for _, info := range infos {
-		var attrs map[string]string
-		var frags []*commonpb.Fragment
-		if info.DNA != nil {
-			attrs = service.FlattenDNAFragments(info.DNA.Fragments)
-			frags = info.DNA.Fragments
+		var ctrlTags []string
+		if tagStore != nil {
+			ctrlTags = tagStore.TagsFor(info.ID)
 		}
-		result = append(result, fleet.StewardData{
-			ID:            info.ID,
-			TenantID:      info.TenantID,
-			Status:        info.Status,
-			LastHeartbeat: info.LastHeartbeat,
-			DNAAttributes: attrs,
-			DNAFragments:  frags,
-			Hidden:        info.Hidden,
-		})
+		result = append(result, buildStewardFleetData(info, ctrlTags))
 	}
 	return result
+}
+
+// clusterServiceAdapter adapts *service.ControllerService to fleet.StewardProvider using the
+// cluster-aware GetAllStewardsCluster method. Its population source is cluster-wide — NOT
+// node-local like controllerServiceAdapter — so every new caller must be independently vetted
+// for delivery-path safety before being pointed at it or at s.clusterFleetQuery. Do not assume
+// it is safe by default. (Issue #3495)
+type clusterServiceAdapter struct {
+	svc *service.ControllerService
+}
+
+func (a *clusterServiceAdapter) GetAllStewards() []fleet.StewardData {
+	// context.Background: tenant scoping is applied downstream by MemoryQuery.Search via
+	// Filter.TenantSubtree/TenantID, not at the provider level.
+	infos := a.svc.GetAllStewardsCluster(context.Background())
+	result := make([]fleet.StewardData, 0, len(infos))
+	for _, info := range infos {
+		// GetAllStewardsCluster already copies Tags from the tag store on each refresh.
+		result = append(result, buildStewardFleetData(info, info.Tags))
+	}
+	return result
+}
+
+// buildStewardFleetData converts *service.StewardInfo to fleet.StewardData with both
+// DNAAttributes (flattened from fragments + ctrlTags merged) and DNAFragments populated.
+// controllerServiceAdapter passes tagStore.TagsFor(info.ID) as ctrlTags; clusterServiceAdapter
+// passes info.Tags (already populated by GetAllStewardsCluster). Using this helper for both
+// adapters ensures their field composition stays identical for any steward both can see.
+// (Issue #3495)
+func buildStewardFleetData(info *service.StewardInfo, ctrlTags []string) fleet.StewardData {
+	var attrs map[string]string
+	var frags []*commonpb.Fragment
+	if info.DNA != nil {
+		attrs = service.FlattenDNAFragments(info.DNA.Fragments)
+		frags = info.DNA.Fragments
+	}
+	if len(ctrlTags) > 0 {
+		attrs = mergeControllerTags(attrs, ctrlTags)
+	}
+	return fleet.StewardData{
+		ID:            info.ID,
+		TenantID:      info.TenantID,
+		Status:        info.Status,
+		LastHeartbeat: info.LastHeartbeat,
+		DNAAttributes: attrs,
+		DNAFragments:  frags,
+		Hidden:        info.Hidden,
+	}
+}
+
+// mergeControllerTags returns a copy of attrs with controller-stored ctrlTags merged into the
+// "tags" key. If attrs already carries a DNA-reported "tags" value, the two sets are unioned
+// (DNA tags first, duplicates dropped). Returns attrs unchanged when ctrlTags is empty.
+// Never mutates the input map.
+func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]string {
+	if len(ctrlTags) == 0 {
+		return attrs
+	}
+	merged := make(map[string]string, len(attrs)+1)
+	for k, v := range attrs {
+		merged[k] = v
+	}
+	seen := make(map[string]struct{})
+	var all []string
+	for _, t := range strings.Split(merged["tags"], ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	for _, t := range ctrlTags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	merged["tags"] = strings.Join(all, ",")
+	return merged
 }
 
 // setupRouter initializes the HTTP router with all routes and middleware
@@ -1110,8 +1195,11 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workflowHandler = h
-	if h != nil && s.fleetQuery != nil {
-		h.SetFleetQuery(s.fleetQuery)
+	// Use clusterFleetQuery for consistency. Both workflow nodes that would consume a
+	// propagated fleet.FleetQuery are unreachable in production (see Issue #3495, Problem
+	// being fixed), so this rewiring has no behavioural effect today.
+	if h != nil && s.clusterFleetQuery != nil {
+		h.SetFleetQuery(s.clusterFleetQuery)
 	}
 	if h == nil {
 		return

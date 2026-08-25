@@ -225,7 +225,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.fleetQuery == nil {
+	if s.clusterFleetQuery == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
 		return
 	}
@@ -261,7 +261,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		s.runManager,
 		s.runExecutionQueue,
-		s.fleetQuery,
+		s.clusterFleetQuery,
 		tenantID,
 		principal.ID,
 		filter,
@@ -342,7 +342,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.fleetQuery == nil {
+	if s.clusterFleetQuery == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
 		return
 	}
@@ -382,7 +382,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		s.runManager,
 		s.runExecutionQueue,
-		s.fleetQuery,
+		s.clusterFleetQuery,
 		tenantID,
 		principal.ID,
 		filter,

@@ -13,8 +13,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -336,4 +340,82 @@ func TestHandleListAllConnections_DisconnectedStewardNotIncluded(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.Data.Connections)
+}
+
+// TestHandleListAllConnections_PeerAttachedSteward proves the tenant-scoping set that
+// gates the connection list is now built from the cluster-wide steward view (Issue #3495).
+// A steward that only exists in durable fleet storage — registered through a peer
+// controller node, so absent from this node's live registry — was previously missing from
+// allowedIDs, and its connection to this node was filtered out of the response even though
+// the caller's tenant owns it. After the cluster inventory refreshes it is allowed through.
+func TestHandleListAllConnections_PeerAttachedSteward(t *testing.T) {
+	ctx := context.Background()
+
+	// Durable fleet DNA storage carrying a steward this node never registered.
+	// The tenant must match the API key's tenant ("test-tenant") — cluster-wide
+	// visibility does not relax tenant scoping.
+	cfg := fleetStorage.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.EnableDeduplication = false
+	stg, err := fleetStorage.NewManager(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stg.Close() })
+
+	peerDNA := &commonpb.DNA{
+		Id: "peer-conn",
+		Fragments: []*commonpb.Fragment{
+			mustAPIFrag(t, "host:os", map[string]interface{}{"os": "linux"}),
+		},
+	}
+	require.NoError(t, stg.Store(ctx, "peer-conn", peerDNA,
+		&fleetStorage.StoreOptions{TenantID: "test-tenant", Status: "active"}))
+	require.NoError(t, stg.SetDeviceTenant(ctx, "peer-conn", "test-tenant"))
+
+	peerSvc := service.NewControllerServiceWithStorage(logging.NewNoopLogger(), stg)
+
+	server := setupTestServer(t)
+	server.controllerService = peerSvc
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+
+	// The peer steward is connected to this node's transport registry but unknown to
+	// this node's live steward registry.
+	reg := registry.NewRegistry()
+	registerTestConnection(t, reg, "peer-conn")
+	server.SetRegistry(reg)
+
+	listConnections := func(t *testing.T) []StewardConnectionItem {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/connections/all", nil)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Data struct {
+				Connections []StewardConnectionItem `json:"connections"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp.Data.Connections
+	}
+
+	// Before any cluster refresh the handler degrades to the node-local view, which does
+	// not know this steward — the pre-story behaviour.
+	assert.Empty(t, listConnections(t),
+		"before the cluster inventory is populated the node-local fallback hides the peer steward")
+
+	refreshCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	// StartClusterRefresh refreshes immediately; the long interval keeps the ticker quiet.
+	peerSvc.StartClusterRefresh(refreshCtx, 24*time.Hour)
+
+	require.Eventually(t, func() bool {
+		for _, c := range listConnections(t) {
+			if c.StewardID == "peer-conn" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond,
+		"peer steward connection must appear once the cluster inventory refreshed")
 }

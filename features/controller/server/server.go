@@ -3682,14 +3682,21 @@ type serverFleetStewardProvider struct {
 	svc *service.ControllerService
 }
 
+// serverFleetStewardProvider adapts *service.ControllerService to
+// controllerFleet.StewardProvider for use by MemoryQuery.
+// Population source is deliberately node-local (GetAllStewards, dispatch-safe). Field
+// composition — tags merged, DNAFragments populated — must match controllerServiceAdapter
+// in features/controller/api/server.go for any steward both adapters can see. (Issue #3495)
 func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardData {
 	infos := p.svc.GetAllStewards()
 	tagStore := p.svc.TagStore()
 	result := make([]controllerFleet.StewardData, 0, len(infos))
 	for _, info := range infos {
 		var attrs map[string]string
+		var frags []*common.Fragment
 		if info.DNA != nil {
 			attrs = service.FlattenDNAFragments(info.DNA.Fragments)
+			frags = info.DNA.Fragments
 		}
 		if tagStore != nil {
 			attrs = mergeControllerTags(attrs, tagStore.TagsFor(info.ID))
@@ -3700,6 +3707,7 @@ func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardD
 			Status:        info.Status,
 			LastHeartbeat: info.LastHeartbeat,
 			DNAAttributes: attrs,
+			DNAFragments:  frags,
 			Hidden:        info.Hidden,
 		})
 	}
