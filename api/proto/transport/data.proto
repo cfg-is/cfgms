@@ -149,3 +149,42 @@ message TelemetrySnapshot {
   repeated ServiceSnapshot services = 3;
   google.protobuf.Timestamp timestamp = 4;
 }
+
+// === Osquery Ad-hoc Query (Issue #3566, Epic #2855) ===
+
+// OsqueryQueryRequest is sent by the controller (server) to the steward (client)
+// to request execution of a catalog query. The catalog_id must map to an entry in
+// the bundle-embedded catalog registry shipped with the signed osquery module;
+// params must satisfy the declared type/bound schema for that catalog entry.
+// Raw SQL is never accepted on the wire — the steward resolves SQL from the
+// catalog ID after front-door admission validation.
+message OsqueryQueryRequest {
+  string steward_id = 1;
+  // catalog_id references a named entry in the osquery module's bundle-embedded
+  // catalog (features/modules/extended/osquery/catalog.go). Unrecognised IDs
+  // are rejected before any query text is constructed or runQuery is called.
+  string catalog_id = 2;
+  // params supplies typed values for template substitution. Each key must match
+  // a parameter name declared in the catalog entry's parameter schema, and each
+  // value must satisfy that parameter's declared type and bounds. Values
+  // containing SQL metacharacters (', --, ;, UNION) are rejected at admission
+  // if the declared parameter type does not explicitly allow them.
+  map<string, string> params = 3;
+}
+
+// OsqueryQueryResponse is sent by the steward (client) to the controller (server)
+// after executing a catalog query via runQuery. Each row is a flat string map
+// matching osquery's JSON-array output format.
+message OsqueryQueryResponse {
+  string steward_id = 1;
+  string catalog_id = 2;
+  // rows contains the query result rows. Each row is a flat map of column name
+  // to string value, matching osquery's --json output format.
+  repeated OsqueryRow rows = 3;
+}
+
+// OsqueryRow is one result row from an osquery catalog query.
+// Column names and values are strings, matching osquery's JSON-array output.
+message OsqueryRow {
+  map<string, string> columns = 1;
+}

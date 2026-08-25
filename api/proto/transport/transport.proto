@@ -58,6 +58,13 @@ service StewardTransport {
   // The steward (client) sends TelemetrySnapshot frames and receives TelemetryRequest
   // control messages. Sampling only runs while an inbound subscribe=true request is active.
   rpc TelemetryStream(stream TelemetrySnapshot) returns (stream TelemetryRequest);
+
+  // OsqueryQuery is the ad-hoc catalog query channel (Issue #3566, Epic #2855).
+  // The steward (client) opens the stream and sends OsqueryQueryResponse result
+  // frames; the controller (server) sends OsqueryQueryRequest frames to request
+  // execution of a catalog query on the steward. Query text is never sent on the
+  // wire — the steward resolves SQL from the catalog ID after front-door admission.
+  rpc OsqueryQuery(stream OsqueryQueryResponse) returns (stream OsqueryQueryRequest);
 }
 
 // PingRequest is a lightweight health check.

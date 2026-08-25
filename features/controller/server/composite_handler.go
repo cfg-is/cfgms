@@ -8,6 +8,12 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+
+	// stewardosquery is imported here following the same pattern as
+	// features/controller/transport importing features/steward/dna: the
+	// controller-side stream handler (HandleGRPC) and the steward-side execution
+	// path (Execute) share one type. Splitting them is tracked as future work.
+	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"google.golang.org/grpc"
 )
@@ -16,8 +22,8 @@ import (
 // handler. Control plane RPCs go to the CP handler; SyncConfig is handled
 // directly by the config handler; SyncDNA by the DNA handler; BulkTransfer
 // by the bulk handler; LogStream by the log stream handler; TelemetryStream
-// by the telemetry handler; Terminal by the terminal handler. Future RPCs fall
-// through to the Unimplemented base.
+// by the telemetry handler; Terminal by the terminal handler; OsqueryQuery
+// by the osquery handler. Future RPCs fall through to the Unimplemented base.
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
@@ -28,6 +34,7 @@ type compositeTransportServer struct {
 	logStreamHandler *controllerTransport.LogStreamHandler // LogStream (direct handling)
 	telemetryHandler *controllerTransport.TelemetryHandler // TelemetryStream (direct handling)
 	terminalHandler  *controllerTransport.TerminalHandler  // Terminal (direct handling)
+	osqueryHandler   *stewardosquery.OsqueryHandler        // OsqueryQuery (direct handling)
 	logger           logging.Logger
 }
 
@@ -72,6 +79,11 @@ func (c *compositeTransportServer) SetTelemetryHandler(h *controllerTransport.Te
 // SetTerminalHandler sets the Terminal bidi RPC handler. Call after newCompositeTransportServer.
 func (c *compositeTransportServer) SetTerminalHandler(h *controllerTransport.TerminalHandler) {
 	c.terminalHandler = h
+}
+
+// SetOsqueryHandler sets the OsqueryQuery bidi RPC handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetOsqueryHandler(h *stewardosquery.OsqueryHandler) {
+	c.osqueryHandler = h
 }
 
 // --- Control Plane RPCs (delegated to CP handler) ---
@@ -149,4 +161,14 @@ func (c *compositeTransportServer) Terminal(stream grpc.BidiStreamingServer[tran
 		return c.terminalHandler.HandleGRPC(stream)
 	}
 	return c.UnimplementedStewardTransportServer.Terminal(stream)
+}
+
+// OsqueryQuery is handled directly by the osquery handler. The steward opens
+// this bidi stream to receive ad-hoc catalog query requests from the controller
+// and return result rows. The handler enforces mTLS peer authentication.
+func (c *compositeTransportServer) OsqueryQuery(stream grpc.BidiStreamingServer[transportpb.OsqueryQueryResponse, transportpb.OsqueryQueryRequest]) error {
+	if c.osqueryHandler != nil {
+		return c.osqueryHandler.HandleGRPC(stream)
+	}
+	return c.UnimplementedStewardTransportServer.OsqueryQuery(stream)
 }
