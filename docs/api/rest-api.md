@@ -2724,6 +2724,116 @@ List all web admin accounts. No credential material (registered passkey public k
 }
 ```
 
+#### POST /api/v1/accounts/{username}/certs/bind
+
+Bind an mTLS admin certificate to the account by serial number. The serial is the binding and lookup key — it matches what `extractAdminPrincipal` already checks via `certManager.IsRevoked(serial)` on every mTLS admin request.
+
+**Authentication:** Required  
+**Required permission:** `cert-binding:bind`  
+**Assurance:** Strong session required
+
+**Parameters:**
+
+- `username` (path): Username of the account to bind the certificate to
+
+**Request body:**
+
+```json
+{
+  "serial": "3a:2f:…",
+  "fingerprint": "sha256:abc123…",
+  "label": "primary laptop bundle"
+}
+```
+
+- `serial` (required): Certificate serial number (the binding key).
+- `fingerprint` (optional): Certificate fingerprint for audit correlation.
+- `label` (optional): Admin-supplied free text description.
+
+**Response (201 Created):**
+
+```json
+{
+  "data": {
+    "serial": "3a:2f:…",
+    "fingerprint": "sha256:abc123…",
+    "label": "primary laptop bundle",
+    "bound_at": "2026-01-12T10:30:00Z"
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+**Errors:**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `MISSING_SERIAL` | `serial` is absent from the request body |
+| 404 | `ACCOUNT_NOT_FOUND` | No account with that username |
+| 409 | `SERIAL_CONFLICT` | Serial is already bound to this or a different account |
+
+#### GET /api/v1/accounts/{username}/certs
+
+List all mTLS admin certificates bound to the account. Returns public metadata only — no private key material is ever stored.
+
+**Authentication:** Required  
+**Required permission:** `cert-binding:list`
+
+**Parameters:**
+
+- `username` (path): Username of the account to list certificates for
+
+**Response (200 OK):**
+
+```json
+{
+  "data": [
+    {
+      "serial": "3a:2f:…",
+      "fingerprint": "sha256:abc123…",
+      "label": "primary laptop bundle",
+      "bound_at": "2026-01-12T10:30:00Z"
+    }
+  ],
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+Returns an empty array when no certificates are bound.
+
+#### POST /api/v1/accounts/{username}/certs/revoke/{serial}
+
+Remove a certificate binding from the account **and** revoke the certificate via `certManager.Revoke(serial)` in the same operation. A certificate cannot be left unbound from every account while still able to authenticate — the two steps are always coupled.
+
+**Authentication:** Required  
+**Required permission:** `cert-binding:revoke`  
+**Assurance:** Strong session required
+
+**Parameters:**
+
+- `username` (path): Username of the account
+- `serial` (path): Serial number of the certificate to revoke
+
+**Response (200 OK):**
+
+```json
+{
+  "data": {
+    "username": "alice",
+    "serial": "3a:2f:…",
+    "revoked": true
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+**Errors:**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 404 | `ACCOUNT_NOT_FOUND` | No account with that username |
+| 404 | `BINDING_NOT_FOUND` | No binding for that serial on this account |
+
 #### DELETE /api/v1/accounts/{username}
 
 Delete a web admin account. Removes both the in-memory cache entry and the durable secret-store record.
