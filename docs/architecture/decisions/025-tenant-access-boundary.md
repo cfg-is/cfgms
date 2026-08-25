@@ -624,3 +624,66 @@ because a list response has no single resource to attach a per-item challenge to
    endpoint unusable for its intended callers.
 8. **Decision 4's logging/metrics carve-out remains entirely unimplemented** (Tunable 4)
    — no code in this story touches it.
+
+## Amendment 3 (2026-08-25) — An admin certificate with no bound account keeps implicit root, indefinitely and audibly
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** Decision 1, Amendment 2
+
+Epic #3178 makes the administrator account the identity anchor and binds mTLS admin
+certificates to it, so `extractAdminPrincipal` derives `TenantID`, `GlobalScope` and
+`Permissions` from the bound account rather than hardcoding root. That introduces a state this
+ADR has never had to describe: **an admin-marked certificate with no bound account.**
+
+It cannot be avoided. The first administrator certificate necessarily exists before any account
+does — `bootstrap-admin` and the first-boot `issueAdminBundle` path both mint one — so a
+deployment with zero accounts must still authenticate, or first boot locks the operator out.
+
+### Decision
+
+**An admin-marked certificate with no bound account resolves to implicit root, exactly as it does
+today. This fallback does not close once a first account is bound, and it is not time-limited.**
+
+It is no longer an unstated default. Three requirements make it explicit:
+
+1. **Every authentication through the unbound path emits its own audit event**, distinct from
+   normal account-resolved admin authentication, carrying the certificate identity.
+2. **When at least one administrator account exists and an unbound certificate authenticates
+   anyway, that is anomalous and must be separately detectable** — not merely present in the
+   audit stream. Under normal operation this combination should not occur; treating it as
+   routine is what would turn a bootstrap path into an unnoticed standing bypass.
+3. **Revocation remains authoritative and unchanged.** The existing per-request
+   `certManager.IsRevoked(serial)` check in the cert-auth path applies to unbound certificates
+   identically. Revoking the certificate is the operation that closes this path for a given
+   credential.
+
+### Why not close it once a first account is bound
+
+Considered and rejected. Closing the fallback creates an unrecoverable state: if the account
+store is lost or corrupted, a freshly issued admin certificate would also be unbound and
+therefore rejected, so **holding the CA would no longer be sufficient to regain access to your
+own deployment**. That is a bricking scenario for a self-hosted operator, and it trades a bounded
+risk for an unbounded one.
+
+The security cost of keeping it open is real but already bounded by an existing trust root: an
+admin-marked certificate is CA-issued, and an attacker able to mint one has already compromised
+the CA — at which point the account layer offers no additional protection. The residual risk is
+narrower than it first appears: a *stale* certificate issued before accounts existed and never
+revoked. Requirement 3 addresses exactly that, and requirement 2 makes its use visible.
+
+### Relationship to `RootScoped`
+
+Unchanged, and deliberately so. `Principal.RootScoped` continues to derive from
+`cert.HasRootScopeMarker` alone, per A2.1/A2.2 — never from an account, bound or unbound. This
+amendment governs only what an **unbound** certificate resolves to for `TenantID`, `GlobalScope`
+and `Permissions`. A certificate's root-scope classification is a property of the certificate.
+
+### Deliberately left open
+
+Whether a root-scope account should be **required** to carry a marker certificate is a separate
+tightening of a root-access rule, recorded as a follow-up question on epic #3178 and explicitly
+out of scope there. This amendment does not decide it.
+
+### Effect on decomposition
+
+Epic #3178's principal-resolution story implements this amendment and cites it. Stories cite
+ADRs; they do not edit them.
