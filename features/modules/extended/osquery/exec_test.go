@@ -353,6 +353,35 @@ func TestRunQuery_NonZeroExitReturnsError(t *testing.T) {
 	}
 }
 
+// TestClassifyStartError_MapsWindowsLookPathNotFoundToFsErrNotExist reproduces
+// the Windows-only merge-queue failure directly, without depending on
+// Windows-specific process-launch behavior.
+//
+// On Windows, exec.Command resolves an extensionless path (even one that
+// contains a directory separator) via LookPath, whose failure mode is
+// exec.ErrNotFound wrapped in *exec.Error — not a *fs.PathError wrapping
+// fs.ErrNotExist the way a failed POSIX os.StartProcess is. Callers of
+// runQuery, and this package's own tests, assert errors.Is(err,
+// fs.ErrNotExist) for a missing binary path on every platform; the mapping
+// exercised here is what makes that assertion true on Windows.
+func TestClassifyStartError_MapsWindowsLookPathNotFoundToFsErrNotExist(t *testing.T) {
+	lookPathErr := &exec.Error{Name: "no-such-osqueryi", Err: exec.ErrNotFound}
+
+	got := classifyStartError(lookPathErr)
+	if got == nil {
+		t.Fatal("classifyStartError returned nil for a non-nil input error")
+	}
+	if !errors.Is(got, fs.ErrNotExist) {
+		t.Errorf("classifyStartError(%v) = %v — does not satisfy errors.Is(_, fs.ErrNotExist)", lookPathErr, got)
+	}
+	if !errors.Is(got, lookPathErr) {
+		t.Errorf("classifyStartError(%v) = %v — does not preserve the original cause via %%w", lookPathErr, got)
+	}
+	if !strings.Contains(got.Error(), "osquery execution failed") {
+		t.Errorf("classifyStartError(%v) = %q — does not identify the start-failure branch", lookPathErr, got.Error())
+	}
+}
+
 // TestRunQuery_ProcessStartFailureReturnsExecutionError exercises the
 // non-*exec.ExitError branch of runQuery's error handling: the failure mode
 // where cmd.Output() returns before the child process ever runs, so there is no

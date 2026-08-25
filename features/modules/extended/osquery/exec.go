@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os/exec"
 	"strings"
 
@@ -70,7 +71,7 @@ func runQuery(ctx context.Context, binPath, query string) ([]map[string]string, 
 			sanitizedStderr := logging.SanitizeLogValue(string(exitErr.Stderr))
 			return nil, fmt.Errorf("osquery exited non-zero: %w; stderr: %s", err, sanitizedStderr)
 		}
-		return nil, fmt.Errorf("osquery execution failed: %w", err)
+		return nil, classifyStartError(err)
 	}
 
 	var rows []map[string]string
@@ -78,4 +79,23 @@ func runQuery(ctx context.Context, binPath, query string) ([]map[string]string, 
 		return nil, fmt.Errorf("osquery output parse error: %w", err)
 	}
 	return rows, nil
+}
+
+// classifyStartError wraps an error from cmd.Output() that occurred before
+// the child process ever ran (i.e. not an *exec.ExitError) so that a missing
+// binary reliably satisfies errors.Is(err, fs.ErrNotExist) on every platform.
+//
+// On POSIX, os.StartProcess for a missing path returns a *fs.PathError
+// wrapping fs.ErrNotExist directly, so %w alone already satisfies that
+// check. On Windows, exec.Command resolves an extensionless path — even an
+// absolute one — via LookPath, whose not-found failure mode is
+// exec.ErrNotFound wrapped in *exec.Error, which does not wrap
+// fs.ErrNotExist. Mapping it here keeps that platform difference out of
+// every caller.
+func classifyStartError(err error) error {
+	var lookErr *exec.Error
+	if errors.As(err, &lookErr) && errors.Is(lookErr.Err, exec.ErrNotFound) {
+		return fmt.Errorf("osquery execution failed: %w: %w", err, fs.ErrNotExist)
+	}
+	return fmt.Errorf("osquery execution failed: %w", err)
 }
