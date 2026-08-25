@@ -905,3 +905,132 @@ func TestRollout_Start_NoRingsConfigured(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, rollouts, "no rollout record may be created when no rings are configured")
 }
+
+// --- Leadership gate tests (Issue #3540) ---
+
+// TestRolloutHandlerLeaderGate verifies that handleStartRollout and handleHaltRollout
+// return 503 and make no s.rolloutStore writes when s.registrationLeaderStatus is set
+// and reports no leadership (the partition scenario: a non-authoritative controller
+// cannot start or halt a fleet-wide version rollout).
+func TestRolloutHandlerLeaderGate(t *testing.T) {
+	follower := &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	t.Run("handleStartRollout rejects with 503 and does not write to rolloutStore", func(t *testing.T) {
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+		server.registrationLeaderStatus = follower
+
+		rec := doStartRollout(server, "tenant-a", "v1.2.3")
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"non-authoritative node must return 503: %s", rec.Body.String())
+
+		// Verify rolloutStore was never written: no records may be created.
+		all, err := rolloutStore.ListRolloutsByTenant(context.Background(), "tenant-a")
+		require.NoError(t, err)
+		assert.Empty(t, all, "rolloutStore must not be written when node is not authoritative")
+	})
+
+	t.Run("handleHaltRollout rejects with 503 and does not modify rolloutStore", func(t *testing.T) {
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+		// Pre-seed an in-progress rollout record so we can verify it is not mutated.
+		const rolloutID = "pre-seeded-rollout"
+		require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+			ID:            rolloutID,
+			TenantID:      "tenant-a",
+			TargetVersion: "v1.2.3",
+			CurrentRing:   "pre-release",
+			Status:        business.RolloutStatusInProgress,
+			StartedAt:     time.Now().UTC(),
+		}))
+
+		// Set follower mode after seeding so the Create above is unaffected.
+		server.registrationLeaderStatus = follower
+
+		rec := doHaltRollout(server, "tenant-a", rolloutID)
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"non-authoritative node must return 503 for halt: %s", rec.Body.String())
+
+		// Verify the rollout record was not modified: status must still be in-progress.
+		record, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+		require.NoError(t, err)
+		assert.Equal(t, business.RolloutStatusInProgress, record.Status,
+			"rolloutStore must not be modified when node is not authoritative")
+	})
+}
+
+// TestRolloutHandlerLeaderGate_PassThrough verifies that handleStartRollout and
+// handleHaltRollout still reach the existing logic when the leadership checker is nil
+// (single-server deployment without HA) or reports leadership (authoritative node).
+func TestRolloutHandlerLeaderGate_PassThrough(t *testing.T) {
+	t.Run("nil checker: handleStartRollout still reaches existing logic", func(t *testing.T) {
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+		// registrationLeaderStatus is nil by default (newMinimalServerForRollout does not wire HA).
+
+		rec := doStartRollout(server, "tenant-a", "v1.2.3")
+
+		// 202 Accepted confirms the handler reached the existing start logic.
+		assert.Equal(t, http.StatusAccepted, rec.Code,
+			"nil checker must not block the handler: %s", rec.Body.String())
+
+		all, err := rolloutStore.ListRolloutsByTenant(context.Background(), "tenant-a")
+		require.NoError(t, err)
+		assert.Len(t, all, 1, "nil checker must allow rollout creation")
+	})
+
+	t.Run("authoritative checker: handleStartRollout still reaches existing logic", func(t *testing.T) {
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+		server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
+
+		rec := doStartRollout(server, "tenant-a", "v1.2.3")
+
+		assert.Equal(t, http.StatusAccepted, rec.Code,
+			"authoritative checker must not block the handler: %s", rec.Body.String())
+
+		all, err := rolloutStore.ListRolloutsByTenant(context.Background(), "tenant-a")
+		require.NoError(t, err)
+		assert.Len(t, all, 1, "authoritative checker must allow rollout creation")
+	})
+
+	t.Run("nil checker: handleHaltRollout still reaches existing logic", func(t *testing.T) {
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+
+		const rolloutID = "halt-passthrough-nil"
+		require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+			ID:            rolloutID,
+			TenantID:      "tenant-a",
+			TargetVersion: "v1.2.3",
+			CurrentRing:   "pre-release",
+			Status:        business.RolloutStatusInProgress,
+			StartedAt:     time.Now().UTC(),
+		}))
+
+		rec := doHaltRollout(server, "tenant-a", rolloutID)
+
+		// 200 confirms the handler reached the existing halt logic (no active goroutine;
+		// UpdateRolloutProgress transitions the record to halted).
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"nil checker must not block halt handler: %s", rec.Body.String())
+	})
+
+	t.Run("authoritative checker: handleHaltRollout still reaches existing logic", func(t *testing.T) {
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+		server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
+
+		const rolloutID = "halt-passthrough-auth"
+		require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
+			ID:            rolloutID,
+			TenantID:      "tenant-a",
+			TargetVersion: "v1.2.3",
+			CurrentRing:   "pre-release",
+			Status:        business.RolloutStatusInProgress,
+			StartedAt:     time.Now().UTC(),
+		}))
+
+		rec := doHaltRollout(server, "tenant-a", rolloutID)
+
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"authoritative checker must not block halt handler: %s", rec.Body.String())
+	})
+}
