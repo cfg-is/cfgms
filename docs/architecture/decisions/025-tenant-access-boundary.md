@@ -624,3 +624,107 @@ because a list response has no single resource to attach a per-item challenge to
    endpoint unusable for its intended callers.
 8. **Decision 4's logging/metrics carve-out remains entirely unimplemented** (Tunable 4)
    — no code in this story touches it.
+
+## Amendment 3 (2026-08-25) — An admin certificate authenticates; it does not authorize
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** Decision 1, Amendment 2
+
+Epic #3178 makes the administrator account the identity anchor and binds mTLS admin certificates to
+it. That forced a decision about a state this ADR never described: **an admin-marked certificate
+with no bound account.**
+
+Today such a certificate is implicitly root. `extractAdminPrincipal` hardcodes `GlobalScope: true`,
+`TenantID: ""` and `Permissions: nil`, and `hasPermission` reads nil `Permissions` as implicit
+admin. Possession of the certificate *is* the authorization.
+
+### Decision
+
+**An admin mTLS certificate is an authentication credential and nothing more. It confers no
+authority on its own. Authorization comes exclusively from the account it is bound to.**
+
+- **A certificate with no bound account authenticates and can do nothing.** Its principal carries a
+  **non-nil, empty** `Permissions` slice, `GlobalScope: false`, and `TenantID: ""`. Every
+  permission check fails closed.
+- **Implicit root by possession of a certificate is removed**, not merely bounded, audited, or
+  time-limited. There is no state in which holding a certificate grants authority that no account
+  granted.
+- **Bootstrap issues a bound certificate, not an unbound one.** `bootstrap-admin` and the first-boot
+  `issueAdminBundle` path must create an administrator account and bind the issued certificate to it
+  in the same operation. An unbound certificate is never a useful artifact, so first boot never
+  produces one.
+- **Recovery is local, not remote.** A deployment that loses its accounts recovers with
+  `bootstrap-admin` on the controller host, which reads config and the CA directly and needs no
+  network authentication. That requires shell access to the controller — strictly stronger than
+  possessing a certificate, and unavailable to a remote attacker holding a stale bundle.
+
+### The `nil`-means-admin sentinel is inverted, and must be replaced
+
+`nil` `Permissions` is the **implicit-admin marker** consumed by `hasPermission`. The zero value of
+the field therefore means *unrestricted*. Every principal-construction site is one forgotten
+initialisation away from granting root: writing the natural `var permissions []string`, or letting a
+lookup error fall through to an unset field, yields implicit admin rather than nothing.
+
+Today exactly one site gets this right by discipline. The web-cookie branch initialises
+`permissions := []string{}` before its account lookup, with a comment explaining that "non-nil is the
+fail-closed default: an account that cannot be resolved gets an empty grant set, never an unbounded
+one" — so a store error leaves the empty slice intact and the request is denied. That is correct, and
+it is correct because a developer remembered.
+
+**That is not a property to rely on, and epic #3178 adds two more construction sites that must each
+remember it independently.** A database error, a timeout, a refactor that hoists a declaration, or a
+new authentication path written by someone who has not read that comment all fail *open*.
+
+**Requirement: implicit admin must be carried by an explicit field, not by the zero value.** A
+principal is implicitly admin only when something deliberately says so — `Permissions` then describes
+grants and nothing else. With that inversion, a principal built from zero values, or abandoned
+half-constructed on an error path, denies everything by construction rather than by vigilance.
+
+The concept of implicit admin is retained deliberately: enumerating every permission ID onto a
+root-scope account would add no gate that `permissionAssurance` does not already apply, and would
+silently strip an administrator of any permission introduced after their account was created. What
+changes is only how it is encoded.
+
+Until that inversion lands, any new construction site must initialise to a non-nil empty slice and
+carry a required test asserting an unbound or unresolved principal is **denied a specific
+permission** — not merely that it authenticates.
+
+### Why not keep an audited, indefinite bootstrap fallback
+
+Considered and rejected. An earlier draft of this amendment kept implicit root for unbound
+certificates indefinitely, with a per-use audit event and anomaly detection, on the grounds that
+closing it risked an unrecoverable deployment: a lost account store would leave a freshly issued
+certificate also unbound and therefore rejected, so holding the CA would no longer suffice.
+
+**That argument was wrong, because it assumed recovery had to happen over the network.**
+`bootstrap-admin` is a local controller subcommand — it needs shell access to the controller host,
+not a credential the API will accept. So the recovery path never depended on the fallback being
+open, and the fallback bought nothing that local access does not already provide.
+
+What it cost was real: a standing network-reachable path where possession of a certificate the
+account layer knows nothing about yields unrestricted access, forever. Detection is not prevention,
+and CLAUDE.md's threat model asks that rarely-touched settings **bound the blast radius** of admin
+or controller compromise rather than merely record it. A stale certificate issued before accounts
+existed, or one whose account was later deleted, now authenticates and does nothing.
+
+### Relationship to `RootScoped`
+
+Unchanged. `Principal.RootScoped` continues to derive from `cert.HasRootScopeMarker` alone, per
+A2.1/A2.2 — never from an account, bound or unbound. This amendment governs `TenantID`,
+`GlobalScope` and `Permissions`. A certificate's root-scope classification remains a property of the
+certificate; what changes is that classification alone no longer grants anything.
+
+### Consequences
+
+- Every existing admin certificate stops working until bound to an account. Pre-GA, this is a clean
+  break rather than a migration; the project convention is to prefer the break and a clear error
+  message over a compatibility shim.
+- Revocation remains authoritative but is no longer the only control. Deleting or disabling the
+  bound account is now sufficient to render a certificate inert, without needing to reach the CA.
+- The follow-up question recorded on epic #3178 — whether a root-scope account should be *required*
+  to carry a marker certificate — is unaffected and still open.
+
+### Effect on decomposition
+
+Epic #3178's principal-resolution story implements the unbound-certificate rule and cites this
+amendment. The bootstrap account-and-binding requirement is a separate deliverable. Stories cite
+ADRs; they do not edit them.
