@@ -59,22 +59,51 @@ type clusterRegistryAdapter struct {
 }
 
 // MemberClusters returns the sorted cluster names that stewardID belongs to,
-// derived from the current in-memory steward DNA fragments. Cluster membership
-// is scoped to the queried steward's own tenant so that same-named clusters in
+// derived from the cluster-wide steward DNA fragments. Cluster membership is
+// scoped to the queried steward's own tenant so that same-named clusters in
 // different tenants cannot pollute each other's member lists (BuildRegistry
 // contract: "Tenant scoping must be applied by the caller").
+//
+// Bug fix (Issue #3495): previously node-local (GetAllStewards), so a steward
+// whose cluster-tagged fragment was only observed by a peer controller node was
+// invisible here. Now uses GetAllStewardsCluster so peer-node fragments are included.
 func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
-	info, exists := a.controllerSvc.GetStewardInfo(stewardID)
-	if !exists {
+	// Use the cluster-wide inventory so peer-attached stewards with cluster
+	// membership fragments are included. Pass context.Background() (unscoped)
+	// and apply exact-tenant filtering manually to preserve the prior exact-match
+	// scoping behaviour (GetAllStewardsCluster applies subtree scoping, which
+	// would be a wider change than intended for MemberClusters).
+	// Degrade to node-local if the cluster cache is not yet populated.
+	stewards := a.controllerSvc.GetAllStewardsCluster(context.Background())
+	if stewards == nil {
+		stewards = a.controllerSvc.GetAllStewards()
+	}
+
+	// Resolve the queried steward's own tenant, which scopes the member list.
+	// The node-local registry is checked first: it is the freshest view for a
+	// steward attached to this node, so live tenant moves are picked up before
+	// the next cluster refresh. A steward attached to a peer node is absent
+	// there, so fall back to the cluster inventory — without this the cluster-wide
+	// read above could never be reached for exactly the stewards it exists to
+	// serve, and their membership stayed invisible (Issue #3495).
+	tenantID, known := "", false
+	if info, exists := a.controllerSvc.GetStewardInfo(stewardID); exists {
+		tenantID, known = info.TenantID, true
+	} else {
+		for _, s := range stewards {
+			if s.ID == stewardID {
+				tenantID, known = s.TenantID, true
+				break
+			}
+		}
+	}
+	if !known {
 		return nil
 	}
-	tenantID := info.TenantID
-
-	stewards := a.controllerSvc.GetAllStewards()
 	fleetData := make([]fleet.StewardData, 0, len(stewards))
 	for _, s := range stewards {
 		if s.TenantID != tenantID {
-			continue // scope to this steward's tenant only
+			continue // scope to this steward's tenant only (exact match, same as before)
 		}
 		var frags []*common.Fragment
 		if s.DNA != nil {

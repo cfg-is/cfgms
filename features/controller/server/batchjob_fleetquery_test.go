@@ -309,6 +309,34 @@ func TestServerFleetStewardProvider_DNATagsUnion(t *testing.T) {
 	assert.Equal(t, 1, parts["shared-tag"], "shared-tag must appear exactly once (no duplicate)")
 }
 
+// TestServerFleetStewardProvider_DNAFragmentsPopulated is REQUIRED TEST part 2 (Issue #3495):
+// proves that serverFleetStewardProvider.GetAllStewards() now populates the DNAFragments
+// field. Pre-story code flattened DNA fragments into DNAAttributes but left DNAFragments
+// nil, so any consumer that parses fragments directly (cluster membership, role owners)
+// saw nothing through this provider.
+func TestServerFleetStewardProvider_DNAFragmentsPopulated(t *testing.T) {
+	svc := service.NewControllerService(logging.NewNoopLogger())
+	require.NoError(t, svc.RegisterSteward("s-frag", "tenant-a", "addr-1", "online"))
+
+	frags := []*common.Fragment{
+		mustFrag(t, "host:os", map[string]interface{}{"os": "linux"}),
+		mustFrag(t, "hostname", map[string]interface{}{"hostname": "frag-host"}),
+	}
+	require.True(t, svc.SetStewardDNA("s-frag", &common.DNA{Id: "s-frag", Fragments: frags}))
+
+	provider := &serverFleetStewardProvider{svc: svc}
+	stewards := provider.GetAllStewards()
+	require.Len(t, stewards, 1)
+
+	s := stewards[0]
+	assert.NotNil(t, s.DNAFragments, "DNAFragments must be populated (was nil in pre-story code)")
+	assert.Len(t, s.DNAFragments, 2, "all fragments must be forwarded")
+
+	// Also verify DNAAttributes are still correct (regression check).
+	assert.Equal(t, "linux", s.DNAAttributes["os"])
+	assert.Equal(t, "frag-host", s.DNAAttributes["hostname"])
+}
+
 // splitTrimTags splits a comma-separated tag string, trims whitespace, and drops empties.
 func splitTrimTags(raw string) []string {
 	if raw == "" {

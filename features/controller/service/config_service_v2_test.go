@@ -18,6 +18,7 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -392,4 +393,67 @@ func TestFlattenDNAFragments_SelectorRelevantKeys(t *testing.T) {
 	assert.Equal(t, "linux", flat["runtime_os"], "runtime_os key must be flattened from host:os fragment")
 	assert.Equal(t, "amd64", flat["arch"], "arch key must be flattened from host:cpu fragment")
 	assert.Equal(t, "x86_64", flat["cpu_arch"], "cpu_arch key must be flattened from host:cpu fragment")
+}
+
+// TestMemberClusters_PeerAttachedSteward proves that cluster membership for a steward
+// registered on a peer controller node is visible through clusterRegistryAdapter
+// (Issue #3495). Two ControllerService instances share one durable fleet storage
+// directory, the way two controller nodes share a backend: node 1 registers the steward
+// and syncs its cluster:<name> fragment; node 2 never sees it in its node-local live
+// registry and learns of it only through the cluster inventory refresh.
+//
+// Pre-story code derived membership from GetAllStewards() — node-local — so node 2
+// returned no clusters for this steward and its cluster policies were never applied.
+func TestMemberClusters_PeerAttachedSteward(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+
+	// --- Node 1: register the steward and publish its cluster membership fragment. ---
+	storage1 := openFleetStorageAt(t, dataDir)
+	svc1 := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage1)
+	require.NoError(t, svc1.RegisterSteward("peer-member", "tenant-a", "addr-1", "active"))
+
+	clusterFrag, err := sdna.NewFragment("cluster:my-peer-cluster", "hyperv", sdna.MapState{
+		"name":           "my-peer-cluster",
+		"resource_owner": map[string]string{},
+	})
+	require.NoError(t, err)
+
+	// SyncDNA is the production persistence path: it writes the full snapshot to durable
+	// storage, which is what the peer node later reads. hostname/os fragments are required
+	// for the DNA integrity check that guards that write.
+	resp, err := svc1.SyncDNA(ctx, &commonpb.DNA{
+		Id: "peer-member",
+		Fragments: []*commonpb.Fragment{
+			clusterFrag,
+			mustFragment("host:os", map[string]interface{}{"os": "linux"}),
+			mustFragment("hostname", map[string]interface{}{"hostname": "peer-host"}),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, commonpb.Status_OK, resp.Code)
+	require.NoError(t, storage1.Close())
+
+	// --- Node 2: a separate service instance over the same durable storage. ---
+	storage2 := openFleetStorageAt(t, dataDir)
+	t.Cleanup(func() { _ = storage2.Close() })
+	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage2)
+
+	require.Empty(t, svc2.GetAllStewards(),
+		"peer steward must not be in node-local view on the second node")
+
+	adapter := &clusterRegistryAdapter{controllerSvc: svc2}
+	require.Empty(t, adapter.MemberClusters("peer-member"),
+		"before the cluster inventory refreshes, node 2 knows nothing about the peer steward")
+
+	// Refresh the cluster inventory — the same work StartClusterRefresh does on a timer.
+	svc2.refreshClusterInventory(ctx)
+
+	clusters := adapter.MemberClusters("peer-member")
+	require.Contains(t, clusters, "my-peer-cluster",
+		"peer steward's cluster membership must be visible via MemberClusters after cluster refresh")
+
+	// A steward that exists in neither view still resolves to no clusters.
+	assert.Empty(t, adapter.MemberClusters("no-such-steward"),
+		"an unknown steward ID must not resolve to any cluster")
 }

@@ -16,9 +16,12 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
+	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/health"
+	"github.com/cfgis/cfgms/features/controller/service"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -577,6 +580,81 @@ func TestStewardsInTenantScope_DuplicateHostnameClaim(t *testing.T) {
 		_, hostnames := server.stewardsInTenantScope("default")
 		require.Equal(t, "steward-fresh", hostnames["CFG-70-02"],
 			"duplicate hostname claims must resolve to the most recent heartbeat, every call")
+	}
+}
+
+// TestStewardsInTenantScope_PeerAttachedSteward proves the cluster-aware read path
+// (Issue #3495): a steward whose only record lives in durable fleet storage — never
+// registered through this controller node, so absent from the node-local live registry —
+// becomes visible to stewardsInTenantScope once the cluster inventory has refreshed.
+// Pre-story code read GetAllStewards() and could never see it.
+func TestStewardsInTenantScope_PeerAttachedSteward(t *testing.T) {
+	ctx := context.Background()
+
+	// Durable fleet DNA storage shared by every controller node in a real cluster.
+	cfg := fleetStorage.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.EnableDeduplication = false
+	stg, err := fleetStorage.NewManager(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stg.Close() })
+
+	// Write a "peer steward" straight to durable storage — the state a peer node's
+	// registration leaves behind. This node never calls RegisterSteward for it.
+	peerDNA := &commonpb.DNA{
+		Id: "peer-steward",
+		Fragments: []*commonpb.Fragment{
+			mustAPIFrag(t, "host:os", map[string]interface{}{"os": "linux"}),
+			clusterFragment(t, "peer-cluster", nil),
+		},
+	}
+	require.NoError(t, stg.Store(ctx, "peer-steward", peerDNA,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, stg.SetDeviceTenant(ctx, "peer-steward", "tenant-a"))
+
+	peerSvc := service.NewControllerServiceWithStorage(logging.NewNoopLogger(), stg)
+
+	// The node-local view must not contain the peer steward; that is the gap #3495 closes.
+	for _, s := range peerSvc.GetAllStewards() {
+		require.NotEqual(t, "peer-steward", s.ID, "peer steward must not be in the node-local view")
+	}
+
+	server := setupTestServer(t)
+	server.controllerService = peerSvc
+
+	refreshCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	// StartClusterRefresh performs its first refresh immediately; the long interval keeps
+	// the ticker from firing again during the test.
+	peerSvc.StartClusterRefresh(refreshCtx, 24*time.Hour)
+	require.Eventually(t, func() bool {
+		for _, s := range peerSvc.GetAllStewardsCluster(ctx) {
+			if s.ID == "peer-steward" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond,
+		"peer steward must appear in the cluster inventory after refresh")
+
+	stewards, hostnames := server.stewardsInTenantScope("")
+	found := false
+	for _, sd := range stewards {
+		if sd.ID == "peer-steward" {
+			found = true
+			assert.NotEmpty(t, sd.DNAFragments,
+				"the peer steward's durable DNA fragments must survive the conversion")
+		}
+	}
+	require.True(t, found,
+		"peer steward must be visible in stewardsInTenantScope once the cluster inventory refreshed")
+	assert.NotNil(t, hostnames, "the hostname index must still be built alongside the scoped view")
+
+	// Tenant scoping still applies to the cluster-wide source.
+	outOfScope, _ := server.stewardsInTenantScope("tenant-b")
+	for _, sd := range outOfScope {
+		assert.NotEqual(t, "peer-steward", sd.ID,
+			"a peer steward outside the caller's tenant subtree must stay hidden")
 	}
 }
 
