@@ -1110,7 +1110,7 @@ type APIWebAuthnCredentialInfo struct {
 	RegisteredAt string   `json:"registered_at"`
 }
 
-// APIWebAuthnListResponse is the response from GET /api/v1/web/accounts/{username}/webauthn/credentials.
+// APIWebAuthnListResponse is the response from GET /api/v1/accounts/{username}/webauthn/credentials.
 type APIWebAuthnListResponse struct {
 	Username    string                      `json:"username"`
 	Credentials []APIWebAuthnCredentialInfo `json:"credentials"`
@@ -1123,10 +1123,10 @@ type APIWebAuthnRegisterFinishResponse struct {
 	RegisteredAt string `json:"registered_at"`
 }
 
-// WebAuthnListCredentials calls GET /api/v1/web/accounts/{username}/webauthn/credentials
+// WebAuthnListCredentials calls GET /api/v1/accounts/{username}/webauthn/credentials
 // and returns the list of registered credentials for that account.
 func (c *APIClient) WebAuthnListCredentials(ctx context.Context, username string) (*APIWebAuthnListResponse, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/v1/web/accounts/"+url.PathEscape(username)+"/webauthn/credentials", nil)
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/accounts/"+url.PathEscape(username)+"/webauthn/credentials", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1149,11 +1149,11 @@ func (c *APIClient) WebAuthnListCredentials(ctx context.Context, username string
 	return &result, nil
 }
 
-// WebAuthnBeginRegistration calls POST /api/v1/web/accounts/{username}/webauthn/register/begin
+// WebAuthnBeginRegistration calls POST /api/v1/accounts/{username}/webauthn/register/begin
 // and returns the raw PublicKeyCredentialCreationOptions JSON (the data field from the
 // APIResponse envelope). The caller passes this JSON to the browser's navigator.credentials.create().
 func (c *APIClient) WebAuthnBeginRegistration(ctx context.Context, username string) (json.RawMessage, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/web/accounts/"+url.PathEscape(username)+"/webauthn/register/begin", nil)
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/accounts/"+url.PathEscape(username)+"/webauthn/register/begin", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1172,11 +1172,11 @@ func (c *APIClient) WebAuthnBeginRegistration(ctx context.Context, username stri
 	return envelope.Data, nil
 }
 
-// WebAuthnFinishRegistration calls POST /api/v1/web/accounts/{username}/webauthn/register/finish
+// WebAuthnFinishRegistration calls POST /api/v1/accounts/{username}/webauthn/register/finish
 // with the authenticator response JSON from the browser's navigator.credentials.create() result.
 // label is attached as a query parameter. Returns the registered credential metadata.
 func (c *APIClient) WebAuthnFinishRegistration(ctx context.Context, username, label string, credResponseJSON []byte) (*APIWebAuthnRegisterFinishResponse, error) {
-	path := "/api/v1/web/accounts/" + url.PathEscape(username) + "/webauthn/register/finish"
+	path := "/api/v1/accounts/" + url.PathEscape(username) + "/webauthn/register/finish"
 	if label != "" {
 		path += "?label=" + url.QueryEscape(label)
 	}
@@ -1255,11 +1255,11 @@ func (c *APIClient) WebAuthnPresenceFinish(ctx context.Context, assertionRespons
 	return result.PresenceToken, nil
 }
 
-// WebAuthnRevokeCredential calls POST /api/v1/web/accounts/{username}/webauthn/revoke/{credential_id}
+// WebAuthnRevokeCredential calls POST /api/v1/accounts/{username}/webauthn/revoke/{credential_id}
 // to remove the specified credential from the account. credential_id must be the base64url-encoded
 // credential ID (as returned by WebAuthnListCredentials).
 func (c *APIClient) WebAuthnRevokeCredential(ctx context.Context, username, credentialID string) error {
-	path := "/api/v1/web/accounts/" + url.PathEscape(username) + "/webauthn/revoke/" + url.PathEscape(credentialID)
+	path := "/api/v1/accounts/" + url.PathEscape(username) + "/webauthn/revoke/" + url.PathEscape(credentialID)
 	resp, err := c.doRequest(ctx, "POST", path, nil)
 	if err != nil {
 		return err

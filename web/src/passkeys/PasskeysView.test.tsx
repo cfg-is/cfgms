@@ -126,7 +126,7 @@ function route(input: RequestInfo | URL): Response {
     })
   }
   // PasskeysView management endpoints.
-  if (url.endsWith(`/api/v1/web/accounts/${USERNAME}/webauthn/credentials`)) {
+  if (url.endsWith(`/api/v1/accounts/${USERNAME}/webauthn/credentials`)) {
     return listQueue.next()
   }
   if (url.endsWith('/webauthn/register/begin')) {

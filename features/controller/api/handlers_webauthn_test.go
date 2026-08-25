@@ -113,7 +113,7 @@ func finishBody(t *testing.T, credID, clientDataJSON, attObj string) *bytes.Read
 func doBegin(t *testing.T, server *Server, username string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/register/begin", username), nil)
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/register/begin", username), nil)
 	req = withVars(req, map[string]string{"username": username})
 	req = withPrincipal(req, testAdminPrincipal())
 	rec := httptest.NewRecorder()
@@ -128,7 +128,7 @@ func doFinish(t *testing.T, server *Server, username string, body *bytes.Reader)
 		body = bytes.NewReader(nil)
 	}
 	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/register/finish", username), body)
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/register/finish", username), body)
 	req = withVars(req, map[string]string{"username": username})
 	req = withPrincipal(req, testAdminPrincipal())
 	rec := httptest.NewRecorder()
@@ -325,7 +325,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost,
-			"/api/v1/web/accounts/"+username+"/webauthn/register/finish",
+			"/api/v1/accounts/"+username+"/webauthn/register/finish",
 			bytes.NewReader(payload))
 		req = withVars(req, map[string]string{"username": username})
 		req = withPrincipal(req, testAdminPrincipal())
@@ -410,7 +410,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 func doListCredentials(t *testing.T, server *Server, username string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet,
-		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/credentials", username), nil)
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/credentials", username), nil)
 	req = withVars(req, map[string]string{"username": username})
 	req = withPrincipal(req, testAdminPrincipal())
 	rec := httptest.NewRecorder()
@@ -422,7 +422,7 @@ func doListCredentials(t *testing.T, server *Server, username string) *httptest.
 func doRevokeCredential(t *testing.T, server *Server, username, credIDParam string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/revoke/%s", username, credIDParam), nil)
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/revoke/%s", username, credIDParam), nil)
 	req = withVars(req, map[string]string{"username": username, "credential_id": credIDParam})
 	req = withPrincipal(req, testAdminPrincipal())
 	rec := httptest.NewRecorder()
@@ -485,7 +485,7 @@ func TestWebAuthnListCredentials(t *testing.T) {
 		// Use a placeholder URL path; inject the invalid username via withVars so
 		// httptest.NewRequest doesn't panic on the special characters.
 		req := httptest.NewRequest(http.MethodGet,
-			"/api/v1/web/accounts/placeholder/webauthn/credentials", nil)
+			"/api/v1/accounts/placeholder/webauthn/credentials", nil)
 		req = withVars(req, map[string]string{"username": "bad user!"})
 		req = withPrincipal(req, testAdminPrincipal())
 		rec := httptest.NewRecorder()
@@ -563,7 +563,7 @@ func withCookieAuth(req *http.Request, acct *webAccount) *http.Request {
 func doListCredentialsCookieAuth(t *testing.T, server *Server, acct *webAccount, pathUsername string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet,
-		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/credentials", pathUsername), nil)
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/credentials", pathUsername), nil)
 	req = withVars(req, map[string]string{"username": pathUsername})
 	req = withCookieAuth(req, acct)
 	rec := httptest.NewRecorder()
@@ -576,7 +576,7 @@ func doListCredentialsCookieAuth(t *testing.T, server *Server, acct *webAccount,
 func doRevokeCredentialCookieAuth(t *testing.T, server *Server, acct *webAccount, pathUsername, credIDParam string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/api/v1/web/accounts/%s/webauthn/revoke/%s", pathUsername, credIDParam), nil)
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/revoke/%s", pathUsername, credIDParam), nil)
 	req = withVars(req, map[string]string{"username": pathUsername, "credential_id": credIDParam})
 	req = withCookieAuth(req, acct)
 	rec := httptest.NewRecorder()
@@ -1322,7 +1322,7 @@ func TestEnrollmentConfinement(t *testing.T) {
 	}
 
 	t.Run("ZeroPasskeys_Blocked", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
 		req = withCookieSession(req, 0)
 		rec := httptest.NewRecorder()
 		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
@@ -1332,7 +1332,7 @@ func TestEnrollmentConfinement(t *testing.T) {
 
 	t.Run("NegativeAuthenticatorCount_Blocked", func(t *testing.T) {
 		// -1 means account load failed; fail-closed.
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
 		req = withCookieSession(req, -1)
 		rec := httptest.NewRecorder()
 		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
@@ -1341,7 +1341,7 @@ func TestEnrollmentConfinement(t *testing.T) {
 	})
 
 	t.Run("OnePasskey_Allowed", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
 		req = withCookieSession(req, 1)
 		rec := httptest.NewRecorder()
 		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
@@ -1352,7 +1352,7 @@ func TestEnrollmentConfinement(t *testing.T) {
 
 	t.Run("mTLSAdmin_NotBlockedByConfinement", func(t *testing.T) {
 		// mTLS principal: cookieAuth is false → confinement does not apply.
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
 		ctx := context.WithValue(req.Context(), cookieAuthContextKey, false)
 		ctx = context.WithValue(ctx, principalContextKey, &Principal{
 			ID:                 "mtls-admin",
@@ -1368,7 +1368,7 @@ func TestEnrollmentConfinement(t *testing.T) {
 
 	t.Run("NoCookieAuth_NotBlocked", func(t *testing.T) {
 		// Request with no cookie auth context at all.
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
 		rec := httptest.NewRecorder()
 		server.enrollmentConfinementMiddleware(successHandler).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code,

@@ -356,3 +356,110 @@ func TestResolveAssurance_UnknownPermission_FoundByOverride(t *testing.T) {
 	require.True(t, found, "tenant-declared perm must be reported as found")
 	assert.Equal(t, session.AssuranceStrong, req.Min)
 }
+
+// ---- pre-rename permission-ID overrides (Issue #3574) ----
+//
+// The web-account:* -> account:* rename moved the permission IDs that gate account
+// creation, update, deletion and enrollment-link revocation. Per-tenant assurance-policy
+// overrides are persisted keyed by the literal ID an admin wrote, so without alias-aware
+// matching the rename would silently drop a deliberately raised bar — the fail-OPEN
+// direction. These tests pin that behaviour.
+
+// TestResolveAssurance_LegacyWebAccountOverride_PreservesPresence verifies that a stored
+// override keyed by the pre-rename ID "web-account:delete" still applies its
+// RequireUserPresence requirement to the renamed permission "account:delete".
+func TestResolveAssurance_LegacyWebAccountOverride_PreservesPresence(t *testing.T) {
+	apStore := newTestAssurancePolicyStore()
+	require.NoError(t, apStore.SetPolicy(context.Background(), &business.AssurancePolicy{
+		TenantID: "root/child",
+		Overrides: []business.AssurancePolicyOverride{
+			{PermissionID: "web-account:delete", RequireUserPresence: true},
+		},
+	}))
+	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root/child": {"root", "root/child"},
+	})
+	srv := &Server{
+		assurancePolicyStore: apStore,
+		tenantStore:          tsStore,
+		logger:               logging.NewNoopLogger(),
+	}
+
+	req, found := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:delete")
+	require.True(t, found)
+	assert.Equal(t, session.AssuranceStrong, req.Min, "global floor for account:delete must be preserved")
+	assert.True(t, req.RequireUserPresence,
+		"an override stored under the pre-rename ID web-account:delete must still require user presence "+
+			"for account:delete — dropping it silently is the fail-open direction")
+}
+
+// TestResolveAssurance_LegacyOverride_DoesNotLeakAcrossPermissions verifies that the alias
+// match is exact per operation: an override on web-account:list must not raise the bar for
+// account:delete, and an unrelated legacy ID must not match at all.
+func TestResolveAssurance_LegacyOverride_DoesNotLeakAcrossPermissions(t *testing.T) {
+	apStore := newTestAssurancePolicyStore()
+	require.NoError(t, apStore.SetPolicy(context.Background(), &business.AssurancePolicy{
+		TenantID: "root/child",
+		Overrides: []business.AssurancePolicyOverride{
+			{PermissionID: "web-account:list", RequireUserPresence: true},
+		},
+	}))
+	tsStore := newTestTenantStoreWithPath(map[string][]string{
+		"root/child": {"root", "root/child"},
+	})
+	srv := &Server{
+		assurancePolicyStore: apStore,
+		tenantStore:          tsStore,
+		logger:               logging.NewNoopLogger(),
+	}
+
+	req, _ := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:delete")
+	assert.False(t, req.RequireUserPresence,
+		"web-account:list must alias only to account:list, never to another account:* permission")
+
+	reqList, foundList := srv.resolveAssuranceRequirement(context.Background(), "root/child", "account:list")
+	require.True(t, foundList, "an override stored under a legacy ID must make the renamed permission found")
+	assert.True(t, reqList.RequireUserPresence, "web-account:list must alias to account:list")
+}
+
+// TestResolveAssuranceForPath_LegacyOverride_CountsAsAncestorBar verifies that the
+// tighten-only write validation in handleSetAssurancePolicy also honours a pre-rename
+// ancestor override — otherwise a descendant could be told its lower bar is acceptable.
+func TestResolveAssuranceForPath_LegacyOverride_CountsAsAncestorBar(t *testing.T) {
+	apStore := newTestAssurancePolicyStore()
+	require.NoError(t, apStore.SetPolicy(context.Background(), &business.AssurancePolicy{
+		TenantID: "root",
+		Overrides: []business.AssurancePolicyOverride{
+			{PermissionID: "web-account:update", RequireUserPresence: true},
+		},
+	}))
+	srv := &Server{
+		assurancePolicyStore: apStore,
+		logger:               logging.NewNoopLogger(),
+	}
+
+	req, found := srv.resolveAssuranceRequirementForPath(context.Background(), []string{"root"}, "account:update")
+	require.True(t, found)
+	assert.True(t, req.RequireUserPresence,
+		"the ancestor bar used for tighten-only validation must include pre-rename override IDs")
+}
+
+// TestOverrideAppliesTo verifies the alias predicate directly: exact matches, pre-rename
+// matches, and non-matches.
+func TestOverrideAppliesTo(t *testing.T) {
+	assert.True(t, overrideAppliesTo("account:delete", "account:delete"), "exact match must apply")
+	assert.True(t, overrideAppliesTo("web-account:delete", "account:delete"), "pre-rename ID must apply")
+	assert.True(t, overrideAppliesTo("web-account:revoke-enrollment-link", "account:revoke-enrollment-link"))
+	assert.False(t, overrideAppliesTo("account:delete", "account:create"), "different permissions must not match")
+	assert.False(t, overrideAppliesTo("web-account:delete", "account:create"),
+		"a pre-rename ID must not match a different operation")
+	assert.False(t, overrideAppliesTo("account:delete", "web-account:delete"),
+		"aliasing is one-way: the current ID must not satisfy a lookup of the retired ID")
+
+	// Every legacy ID must alias to a permission that still exists in knownPermissions —
+	// a mapping to a dead target would be silently inert.
+	for current := range legacyPermissionIDs {
+		assert.True(t, isKnownPermission(current),
+			"legacyPermissionIDs target %q must be a live permission ID", current)
+	}
+}

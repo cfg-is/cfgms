@@ -582,7 +582,7 @@ describe('AccountsView — delete confirm', () => {
     })
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining('/api/v1/web/accounts/'),
+        expect.stringContaining('/api/v1/accounts/'),
         expect.objectContaining({ method: 'DELETE' }),
       )
     })
@@ -1154,7 +1154,7 @@ describe('AccountsView — edit account (Issue #3132)', () => {
     expect(input.value).toContain('steward:read')
   })
 
-  it('edit save calls PUT /api/v1/web/accounts/{username} and refreshes', async () => {
+  it('edit save calls PUT /api/v1/accounts/{username} and refreshes', async () => {
     fetchMock
       .mockResolvedValueOnce(makeAccountsResponse([makeAccount()]))
       .mockResolvedValueOnce(makeUpdateResponse({ permissions: ['steward:list', 'steward:read'] }))

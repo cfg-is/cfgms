@@ -341,6 +341,14 @@ func New(
 		logger.Warn("Startup scan for privileged API keys failed; continuing", "error", err)
 	}
 
+	// Issue #3574: Scan for web accounts whose stored permissions contain IDs that
+	// isKnownPermission no longer recognizes (stale grants after the permission-ID
+	// rename in #3574). Those grants match nothing hasPermission will honor; this
+	// log makes the break observable to operators instead of silently denying requests.
+	if err := server.scanWebAccountsForStalePermissions(context.Background()); err != nil {
+		logger.Warn("Startup scan for web accounts with stale permissions failed; continuing", "error", err)
+	}
+
 	// Seed test API keys only when explicitly requested via environment variable.
 	// Never runs in production — must be set deliberately in test environments.
 	if os.Getenv("CFGMS_SEED_TEST_API_KEYS") == "1" {
@@ -2362,6 +2370,45 @@ func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
 				"key_id", logging.SanitizeLogValue(meta.Metadata["id"]),
 				"tenant_id", logging.SanitizeLogValue(meta.TenantID),
 				"overlapping_permissions", logging.SanitizeLogValue(strings.Join(overlapping, ",")),
+			)
+		}
+	}
+	return nil
+}
+
+// Issue #3574: scanWebAccountsForStalePermissions enumerates every web account in the secret
+// store and logs a warning for any account whose stored Permissions slice contains an ID that
+// isKnownPermission no longer recognizes. Stale grants (permission IDs renamed or removed)
+// silently match nothing hasPermission will honor; this scan makes the break observable at
+// startup so operators can update affected accounts rather than silently seeing all requests
+// denied.
+func (s *Server) scanWebAccountsForStalePermissions(ctx context.Context) error {
+	if s.secretStore == nil {
+		return nil
+	}
+	secrets, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: webAccountSecretType,
+		},
+	})
+	if err != nil {
+		s.logger.Warn("Startup scan: failed to list web accounts from secret store", "error", err)
+		return err
+	}
+	for _, meta := range secrets {
+		var stale []string
+		for _, p := range parsePermissions(meta.Metadata["permissions"]) {
+			if !isKnownPermission(p) {
+				stale = append(stale, p)
+			}
+		}
+		if len(stale) > 0 {
+			s.logger.Warn(
+				"Web account holds unrecognized permission IDs (stale after rename); "+
+					"those grants match nothing — update the account's permissions",
+				"username", logging.SanitizeLogValue(meta.Metadata["username"]),
+				"tenant_id", logging.SanitizeLogValue(meta.TenantID),
+				"stale_permissions", logging.SanitizeLogValue(strings.Join(stale, ",")),
 			)
 		}
 	}

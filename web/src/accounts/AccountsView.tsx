@@ -3,7 +3,7 @@
 
 /*
  * Accounts view (Issue #2733, #2974, #3134, #3132) — the /accounts route entry point.
- * Fetches GET /api/v1/web/accounts, renders a table, and exposes
+ * Fetches GET /api/v1/accounts, renders a table, and exposes
  * account create, edit, delete, password reset, and enable/disable.
  * Roles are surfaced read-only in a tab.
  *
@@ -23,7 +23,7 @@
  * Issue #3132: each account row exposes an edit action (permissions only,
  * via EditAccountPanel), a passkey-reset action (separate confirm step, mints
  * an enrollment link the same way create does), and an enable/disable toggle
- * (confirm step; toggling disabled state via PUT /api/v1/web/accounts/{username};
+ * (confirm step; toggling disabled state via PUT /api/v1/accounts/{username};
  * disabled accounts show a Disabled badge and stay in the list).
  *
  * M-AUTH-2: granting and revoking a role are sensitive operations. Both
@@ -52,7 +52,7 @@ import {
   EscalationError,
   type WebAccountInfo,
   type RoleInfo,
-} from './useWebAccounts.ts'
+} from './useAccounts.ts'
 import RolesView, { JustificationField } from './RolesView.tsx'
 
 function LoadingRows() {
@@ -684,7 +684,7 @@ function CreateAccountPanel({
 
 /**
  * EditAccountPanel (Issue #3132). Pre-filled with current permissions; saves
- * via PUT /api/v1/web/accounts/{username}. Password reset is a separate
+ * via PUT /api/v1/accounts/{username}. Password reset is a separate
  * action — this panel never touches credentials (passkey-only, ADR-021).
  */
 function EditAccountPanel({
@@ -813,7 +813,7 @@ export default function AccountsView() {
     setDeletingAccount(null)
     try {
       const response = await apiFetch(
-        `/api/v1/web/accounts/${encodeURIComponent(username)}`,
+        `/api/v1/accounts/${encodeURIComponent(username)}`,
         { method: 'DELETE' },
       )
       if (!response.ok) {

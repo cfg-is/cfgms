@@ -35,7 +35,7 @@ func postWebAccount(t *testing.T, server *Server, principal *Principal, body int
 	t.Helper()
 	payload, err := json.Marshal(body)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/accounts", bytes.NewReader(payload))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", bytes.NewReader(payload))
 	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()
 	server.handleCreateWebAccount(rec, req)
@@ -46,7 +46,7 @@ func postWebAccount(t *testing.T, server *Server, principal *Principal, body int
 // and the {username} route variable injected.
 func deleteWebAccount(t *testing.T, server *Server, principal *Principal, username string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/web/accounts/"+username, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/accounts/"+username, nil)
 	req = withPrincipal(req, principal)
 	req = withVars(req, map[string]string{"username": username})
 	rec := httptest.NewRecorder()
@@ -95,7 +95,7 @@ func TestWebAccounts_CreateReturnsIdentity(t *testing.T) {
 func TestWebAccounts_AssuranceGateRejectsAPIKeyCaller(t *testing.T) {
 	server := setupTestServer(t)
 	apiKey := NewTestKey(t, server, []string{
-		"web-account:create", "web-account:delete", "web-account:revoke-enrollment-link",
+		"account:create", "account:delete", "account:revoke-enrollment-link",
 	})
 
 	body, err := json.Marshal(WebAccountRequest{Username: "tier3-user"})
@@ -106,10 +106,10 @@ func TestWebAccounts_AssuranceGateRejectsAPIKeyCaller(t *testing.T) {
 		path   string
 		body   []byte
 	}{
-		{http.MethodPost, "/api/v1/web/accounts", body},
-		{http.MethodDelete, "/api/v1/web/accounts/tier3-user", nil},
+		{http.MethodPost, "/api/v1/accounts", body},
+		{http.MethodDelete, "/api/v1/accounts/tier3-user", nil},
 		// Issue #2974: the enrollment-link revoke route is equally Strong-gated.
-		{http.MethodPost, "/api/v1/web/accounts/tier3-user/enrollment-link/revoke", nil},
+		{http.MethodPost, "/api/v1/accounts/tier3-user/enrollment-link/revoke", nil},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(tc.body))
@@ -288,7 +288,7 @@ func TestWebAccounts_AuditEntriesEmitted(t *testing.T) {
 // and returns the parsed slice of WebAccountInfo from the response.
 func listWebAccounts(t *testing.T, server *Server, principal *Principal) (*httptest.ResponseRecorder, []WebAccountInfo) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
 	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()
 	server.handleListWebAccounts(rec, req)
@@ -380,24 +380,24 @@ func TestWebAccounts_ListReflectsDeletes(t *testing.T) {
 }
 
 // TestWebAccounts_ListRequiresPermissionNotTier3 verifies that an API-key caller
-// with only the web-account:list permission CAN reach the list endpoint (no Tier-3
+// with only the account:list permission CAN reach the list endpoint (no Tier-3
 // gate), while the create/delete endpoints remain Tier-3 gated.
 func TestWebAccounts_ListRequiresPermissionNotTier3(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"web-account:list"})
+	apiKey := NewTestKey(t, server, []string{"account:list"})
 
 	// POST an account first (using the admin path so the store has content).
 	postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 		Username: "tier-check-user",
 	})
 
-	// An API-key caller with web-account:list reaches GET /api/v1/web/accounts.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts", nil)
+	// An API-key caller with account:list reaches GET /api/v1/accounts.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
 	req.Header.Set("X-API-Key", apiKey)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code,
-		"API-key caller with web-account:list must reach the list endpoint (no Tier-3 gate)")
+		"API-key caller with account:list must reach the list endpoint (no Tier-3 gate)")
 
 	body := rec.Body.String()
 	assert.NotContains(t, body, "$argon2id$", "list response must not contain any argon2id hash")
@@ -523,7 +523,7 @@ func TestWebAccounts_RootScope_AppearsInList(t *testing.T) {
 	assert.Equal(t, "", found.TenantID, "tenant_id must be empty in list response for root-scoped account")
 }
 
-// ---- Issue #3137: tenant-subtree scope enforcement on GET /api/v1/web/accounts ----
+// ---- Issue #3137: tenant-subtree scope enforcement on GET /api/v1/accounts ----
 
 // TestWebAccounts_TenantScope_SiblingExclusion is the [REQUIRED TEST] from Issue #3137:
 // a caller scoped to client-1 must never see an account belonging to sibling tenant client-2.
@@ -650,7 +650,7 @@ func TestWebAccounts_RootScope_DeleteWorks(t *testing.T) {
 // revokeEnrollmentLink calls handleRevokeEnrollmentLink directly with an admin principal.
 func revokeEnrollmentLink(t *testing.T, server *Server, principal *Principal, username string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/accounts/"+username+"/enrollment-link/revoke", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts/"+username+"/enrollment-link/revoke", nil)
 	req = withPrincipal(req, principal)
 	req = withVars(req, map[string]string{"username": username})
 	rec := httptest.NewRecorder()
@@ -670,7 +670,7 @@ func parseCreateResponse(t *testing.T, rec *httptest.ResponseRecorder) WebAccoun
 	return cr
 }
 
-// TestWebAccounts_CreateMintsEnrollmentLink verifies that POST /api/v1/web/accounts returns
+// TestWebAccounts_CreateMintsEnrollmentLink verifies that POST /api/v1/accounts returns
 // an enrollment_magic_link field on creation (non-empty, >=40 hex chars for 160-bit entropy).
 func TestWebAccounts_CreateMintsEnrollmentLink(t *testing.T) {
 	server := setupTestServer(t)
@@ -997,7 +997,7 @@ func TestWebAccounts_RevokeEnrollmentLink_CrossTenantForbidden(t *testing.T) {
 func TestWebAccounts_RevokeEnrollmentLinkRoute(t *testing.T) {
 	server := setupTestServer(t)
 	const username = "router-revoke-user"
-	const path = "/api/v1/web/accounts/" + username + "/enrollment-link/revoke"
+	const path = "/api/v1/accounts/" + username + "/enrollment-link/revoke"
 
 	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
 		Username: username,
@@ -1161,7 +1161,7 @@ func TestWebAccounts_ResetCredentialsMintsFreshLink(t *testing.T) {
 }
 
 // TestWebAccounts_CreateEnforcesTenantScope is the [REQUIRED TEST] for create-side tenant
-// isolation (Issue #2974): POST /api/v1/web/accounts issues a bearer enrollment credential,
+// isolation (Issue #2974): POST /api/v1/accounts issues a bearer enrollment credential,
 // so a tenant-scoped caller must not be able to target another tenant's subtree, mint a
 // root-scoped account, or pull an out-of-subtree account into its own tenant.
 func TestWebAccounts_CreateEnforcesTenantScope(t *testing.T) {
@@ -1260,12 +1260,12 @@ func TestWebAccounts_VerifyEnrollmentToken(t *testing.T) {
 	assert.False(t, verifyEnrollmentToken(nil, rawToken), "nil account must not verify")
 }
 
-// ---- Issue #3126: GET/PUT /api/v1/web/accounts/{username} ----
+// ---- Issue #3126: GET/PUT /api/v1/accounts/{username} ----
 
 // getWebAccount calls handleGetWebAccount directly with the given principal.
 func getWebAccountHandler(t *testing.T, server *Server, principal *Principal, username string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts/"+username, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+username, nil)
 	req = withPrincipal(req, principal)
 	req = withVars(req, map[string]string{"username": username})
 	rec := httptest.NewRecorder()
@@ -1278,7 +1278,7 @@ func putWebAccount(t *testing.T, server *Server, principal *Principal, username 
 	t.Helper()
 	payload, err := json.Marshal(body)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/web/accounts/"+username, bytes.NewReader(payload))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/accounts/"+username, bytes.NewReader(payload))
 	req = withPrincipal(req, principal)
 	req = withVars(req, map[string]string{"username": username})
 	rec := httptest.NewRecorder()
@@ -1662,9 +1662,9 @@ func TestWebAccounts_UpdateAuditEmitted(t *testing.T) {
 // caller (Machine-assurance) is rejected from the update endpoint with 403.
 func TestWebAccounts_UpdateRoute_MachineAssuranceRejected(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"web-account:update"})
+	apiKey := NewTestKey(t, server, []string{"account:update"})
 
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/web/accounts/any-user",
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/accounts/any-user",
 		bytes.NewReader([]byte(`{"disabled":true}`)))
 	req.Header.Set("X-API-Key", apiKey)
 	rec := httptest.NewRecorder()
@@ -1683,7 +1683,7 @@ func TestWebAccounts_GetRoute_PermissionRequired(t *testing.T) {
 	server := setupTestServer(t)
 	postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "route-get-user"})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/accounts/route-get-user", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/route-get-user", nil)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
@@ -1818,7 +1818,7 @@ func TestWebAccounts_Disabled_MiddlewareRejectsSurvivingSession(t *testing.T) {
 // request body, which the typed putWebAccount helper cannot express.
 func putWebAccountRaw(t *testing.T, server *Server, principal *Principal, username, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/web/accounts/"+username, strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/accounts/"+username, strings.NewReader(body))
 	req = withPrincipal(req, principal)
 	req = withVars(req, map[string]string{"username": username})
 	rec := httptest.NewRecorder()

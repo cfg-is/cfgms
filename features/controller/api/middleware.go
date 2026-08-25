@@ -1392,7 +1392,10 @@ func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, perm
 			return floor, found
 		}
 		for _, ov := range policy.Overrides {
-			if ov.PermissionID != permissionID {
+			// overrideAppliesTo matches the exact ID and any pre-rename ID for the same
+			// operation, so a stored override survives a permission-ID rename instead of
+			// silently dropping the admin's raised bar (Issue #3574).
+			if !overrideAppliesTo(ov.PermissionID, permissionID) {
 				continue
 			}
 			found = true

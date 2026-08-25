@@ -81,25 +81,25 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"PUT", "/api/v1/tenants/test-tenant/assurance-policy", "assurance-policy:set"}, // Issue #2839: per-tenant assurance override — raises tenant's own posture.
 	{"POST", "/api/v1/stewards/test-steward-id/move", "steward:move"},
 	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"},
-	{"POST", "/api/v1/web/accounts", "web-account:create"},
-	{"PUT", "/api/v1/web/accounts/test-user", "web-account:update"}, // Issue #3126: update permissions/disabled (Tier-3: can disable accounts)
-	{"DELETE", "/api/v1/web/accounts/test-user", "web-account:delete"},
+	{"POST", "/api/v1/accounts", "account:create"},
+	{"PUT", "/api/v1/accounts/test-user", "account:update"}, // Issue #3126: update permissions/disabled (Tier-3: can disable accounts)
+	{"DELETE", "/api/v1/accounts/test-user", "account:delete"},
 	// Enrollment magic-link revocation (Issue #2974) — invalidates an unredeemed
 	// bearer credential that would otherwise enroll a first passkey.
-	{"POST", "/api/v1/web/accounts/test-user/enrollment-link/revoke", "web-account:revoke-enrollment-link"},
+	{"POST", "/api/v1/accounts/test-user/enrollment-link/revoke", "account:revoke-enrollment-link"},
 	// Cluster node lifecycle (Issue #2780) — new entries in permissionAssurance.
 	{"POST", "/api/v1/cluster/nodes/test-id/drain", "cluster:drain-node"},
 	{"POST", "/api/v1/cluster/nodes/test-id/decommission", "cluster:decommission-node"},
 	// Session credential-minting (Issue #2780) — requires step-up before issuing Bearer token.
 	{"POST", "/api/v1/sessions", "session:create"},
 	// WebAuthn passkey / FIDO2 registration (Issue #2782) — credential-minting surface.
-	{"POST", "/api/v1/web/accounts/test-user/webauthn/register/begin", "webauthn:register"},
-	{"POST", "/api/v1/web/accounts/test-user/webauthn/register/finish", "webauthn:register"},
+	{"POST", "/api/v1/accounts/test-user/webauthn/register/begin", "webauthn:register"},
+	{"POST", "/api/v1/accounts/test-user/webauthn/register/finish", "webauthn:register"},
 	// Module bundle approval (Issue #2728) — admin decision on code executed on every managed endpoint.
 	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/approve", "module:approve"},
 	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/reject", "module:reject"},
 	// WebAuthn passkey bootstrap and recovery (Issue #2783) — credential-removal surface.
-	{"POST", "/api/v1/web/accounts/test-user/webauthn/revoke/Y3JlZGVudGlhbC1pZC0x", "webauthn:revoke"},
+	{"POST", "/api/v1/accounts/test-user/webauthn/revoke/Y3JlZGVudGlhbC1pZC0x", "webauthn:revoke"},
 	// WebAuthn presence ceremony (Issue #2784) — gates RequireUserPresence-gated actions.
 	{"POST", "/api/v1/webauthn/presence/begin", "webauthn:assert-presence"},
 	{"POST", "/api/v1/webauthn/presence/finish", "webauthn:assert-presence"},

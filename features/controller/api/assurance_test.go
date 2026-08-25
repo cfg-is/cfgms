@@ -51,8 +51,8 @@ func TestPermissionAssurance_FormerTier3SetPresent(t *testing.T) {
 		"refresh:set-policy",
 		"steward:move",
 		"steward:decommission",
-		"web-account:create",
-		"web-account:delete",
+		"account:create",
+		"account:delete",
 	}
 	for _, perm := range formerTier3 {
 		req, found := permissionAssurance[perm]
@@ -218,17 +218,17 @@ func TestPermissionAssurance_TenantManage_FloorEnforced(t *testing.T) {
 	})
 }
 
-// TestPermissionAssurance_WebAccountUpdateStrong is a REQUIRED test (Issue #3126 AC:
-// "web-account:update is registered in permissionAssurance at Min: session.AssuranceStrong").
+// TestPermissionAssurance_AccountUpdateStrong is a REQUIRED test (Issue #3126 AC:
+// "account:update is registered in permissionAssurance at Min: session.AssuranceStrong").
 // An update endpoint that can reset a password or disable an account is at least as
-// sensitive as web-account:create or web-account:delete, both already at AssuranceStrong.
-func TestPermissionAssurance_WebAccountUpdateStrong(t *testing.T) {
-	req, found := permissionAssurance["web-account:update"]
-	require.True(t, found, "web-account:update must be in permissionAssurance (Issue #3126)")
+// sensitive as account:create or account:delete, both already at AssuranceStrong.
+func TestPermissionAssurance_AccountUpdateStrong(t *testing.T) {
+	req, found := permissionAssurance["account:update"]
+	require.True(t, found, "account:update must be in permissionAssurance (Issue #3126, #3574)")
 	assert.Equal(t, session.AssuranceStrong, req.Min,
-		"web-account:update must require AssuranceStrong (same bar as create and delete)")
+		"account:update must require AssuranceStrong (same bar as create and delete)")
 	assert.False(t, req.RequireUserPresence,
-		"web-account:update must not require user presence (not a catastrophic operation)")
+		"account:update must not require user presence (not a catastrophic operation)")
 }
 
 // TestPermissionAssurance_CrossRegistryInvariant is a REQUIRED test (Issue #3195).
