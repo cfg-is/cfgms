@@ -104,7 +104,15 @@ jobs:
       # the SCM / WMI calls in ./cmd/... on Windows.
       run: |
         if [ "${{ matrix.platform }}" = "Windows" ]; then
-          go test -short -timeout=8m ./pkg/... ./features/... ./cmd/...
+          go test -short -timeout=8m ./pkg/... ./features/...
+          # -v is scoped to ./cmd/... (Issue #3470): the Windows-only SCM tests in
+          # cmd/cfgms-steward-launcher are the reason this job exists, and a
+          # non-verbose run emits only one "ok <package>" line per package — the
+          # per-test "--- PASS" / "--- SKIP" result each SCM test produces is
+          # absent from the log entirely, so there is no way to tell a passing SCM
+          # test from one that skipped for lack of Administrator rights. Keeping
+          # -v off ./pkg/... and ./features/... holds the rest of the log readable.
+          go test -v -short -timeout=8m ./cmd/...
         else
           go test -race -short -timeout=8m ./pkg/... ./features/... ./cmd/...
         fi
