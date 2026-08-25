@@ -657,14 +657,36 @@ authority on its own. Authorization comes exclusively from the account it is bou
   network authentication. That requires shell access to the controller — strictly stronger than
   possessing a certificate, and unavailable to a remote attacker holding a stale bundle.
 
-### Implementation note that inverts the usual rule, and will be got wrong
+### The `nil`-means-admin sentinel is inverted, and must be replaced
 
-`nil` `Permissions` is the **implicit-admin marker** consumed by `hasPermission`. An unbound
-certificate must therefore receive a **non-nil empty slice**, never `nil`. Writing the obvious
-`Permissions: nil` for "this certificate has no permissions" produces the exact opposite of this
-decision: unrestricted admin. This is the single most likely implementation error against this
-amendment, and it must carry a required test asserting an unbound certificate is denied a specific
-permission — not merely that it authenticates.
+`nil` `Permissions` is the **implicit-admin marker** consumed by `hasPermission`. The zero value of
+the field therefore means *unrestricted*. Every principal-construction site is one forgotten
+initialisation away from granting root: writing the natural `var permissions []string`, or letting a
+lookup error fall through to an unset field, yields implicit admin rather than nothing.
+
+Today exactly one site gets this right by discipline. The web-cookie branch initialises
+`permissions := []string{}` before its account lookup, with a comment explaining that "non-nil is the
+fail-closed default: an account that cannot be resolved gets an empty grant set, never an unbounded
+one" — so a store error leaves the empty slice intact and the request is denied. That is correct, and
+it is correct because a developer remembered.
+
+**That is not a property to rely on, and epic #3178 adds two more construction sites that must each
+remember it independently.** A database error, a timeout, a refactor that hoists a declaration, or a
+new authentication path written by someone who has not read that comment all fail *open*.
+
+**Requirement: implicit admin must be carried by an explicit field, not by the zero value.** A
+principal is implicitly admin only when something deliberately says so — `Permissions` then describes
+grants and nothing else. With that inversion, a principal built from zero values, or abandoned
+half-constructed on an error path, denies everything by construction rather than by vigilance.
+
+The concept of implicit admin is retained deliberately: enumerating every permission ID onto a
+root-scope account would add no gate that `permissionAssurance` does not already apply, and would
+silently strip an administrator of any permission introduced after their account was created. What
+changes is only how it is encoded.
+
+Until that inversion lands, any new construction site must initialise to a non-nil empty slice and
+carry a required test asserting an unbound or unresolved principal is **denied a specific
+permission** — not merely that it authenticates.
 
 ### Why not keep an audited, indefinite bootstrap fallback
 
