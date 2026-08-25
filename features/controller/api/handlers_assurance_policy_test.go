@@ -325,14 +325,16 @@ func TestRequirePermission_PresenceOverride_HTTPChallengeAndSiblingAdmission(t *
 		"precondition: global map must not require presence for certificate:provision")
 
 	// AssuranceStrong (as an mTLS caller would be) with no fresh presence proof.
-	// Permissions nil is the implicit-admin marker, so authorisation passes and the
-	// only thing that can reject this request is the presence gate.
+	// ImplicitAdmin: true is the explicit admin marker (ADR-025 Amendment 3), so
+	// authorisation passes and the only thing that can reject this request is the
+	// presence gate.
 	principal := &Principal{
-		ID:           "test-admin",
-		Name:         "test-admin",
-		Assurance:    session.AssuranceStrong,
-		GlobalScope:  true,
-		LastProvenAt: time.Now(),
+		ID:            "test-admin",
+		Name:          "test-admin",
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   true,
+		LastProvenAt:  time.Now(),
+		ImplicitAdmin: true,
 	}
 
 	call := func(tenantID string) *httptest.ResponseRecorder {

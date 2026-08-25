@@ -242,10 +242,11 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 	// presence check is satisfied. This tests that the gates compose correctly rather
 	// than blocking legitimate admins who have completed the presence ceremony.
 	strongPrincipal := &Principal{
-		ID:         "cert-admin",
-		Name:       "mtls-cert:cert-admin",
-		Assurance:  session.AssuranceStrong,
-		CertSerial: "abc123",
+		ID:            "cert-admin",
+		Name:          "mtls-cert:cert-admin",
+		Assurance:     session.AssuranceStrong,
+		CertSerial:    "abc123",
+		ImplicitAdmin: true,
 	}
 	for _, entry := range strongAssuranceRouteTable {
 		entry := entry
@@ -316,9 +317,10 @@ func TestAssuranceGate_BasicAssurance_GetsStepUp(t *testing.T) {
 	server := setupTestServer(t)
 
 	basicPrincipal := &Principal{
-		ID:        "web-admin",
-		Name:      "web-session:web-admin",
-		Assurance: session.AssuranceBasic,
+		ID:            "web-admin",
+		Name:          "web-session:web-admin",
+		Assurance:     session.AssuranceBasic,
+		ImplicitAdmin: true,
 	}
 
 	// Use a representative strong-assurance route (api-key:create) to test the gate.
@@ -390,10 +392,11 @@ func TestAssuranceGate_StrongAssurance_ReachesHandler(t *testing.T) {
 	server := setupTestServer(t)
 
 	strongPrincipal := &Principal{
-		ID:         "cert-admin",
-		Name:       "mtls-cert:cert-admin",
-		Assurance:  session.AssuranceStrong,
-		CertSerial: "abc123",
+		ID:            "cert-admin",
+		Name:          "mtls-cert:cert-admin",
+		Assurance:     session.AssuranceStrong,
+		CertSerial:    "abc123",
+		ImplicitAdmin: true,
 	}
 
 	handlerCalled := false
@@ -478,7 +481,7 @@ func assertBasicPassesFromRequirePermission(t *testing.T, server *Server, resour
 	t.Helper()
 	basicPrincipal := &Principal{
 		ID: "web-admin", Name: "web-session:web-admin",
-		Assurance: session.AssuranceBasic,
+		Assurance: session.AssuranceBasic, ImplicitAdmin: true,
 	}
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := server.requirePermission(resource, action)(probe)
@@ -498,7 +501,7 @@ func assertStepUpFromRequirePermission(t *testing.T, server *Server, resource, a
 	t.Helper()
 	basicPrincipal := &Principal{
 		ID: "web-admin", Name: "web-session:web-admin",
-		Assurance: session.AssuranceBasic,
+		Assurance: session.AssuranceBasic, ImplicitAdmin: true,
 	}
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := server.requirePermission(resource, action)(probe)
@@ -541,7 +544,7 @@ func TestAssuranceGate_StepUp_ResponseContainsRequiredAssuranceField(t *testing.
 
 	basicPrincipal := &Principal{
 		ID: "web-admin", Name: "web-session:web-admin",
-		Assurance: session.AssuranceBasic,
+		Assurance: session.AssuranceBasic, ImplicitAdmin: true,
 	}
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := server.requirePermission("api-key", "create")(probe)

@@ -826,23 +826,26 @@ func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 
 // TestGlobalScope_IndependentOfAssurance proves that GlobalScope and Assurance
 // are genuinely independent signals — not just relabeled versions of each other.
-// A hypothetical future tenant-scoped-but-strongly-authenticated principal
-// (Assurance=AssuranceStrong, GlobalScope=false) must be:
+// A hypothetical future tenant-scoped-but-strongly-authenticated platform admin
+// (Assurance=AssuranceStrong, GlobalScope=false, ImplicitAdmin=true) must be:
 //   - Confined by the tenant-scope sites (runVisibleTo returns false for cross-tenant)
-//   - Still admitted by auth-strength-gated actions (hasPermission returns true for
-//     AssuranceStrong-gated permissions)
+//   - Still admitted by auth-strength-gated actions (hasPermission returns true via
+//     ImplicitAdmin; requirePermission admits on AssuranceStrong-gated routes)
 //
 // This principal is not constructible by any current code path. The test proves
 // that if such an account type were ever added, the two signals would correctly
 // remain independent: the account would see only its own tenant's data but could
 // still perform strongly-authenticated operations.
 func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
-	// Hypothetical tenant-scoped principal with strong assurance — not producible today.
+	// Hypothetical tenant-scoped implicit-admin principal with strong assurance —
+	// not producible today. ImplicitAdmin: true reflects that permission breadth is
+	// an explicit grant, not inferred from Assurance (ADR-025 Amendment 3).
 	strongScoped := &Principal{
-		ID:          "future-strong-scoped-account",
-		Assurance:   session.AssuranceStrong,
-		GlobalScope: false,
-		TenantID:    "tenant-a",
+		ID:            "future-strong-scoped-account",
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   false,
+		TenantID:      "tenant-a",
+		ImplicitAdmin: true,
 	}
 
 	// Tenant-scope sites: GlobalScope=false confines the principal regardless of Assurance.
@@ -852,12 +855,12 @@ func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
 	assert.True(t, runVisibleTo(strongScoped, &controllerrun.RunRecord{RunID: "r-same", TenantID: "tenant-a"}, "tenant-a"),
 		"AssuranceStrong+GlobalScope:false principal must see same-tenant runs")
 
-	// Auth-strength-gated actions: Assurance=AssuranceStrong passes regardless of GlobalScope.
+	// Permission breadth: ImplicitAdmin passes regardless of GlobalScope.
 	server := setupTestServer(t)
 	assert.True(t, server.hasPermission(strongScoped, "certificate:provision"),
-		"AssuranceStrong principal must pass hasPermission for any permission regardless of GlobalScope")
+		"ImplicitAdmin principal must pass hasPermission for any permission regardless of GlobalScope")
 	assert.True(t, server.hasPermission(strongScoped, "rbac:create-role"),
-		"AssuranceStrong principal must pass hasPermission for strong-gated permissions regardless of GlobalScope")
+		"ImplicitAdmin principal must pass hasPermission for strong-gated permissions regardless of GlobalScope")
 
 	// requirePermission must admit the principal on an AssuranceStrong-gated route.
 	admitted := false
@@ -871,7 +874,7 @@ func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	assert.True(t, admitted,
-		"AssuranceStrong+GlobalScope:false principal must be admitted by requirePermission on a Strong-gated route (body: %s)", rec.Body.String())
+		"ImplicitAdmin+GlobalScope:false principal must be admitted by requirePermission on a Strong-gated route (body: %s)", rec.Body.String())
 }
 
 // TestAuthRunAccess_DoesNotConsultGlobalScope proves the empty-tenant admission gate in

@@ -32,12 +32,13 @@ import (
 // opposed to an ordinary unscoped superadmin (RootScoped == false).
 func rootScopedPrincipal(id string) *Principal {
 	return &Principal{
-		ID:          id,
-		Name:        "root-scoped:" + id,
-		Assurance:   session.AssuranceStrong,
-		GlobalScope: true,
-		TenantID:    "",
-		RootScoped:  true,
+		ID:            id,
+		Name:          "root-scoped:" + id,
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   true,
+		TenantID:      "",
+		RootScoped:    true,
+		ImplicitAdmin: true,
 	}
 }
 

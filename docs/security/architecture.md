@@ -360,6 +360,44 @@ The read-only dry run for the CIDR match set — `GET /api/v1/registration/appro
 
 **Rationale:** Endpoints in this set can issue credentials, modify trust anchors, or alter the authorization model itself. Restricting them to `AssuranceStrong` provides a hardware-backed authentication guarantee that cannot be replicated by a compromised or stolen API key or web session. Operators who need these capabilities must authenticate with an admin credential bundle (mTLS client certificate).
 
+### Principal Model and Implicit Admin (ADR-025 Amendment 3)
+
+Every request that passes authentication resolves to a `Principal` struct
+(`features/controller/api/middleware.go`). `hasPermission` is the single
+function that decides permission breadth — it is consulted by `requirePermission`
+and by handler-internal held-scope ceiling checks.
+
+**ImplicitAdmin field (Issue #3585):** Exactly three `Principal` construction
+sites set `ImplicitAdmin: true`:
+
+1. **mTLS admin certs** — `extractAdminPrincipal`
+2. **CLI Bearer sessions** — `authenticationMiddleware` Bearer branch: sessions
+   with no bound account (certificate-derived), or sessions bound to a
+   root-scope account.
+3. **Root-scope web accounts** — `authenticationMiddleware` web-cookie branch:
+   an account whose `RootScope == true` in the secret store.
+
+All other principals — API keys, relay principals, tenant-scoped accounts, and
+any `account.RootScope == false` account — have `ImplicitAdmin: false` and are
+held to their `Permissions` slice verbatim.
+
+**Zero-value safety:** A zero-valued `Principal{}` has `ImplicitAdmin == false`
+and `Permissions == nil` (empty range). `hasPermission` returns false for every
+named permission, so a forgotten-to-set-up principal fails closed rather than
+being silently promoted to superadmin.
+
+**Breadth ≠ proof strength.** `hasPermission` decides breadth only.
+`requirePermission` applies `permissionAssurance` immediately after, so an
+implicit admin is still challenged for `AssuranceStrong` permissions (WebAuthn
+step-up) and `RequireUserPresence` ones (single-use presence token). Setting
+`ImplicitAdmin: true` cannot widen the assurance gate.
+
+**Why not enumerate?** Root-scope accounts hold every current and future
+permission by construction. Enumerating all IDs at account-creation time would
+silently strip an administrator of any permission introduced after the account
+was created; the implicit-admin switch is the correct model (Founder decision,
+2026-08-25).
+
 ## Security Best Practices
 
 ### Certificate Management
