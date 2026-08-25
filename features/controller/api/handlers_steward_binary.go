@@ -79,6 +79,14 @@ func stewardBinaryDownloadCacheKey(tenantID, version, platform, arch string) str
 // Verifies the Ed25519 publisher signature against CFGMSPublisherIdentity before storing the blob.
 // Returns 400 if signature is absent or invalid, 409 if the binary already exists (use ?force=true to overwrite).
 func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Request) {
+	// s.registrationLeaderStatus is the generic lease-backed authority checker
+	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
+	// wired for registration/token endpoints by #3471; reused here unchanged —
+	// the name is registration-era but the check is generic (Issue #3411).
+	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if s.blobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
 		return
