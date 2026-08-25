@@ -108,7 +108,7 @@ func (b *credManBackend) get(key string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("CredReadW failed: %w", callErr)
 	}
-	defer procCredFreeProc.Call(uintptr(unsafe.Pointer(pcred)))
+	defer func() { _, _, _ = procCredFreeProc.Call(uintptr(unsafe.Pointer(pcred))) }()
 
 	// Copy the blob out of the Credential Manager-allocated buffer before freeing.
 	if pcred.CredentialBlobSize == 0 || pcred.CredentialBlob == nil {

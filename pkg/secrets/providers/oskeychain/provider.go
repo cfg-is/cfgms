@@ -32,7 +32,7 @@ const (
 
 	// serviceName groups CFGMS entries in OS stores that split identity into a
 	// service + account pair (macOS Keychain, Secret Service attributes).
-	serviceName = "cfgms"
+	serviceName = "cfgms" //nolint:unused // cross-platform: used by provider_darwin.go and provider_linux.go, invisible to a GOOS=windows lint run
 
 	// maxSecretSize bounds the stored value to a session token. Windows
 	// Credential Manager caps a CRED_TYPE_GENERIC blob at 2560 bytes
@@ -63,10 +63,6 @@ type backend interface {
 	// name identifies the backend for diagnostics.
 	name() string
 }
-
-// newBackend constructs the platform backend. It is a package var so tests can
-// substitute a fake or force the unavailable path on any platform.
-var newBackend = platformNewBackend
 
 // Provider implements interfaces.SecretProvider using the host OS keychain.
 type Provider struct{}
@@ -112,7 +108,7 @@ func (p *Provider) ClusterCapable() bool { return false }
 // Linux with neither Secret Service nor a kernel keyring), so callers fall back
 // to the one-shot --bundle path rather than failing hard.
 func (p *Provider) Available() (bool, error) {
-	b, err := newBackend()
+	b, err := platformNewBackend()
 	if err != nil {
 		return false, nil
 	}
@@ -123,7 +119,7 @@ func (p *Provider) Available() (bool, error) {
 // is accepted for interface conformance but is unused — the backend is selected
 // by platform.
 func (p *Provider) CreateSecretStore(_ map[string]interface{}) (interfaces.SecretStore, error) {
-	b, err := newBackend()
+	b, err := platformNewBackend()
 	if err != nil {
 		return nil, fmt.Errorf("oskeychain: no OS keychain backend available: %w", err)
 	}

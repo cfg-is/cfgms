@@ -67,7 +67,7 @@ func (e *dpapiEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 	if ret == 0 {
 		return nil, fmt.Errorf("CryptProtectData failed: %w", err)
 	}
-	defer windows.LocalFree(windows.Handle(unsafe.Pointer(output.pbData)))
+	defer func() { _, _ = windows.LocalFree(windows.Handle(unsafe.Pointer(output.pbData))) }()
 
 	return blobToBytes(output), nil
 }
@@ -94,7 +94,7 @@ func (e *dpapiEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 	if ret == 0 {
 		return nil, fmt.Errorf("CryptUnprotectData failed: %w", err)
 	}
-	defer windows.LocalFree(windows.Handle(unsafe.Pointer(output.pbData)))
+	defer func() { _, _ = windows.LocalFree(windows.Handle(unsafe.Pointer(output.pbData))) }()
 
 	return blobToBytes(output), nil
 }

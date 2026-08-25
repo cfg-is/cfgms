@@ -83,6 +83,6 @@ func readWithShareFlags(path string) ([]byte, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	f := os.NewFile(uintptr(handle), path)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return io.ReadAll(f)
 }

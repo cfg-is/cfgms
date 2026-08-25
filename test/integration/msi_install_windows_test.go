@@ -92,7 +92,7 @@ func TestMSIInstallWindowsService(t *testing.T) {
 	// Step 4: verify service registration in the SCM.
 	scm, err := mgr.Connect()
 	require.NoError(t, err, "must be able to connect to Windows SCM — test requires Administrator privileges")
-	defer scm.Disconnect()
+	t.Cleanup(func() { require.NoError(t, scm.Disconnect()) })
 
 	svc, err := scm.OpenService("CFGMSSteward")
 	if err != nil {
@@ -103,7 +103,7 @@ func TestMSIInstallWindowsService(t *testing.T) {
 		t.Fail()
 		return
 	}
-	defer svc.Close()
+	t.Cleanup(func() { require.NoError(t, svc.Close()) })
 
 	cfg, err := svc.Config()
 	require.NoError(t, err, "must be able to read service config")
