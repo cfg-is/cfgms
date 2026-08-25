@@ -366,16 +366,67 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// (TenantID=="", matching an unscoped mTLS admin cert) receive cross-tenant
 					// visibility; tenant-scoped sessions are confined to their subtree. Fail-closed:
 					// explicit scope → GlobalScope=false, matching the web-session path's shape.
+					//
+					// Issue #3576: if a web account is bound to this session's PrincipalID,
+					// re-resolve TenantID, GlobalScope, and Permissions from that live account
+					// on every request — mirroring the web-cookie branch's per-request account
+					// recheck (Issue #3311). When no account is found, all three fall back to
+					// their session-derived defaults, preserving byte-identical behavior for
+					// today's principals (certificate-derived or root-scope web accounts).
 					globalScope := sess.TenantID == ""
+					tenantID := sess.TenantID
+					var permissions []string // nil = implicit-admin marker (default when no account is found)
+					acct, acctErr := s.getWebAccountByID(r.Context(), sess.PrincipalID)
+					if acctErr != nil {
+						// Fail closed. The bound account is the authority for this
+						// principal's permissions, tenant scope and disabled status, so a
+						// lookup failure (secret-store/SOPS error, git storage error,
+						// ListSecrets failure, context deadline) must not be treated as
+						// "no account found": that fallback leaves permissions nil, which
+						// hasPermission reads as the implicit-admin marker, skips the
+						// Issue #3126 disabled check, and restores session-derived scope
+						// over the authoritative account values — i.e. every containment
+						// control would degrade precisely when the store is unhealthy.
+						// A principal with no bound account (certificate-derived CLI
+						// session) returns (nil, nil), not an error, so those sessions
+						// never reach this branch.
+						s.logger.Error("Web account lookup failed for session token; failing closed",
+							"principal_id", logging.SanitizeLogValue(sess.PrincipalID),
+							"error", logging.SanitizeLogValue(acctErr.Error()))
+						s.writeErrorResponse(w, http.StatusServiceUnavailable,
+							"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+						return
+					}
+					if acct != nil {
+						if acct.Disabled {
+							// Disabled account: reject with the same 401 a revoked session gets.
+							// Best-effort revocation ensures the token is rejected on subsequent
+							// requests by sessionManager.Validate, but a revocation failure does
+							// not affect this request's 401 (same pattern as the web-cookie branch).
+							if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
+								s.logger.Warn("Failed to revoke session of disabled web account",
+									"session_id", logging.SanitizeLogValue(sess.ID),
+									"error", logging.SanitizeLogValue(revokeErr.Error()))
+							}
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+							return
+						}
+						tenantID = acct.TenantID
+						globalScope = acct.RootScope
+						if !acct.RootScope {
+							// Tenant-scoped account: enforce the configured RBAC grants verbatim.
+							permissions = append([]string{}, acct.Permissions...)
+						}
+						// acct.RootScope == true: permissions stays nil (implicit-admin marker)
+					}
 					sessionPrincipal := &Principal{
 						ID:           sess.PrincipalID,
 						Name:         "session:" + logging.SanitizeLogValue(sess.PrincipalID),
 						Assurance:    sess.Assurance,
 						LastProvenAt: sess.LastProvenAt,
 						GlobalScope:  globalScope,
-						// TenantID mirrors the issuing admin cert; "" means no tenant scope
-						// (same semantics as extractAdminPrincipal for mTLS admin certs).
-						TenantID: sess.TenantID,
+						Permissions:  permissions,
+						TenantID:     tenantID,
 						// RootScoped mirrors the session's own explicit marker (ADR-025
 						// Amendment 1 A1.3, set only by session.Manager.IssueRootScoped) —
 						// never derived from TenantID or GlobalScope.
@@ -383,7 +434,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					}
 					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
 					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
-					ctx = context.WithValue(ctx, ctxkeys.TenantID, sess.TenantID)
+					ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -626,7 +677,24 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, statusCode int, messa
 		Timestamp: time.Now().UTC(),
 	}
 
-	_ = json.NewEncoder(w).Encode(errorResponse)
+	s.encodeJSONBody(w, errorResponse, "error")
+}
+
+// encodeJSONBody serializes payload to w and reports an encode failure instead of
+// discarding it. Every rejection path in this file routes through here so that a
+// truncated or unwritable security response is visible in the logs — the same
+// treatment writeResponse gives the success path. bodyKind names the response shape
+// (e.g. "error", "step_up_required") so the log identifies which path failed without
+// echoing the payload.
+//
+// The header and status have already been written by the caller at this point, so
+// there is no second response to send; logging is the only remaining action.
+func (s *Server) encodeJSONBody(w http.ResponseWriter, payload interface{}, bodyKind string) {
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		s.logger.Error("Failed to encode response",
+			"body_kind", bodyKind,
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // writeSuccessResponse writes a standardized success response
@@ -644,9 +712,7 @@ func (s *Server) writeResponse(w http.ResponseWriter, statusCode int, data inter
 		Timestamp: time.Now().UTC(),
 	}
 
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error("Failed to encode response", "error", err)
-	}
+	s.encodeJSONBody(w, response, "success")
 }
 
 // AuthorizationDecision contains the result of an authorization check
@@ -804,13 +870,13 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s"`, levelName))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(struct {
+				s.encodeJSONBody(w, struct {
 					Error             string `json:"error"`
 					RequiredAssurance string `json:"required_assurance"`
 				}{
 					Error:             "step_up_required",
 					RequiredAssurance: levelName,
-				})
+				}, "step_up_required")
 				return
 			}
 
@@ -831,7 +897,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
-					_ = json.NewEncoder(w).Encode(struct {
+					s.encodeJSONBody(w, struct {
 						Error             string `json:"error"`
 						RequiredAssurance string `json:"required_assurance"`
 						PresenceRequired  bool   `json:"presence_required"`
@@ -839,7 +905,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 						Error:             "step_up_required",
 						RequiredAssurance: levelName,
 						PresenceRequired:  true,
-					})
+					}, "step_up_required")
 					return
 				}
 
@@ -851,13 +917,13 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
-					_ = json.NewEncoder(w).Encode(struct {
+					s.encodeJSONBody(w, struct {
 						Error            string `json:"error"`
 						PresenceRequired bool   `json:"presence_required"`
 					}{
 						Error:            "presence_token_invalid",
 						PresenceRequired: true,
-					})
+					}, "presence_token_invalid")
 					return
 				}
 				record, _ := raw.(*presenceTokenRecord)
@@ -866,13 +932,13 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
-					_ = json.NewEncoder(w).Encode(struct {
+					s.encodeJSONBody(w, struct {
 						Error            string `json:"error"`
 						PresenceRequired bool   `json:"presence_required"`
 					}{
 						Error:            "presence_token_expired",
 						PresenceRequired: true,
-					})
+					}, "presence_token_expired")
 					return
 				}
 				// Bind the presence proof to the acting principal (ADR-021 Decision 4):
@@ -889,13 +955,13 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
-					_ = json.NewEncoder(w).Encode(struct {
+					s.encodeJSONBody(w, struct {
 						Error            string `json:"error"`
 						PresenceRequired bool   `json:"presence_required"`
 					}{
 						Error:            "presence_token_principal_mismatch",
 						PresenceRequired: true,
-					})
+					}, "presence_token_principal_mismatch")
 					return
 				}
 				s.logger.Debug("Presence token accepted",
@@ -1131,7 +1197,7 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code st
 		Timestamp: time.Now().UTC(),
 	}
 
-	_ = json.NewEncoder(w).Encode(errorResponse)
+	s.encodeJSONBody(w, errorResponse, "authorization_error")
 }
 
 // auditAuthorizationDecision logs authorization decisions for security auditing (H3).
