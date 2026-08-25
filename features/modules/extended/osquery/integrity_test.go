@@ -26,8 +26,28 @@ func platformKey() string {
 
 // installOsqueryBundle writes a signed osquery bundle to a temp directory and
 // returns the installation root, the bundle, and an enforcer whose CFGMS
-// identity trusts the signing key.
+// identity trusts the signing key. The binary is installed under its os-arch
+// key name and is not marked executable — callers that need to actually run it
+// use installOsqueryBundleAs.
 func installOsqueryBundle(t *testing.T, binaryContent []byte) (string, *bundle.Bundle, *stewardtrust.StewardTrustEnforcer) {
+	t.Helper()
+	return installOsqueryBundleAs(t, platformKey(), binaryContent, 0o600)
+}
+
+// installOsqueryBundleAs installs a signed osquery bundle whose platform binary
+// is written as binaries/<binaryName> with the given mode, and returns the
+// installation root, the bundle, and an enforcer trusting the signing key.
+//
+// binaryName is a parameter because Windows decides executability by file
+// extension (PATHEXT), so a runnable fake osquery must keep its .bat suffix
+// inside the bundle. The bundle's os-arch key is always platformKey(); only the
+// on-disk file name varies.
+func installOsqueryBundleAs(
+	t *testing.T,
+	binaryName string,
+	binaryContent []byte,
+	mode os.FileMode,
+) (string, *bundle.Bundle, *stewardtrust.StewardTrustEnforcer) {
 	t.Helper()
 
 	root := t.TempDir()
@@ -44,7 +64,7 @@ func installOsqueryBundle(t *testing.T, binaryContent []byte) (string, *bundle.B
 	if err := os.MkdirAll(filepath.Join(root, "binaries"), 0o700); err != nil {
 		t.Fatalf("mkdir binaries: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "binaries", key), binaryContent, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "binaries", binaryName), binaryContent, mode); err != nil {
 		t.Fatalf("install binary: %v", err)
 	}
 
@@ -61,7 +81,7 @@ func installOsqueryBundle(t *testing.T, binaryContent []byte) (string, *bundle.B
 			Kind:      "steward",
 			Executors: []string{"steward"},
 		},
-		Binaries:    map[string]string{key: "binaries/" + key},
+		Binaries:    map[string]string{key: "binaries/" + binaryName},
 		ContentHash: contentHash,
 	}
 
