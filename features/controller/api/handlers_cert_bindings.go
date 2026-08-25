@@ -150,7 +150,7 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 
 	if req.Fingerprint != "" && !fingerprintRE.MatchString(req.Fingerprint) {
 		s.writeErrorResponse(w, http.StatusBadRequest,
-			"invalid fingerprint format: must be hex characters and colons, max 128 characters", "INVALID_FINGERPRINT")
+			"invalid fingerprint format: must be hex characters and colons, max 256 characters", "INVALID_FINGERPRINT")
 		return
 	}
 
