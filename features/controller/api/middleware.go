@@ -91,7 +91,7 @@ type Principal struct {
 	CertFingerprint string
 	CertNotAfter    time.Time
 	// AuthenticatorCount is the number of WebAuthn credentials registered for this principal's
-	// web account. Set at Principal-build time for cookie-authenticated sessions only (Issue #2965).
+	// account. Set at Principal-build time for cookie-authenticated sessions only (Issue #2965).
 	// Zero for mTLS/API-key principals. -1 indicates the account could not be loaded.
 	// Confinement middleware and routing layers use this to distinguish "no passkeys" (0)
 	// from "unknown" (-1) or "has passkeys" (>0) without a per-request store query.
@@ -367,12 +367,12 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// visibility; tenant-scoped sessions are confined to their subtree. Fail-closed:
 					// explicit scope → GlobalScope=false, matching the web-session path's shape.
 					//
-					// Issue #3576: if a web account is bound to this session's PrincipalID,
+					// Issue #3576: if an account is bound to this session's PrincipalID,
 					// re-resolve TenantID, GlobalScope, and Permissions from that live account
 					// on every request — mirroring the web-cookie branch's per-request account
 					// recheck (Issue #3311). When no account is found, all three fall back to
 					// their session-derived defaults, preserving byte-identical behavior for
-					// today's principals (certificate-derived or root-scope web accounts).
+					// today's principals (certificate-derived or root-scope accounts).
 					globalScope := sess.TenantID == ""
 					tenantID := sess.TenantID
 					var permissions []string // nil = implicit-admin marker (default when no account is found)
@@ -390,7 +390,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						// A principal with no bound account (certificate-derived CLI
 						// session) returns (nil, nil), not an error, so those sessions
 						// never reach this branch.
-						s.logger.Error("Web account lookup failed for session token; failing closed",
+						s.logger.Error("Account lookup failed for session token; failing closed",
 							"principal_id", logging.SanitizeLogValue(sess.PrincipalID),
 							"error", logging.SanitizeLogValue(acctErr.Error()))
 						s.writeErrorResponse(w, http.StatusServiceUnavailable,
@@ -404,7 +404,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 							// requests by sessionManager.Validate, but a revocation failure does
 							// not affect this request's 401 (same pattern as the web-cookie branch).
 							if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
-								s.logger.Warn("Failed to revoke session of disabled web account",
+								s.logger.Warn("Failed to revoke session of disabled account",
 									"session_id", logging.SanitizeLogValue(sess.ID),
 									"error", logging.SanitizeLogValue(revokeErr.Error()))
 							}
@@ -509,7 +509,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					if acct.Disabled {
 						s.csrfTokens.Delete(webSess.ID)
 						if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
-							s.logger.Warn("Failed to revoke session of disabled web account",
+							s.logger.Warn("Failed to revoke session of disabled account",
 								"session_id", logging.SanitizeLogValue(webSess.ID),
 								"error", logging.SanitizeLogValue(revokeErr.Error()))
 						}
@@ -519,7 +519,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					authCount = len(acct.Credentials)
 					globalScope = acct.RootScope
 					if acct.RootScope {
-						// Root-scope web accounts are platform administrators: they hold
+						// Root-scope accounts are platform administrators: they hold
 						// every permission, exactly as the mTLS-admin and CLI-session
 						// principals do. This is not an authorization hole — permission
 						// breadth and proof strength are separate layers, and this one
@@ -533,7 +533,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						// of any permission introduced after their account was created.
 						permissions = nil
 					} else {
-						// Tenant-scoped web accounts are least-privilege operators: their
+						// Tenant-scoped accounts are least-privilege operators: their
 						// configured RBAC grants are enforced verbatim (Issue #2919).
 						permissions = append(permissions, acct.Permissions...)
 					}
@@ -783,7 +783,7 @@ func (s *Server) enrollmentConfinementMiddleware(next http.Handler) http.Handler
 
 // requirePermission creates middleware that enforces specific permission requirements.
 // Human administrator principals carry nil Permissions and are implicitly
-// authorized; web accounts carry an explicit (possibly empty) permission slice.
+// authorized; accounts carry an explicit (possibly empty) permission slice.
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1299,9 +1299,9 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 //
 // A nil Permissions slice is the explicit implicit-admin marker, carried by the three
 // platform-administrator principals: mTLS admin certs, CLI Bearer sessions, and
-// root-scope web accounts. Every other principal carries a non-nil slice — including
-// an empty one — and is held to it verbatim: tenant-scoped web accounts, API keys,
-// relay principals, and any web account that failed to resolve.
+// root-scope accounts. Every other principal carries a non-nil slice — including
+// an empty one — and is held to it verbatim: tenant-scoped accounts, API keys,
+// relay principals, and any account that failed to resolve.
 //
 // This decides permission BREADTH only, never proof strength. requirePermission
 // consults permissionAssurance immediately after this returns, so an implicit admin

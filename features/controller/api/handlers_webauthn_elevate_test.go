@@ -180,7 +180,7 @@ func TestStepUpBegin_AccountNotFound_404(t *testing.T) {
 	// testAdminPrincipal has ID="test-mtls-admin"; no web account with that name.
 	rec := doStepUpBegin(t, server, testAdminPrincipal(), "some-session-id")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	assert.Equal(t, "ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
 }
 
 func TestStepUpBegin_NoCredentials_409(t *testing.T) {
@@ -254,7 +254,7 @@ func TestStepUpFinish_AccountNotFound_404(t *testing.T) {
 	// since session check is after account check — wait, need to confirm order.
 	// Account check is BEFORE session load in handleStepUpFinish.
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+	assert.Equal(t, "ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
 }
 
 func TestStepUpFinish_NoActiveSession_400(t *testing.T) {

@@ -74,7 +74,7 @@ type webAuthnPendingSession struct {
 	expires time.Time
 }
 
-// webauthnUser adapts a account to the go-webauthn/webauthn User interface.
+// webauthnUser adapts an account to the go-webauthn/webauthn User interface.
 type webauthnUser struct {
 	id          []byte
 	name        string
@@ -87,7 +87,7 @@ func (u *webauthnUser) WebAuthnName() string                       { return u.na
 func (u *webauthnUser) WebAuthnDisplayName() string                { return u.displayName }
 func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential { return u.credentials }
 
-// buildWebauthnUser converts a account into the webauthn.User the library expects.
+// buildWebauthnUser converts an account into the webauthn.User the library expects.
 // Existing credentials are included so BeginRegistration can populate excludeCredentials.
 func buildWebauthnUser(acct *account) *webauthnUser {
 	creds := make([]webauthn.Credential, 0, len(acct.Credentials))
@@ -118,7 +118,7 @@ func buildWebauthnUser(acct *account) *webauthnUser {
 }
 
 // resolveAccountForCredentials enforces caller-scoping for the credential
-// management surface (Issue #2992). Cookie-auth principals (human web accounts,
+// management surface (Issue #2992). Cookie-auth principals (human accounts,
 // ADR-021 Amendment 1) may only operate on their own account — IDOR prevention.
 // mTLS and API-key principals retain admin-level access via the path {username}.
 //
@@ -130,20 +130,20 @@ func (s *Server) resolveAccountForCredentials(w http.ResponseWriter, r *http.Req
 	isCookieAuth, _ := r.Context().Value(cookieAuthContextKey).(bool)
 
 	if isCookieAuth && principal != nil {
-		// Self-service path (human web account): resolve from session, not path.
+		// Self-service path (human account): resolve from session, not path.
 		// Session PrincipalID is the account's UUID; getAccountByID looks it up.
 		acct, err := s.getAccountByID(r.Context(), principal.ID)
 		if err != nil {
-			s.logger.Error("Failed to resolve web account for credential operation",
+			s.logger.Error("Failed to resolve account for credential operation",
 				"principal_id", logging.SanitizeLogValue(principal.ID),
 				"error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError,
-				"Failed to look up web account", "STORE_ERROR")
+				"Failed to look up account", "STORE_ERROR")
 			return nil, nil, false
 		}
 		if acct == nil {
 			s.writeErrorResponse(w, http.StatusNotFound,
-				"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+				"Account not found", "ACCOUNT_NOT_FOUND")
 			return nil, nil, false
 		}
 		// IDOR rejection: path username must match the session-bound account.
@@ -162,16 +162,16 @@ func (s *Server) resolveAccountForCredentials(w http.ResponseWriter, r *http.Req
 	}
 	acct, err := s.getAccount(r.Context(), pathUsername)
 	if err != nil {
-		s.logger.Error("Failed to resolve web account for credential operation",
+		s.logger.Error("Failed to resolve account for credential operation",
 			"username", logging.SanitizeLogValue(pathUsername),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to look up web account", "STORE_ERROR")
+			"Failed to look up account", "STORE_ERROR")
 		return nil, nil, false
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found", "ACCOUNT_NOT_FOUND")
 		return nil, nil, false
 	}
 	return acct, principal, true
@@ -433,16 +433,16 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 	// Presence ceremonies are only meaningful for principals with registered credentials.
 	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
-		s.logger.Error("Failed to look up web account for presence begin",
+		s.logger.Error("Failed to look up account for presence begin",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to look up web account", "STORE_ERROR")
+			"Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found — WebAuthn credential required for presence ceremony", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found — WebAuthn credential required for presence ceremony", "ACCOUNT_NOT_FOUND")
 		return
 	}
 	if len(acct.Credentials) == 0 {
@@ -515,16 +515,16 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 
 	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
-		s.logger.Error("Failed to look up web account for presence finish",
+		s.logger.Error("Failed to look up account for presence finish",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to look up web account", "STORE_ERROR")
+			"Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -874,7 +874,7 @@ func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *account, credent
 		Type(business.AuditEventSystemAccess).
 		Action("account.passkey_enrolled").
 		User(acct.ID, business.AuditUserTypeHuman).
-		Resource("web-account", logging.SanitizeLogValue(acct.Username), "").
+		Resource("account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh).
 		Details(map[string]interface{}{
@@ -896,7 +896,7 @@ func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *account, credent
 // found on the account; returns 204 on success.
 //
 // Self-lockout guard (Issue #2992, ADR-021 Amendment 1): cookie-auth principals
-// (human web accounts) cannot remove their last passkey — doing so would lock them out,
+// (human accounts) cannot remove their last passkey — doing so would lock them out,
 // because they have no mTLS cert fallback. mTLS/API-key principals are exempt: they retain
 // alternative access paths (ADR-021 §7) and may revoke the last credential.
 //
@@ -939,7 +939,7 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 	freshAcct, freshErr := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
 	if freshErr != nil {
 		s.credentialMu.Unlock()
-		s.logger.Error("Failed to reload web account for credential revocation",
+		s.logger.Error("Failed to reload account for credential revocation",
 			"username", logging.SanitizeLogValue(acct.Username),
 			"error", logging.SanitizeLogValue(freshErr.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
@@ -949,7 +949,7 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 	if freshAcct == nil {
 		s.credentialMu.Unlock()
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -969,9 +969,9 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Anti-lockout guard: cookie-auth (human web account) principals cannot remove
+	// Anti-lockout guard: cookie-auth (human account) principals cannot remove
 	// their last passkey. They have no mTLS cert fallback (ADR-021 §7 does not apply
-	// to human web accounts — only to mTLS-authenticated principals). Recovery requires
+	// to human accounts — only to mTLS-authenticated principals). Recovery requires
 	// an admin-initiated account reset.
 	if isCookieAuth && len(remaining) == 0 {
 		s.credentialMu.Unlock()
@@ -1028,7 +1028,7 @@ func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *account, crede
 		Type(business.AuditEventSystemAccess).
 		Action("account.passkey_added").
 		User(acct.ID, business.AuditUserTypeHuman).
-		Resource("web-account", logging.SanitizeLogValue(acct.Username), "").
+		Resource("account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityMedium).
 		Details(details)
@@ -1061,7 +1061,7 @@ func (s *Server) emitPasskeyRevokedAudit(ctx context.Context, acct *account, cre
 		Type(business.AuditEventSystemAccess).
 		Action("account.passkey_revoked").
 		User(acct.ID, business.AuditUserTypeHuman).
-		Resource("web-account", logging.SanitizeLogValue(acct.Username), "").
+		Resource("account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh).
 		Details(details)

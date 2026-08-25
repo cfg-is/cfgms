@@ -2688,7 +2688,7 @@ enrollment status.
 | Status | Code | Condition |
 |--------|------|-----------|
 | 403 | `FORBIDDEN` | Caller's tenant scope does not contain the account's tenant |
-| 404 | `WEB_ACCOUNT_NOT_FOUND` | No account with that username |
+| 404 | `ACCOUNT_NOT_FOUND` | No account with that username |
 | 409 | `NO_OUTSTANDING_LINK` | No unredeemed, unexpired, unrevoked link exists for this account |
 
 #### GET /api/v1/accounts
@@ -2748,7 +2748,7 @@ Delete a web admin account. Removes both the in-memory cache entry and the durab
 }
 ```
 
-Returns `404 WEB_ACCOUNT_NOT_FOUND` if the account does not exist.
+Returns `404 ACCOUNT_NOT_FOUND` if the account does not exist.
 
 ## Alerts
 

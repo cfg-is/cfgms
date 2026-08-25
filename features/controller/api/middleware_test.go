@@ -2491,7 +2491,7 @@ func TestBearerSession_AccountLookupError_FailsClosed(t *testing.T) {
 			"the internal store error must not be disclosed in the response body")
 
 		logged := capLog.captured()
-		assert.Contains(t, logged, "Web account lookup failed for session token",
+		assert.Contains(t, logged, "Account lookup failed for session token",
 			"the discarded error must now be logged")
 		assert.Contains(t, logged, "injected ListSecrets failure",
 			"the sanitized underlying error must appear in the log for operators")

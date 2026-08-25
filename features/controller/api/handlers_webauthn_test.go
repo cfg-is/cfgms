@@ -180,7 +180,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 	t.Run("Begin_AccountNotFound", func(t *testing.T) {
 		rec := doBegin(t, server, "no-such-user")
 		assert.Equal(t, http.StatusNotFound, rec.Code)
-		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+		assert.Equal(t, "ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
 	})
 
 	t.Run("Begin_InvalidUsername", func(t *testing.T) {
@@ -847,7 +847,7 @@ func TestWebAuthnPresenceBegin(t *testing.T) {
 		// testAdminPrincipal has ID="test-mtls-admin"; no web account exists with that name.
 		rec := doPresenceBegin(t, server, testAdminPrincipal())
 		assert.Equal(t, http.StatusNotFound, rec.Code)
-		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+		assert.Equal(t, "ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
 	})
 
 	t.Run("NoCredentials_409", func(t *testing.T) {
@@ -884,7 +884,7 @@ func TestWebAuthnPresenceFinish(t *testing.T) {
 		// testAdminPrincipal has ID="test-mtls-admin"; no web account with that name.
 		rec := doPresenceFinish(t, server, testAdminPrincipal())
 		assert.Equal(t, http.StatusNotFound, rec.Code)
-		assert.Equal(t, "WEB_ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+		assert.Equal(t, "ACCOUNT_NOT_FOUND", errCode(t, rec.Body.Bytes()))
 	})
 
 	t.Run("NoActiveSession_400", func(t *testing.T) {

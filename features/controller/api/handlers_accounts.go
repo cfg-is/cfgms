@@ -44,7 +44,7 @@ const (
 	// web-admin account records in the central secret store.
 	accountSecretType = "account"
 
-	// accountKeyPrefix namespaces web-account records in the secret store,
+	// accountKeyPrefix namespaces account records in the secret store,
 	// mirroring how API-key records use their hash as the key.
 	accountKeyPrefix = "account-"
 
@@ -169,7 +169,7 @@ type AccountCreateResponse struct {
 }
 
 // accountStorageTenant returns the tenant key to use in the secret store
-// for a web account. Root-scoped accounts (logicalTenantID == "") are stored
+// for an account. Root-scoped accounts (logicalTenantID == "") are stored
 // under the system sentinel because the secret store requires non-empty TenantID.
 // The metadata field "root_scope" is the authoritative indicator; this mapping is
 // only for storage routing (Issue #2919).
@@ -191,7 +191,7 @@ func validateUsername(username string) error {
 
 // --- account store: in-memory cache over the central secret store ---
 
-// accountStoreKey returns the secret-store lookup key for a web account.
+// accountStoreKey returns the secret-store lookup key for an account.
 // The key is an identifier (prefix + username), never credential material.
 func accountStoreKey(username string) string {
 	return accountKeyPrefix + username
@@ -308,21 +308,21 @@ func (s *Server) getAccountByID(ctx context.Context, principalID string) (*accou
 		return nil, nil
 	}
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
-		Tags: []string{"web-account"},
+		Tags: []string{"account"},
 		Metadata: map[string]string{
 			secretsif.MetadataKeySecretType: accountSecretType,
 			"id":                            principalID,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list web accounts by principal ID: %w", err)
+		return nil, fmt.Errorf("failed to list accounts by principal ID: %w", err)
 	}
 	if len(metas) == 0 {
 		return nil, nil
 	}
 	username := metas[0].Metadata["username"]
 	if username == "" {
-		return nil, fmt.Errorf("web account for principal ID is missing username metadata")
+		return nil, fmt.Errorf("account for principal ID is missing username metadata")
 	}
 	return s.loadAccountFromStore(ctx, username, metas[0].TenantID)
 }
@@ -331,7 +331,7 @@ func (s *Server) getAccountByID(ctx context.Context, principalID string) (*accou
 // and re-caches it. The tenant is not known at lookup time, so the record is
 // located by metadata filter.
 //
-// All web-account fields are stored in the ListSecrets metadata map; the secret
+// All account fields are stored in the ListSecrets metadata map; the secret
 // Value is always empty (Issue #2993 passkey-only). Reading from the metadata
 // returned by ListSecrets avoids a second GetSecret round-trip and works correctly
 // for multi-level tenant IDs (e.g., root/msp-a/client-2) where GetSecret's
@@ -344,14 +344,14 @@ func (s *Server) loadAccountFromStore(ctx context.Context, username, tenantHint 
 	}
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
 		TenantID: tenantHint,
-		Tags:     []string{"web-account"},
+		Tags:     []string{"account"},
 		Metadata: map[string]string{
 			secretsif.MetadataKeySecretType: accountSecretType,
 			"username":                      username,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list web accounts: %w", err)
+		return nil, fmt.Errorf("failed to list accounts: %w", err)
 	}
 	if len(metas) == 0 {
 		return nil, nil
@@ -433,7 +433,7 @@ func (s *Server) persistAccount(ctx context.Context, acct *account, createdBy st
 		TenantID:    accountStorageTenant(acct.TenantID), // Issue #2919: sentinel for root-scope
 		CreatedBy:   createdBy,
 		Description: "web admin account",
-		Tags:        []string{"web-account"},
+		Tags:        []string{"account"},
 		Metadata:    meta,
 	}
 	return s.secretStore.StoreSecret(ctx, secretReq)
@@ -441,7 +441,7 @@ func (s *Server) persistAccount(ctx context.Context, acct *account, createdBy st
 
 // --- audit (founder condition 2) ---
 
-// emitAccountAudit records a web-account lifecycle audit event with the
+// emitAccountAudit records an account lifecycle audit event with the
 // sanitized username and the acting admin principal. No-op when auditManager is
 // nil. In-package precedent: emitDecommissionAudit (handlers_stewards.go).
 // details is optional extra context (delivery_method, etc.); the raw token is
@@ -458,21 +458,21 @@ func (s *Server) emitAccountAudit(ctx context.Context, action, tenantID, actingP
 		Type(business.AuditEventSystemAccess).
 		Action(action).
 		User(actingPrincipalID, business.AuditUserTypeHuman).
-		Resource("web-account", logging.SanitizeLogValue(username), "").
+		Resource("account", logging.SanitizeLogValue(username), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)
 	if len(details) > 0 {
 		b = b.Details(details)
 	}
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit web-account audit event",
+		s.logger.Warn("Failed to emit account audit event",
 			"action", action,
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
-// getAccountByEnrollmentToken finds the web account whose enrollment token hash
+// getAccountByEnrollmentToken finds the account whose enrollment token hash
 // matches hash(rawToken). The scan is necessary because tokens identify accounts —
 // the lookup direction is token→account, not account→token. Cache is checked first;
 // if not found there, the durable store is scanned.
@@ -590,7 +590,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Same permission allow-list discipline as API keys ("*" and unknown IDs rejected):
-	// web accounts are RBAC-equivalent to API-key principals, not implicit admins.
+	// accounts are RBAC-equivalent to API-key principals, not implicit admins.
 	for _, p := range req.Permissions {
 		if !isKnownPermission(p) {
 			s.writeErrorResponse(w, http.StatusBadRequest,
@@ -613,9 +613,9 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := s.getAccount(r.Context(), req.Username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(req.Username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 
@@ -646,7 +646,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		// containment control (an admin account suspected of takeover); persistAccount
 		// rebuilds the metadata from the record it is handed, so dropping this carry-forward
 		// would silently clear the "disabled" key and revive the account — with retained
-		// passkeys — under a account.reset audit action that never reads as an enable.
+		// passkeys — under an account.reset audit action that never reads as an enable.
 		// Re-enabling is an explicit PUT {"disabled": false}, which emits account.enabled.
 		acct.Disabled = existing.Disabled
 		// Issue #2782: preserve registered WebAuthn credentials across account resets,
@@ -694,7 +694,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	if existing != nil && accountStorageTenant(existing.TenantID) != accountStorageTenant(acct.TenantID) {
 		oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(existing.TenantID), accountStoreKey(existing.Username))
 		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
-			s.logger.Warn("Failed to delete web account record from previous tenant",
+			s.logger.Warn("Failed to delete account record from previous tenant",
 				"username", logging.SanitizeLogValue(acct.Username),
 				"error", logging.SanitizeLogValue(delErr.Error()))
 		}
@@ -732,9 +732,9 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.persistAccount(r.Context(), acct, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist web account to secret store", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to persist account to secret store", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(acct.Username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist account", "STORE_ERROR")
 		return
 	}
 	s.cacheAccount(acct)
@@ -792,14 +792,14 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 
 	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account for enrollment link revoke",
+		s.logger.Error("Failed to look up account for enrollment link revoke",
 			"error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 	// Issue #2974: enforce tenant-subtree scope before revealing any link state.
@@ -879,8 +879,8 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		s.logger.Error("Failed to list web accounts", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list web accounts", "STORE_ERROR")
+		s.logger.Error("Failed to list accounts", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list accounts", "STORE_ERROR")
 		return
 	}
 
@@ -936,7 +936,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, accounts)
 }
 
-// VerifyCredential is the login-gate enforcement point for web accounts (Issue #3126).
+// VerifyCredential is the login-gate enforcement point for accounts (Issue #3126).
 // It is called after successful WebAuthn assertion to check whether the account may
 // proceed to session issuance. Returns ErrInvalidWebCredential when the account is
 // disabled — the caller must not leak whether the account is disabled vs. not found.
@@ -951,7 +951,7 @@ func (s *Server) VerifyCredential(acct *account) error {
 }
 
 // revokeSessionsForPrincipal revokes every live web session belonging to the
-// given web-account ID and drops the session-bound CSRF token for each
+// given account ID and drops the session-bound CSRF token for each
 // (Issue #3126). Returns the number of sessions revoked.
 //
 // Revocation is best effort per session: a store failure on one session is logged
@@ -1006,13 +1006,13 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 
 	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1020,7 +1020,7 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	// not 403 — to avoid disclosing that the account exists in another tenant.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	if !isWithinTenantScope(callerTenant, acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1065,13 +1065,13 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 
 	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1079,7 +1079,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	// A cross-tenant caller gets 404 — not 403 — to avoid disclosing account existence.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	if !isWithinTenantScope(callerTenant, acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1125,9 +1125,9 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.persistAccount(r.Context(), &updated, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist web account update", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to persist account update", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update account", "STORE_ERROR")
 		return
 	}
 	s.cacheAccount(&updated)
@@ -1156,7 +1156,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		if req.ResetCredentials {
 			resetState = "true"
 		}
-		s.logger.Info("Revoked live web sessions for web account",
+		s.logger.Info("Revoked live web sessions for account",
 			"username", logging.SanitizeLogValue(username),
 			"disabled", disabledState,
 			"credentials_reset", resetState,
@@ -1225,13 +1225,13 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 
 	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1241,7 +1241,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 
 	storeKey := fmt.Sprintf("%s/%s", accountStorageTenant(acct.TenantID), accountStoreKey(username))
 	if err := s.secretStore.DeleteSecret(r.Context(), storeKey); err != nil {
-		s.logger.Warn("Failed to delete web account from secret store (memory cache already cleared)",
+		s.logger.Warn("Failed to delete account from secret store (memory cache already cleared)",
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
 		// Continue anyway — mirrors handleDeleteAPIKey; the cache entry is gone and

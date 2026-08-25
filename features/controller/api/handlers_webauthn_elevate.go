@@ -93,16 +93,16 @@ func (s *Server) handleStepUpBegin(w http.ResponseWriter, r *http.Request) {
 
 	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
-		s.logger.Error("Step-up begin: failed to load web account",
+		s.logger.Error("Step-up begin: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to load web account", "STORE_ERROR")
+			"Failed to load account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 	if len(acct.Credentials) == 0 {
@@ -170,16 +170,16 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 
 	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
-		s.logger.Error("Step-up finish: failed to load web account",
+		s.logger.Error("Step-up finish: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to load web account", "STORE_ERROR")
+			"Failed to load account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 

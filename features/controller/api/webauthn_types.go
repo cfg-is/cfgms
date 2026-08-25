@@ -16,7 +16,7 @@ import (
 // Only public-key material is persisted — the server never holds the private key.
 //
 // Storage decision (required explicit call by the issue): credentials are stored
-// in the web-account secrets-store metadata entry, keeping one persistence path per
+// in the account secrets-store metadata entry, keeping one persistence path per
 // account record. Rationale: WebAuthn credentials are public keys — they do not need
 // secret storage (ADR-021 Non-Goals). The secrets-store seam is chosen for
 // implementation simplicity (one record, one persistence path).

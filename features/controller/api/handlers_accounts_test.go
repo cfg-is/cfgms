@@ -277,7 +277,7 @@ func TestAccounts_AuditEntriesEmitted(t *testing.T) {
 		require.NotEmpty(t, entries, "audit entry for %s must be written", action)
 		e := entries[0]
 		assert.Equal(t, action, e.Action)
-		assert.Equal(t, "web-account", e.ResourceType)
+		assert.Equal(t, "account", e.ResourceType)
 		assert.Equal(t, "audit-user", e.ResourceID, "sanitized username is the resource ID")
 		assert.Equal(t, admin.ID, e.UserID, "acting admin principal must be recorded")
 		assert.Equal(t, business.AuditResultSuccess, e.Result)
@@ -992,7 +992,7 @@ func TestAccounts_RevokeEnrollmentLink_CrossTenantForbidden(t *testing.T) {
 
 // TestAccounts_RevokeEnrollmentLinkRoute drives the revoke endpoint through the real
 // router (server.router.ServeHTTP) rather than calling the handler directly, so route
-// registration, the requirePermission("web-account", "revoke-enrollment-link") wrapper and
+// registration, the requirePermission("account", "revoke-enrollment-link") wrapper and
 // the AssuranceStrong gate are all exercised as they are wired in production (Issue #2974).
 func TestAccounts_RevokeEnrollmentLinkRoute(t *testing.T) {
 	server := setupTestServer(t)
@@ -1652,7 +1652,7 @@ func TestAccounts_UpdateAuditEmitted(t *testing.T) {
 		require.NotEmpty(t, entries, "audit entry for %s must be written", action)
 		e := entries[0]
 		assert.Equal(t, action, e.Action)
-		assert.Equal(t, "web-account", e.ResourceType)
+		assert.Equal(t, "account", e.ResourceType)
 		assert.Equal(t, "audit-update-user", e.ResourceID)
 		assert.Equal(t, admin.ID, e.UserID)
 	}
@@ -1903,7 +1903,7 @@ func TestAccounts_Update_UnknownPermissionRejected(t *testing.T) {
 // TestAccounts_ResetRetainsDisabled verifies that a POST upsert ("reset this admin")
 // of a disabled account does not silently re-enable it. Disable is a containment control,
 // so clearing it must require an explicit PUT {"disabled": false} — which is the only path
-// that emits a account.enabled audit event.
+// that emits an account.enabled audit event.
 func TestAccounts_ResetRetainsDisabled(t *testing.T) {
 	server := setupTestServer(t)
 	admin := testAdminPrincipal()
@@ -2101,7 +2101,7 @@ func TestAccounts_UpdateResetCredentials_AuditEmitted(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, entries, "audit entry for account.credentials_reset must be written")
 	e := entries[0]
-	assert.Equal(t, "web-account", e.ResourceType)
+	assert.Equal(t, "account", e.ResourceType)
 	assert.Equal(t, username, e.ResourceID)
 	assert.Equal(t, admin.ID, e.UserID)
 	// A credential reset mints a bearer enrollment credential, so the audit records
@@ -2614,7 +2614,7 @@ func TestGetAccountByID_DecryptScopedToTenant(t *testing.T) {
 	first := calls[0]
 	assert.Equal(t, tenantA, first.filter.TenantID,
 		"first ListSecrets call must be scoped to tenantA, not left unscoped across all tenants")
-	assert.Contains(t, first.filter.Tags, "web-account",
+	assert.Contains(t, first.filter.Tags, "account",
 		"ListSecrets call must carry the web-account type tag to further limit the query")
 
 	// Every call made while resolving a tenantA principal must be tenant-scoped.
@@ -2632,12 +2632,12 @@ func TestGetAccountByID_DecryptScopedToTenant(t *testing.T) {
 	base := capture.SecretStore
 	scoped, err := base.ListSecrets(context.Background(), &secretsif.SecretFilter{
 		TenantID: tenantA,
-		Tags:     []string{"web-account"},
+		Tags:     []string{"account"},
 		Metadata: map[string]string{secretsif.MetadataKeySecretType: accountSecretType},
 	})
 	require.NoError(t, err)
 	unscoped, err := base.ListSecrets(context.Background(), &secretsif.SecretFilter{
-		Tags:     []string{"web-account"},
+		Tags:     []string{"account"},
 		Metadata: map[string]string{secretsif.MetadataKeySecretType: accountSecretType},
 	})
 	require.NoError(t, err)
