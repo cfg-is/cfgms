@@ -142,7 +142,7 @@ const file_transport_transport_proto_rawDesc = "" +
 	"\ftimestamp_ns\x18\x02 \x01(\x03R\vtimestampNs\"t\n" +
 	"\fPingResponse\x120\n" +
 	"\x14request_timestamp_ns\x18\x01 \x01(\x03R\x12requestTimestampNs\x122\n" +
-	"\x15response_timestamp_ns\x18\x02 \x01(\x03R\x13responseTimestampNs2\xba\x06\n" +
+	"\x15response_timestamp_ns\x18\x02 \x01(\x03R\x13responseTimestampNs2\x9b\a\n" +
 	"\x10StewardTransport\x12Y\n" +
 	"\bRegister\x12%.cfgms.api.controller.RegisterRequest\x1a&.cfgms.api.controller.RegisterResponse\x12C\n" +
 	"\x04Ping\x12\x1c.cfgms.transport.PingRequest\x1a\x1d.cfgms.transport.PingResponse\x12V\n" +
@@ -155,7 +155,8 @@ const file_transport_transport_proto_rawDesc = "" +
 	"TaskStream\x12\x1c.cfgms.transport.TaskMessage\x1a\x1c.cfgms.transport.TaskMessage(\x010\x01\x12L\n" +
 	"\bTerminal\x12\x1d.cfgms.transport.TerminalData\x1a\x1d.cfgms.transport.TerminalData(\x010\x01\x12L\n" +
 	"\tLogStream\x12\x19.cfgms.transport.LogEntry\x1a\".cfgms.transport.LogStreamResponse(\x01\x12\\\n" +
-	"\x0fTelemetryStream\x12\".cfgms.transport.TelemetrySnapshot\x1a!.cfgms.transport.TelemetryRequest(\x010\x01B,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
+	"\x0fTelemetryStream\x12\".cfgms.transport.TelemetrySnapshot\x1a!.cfgms.transport.TelemetryRequest(\x010\x01\x12_\n" +
+	"\fOsqueryQuery\x12%.cfgms.transport.OsqueryQueryResponse\x1a$.cfgms.transport.OsqueryQueryRequest(\x010\x01B,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
 
 var (
 	file_transport_transport_proto_rawDescOnce sync.Once
@@ -182,11 +183,13 @@ var file_transport_transport_proto_goTypes = []any{
 	(*TerminalData)(nil),                // 8: cfgms.transport.TerminalData
 	(*LogEntry)(nil),                    // 9: cfgms.transport.LogEntry
 	(*TelemetrySnapshot)(nil),           // 10: cfgms.transport.TelemetrySnapshot
-	(*controller.RegisterResponse)(nil), // 11: cfgms.api.controller.RegisterResponse
-	(*ConfigChunk)(nil),                 // 12: cfgms.transport.ConfigChunk
-	(*DNASyncResponse)(nil),             // 13: cfgms.transport.DNASyncResponse
-	(*LogStreamResponse)(nil),           // 14: cfgms.transport.LogStreamResponse
-	(*TelemetryRequest)(nil),            // 15: cfgms.transport.TelemetryRequest
+	(*OsqueryQueryResponse)(nil),        // 11: cfgms.transport.OsqueryQueryResponse
+	(*controller.RegisterResponse)(nil), // 12: cfgms.api.controller.RegisterResponse
+	(*ConfigChunk)(nil),                 // 13: cfgms.transport.ConfigChunk
+	(*DNASyncResponse)(nil),             // 14: cfgms.transport.DNASyncResponse
+	(*LogStreamResponse)(nil),           // 15: cfgms.transport.LogStreamResponse
+	(*TelemetryRequest)(nil),            // 16: cfgms.transport.TelemetryRequest
+	(*OsqueryQueryRequest)(nil),         // 17: cfgms.transport.OsqueryQueryRequest
 }
 var file_transport_transport_proto_depIdxs = []int32{
 	2,  // 0: cfgms.transport.StewardTransport.Register:input_type -> cfgms.api.controller.RegisterRequest
@@ -199,18 +202,20 @@ var file_transport_transport_proto_depIdxs = []int32{
 	8,  // 7: cfgms.transport.StewardTransport.Terminal:input_type -> cfgms.transport.TerminalData
 	9,  // 8: cfgms.transport.StewardTransport.LogStream:input_type -> cfgms.transport.LogEntry
 	10, // 9: cfgms.transport.StewardTransport.TelemetryStream:input_type -> cfgms.transport.TelemetrySnapshot
-	11, // 10: cfgms.transport.StewardTransport.Register:output_type -> cfgms.api.controller.RegisterResponse
-	1,  // 11: cfgms.transport.StewardTransport.Ping:output_type -> cfgms.transport.PingResponse
-	3,  // 12: cfgms.transport.StewardTransport.ControlChannel:output_type -> cfgms.transport.ControlMessage
-	12, // 13: cfgms.transport.StewardTransport.SyncConfig:output_type -> cfgms.transport.ConfigChunk
-	13, // 14: cfgms.transport.StewardTransport.SyncDNA:output_type -> cfgms.transport.DNASyncResponse
-	6,  // 15: cfgms.transport.StewardTransport.BulkTransfer:output_type -> cfgms.transport.BulkChunk
-	7,  // 16: cfgms.transport.StewardTransport.TaskStream:output_type -> cfgms.transport.TaskMessage
-	8,  // 17: cfgms.transport.StewardTransport.Terminal:output_type -> cfgms.transport.TerminalData
-	14, // 18: cfgms.transport.StewardTransport.LogStream:output_type -> cfgms.transport.LogStreamResponse
-	15, // 19: cfgms.transport.StewardTransport.TelemetryStream:output_type -> cfgms.transport.TelemetryRequest
-	10, // [10:20] is the sub-list for method output_type
-	0,  // [0:10] is the sub-list for method input_type
+	11, // 10: cfgms.transport.StewardTransport.OsqueryQuery:input_type -> cfgms.transport.OsqueryQueryResponse
+	12, // 11: cfgms.transport.StewardTransport.Register:output_type -> cfgms.api.controller.RegisterResponse
+	1,  // 12: cfgms.transport.StewardTransport.Ping:output_type -> cfgms.transport.PingResponse
+	3,  // 13: cfgms.transport.StewardTransport.ControlChannel:output_type -> cfgms.transport.ControlMessage
+	13, // 14: cfgms.transport.StewardTransport.SyncConfig:output_type -> cfgms.transport.ConfigChunk
+	14, // 15: cfgms.transport.StewardTransport.SyncDNA:output_type -> cfgms.transport.DNASyncResponse
+	6,  // 16: cfgms.transport.StewardTransport.BulkTransfer:output_type -> cfgms.transport.BulkChunk
+	7,  // 17: cfgms.transport.StewardTransport.TaskStream:output_type -> cfgms.transport.TaskMessage
+	8,  // 18: cfgms.transport.StewardTransport.Terminal:output_type -> cfgms.transport.TerminalData
+	15, // 19: cfgms.transport.StewardTransport.LogStream:output_type -> cfgms.transport.LogStreamResponse
+	16, // 20: cfgms.transport.StewardTransport.TelemetryStream:output_type -> cfgms.transport.TelemetryRequest
+	17, // 21: cfgms.transport.StewardTransport.OsqueryQuery:output_type -> cfgms.transport.OsqueryQueryRequest
+	11, // [11:22] is the sub-list for method output_type
+	0,  // [0:11] is the sub-list for method input_type
 	0,  // [0:0] is the sub-list for extension type_name
 	0,  // [0:0] is the sub-list for extension extendee
 	0,  // [0:0] is the sub-list for field type_name

@@ -10,6 +10,7 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -267,6 +268,59 @@ func TestComposite_Terminal_WithHandler(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "not implemented",
 		"Terminal must route through terminalHandler, not the Unimplemented fallback")
+}
+
+// emptyOsqueryStream implements grpc.BidiStreamingServer[OsqueryQueryResponse, OsqueryQueryRequest].
+// Context() returns a background context (no mTLS peer) so the osquery handler's
+// mTLS extraction fails fast, proving delegation without needing a live stream.
+type emptyOsqueryStream struct{}
+
+func (s *emptyOsqueryStream) Recv() (*transportpb.OsqueryQueryResponse, error) {
+	return nil, io.EOF
+}
+func (s *emptyOsqueryStream) Send(*transportpb.OsqueryQueryRequest) error { return nil }
+func (s *emptyOsqueryStream) SetHeader(metadata.MD) error                 { return nil }
+func (s *emptyOsqueryStream) SendHeader(metadata.MD) error                { return nil }
+func (s *emptyOsqueryStream) SetTrailer(metadata.MD)                      {}
+func (s *emptyOsqueryStream) Context() context.Context                    { return context.Background() }
+func (s *emptyOsqueryStream) SendMsg(interface{}) error                   { return nil }
+func (s *emptyOsqueryStream) RecvMsg(interface{}) error                   { return nil }
+
+// Compile-time check.
+var _ grpc.BidiStreamingServer[transportpb.OsqueryQueryResponse, transportpb.OsqueryQueryRequest] = (*emptyOsqueryStream)(nil)
+
+// TestComposite_OsqueryQuery_NilHandler verifies that OsqueryQuery with no
+// registered handler falls through to the Unimplemented base.
+func TestComposite_OsqueryQuery_NilHandler(t *testing.T) {
+	cp := newRecordingHandler()
+	composite := newCompositeTransportServer(cp, nil)
+
+	err := composite.OsqueryQuery(&emptyOsqueryStream{})
+	require.Error(t, err, "OsqueryQuery with nil osqueryHandler should return unimplemented error")
+	assert.Contains(t, err.Error(), "not implemented",
+		"OsqueryQuery with nil handler must fall through to the Unimplemented base")
+}
+
+// TestComposite_OsqueryQuery_WithHandler is the REQUIRED TEST for AC6
+// (Issue #3566): SetOsqueryHandler registration on compositeTransportServer is
+// exercised here, mirroring the existing handler-wiring tests for Terminal and
+// TelemetryStream. Calling OsqueryQuery with a background context (no mTLS peer)
+// returns Unauthenticated rather than Unimplemented, proving the handler is
+// reached.
+func TestComposite_OsqueryQuery_WithHandler(t *testing.T) {
+	cp := newRecordingHandler()
+	logger := logging.NewNoopLogger()
+	osqueryHandler := stewardosquery.NewOsqueryHandler(logger, "/dev/null")
+	composite := newCompositeTransportServer(cp, logger)
+	composite.SetOsqueryHandler(osqueryHandler)
+
+	// Empty stream with background context (no mTLS peer) → Unauthenticated from
+	// the handler's mTLS extraction. This proves osqueryHandler.HandleGRPC is
+	// invoked, not the Unimplemented fallback.
+	err := composite.OsqueryQuery(&emptyOsqueryStream{})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "not implemented",
+		"OsqueryQuery must route through osqueryHandler, not the Unimplemented fallback")
 }
 
 // TestComposite_AdditiveExtension proves that adding a new data-plane handler

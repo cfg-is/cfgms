@@ -50,6 +50,14 @@ import (
 // is not a terminal (non-TTY, i.e. programmatic invocation with piped input).
 // The --json flag requests JSON-array output. No SQL argument is passed on the
 // command line — the fixed args slice contains only constant flag strings.
+// RunQuery is the exported entry point for the RPC handler (Story #3566). The
+// function is intentionally query-string-agnostic: callers are responsible for
+// all catalog-ID lookup and parameter validation before constructing the query
+// string. See features/steward/osquery/handler.go for the admission check.
+func RunQuery(ctx context.Context, binPath, query string) ([]map[string]string, error) {
+	return runQuery(ctx, binPath, query)
+}
+
 func runQuery(ctx context.Context, binPath, query string) ([]map[string]string, error) {
 	// args is a fixed constant slice — query content never appears here.
 	// #nosec G204 — binPath is the integrity-verified binary path returned by

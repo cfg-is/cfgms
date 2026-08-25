@@ -1108,6 +1108,191 @@ func (x *TelemetrySnapshot) GetTimestamp() *timestamppb.Timestamp {
 	return nil
 }
 
+// OsqueryQueryRequest is sent by the controller (server) to the steward (client)
+// to request execution of a catalog query. The catalog_id must map to an entry in
+// the bundle-embedded catalog registry shipped with the signed osquery module;
+// params must satisfy the declared type/bound schema for that catalog entry.
+// Raw SQL is never accepted on the wire — the steward resolves SQL from the
+// catalog ID after front-door admission validation.
+type OsqueryQueryRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StewardId string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	// catalog_id references a named entry in the osquery module's bundle-embedded
+	// catalog (features/modules/extended/osquery/catalog.go). Unrecognised IDs
+	// are rejected before any query text is constructed or runQuery is called.
+	CatalogId string `protobuf:"bytes,2,opt,name=catalog_id,json=catalogId,proto3" json:"catalog_id,omitempty"`
+	// params supplies typed values for template substitution. Each key must match
+	// a parameter name declared in the catalog entry's parameter schema, and each
+	// value must satisfy that parameter's declared type and bounds. Values
+	// containing SQL metacharacters (', --, ;, UNION) are rejected at admission
+	// if the declared parameter type does not explicitly allow them.
+	Params        map[string]string `protobuf:"bytes,3,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OsqueryQueryRequest) Reset() {
+	*x = OsqueryQueryRequest{}
+	mi := &file_transport_data_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OsqueryQueryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OsqueryQueryRequest) ProtoMessage() {}
+
+func (x *OsqueryQueryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OsqueryQueryRequest.ProtoReflect.Descriptor instead.
+func (*OsqueryQueryRequest) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *OsqueryQueryRequest) GetStewardId() string {
+	if x != nil {
+		return x.StewardId
+	}
+	return ""
+}
+
+func (x *OsqueryQueryRequest) GetCatalogId() string {
+	if x != nil {
+		return x.CatalogId
+	}
+	return ""
+}
+
+func (x *OsqueryQueryRequest) GetParams() map[string]string {
+	if x != nil {
+		return x.Params
+	}
+	return nil
+}
+
+// OsqueryQueryResponse is sent by the steward (client) to the controller (server)
+// after executing a catalog query via runQuery. Each row is a flat string map
+// matching osquery's JSON-array output format.
+type OsqueryQueryResponse struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StewardId string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	CatalogId string                 `protobuf:"bytes,2,opt,name=catalog_id,json=catalogId,proto3" json:"catalog_id,omitempty"`
+	// rows contains the query result rows. Each row is a flat map of column name
+	// to string value, matching osquery's --json output format.
+	Rows          []*OsqueryRow `protobuf:"bytes,3,rep,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OsqueryQueryResponse) Reset() {
+	*x = OsqueryQueryResponse{}
+	mi := &file_transport_data_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OsqueryQueryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OsqueryQueryResponse) ProtoMessage() {}
+
+func (x *OsqueryQueryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OsqueryQueryResponse.ProtoReflect.Descriptor instead.
+func (*OsqueryQueryResponse) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *OsqueryQueryResponse) GetStewardId() string {
+	if x != nil {
+		return x.StewardId
+	}
+	return ""
+}
+
+func (x *OsqueryQueryResponse) GetCatalogId() string {
+	if x != nil {
+		return x.CatalogId
+	}
+	return ""
+}
+
+func (x *OsqueryQueryResponse) GetRows() []*OsqueryRow {
+	if x != nil {
+		return x.Rows
+	}
+	return nil
+}
+
+// OsqueryRow is one result row from an osquery catalog query.
+// Column names and values are strings, matching osquery's JSON-array output.
+type OsqueryRow struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Columns       map[string]string      `protobuf:"bytes,1,rep,name=columns,proto3" json:"columns,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OsqueryRow) Reset() {
+	*x = OsqueryRow{}
+	mi := &file_transport_data_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OsqueryRow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OsqueryRow) ProtoMessage() {}
+
+func (x *OsqueryRow) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OsqueryRow.ProtoReflect.Descriptor instead.
+func (*OsqueryRow) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *OsqueryRow) GetColumns() map[string]string {
+	if x != nil {
+		return x.Columns
+	}
+	return nil
+}
+
 var File_transport_data_proto protoreflect.FileDescriptor
 
 const file_transport_data_proto_rawDesc = "" +
@@ -1208,7 +1393,28 @@ const file_transport_data_proto_rawDesc = "" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12>\n" +
 	"\tprocesses\x18\x02 \x03(\v2 .cfgms.transport.ProcessSnapshotR\tprocesses\x12<\n" +
 	"\bservices\x18\x03 \x03(\v2 .cfgms.transport.ServiceSnapshotR\bservices\x128\n" +
-	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp*\x99\x01\n" +
+	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xd8\x01\n" +
+	"\x13OsqueryQueryRequest\x12\x1d\n" +
+	"\n" +
+	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1d\n" +
+	"\n" +
+	"catalog_id\x18\x02 \x01(\tR\tcatalogId\x12H\n" +
+	"\x06params\x18\x03 \x03(\v20.cfgms.transport.OsqueryQueryRequest.ParamsEntryR\x06params\x1a9\n" +
+	"\vParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x85\x01\n" +
+	"\x14OsqueryQueryResponse\x12\x1d\n" +
+	"\n" +
+	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1d\n" +
+	"\n" +
+	"catalog_id\x18\x02 \x01(\tR\tcatalogId\x12/\n" +
+	"\x04rows\x18\x03 \x03(\v2\x1b.cfgms.transport.OsqueryRowR\x04rows\"\x8c\x01\n" +
+	"\n" +
+	"OsqueryRow\x12B\n" +
+	"\acolumns\x18\x01 \x03(\v2(.cfgms.transport.OsqueryRow.ColumnsEntryR\acolumns\x1a:\n" +
+	"\fColumnsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x99\x01\n" +
 	"\fTransferType\x12\x1d\n" +
 	"\x19TRANSFER_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15TRANSFER_TYPE_PACKAGE\x10\x01\x12\x18\n" +
@@ -1236,7 +1442,7 @@ func file_transport_data_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_data_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_transport_data_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_transport_data_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_transport_data_proto_goTypes = []any{
 	(TransferType)(0),             // 0: cfgms.transport.TransferType
 	(TaskMessageType)(0),          // 1: cfgms.transport.TaskMessageType
@@ -1253,27 +1459,35 @@ var file_transport_data_proto_goTypes = []any{
 	(*ProcessSnapshot)(nil),       // 12: cfgms.transport.ProcessSnapshot
 	(*ServiceSnapshot)(nil),       // 13: cfgms.transport.ServiceSnapshot
 	(*TelemetrySnapshot)(nil),     // 14: cfgms.transport.TelemetrySnapshot
-	nil,                           // 15: cfgms.transport.BulkChunk.MetadataEntry
-	nil,                           // 16: cfgms.transport.LogEntry.FieldsEntry
-	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
-	(Severity)(0),                 // 18: cfgms.transport.Severity
+	(*OsqueryQueryRequest)(nil),   // 15: cfgms.transport.OsqueryQueryRequest
+	(*OsqueryQueryResponse)(nil),  // 16: cfgms.transport.OsqueryQueryResponse
+	(*OsqueryRow)(nil),            // 17: cfgms.transport.OsqueryRow
+	nil,                           // 18: cfgms.transport.BulkChunk.MetadataEntry
+	nil,                           // 19: cfgms.transport.LogEntry.FieldsEntry
+	nil,                           // 20: cfgms.transport.OsqueryQueryRequest.ParamsEntry
+	nil,                           // 21: cfgms.transport.OsqueryRow.ColumnsEntry
+	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
+	(Severity)(0),                 // 23: cfgms.transport.Severity
 }
 var file_transport_data_proto_depIdxs = []int32{
 	0,  // 0: cfgms.transport.BulkChunk.transfer_type:type_name -> cfgms.transport.TransferType
-	15, // 1: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
+	18, // 1: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
 	1,  // 2: cfgms.transport.TaskMessage.type:type_name -> cfgms.transport.TaskMessageType
-	17, // 3: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
-	18, // 4: cfgms.transport.LogEntry.level:type_name -> cfgms.transport.Severity
-	17, // 5: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
-	16, // 6: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
+	22, // 3: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
+	23, // 4: cfgms.transport.LogEntry.level:type_name -> cfgms.transport.Severity
+	22, // 5: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
+	19, // 6: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
 	12, // 7: cfgms.transport.TelemetrySnapshot.processes:type_name -> cfgms.transport.ProcessSnapshot
 	13, // 8: cfgms.transport.TelemetrySnapshot.services:type_name -> cfgms.transport.ServiceSnapshot
-	17, // 9: cfgms.transport.TelemetrySnapshot.timestamp:type_name -> google.protobuf.Timestamp
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	22, // 9: cfgms.transport.TelemetrySnapshot.timestamp:type_name -> google.protobuf.Timestamp
+	20, // 10: cfgms.transport.OsqueryQueryRequest.params:type_name -> cfgms.transport.OsqueryQueryRequest.ParamsEntry
+	17, // 11: cfgms.transport.OsqueryQueryResponse.rows:type_name -> cfgms.transport.OsqueryRow
+	21, // 12: cfgms.transport.OsqueryRow.columns:type_name -> cfgms.transport.OsqueryRow.ColumnsEntry
+	13, // [13:13] is the sub-list for method output_type
+	13, // [13:13] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_transport_data_proto_init() }
@@ -1288,7 +1502,7 @@ func file_transport_data_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_data_proto_rawDesc), len(file_transport_data_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   15,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

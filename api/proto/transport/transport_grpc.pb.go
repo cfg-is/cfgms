@@ -33,6 +33,7 @@ const (
 	StewardTransport_Terminal_FullMethodName        = "/cfgms.transport.StewardTransport/Terminal"
 	StewardTransport_LogStream_FullMethodName       = "/cfgms.transport.StewardTransport/LogStream"
 	StewardTransport_TelemetryStream_FullMethodName = "/cfgms.transport.StewardTransport/TelemetryStream"
+	StewardTransport_OsqueryQuery_FullMethodName    = "/cfgms.transport.StewardTransport/OsqueryQuery"
 )
 
 // StewardTransportClient is the client API for StewardTransport service.
@@ -70,6 +71,12 @@ type StewardTransportClient interface {
 	// The steward (client) sends TelemetrySnapshot frames and receives TelemetryRequest
 	// control messages. Sampling only runs while an inbound subscribe=true request is active.
 	TelemetryStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TelemetrySnapshot, TelemetryRequest], error)
+	// OsqueryQuery is the ad-hoc catalog query channel (Issue #3566, Epic #2855).
+	// The steward (client) opens the stream and sends OsqueryQueryResponse result
+	// frames; the controller (server) sends OsqueryQueryRequest frames to request
+	// execution of a catalog query on the steward. Query text is never sent on the
+	// wire — the steward resolves SQL from the catalog ID after front-door admission.
+	OsqueryQuery(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[OsqueryQueryResponse, OsqueryQueryRequest], error)
 }
 
 type stewardTransportClient struct {
@@ -210,6 +217,19 @@ func (c *stewardTransportClient) TelemetryStream(ctx context.Context, opts ...gr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StewardTransport_TelemetryStreamClient = grpc.BidiStreamingClient[TelemetrySnapshot, TelemetryRequest]
 
+func (c *stewardTransportClient) OsqueryQuery(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[OsqueryQueryResponse, OsqueryQueryRequest], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StewardTransport_ServiceDesc.Streams[8], StewardTransport_OsqueryQuery_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[OsqueryQueryResponse, OsqueryQueryRequest]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StewardTransport_OsqueryQueryClient = grpc.BidiStreamingClient[OsqueryQueryResponse, OsqueryQueryRequest]
+
 // StewardTransportServer is the server API for StewardTransport service.
 // All implementations must embed UnimplementedStewardTransportServer
 // for forward compatibility.
@@ -245,6 +265,12 @@ type StewardTransportServer interface {
 	// The steward (client) sends TelemetrySnapshot frames and receives TelemetryRequest
 	// control messages. Sampling only runs while an inbound subscribe=true request is active.
 	TelemetryStream(grpc.BidiStreamingServer[TelemetrySnapshot, TelemetryRequest]) error
+	// OsqueryQuery is the ad-hoc catalog query channel (Issue #3566, Epic #2855).
+	// The steward (client) opens the stream and sends OsqueryQueryResponse result
+	// frames; the controller (server) sends OsqueryQueryRequest frames to request
+	// execution of a catalog query on the steward. Query text is never sent on the
+	// wire — the steward resolves SQL from the catalog ID after front-door admission.
+	OsqueryQuery(grpc.BidiStreamingServer[OsqueryQueryResponse, OsqueryQueryRequest]) error
 	mustEmbedUnimplementedStewardTransportServer()
 }
 
@@ -284,6 +310,9 @@ func (UnimplementedStewardTransportServer) LogStream(grpc.ClientStreamingServer[
 }
 func (UnimplementedStewardTransportServer) TelemetryStream(grpc.BidiStreamingServer[TelemetrySnapshot, TelemetryRequest]) error {
 	return status.Error(codes.Unimplemented, "method TelemetryStream not implemented")
+}
+func (UnimplementedStewardTransportServer) OsqueryQuery(grpc.BidiStreamingServer[OsqueryQueryResponse, OsqueryQueryRequest]) error {
+	return status.Error(codes.Unimplemented, "method OsqueryQuery not implemented")
 }
 func (UnimplementedStewardTransportServer) mustEmbedUnimplementedStewardTransportServer() {}
 func (UnimplementedStewardTransportServer) testEmbeddedByValue()                          {}
@@ -402,6 +431,13 @@ func _StewardTransport_TelemetryStream_Handler(srv interface{}, stream grpc.Serv
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StewardTransport_TelemetryStreamServer = grpc.BidiStreamingServer[TelemetrySnapshot, TelemetryRequest]
 
+func _StewardTransport_OsqueryQuery_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(StewardTransportServer).OsqueryQuery(&grpc.GenericServerStream[OsqueryQueryResponse, OsqueryQueryRequest]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StewardTransport_OsqueryQueryServer = grpc.BidiStreamingServer[OsqueryQueryResponse, OsqueryQueryRequest]
+
 // StewardTransport_ServiceDesc is the grpc.ServiceDesc for StewardTransport service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -461,6 +497,12 @@ var StewardTransport_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "TelemetryStream",
 			Handler:       _StewardTransport_TelemetryStream_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "OsqueryQuery",
+			Handler:       _StewardTransport_OsqueryQuery_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},
