@@ -7,6 +7,24 @@ import (
 	"strings"
 )
 
+// AbsentCapability describes a declared-optional store that is absent in the
+// running deployment. Returned by CollectAbsentOptionalCapabilities at
+// composition time and served verbatim by the administrative status surface.
+type AbsentCapability struct {
+	// Capability is the store name (e.g. "PushStore").
+	Capability string `json:"capability"`
+	// Subsystem is the feature or component that declared the optional dependency.
+	Subsystem string `json:"subsystem"`
+	// Consequence is an operator-actionable description of what the absence means.
+	// Written by the declaring subsystem; must name the functional impact, not the
+	// internal type (e.g. "Push-state is not persisted — in-flight config pushes
+	// may not resume after a controller restart" rather than "PushStore: nil").
+	Consequence string `json:"consequence"`
+	// Provider is the storage provider currently running, so an operator knows
+	// which provider to switch to if they want to supply the missing capability.
+	Provider string `json:"provider"`
+}
+
 // StoreName identifies a named store within a StorageManager.
 type StoreName string
 
@@ -55,6 +73,12 @@ const (
 //
 //	var StoreRequirements = []interfaces.StoreRequirement{
 //	    {Subsystem: "registration", Store: interfaces.StoreNamePendingRegistration, Severity: interfaces.RequirementRequired},
+//	    {
+//	        Subsystem:   "push",
+//	        Store:       interfaces.StoreNamePush,
+//	        Severity:    interfaces.RequirementOptional,
+//	        Consequence: "Push-state is not persisted — in-flight config pushes may not resume after a controller restart",
+//	    },
 //	}
 type StoreRequirement struct {
 	// Subsystem identifies the feature or component that depends on this store.
@@ -64,6 +88,11 @@ type StoreRequirement struct {
 	Store StoreName
 	// Severity controls whether absence blocks startup.
 	Severity RequirementSeverity
+	// Consequence is an operator-actionable description of what the absence means.
+	// Required when Severity is RequirementOptional so that CollectAbsentOptionalCapabilities
+	// can surface a human-readable impact rather than a bare store name.
+	// Ignored for RequirementRequired (the error message at startup is authoritative).
+	Consequence string
 }
 
 // HasStore reports whether the named store is non-nil in sm.
@@ -145,4 +174,36 @@ func ValidateStorageRequirements(sm *StorageManager, reqs []StoreRequirement) er
 			strings.Join(missing, "\n"))
 	}
 	return nil
+}
+
+// CollectAbsentOptionalCapabilities returns one AbsentCapability entry for each
+// optional store in reqs that is absent in sm. Required stores are ignored — their
+// absence is already a fatal startup error caught by ValidateStorageRequirements.
+//
+// providerName is the operator-facing provider label (e.g. "flatfile", "database")
+// reported in each entry's Provider field, so an operator can tell which backend
+// to switch to for the capability. Callers must not substitute
+// sm.GetProviderName(): that returns the internal composition name — "composite"
+// for the OSS flatfile+SQLite backend — which names no backend an operator can
+// actually choose between and would silently diverge from the provider named in
+// each requirement's own operator-facing Consequence text.
+//
+// Call this once at composition time alongside ValidateStorageRequirements and pass
+// the result to the administrative status surface. Never call it per request.
+func CollectAbsentOptionalCapabilities(sm *StorageManager, reqs []StoreRequirement, providerName string) []AbsentCapability {
+	var absent []AbsentCapability
+	for _, req := range reqs {
+		if req.Severity != RequirementOptional {
+			continue
+		}
+		if !sm.HasStore(req.Store) {
+			absent = append(absent, AbsentCapability{
+				Capability:  string(req.Store),
+				Subsystem:   req.Subsystem,
+				Consequence: req.Consequence,
+				Provider:    providerName,
+			})
+		}
+	}
+	return absent
 }

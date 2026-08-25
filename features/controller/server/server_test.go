@@ -554,6 +554,55 @@ func TestNew_ClusterModeRequiresClusterCapableProviders(t *testing.T) {
 	})
 }
 
+// TestAbsentCapabilities_ProviderMatchesStorageProviderName is the regression guard
+// for PR #3523 review finding #1: CollectAbsentOptionalCapabilities used to derive
+// its Provider field from sm.GetProviderName(), which any StorageManager built by
+// CreateOSSStorageManager always reports as the internal composition name
+// "composite" — not "flatfile", the label storageProviderName(cfg) bakes into the
+// same requirement's Consequence text and the label the operating-model docs
+// promise. That mismatch shipped a response where Provider and Consequence named
+// two different things for the same capability.
+//
+// Push (interfaces.StoreNamePush) is declared RequirementRequired in
+// collectActiveStorageRequirements as of Issue #3492 — every deployment shape
+// guarantees it, so it can no longer stand in for an absent-optional capability.
+// This test instead hand-constructs an optional StoreRequirement, mirroring
+// pkg/storage/interfaces/requirements_test.go, to exercise storageProviderName(cfg)
+// feeding interfaces.CollectAbsentOptionalCapabilities exactly as New() wires it at
+// composition time — rather than hand-constructing an AbsentCapability directly.
+func TestAbsentCapabilities_ProviderMatchesStorageProviderName(t *testing.T) {
+	cfg := &config.Config{
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: "/irrelevant-for-this-test",
+		},
+	}
+
+	reqs := []interfaces.StoreRequirement{
+		{
+			Subsystem:   "example",
+			Store:       interfaces.StoreNameTrigger,
+			Severity:    interfaces.RequirementOptional,
+			Consequence: "Example capability is degraded (provider: flatfile)",
+		},
+	}
+
+	sm := interfaces.NewStorageManagerFromStores(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.Equal(t, "composite", sm.GetProviderName(),
+		"precondition: NewStorageManagerFromStores always reports the internal composition name")
+
+	absent := interfaces.CollectAbsentOptionalCapabilities(sm, reqs, storageProviderName(cfg))
+
+	require.Len(t, absent, 1)
+	assert.Equal(t, string(interfaces.StoreNameTrigger), absent[0].Capability)
+	assert.Equal(t, "flatfile", absent[0].Provider,
+		"Provider must be the operator-facing storageProviderName(cfg) label")
+	assert.Contains(t, absent[0].Consequence, "flatfile",
+		"Consequence and Provider must name the same provider so the response is internally consistent")
+	assert.NotEqual(t, sm.GetProviderName(), absent[0].Provider,
+		"regression guard: Provider must never fall back to the StorageManager's internal \"composite\" composition name")
+}
+
 // TestLoadExistingCertificateManager_ClusterMode_UsesVaultNotLocalDisk is the
 // REQUIRED regression test for Issue #3130: a cluster-mode CA's private key is
 // never written to local disk (cert.NewManagerFromSecretStore keeps it

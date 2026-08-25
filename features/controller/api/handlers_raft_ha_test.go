@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // TestRaftStatus_AuthorizedRequest_Returns200 verifies that an authenticated request
@@ -241,4 +243,121 @@ func TestHAStatus_NonLeader_IsLeaderFalse_RaftIsLeaderFalse(t *testing.T) {
 		"is_leader must be false: non-leader node has no lease-backed authority (HasLeadership() = false)")
 	assert.False(t, resp.RaftIsLeader,
 		"raft_is_leader must be false: non-leader node is not Raft leader (IsRaftLeader() = false)")
+}
+
+// TestHAStatus_AbsentCapabilities_ReportedToAuthorizedCaller verifies that a
+// deployment missing an optional capability reports it in GET /api/v1/ha/status
+// with the capability name, subsystem, consequence, and provider — satisfying the
+// REQUIRED TEST from Issue #3409: "A deployment missing an optional capability
+// reports it; a deployment with all capabilities reports none."
+func TestHAStatus_AbsentCapabilities_ReportedToAuthorizedCaller(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Wire a SingleServerMode HA manager so handleHAStatus proceeds past the nil guard.
+	haManager := newHAManagerWithCAPEM(t, nil)
+	server.mu.Lock()
+	server.haManager = haManager
+	server.mu.Unlock()
+
+	// Wire one absent optional capability — the push subsystem's PushStore, the
+	// motivating case from Issue #3409 (cluster controller with no push-state store).
+	absent := []interfaces.AbsentCapability{
+		{
+			Capability:  "PushStore",
+			Subsystem:   "push",
+			Consequence: "Push-state is not persisted — in-flight config pushes may not resume after a controller restart (provider: flatfile)",
+			Provider:    "flatfile",
+		},
+	}
+	server.SetAbsentCapabilities(absent)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"ha:read-status"}, "test-tenant", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ha/status", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	w := httptest.NewRecorder()
+	server.GetRouter().ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp HAStatusResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+
+	require.Len(t, resp.AbsentCapabilities, 1,
+		"one absent optional capability must be reported")
+	got := resp.AbsentCapabilities[0]
+	assert.Equal(t, "PushStore", got.Capability)
+	assert.Equal(t, "push", got.Subsystem)
+	assert.Equal(t, "flatfile", got.Provider)
+	assert.NotEmpty(t, got.Consequence,
+		"consequence must be non-empty so the operator knows what the absence means")
+}
+
+// TestHAStatus_AllCapabilitiesPresent_ReportsNone verifies the complement: when no
+// optional capabilities are absent, the absent_capabilities field is either absent
+// or empty — the operator can read "no degradation" from the status output.
+func TestHAStatus_AllCapabilitiesPresent_ReportsNone(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Wire a SingleServerMode HA manager so handleHAStatus proceeds past the nil guard.
+	haManager := newHAManagerWithCAPEM(t, nil)
+	server.mu.Lock()
+	server.haManager = haManager
+	server.mu.Unlock()
+	// Do not call SetAbsentCapabilities — the default is nil/empty.
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"ha:read-status"}, "test-tenant", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ha/status", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	w := httptest.NewRecorder()
+	server.GetRouter().ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp HAStatusResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+
+	assert.Empty(t, resp.AbsentCapabilities,
+		"a deployment with all capabilities present must report an empty absent_capabilities list")
+}
+
+// TestHAStatus_AbsentCapabilities_NotExposedToUnauthenticatedCaller verifies that
+// absent-capability detail is NOT exposed to callers who do not hold the
+// ha:read-status permission — satisfying the REQUIRED TEST from Issue #3409:
+// "The information is not exposed to callers who should not see administrative
+// detail, with a negative case for the scoping."
+func TestHAStatus_AbsentCapabilities_NotExposedToUnauthenticatedCaller(t *testing.T) {
+	server := setupTestServer(t)
+
+	// Wire a SingleServerMode HA manager and absent capabilities — the handler
+	// would return capability detail if the caller were authenticated.
+	haManager := newHAManagerWithCAPEM(t, nil)
+	server.mu.Lock()
+	server.haManager = haManager
+	server.mu.Unlock()
+
+	absent := []interfaces.AbsentCapability{
+		{
+			Capability:  "PushStore",
+			Subsystem:   "push",
+			Consequence: "Push-state is not persisted — in-flight config pushes may not resume after a controller restart (provider: flatfile)",
+			Provider:    "flatfile",
+		},
+	}
+	server.SetAbsentCapabilities(absent)
+
+	// Unauthenticated request — no API key.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ha/status", nil)
+	w := httptest.NewRecorder()
+	server.GetRouter().ServeHTTP(w, req)
+
+	// Must be rejected at the auth layer, not leak any capability detail.
+	assert.NotEqual(t, http.StatusOK, w.Code,
+		"unauthenticated request must not receive 200 — the auth middleware must reject it")
+	body := w.Body.String()
+	assert.NotContains(t, body, "PushStore",
+		"absent capability names must not appear in unauthenticated responses")
+	assert.NotContains(t, body, "absent_capabilities",
+		"the absent_capabilities field must not appear in unauthenticated responses")
 }

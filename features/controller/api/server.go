@@ -53,6 +53,7 @@ import (
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops" // Auto-register SOPS provider
 	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -169,6 +170,7 @@ type Server struct {
 	tenantStore                    business.TenantStore                  // Issue #2839: tenant hierarchy for per-tenant assurance resolution
 	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
 	tenantCrossingStore            business.TenantCrossingStore          // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	absentCapabilities             []interfaces.AbsentCapability         // Issue #3409: declared-optional capabilities absent in this deployment
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -186,6 +188,15 @@ type Server struct {
 // membership state; safe to call concurrently with handleHealth.
 func (s *Server) SetDraining(draining bool) {
 	s.clusterDraining.Store(draining)
+}
+
+// SetAbsentCapabilities stores the declared-optional capabilities that are absent
+// in this deployment. Call once at composition time; the value is served verbatim
+// by GET /api/v1/ha/status (Issue #3409). Thread-safe.
+func (s *Server) SetAbsentCapabilities(caps []interfaces.AbsentCapability) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.absentCapabilities = caps
 }
 
 // APIKey represents an API key for external authentication
