@@ -109,14 +109,15 @@ const buildVersionCheck = "story-362-config-signing-enabled"
 // (Issue #3104, ADR-024 Amendment 1 §3). It wraps the module cache in production
 // and an in-memory stub in tests. Nil = feature disabled.
 type ObserveManifestProvider interface {
-	// ListObservableManifests returns all module manifests that declare at least
-	// one observe_when predicate and are eligible for Tier-2 dispatch.
+	// ListObservableManifests returns all approved module manifests that declare
+	// at least one observe_when predicate or have always_pull set, making them
+	// eligible for Tier-2 dispatch.
 	ListObservableManifests() ([]*modules.ModuleMetadata, error)
 }
 
 // moduleManifestAdapter adapts *modulecache.ModuleCache as
 // ObserveManifestProvider. Only approved bundles are returned; manifests with no
-// observe_when predicates are silently filtered out.
+// observe_when predicates and always_pull unset are silently filtered out.
 type moduleManifestAdapter struct {
 	cache *modulecache.ModuleCache
 }
@@ -137,7 +138,7 @@ func (p *moduleManifestAdapter) ListObservableManifests() ([]*modules.ModuleMeta
 		if getErr != nil {
 			continue
 		}
-		if b.Manifest != nil && len(b.Manifest.ObserveWhen) > 0 {
+		if b.Manifest != nil && (len(b.Manifest.ObserveWhen) > 0 || b.Manifest.AlwaysPull) {
 			result = append(result, b.Manifest)
 		}
 	}
