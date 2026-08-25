@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -1362,4 +1365,133 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 	// deleteTriggerFromStorage must succeed even with missing secret refs (WARN + continue).
 	err := mgr.deleteTriggerFromStorage(ctx, "t-del-partial")
 	assert.NoError(t, err, "deleteTriggerFromStorage must not fail on missing secret refs")
+}
+
+// ---------------------------------------------------------------------------
+// Store requirement declaration tests (Issue #3493)
+// ---------------------------------------------------------------------------
+
+// decliningTriggerProvider is a purpose-built StorageProvider that returns
+// ErrNotSupported for CreateTriggerStore while delegating every other method
+// to TestStorageProvider. It is a real provider that cannot supply workflow
+// trigger persistence — the condition StoreRequirements exists to catch at startup.
+type decliningTriggerProvider struct {
+	*TestStorageProvider
+}
+
+func (p *decliningTriggerProvider) Name() string { return "test-declining-trigger" }
+
+func (p *decliningTriggerProvider) CreateTriggerStore(_ map[string]interface{}) (business.TriggerStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+// clusterTriggerStoreConfig returns the database-provider configuration used by the
+// cluster-shape subtest, built from the same CFGMS_TEST_DB_* environment variables the
+// database provider's own tests use so it targets the CI Postgres service when one is
+// present and fails to connect (rather than failing to parse) when one is not.
+func clusterTriggerStoreConfig() map[string]interface{} {
+	port := "5432"
+	if v := os.Getenv("CFGMS_TEST_DB_PORT"); v != "" {
+		port = v
+	}
+	dbName := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_NAME"); v != "" {
+		dbName = v
+	}
+	dbUser := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_USER"); v != "" {
+		dbUser = v
+	}
+	dsn := fmt.Sprintf("host=localhost port=%s dbname=%s user=%s password=%s sslmode=disable",
+		port, dbName, dbUser, os.Getenv("CFGMS_TEST_DB_PASSWORD"))
+	return map[string]interface{}{"dsn": dsn}
+}
+
+// TestStoreRequirements_TriggerStoreAvailable_PassesValidation verifies that a
+// controller composed with workflow-trigger enabled and TriggerStore available
+// starts cleanly — in both the OSS (flatfile+SQLite) and database-provider shapes.
+// Both shapes supply TriggerStore (#3402 shipped it on the database provider),
+// so both must pass ValidateStorageRequirements with StoreRequirements.
+//
+// Each subtest builds its own StorageManager from the real provider registry for
+// the shape it names: two distinct compositions, not one object validated twice.
+func TestStoreRequirements_TriggerStoreAvailable_PassesValidation(t *testing.T) {
+	t.Run("OSS shape", func(t *testing.T) {
+		// The production OSS composition entry point: real flatfile provider for
+		// config/audit/steward, real SQLite provider for business stores.
+		sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "triggers.db"))
+		require.NoError(t, err, "OSS composition (flatfile + SQLite) must succeed")
+		t.Cleanup(func() { _ = sm.Close() })
+
+		require.True(t, sm.HasStore(interfaces.StoreNameTrigger),
+			"the OSS shape must supply TriggerStore — without it the assertion below is vacuous")
+		require.NoError(t, interfaces.ValidateStorageRequirements(sm, StoreRequirements),
+			"OSS controller with TriggerStore available must start cleanly")
+	})
+
+	t.Run("database shape", func(t *testing.T) {
+		provider, err := interfaces.GetStorageProvider("database")
+		require.NoError(t, err, "the database provider backing the cluster shape must be registered")
+
+		ts, createErr := provider.CreateTriggerStore(clusterTriggerStoreConfig())
+		// ErrNotSupported is the one outcome that reaches this gate: CreateClusterStorageManager
+		// translates it into a nil triggerStore field, and a nil field is the only input that
+		// makes ValidateStorageRequirements fail. Any other error aborts composition earlier.
+		// This assertion holds with or without a reachable Postgres, so the cluster shape's
+		// capability (#3402) is checked on every run, not only in the integration lane.
+		require.False(t, errors.Is(createErr, business.ErrNotSupported),
+			"the database provider must not decline TriggerStore — a declined store makes every cluster-mode controller fail this startup gate")
+		if createErr != nil {
+			// No Postgres reachable: a deployment condition, not a capability gap. The
+			// live composition below runs wherever the Postgres service exists.
+			t.Logf("no reachable Postgres for the live cluster composition (%v); capability assertion above still applied", createErr)
+			return
+		}
+		if c, ok := ts.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+
+		// Postgres is present: compose the real cluster StorageManager — a second,
+		// database-provider-backed manager distinct from the OSS one above.
+		sm, err := interfaces.CreateClusterStorageManager(
+			clusterTriggerStoreConfig()["dsn"].(string),
+			"test-hmac-key-for-workflow-trigger-requirement-tests-only",
+			nil,
+		)
+		require.NoError(t, err, "cluster composition against the database provider must succeed")
+		t.Cleanup(func() { _ = sm.Close() })
+
+		require.Equal(t, "database", sm.GetProviderName(),
+			"the cluster shape must be backed by the database provider, not flatfile or SQLite")
+		require.True(t, sm.HasStore(interfaces.StoreNameTrigger),
+			"the database shape must supply TriggerStore — without it the assertion below is vacuous")
+		require.NoError(t, interfaces.ValidateStorageRequirements(sm, StoreRequirements),
+			"database-provider controller with TriggerStore available must start cleanly")
+	})
+}
+
+// TestStoreRequirements_TriggerStoreDeclined_FailsStartup verifies that a controller
+// composed with workflow-trigger enabled but a provider that declines TriggerStore
+// fails startup with an error naming the workflow-trigger subsystem. The declining
+// condition is produced by a purpose-built test provider (not a mock) so the
+// test exercises the same code path as a real composition failure.
+func TestStoreRequirements_TriggerStoreDeclined_FailsStartup(t *testing.T) {
+	p := &decliningTriggerProvider{TestStorageProvider: NewTestStorageProvider()}
+	ts, declineErr := p.CreateTriggerStore(nil)
+	require.True(t, errors.Is(declineErr, business.ErrNotSupported),
+		"declining provider must return ErrNotSupported for CreateTriggerStore")
+	require.Nil(t, ts)
+
+	// Compose a StorageManager as production code does: ErrNotSupported → nil TriggerStore field.
+	sm := interfaces.NewStorageManagerFromStores(
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, ts, nil,
+	)
+
+	err := interfaces.ValidateStorageRequirements(sm, StoreRequirements)
+	require.Error(t, err,
+		"workflow-trigger's required TriggerStore must block startup when the provider declines it")
+	assert.Contains(t, err.Error(), "workflow-trigger",
+		"error must name the declaring subsystem")
+	assert.Contains(t, err.Error(), string(interfaces.StoreNameTrigger),
+		"error must name the missing store")
 }

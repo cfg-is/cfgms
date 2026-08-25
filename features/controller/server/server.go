@@ -411,8 +411,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// the enabled subsystems. A missing required store fails closed here — at startup,
 	// before anything tries to use the store — rather than silently producing a nil
 	// that causes a 503 at request time (issue #3400 regression guard).
-	// Registration's declarations are wired (#3491) and push (#3492) is wired;
-	// workflow-trigger (#3493) is still pending under epic #3406.
+	// Registration (#3491) and push (#3492) are wired; workflow-trigger (#3493)
+	// is now wired too — all three subsystems from epic #3406 declare their
+	// required stores below.
 	activeReqs := collectActiveStorageRequirements(cfg)
 	if reqErr := interfaces.ValidateStorageRequirements(storageManager, activeReqs); reqErr != nil {
 		return nil, reqErr
@@ -3790,13 +3791,13 @@ func resolveRegistrationWorkflow(cfg *config.Config) string {
 // both require PendingRegistrationStore, and both are active only when the
 // effective registration workflow is "manual-review". Under any other workflow
 // neither runs, so neither imposes a requirement. Push (#3492) is wired
-// unconditionally via pushStoreRequirements.
-//
-// Deferred: tracked in #3493 (workflow-trigger) — the remaining subsystem-adoption
-// story under epic #3406 that adds its declaration here.
+// unconditionally via pushStoreRequirements. Workflow-trigger (#3493) is wired
+// unconditionally via workflowtrigger.StoreRequirements — the subsystem is
+// always active when the controller starts.
 func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequirement {
 	var reqs []interfaces.StoreRequirement
 	reqs = append(reqs, pushStoreRequirements...)
+	reqs = append(reqs, workflowtrigger.StoreRequirements...)
 
 	if resolveRegistrationWorkflow(cfg) == registrationWorkflowManualReview {
 		// The approval hook persists incoming requests; the expiry job ages them out.
