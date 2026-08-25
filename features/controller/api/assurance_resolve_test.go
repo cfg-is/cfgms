@@ -365,10 +365,10 @@ func TestResolveAssurance_UnknownPermission_FoundByOverride(t *testing.T) {
 // matching the rename would silently drop a deliberately raised bar — the fail-OPEN
 // direction. These tests pin that behaviour.
 
-// TestResolveAssurance_LegacyWebAccountOverride_PreservesPresence verifies that a stored
+// TestResolveAssurance_LegacyAccountOverride_PreservesPresence verifies that a stored
 // override keyed by the pre-rename ID "web-account:delete" still applies its
 // RequireUserPresence requirement to the renamed permission "account:delete".
-func TestResolveAssurance_LegacyWebAccountOverride_PreservesPresence(t *testing.T) {
+func TestResolveAssurance_LegacyAccountOverride_PreservesPresence(t *testing.T) {
 	apStore := newTestAssurancePolicyStore()
 	require.NoError(t, apStore.SetPolicy(context.Background(), &business.AssurancePolicy{
 		TenantID: "root/child",

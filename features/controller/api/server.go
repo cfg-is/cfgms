@@ -84,7 +84,7 @@ type Server struct {
 	haManager                      *ha.Manager
 	apiKeys                        map[string]*APIKey                    // In-memory cache for fast lookup
 	secretStore                    secretsif.SecretStore                 // M-AUTH-1: Central secrets provider for API keys
-	webAccounts                    map[string]*webAccount                // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
+	accounts                       map[string]*account                   // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
 	registrationTokenStore         registration.Store                    // Registration token store for steward registration
 	corsConfig                     *CORSConfig                           // CORS configuration
 	signerCertSerial               string                                // Story #378: Serial of cert used for config signing
@@ -341,12 +341,12 @@ func New(
 		logger.Warn("Startup scan for privileged API keys failed; continuing", "error", err)
 	}
 
-	// Issue #3574: Scan for web accounts whose stored permissions contain IDs that
+	// Issue #3574: Scan for accounts whose stored permissions contain IDs that
 	// isKnownPermission no longer recognizes (stale grants after the permission-ID
 	// rename in #3574). Those grants match nothing hasPermission will honor; this
 	// log makes the break observable to operators instead of silently denying requests.
-	if err := server.scanWebAccountsForStalePermissions(context.Background()); err != nil {
-		logger.Warn("Startup scan for web accounts with stale permissions failed; continuing", "error", err)
+	if err := server.scanAccountsForStalePermissions(context.Background()); err != nil {
+		logger.Warn("Startup scan for accounts with stale permissions failed; continuing", "error", err)
 	}
 
 	// Seed test API keys only when explicitly requested via environment variable.
@@ -2025,7 +2025,7 @@ func (s *Server) configureCORS() {
 
 // envAllowEphemeralSecrets is the dev/test-only override that downgrades the
 // ephemeral-secret-store hard fail to a WARN. Never set in production: an
-// ephemeral store loses all passkeys and web-account records on controller
+// ephemeral store loses all passkeys and account records on controller
 // restart, locking out every human account (ADR-021 Amendment 1).
 //
 // Scope: this flag governs the storage-location decision only. Store creation
@@ -2182,7 +2182,7 @@ func resolveSecretsBackend(storage *config.StorageConfig, secretsPath string) (m
 		if isDatabaseDSNEphemeral(dsn) {
 			return storage.Config, fmt.Sprintf(
 				"database DSN %q is ephemeral (in-memory or tmp-path SQLite). "+
-					"Passkeys and web-account records will be lost on controller restart. "+
+					"Passkeys and account records will be lost on controller restart. "+
 					"Fix: use a persistent database DSN. "+
 					"Dev/test only: set %s=true to override.",
 				dsn, envAllowEphemeralSecrets)
@@ -2210,7 +2210,7 @@ func resolveSecretsBackend(storage *config.StorageConfig, secretsPath string) (m
 		case isEphemeralSQLitePath(path):
 			return backend, fmt.Sprintf(
 				"sqlite database path %q is ephemeral (in-memory, or under a directory wiped on "+
-					"reboot). Passkeys and web-account records will be lost on controller restart. "+
+					"reboot). Passkeys and account records will be lost on controller restart. "+
 					"Fix: set storage.sqlite_path to a persistent file outside %s. "+
 					"Dev/test only: set %s=true to override.",
 				path, os.TempDir(), envAllowEphemeralSecrets)
@@ -2225,7 +2225,7 @@ func resolveSecretsBackend(storage *config.StorageConfig, secretsPath string) (m
 		if isEphemeralSecretsPath(secretsPath) {
 			return backend, fmt.Sprintf(
 				"secrets path %q is under an ephemeral directory (%s). "+
-					"Passkeys and web-account records stored here will be lost on "+
+					"Passkeys and account records stored here will be lost on "+
 					"controller restart, locking out all human accounts. "+
 					"Fix: set CFGMS_SECRETS_REPO_PATH to a persistent directory outside %s, "+
 					"or use storage.provider: database. "+
@@ -2245,7 +2245,7 @@ func resolveSecretsBackend(storage *config.StorageConfig, secretsPath string) (m
 // — a secrets path under a tmp directory, /dev/shm or /run/user, an in-memory or
 // tmp-path database DSN, or a sqlite backend with a missing/in-memory/tmp-path
 // database file — because a controller restart would wipe every passkey and
-// web-account record, locking out all human accounts (ADR-021 Amendment 1).
+// account record, locking out all human accounts (ADR-021 Amendment 1).
 // Set CFGMS_ALLOW_EPHEMERAL_SECRETS=true to downgrade that rejection to a WARN
 // for dev/test environments only; store creation and health-check failures stay
 // fail-closed regardless.
@@ -2273,7 +2273,7 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	allowEphemeral := strings.EqualFold(strings.TrimSpace(os.Getenv(envAllowEphemeralSecrets)), "true")
 
 	// Guard: fail closed on ephemeral secret storage (ADR-021 Amendment 1).
-	// A controller restart wipes passkeys and web-account records stored in
+	// A controller restart wipes passkeys and account records stored in
 	// ephemeral locations, locking out all human accounts. The decision is made
 	// from the storage configuration actually handed to the secrets backend, so
 	// no provider can pass the guard on a value it never reads.
@@ -2285,7 +2285,7 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 		}
 		logger.Warn("DANGER: secret store is using ephemeral storage",
 			"reason", logging.SanitizeLogValue(ephemeralReason),
-			"risk", "passkeys and web-account records will be lost on controller restart; all human accounts will be locked out",
+			"risk", "passkeys and account records will be lost on controller restart; all human accounts will be locked out",
 			"override", envAllowEphemeralSecrets+"=true")
 	}
 
@@ -2308,7 +2308,7 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	}
 
 	// Verify store is healthy. Fail closed unconditionally: a broken store at
-	// startup means passkeys and web-account records are inaccessible. This is
+	// startup means passkeys and account records are inaccessible. This is
 	// a separate control from the ephemeral-path guard and is deliberately not
 	// governed by envAllowEphemeralSecrets — that flag only downgrades the
 	// ephemeral-location rejection, and must never disable store-health
@@ -2376,23 +2376,23 @@ func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
 	return nil
 }
 
-// Issue #3574: scanWebAccountsForStalePermissions enumerates every web account in the secret
+// Issue #3574: scanAccountsForStalePermissions enumerates every account in the secret
 // store and logs a warning for any account whose stored Permissions slice contains an ID that
 // isKnownPermission no longer recognizes. Stale grants (permission IDs renamed or removed)
 // silently match nothing hasPermission will honor; this scan makes the break observable at
 // startup so operators can update affected accounts rather than silently seeing all requests
 // denied.
-func (s *Server) scanWebAccountsForStalePermissions(ctx context.Context) error {
+func (s *Server) scanAccountsForStalePermissions(ctx context.Context) error {
 	if s.secretStore == nil {
 		return nil
 	}
 	secrets, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
 		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
+			secretsif.MetadataKeySecretType: accountSecretType,
 		},
 	})
 	if err != nil {
-		s.logger.Warn("Startup scan: failed to list web accounts from secret store", "error", err)
+		s.logger.Warn("Startup scan: failed to list accounts from secret store", "error", err)
 		return err
 	}
 	for _, meta := range secrets {
@@ -2404,7 +2404,7 @@ func (s *Server) scanWebAccountsForStalePermissions(ctx context.Context) error {
 		}
 		if len(stale) > 0 {
 			s.logger.Warn(
-				"Web account holds unrecognized permission IDs (stale after rename); "+
+				"Account holds unrecognized permission IDs (stale after rename); "+
 					"those grants match nothing — update the account's permissions",
 				"username", logging.SanitizeLogValue(meta.Metadata["username"]),
 				"tenant_id", logging.SanitizeLogValue(meta.TenantID),

@@ -111,7 +111,7 @@ func TestPermissionAssurance_CatastrophicForwardDeclarations(t *testing.T) {
 // TestPermissionAssurance_ApproveByCIDRIsGrantable verifies that
 // registration:approve-by-cidr is in the knownPermissions allow-list (Issue #2969).
 // Splitting approve-by-cidr out of registration:approve is only usable if the new
-// permission can actually be granted: handleCreateWebAccount and handleCreateAPIKey
+// permission can actually be granted: handleCreateAccount and handleCreateAPIKey
 // reject any permission ID absent from that list with 400 INVALID_PERMISSION, which
 // would make the web console's CIDR approval flow ungrantable.
 func TestPermissionAssurance_ApproveByCIDRIsGrantable(t *testing.T) {

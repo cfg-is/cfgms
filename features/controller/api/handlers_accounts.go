@@ -40,25 +40,25 @@ import (
 var ErrInvalidWebCredential = errors.New("invalid credentials")
 
 const (
-	// webAccountSecretType is the distinct MetadataKeySecretType value for
+	// accountSecretType is the distinct MetadataKeySecretType value for
 	// web-admin account records in the central secret store.
-	webAccountSecretType = "web_account"
+	accountSecretType = "account"
 
-	// webAccountKeyPrefix namespaces web-account records in the secret store,
+	// accountKeyPrefix namespaces account records in the secret store,
 	// mirroring how API-key records use their hash as the key.
-	webAccountKeyPrefix = "web-account-"
+	accountKeyPrefix = "account-"
 
 	// enrollmentTokenBytes is the random source length for enrollment magic links.
 	// 20 bytes = 160 bits of entropy — exceeds the >=128-bit requirement (Issue #2974).
 	enrollmentTokenBytes = 20
 )
 
-// webUsernameRegex keeps usernames log- and path-safe (security A4.1): usernames
+// usernameRegex keeps usernames log- and path-safe (security A4.1): usernames
 // appear in DELETE /api/v1/accounts/{username} URL paths, which are logged.
 // 3..64 characters, starting alphanumeric; then alphanumerics, '.', '_', '-'.
-var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
+var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 
-// webAccount is a web-admin account record.
+// account is a web-admin account record.
 // Accounts carry the same principal fields the session path builds (Principal):
 // they are RBAC-equivalent to API-key principals (ADR-014 §7 parity), NOT
 // implicit global admins.
@@ -71,10 +71,10 @@ var webUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 // These are public keys — they are stored in the same secrets-store record as the
 // account identity (one persistence path per account). See WebAuthnCredential.
 //
-// Disabled: true prevents login via VerifyWebCredential regardless of valid
+// Disabled: true prevents login via VerifyCredential regardless of valid
 // credentials. It does not remove RBAC role assignments or WebAuthn credentials
 // (Issue #3126: it is a login gate, not a data-removal operation).
-type webAccount struct {
+type account struct {
 	ID          string
 	Username    string
 	TenantID    string
@@ -92,7 +92,7 @@ type webAccount struct {
 	EnrollmentLinkRevoked   bool
 }
 
-// WebAccountRequest is the POST /api/v1/accounts body. The same endpoint
+// AccountRequest is the POST /api/v1/accounts body. The same endpoint
 // creates a new account or resets an existing one (upsert): on reset, omitted
 // tenant_id/permissions are retained from the existing record.
 //
@@ -106,7 +106,7 @@ type webAccount struct {
 // every registered passkey, so that a fresh enrollment magic link may be minted.
 // It is the only way to obtain a new link for an account that already holds a
 // passkey — Decision 3 states "no magic link is involved after the first passkey".
-type WebAccountRequest struct {
+type AccountRequest struct {
 	Username         string   `json:"username"`
 	TenantID         string   `json:"tenant_id,omitempty"`
 	RootScope        bool     `json:"root_scope,omitempty"` // Issue #2919: explicit root grant
@@ -114,11 +114,11 @@ type WebAccountRequest struct {
 	ResetCredentials bool     `json:"reset_credentials,omitempty"` // Issue #2974: ADR-021 Am.1 Decision 4
 }
 
-// WebAccountInfo is the response shape for account list, get-one, and update. It never
+// AccountInfo is the response shape for account list, get-one, and update. It never
 // carries any secret material. HasOutstandingEnrollmentLink is true when an
 // unredeemed, non-expired, non-revoked link exists for the account (Issue #2974).
 // Disabled is true when the account has been administratively disabled (Issue #3126).
-type WebAccountInfo struct {
+type AccountInfo struct {
 	ID                           string    `json:"id"`
 	Username                     string    `json:"username"`
 	TenantID                     string    `json:"tenant_id"`
@@ -129,51 +129,51 @@ type WebAccountInfo struct {
 	HasOutstandingEnrollmentLink bool      `json:"has_outstanding_enrollment_link"` // Issue #2974
 }
 
-// WebAccountUpdateRequest is the PUT /api/v1/accounts/{username} body (Issue #3126).
+// AccountUpdateRequest is the PUT /api/v1/accounts/{username} body (Issue #3126).
 // All fields are optional — omitted fields retain their current values, allowing
 // independent update of permissions, disabled state, and credentials without
 // requiring a full account record. A nil pointer means "not provided; keep
 // existing value".
 //
-// ResetCredentials is the update-side equivalent of WebAccountRequest.ResetCredentials
+// ResetCredentials is the update-side equivalent of AccountRequest.ResetCredentials
 // (ADR-021 Amendment 1 Decision 4): accounts are passkey-only, so "reset the
 // password" re-provisions the account to the zero-authenticator state and mints
-// a fresh enrollment magic link, exactly mirroring handleCreateWebAccount's
+// a fresh enrollment magic link, exactly mirroring handleCreateAccount's
 // reset path. It is independent of Permissions and Disabled.
-type WebAccountUpdateRequest struct {
+type AccountUpdateRequest struct {
 	Permissions      *[]string `json:"permissions"`
 	Disabled         *bool     `json:"disabled"`
 	ResetCredentials bool      `json:"reset_credentials,omitempty"`
 }
 
-// WebAccountUpdateResponse is returned by PUT /api/v1/accounts/{username}.
+// AccountUpdateResponse is returned by PUT /api/v1/accounts/{username}.
 // EnrollmentMagicLink is present only when reset_credentials was set to true —
 // the same single-use, TTL-bounded token minted by the create/reset path
 // (Issue #2974); absent for all other update shapes since no new link is minted.
-type WebAccountUpdateResponse struct {
-	WebAccountInfo
+type AccountUpdateResponse struct {
+	AccountInfo
 	EnrollmentMagicLink string `json:"enrollment_magic_link,omitempty"`
 }
 
-// WebAccountCreateResponse is returned by POST /api/v1/accounts only.
+// AccountCreateResponse is returned by POST /api/v1/accounts only.
 // EnrollmentMagicLink is the single-use, TTL-bounded token shown exactly once
 // to the admin for out-of-band handoff (Issue #2974). It is never stored in
 // plaintext and is not present in list or subsequent responses. It is absent
 // when no link was minted — an account that already holds a passkey gets none
 // (ADR-021 Amendment 1 Decision 3).
-type WebAccountCreateResponse struct {
-	WebAccountInfo
+type AccountCreateResponse struct {
+	AccountInfo
 	// EnrollmentMagicLink is the raw token (>=128-bit random, hex-encoded).
 	// Shown once in the admin UI for copy-to-clipboard; not logged or audited.
 	EnrollmentMagicLink string `json:"enrollment_magic_link,omitempty"`
 }
 
-// webAccountStorageTenant returns the tenant key to use in the secret store
-// for a web account. Root-scoped accounts (logicalTenantID == "") are stored
+// accountStorageTenant returns the tenant key to use in the secret store
+// for an account. Root-scoped accounts (logicalTenantID == "") are stored
 // under the system sentinel because the secret store requires non-empty TenantID.
 // The metadata field "root_scope" is the authoritative indicator; this mapping is
 // only for storage routing (Issue #2919).
-func webAccountStorageTenant(logicalTenantID string) string {
+func accountStorageTenant(logicalTenantID string) string {
 	if logicalTenantID == "" {
 		return audit.SystemTenantID
 	}
@@ -182,8 +182,8 @@ func webAccountStorageTenant(logicalTenantID string) string {
 
 // --- input validation (security A4.1) ---
 
-func validateWebUsername(username string) error {
-	if !webUsernameRegex.MatchString(username) {
+func validateUsername(username string) error {
+	if !usernameRegex.MatchString(username) {
 		return fmt.Errorf("username must be 3-64 characters: alphanumerics, '.', '_', '-', starting with an alphanumeric")
 	}
 	return nil
@@ -191,41 +191,41 @@ func validateWebUsername(username string) error {
 
 // --- account store: in-memory cache over the central secret store ---
 
-// webAccountStoreKey returns the secret-store lookup key for a web account.
+// accountStoreKey returns the secret-store lookup key for an account.
 // The key is an identifier (prefix + username), never credential material.
-func webAccountStoreKey(username string) string {
-	return webAccountKeyPrefix + username
+func accountStoreKey(username string) string {
+	return accountKeyPrefix + username
 }
 
-// cacheWebAccount inserts acct into the in-memory cache (lazy-init under s.mu).
-func (s *Server) cacheWebAccount(acct *webAccount) {
+// cacheAccount inserts acct into the in-memory cache (lazy-init under s.mu).
+func (s *Server) cacheAccount(acct *account) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.webAccounts == nil {
-		s.webAccounts = make(map[string]*webAccount)
+	if s.accounts == nil {
+		s.accounts = make(map[string]*account)
 	}
-	s.webAccounts[acct.Username] = acct
+	s.accounts[acct.Username] = acct
 }
 
-// getWebAccount returns the account for username, re-verifying the disabled status
+// getAccount returns the account for username, re-verifying the disabled status
 // from the durable store on every call — including a cache hit — so that a disable
 // performed on another controller node is honoured on this node's very next request
 // (Issue #3311). On a cache hit the store is queried; if the store has no entry (e.g.
 // the account was injected into the cache for testing without a backing store record),
 // the cached value is returned so callers are not surprised by a sudden nil.
-func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccount, error) {
+func (s *Server) getAccount(ctx context.Context, username string) (*account, error) {
 	s.mu.RLock()
-	cached := s.webAccounts[username]
+	cached := s.accounts[username]
 	s.mu.RUnlock()
 	if cached == nil {
-		return s.loadWebAccountFromStore(ctx, username, "")
+		return s.loadAccountFromStore(ctx, username, "")
 	}
 	// Issue #3311: Re-verify from the durable store on every cache hit so a status
 	// change written by another controller node propagates on this node's very next
 	// request. If the store returns nil (no matching record — e.g. account injected
 	// into cache for tests but not persisted, or concurrently deleted), fall back to
 	// the cached value so behaviour is equivalent to the pre-fix cache-hit path.
-	fresh, err := s.loadWebAccountFromStore(ctx, username, "")
+	fresh, err := s.loadAccountFromStore(ctx, username, "")
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccoun
 	return cached, nil
 }
 
-// getWebAccountByID resolves the durable principal ID stored in a web session
+// getAccountByID resolves the durable principal ID stored in a web session
 // back to its account. Session principal IDs are deliberately stable across
 // account updates, so authentication middleware must not treat the ID
 // as a username when loading permissions and tenant scope.
@@ -243,7 +243,7 @@ func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccoun
 // Issue #3311: On a cache hit the disabled status is re-verified against the
 // durable store, so a disable on another controller node propagates on this
 // node's very next request. If the store returns no matching record (e.g. account
-// was injected via cacheWebAccount without a backing store record, or was
+// was injected via cacheAccount without a backing store record, or was
 // concurrently deleted), the cached value is returned so behaviour matches the
 // pre-fix cache-hit path.
 //
@@ -251,10 +251,10 @@ func (s *Server) getWebAccount(ctx context.Context, username string) (*webAccoun
 // re-verified record is only trusted when its ID still matches the requested
 // principal. A username that has been deleted and recreated resolves to a
 // different principal, which must never inherit the requesting session's identity.
-func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*webAccount, error) {
+func (s *Server) getAccountByID(ctx context.Context, principalID string) (*account, error) {
 	s.mu.RLock()
-	var cached *webAccount
-	for _, acct := range s.webAccounts {
+	var cached *account
+	for _, acct := range s.accounts {
 		if acct != nil && acct.ID == principalID {
 			cached = acct
 			break
@@ -266,13 +266,13 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 		// Issue #3311: Re-verify from the durable store on every cache hit.
 		// Issue #3347: Scope the first lookup to the cached account's tenant so only
 		// that tenant's secrets are decrypted (the hot path).
-		fresh, err := s.loadWebAccountFromStore(ctx, cached.Username, webAccountStorageTenant(cached.TenantID))
+		fresh, err := s.loadAccountFromStore(ctx, cached.Username, accountStorageTenant(cached.TenantID))
 		if err != nil {
 			return nil, err
 		}
 		if fresh == nil {
 			// Scoped lookup returned nil. Two causes are possible:
-			//   a) No backing store record (account injected via cacheWebAccount for tests,
+			//   a) No backing store record (account injected via cacheAccount for tests,
 			//      or concurrently deleted): return the cached value as before.
 			//   b) Account recreated under a different tenant: the stale cache entry must
 			//      NOT be returned — returning it would hand an orphaned session the old
@@ -280,7 +280,7 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 			// Distinguish by a follow-up unscoped reload. If the unscoped lookup also
 			// returns nil (case a), return the cached account. If it finds a record, fall
 			// through to the identity check below (case b).
-			fresh, err = s.loadWebAccountFromStore(ctx, cached.Username, "")
+			fresh, err = s.loadAccountFromStore(ctx, cached.Username, "")
 			if err != nil {
 				return nil, err
 			}
@@ -298,7 +298,7 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 		// delete-and-recreate of the same username therefore yields a record whose
 		// ID differs from the one this session holds. Returning it would hand the
 		// caller a different principal's permissions and tenant scope, so the
-		// mismatched record is discarded here. loadWebAccountFromStore has already
+		// mismatched record is discarded here. loadAccountFromStore has already
 		// replaced the stale username-keyed cache entry with what it just read, so
 		// nothing stale is left behind; fall through to the authoritative
 		// ID-filtered store lookup, which reports the orphaned principal as absent.
@@ -308,56 +308,56 @@ func (s *Server) getWebAccountByID(ctx context.Context, principalID string) (*we
 		return nil, nil
 	}
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
-		Tags: []string{"web-account"},
+		Tags: []string{"account"},
 		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
+			secretsif.MetadataKeySecretType: accountSecretType,
 			"id":                            principalID,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list web accounts by principal ID: %w", err)
+		return nil, fmt.Errorf("failed to list accounts by principal ID: %w", err)
 	}
 	if len(metas) == 0 {
 		return nil, nil
 	}
 	username := metas[0].Metadata["username"]
 	if username == "" {
-		return nil, fmt.Errorf("web account for principal ID is missing username metadata")
+		return nil, fmt.Errorf("account for principal ID is missing username metadata")
 	}
-	return s.loadWebAccountFromStore(ctx, username, metas[0].TenantID)
+	return s.loadAccountFromStore(ctx, username, metas[0].TenantID)
 }
 
-// loadWebAccountFromStore reloads an account record from the central secret store
+// loadAccountFromStore reloads an account record from the central secret store
 // and re-caches it. The tenant is not known at lookup time, so the record is
 // located by metadata filter.
 //
-// All web-account fields are stored in the ListSecrets metadata map; the secret
+// All account fields are stored in the ListSecrets metadata map; the secret
 // Value is always empty (Issue #2993 passkey-only). Reading from the metadata
 // returned by ListSecrets avoids a second GetSecret round-trip and works correctly
 // for multi-level tenant IDs (e.g., root/msp-a/client-2) where GetSecret's
 // single-slash key splitting would produce the wrong TenantID. ListSecrets also
 // bypasses the SOPS in-process cache, so the result always reflects the latest
 // on-disk state — which is the property required for cross-node propagation (Issue #3311).
-func (s *Server) loadWebAccountFromStore(ctx context.Context, username, tenantHint string) (*webAccount, error) {
+func (s *Server) loadAccountFromStore(ctx context.Context, username, tenantHint string) (*account, error) {
 	if s.secretStore == nil {
 		return nil, nil
 	}
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
 		TenantID: tenantHint,
-		Tags:     []string{"web-account"},
+		Tags:     []string{"account"},
 		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
+			secretsif.MetadataKeySecretType: accountSecretType,
 			"username":                      username,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list web accounts: %w", err)
+		return nil, fmt.Errorf("failed to list accounts: %w", err)
 	}
 	if len(metas) == 0 {
 		return nil, nil
 	}
 	m := metas[0]
-	acct := &webAccount{
+	acct := &account{
 		ID:          m.Metadata["id"],
 		Username:    m.Metadata["username"],
 		TenantID:    m.TenantID,
@@ -387,22 +387,22 @@ func (s *Server) loadWebAccountFromStore(ctx context.Context, username, tenantHi
 			acct.EnrollmentLinkExpiresAt = t
 		}
 	}
-	s.cacheWebAccount(acct)
+	s.cacheAccount(acct)
 	return acct, nil
 }
 
-// persistWebAccount writes the account record through the central pkg/secrets seam
+// persistAccount writes the account record through the central pkg/secrets seam
 // (same seam as API keys — handlers_apikeys.go). WebAuthn credentials (public keys)
 // are serialized to JSON in the metadata.
-func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, createdBy string) error {
+func (s *Server) persistAccount(ctx context.Context, acct *account, createdBy string) error {
 	meta := map[string]string{
-		secretsif.MetadataKeySecretType: webAccountSecretType,
+		secretsif.MetadataKeySecretType: accountSecretType,
 		"id":                            acct.ID,
 		"username":                      acct.Username,
 		"permissions":                   serializePermissions(acct.Permissions),
 		"created_at":                    acct.CreatedAt.UTC().Format(time.RFC3339),
 	}
-	// Issue #2919: mark root-scoped accounts so loadWebAccountFromStore can restore
+	// Issue #2919: mark root-scoped accounts so loadAccountFromStore can restore
 	// TenantID="" on reload (the store holds them under the "system" sentinel tenant).
 	if acct.RootScope {
 		meta["root_scope"] = "true"
@@ -428,12 +428,12 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 		}
 	}
 	secretReq := &secretsif.SecretRequest{
-		Key:         webAccountStoreKey(acct.Username),
-		Value:       "",                                     // no secret value — accounts are passkey-only (Issue #2993)
-		TenantID:    webAccountStorageTenant(acct.TenantID), // Issue #2919: sentinel for root-scope
+		Key:         accountStoreKey(acct.Username),
+		Value:       "",                                  // no secret value — accounts are passkey-only (Issue #2993)
+		TenantID:    accountStorageTenant(acct.TenantID), // Issue #2919: sentinel for root-scope
 		CreatedBy:   createdBy,
 		Description: "web admin account",
-		Tags:        []string{"web-account"},
+		Tags:        []string{"account"},
 		Metadata:    meta,
 	}
 	return s.secretStore.StoreSecret(ctx, secretReq)
@@ -441,12 +441,12 @@ func (s *Server) persistWebAccount(ctx context.Context, acct *webAccount, create
 
 // --- audit (founder condition 2) ---
 
-// emitWebAccountAudit records a web-account lifecycle audit event with the
+// emitAccountAudit records an account lifecycle audit event with the
 // sanitized username and the acting admin principal. No-op when auditManager is
 // nil. In-package precedent: emitDecommissionAudit (handlers_stewards.go).
 // details is optional extra context (delivery_method, etc.); the raw token is
 // NEVER a key or value here (Issue #2974 audit requirement).
-func (s *Server) emitWebAccountAudit(ctx context.Context, action, tenantID, actingPrincipalID, username string, details map[string]interface{}) {
+func (s *Server) emitAccountAudit(ctx context.Context, action, tenantID, actingPrincipalID, username string, details map[string]interface{}) {
 	if s.auditManager == nil {
 		return
 	}
@@ -458,21 +458,21 @@ func (s *Server) emitWebAccountAudit(ctx context.Context, action, tenantID, acti
 		Type(business.AuditEventSystemAccess).
 		Action(action).
 		User(actingPrincipalID, business.AuditUserTypeHuman).
-		Resource("web-account", logging.SanitizeLogValue(username), "").
+		Resource("account", logging.SanitizeLogValue(username), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)
 	if len(details) > 0 {
 		b = b.Details(details)
 	}
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit web-account audit event",
+		s.logger.Warn("Failed to emit account audit event",
 			"action", action,
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
-// getWebAccountByEnrollmentToken finds the web account whose enrollment token hash
+// getAccountByEnrollmentToken finds the account whose enrollment token hash
 // matches hash(rawToken). The scan is necessary because tokens identify accounts —
 // the lookup direction is token→account, not account→token. Cache is checked first;
 // if not found there, the durable store is scanned.
@@ -480,13 +480,13 @@ func (s *Server) emitWebAccountAudit(ctx context.Context, action, tenantID, acti
 // Returns (nil, nil) when no account with the given token exists. The caller MUST
 // call verifyEnrollmentToken on the returned account to confirm validity, expiry, and
 // revocation status — the store lookup finds by hash only and does not check liveness.
-func (s *Server) getWebAccountByEnrollmentToken(ctx context.Context, rawToken string) (*webAccount, error) {
+func (s *Server) getAccountByEnrollmentToken(ctx context.Context, rawToken string) (*account, error) {
 	tokenHash := hashEnrollmentToken(rawToken)
 
-	// Check the in-memory cache first — the fresh handler path uses loadWebAccountFromStore
+	// Check the in-memory cache first — the fresh handler path uses loadAccountFromStore
 	// for CAS purposes, but begin can use the cache for a fast validity check.
 	s.mu.RLock()
-	for _, acct := range s.webAccounts {
+	for _, acct := range s.accounts {
 		if acct != nil && acct.EnrollmentLinkHash == tokenHash {
 			s.mu.RUnlock()
 			return acct, nil
@@ -502,7 +502,7 @@ func (s *Server) getWebAccountByEnrollmentToken(ctx context.Context, rawToken st
 	// here; the caller checks validity separately via verifyEnrollmentToken.
 	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
 		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
+			secretsif.MetadataKeySecretType: accountSecretType,
 			"enrollment_link_hash":          tokenHash,
 		},
 	})
@@ -516,7 +516,7 @@ func (s *Server) getWebAccountByEnrollmentToken(ctx context.Context, rawToken st
 	if username == "" {
 		return nil, fmt.Errorf("account matched by enrollment token is missing username metadata")
 	}
-	return s.loadWebAccountFromStore(ctx, username, "")
+	return s.loadAccountFromStore(ctx, username, "")
 }
 
 // --- enrollment magic link (Issue #2974) ---
@@ -545,7 +545,7 @@ func mintEnrollmentToken() (rawToken, tokenHash string, err error) {
 // enrollmentLinkOutstanding reports whether acct has an outstanding (non-expired,
 // non-revoked) enrollment link. This is exposed in list responses so admins can see
 // which accounts are still awaiting first-passkey enrollment.
-func enrollmentLinkOutstanding(acct *webAccount) bool {
+func enrollmentLinkOutstanding(acct *account) bool {
 	return acct.EnrollmentLinkHash != "" &&
 		!acct.EnrollmentLinkRevoked &&
 		!acct.EnrollmentLinkExpiresAt.IsZero() &&
@@ -556,7 +556,7 @@ func enrollmentLinkOutstanding(acct *webAccount) bool {
 // against the stored hash. Returns true only when the presented token is valid,
 // unexpired, and not revoked — satisfying the constant-time compare requirement.
 // Called at redemption time (#2966) when the recipient presents the link.
-func verifyEnrollmentToken(acct *webAccount, presentedRaw string) bool {
+func verifyEnrollmentToken(acct *account, presentedRaw string) bool {
 	if acct == nil || !enrollmentLinkOutstanding(acct) {
 		return false
 	}
@@ -567,18 +567,18 @@ func verifyEnrollmentToken(acct *webAccount, presentedRaw string) bool {
 
 // --- handlers (Tier-3: admin mTLS only; wired in setupRouter) ---
 
-// handleCreateWebAccount handles POST /api/v1/accounts (Tier-3). It creates a
+// handleCreateAccount handles POST /api/v1/accounts (Tier-3). It creates a
 // web-admin account, or resets an existing one (upsert): on reset, omitted
 // tenant_id/permissions are retained. Passkeys are registered separately via the
 // WebAuthn registration endpoints (Issue #2993).
-func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) {
-	var req WebAccountRequest
+func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
+	var req AccountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
 		return
 	}
 
-	if err := validateWebUsername(req.Username); err != nil {
+	if err := validateUsername(req.Username); err != nil {
 		// Error text describes the rule only — never echoes the submitted value.
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
 		return
@@ -590,7 +590,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// Same permission allow-list discipline as API keys ("*" and unknown IDs rejected):
-	// web accounts are RBAC-equivalent to API-key principals, not implicit admins.
+	// accounts are RBAC-equivalent to API-key principals, not implicit admins.
 	for _, p := range req.Permissions {
 		if !isKnownPermission(p) {
 			s.writeErrorResponse(w, http.StatusBadRequest,
@@ -600,7 +600,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	}
 	// go/log-injection (CWE-117) + storage-key safety: strip CR/LF from json.Decoded
 	// identifier fields at the source using strings.ReplaceAll — the form CodeQL's
-	// ReplaceSanitizer recognises. Runs after validateWebUsername (a mangled username
+	// ReplaceSanitizer recognises. Runs after validateUsername (a mangled username
 	// cannot pass the regex); TenantID has no charset guard, so this is its guard.
 	req.Username = strings.ReplaceAll(strings.ReplaceAll(req.Username, "\n", ""), "\r", "")
 	req.TenantID = strings.ReplaceAll(strings.ReplaceAll(req.TenantID, "\n", ""), "\r", "")
@@ -611,15 +611,15 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		actingPrincipalID = principal.ID
 	}
 
-	existing, err := s.getWebAccount(r.Context(), req.Username)
+	existing, err := s.getAccount(r.Context(), req.Username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(req.Username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 
-	acct := &webAccount{
+	acct := &account{
 		ID:          uuid.New().String(),
 		Username:    req.Username,
 		TenantID:    req.TenantID,
@@ -627,7 +627,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		Permissions: req.Permissions,
 		CreatedAt:   time.Now().UTC(),
 	}
-	action := "web_account.created"
+	action := "account.created"
 	status := http.StatusCreated
 	if existing != nil {
 		// Reset (upsert): keep the principal identity stable; retain omitted fields.
@@ -643,11 +643,11 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 			acct.Permissions = existing.Permissions
 		}
 		// Issue #3126: a reset must never re-enable a disabled account. Disable is a
-		// containment control (an admin account suspected of takeover); persistWebAccount
+		// containment control (an admin account suspected of takeover); persistAccount
 		// rebuilds the metadata from the record it is handed, so dropping this carry-forward
 		// would silently clear the "disabled" key and revive the account — with retained
-		// passkeys — under a web_account.reset audit action that never reads as an enable.
-		// Re-enabling is an explicit PUT {"disabled": false}, which emits web_account.enabled.
+		// passkeys — under an account.reset audit action that never reads as an enable.
+		// Re-enabling is an explicit PUT {"disabled": false}, which emits account.enabled.
 		acct.Disabled = existing.Disabled
 		// Issue #2782: preserve registered WebAuthn credentials across account resets,
 		// unless the admin explicitly re-provisions to the zero-authenticator state
@@ -656,7 +656,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		if !req.ResetCredentials {
 			acct.Credentials = existing.Credentials
 		}
-		action = "web_account.reset"
+		action = "account.reset"
 		status = http.StatusOK
 	}
 	// Resolve final scope (Issue #2919):
@@ -673,7 +673,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Issue #2974: enforce tenant-subtree scope, matching handleRevokeEnrollmentLink
-	// and handleListWebAccounts. This endpoint issues a bearer enrollment credential,
+	// and handleListAccounts. This endpoint issues a bearer enrollment credential,
 	// so a tenant-scoped caller must not be able to target a username outside its own
 	// subtree, nor mint a root-scoped account (root scope resolves to TenantID "",
 	// which is inside no scoped caller's subtree). Both the record being replaced and
@@ -691,10 +691,10 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 
 	// If a reset moves the account to a different storage tenant, remove the old
 	// record so the store never holds two live records for one username.
-	if existing != nil && webAccountStorageTenant(existing.TenantID) != webAccountStorageTenant(acct.TenantID) {
-		oldKey := fmt.Sprintf("%s/%s", webAccountStorageTenant(existing.TenantID), webAccountStoreKey(existing.Username))
+	if existing != nil && accountStorageTenant(existing.TenantID) != accountStorageTenant(acct.TenantID) {
+		oldKey := fmt.Sprintf("%s/%s", accountStorageTenant(existing.TenantID), accountStoreKey(existing.Username))
 		if delErr := s.secretStore.DeleteSecret(r.Context(), oldKey); delErr != nil {
-			s.logger.Warn("Failed to delete web account record from previous tenant",
+			s.logger.Warn("Failed to delete account record from previous tenant",
 				"username", logging.SanitizeLogValue(acct.Username),
 				"error", logging.SanitizeLogValue(delErr.Error()))
 		}
@@ -731,20 +731,20 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		acct.EnrollmentLinkRevoked = existing.EnrollmentLinkHash != ""
 	}
 
-	if err := s.persistWebAccount(r.Context(), acct, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist web account to secret store", "error", logging.SanitizeLogValue(err.Error()),
+	if err := s.persistAccount(r.Context(), acct, actingPrincipalID); err != nil {
+		s.logger.Error("Failed to persist account to secret store", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(acct.Username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist account", "STORE_ERROR")
 		return
 	}
-	s.cacheWebAccount(acct)
+	s.cacheAccount(acct)
 
 	// Issue #3126: a reset that re-provisions to the zero-authenticator state must also
 	// terminate the account's live browser sessions. Same reasoning as the PUT path —
 	// this is the takeover-containment operation, and sessions minted by the passkeys
 	// being wiped would otherwise stay usable for the absolute session lifetime.
 	if existing != nil && req.ResetCredentials {
-		revoked := s.revokeWebSessionsForPrincipal(r.Context(), acct.ID)
+		revoked := s.revokeSessionsForPrincipal(r.Context(), acct.ID)
 		s.logger.Info("Revoked live web sessions for credential reset",
 			"username", logging.SanitizeLogValue(acct.Username),
 			"revoked_sessions", revoked)
@@ -756,7 +756,7 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 	if rawToken != "" {
 		auditDetails["delivery_method"] = "ui-shown"
 	}
-	s.emitWebAccountAudit(r.Context(), action, acct.TenantID, actingPrincipalID, acct.Username, auditDetails)
+	s.emitAccountAudit(r.Context(), action, acct.TenantID, actingPrincipalID, acct.Username, auditDetails)
 	s.logger.Info("Web admin account provisioned",
 		"action", action,
 		"username", logging.SanitizeLogValue(acct.Username),
@@ -765,8 +765,8 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 		"enrollment_link_minted", rawToken != "",
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
-	s.writeResponse(w, status, WebAccountCreateResponse{
-		WebAccountInfo: WebAccountInfo{
+	s.writeResponse(w, status, AccountCreateResponse{
+		AccountInfo: AccountInfo{
 			ID:                           acct.ID,
 			Username:                     acct.Username,
 			TenantID:                     acct.TenantID,
@@ -785,21 +785,21 @@ func (s *Server) handleCreateWebAccount(w http.ResponseWriter, r *http.Request) 
 // recipient, departed employee, or suspected token leak (Issue #2974).
 func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]
-	if err := validateWebUsername(username); err != nil {
+	if err := validateUsername(username); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
 		return
 	}
 
-	acct, err := s.getWebAccount(r.Context(), username)
+	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account for enrollment link revoke",
+		s.logger.Error("Failed to look up account for enrollment link revoke",
 			"error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 	// Issue #2974: enforce tenant-subtree scope before revealing any link state.
@@ -822,14 +822,14 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Persist a copy first, then mutate the cache — never the other way round.
-	// getWebAccount hands back the pointer held in s.webAccounts, so revoking on
+	// getAccount hands back the pointer held in s.accounts, so revoking on
 	// that object before the durable write would leave the cache claiming "revoked"
 	// while the store still holds a live link: the retry would see no outstanding
 	// link and answer 409, making revocation unrecoverable, and a restart would
 	// reload the live link for the rest of its TTL. Revocation must fail closed.
 	pending := *acct
 	pending.EnrollmentLinkRevoked = true
-	if err := s.persistWebAccount(r.Context(), &pending, actingPrincipalID); err != nil {
+	if err := s.persistAccount(r.Context(), &pending, actingPrincipalID); err != nil {
 		s.logger.Error("Failed to persist enrollment link revocation",
 			"error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
@@ -841,9 +841,9 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	s.mu.Lock()
 	acct.EnrollmentLinkRevoked = true
 	s.mu.Unlock()
-	s.cacheWebAccount(acct)
+	s.cacheAccount(acct)
 
-	s.emitWebAccountAudit(r.Context(), "web_account.enrollment_link.revoked", acct.TenantID, actingPrincipalID, username,
+	s.emitAccountAudit(r.Context(), "account.enrollment_link.revoked", acct.TenantID, actingPrincipalID, username,
 		map[string]interface{}{"action": "revoke"})
 	s.logger.Info("Enrollment magic link revoked",
 		"username", logging.SanitizeLogValue(username),
@@ -855,9 +855,9 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// handleListWebAccounts handles GET /api/v1/accounts (requirePermission only,
+// handleListAccounts handles GET /api/v1/accounts (requirePermission only,
 // no Tier-3 wrapper — reads are categorically outside the Tier-3 surface; see
-// Implementation Notes in Issue #2733). The response uses WebAccountInfo: no
+// Implementation Notes in Issue #2733). The response uses AccountInfo: no
 // secret material is ever included.
 //
 // Issue #3137: results are scoped to the caller's tenant subtree. An unscoped
@@ -865,7 +865,7 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 // accounts whose storage TenantID equals callerTenant or is a descendant of it
 // (i.e. starts with callerTenant + "/"), which covers the full subtree of child
 // tenants without requiring an exact-match-only TenantID filter.
-func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return
@@ -875,16 +875,16 @@ func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 
 	metas, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
 		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
+			secretsif.MetadataKeySecretType: accountSecretType,
 		},
 	})
 	if err != nil {
-		s.logger.Error("Failed to list web accounts", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list web accounts", "STORE_ERROR")
+		s.logger.Error("Failed to list accounts", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list accounts", "STORE_ERROR")
 		return
 	}
 
-	accounts := make([]WebAccountInfo, 0, len(metas))
+	accounts := make([]AccountInfo, 0, len(metas))
 	for _, meta := range metas {
 		// Issue #3137: enforce tenant-subtree scope. Skip accounts outside the
 		// caller's subtree. Unscoped admins (callerTenant == "") see everything.
@@ -921,7 +921,7 @@ func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		accounts = append(accounts, WebAccountInfo{
+		accounts = append(accounts, AccountInfo{
 			ID:                           meta.Metadata["id"],
 			Username:                     meta.Metadata["username"],
 			TenantID:                     tenantID,
@@ -936,11 +936,11 @@ func (s *Server) handleListWebAccounts(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, accounts)
 }
 
-// VerifyWebCredential is the login-gate enforcement point for web accounts (Issue #3126).
+// VerifyCredential is the login-gate enforcement point for accounts (Issue #3126).
 // It is called after successful WebAuthn assertion to check whether the account may
 // proceed to session issuance. Returns ErrInvalidWebCredential when the account is
 // disabled — the caller must not leak whether the account is disabled vs. not found.
-func (s *Server) VerifyWebCredential(acct *webAccount) error {
+func (s *Server) VerifyCredential(acct *account) error {
 	if acct == nil {
 		return ErrInvalidWebCredential
 	}
@@ -950,8 +950,8 @@ func (s *Server) VerifyWebCredential(acct *webAccount) error {
 	return nil
 }
 
-// revokeWebSessionsForPrincipal revokes every live web session belonging to the
-// given web-account ID and drops the session-bound CSRF token for each
+// revokeSessionsForPrincipal revokes every live web session belonging to the
+// given account ID and drops the session-bound CSRF token for each
 // (Issue #3126). Returns the number of sessions revoked.
 //
 // Revocation is best effort per session: a store failure on one session is logged
@@ -959,7 +959,7 @@ func (s *Server) VerifyWebCredential(acct *webAccount) error {
 // authenticationMiddleware re-resolves the account on every request and rejects a
 // disabled one — so a partial failure degrades to "rejected on next request",
 // never to "still authorized".
-func (s *Server) revokeWebSessionsForPrincipal(ctx context.Context, principalID string) int {
+func (s *Server) revokeSessionsForPrincipal(ctx context.Context, principalID string) int {
 	if principalID == "" {
 		return 0
 	}
@@ -994,25 +994,25 @@ func (s *Server) revokeWebSessionsForPrincipal(ctx context.Context, principalID 
 	return revoked
 }
 
-// handleGetWebAccount handles GET /api/v1/accounts/{username} (Issue #3126).
+// handleGetAccount handles GET /api/v1/accounts/{username} (Issue #3126).
 // Returns the account's identity and status — no secret material, no WebAuthn credentials.
 // A cross-tenant caller gets 404 to avoid disclosing account existence.
-func (s *Server) handleGetWebAccount(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]
-	if err := validateWebUsername(username); err != nil {
+	if err := validateUsername(username); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
 		return
 	}
 
-	acct, err := s.getWebAccount(r.Context(), username)
+	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1020,11 +1020,11 @@ func (s *Server) handleGetWebAccount(w http.ResponseWriter, r *http.Request) {
 	// not 403 — to avoid disclosing that the account exists in another tenant.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	if !isWithinTenantScope(callerTenant, acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
-	s.writeSuccessResponse(w, WebAccountInfo{
+	s.writeSuccessResponse(w, AccountInfo{
 		ID:                           acct.ID,
 		Username:                     acct.Username,
 		TenantID:                     acct.TenantID,
@@ -1036,17 +1036,17 @@ func (s *Server) handleGetWebAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUpdateWebAccount handles PUT /api/v1/accounts/{username} (Issue #3126, Tier-3).
+// handleUpdateAccount handles PUT /api/v1/accounts/{username} (Issue #3126, Tier-3).
 // All request fields are optional — omitted fields retain existing values.
 // A cross-tenant caller gets 404 to avoid disclosing account existence.
-func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]
-	if err := validateWebUsername(username); err != nil {
+	if err := validateUsername(username); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
 		return
 	}
 
-	var req WebAccountUpdateRequest
+	var req AccountUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
 		return
@@ -1063,15 +1063,15 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	acct, err := s.getWebAccount(r.Context(), username)
+	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1079,7 +1079,7 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	// A cross-tenant caller gets 404 — not 403 — to avoid disclosing account existence.
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	if !isWithinTenantScope(callerTenant, acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -1105,7 +1105,7 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	// Issue #3126 (review follow-up): "reset the password" in the passkey-only
 	// model (ADR-021 Amendment 1) is a credential reset — re-provision to the
 	// zero-authenticator state and mint a fresh enrollment link, exactly
-	// mirroring handleCreateWebAccount's ResetCredentials path. Independent of
+	// mirroring handleCreateAccount's ResetCredentials path. Independent of
 	// permissions/disabled changes above.
 	var rawToken string
 	if req.ResetCredentials {
@@ -1124,13 +1124,13 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 		updated.EnrollmentLinkRevoked = false
 	}
 
-	if err := s.persistWebAccount(r.Context(), &updated, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist web account update", "error", logging.SanitizeLogValue(err.Error()),
+	if err := s.persistAccount(r.Context(), &updated, actingPrincipalID); err != nil {
+		s.logger.Error("Failed to persist account update", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update account", "STORE_ERROR")
 		return
 	}
-	s.cacheWebAccount(&updated)
+	s.cacheAccount(&updated)
 
 	// Issue #3126: both containment operations terminate the account's live browser
 	// sessions. The login gate alone would leave an already-authenticated session
@@ -1144,7 +1144,7 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	//     minted would leave the attacker's cookie live, so the containment operation
 	//     would not contain.
 	if (disabledChanged && updated.Disabled) || req.ResetCredentials {
-		revoked := s.revokeWebSessionsForPrincipal(r.Context(), updated.ID)
+		revoked := s.revokeSessionsForPrincipal(r.Context(), updated.ID)
 		// go/log-injection: derive from an explicit branch to a string literal so no
 		// value flows from the request to the log sink (CodeQL taint-tracks request
 		// booleans through struct fields regardless of type; strconv.FormatBool would
@@ -1156,7 +1156,7 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 		if req.ResetCredentials {
 			resetState = "true"
 		}
-		s.logger.Info("Revoked live web sessions for web account",
+		s.logger.Info("Revoked live web sessions for account",
 			"username", logging.SanitizeLogValue(username),
 			"disabled", disabledState,
 			"credentials_reset", resetState,
@@ -1166,32 +1166,32 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	// Emit granular audit events. A disable/enable transition and a credential reset
 	// are independent operations that one request can perform together, so each emits
 	// its own event: a first-match switch would let a combined request bury the
-	// credential reset behind web_account.disabled, leaving the passkey wipe and the
+	// credential reset behind account.disabled, leaving the passkey wipe and the
 	// bearer enrollment-link mint with no audit trace at all — an audit-evasion path
 	// for a privileged actor. Other field changes fall back to the generic action.
 	var actions []string
 	if disabledChanged {
-		action := "web_account.enabled"
+		action := "account.enabled"
 		if updated.Disabled {
-			action = "web_account.disabled"
+			action = "account.disabled"
 		}
 		actions = append(actions, action)
-		s.emitWebAccountAudit(r.Context(), action, updated.TenantID, actingPrincipalID, username, nil)
+		s.emitAccountAudit(r.Context(), action, updated.TenantID, actingPrincipalID, username, nil)
 	}
 	if req.ResetCredentials {
-		// Mirrors handleCreateWebAccount: minting a bearer enrollment credential records
+		// Mirrors handleCreateAccount: minting a bearer enrollment credential records
 		// that it was minted and how it is delivered (Issue #2974). The raw token is
 		// NEVER logged or audited.
-		actions = append(actions, "web_account.credentials_reset")
-		s.emitWebAccountAudit(r.Context(), "web_account.credentials_reset", updated.TenantID,
+		actions = append(actions, "account.credentials_reset")
+		s.emitAccountAudit(r.Context(), "account.credentials_reset", updated.TenantID,
 			actingPrincipalID, username, map[string]interface{}{
 				"enrollment_link_minted": rawToken != "",
 				"delivery_method":        "ui-shown",
 			})
 	}
 	if len(actions) == 0 {
-		actions = append(actions, "web_account.updated")
-		s.emitWebAccountAudit(r.Context(), "web_account.updated", updated.TenantID, actingPrincipalID, username, nil)
+		actions = append(actions, "account.updated")
+		s.emitAccountAudit(r.Context(), "account.updated", updated.TenantID, actingPrincipalID, username, nil)
 	}
 	s.logger.Info("Web admin account updated",
 		"actions", strings.Join(actions, ","),
@@ -1199,8 +1199,8 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 		"tenant_id", logging.SanitizeLogValue(updated.TenantID),
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
-	s.writeSuccessResponse(w, WebAccountUpdateResponse{
-		WebAccountInfo: WebAccountInfo{
+	s.writeSuccessResponse(w, AccountUpdateResponse{
+		AccountInfo: AccountInfo{
 			ID:                           updated.ID,
 			Username:                     updated.Username,
 			TenantID:                     updated.TenantID,
@@ -1214,34 +1214,34 @@ func (s *Server) handleUpdateWebAccount(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleDeleteWebAccount handles DELETE /api/v1/accounts/{username} (Tier-3).
+// handleDeleteAccount handles DELETE /api/v1/accounts/{username} (Tier-3).
 // It removes the account from the in-memory cache and the central secret store.
-func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]
-	if err := validateWebUsername(username); err != nil {
+	if err := validateUsername(username); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
 		return
 	}
 
-	acct, err := s.getWebAccount(r.Context(), username)
+	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
-		s.logger.Error("Failed to look up web account", "error", logging.SanitizeLogValue(err.Error()),
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
 			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up web account", "STORE_ERROR")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
 	s.mu.Lock()
-	delete(s.webAccounts, username)
+	delete(s.accounts, username)
 	s.mu.Unlock()
 
-	storeKey := fmt.Sprintf("%s/%s", webAccountStorageTenant(acct.TenantID), webAccountStoreKey(username))
+	storeKey := fmt.Sprintf("%s/%s", accountStorageTenant(acct.TenantID), accountStoreKey(username))
 	if err := s.secretStore.DeleteSecret(r.Context(), storeKey); err != nil {
-		s.logger.Warn("Failed to delete web account from secret store (memory cache already cleared)",
+		s.logger.Warn("Failed to delete account from secret store (memory cache already cleared)",
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
 		// Continue anyway — mirrors handleDeleteAPIKey; the cache entry is gone and
@@ -1253,7 +1253,7 @@ func (s *Server) handleDeleteWebAccount(w http.ResponseWriter, r *http.Request) 
 	if principal != nil {
 		actingPrincipalID = principal.ID
 	}
-	s.emitWebAccountAudit(r.Context(), "web_account.deleted", acct.TenantID, actingPrincipalID, username, nil)
+	s.emitAccountAudit(r.Context(), "account.deleted", acct.TenantID, actingPrincipalID, username, nil)
 	s.logger.Info("Web admin account deleted",
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),

@@ -26,7 +26,7 @@ const defaultDecommissionTimeout = 5 * time.Minute
 // middleware.go's tenant-isolation block admits any tenant-scoped principal that holds
 // the grant, and the ADR-025 Decision 1 root-scoped block is likewise a no-op. Since
 // cluster:drain-node and cluster:decommission-node are grantable permission IDs
-// (permissions.go), a web account confined to a single tenant could otherwise drain or
+// (permissions.go), an account confined to a single tenant could otherwise drain or
 // decommission a node serving every tenant. Restrict both operations to principals with
 // no tenant confinement — unscoped admins, and root-scoped SaaS operators, whose
 // TenantID is "" by construction (middleware.go: RootScoped principals keep the unscoped

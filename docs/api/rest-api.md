@@ -2595,7 +2595,7 @@ Each web account has exactly one of:
 
 `root_scope` and `tenant_id` are mutually exclusive — supplying both returns `400 INVALID_SCOPE`. An empty `tenant_id` alone **never** grants root scope; `root_scope: true` must be set explicitly (defense-in-depth).
 
-#### POST /api/v1/web/accounts
+#### POST /api/v1/accounts
 
 Create a new web admin account, or reset an existing one (upsert: omitted `tenant_id`/`permissions` retained from the existing record). This endpoint provisions the account identity and scope only — there is no password. Passkey credentials are enrolled separately via the WebAuthn registration ceremony (Issue #2782).
 
@@ -2606,7 +2606,7 @@ credentials yet, so the response also mints a single-use, TTL-bounded
 a new link.
 
 **Authentication:** Required  
-**Required permission:** `web-account:create`  
+**Required permission:** `account:create`  
 **Assurance:** Strong session (passkey or elevated mTLS) required
 
 **Request body:**
@@ -2651,14 +2651,14 @@ Root-scoped accounts have `tenant_id: ""` and `root_scope: true` in the response
 | `data.has_outstanding_enrollment_link` | bool | True when the account has an unredeemed, unexpired, unrevoked enrollment link. |
 | `data.enrollment_magic_link` | string | The raw enrollment token. Present **only** in this response, when a link was minted (zero-credential account) — omitted otherwise. The server stores only a SHA-256 hash of this value and never returns or logs the raw token again; the admin UI shows it once for copy-to-clipboard handoff. Single-use and expires 72 hours after minting. |
 
-#### POST /api/v1/web/accounts/{username}/enrollment-link/revoke
+#### POST /api/v1/accounts/{username}/enrollment-link/revoke
 
 Revoke an outstanding (unredeemed) enrollment magic link, invalidating it before
 it can be used — for a wrong recipient, a departed employee, or a suspected leak
 (Issue #2974). Does not delete or otherwise modify the account itself.
 
 **Authentication:** Required  
-**Required permission:** `web-account:revoke-enrollment-link`  
+**Required permission:** `account:revoke-enrollment-link`  
 **Assurance:** Strong session (passkey or elevated mTLS) required
 
 Callers are authorized only within their own tenant subtree: a caller scoped to
@@ -2688,15 +2688,15 @@ enrollment status.
 | Status | Code | Condition |
 |--------|------|-----------|
 | 403 | `FORBIDDEN` | Caller's tenant scope does not contain the account's tenant |
-| 404 | `WEB_ACCOUNT_NOT_FOUND` | No account with that username |
+| 404 | `ACCOUNT_NOT_FOUND` | No account with that username |
 | 409 | `NO_OUTSTANDING_LINK` | No unredeemed, unexpired, unrevoked link exists for this account |
 
-#### GET /api/v1/web/accounts
+#### GET /api/v1/accounts
 
 List all web admin accounts. No credential material (registered passkey public keys) is included.
 
 **Authentication:** Required  
-**Required permission:** `web-account:list`
+**Required permission:** `account:list`
 
 **Response:**
 
@@ -2724,12 +2724,12 @@ List all web admin accounts. No credential material (registered passkey public k
 }
 ```
 
-#### DELETE /api/v1/web/accounts/{username}
+#### DELETE /api/v1/accounts/{username}
 
 Delete a web admin account. Removes both the in-memory cache entry and the durable secret-store record.
 
 **Authentication:** Required  
-**Required permission:** `web-account:delete`  
+**Required permission:** `account:delete`  
 **Assurance:** Strong session required
 
 **Parameters:**
@@ -2748,7 +2748,7 @@ Delete a web admin account. Removes both the in-memory cache entry and the durab
 }
 ```
 
-Returns `404 WEB_ACCOUNT_NOT_FOUND` if the account does not exist.
+Returns `404 ACCOUNT_NOT_FOUND` if the account does not exist.
 
 ## Alerts
 

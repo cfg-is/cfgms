@@ -79,7 +79,7 @@ func doPasskeyLogin(t *testing.T, srv *Server, username, existingSession string)
 	sigBytes, err := hex.DecodeString(svAuthSignatureHex)
 	require.NoError(t, err)
 
-	acct, lookupErr := srv.getWebAccount(context.Background(), username)
+	acct, lookupErr := srv.getAccount(context.Background(), username)
 	require.NoError(t, lookupErr)
 	require.NotNil(t, acct, "account %q must exist before passkey login", username)
 
@@ -219,14 +219,14 @@ func doLogout(t *testing.T, srv *Server, sessionTok, csrfTok string) *httptest.R
 
 func TestWebSessionEnforcesAccountPermissionsAndTenantScope(t *testing.T) {
 	srv, username := setupPasskeySessionServer(t)
-	acct, err := srv.getWebAccount(context.Background(), username)
+	acct, err := srv.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 	acct.Permissions = []string{"steward:list"}
 	// Persist the permission grant to the store so that the Issue #3311 re-verify
-	// path in getWebAccount/getWebAccountByID reads the updated value from disk.
-	require.NoError(t, srv.persistWebAccount(context.Background(), acct, "test"))
-	srv.cacheWebAccount(acct)
+	// path in getAccount/getAccountByID reads the updated value from disk.
+	require.NoError(t, srv.persistAccount(context.Background(), acct, "test"))
+	srv.cacheAccount(acct)
 
 	loginRec := doPasskeyLogin(t, srv, username, "")
 	require.Equal(t, http.StatusOK, loginRec.Code, "login failed: %s", loginRec.Body.String())
@@ -325,7 +325,7 @@ func TestPasskeyLogin_ResponseCarriesTenantScope(t *testing.T) {
 		rec := doPasskeyLogin(t, srv, username, "")
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		// setupWebAuthnServer creates accounts without a tenant; check from the account.
-		acct, err := srv.getWebAccount(context.Background(), username)
+		acct, err := srv.getAccount(context.Background(), username)
 		require.NoError(t, err)
 		tenantID, rootScope := decodeScope(t, rec)
 		assert.Equal(t, acct.TenantID, tenantID)
@@ -335,7 +335,7 @@ func TestPasskeyLogin_ResponseCarriesTenantScope(t *testing.T) {
 	t.Run("root-scoped account returns empty tenant_id and root_scope=true", func(t *testing.T) {
 		srv, _ := setupPasskeySessionServer(t)
 		const rootUser = "root-passkey-user"
-		rec := postWebAccount(t, srv, testAdminPrincipal(), WebAccountRequest{
+		rec := postAccount(t, srv, testAdminPrincipal(), AccountRequest{
 			Username:  rootUser,
 			RootScope: true,
 		})
@@ -942,7 +942,7 @@ func TestPasskeyLoginBegin_NamedFlow(t *testing.T) {
 	}
 
 	t.Run("invalid username returns 400", func(t *testing.T) {
-		// "xy" fails the validateWebUsername regex (fewer than 3 characters).
+		// "xy" fails the validateUsername regex (fewer than 3 characters).
 		// This is a format check and does not reveal account existence.
 		csrfToken := doCSRF(t, srv)
 		rec := doPasskeyLoginBegin(t, srv, csrfToken, "xy")
@@ -961,7 +961,7 @@ func TestPasskeyLoginBegin_NamedFlow(t *testing.T) {
 	t.Run("account with no credentials returns uniform challenge (no enumeration)", func(t *testing.T) {
 		// An account with no passkeys enrolled must also return a challenge, not an error.
 		const noCredUser = "no-cred-begin-user"
-		rec := postWebAccount(t, srv, testAdminPrincipal(), WebAccountRequest{Username: noCredUser})
+		rec := postAccount(t, srv, testAdminPrincipal(), AccountRequest{Username: noCredUser})
 		require.Equal(t, http.StatusCreated, rec.Code, "account setup: %s", rec.Body.String())
 
 		csrfToken := doCSRF(t, srv)
@@ -1019,11 +1019,11 @@ func TestPasskeyLoginFinish_SignCountClone_400(t *testing.T) {
 
 	// Overwrite the injected credential with SignCount=100.
 	// The spec vector's assertion returns SignCount=0, triggering clone detection.
-	acct, err := srv.getWebAccount(context.Background(), username)
+	acct, err := srv.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 	acct.Credentials = nil
-	require.NoError(t, srv.persistWebAccount(context.Background(), acct, "test"))
+	require.NoError(t, srv.persistAccount(context.Background(), acct, "test"))
 	injectCredentialWithPublicKey(t, srv, username, credIDBytes, pubKeyBytes, 100)
 
 	challengeBytes, err := hex.DecodeString(svAuthChallengeHex)
@@ -1035,7 +1035,7 @@ func TestPasskeyLoginFinish_SignCountClone_400(t *testing.T) {
 	sigBytes, err := hex.DecodeString(svAuthSignatureHex)
 	require.NoError(t, err)
 
-	reloaded, err := srv.getWebAccount(context.Background(), username)
+	reloaded, err := srv.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, reloaded)
 

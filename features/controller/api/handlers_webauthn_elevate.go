@@ -91,18 +91,18 @@ func (s *Server) handleStepUpBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getWebAccount(r.Context(), principal.ID)
+	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
-		s.logger.Error("Step-up begin: failed to load web account",
+		s.logger.Error("Step-up begin: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to load web account", "STORE_ERROR")
+			"Failed to load account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 	if len(acct.Credentials) == 0 {
@@ -168,18 +168,18 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getWebAccount(r.Context(), principal.ID)
+	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
-		s.logger.Error("Step-up finish: failed to load web account",
+		s.logger.Error("Step-up finish: failed to load account",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to load web account", "STORE_ERROR")
+			"Failed to load account", "STORE_ERROR")
 		return
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound,
-			"Web account not found", "WEB_ACCOUNT_NOT_FOUND")
+			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
 
@@ -282,14 +282,14 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if persistErr := s.persistWebAccount(r.Context(), &updatedAcct, principal.ID); persistErr != nil {
+	if persistErr := s.persistAccount(r.Context(), &updatedAcct, principal.ID); persistErr != nil {
 		s.logger.Error("Step-up finish: failed to persist updated sign count",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(persistErr.Error()))
 		// Non-fatal for session elevation: sign-count persistence failing does not
 		// compromise the cryptographic verification already performed. Log the error and proceed.
 	} else {
-		s.cacheWebAccount(&updatedAcct)
+		s.cacheAccount(&updatedAcct)
 	}
 
 	// Elevate the session: rotate the token and set AssuranceStrong.

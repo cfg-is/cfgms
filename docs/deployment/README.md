@@ -67,7 +67,7 @@ CFGMS supports pluggable secrets backends. The default is SOPS (file-based, git-
 
 ### Durable secret storage (required for passkey accounts)
 
-The controller stores web-account passkeys in its secret store (ADR-021 Amendment 1). If
+The controller stores account passkeys in its secret store (ADR-021 Amendment 1). If
 the secret store is ephemeral — i.e. backed by a temporary directory or in-memory database
 — **a controller restart wipes every passkey and locks out all human accounts**. Recovery
 requires re-enrolling via the mTLS certificate, which may not be available in all environments.
