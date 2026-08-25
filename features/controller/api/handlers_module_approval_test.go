@@ -87,10 +87,11 @@ func setupModuleApprovalServer(t *testing.T) (*Server, *cache.ModuleCache, *appr
 // strongPrincipal builds a Strong-assurance principal for testing AssuranceStrong gates.
 func moduleTestStrongPrincipal() *Principal {
 	return &Principal{
-		ID:         "cert-admin",
-		Name:       "mtls-cert:cert-admin",
-		Assurance:  session.AssuranceStrong,
-		CertSerial: "test-serial",
+		ID:            "cert-admin",
+		Name:          "mtls-cert:cert-admin",
+		Assurance:     session.AssuranceStrong,
+		CertSerial:    "test-serial",
+		ImplicitAdmin: true,
 	}
 }
 

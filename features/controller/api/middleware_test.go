@@ -614,14 +614,50 @@ func TestMTLSAuth_NoCert_FallsBackToAPIKey(t *testing.T) {
 }
 
 // TestHasPermission_AdminPrincipal verifies that an administrator principal with
-// the explicit nil-permissions marker is authorized for every permission.
+// ImplicitAdmin: true is authorized for every permission (ADR-025 Amendment 3).
 func TestHasPermission_AdminPrincipal(t *testing.T) {
 	server := setupTestServer(t)
-	admin := &Principal{Assurance: session.AssuranceBasic}
+	admin := &Principal{Assurance: session.AssuranceBasic, ImplicitAdmin: true}
 
 	assert.True(t, server.hasPermission(admin, "steward:read"))
 	assert.True(t, server.hasPermission(admin, "rbac:delete-role"))
 	assert.True(t, server.hasPermission(admin, "some-future:permission"))
+}
+
+// TestHasPermission_ZeroValuedPrincipalIsDenied verifies that a zero-valued
+// Principal{} is denied every named permission. Previously, Permissions==nil served
+// as the implicit-admin marker, making a zero-valued principal unintentionally
+// privileged. ADR-025 Amendment 3 removed that hazard: ImplicitAdmin must be set
+// explicitly, and the zero value of bool is false.
+func TestHasPermission_ZeroValuedPrincipalIsDenied(t *testing.T) {
+	server := setupTestServer(t)
+	zero := &Principal{}
+
+	assert.False(t, server.hasPermission(zero, "steward:read"),
+		"zero-valued principal must be denied any named permission")
+	assert.False(t, server.hasPermission(zero, "rbac:delete-role"),
+		"zero-valued principal must be denied any named permission")
+	assert.False(t, server.hasPermission(zero, "certificate:provision"),
+		"zero-valued principal must be denied any named permission")
+}
+
+// TestHasPermission_IncompletePrincipalIsDenied verifies that a partially-constructed
+// principal with human assurance and nil Permissions but ImplicitAdmin==false is denied.
+// This closes the hazard where Permissions==nil was the implicit-admin marker: a caller
+// who forgets to set Permissions on a new Principal no longer gets an unintended
+// superadmin by default.
+func TestHasPermission_IncompletePrincipalIsDenied(t *testing.T) {
+	server := setupTestServer(t)
+	incomplete := &Principal{
+		ID:          "some-principal",
+		Assurance:   session.AssuranceBasic,
+		Permissions: nil, // explicitly nil, but ImplicitAdmin is false (zero value)
+	}
+
+	assert.False(t, server.hasPermission(incomplete, "steward:read"),
+		"nil Permissions without ImplicitAdmin must not grant any permission")
+	assert.False(t, server.hasPermission(incomplete, "certificate:provision"),
+		"nil Permissions without ImplicitAdmin must not grant any permission")
 }
 
 // TestHasPermission_AccountPermissions verifies that human assurance does not
@@ -1179,24 +1215,17 @@ func TestWebSessionCookie_ValidCookie_BuildsPrincipal(t *testing.T) {
 	assert.Equal(t, "web-session:alice", capturedPrincipal.Name)
 }
 
-// TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker pins the fail-closed
-// half of hasPermission's implicit-admin encoding.
+// TestWebSessionCookie_PrincipalNeverCarriesImplicitAdmin pins the fail-closed
+// half of hasPermission's implicit-admin encoding (ADR-025 Amendment 3).
 //
-// hasPermission grants every permission to a principal with Assurance >= AssuranceBasic
-// AND a nil Permissions slice — nil is the marker for administrator mTLS and CLI-session
-// principals. Web-session principals also carry AssuranceBasic, so the ONLY thing keeping
-// them subject to their configured RBAC grants is that authenticationMiddleware builds
-// them with a non-nil slice.
-//
-// That distinction is invisible in Go: len(), range and append treat a nil and an empty
-// slice identically, and `append(nil)` with zero elements yields nil. Initialising with
-// `var permissions []string` instead of `[]string{}` — an idiomatic-looking, apparently
-// equivalent edit — would silently promote every web account to full administrator.
-// This test fails on exactly that edit.
+// hasPermission grants every permission to a principal with ImplicitAdmin: true.
+// Web-session principals must never have ImplicitAdmin set unless the underlying
+// account is root-scoped. A web account that cannot be resolved (no account record,
+// or account lookup fails) must yield zero permissions and ImplicitAdmin: false.
 //
 // The account lookup deliberately misses here (no web account backs "alice"), which is the
 // worst case: an unresolvable account must yield no permissions, never unbounded ones.
-func TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker(t *testing.T) {
+func TestWebSessionCookie_PrincipalNeverCarriesImplicitAdmin(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
 	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
@@ -1215,12 +1244,14 @@ func TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker(t *testing.T)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, capturedPrincipal, "Principal must be set in context")
 	require.Equal(t, session.AssuranceBasic, capturedPrincipal.Assurance,
-		"precondition: a web principal carries the assurance level that arms the implicit-admin branch")
+		"precondition: a web principal carries AssuranceBasic")
 
+	assert.False(t, capturedPrincipal.ImplicitAdmin,
+		"an unresolvable-account web principal must not carry ImplicitAdmin: true")
 	require.NotNil(t, capturedPrincipal.Permissions,
-		"web-session principals MUST carry a non-nil Permissions slice; nil is the implicit-admin marker")
+		"web-session principals MUST carry a non-nil Permissions slice")
 
-	// The security property the non-nil slice exists to produce.
+	// The security property the explicit ImplicitAdmin gate exists to produce.
 	assert.False(t, srv.hasPermission(capturedPrincipal, "rbac:create-role"),
 		"a web principal with no resolvable account must not be granted permissions it was never assigned")
 	assert.False(t, srv.hasPermission(capturedPrincipal, "steward:write-config"),
@@ -1263,8 +1294,10 @@ func TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp(t *test
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, capturedPrincipal)
-	assert.Nil(t, capturedPrincipal.Permissions,
-		"a resolved root-scope account carries the nil implicit-admin marker")
+	assert.True(t, capturedPrincipal.ImplicitAdmin,
+		"a resolved root-scope account must carry ImplicitAdmin: true (ADR-025 Amendment 3)")
+	assert.NotNil(t, capturedPrincipal.Permissions,
+		"Permissions must not be nil — the nil-sentinel is replaced by ImplicitAdmin")
 	assert.True(t, capturedPrincipal.GlobalScope,
 		"root scope grants cross-tenant visibility")
 	assert.True(t, srv.hasPermission(capturedPrincipal, "workflow:execute"),
@@ -1328,7 +1361,9 @@ func TestWebSessionCookie_TenantScopedAccountIsEnumerated(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, capturedPrincipal)
 	require.NotNil(t, capturedPrincipal.Permissions,
-		"a tenant-scoped account must never carry the implicit-admin marker")
+		"a tenant-scoped account must carry a non-nil Permissions slice")
+	assert.False(t, capturedPrincipal.ImplicitAdmin,
+		"a tenant-scoped account must never carry ImplicitAdmin: true")
 	assert.False(t, capturedPrincipal.GlobalScope,
 		"a tenant-scoped account is confined to its tenant subtree")
 	assert.True(t, srv.hasPermission(capturedPrincipal, "steward:list"),
@@ -2358,8 +2393,8 @@ func TestBearerSession_BoundDisabledAccount_Returns401Revoked(t *testing.T) {
 }
 
 // TestBearerSession_NoAccountFound_PreservesImplicitAdmin verifies that a session
-// whose PrincipalID matches no account behaves exactly as before Issue #3576:
-// Permissions stays nil (implicit-admin marker) and TenantID comes from the session.
+// whose PrincipalID matches no account (e.g. a certificate-derived CLI session)
+// sets ImplicitAdmin: true and TenantID from the session (ADR-025 Amendment 3).
 func TestBearerSession_NoAccountFound_PreservesImplicitAdmin(t *testing.T) {
 	cfg := session.DefaultConfig()
 	store := session.NewMemStore(cfg, time.Now)
@@ -2385,14 +2420,16 @@ func TestBearerSession_NoAccountFound_PreservesImplicitAdmin(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code, "session with no matching account must still succeed")
 	require.NotNil(t, capturedPrincipal)
-	assert.Nil(t, capturedPrincipal.Permissions,
-		"no-account-found fallback must preserve nil Permissions (implicit-admin marker for today's principals)")
+	assert.True(t, capturedPrincipal.ImplicitAdmin,
+		"no-account-found fallback must set ImplicitAdmin: true (ADR-025 Amendment 3)")
+	assert.NotNil(t, capturedPrincipal.Permissions,
+		"Permissions must not be nil — the nil-sentinel is replaced by ImplicitAdmin")
 	assert.Empty(t, capturedPrincipal.TenantID,
 		"no-account-found fallback must use the session's TenantID (empty for an unscoped session)")
 }
 
 // TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin verifies that a session
-// bound to a root-scope account resolves to nil Permissions (implicit-admin marker),
+// bound to a root-scope account resolves to ImplicitAdmin: true (ADR-025 Amendment 3),
 // mirroring the web-cookie branch's root-scope rule.
 func TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin(t *testing.T) {
 	cfg := session.DefaultConfig()
@@ -2425,8 +2462,10 @@ func TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, capturedPrincipal)
-	assert.Nil(t, capturedPrincipal.Permissions,
-		"a root-scope bound account must yield nil Permissions (implicit-admin marker)")
+	assert.True(t, capturedPrincipal.ImplicitAdmin,
+		"a root-scope bound account must set ImplicitAdmin: true (ADR-025 Amendment 3)")
+	assert.NotNil(t, capturedPrincipal.Permissions,
+		"Permissions must not be nil — the nil-sentinel is replaced by ImplicitAdmin")
 	assert.True(t, capturedPrincipal.GlobalScope,
 		"a root-scope bound account must set GlobalScope=true")
 }
@@ -2435,10 +2474,10 @@ func TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin(t *testing.T) {
 // fail-closed account-resolution property of the Bearer branch (Issue #3576 security
 // review). getAccountByID returns a real error when the durable store is unhealthy
 // (secret-store/SOPS failure, git storage error, ListSecrets failure, context deadline).
-// Treating that error as "no account found" would leave Permissions nil — the
-// implicit-admin marker hasPermission honours at AssuranceBasic — skip the Issue #3126
-// disabled check, and restore session-derived tenant scope over the account's. The
-// request must be rejected instead, and the downstream handler must never run.
+// Treating that error as "no account found" would set ImplicitAdmin: true — the
+// implicit-admin gate hasPermission honours — skip the Issue #3126 disabled check,
+// and restore session-derived tenant scope over the account's. The request must be
+// rejected instead, and the downstream handler must never run.
 func TestBearerSession_AccountLookupError_FailsClosed(t *testing.T) {
 	capLog := &captureAllLogger{}
 	srv := setupTestServerWithLogger(t, capLog)
@@ -2499,8 +2538,8 @@ func TestBearerSession_AccountLookupError_FailsClosed(t *testing.T) {
 
 	t.Run("no implicit-admin escalation", func(t *testing.T) {
 		// steward:write-config is not in the account's grants. Before the fix the
-		// lookup error left Permissions nil, which hasPermission treats as implicit
-		// admin, so this request was ALLOWED (200).
+		// lookup error would set ImplicitAdmin: true (via the no-account-found path),
+		// so this request was ALLOWED (200).
 		handler := srv.authenticationMiddleware(
 			srv.requirePermission("steward", "write-config")(
 				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

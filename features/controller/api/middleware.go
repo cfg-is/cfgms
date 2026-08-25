@@ -104,6 +104,17 @@ type Principal struct {
 	// only: cert.HasRootScopeMarker for mTLS admin certs, Session.RootScoped for cfg-CLI
 	// Bearer sessions. Always false for API-key, web-session, and relay principals.
 	RootScoped bool
+	// ImplicitAdmin marks a principal as having unrestricted permission breadth (ADR-025
+	// Amendment 3). Exactly three construction sites set this: mTLS admin certs
+	// (extractAdminPrincipal), CLI Bearer sessions with no bound account or a root-scope
+	// account, and root-scope web accounts. All other principals — API keys, relay
+	// principals, tenant-scoped accounts, zero-valued Principal{} — are denied any
+	// permission unless it appears in Permissions verbatim.
+	//
+	// A zero-valued Principal{} (ImplicitAdmin==false, Permissions==nil) is denied every
+	// permission by construction. Previously, Permissions==nil served as the implicit-admin
+	// marker; that sentinel made a zero-valued principal unintentionally privileged.
+	ImplicitAdmin bool
 }
 
 // loggingMiddleware logs HTTP requests
@@ -258,6 +269,9 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		// A1.3) — never inferred from TenantID being empty. Absent on every admin cert
 		// issued before this marker existed, so existing deployments are unaffected.
 		RootScoped: cert.HasRootScopeMarker(peerCert),
+		// mTLS admin certs are one of the three implicit-admin construction sites
+		// (ADR-025 Amendment 3). Permissions is left nil; ImplicitAdmin is the gate.
+		ImplicitAdmin: true,
 	}
 }
 
@@ -375,17 +389,20 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// today's principals (certificate-derived or root-scope accounts).
 					globalScope := sess.TenantID == ""
 					tenantID := sess.TenantID
-					var permissions []string // nil = implicit-admin marker (default when no account is found)
+					// Default: no bound account → certificate-derived or root-scope session → implicit admin.
+					// ImplicitAdmin is set explicitly; permissions is always non-nil (ADR-025 Amendment 3).
+					implicitAdmin := true
+					permissions := []string{}
 					acct, acctErr := s.getAccountByID(r.Context(), sess.PrincipalID)
 					if acctErr != nil {
 						// Fail closed. The bound account is the authority for this
 						// principal's permissions, tenant scope and disabled status, so a
 						// lookup failure (secret-store/SOPS error, git storage error,
 						// ListSecrets failure, context deadline) must not be treated as
-						// "no account found": that fallback leaves permissions nil, which
-						// hasPermission reads as the implicit-admin marker, skips the
-						// Issue #3126 disabled check, and restores session-derived scope
-						// over the authoritative account values — i.e. every containment
+						// "no account found": the no-account fallback sets ImplicitAdmin:
+						// true (the default for certificate-derived sessions), which would
+						// skip the Issue #3126 disabled check and restore session-derived
+						// scope over the authoritative account values — every containment
 						// control would degrade precisely when the store is unhealthy.
 						// A principal with no bound account (certificate-derived CLI
 						// session) returns (nil, nil), not an error, so those sessions
@@ -413,20 +430,24 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						}
 						tenantID = acct.TenantID
 						globalScope = acct.RootScope
-						if !acct.RootScope {
-							// Tenant-scoped account: enforce the configured RBAC grants verbatim.
+						if acct.RootScope {
+							// Root-scope account: implicit admin, same as a no-account session.
+							// ImplicitAdmin is already true; permissions stays empty.
+						} else {
+							// Tenant-scoped account: enforce RBAC grants verbatim; not implicit admin.
+							implicitAdmin = false
 							permissions = append([]string{}, acct.Permissions...)
 						}
-						// acct.RootScope == true: permissions stays nil (implicit-admin marker)
 					}
 					sessionPrincipal := &Principal{
-						ID:           sess.PrincipalID,
-						Name:         "session:" + logging.SanitizeLogValue(sess.PrincipalID),
-						Assurance:    sess.Assurance,
-						LastProvenAt: sess.LastProvenAt,
-						GlobalScope:  globalScope,
-						Permissions:  permissions,
-						TenantID:     tenantID,
+						ID:            sess.PrincipalID,
+						Name:          "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+						Assurance:     sess.Assurance,
+						LastProvenAt:  sess.LastProvenAt,
+						GlobalScope:   globalScope,
+						Permissions:   permissions,
+						TenantID:      tenantID,
+						ImplicitAdmin: implicitAdmin,
 						// RootScoped mirrors the session's own explicit marker (ADR-025
 						// Amendment 1 A1.3, set only by session.Manager.IssueRootScoped) —
 						// never derived from TenantID or GlobalScope.
@@ -489,11 +510,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
 				authCount := -1
 				globalScope := false
-				// Non-nil is the fail-closed default: an account that cannot be resolved
-				// gets an empty grant set, never an unbounded one. nil is the
-				// implicit-admin marker consumed by hasPermission, and is assigned
-				// below only for an account that resolved AND carries an explicit
-				// root-scope grant.
+				// Fail-closed defaults: account that cannot be resolved gets an empty grant set,
+				// never an unbounded one. ImplicitAdmin is only set for a resolved root-scope account
+				// (ADR-025 Amendment 3). permissions is always non-nil; the nil-sentinel is gone.
+				implicitAdminWeb := false
 				permissions := []string{}
 				if acct, err := s.getAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
 					// Issue #3126: an administratively disabled account loses access
@@ -528,10 +548,11 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						// AssuranceStrong permissions still force a WebAuthn step-up from
 						// this AssuranceBasic session, and the 6 RequireUserPresence ones
 						// still demand a fresh single-use presence token. Enumerating all
-						// 87 IDs per account instead would add no assurance gate that is
+						// IDs per account instead would add no assurance gate that is
 						// not already applied, and would silently strip an administrator
 						// of any permission introduced after their account was created.
-						permissions = nil
+						// ADR-025 Amendment 3: ImplicitAdmin replaces the nil-sentinel.
+						implicitAdminWeb = true
 					} else {
 						// Tenant-scoped accounts are least-privilege operators: their
 						// configured RBAC grants are enforced verbatim (Issue #2919).
@@ -547,6 +568,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					Permissions:        permissions,
 					TenantID:           webSess.TenantID,
 					AuthenticatorCount: authCount,
+					ImplicitAdmin:      implicitAdminWeb,
 				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
@@ -782,8 +804,8 @@ func (s *Server) enrollmentConfinementMiddleware(next http.Handler) http.Handler
 }
 
 // requirePermission creates middleware that enforces specific permission requirements.
-// Human administrator principals carry nil Permissions and are implicitly
-// authorized; accounts carry an explicit (possibly empty) permission slice.
+// Implicit-admin principals (ImplicitAdmin: true) are authorized for every permission;
+// all other principals are held to their Permissions slice verbatim.
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1297,11 +1319,11 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 
 // hasPermission checks whether principal has permissionID.
 //
-// A nil Permissions slice is the explicit implicit-admin marker, carried by the three
-// platform-administrator principals: mTLS admin certs, CLI Bearer sessions, and
-// root-scope accounts. Every other principal carries a non-nil slice — including
-// an empty one — and is held to it verbatim: tenant-scoped accounts, API keys,
-// relay principals, and any account that failed to resolve.
+// The three platform-administrator principal types — mTLS admin certs, CLI Bearer
+// sessions (no bound account or root-scope account), and root-scope web accounts —
+// carry ImplicitAdmin: true (ADR-025 Amendment 3). All other principals — API keys,
+// relay principals, tenant-scoped accounts, and a zero-valued Principal{} — have
+// ImplicitAdmin: false and are held to their Permissions slice verbatim.
 //
 // This decides permission BREADTH only, never proof strength. requirePermission
 // consults permissionAssurance immediately after this returns, so an implicit admin
@@ -1309,17 +1331,16 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 // fresh single-use presence token for RequireUserPresence ones. Widening breadth here
 // cannot widen the assurance gate.
 //
-// nil and empty slices are near-indistinguishable in Go — len, range and append treat
-// them alike, and append(nil) with zero elements yields nil — so the middleware
-// assigns nil deliberately and never by omission. See
-// TestWebSessionCookie_PrincipalNeverCarriesImplicitAdminMarker.
+// A zero-valued Principal{} is denied every permission by construction: ImplicitAdmin
+// is false and Permissions is nil (empty range). The prior Permissions==nil sentinel
+// made a zero-valued principal unintentionally privileged; that hazard is removed.
 //
 // C1: "*" is treated as a literal permission name — it will not match any real permissionID.
 func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 	if principal == nil {
 		return false
 	}
-	if principal.Assurance >= session.AssuranceBasic && principal.Permissions == nil {
+	if principal.ImplicitAdmin {
 		return true
 	}
 	for _, p := range principal.Permissions {

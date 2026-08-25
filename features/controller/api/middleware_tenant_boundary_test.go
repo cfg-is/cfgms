@@ -262,12 +262,13 @@ func TestRootScopedPrincipal_RootTenantItselfAlwaysAllowed(t *testing.T) {
 func TestUnscopedAdmin_UnaffectedOnEveryTenantRoute(t *testing.T) {
 	server := boundaryTestServer(t)
 	admin := &Principal{
-		ID:          "admin-1",
-		Name:        "mtls-admin:admin-1",
-		Assurance:   session.AssuranceStrong,
-		GlobalScope: true,
-		TenantID:    "",
-		CertSerial:  "boundary-test-serial",
+		ID:            "admin-1",
+		Name:          "mtls-admin:admin-1",
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   true,
+		TenantID:      "",
+		CertSerial:    "boundary-test-serial",
+		ImplicitAdmin: true,
 	}
 
 	for _, entry := range tenantBoundaryRouteTable {

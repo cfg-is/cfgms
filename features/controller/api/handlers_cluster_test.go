@@ -61,9 +61,10 @@ func TestAssuranceGate_ClusterDrain_BasicAssuranceGetsStepUp(t *testing.T) {
 	srv, _ := setupClusterTestServer(t)
 
 	basicPrincipal := &Principal{
-		ID:        "web-user",
-		Name:      "web-session:web-user",
-		Assurance: session.AssuranceBasic,
+		ID:            "web-user",
+		Name:          "web-session:web-user",
+		Assurance:     session.AssuranceBasic,
+		ImplicitAdmin: true,
 	}
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := srv.requirePermission("cluster", "drain-node")(probe)
@@ -264,9 +265,10 @@ func TestAssuranceGate_ClusterDecommission_BasicAssuranceGetsStepUp(t *testing.T
 	srv, _ := setupClusterTestServer(t)
 
 	basicPrincipal := &Principal{
-		ID:        "web-user",
-		Name:      "web-session:web-user",
-		Assurance: session.AssuranceBasic,
+		ID:            "web-user",
+		Name:          "web-session:web-user",
+		Assurance:     session.AssuranceBasic,
+		ImplicitAdmin: true,
 	}
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := srv.requirePermission("cluster", "decommission-node")(probe)
