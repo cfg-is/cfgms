@@ -613,6 +613,35 @@ func TestMTLSAuth_NoCert_FallsBackToAPIKey(t *testing.T) {
 	assert.Equal(t, session.AssuranceMachine, capturedPrincipal.Assurance)
 }
 
+// TestAPIKeyAuth_DoesNotSetImplicitAdmin verifies that a Principal constructed via
+// the API-key auth path never carries ImplicitAdmin. Exactly three construction
+// sites set ImplicitAdmin: true (mTLS admin certs, Bearer sessions, root-scope web
+// accounts) — the API-key path must default to false like any other principal type.
+func TestAPIKeyAuth_DoesNotSetImplicitAdmin(t *testing.T) {
+	server := setupTestServer(t)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	var capturedPrincipal *Principal
+	handler := wrapWithAuth(server, "steward", "read",
+		func(w http.ResponseWriter, r *http.Request) {
+			capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+			w.WriteHeader(http.StatusOK)
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/test", nil)
+	req.Header.Set("X-API-Key", apiKeyStr)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "valid API key with granted permission must succeed")
+	require.NotNil(t, capturedPrincipal)
+	assert.False(t, capturedPrincipal.ImplicitAdmin,
+		"API-key-derived principal must never carry ImplicitAdmin")
+
+	assert.False(t, server.hasPermission(capturedPrincipal, "rbac:delete-role"),
+		"API-key principal must be denied a permission outside its explicit grant list")
+}
+
 // TestHasPermission_AdminPrincipal verifies that an administrator principal with
 // ImplicitAdmin: true is authorized for every permission (ADR-025 Amendment 3).
 func TestHasPermission_AdminPrincipal(t *testing.T) {
