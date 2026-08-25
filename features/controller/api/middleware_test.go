@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -2201,6 +2202,413 @@ func TestBearerSession_TenantScoped_CrossTenantAccessDenied(t *testing.T) {
 			"tenant-scoped CLI session must not access a sibling tenant (GlobalScope fix)")
 		assert.Contains(t, rec.Body.String(), "CROSS_TENANT_ACCESS_DENIED",
 			"cross-tenant denial must carry CROSS_TENANT_ACCESS_DENIED error code")
+	})
+}
+
+// --- Bearer session + bound account tests (Issue #3576) ---
+//
+// These tests verify that authenticationMiddleware's Bearer-token branch resolves
+// TenantID, GlobalScope, and Permissions fresh from the bound web account on every
+// request, mirroring the web-cookie branch's per-request account recheck (Issue #3311).
+
+// setupBearerSession issues a cfg-CLI Bearer session for the given principalID and
+// tenantID, returning the token. Uses the manager already wired on srv.
+func setupBearerSession(t *testing.T, mgr session.Manager, principalID, tenantID string) string {
+	t.Helper()
+	_, token, err := mgr.Issue(context.Background(), principalID, "cfg-cli", tenantID)
+	require.NoError(t, err)
+	return token
+}
+
+// TestBearerSession_BoundTenantScopedAccount_PermissionDenied is the [REQUIRED TEST]
+// that a session bound to a tenant-scoped, non-root-scope account with an explicit
+// permission list is DENIED a permission the account does not hold — proving the
+// resolved principal is NOT implicit admin.
+func TestBearerSession_BoundTenantScopedAccount_PermissionDenied(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	// Cache a tenant-scoped account with a limited permission set.
+	srv.cacheWebAccount(&webAccount{
+		ID:          "bounded-operator-id",
+		Username:    "bounded-operator",
+		TenantID:    "tenant-a",
+		RootScope:   false,
+		Permissions: []string{"steward:list"},
+	})
+
+	// Issue a Bearer session for this account's principal ID.
+	token := setupBearerSession(t, mgr, "bounded-operator-id", "tenant-a")
+
+	// steward:write-config is NOT in the account's permissions.
+	handler := srv.authenticationMiddleware(
+		srv.requirePermission("steward", "write-config")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}),
+		),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test/config", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a tenant-scoped Bearer session must be confined to its account's grants — steward:write-config must be denied")
+	assert.Contains(t, rec.Body.String(), "INSUFFICIENT_PERMISSIONS",
+		"denied response must carry INSUFFICIENT_PERMISSIONS code")
+}
+
+// TestBearerSession_BoundAccountPermissionChangeLiveWithoutRelogin is the [REQUIRED TEST]
+// that changing an account's permissions between two requests on the same, still-valid
+// session token changes what the second request is allowed to do — no re-login required.
+func TestBearerSession_BoundAccountPermissionChangeLiveWithoutRelogin(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	// Cache the account with steward:list only.
+	acct := &webAccount{
+		ID:          "live-perm-user-id",
+		Username:    "live-perm-user",
+		TenantID:    "tenant-b",
+		RootScope:   false,
+		Permissions: []string{"steward:list"},
+	}
+	srv.cacheWebAccount(acct)
+
+	// Issue one session token that both requests will use.
+	token := setupBearerSession(t, mgr, acct.ID, acct.TenantID)
+
+	handler := srv.authenticationMiddleware(
+		srv.requirePermission("steward", "write-config")(
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}),
+		),
+	)
+
+	// Request 1: steward:write-config is not in the account's grants → 403.
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test/config", nil)
+	req1.Header.Set("Authorization", "Bearer "+token)
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	assert.Equal(t, http.StatusForbidden, rec1.Code,
+		"steward:write-config must be denied before the permission is granted")
+
+	// Simulate an admin granting steward:write-config — update the cache without re-login.
+	updated := *acct
+	updated.Permissions = append([]string{}, acct.Permissions...)
+	updated.Permissions = append(updated.Permissions, "steward:write-config")
+	srv.cacheWebAccount(&updated)
+
+	// Request 2: same token, now steward:write-config is in the account's grants → 200.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test/config", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code,
+		"steward:write-config must be allowed after the account permission is updated — no re-login required")
+}
+
+// TestBearerSession_BoundDisabledAccount_Returns401Revoked verifies that a session
+// whose PrincipalID matches a Disabled account is rejected with the same
+// "Session has been revoked" 401 an ordinarily-revoked session gets (Issue #3576).
+func TestBearerSession_BoundDisabledAccount_Returns401Revoked(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	srv.cacheWebAccount(&webAccount{
+		ID:       "disabled-cli-id",
+		Username: "disabled-cli-user",
+		TenantID: "tenant-a",
+		Disabled: true,
+	})
+
+	token := setupBearerSession(t, mgr, "disabled-cli-id", "tenant-a")
+
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"a session bound to a disabled account must return 401")
+	assert.Contains(t, rec.Body.String(), "SESSION_REVOKED",
+		"disabled account must produce SESSION_REVOKED — indistinguishable from a revoked session")
+}
+
+// TestBearerSession_NoAccountFound_PreservesImplicitAdmin verifies that a session
+// whose PrincipalID matches no account behaves exactly as before Issue #3576:
+// Permissions stays nil (implicit-admin marker) and TenantID comes from the session.
+func TestBearerSession_NoAccountFound_PreservesImplicitAdmin(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	// No account cached — simulates a session issued from an mTLS admin cert path.
+	token := setupBearerSession(t, mgr, "cert-admin-no-account", "")
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "session with no matching account must still succeed")
+	require.NotNil(t, capturedPrincipal)
+	assert.Nil(t, capturedPrincipal.Permissions,
+		"no-account-found fallback must preserve nil Permissions (implicit-admin marker for today's principals)")
+	assert.Empty(t, capturedPrincipal.TenantID,
+		"no-account-found fallback must use the session's TenantID (empty for an unscoped session)")
+}
+
+// TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin verifies that a session
+// bound to a root-scope account resolves to nil Permissions (implicit-admin marker),
+// mirroring the web-cookie branch's root-scope rule.
+func TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+
+	srv := setupTestServer(t)
+	srv.SetSessionManager(mgr)
+
+	srv.cacheWebAccount(&webAccount{
+		ID:        "root-cli-admin-id",
+		Username:  "root-cli-admin",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	token := setupBearerSession(t, mgr, "root-cli-admin-id", "")
+
+	var capturedPrincipal *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	assert.Nil(t, capturedPrincipal.Permissions,
+		"a root-scope bound account must yield nil Permissions (implicit-admin marker)")
+	assert.True(t, capturedPrincipal.GlobalScope,
+		"a root-scope bound account must set GlobalScope=true")
+}
+
+// TestBearerSession_AccountLookupError_FailsClosed is the [REQUIRED TEST] for the
+// fail-closed account-resolution property of the Bearer branch (Issue #3576 security
+// review). getWebAccountByID returns a real error when the durable store is unhealthy
+// (secret-store/SOPS failure, git storage error, ListSecrets failure, context deadline).
+// Treating that error as "no account found" would leave Permissions nil — the
+// implicit-admin marker hasPermission honours at AssuranceBasic — skip the Issue #3126
+// disabled check, and restore session-derived tenant scope over the account's. The
+// request must be rejected instead, and the downstream handler must never run.
+func TestBearerSession_AccountLookupError_FailsClosed(t *testing.T) {
+	capLog := &captureAllLogger{}
+	srv := setupTestServerWithLogger(t, capLog)
+
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cfg, store, time.Now)
+	srv.SetSessionManager(mgr)
+
+	// Persist a real, tenant-scoped account holding a single grant, so the lookup
+	// exercised below is the same one the middleware performs in production.
+	const username = "failclosed-bearer-operator"
+	rec := postWebAccount(t, srv, testAdminPrincipal(), WebAccountRequest{
+		Username:    username,
+		TenantID:    "tenant-a",
+		Permissions: []string{"steward:list"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	acct := cachedWebAccount(srv, username)
+	require.NotNil(t, acct, "account must be cached so the by-ID lookup hits the store re-verify")
+	require.NotEmpty(t, acct.ID)
+
+	token := setupBearerSession(t, mgr, acct.ID, acct.TenantID)
+
+	// Break the durable store the account lookup depends on.
+	listErr := errors.New("injected ListSecrets failure")
+	srv.secretStore = &errListSecretStore{SecretStore: srv.secretStore, listErr: listErr}
+
+	t.Run("authentication rejects the request", func(t *testing.T) {
+		handlerRan := false
+		handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handlerRan = true
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+
+		assert.False(t, handlerRan,
+			"the protected handler must not run when the bound account could not be resolved")
+		assert.Equal(t, http.StatusServiceUnavailable, resp.Code,
+			"an account-lookup failure must fail closed, not fall through to session-derived defaults")
+		assert.Contains(t, resp.Body.String(), "SERVICE_UNAVAILABLE",
+			"fail-closed rejection must carry the SERVICE_UNAVAILABLE code")
+		assert.NotContains(t, resp.Body.String(), "injected ListSecrets failure",
+			"the internal store error must not be disclosed in the response body")
+
+		logged := capLog.captured()
+		assert.Contains(t, logged, "Web account lookup failed for session token",
+			"the discarded error must now be logged")
+		assert.Contains(t, logged, "injected ListSecrets failure",
+			"the sanitized underlying error must appear in the log for operators")
+	})
+
+	t.Run("no implicit-admin escalation", func(t *testing.T) {
+		// steward:write-config is not in the account's grants. Before the fix the
+		// lookup error left Permissions nil, which hasPermission treats as implicit
+		// admin, so this request was ALLOWED (200).
+		handler := srv.authenticationMiddleware(
+			srv.requirePermission("steward", "write-config")(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}),
+			),
+		)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test/config", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+
+		assert.NotEqual(t, http.StatusOK, resp.Code,
+			"a store failure must never promote a tenant-scoped operator to implicit admin")
+		assert.Equal(t, http.StatusServiceUnavailable, resp.Code,
+			"the request must be rejected at authentication with 503")
+	})
+}
+
+// failingResponseWriter is a real http.ResponseWriter whose body writes always fail,
+// reproducing a client that disconnects after the status line (the condition that makes
+// json.Encoder.Encode return an error). It implements the stdlib interface directly —
+// no mocking framework and no CFGMS component is stubbed.
+type failingResponseWriter struct {
+	header   http.Header
+	status   int
+	writeErr error
+}
+
+func newFailingResponseWriter(err error) *failingResponseWriter {
+	return &failingResponseWriter{header: make(http.Header), writeErr: err}
+}
+
+func (w *failingResponseWriter) Header() http.Header       { return w.header }
+func (w *failingResponseWriter) WriteHeader(code int)      { w.status = code }
+func (w *failingResponseWriter) Write([]byte) (int, error) { return 0, w.writeErr }
+
+// TestResponseEncodeFailuresAreLogged is the [REQUIRED TEST] that no response path in
+// middleware.go silently discards a JSON encoding failure. Every security-rejection
+// writer (writeErrorResponse, writeAuthorizationError, the step-up and presence-token
+// branches of requirePermission) previously used `_ = json.NewEncoder(w).Encode(...)`,
+// so a truncated rejection response left no trace at all. They now share
+// encodeJSONBody with the success path, which logs at Error level.
+func TestResponseEncodeFailuresAreLogged(t *testing.T) {
+	writeErr := errors.New("client disconnected mid-response")
+
+	t.Run("writeErrorResponse", func(t *testing.T) {
+		capLog := &captureAllLogger{}
+		srv := setupTestServerWithLogger(t, capLog)
+
+		w := newFailingResponseWriter(writeErr)
+		srv.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+
+		assert.Equal(t, http.StatusUnauthorized, w.status, "status must still be written")
+		assert.Contains(t, capLog.captured(), "Failed to encode response",
+			"an encoding failure on a rejection response must be logged, not discarded")
+		assert.Contains(t, capLog.captured(), "body_kind error",
+			"the log must identify which response shape failed to encode")
+	})
+
+	t.Run("writeAuthorizationError", func(t *testing.T) {
+		capLog := &captureAllLogger{}
+		srv := setupTestServerWithLogger(t, capLog)
+
+		w := newFailingResponseWriter(writeErr)
+		srv.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS",
+			&AuthorizationDecision{Granted: false, PermissionID: "steward:write-config"})
+
+		assert.Equal(t, http.StatusForbidden, w.status, "status must still be written")
+		assert.Contains(t, capLog.captured(), "Failed to encode response",
+			"an encoding failure on an authorization denial must be logged, not discarded")
+		assert.Contains(t, capLog.captured(), "body_kind authorization_error",
+			"the log must identify which response shape failed to encode")
+	})
+
+	t.Run("requirePermission step-up challenge", func(t *testing.T) {
+		capLog := &captureAllLogger{}
+		srv := setupTestServerWithLogger(t, capLog)
+
+		cfg := session.DefaultConfig()
+		store := session.NewMemStore(cfg, time.Now)
+		t.Cleanup(store.Close)
+		mgr := session.NewManager(cfg, store, time.Now)
+		srv.SetSessionManager(mgr)
+
+		// steward:decommission requires AssuranceStrong; a CLI session is AssuranceBasic,
+		// so requirePermission answers with the step-up challenge body.
+		token := setupBearerSession(t, mgr, "stepup-encode-admin", "")
+		handler := srv.authenticationMiddleware(
+			srv.requirePermission("steward", "decommission")(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}),
+			),
+		)
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/test", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := newFailingResponseWriter(writeErr)
+		handler.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusUnauthorized, w.status,
+			"an AssuranceBasic session must receive the step-up challenge")
+		assert.Contains(t, capLog.captured(), "Failed to encode response",
+			"an encoding failure on the step-up challenge must be logged, not discarded")
+		assert.Contains(t, capLog.captured(), "body_kind step_up_required",
+			"the log must identify the step-up challenge as the failed response shape")
 	})
 }
 
