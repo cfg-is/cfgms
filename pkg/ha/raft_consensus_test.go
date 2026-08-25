@@ -136,6 +136,61 @@ func TestRaftConsensus_propose_stoppedNodeDoesNotPanic(t *testing.T) {
 	}
 }
 
+// TestRaftConsensus_processReady_shutdownRace_doesNotPanic is the regression
+// test for Issue #3528.
+//
+// Root cause: processReady → updateLeadership calls rc.node.Status().Term on a
+// raft node that Stop() has already torn down. In etcd/raft v3.7.0,
+// BasicStatus embeds *pb.HardState as a pointer (not a value); Status() returns
+// Status{} (zero value) once the node is stopped, leaving HardState == nil.
+// Accessing the promoted .Term field on that nil pointer panics at addr=0x0.
+//
+// This test reproduces the exact state that triggered the production panic: the
+// underlying raft node is stopped (simulating Stop() tearing it down) while
+// processReady is still executing with a SoftState that causes updateLeadership
+// to take the "became leader" branch (the only branch that called .Term before
+// the fix). Run under -race with -count=50 to exercise concurrent timing paths.
+func TestRaftConsensus_processReady_shutdownRace_doesNotPanic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nodeInfo := &NodeInfo{
+		ID:    "test-node",
+		State: NodeStateHealthy,
+		Role:  NodeRoleFollower,
+	}
+
+	rc, err := NewRaftConsensus(ctx, 1, nodeInfo, nil, newTestClusterCfg(), "", logging.GetLogger())
+	require.NoError(t, err)
+	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+
+	// Reproduce the race: tear down the underlying raft node while the runRaft
+	// goroutine (and any caller of processReady) is still alive. This mirrors
+	// the production sequence where Stop() called rc.node.Stop() before
+	// rc.wg.Wait() had drained the in-flight processReady goroutine.
+	rc.node.Stop()
+
+	// Feed processReady a Ready with a SoftState whose Lead == rc.nodeID and
+	// RaftState == StateLeader. This causes updateLeadership to enter the
+	// "!wasLeader && isLeader" branch (clusterState.Leader is 0 ≠ nodeID=1 at
+	// construction, so wasLeader is false) and call rc.node.Status().
+	//
+	// Before the fix: .Term is a direct field access on the embedded
+	// *pb.HardState, which is nil in Status{}; the dereference panics.
+	// After the fix: .GetTerm() is the nil-safe proto getter (returns 0 when
+	// HardState is nil), and Stop()'s ordering guarantees runRaft has exited
+	// before rc.node.Stop() is called so this path cannot be reached in normal
+	// operation.
+	assert.NotPanics(t, func() {
+		rc.processReady(raft.Ready{
+			SoftState: &raft.SoftState{
+				Lead:      rc.nodeID,
+				RaftState: raft.StateLeader,
+			},
+		})
+	})
+}
+
 // TestRaftConsensus_ProposeNodeUpdate_AppliedViaRaft verifies that ProposeNodeUpdate
 // encodes the command and sends it through proposeC, and that after the Raft loop
 // processes the entry, GetClusterNodes returns the updated NodeInfo.
@@ -784,8 +839,14 @@ func TestRaftConsensus_NonLeaderNeverGetsLease(t *testing.T) {
 	require.NoError(t, err)
 	defer rc.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
 
-	// Give the node several election timeouts to fail to win an election.
-	time.Sleep(2 * time.Second)
+	// Across several election timeouts the node must never win an election:
+	// the condition is continuously asserted for the whole window rather than
+	// sampled once after a sleep.
+	require.Never(t, func() bool {
+		return rc.IsRaftLeader()
+	}, 2*time.Second, 10*time.Millisecond,
+		"node must never win an election: quorum is 2 and the second voter never started")
+
 	require.NotEqual(t, raft.StateLeader, rc.node.Status().RaftState,
 		"node must not be leader: the second voter never started")
 	require.Empty(t, rc.node.Status().Progress,
@@ -907,12 +968,15 @@ func TestRaftConsensus_LeaseTracksRealPeerAcks(t *testing.T) {
 
 	// The lease must not creep forward on refreshes that see no new ack — that
 	// creep is exactly what stretched the authority window past the ADR-029 bound.
-	time.Sleep(3 * cfg.HeartbeatInterval)
-	rc.refreshLeaseIfQuorum()
-	rc.mu.RLock()
-	stillFirstAck := rc.leaseLastAck
-	rc.mu.RUnlock()
-	assert.True(t, stillFirstAck.Equal(firstAck),
+	// Refresh repeatedly across several heartbeat intervals (the window in which
+	// the raft loop also refreshes on its own tick) and assert on every sample
+	// that the recorded ack instant has not moved.
+	assert.Never(t, func() bool {
+		rc.refreshLeaseIfQuorum()
+		rc.mu.RLock()
+		defer rc.mu.RUnlock()
+		return !rc.leaseLastAck.Equal(firstAck)
+	}, 3*cfg.HeartbeatInterval, 5*time.Millisecond,
 		"leaseLastAck must not advance without a new quorum ack")
 
 	// Property 3a: a later ack moves the lease forward.
