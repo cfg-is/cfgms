@@ -53,6 +53,10 @@ type RotateSigningCertResponse struct {
 // AssuranceStrong-gated in permissionAssurance — this guard mirrors that bar so the
 // defense holds even if rbacService is nil.
 func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request) {
+	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
@@ -363,6 +367,10 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 // Tenant-scope check runs BEFORE calling Revoke — an out-of-scope revoke is a
 // denial-of-service against the owning steward's mTLS connectivity.
 func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request) {
+	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if s.certManager == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
 		return
@@ -455,6 +463,10 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision
 func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Request) {
+	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if s.certProvisioningService == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate provisioning service not available", "SERVICE_UNAVAILABLE")
 		return
@@ -485,17 +497,19 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		ValidityDays: int(provisionReq.ValidityDays),
 	}
 
-	// Call provisioning service. The service reports every failure as both a
-	// non-nil error and Success == false — the two are never independent — so a
-	// single failure branch covers both, plus a nil-response guard. The service's
-	// Message field carries internal error text (CA state, filesystem paths) and is
-	// deliberately logged rather than returned to the caller.
+	// Call provisioning service. Today's service reports every failure as both a
+	// non-nil error and Success == false, but that pairing is a service convention,
+	// not something this handler may assume: a nil response or an unsuccessful
+	// response is a failure on its own, and the log detail is derived by
+	// provisionFailureDetail so no branch dereferences a possibly-nil error. The
+	// service's Message field carries internal error text (CA state, filesystem
+	// paths) and is deliberately logged rather than returned to the caller.
 	provisionResp, err := s.certProvisioningService.ProvisionCertificate(req)
 	if err != nil || provisionResp == nil || !provisionResp.Success {
 		s.logger.Error("Failed to provision certificate",
 			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
 			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
-			"error", logging.SanitizeLogValue(err.Error()))
+			"error", logging.SanitizeLogValue(provisionFailureDetail(provisionResp, err)))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
 		return
 	}
@@ -510,6 +524,25 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.writeResponse(w, http.StatusCreated, result)
+}
+
+// provisionFailureDetail renders the log detail for a failed certificate
+// provisioning attempt. Each failure condition checked by the caller gets its own
+// branch — service error, absent response, unsuccessful response — so a service
+// that reports failure without returning an error (or returns nothing at all) is
+// logged accurately instead of panicking on a nil err.Error() call. The returned
+// text is internal detail for the log only; callers receive a generic message.
+func provisionFailureDetail(resp *service.CertificateProvisioningResponse, err error) string {
+	switch {
+	case err != nil:
+		return err.Error()
+	case resp == nil:
+		return "provisioning service returned no response and no error"
+	case resp.Message != "":
+		return "provisioning service reported failure without an error: " + resp.Message
+	default:
+		return "provisioning service reported failure without an error"
+	}
 }
 
 // safeInt32 safely converts an int to int32 with bounds validation
