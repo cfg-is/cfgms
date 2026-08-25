@@ -44,7 +44,9 @@ import (
 //
 // Callers are responsible for calling PreExecVerifier.VerifyBeforeExec before
 // each invocation to obtain a verified binPath; runQuery does not repeat that
-// check (story #3561).
+// check (story #3561). The production caller is getHostFact, which resolves
+// binPath through osqueryModule.verifiedBinPath (module.go) on every Get() —
+// the only path in this package that reaches runQuery.
 //
 // osquery 5.13.1 stdin contract: osqueryi reads SQL from stdin when its stdin
 // is not a terminal (non-TTY, i.e. programmatic invocation with piped input).

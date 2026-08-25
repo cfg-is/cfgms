@@ -15,37 +15,9 @@ import (
 // Compile-time assertion: osqueryModule satisfies modules.Module.
 var _ modules.Module = (*osqueryModule)(nil)
 
-// TestGet_ReturnsErrNotImplemented pins the S1 scaffold contract for Get():
-// fact-mapping logic lands in S4 of epic #2855, and until then Get() must return
-// modules.ErrNotImplemented with a nil state rather than a partial result.
-func TestGet_ReturnsErrNotImplemented(t *testing.T) {
-	m := New()
-	state, err := m.Get(context.Background(), "host:cpu")
-	if !errors.Is(err, modules.ErrNotImplemented) {
-		t.Errorf("Get() error = %v, want modules.ErrNotImplemented until S4 of epic #2855 implements fact mapping", err)
-	}
-	if state != nil {
-		t.Errorf("Get() state = %v, want nil — an unimplemented Get must not return partial facts", state)
-	}
-}
-
-func TestGet_ReturnsErrNotImplemented_AllResourceIDs(t *testing.T) {
-	m := New()
-	ctx := context.Background()
-	resourceIDs := []string{"host:cpu", "host:memory", "host:os", "host:bios", "", "arbitrary"}
-	for _, rid := range resourceIDs {
-		state, err := m.Get(ctx, rid)
-		if !errors.Is(err, modules.ErrNotImplemented) {
-			t.Errorf("Get(%q) error = %v, want modules.ErrNotImplemented unconditionally", rid, err)
-		}
-		if state != nil {
-			t.Errorf("Get(%q) state = %v, want nil", rid, state)
-		}
-	}
-}
-
 func TestSet_ReturnsErrNotImplemented(t *testing.T) {
-	m := New()
+	// Set never touches the installation, so the zero value is sufficient here.
+	m := New(Installation{})
 	err := m.Set(context.Background(), "host:cpu", nil)
 	if !errors.Is(err, modules.ErrNotImplemented) {
 		t.Errorf("Set() = %v, want modules.ErrNotImplemented — osquery is read-only and Set must never converge state", err)
@@ -53,7 +25,8 @@ func TestSet_ReturnsErrNotImplemented(t *testing.T) {
 }
 
 func TestSet_ReturnsErrNotImplemented_AllResourceIDs(t *testing.T) {
-	m := New()
+	// Set never touches the installation, so the zero value is sufficient here.
+	m := New(Installation{})
 	ctx := context.Background()
 	resourceIDs := []string{"host:cpu", "host:memory", "host:os", "host:bios", "", "arbitrary"}
 	for _, rid := range resourceIDs {
