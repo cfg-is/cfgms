@@ -556,15 +556,19 @@ func (h *DockerComposeHelper) GetStewardLogs(ctx context.Context, stewardName st
 }
 
 // stewardIDPattern matches the identifier the controller assigns at
-// registration, as the steward records it in its own structured log.
-var stewardIDPattern = regexp.MustCompile(`"steward_id":"(steward-[0-9]+)"`)
+// registration, as the steward records it in its own structured log. The
+// trailing "(?:-[0-9a-f]+)?" tolerates both the legacy steward-<nanos> shape
+// and the current steward-<nanos>-<hex> shape minted by generateStewardID
+// (features/controller/api/handlers_registration.go).
+var stewardIDPattern = regexp.MustCompile(`"steward_id":"(steward-[0-9]+(?:-[0-9a-f]+)?)"`)
 
 // StewardID returns the identifier the controller assigned to stewardName.
 //
-// The controller mints this at registration as fmt.Sprintf("steward-%d",
-// time.Now().UnixNano()) (features/controller/api/handlers_registration.go) and
-// returns it in the registration response, which the steward logs. It is not
-// derivable from the Compose service name: these tests previously addressed
+// The controller mints this at registration via generateStewardID
+// (features/controller/api/handlers_registration.go), which appends 8
+// cryptographically random bytes to the timestamp, and returns it in the
+// registration response, which the steward logs. It is not derivable from the
+// Compose service name: these tests previously addressed
 // GET /api/v1/stewards/{id} as "<service>-1" (e.g. "steward-east-1"), a value no
 // controller ever issues, so every lookup answered 404 and every steward was
 // reported "disconnected" no matter how healthy the connection was.

@@ -5,12 +5,14 @@ package api
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -214,8 +216,17 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	// The deny reason is optional, so an absent body is not an error. A body that
+	// is present but malformed is: the reason ends up in the audit record, and
+	// dropping it silently would lose it with no diagnostic trace.
 	var req denyRegistrationRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		s.logger.Warn("Rejected malformed deny-registration body",
+			"pending_id", logging.SanitizeLogValue(pendingID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusDenied); err != nil {
 		s.logger.Error("Failed to deny pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to deny registration", http.StatusInternalServerError)
@@ -322,7 +333,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		}
 		resp, err := s.buildClaimResponse(r.Context(), entry, tokenStr)
 		if err != nil {
-			if errors.Is(err, errClaimDeviceIDConflict) {
+			if errors.Is(err, errClaimDeviceIDConflict) || errors.Is(err, errClaimStewardIDConflict) {
 				// The entry stays "claimed": the colliding enrollment is burned
 				// rather than left retryable, and no certificate was minted.
 				http.Error(w, "device_id already registered in this tenant", http.StatusConflict)
@@ -362,6 +373,24 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 // pending entry asserts a device_id already held by a different steward in the
 // same tenant. Surfaced as HTTP 409 by handleRegistrationStatus.
 var errClaimDeviceIDConflict = errors.New("device_id already registered in this tenant")
+
+// errClaimStewardIDConflict is returned by buildClaimResponse when the pending
+// entry's StewardID is already held by a different device — a steward ID
+// collision. Surfaced as HTTP 409 by handleRegistrationStatus.
+var errClaimStewardIDConflict = errors.New("steward ID already claimed by a different device")
+
+// generateStewardID returns a collision-resistant steward identifier.
+// The ID embeds the given timestamp for readability and 8 cryptographically random
+// bytes (64 bits of entropy) so that concurrent registrations on any platform —
+// including Windows, where the wall clock has substantially coarser granularity than
+// Linux — cannot share an ID regardless of timer resolution.
+func generateStewardID(now time.Time) (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate steward ID: %w", err)
+	}
+	return fmt.Sprintf("steward-%d-%s", now.UnixNano(), hex.EncodeToString(b)), nil
+}
 
 // buildClaimResponse generates the cert and builds the RegistrationStatusResponse.
 // Mirrors the approved path in handleRegister (lines ~286–365).
@@ -443,7 +472,28 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 				business.AuditResultDenied, business.AuditSeverityCritical,
 				map[string]interface{}{"rejection_reason": "duplicate device_id in tenant"})
 			return nil, errClaimDeviceIDConflict
-		case storeErr != nil && !errors.Is(storeErr, business.ErrStewardAlreadyExists):
+		case errors.Is(storeErr, business.ErrStewardAlreadyExists):
+			// A concurrent claim poll or retry wrote this record first. This is benign
+			// when the same device re-claims its own approved entry. However, if two
+			// registrations were assigned the same StewardID (steward ID collision) the
+			// existing record belongs to a different device — refuse the claim so no
+			// second certificate is issued. Key on DeviceID: the same steward re-claiming
+			// has the same DeviceID; a colliding registration has a different one.
+			if entry.DeviceID != "" {
+				if existing, getErr := s.stewardStore.GetSteward(ctx, entry.StewardID); getErr == nil &&
+					existing != nil && existing.DeviceID != entry.DeviceID {
+					s.logger.Warn("Steward ID collision: existing record holds a different device",
+						"steward_id", logging.SanitizeLogValue(entry.StewardID),
+						"pending_device_id", logging.SanitizeLogValue(entry.DeviceID))
+					// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+					s.emitRegistrationAudit(ctx, tokenStr, entry.TenantID, entry.StewardID,
+						business.AuditEventSecurityEvent, "registration_rejected",
+						business.AuditResultDenied, business.AuditSeverityCritical,
+						map[string]interface{}{"rejection_reason": "steward ID collision"})
+					return nil, errClaimStewardIDConflict
+				}
+			}
+		case storeErr != nil:
 			s.logger.Error("Failed to persist steward record to fleet store at enrollment",
 				"steward_id", logging.SanitizeLogValue(entry.StewardID),
 				"error", logging.SanitizeLogValue(storeErr.Error()))
@@ -795,7 +845,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stewardID := fmt.Sprintf("steward-%d", time.Now().UnixNano())
+	stewardID, idErr := generateStewardID(time.Now())
+	if idErr != nil {
+		s.logger.Error("Failed to generate steward ID", "error", logging.SanitizeLogValue(idErr.Error()))
+		http.Error(w, "Registration service unavailable", http.StatusInternalServerError)
+		return
+	}
 
 	// Build initial DNA attributes from best-effort identity hints (Issue #2640).
 	// Hostname and OS are optional; registration succeeds when absent.

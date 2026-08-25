@@ -958,6 +958,23 @@ func TestHandleDenyRegistration(t *testing.T) {
 
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
+
+	t.Run("malformed body returns 400 and leaves the entry pending", func(t *testing.T) {
+		addEntry(t, "pending-deny-3", "steward-deny-3", "default", "10.0.0.4")
+
+		resp := makeDeny(t, "pending-deny-3", `{"reason":`)
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
+			"a malformed deny body must be reported, not silently dropped")
+
+		// The audited deny reason is part of the request: a body the server could
+		// not read must not produce a deny record with the reason missing.
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-deny-3")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+			"a rejected deny request must not change the entry status")
+	})
 }
 
 // TestExtractSourceIP_XFFIgnoredWhenPeerNotProxy verifies that a spoofed
@@ -2306,13 +2323,15 @@ func TestHandleRegister_LeaderGate(t *testing.T) {
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
 			"enrollment against a non-authoritative controller must be rejected")
 
-		var resp RegistrationResponse
-		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-		assert.Empty(t, resp.ClientCert, "no client certificate may be issued by a follower")
-		assert.Empty(t, resp.ClientKey, "no client key may be issued by a follower")
+		// The 503 body is plain text, so it is asserted on directly: no PEM
+		// material of any kind may reach a steward from a follower.
+		body := rec.Body.String()
+		assert.NotContains(t, body, "BEGIN CERTIFICATE",
+			"no client certificate may be issued by a follower")
+		assert.NotContains(t, body, "PRIVATE KEY",
+			"no client key may be issued by a follower")
 
 		// The 503 must not name or imply which node holds leadership.
-		body := rec.Body.String()
 		assert.NotContains(t, body, "node", "503 body must not name a node")
 		assert.NotContains(t, body, "leader", "503 body must not imply which node holds leadership")
 
@@ -2407,12 +2426,15 @@ func TestHandleRegistrationStatus_ClaimLeaderGate(t *testing.T) {
 
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
 			"claiming a cert from a non-authoritative controller must be rejected")
-		var body RegistrationStatusResponse
-		_ = json.Unmarshal(rec.Body.Bytes(), &body)
-		assert.Empty(t, body.ClientCert, "no client certificate may be issued by a follower")
-		assert.Empty(t, body.ClientKey, "no client key may be issued by a follower")
-		assert.NotContains(t, rec.Body.String(), "node", "503 body must not name a node")
-		assert.NotContains(t, rec.Body.String(), "leader",
+		// The 503 body is plain text, so it is asserted on directly: no PEM
+		// material of any kind may reach a steward from a follower.
+		body := rec.Body.String()
+		assert.NotContains(t, body, "BEGIN CERTIFICATE",
+			"no client certificate may be issued by a follower")
+		assert.NotContains(t, body, "PRIVATE KEY",
+			"no client key may be issued by a follower")
+		assert.NotContains(t, body, "node", "503 body must not name a node")
+		assert.NotContains(t, body, "leader",
 			"503 body must not imply which node holds leadership")
 
 		// The entry must stay "approved" so the authoritative controller can
@@ -2871,4 +2893,213 @@ func TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord(t *t
 	}
 	assert.Len(t, matching, 1,
 		"exactly one StewardRecord may hold this device_id, or GetStewardByDeviceID becomes ambiguous")
+}
+
+// TestGenerateStewardID_DistinctUnderFixedClock is the platform-independent regression
+// guard for the steward ID generator (Issue #3526 AC2b).
+//
+// It calls generateStewardID 1000 times with the clock held constant, confirming that
+// the non-clock random component provides enough uniqueness to prevent collisions even
+// when the wall clock resolves at coarse granularity (as on Windows). The test fails
+// immediately when the generator is reverted to fmt.Sprintf("steward-%d",
+// time.Now().UnixNano()) because a fixed timestamp produces the same string every call.
+func TestGenerateStewardID_DistinctUnderFixedClock(t *testing.T) {
+	const N = 1000
+	fixed := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	seen := make(map[string]struct{}, N)
+	for i := 0; i < N; i++ {
+		id, err := generateStewardID(fixed)
+		require.NoError(t, err, "generateStewardID must not fail")
+		require.NotEmpty(t, id)
+		_, dup := seen[id]
+		assert.False(t, dup, "duplicate steward ID at call %d: %s", i, id)
+		seen[id] = struct{}{}
+	}
+	assert.Len(t, seen, N, "all %d IDs must be distinct", N)
+}
+
+// TestHandleRegistrationStatus_DistinctStewardIDsAcrossConcurrentRegistrations drives
+// N concurrent registrations (each with a distinct device_id and identity key) through
+// the quarantine → approve → claim path and asserts every issued steward ID is unique
+// (Issue #3526 AC2).
+func TestHandleRegistrationStatus_DistinctStewardIDsAcrossConcurrentRegistrations(t *testing.T) {
+	const N = 50
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_distinct_steward_ids"
+	const tenantID = "tenant-distinct-ids"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	// Register N devices sequentially, each with a distinct device_id and key.
+	pendingIDs := make([]string, N)
+	for i := 0; i < N; i++ {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		deviceID := fmt.Sprintf("%064x", i+1)
+
+		rec := postRegisterWithBody(server, RegistrationRequest{
+			Token:          regToken,
+			DeviceID:       deviceID,
+			IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, "device %d must quarantine: %s", i, rec.Body.String())
+
+		var qResp RegistrationPendingResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &qResp))
+		pendingIDs[i] = qResp.PendingID
+	}
+
+	// Approve all pending entries before releasing claims concurrently.
+	for _, id := range pendingIDs {
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+			id, business.PendingRegistrationStatusApproved))
+	}
+
+	// Claim all N concurrently from a single barrier.
+	type claimResult struct {
+		stewardID string
+		status    int
+	}
+	start := make(chan struct{})
+	results := make(chan claimResult, N)
+	var wg sync.WaitGroup
+	for _, pendingID := range pendingIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			<-start
+			req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet,
+				ts.URL+"/api/v1/registration/status/"+id, nil)
+			if reqErr != nil {
+				results <- claimResult{status: -1}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+regToken)
+			resp, doErr := ts.Client().Do(req)
+			if doErr != nil {
+				results <- claimResult{status: -1}
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Logf("claim for %s: status %d body %s", id, resp.StatusCode, body)
+				results <- claimResult{status: resp.StatusCode}
+				return
+			}
+			var statusResp RegistrationStatusResponse
+			if decErr := json.NewDecoder(resp.Body).Decode(&statusResp); decErr != nil {
+				results <- claimResult{status: -1}
+				return
+			}
+			results <- claimResult{status: http.StatusOK, stewardID: statusResp.StewardID}
+		}(pendingID)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	seen := make(map[string]bool, N)
+	for res := range results {
+		assert.Equal(t, http.StatusOK, res.status, "every distinct-device claim must succeed")
+		if res.status == http.StatusOK {
+			assert.NotEmpty(t, res.stewardID, "claim response must include steward_id")
+			assert.False(t, seen[res.stewardID],
+				"steward ID %q was issued to more than one device", res.stewardID)
+			seen[res.stewardID] = true
+		}
+	}
+	assert.Len(t, seen, N, "each of the %d devices must receive a unique steward ID", N)
+}
+
+// TestBuildClaimResponse_RefusesDuplicateStewardIDForDifferentDevice verifies that
+// buildClaimResponse refuses to mint a certificate when the pending entry's StewardID
+// is already held by a different device (steward ID collision — Issue #3526 AC3).
+//
+// With the old clock-only generator two concurrent registrations on Windows could share
+// one ID; this guard ensures the second claim is refused even if that somehow happens.
+// The refusal keys on the pending entry's DeviceID, not on the steward-record identity,
+// so the benign re-claim path (same steward, same DeviceID) keeps working.
+func TestBuildClaimResponse_RefusesDuplicateStewardIDForDifferentDevice(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, certMgr)
+
+	const regToken = "cfgms_reg_claim_id_collision"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      "tenant-id-collision",
+		ControllerURL: "grpc://controller:7443",
+	}))
+
+	pubA, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pubB, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	deviceIDA := "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aa"
+	deviceIDB := "bbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabb"
+
+	// Two distinct pending entries that were (hypothetically) assigned the same StewardID
+	// — this is the collision scenario the new ID generator prevents in practice.
+	const sharedStewardID = "steward-collision-test"
+	entryA := &business.PendingRegistrationEntry{
+		PendingID:      "pend-collision-a",
+		StewardID:      sharedStewardID,
+		TenantID:       "tenant-id-collision",
+		DeviceID:       deviceIDA,
+		IdentityKeyPub: []byte(pubA),
+		RegisteredAt:   time.Now().UTC(),
+	}
+	entryB := &business.PendingRegistrationEntry{
+		PendingID:      "pend-collision-b",
+		StewardID:      sharedStewardID,
+		TenantID:       "tenant-id-collision",
+		DeviceID:       deviceIDB,
+		IdentityKeyPub: []byte(pubB),
+		RegisteredAt:   time.Now().UTC(),
+	}
+
+	// First claim succeeds: device A wins and its record is written.
+	respA, err := server.buildClaimResponse(context.Background(), entryA, regToken)
+	require.NoError(t, err, "first claim must succeed")
+	require.NotNil(t, respA)
+	assert.Contains(t, respA.ClientCert, "BEGIN CERTIFICATE")
+
+	// Verify the winning record belongs to device A.
+	stored, lookupErr := stewardSt.GetSteward(context.Background(), sharedStewardID)
+	require.NoError(t, lookupErr, "steward record must exist after first claim")
+	assert.Equal(t, deviceIDA, stored.DeviceID)
+
+	// Second claim with a different DeviceID must be refused: the StewardID
+	// already belongs to device A, not device B.
+	_, err = server.buildClaimResponse(context.Background(), entryB, regToken)
+	assert.ErrorIs(t, err, errClaimStewardIDConflict,
+		"a claim whose StewardID belongs to a different device must return errClaimStewardIDConflict")
+
+	// The steward store must still hold exactly one record — device A's.
+	all, listErr := stewardSt.ListStewards(context.Background())
+	require.NoError(t, listErr)
+	var count int
+	for _, rec := range all {
+		if rec.ID == sharedStewardID {
+			count++
+			assert.Equal(t, deviceIDA, rec.DeviceID, "the winning record must belong to device A")
+		}
+	}
+	assert.Equal(t, 1, count, "exactly one steward record must exist for the shared ID")
 }
