@@ -1205,6 +1205,20 @@ The `GET /api/v1/raft/status` endpoint is protected by RBAC (`ha:read-status` pe
 
 > **Do not use the `X-Raft-From` header for authentication** — it is set by the sender and is untrusted. Only the TLS peer certificate is authoritative.
 
+#### Authority Gating
+
+All side-effecting controller endpoints are gated on lease-backed authority (ADR-029 Decision 4). When `HasLeadership()` returns false, the handler returns HTTP 503 immediately — before any store access, authentication, or principal lookup. A nil checker (single-server mode) is unconditionally authoritative and never returns 503. Read-only and status-poll endpoints are excluded from each gate. Batch-job command dispatch uses Raft term-stamping rather than an HTTP-layer gate; see the final entry.
+
+- **Registration/token endpoints** (#3471) — all seven mutating registration and token handlers, including the generate-on-claim branch of `handleRegistrationStatus`, return 503 when `HasLeadership()` is false; the read-only `GET /api/v1/registration/status/{pending_id}` status-poll branches remain available on any node.
+- **Cluster node drain/decommission** (#3538) — `handleClusterNodeDrain` and `handleClusterNodeDecommission` return 503 on a non-authoritative node; read-only node-list and status queries are unaffected.
+- **Module bundle approval/rejection** (#3539) — `handleApproveModuleBundle` and `handleRejectModuleBundle` return 503 when `HasLeadership()` is false; list and status endpoints remain available.
+- **Version-ring rollout start/halt** (#3540) — `handleStartRollout` (`POST /api/v1/installer/rollouts`) and `handleHaltRollout` (`POST /api/v1/installer/rollouts/{id}/halt`) return 503 on a non-authoritative node; rollout-status reads are unaffected.
+- **Certificate issuance/rotation/revocation** (#3541) — `POST /api/v1/certificates/provision`, `POST /api/v1/certificates/signing/rotate`, and `POST /api/v1/certificates/{serial}/revoke` return 503 when `HasLeadership()` is false; read-only `GET /api/v1/certificates` and `GET /api/v1/certificates/{serial}` remain available.
+- **Installer artifact upload/delete** (#3542) — `handleUploadInstallerArtifact` and `handleDeleteInstallerArtifact` return 503 on a non-authoritative node; read and list endpoints are unaffected.
+- **Steward binary publish** (#3543) — `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}` returns 503 when `HasLeadership()` is false; read and list endpoints remain available.
+- **Steward decommission/move/config write** (#3544) — `handleDecommissionSteward` (`DELETE /api/v1/stewards/{id}`), `handleMoveSteward` (`POST /api/v1/stewards/{id}/move`), `handleUpdateStewardConfig` (`PUT /api/v1/stewards/{id}/config`), and `handleDeleteStewardConfig` (`DELETE /api/v1/stewards/{id}/config`) each return 503 on a non-authoritative node; read-only status and config-read endpoints are unaffected.
+- **Batch-job/run-script command dispatch** (#3545) — fencing via Raft term-stamping, confirmed by test in #3545; `RollingBatchExecutor`'s command dispatch stamps `Term: p.currentTerm()` on every published command (`features/controller/commands/publisher.go:181`), so commands from a stale leader are rejected by followers holding a higher term. This surface is **not** `HasLeadership()`-gated — it operates at the Raft log level rather than the HTTP handler layer.
+
 ## REST API
 
 The REST API is the admin interface to the controller. All operations are authenticated, authorized via RBAC, and audit-logged.
