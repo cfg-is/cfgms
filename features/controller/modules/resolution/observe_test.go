@@ -26,6 +26,18 @@ func makeObserveManifest(name string, predicates []modules.ObservePredicate) *mo
 	}
 }
 
+// makeAlwaysPullManifest builds a minimal ModuleMetadata with AlwaysPull true and no ObserveWhen.
+func makeAlwaysPullManifest(name string) *modules.ModuleMetadata {
+	return &modules.ModuleMetadata{
+		Name:       name,
+		Version:    "1.0.0",
+		Publisher:  "cfgms",
+		Executors:  []string{"steward"},
+		Kind:       "steward",
+		AlwaysPull: true,
+	}
+}
+
 func TestResolveObserveModules_EmptyObserveWhenNeverMatches(t *testing.T) {
 	// A manifest with no ObserveWhen must never appear in the result, even if
 	// the DNA contains data (ADR-024 §2: absence means never auto-pull).
@@ -224,5 +236,104 @@ func TestResolveObserveModules_HypervEnabledDNAFact(t *testing.T) {
 		// Collector omits the key entirely on elevation failure — must not match.
 		got := resolution.ResolveObserveModules(dnaMissingElevation, []*modules.ModuleMetadata{hypervModule})
 		assert.Empty(t, got)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// AlwaysPull tests (ADR-024 Amendment 2, Issue #3563)
+// ---------------------------------------------------------------------------
+
+// TestResolveObserveModules_AlwaysPull_EmptyDNA confirms that an AlwaysPull
+// manifest is included even when the baseline DNA map is empty — universal pull
+// is unconditional, not predicate-gated.
+func TestResolveObserveModules_AlwaysPull_EmptyDNA(t *testing.T) {
+	m := makeAlwaysPullManifest("osquery")
+	got := resolution.ResolveObserveModules(map[string]string{}, []*modules.ModuleMetadata{m})
+	require.Len(t, got, 1)
+	assert.Equal(t, "osquery", got[0])
+}
+
+// TestResolveObserveModules_AlwaysPull_NilDNA confirms AlwaysPull activates with
+// a nil DNA map (steward may send nil on first boot).
+func TestResolveObserveModules_AlwaysPull_NilDNA(t *testing.T) {
+	m := makeAlwaysPullManifest("osquery")
+	got := resolution.ResolveObserveModules(nil, []*modules.ModuleMetadata{m})
+	require.Len(t, got, 1)
+	assert.Equal(t, "osquery", got[0])
+}
+
+// TestResolveObserveModules_AlwaysPull_WithPopulatedDNA confirms AlwaysPull
+// activates regardless of what DNA facts are present.
+func TestResolveObserveModules_AlwaysPull_WithPopulatedDNA(t *testing.T) {
+	m := makeAlwaysPullManifest("osquery")
+	dna := map[string]string{"os": "linux", "arch": "amd64", "hyperv_enabled": "false"}
+	got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{m})
+	require.Len(t, got, 1)
+	assert.Equal(t, "osquery", got[0])
+}
+
+// TestResolveObserveModules_AlwaysFalse_EmptyObserveWhen confirms that a module
+// with AlwaysPull false (or absent) and no ObserveWhen is still never included —
+// existing behavior unchanged (ADR-024 §2).
+func TestResolveObserveModules_AlwaysFalse_EmptyObserveWhen(t *testing.T) {
+	m := &modules.ModuleMetadata{
+		Name:       "inert-module",
+		Version:    "1.0.0",
+		Publisher:  "cfgms",
+		Executors:  []string{"steward"},
+		Kind:       "steward",
+		AlwaysPull: false,
+	}
+	dna := map[string]string{"os": "linux"}
+	got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{m})
+	assert.Empty(t, got, "AlwaysPull=false with no ObserveWhen must never be included")
+}
+
+// TestResolveObserveModules_AlwaysPull_CoexistsWithObserveWhen confirms that a
+// manifest list can contain both AlwaysPull and observe_when modules; each is
+// resolved independently.
+func TestResolveObserveModules_AlwaysPull_CoexistsWithObserveWhen(t *testing.T) {
+	osq := makeAlwaysPullManifest("osquery")
+	hyperv := makeObserveManifest("hyperv", []modules.ObservePredicate{
+		{Fact: "hyperv_enabled", Equals: "true"},
+	})
+	// DNA has hyperv_enabled=true → hyperv matches; osquery always matches.
+	dna := map[string]string{"hyperv_enabled": "true", "os": "windows"}
+	got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{osq, hyperv})
+	sort.Strings(got)
+	assert.Equal(t, []string{"hyperv", "osquery"}, got)
+}
+
+// TestResolveObserveModules_AlwaysPull_HypervUnaffected is the required
+// regression test: existing observe_when-only modules (hyperv) are unaffected by
+// the AlwaysPull field (ADR-024 Amendment 2, AC: "existing observe_when-only
+// modules are unaffected").
+func TestResolveObserveModules_AlwaysPull_HypervUnaffected(t *testing.T) {
+	osq := makeAlwaysPullManifest("osquery")
+	hyperv := makeObserveManifest("hyperv", []modules.ObservePredicate{
+		{Fact: "hyperv_enabled", Equals: "true"},
+	})
+
+	t.Run("hyperv_present_when_predicate_matches", func(t *testing.T) {
+		dna := map[string]string{"hyperv_enabled": "true"}
+		got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{hyperv, osq})
+		sort.Strings(got)
+		assert.Equal(t, []string{"hyperv", "osquery"}, got)
+	})
+
+	t.Run("hyperv_absent_when_predicate_does_not_match", func(t *testing.T) {
+		// osquery must still appear (AlwaysPull); hyperv must not (predicate fails).
+		dna := map[string]string{"hyperv_enabled": "false"}
+		got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{hyperv, osq})
+		require.Len(t, got, 1)
+		assert.Equal(t, "osquery", got[0])
+	})
+
+	t.Run("hyperv_absent_when_fact_missing", func(t *testing.T) {
+		// osquery must still appear; hyperv must not.
+		dna := map[string]string{"os": "linux"}
+		got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{hyperv, osq})
+		require.Len(t, got, 1)
+		assert.Equal(t, "osquery", got[0])
 	})
 }

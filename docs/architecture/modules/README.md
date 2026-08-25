@@ -54,6 +54,7 @@ Every `module.yaml` must include the following fields:
 | `kind` | — | derived | Derived from `executors[0]`; never set in YAML (see below) |
 | `behavioral_envelope` | object | no | Runtime behavior declaration for security auditing |
 | `observe_when` | list | no | Activation predicate for read-only DNA observation (ADR-024). Absent = never auto-pulled for DNA. |
+| `always_pull` | bool | no | Pull this module on every steward unconditionally, without a DNA predicate match (ADR-024 Amendment 2). Use only for universal baseline modules (e.g. `osquery`). Absent or `false` = predicate-gated only. |
 
 ### Executor values and derived `kind`
 

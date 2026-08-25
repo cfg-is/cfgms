@@ -94,6 +94,14 @@ type ModuleMetadata struct {
 	// never auto-pulled for DNA — backward-compatible with all existing module.yaml
 	// files that predate this field.
 	ObserveWhen []ObservePredicate `yaml:"observe_when,omitempty" json:"observe_when,omitempty"`
+
+	// AlwaysPull activates this module for read-only DNA observation on every
+	// steward unconditionally, without requiring any DNA fact match (ADR-024
+	// Amendment 2). Intended for universal baseline modules such as osquery that
+	// must run on every managed host. False (or absent) preserves the existing
+	// observe_when-only semantics — backward-compatible with all existing
+	// module.yaml files that predate this field.
+	AlwaysPull bool `yaml:"always_pull,omitempty" json:"always_pull,omitempty"`
 }
 
 // BehavioralEnvelope documents the runtime behavior of a module for security auditing
@@ -498,6 +506,8 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 		clone.ObserveWhen = make([]ObservePredicate, len(m.ObserveWhen))
 		copy(clone.ObserveWhen, m.ObserveWhen)
 	}
+
+	clone.AlwaysPull = m.AlwaysPull
 
 	return clone
 }

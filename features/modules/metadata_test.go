@@ -814,6 +814,7 @@ func TestModuleMetadata_Clone(t *testing.T) {
 			NetworkEgress:            []string{"api.example.com:443"},
 			LolbinUsageJustification: "required",
 		},
+		AlwaysPull: true,
 	}
 
 	// Clone the metadata
@@ -830,6 +831,10 @@ func TestModuleMetadata_Clone(t *testing.T) {
 
 	if clone.Kind != original.Kind {
 		t.Errorf("Clone Kind = %v, expected %v", clone.Kind, original.Kind)
+	}
+
+	if clone.AlwaysPull != original.AlwaysPull {
+		t.Errorf("Clone AlwaysPull = %v, expected %v", clone.AlwaysPull, original.AlwaysPull)
 	}
 
 	if len(clone.Executors) != len(original.Executors) || clone.Executors[0] != original.Executors[0] {
@@ -1281,6 +1286,176 @@ func TestModuleMetadata_Clone_ObserveWhen(t *testing.T) {
 	clone.ObserveWhen[0].Fact = "mutated"
 	if original.ObserveWhen[0].Fact == "mutated" {
 		t.Error("mutating clone ObserveWhen[0].Fact affected original")
+	}
+}
+
+// TestParseModuleMetadata_AlwaysPull verifies the yaml:"always_pull" parse path
+// (ADR-024 Amendment 2): absent key yields false for backward compatibility,
+// an explicit true/false is honoured, and always_pull composes with observe_when.
+func TestParseModuleMetadata_AlwaysPull(t *testing.T) {
+	baseYAML := func(extra string) string {
+		return `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+` + extra
+	}
+
+	tests := []struct {
+		name           string
+		yaml           string
+		wantAlwaysPull bool
+		wantObserveLen int
+	}{
+		{
+			name:           "no always_pull key — backward compatible, false",
+			yaml:           baseYAML(""),
+			wantAlwaysPull: false,
+		},
+		{
+			name:           "always_pull: true",
+			yaml:           baseYAML("always_pull: true\n"),
+			wantAlwaysPull: true,
+		},
+		{
+			name:           "always_pull: false explicit",
+			yaml:           baseYAML("always_pull: false\n"),
+			wantAlwaysPull: false,
+		},
+		{
+			name: "always_pull alongside observe_when",
+			yaml: baseYAML(`always_pull: true
+observe_when:
+  - fact: os
+    equals: windows
+`),
+			wantAlwaysPull: true,
+			wantObserveLen: 1,
+		},
+		{
+			name: "observe_when only — always_pull stays false",
+			yaml: baseYAML(`observe_when:
+  - fact: windows_feature
+    contains: hyperv
+`),
+			wantAlwaysPull: false,
+			wantObserveLen: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata, err := ParseModuleMetadata(strings.NewReader(tt.yaml))
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if metadata.AlwaysPull != tt.wantAlwaysPull {
+				t.Errorf("AlwaysPull = %v, want %v", metadata.AlwaysPull, tt.wantAlwaysPull)
+			}
+			if len(metadata.ObserveWhen) != tt.wantObserveLen {
+				t.Errorf("ObserveWhen length = %d, want %d", len(metadata.ObserveWhen), tt.wantObserveLen)
+			}
+		})
+	}
+}
+
+// TestParseModuleMetadata_AlwaysPullRoundTrip verifies always_pull survives a
+// YAML round-trip through ToYAML + Unmarshal, and that the omitempty tag drops
+// the key when false so pre-existing module.yaml files round-trip unchanged.
+func TestParseModuleMetadata_AlwaysPullRoundTrip(t *testing.T) {
+	t.Run("true survives round-trip", func(t *testing.T) {
+		input := `name: osquery
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+always_pull: true
+`
+		metadata, err := ParseModuleMetadata(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+
+		yamlBytes, err := metadata.ToYAML()
+		if err != nil {
+			t.Fatalf("ToYAML() error: %v", err)
+		}
+		if !strings.Contains(string(yamlBytes), "always_pull: true") {
+			t.Errorf("ToYAML() output missing always_pull key:\n%s", yamlBytes)
+		}
+
+		var reparsed ModuleMetadata
+		if err := yaml.Unmarshal(yamlBytes, &reparsed); err != nil {
+			t.Fatalf("failed to unmarshal round-tripped YAML: %v", err)
+		}
+		if !reparsed.AlwaysPull {
+			t.Error("AlwaysPull after round-trip = false, want true")
+		}
+	})
+
+	t.Run("false is omitted by omitempty", func(t *testing.T) {
+		input := `name: test
+version: 1.0.0
+publisher: cfgms
+executors:
+  - steward
+`
+		metadata, err := ParseModuleMetadata(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+
+		yamlBytes, err := metadata.ToYAML()
+		if err != nil {
+			t.Fatalf("ToYAML() error: %v", err)
+		}
+		if strings.Contains(string(yamlBytes), "always_pull") {
+			t.Errorf("ToYAML() emitted always_pull for a false value:\n%s", yamlBytes)
+		}
+	})
+}
+
+// TestLoadModuleMetadata_AlwaysPull_OsqueryManifest parses the shipped osquery
+// module.yaml (a real manifest, not a fixture) to confirm the always_pull key it
+// declares is actually recognised by the parser.
+func TestLoadModuleMetadata_AlwaysPull_OsqueryManifest(t *testing.T) {
+	metadata, err := LoadModuleMetadata(filepath.Join("extended", "osquery", "module.yaml"))
+	if err != nil {
+		t.Fatalf("failed to load osquery module.yaml: %v", err)
+	}
+	if !metadata.AlwaysPull {
+		t.Error("osquery manifest AlwaysPull = false, want true (always_pull: true is declared in module.yaml)")
+	}
+	if len(metadata.ObserveWhen) != 0 {
+		t.Errorf("osquery manifest ObserveWhen = %v, want empty (activation is via always_pull)", metadata.ObserveWhen)
+	}
+}
+
+// TestModuleMetadata_Clone_AlwaysPull verifies Clone preserves AlwaysPull for
+// both values and that the copy is independent of the original.
+func TestModuleMetadata_Clone_AlwaysPull(t *testing.T) {
+	for _, alwaysPull := range []bool{true, false} {
+		original := &ModuleMetadata{
+			Name:       "test",
+			Version:    "1.0.0",
+			Publisher:  "cfgms",
+			Executors:  []string{"steward"},
+			Kind:       "steward",
+			AlwaysPull: alwaysPull,
+		}
+
+		clone := original.Clone()
+
+		if clone.AlwaysPull != original.AlwaysPull {
+			t.Errorf("Clone AlwaysPull = %v, want %v", clone.AlwaysPull, original.AlwaysPull)
+		}
+
+		// Mutating the clone must not affect the original.
+		clone.AlwaysPull = !alwaysPull
+		if original.AlwaysPull != alwaysPull {
+			t.Errorf("mutating clone AlwaysPull affected original: original = %v, want %v", original.AlwaysPull, alwaysPull)
+		}
 	}
 }
 

@@ -9,15 +9,18 @@ import (
 	modules "github.com/cfgis/cfgms/features/modules"
 )
 
-// ResolveObserveModules returns the names of modules whose observe_when predicates
-// match the given baseline DNA attribute map.
+// ResolveObserveModules returns the names of modules that should observe on the
+// steward given the baseline DNA attribute map.
 //
-// Matching rules (ADR-024 §5):
-//   - A manifest with nil or empty ObserveWhen never appears in the result.
-//     Absence of ObserveWhen means "never auto-pull for DNA" (ADR-024 §2).
-//   - Predicates within a single manifest are OR'd: any one match activates
-//     that module. equals requires exact string equality; contains requires
-//     strings.Contains on the fact value.
+// Matching rules (ADR-024 §5, Amendment 2):
+//   - A manifest with AlwaysPull true always appears in the result, regardless
+//     of the DNA contents (including an empty map) — per-cycle universal pull.
+//   - A manifest with nil or empty ObserveWhen and AlwaysPull false never
+//     appears in the result. Absence of both fields means "never auto-pull for
+//     DNA" (ADR-024 §2).
+//   - When ObserveWhen is non-empty, predicates are OR'd: any one match
+//     activates that module. equals requires exact string equality; contains
+//     requires strings.Contains on the fact value.
 //
 // This is a pure function — no I/O, no RPC. The wiring to an actual call site
 // (steward observation loop RPC) is handled by a separate sibling story.
@@ -28,6 +31,10 @@ func ResolveObserveModules(dna map[string]string, manifests []*modules.ModuleMet
 
 	var result []string
 	for _, m := range manifests {
+		if m.AlwaysPull {
+			result = append(result, m.Name)
+			continue
+		}
 		if len(m.ObserveWhen) == 0 {
 			continue
 		}

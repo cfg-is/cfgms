@@ -21,9 +21,7 @@ requirements:
   os: [linux, darwin, windows]
   arch: [amd64, arm64]
 
-# observe_when: omitted — pending ADR-024 module-tagging story (bounded,
-# inventory-worthy domain via curated osquery queries; observe_when predicate
-# will be added by the ADR-024 epic).
+always_pull: true
 
 behavioral_envelope:
   shells_out_to:
