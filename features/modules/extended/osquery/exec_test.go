@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,86 @@ func makeScript(t *testing.T, body string) string {
 		t.Fatalf("chmod script: %v", err)
 	}
 	return f.Name()
+}
+
+// makeBatch writes a cmd.exe batch script to a temp file with a .bat
+// extension and returns the path. Unlike POSIX, Windows determines whether a
+// file is executable by its extension (PATHEXT), not a permission bit — an
+// extensionless file is never resolved as an executable by os/exec's
+// Windows path-extension search, regardless of its content or permissions.
+func makeBatch(t *testing.T, body string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "fake-osquery-*.bat")
+	if err != nil {
+		t.Fatalf("create temp batch file: %v", err)
+	}
+	if _, err := f.WriteString("@echo off\n" + body); err != nil {
+		t.Fatalf("write batch body: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close batch file: %v", err)
+	}
+	return f.Name()
+}
+
+// newFakeOsquery writes a fake osquery binary appropriate for the current
+// platform and returns its path: a POSIX shell script on Linux/macOS, a
+// cmd.exe batch script on Windows. Every caller supplies both bodies so the
+// two behaviors stay next to each other and are easy to keep in sync.
+func newFakeOsquery(t *testing.T, posixBody, windowsBody string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return makeBatch(t, windowsBody)
+	}
+	return makeScript(t, posixBody)
+}
+
+// newNonExecutableFixture returns the path to a file that exists, has valid
+// script content, but cannot be started as a process — used to exercise
+// runQuery's start-failure branch.
+//
+// On POSIX, this is a mode-0600 file: execve(2) requires at least one execute
+// bit for every user including root, so it fails to start regardless of test
+// UID. Windows has no equivalent exec bit — executability there is decided by
+// file extension (PATHEXT), and CreateProcess enforces access via the file's
+// ACL, not a permission mode integer. A bare os.WriteFile with an extensionless
+// name would fail via the same PATHEXT-resolution path every other fixture in
+// this file needs (fs.ErrNotExist-shaped "file not found"), not the permission
+// failure this test wants to exercise. So on Windows the fixture is a .bat file
+// (resolves like every other fixture here) with an explicit icacls deny rule
+// that blocks the current user's read/execute access, producing a genuine
+// ERROR_ACCESS_DENIED from CreateProcess — which Go's syscall layer maps to
+// fs.ErrPermission, matching the POSIX assertion in the caller's test table.
+func newNonExecutableFixture(t *testing.T, dir string) string {
+	t.Helper()
+
+	if runtime.GOOS != "windows" {
+		nonExecutable := filepath.Join(dir, "not-executable")
+		if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\necho '[]'\n"), 0o600); err != nil {
+			t.Fatalf("write non-executable file: %v", err)
+		}
+		return nonExecutable
+	}
+
+	nonExecutable := filepath.Join(dir, "not-executable.bat")
+	if err := os.WriteFile(nonExecutable, []byte("@echo off\necho []\n"), 0o600); err != nil {
+		t.Fatalf("write non-executable file: %v", err)
+	}
+
+	user := os.Getenv("USERNAME")
+	if user == "" {
+		t.Fatal("USERNAME environment variable not set — cannot construct icacls deny rule")
+	}
+	denyCmd := exec.Command("icacls", nonExecutable, "/deny", user+":(RX)")
+	if out, err := denyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("icacls /deny failed: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		// Restore access so t.TempDir()'s cleanup can remove the file.
+		_ = exec.Command("icacls", nonExecutable, "/grant", user+":(RX)").Run()
+	})
+
+	return nonExecutable
 }
 
 // TestRunQuery_NoArgBuildViaSprintfOrConcat is the REQUIRED TEST for
@@ -84,7 +165,10 @@ func TestRunQuery_SanitizeLogValueInErrorPath(t *testing.T) {
 // TestRunQuery_MalformedJSONReturnsError is a REQUIRED TEST (issue #3562 AC)
 // verifying that non-JSON osquery output produces an error, not a panic.
 func TestRunQuery_MalformedJSONReturnsError(t *testing.T) {
-	bin := makeScript(t, `echo "this is not valid json"`)
+	bin := newFakeOsquery(t,
+		`echo "this is not valid json"`,
+		"echo this is not valid json\n",
+	)
 	_, err := runQuery(context.Background(), bin, "SELECT 1")
 	if err == nil {
 		t.Fatal("runQuery accepted non-JSON output — a parse error must be returned")
@@ -106,7 +190,10 @@ func TestRunQuery_StderrSanitizedInError(t *testing.T) {
 		t.Fatalf("write tainted stderr file: %v", err)
 	}
 
-	bin := makeScript(t, fmt.Sprintf("cat %s >&2; exit 1", stderrFile))
+	bin := newFakeOsquery(t,
+		fmt.Sprintf("cat \"%s\" >&2; exit 1", stderrFile),
+		fmt.Sprintf("type \"%s\" 1>&2\nexit /b 1\n", stderrFile),
+	)
 
 	_, err := runQuery(context.Background(), bin, "SELECT 1")
 	if err == nil {
@@ -125,11 +212,20 @@ func TestRunQuery_StderrSanitizedInError(t *testing.T) {
 // TestRunQuery_ContextCancellationTerminatesProcess verifies that a cancelled
 // context terminates the child osquery process rather than blocking forever.
 //
-// The script uses "exec sleep 60" so the shell replaces itself with sleep — no
-// child subprocess holds the stdout pipe open after the kill, so cmd.Output()
-// can return promptly when the context fires.
+// The POSIX script uses "exec sleep 60" so the shell replaces itself with
+// sleep — no child subprocess holds the stdout pipe open after the kill, so
+// cmd.Output() can return promptly when the context fires. The Windows batch
+// script spins in a "for /l" loop instead of shelling out to ping/timeout,
+// for the same reason: any subprocess a batch file starts (e.g. ping.exe)
+// keeps the inherited stdout pipe open after cmd.exe itself is killed, and
+// cmd.Output() would then block until that orphaned subprocess exits on its
+// own — up to a minute later. "for /l" is a shell builtin, so killing the
+// single cmd.exe process is enough to close the pipe immediately.
 func TestRunQuery_ContextCancellationTerminatesProcess(t *testing.T) {
-	bin := makeScript(t, `exec sleep 60`)
+	bin := newFakeOsquery(t,
+		`exec sleep 60`,
+		"for /l %%i in (1,1,1000000000) do rem\n",
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
@@ -150,7 +246,10 @@ func TestRunQuery_ContextCancellationTerminatesProcess(t *testing.T) {
 // TestRunQuery_HappyPath verifies that a valid JSON response is parsed into the
 // expected row slice.
 func TestRunQuery_HappyPath(t *testing.T) {
-	bin := makeScript(t, `echo '[{"cpu_brand":"GenuineIntel","physical_cores":"4"}]'`)
+	bin := newFakeOsquery(t,
+		`echo '[{"cpu_brand":"GenuineIntel","physical_cores":"4"}]'`,
+		"echo [{\"cpu_brand\":\"GenuineIntel\",\"physical_cores\":\"4\"}]\n",
+	)
 
 	rows, err := runQuery(context.Background(), bin, "SELECT cpu_brand, physical_cores FROM cpu_info")
 	if err != nil {
@@ -170,7 +269,7 @@ func TestRunQuery_HappyPath(t *testing.T) {
 // TestRunQuery_EmptyResultSet verifies that an empty JSON array is accepted
 // without error and returns a nil/zero-length slice.
 func TestRunQuery_EmptyResultSet(t *testing.T) {
-	bin := makeScript(t, `echo '[]'`)
+	bin := newFakeOsquery(t, `echo '[]'`, "echo []\n")
 
 	rows, err := runQuery(context.Background(), bin, "SELECT 1 WHERE 1=0")
 	if err != nil {
@@ -188,12 +287,17 @@ func TestRunQuery_EmptyResultSet(t *testing.T) {
 // query were passed as a CLI argument, stdin would be empty and the script
 // would output an empty array.
 func TestRunQuery_QueryDeliveredViaStdin(t *testing.T) {
-	bin := makeScript(t, `
+	bin := newFakeOsquery(t,
+		`
 if read -r line; then
     echo '[{"stdin_received":"true"}]'
 else
     echo '[]'
-fi`)
+fi`,
+		`set /p line=
+if defined line (echo [{"stdin_received":"true"}]) else (echo [])
+`,
+	)
 
 	rows, err := runQuery(context.Background(), bin, "SELECT 1")
 	if err != nil {
@@ -210,7 +314,10 @@ fi`)
 
 // TestRunQuery_MultipleRows verifies parsing of a multi-row JSON result.
 func TestRunQuery_MultipleRows(t *testing.T) {
-	bin := makeScript(t, `echo '[{"name":"eth0","type":"ethernet"},{"name":"lo","type":"loopback"}]'`)
+	bin := newFakeOsquery(t,
+		`echo '[{"name":"eth0","type":"ethernet"},{"name":"lo","type":"loopback"}]'`,
+		"echo [{\"name\":\"eth0\",\"type\":\"ethernet\"},{\"name\":\"lo\",\"type\":\"loopback\"}]\n",
+	)
 
 	rows, err := runQuery(context.Background(), bin, "SELECT name, type FROM interface_details")
 	if err != nil {
@@ -230,7 +337,7 @@ func TestRunQuery_MultipleRows(t *testing.T) {
 // TestRunQuery_NonZeroExitReturnsError verifies that a non-zero exit code from
 // the osquery binary is propagated as an error.
 func TestRunQuery_NonZeroExitReturnsError(t *testing.T) {
-	bin := makeScript(t, `exit 2`)
+	bin := newFakeOsquery(t, `exit 2`, "exit /b 2\n")
 
 	_, err := runQuery(context.Background(), bin, "SELECT 1")
 	if err == nil {
@@ -260,13 +367,7 @@ func TestRunQuery_NonZeroExitReturnsError(t *testing.T) {
 func TestRunQuery_ProcessStartFailureReturnsExecutionError(t *testing.T) {
 	dir := t.TempDir()
 
-	// A regular file with valid script content but no execute bit. execve(2)
-	// requires at least one execute bit to be set, for every user including
-	// root, so this fails to start on any POSIX host regardless of test UID.
-	nonExecutable := filepath.Join(dir, "not-executable")
-	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\necho '[]'\n"), 0o600); err != nil {
-		t.Fatalf("write non-executable file: %v", err)
-	}
+	nonExecutable := newNonExecutableFixture(t, dir)
 
 	tests := []struct {
 		name    string
