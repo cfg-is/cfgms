@@ -633,6 +633,72 @@ func TestRollingBatchExecutor_RollbackDispatchFailureTransitionsJobFailed(t *tes
 	assert.Equal(t, 6, f.cp.sentCount())
 }
 
+// staticTermSource is a minimal TermSource test double that returns a fixed term.
+// It is not a mock of commands.Publisher — it only satisfies the commands.TermSource
+// interface, exactly as the pattern established by #3390.
+type staticTermSource struct {
+	term uint64
+}
+
+func (s *staticTermSource) GetTerm() uint64 { return s.term }
+
+// TestRollingBatchExecutor_DispatchBatch_StampsRaftTerm is the REQUIRED test
+// (Issue #3545): proves that every CommandSyncConfig published via
+// RollingBatchExecutor.dispatchBatch carries the current Raft term as stamped
+// by the configured TermSource, using a real commands.Publisher and only a
+// minimal TermSource test double.
+func TestRollingBatchExecutor_DispatchBatch_StampsRaftTerm(t *testing.T) {
+	const wantTerm uint64 = 99
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cp := newExecutorTestCP()
+	logger := logging.NewNoopLogger()
+
+	pub, err := commands.New(&commands.Config{
+		ControlPlane: cp,
+		TermSource:   &staticTermSource{term: wantTerm},
+		Logger:       logger,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pub.Start(ctx))
+
+	store := newTestBatchJobStore()
+	require.NoError(t, store.Initialize(ctx))
+
+	exec := batchjob.NewRollingBatchExecutor(
+		store,
+		newTestFleetQuery("s-0", "s-1", "s-2"),
+		pub,
+		nil,
+		logger,
+	)
+
+	job := newPendingJob("job-term", 10)
+	require.NoError(t, store.CreateBatchJob(ctx, job))
+
+	d := newCompletionDriver(t, cp, pub, func(_ string) bool { return false })
+	d.start(ctx)
+	defer d.stop()
+
+	require.NoError(t, exec.Execute(ctx, job))
+
+	// All 3 stewards dispatched in a single batch.
+	require.Equal(t, 3, cp.sentCount(), "all 3 stewards must receive a command")
+
+	cp.mu.Lock()
+	sent := make([]*controlplaneTypes.SignedCommand, len(cp.sent))
+	copy(sent, cp.sent)
+	cp.mu.Unlock()
+
+	for _, cmd := range sent {
+		assert.Equal(t, wantTerm, cmd.Command.Term,
+			"command to steward %s must carry term %d from TermSource",
+			cmd.Command.StewardID, wantTerm)
+	}
+}
+
 // TestRollingBatchExecutor_ContextCancellation verifies that Execute returns
 // ctx.Err() when the context is cancelled while waiting for batch completion.
 func TestRollingBatchExecutor_ContextCancellation(t *testing.T) {
