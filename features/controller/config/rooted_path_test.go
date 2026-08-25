@@ -18,7 +18,7 @@ import (
 // filepath.IsAbs disagrees (Windows requires a volume name).
 func TestIsRootedPath_POSIXAbsoluteIsRootedOnEveryPlatform(t *testing.T) {
 	for _, p := range []string{"/var/lib/cfgms/certs", "/etc/cfgms", "/"} {
-		assert.True(t, isRootedPath(p), "%q must be treated as rooted on %s", p, runtime.GOOS)
+		assert.True(t, IsRootedPath(p), "%q must be treated as rooted on %s", p, runtime.GOOS)
 	}
 }
 
@@ -26,7 +26,7 @@ func TestIsRootedPath_POSIXAbsoluteIsRootedOnEveryPlatform(t *testing.T) {
 // relative cert_path is still anchored to the config file's directory.
 func TestIsRootedPath_RelativeIsNotRooted(t *testing.T) {
 	for _, p := range []string{"certs/", "certs", "./certs", "../certs", ""} {
-		assert.False(t, isRootedPath(p), "%q must be treated as relative", p)
+		assert.False(t, IsRootedPath(p), "%q must be treated as relative", p)
 	}
 }
 
@@ -37,7 +37,7 @@ func TestIsRootedPath_WindowsSpellings(t *testing.T) {
 		t.Skip("volume-qualified and backslash-rooted paths are only meaningful on Windows")
 	}
 	for _, p := range []string{`C:\ProgramData\cfgms\certs`, `\cfgms\certs`, `\\server\share\certs`} {
-		assert.True(t, isRootedPath(p), "%q must be treated as rooted", p)
+		assert.True(t, IsRootedPath(p), "%q must be treated as rooted", p)
 	}
 }
 

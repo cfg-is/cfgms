@@ -883,19 +883,21 @@ func isWindows() bool {
 	return os.PathSeparator == '\\' && os.PathListSeparator == ';'
 }
 
-// isRootedPath reports whether p is already anchored to a filesystem root, and so must
-// not be joined to the directory holding the config file.
+// IsRootedPath reports whether p is already anchored to a filesystem root, and so must
+// not be joined to a directory to make it CWD-independent (Issue #3460).
 //
 // filepath.IsAbs alone is not sufficient here. It answers for the running platform only:
 // on Windows a path needs a volume name, so IsAbs("/var/lib/cfgms/certs") is false. A
-// controller config is a reviewed, hand-authored artefact that uses POSIX paths and is
-// parsed on every platform the controller builds for, including by the deployment
-// contract tests. Deciding rootedness with IsAbs alone silently rewrote such a path to
-// <config dir>/var/lib/cfgms/certs on Windows.
+// controller/steward config is a reviewed, hand-authored artefact that uses POSIX paths
+// and is parsed on every platform CFGMS builds for, including by the deployment contract
+// tests. Deciding rootedness with IsAbs alone silently rewrote such a path to
+// <base dir>/var/lib/cfgms/certs on Windows.
 //
 // A leading slash of either flavour therefore counts as rooted everywhere. Genuinely
-// relative paths ("certs/", "./certs") still fall through to the #3197 anchoring.
-func isRootedPath(p string) bool {
+// relative paths ("certs/", "./certs") still fall through to CWD-independence anchoring.
+// Exported for reuse by other packages facing the same operator-declared-path class of
+// defect (features/controller/server's resolveDNADataRoot, #3460 Scope item 2).
+func IsRootedPath(p string) bool {
 	if filepath.IsAbs(p) {
 		return true
 	}
@@ -948,7 +950,7 @@ func LoadWithPath(configPath string) (*Config, error) {
 		// Resolve cert_path to absolute relative to the config file directory.
 		// A relative cert_path is CWD-dependent at runtime; anchoring it to the
 		// config file removes that dependency (Issue #3197).
-		if !isRootedPath(cfg.CertPath) {
+		if !IsRootedPath(cfg.CertPath) {
 			cfg.CertPath = filepath.Join(filepath.Dir(foundPath), cfg.CertPath)
 		}
 
