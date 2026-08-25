@@ -1358,3 +1358,89 @@ so the "idempotent, re-run safe" script could not actually be re-run without
 taking the node down first, forcing a cluster-wide outage before any preparation
 could happen. It now distinguishes its own running `cfgms-controller` from a
 foreign listener.
+
+---
+
+## 9. Steward-side Raft-term command fence (story #3436)
+
+Live-fleet proof for the in-memory comparison logic in
+`features/steward/client/client_transport.go` (`checkTermFence` /
+`receiveCommand`) — see
+[`steward-operating-model.md`](../architecture/steward-operating-model.md#raft-term-command-fence-adr-029-decision-6)
+for the design. This story implements comparison only; persistence across a
+steward restart and the authenticated reset path are #3437.
+
+### Method
+
+A steward binary built from the story branch (`v0.0.0-story3436-fencetest`,
+`go build ./cmd/steward`, no ldflags beyond `pkg/version.Version`) was run as a
+**standalone validation instance** on `CFG-70-02` — deliberately *not* the
+shared `CFGMSSteward` production service on that host, to avoid touching a
+live fleet member other stories depend on. Isolation required overriding two
+environment variables the steward reads independently
+(`ProgramData` for certs/secrets, `CFGMS_LOG_DIR` for logs — the latter is set
+host-wide on `CFG-70-02` to the real `C:\ProgramData\CFGMS\logs`, and a first
+attempt without overriding it wrote two orphaned log files into that
+production directory before the mistake was caught; no production files were
+modified, and the two stray files were deleted). `CFGMS_HTTP_CA_CERT_PATH` was
+pointed at the real cluster CA read-only.
+
+The instance registered fresh (`cfg token create --tenant-id=infra-hyperv`,
+approved via `cfg registration approve`) against the live 3-node
+`cfgms-ctrl-01` / `cfgms-ha-node2` / `cfgms-ha-node3` HA controller cluster
+described in §1 — the same cluster whose Raft term this story's fence
+enforces against. Registration and token-creation POSTs only succeeded
+against `192.168.234.106` (the leader at the time); the other two nodes
+returned `503` for both, consistent with these being unforwarded
+leader-only writes rather than a fleet problem.
+
+To observe the fence's decision on real inbound traffic without changing the
+committed logic, two temporary `logger.Info` lines (prefixed
+`TEMP-3436-VALIDATION-ONLY`) were added to `checkTermFence`, built, run
+against the live cluster, and then reverted before commit — `git diff` against
+the committed state was checked to confirm zero trace remained (`grep -c
+TEMP-3436` = 0) and the fencing unit tests were re-run to confirm no
+regression from the edit/revert cycle.
+
+### Result
+
+The steward (`steward-1787621085452586756`, a disposable validation record —
+left enrolled, consistent with this fleet's existing orphaned-record entries
+noted elsewhere in this doc; no decommission command exists) completed a real
+mTLS + gRPC-over-QUIC connection to `cfgms-ha-node3` and received a genuine
+inbound `push_signing_cert` command from the live controller as part of its
+on-connect handshake. `checkTermFence` observed it with `claimed_term: 0`
+against an unset ratchet and accepted it via the bootstrap-accept branch —
+the same branch the story's bootstrap REQUIRED TEST exercises, now proven
+against a real command dispatched by the real controller over the real wire
+path, not a synthetic one. This confirms end to end: the receive path is
+correctly wired ahead of `commands.Handler.HandleCommand` in the live
+`SubscribeCommands` closure, `sc.Command.Term` deserializes correctly off the
+real gRPC transport, and the fence does not interfere with normal command
+delivery against a live controller.
+
+**Not proven live: the rejection branches.** A genuine term decrease cannot be
+produced by a healthy controller in this cluster — Raft terms are monotonic
+(`becomeCandidate` only increments), so no legitimate live command can ever
+carry a term below one this steward has already seen. Forcing a real
+decrease would require deliberately corrupting the shared 3-node HA
+controller cluster's Raft state (e.g. the documented `raft.db`-delete
+recovery in §8, which resets the cluster other in-flight stories depend on)
+— judged disproportionate to this story's validation. The rejection and
+downgrade-omission branches are exhaustively covered by
+`TestCheckTermFence_AcceptsAtOrAboveHighest_RejectsBelow` and
+`TestCheckTermFence_DowngradeAfterRatchetSet_RejectsMissingOrZeroTerm` in
+`client_transport_fencing_test.go` (deterministic, run in CI on every PR), and
+by inspection share the exact `checkTermFence` code path just proven live for
+the accept case — there is no separate rejection path that live traffic could
+exercise differently. A live demonstration of an actual downgrade attempt
+requires either #3437's `clusterID`-paired reset scenario (a legitimate
+rebuild presenting a lower term for a *different* cluster) or dedicated
+adversarial tooling that forges a signed command outside the controller —
+out of scope here.
+
+Attempting to trigger additional live command types via `cfg steward exec` /
+`cfg steward run-command` against the validation steward reproduced the
+`status: running (0/0 completed)` symptom already on file for this fleet
+(target-selector match failure, not a term-fencing issue) — not investigated
+further as out of scope for this story.

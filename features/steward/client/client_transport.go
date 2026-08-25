@@ -59,6 +59,16 @@ import (
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
+// ErrCommandTermFenced is returned by the command receive path when an inbound
+// command fails the Raft-term fence (Story #3436, ADR-029 Decision 6): its term
+// is below the highest this steward has observed, or it omits the term after the
+// ratchet has been set by a prior stamped command. It is a plain refusal, handled
+// identically to the pre-existing ErrWrongSteward / ErrCommandReplay rejections —
+// clientReceiveLoop (pkg/controlplane/providers/grpc/provider.go) only logs a
+// non-nil handler error, so a fenced command never triggers a reconnect or a
+// convergence-loop retry.
+var ErrCommandTermFenced = errors.New("command rejected: raft term fenced")
+
 // DNACollector is the interface used by the DNA refresh loop to re-collect
 // system attributes on each tick. Production code wraps dna.Collector; tests
 // inject a stub returning deterministic attribute maps without real I/O.
@@ -207,6 +217,14 @@ type TransportClient struct {
 	// Command authentication settings (Story #919)
 	commandReplayWindow   time.Duration
 	commandMaxParamsBytes int
+
+	// Raft-term fence (Story #3436, ADR-029 Decision 6 — comparison logic only;
+	// persistence across a steward restart and the authenticated reset path are
+	// #3437). Held on TransportClient, not commands.Handler: setupCommandHandler
+	// builds a fresh Handler on every reconnect, so scoping the ratchet there
+	// would let a forced reconnect silently reset it. Guarded by mu.
+	termRatchetSet  bool
+	highestTermSeen uint64
 
 	// Script signature verification policy (Issue #1671). Wired into the command
 	// handler by setupCommandHandler so CommandExecuteScript signature enforcement
@@ -907,7 +925,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	// Subscribe to commands via gRPC control plane provider
 	c.logger.Info("Subscribing to commands", "steward_id", logging.RedactedID(stewardID))
 	if err := controlPlane.SubscribeCommands(ctx, stewardID, func(ctx context.Context, sc *cpTypes.SignedCommand) error {
-		return cmdHandler.HandleCommand(ctx, sc)
+		return c.receiveCommand(ctx, sc, cmdHandler.HandleCommand)
 	}); err != nil {
 		return fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
@@ -958,6 +976,78 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 
 	c.logger.Info("Connected to controller successfully via gRPC transport")
 	return nil
+}
+
+// receiveCommand is the steward's command-receive path (Story #3436): it enforces
+// the Raft-term fence before an inbound command reaches the authenticated dispatch
+// pipeline (commands.Handler.HandleCommand, passed as dispatch). Extracted as its
+// own method — rather than inlined in the SubscribeCommands closure — so the
+// ordering (fence check strictly before dispatch) is directly unit-testable.
+func (c *TransportClient) receiveCommand(
+	ctx context.Context,
+	sc *cpTypes.SignedCommand,
+	dispatch func(context.Context, *cpTypes.SignedCommand) error,
+) error {
+	if err := c.checkTermFence(sc); err != nil {
+		return err
+	}
+	return dispatch(ctx, sc)
+}
+
+// checkTermFence enforces ADR-029 Decision 6's three-state ratchet, comparison
+// logic only (state is in-memory and does not survive a steward restart — that
+// durability, plus the authenticated cluster-rebuild reset path, is #3437):
+//
+//  1. Never seen a stamped (term > 0) command: accept any command, stamped or
+//     not. A stamped command's term becomes the new high-water mark and sets the
+//     ratchet; an unstamped one is accepted without changing state (genuine
+//     bootstrap, or mid-rollout behind a controller predating #3390).
+//  2. Ratchet set: an unstamped command is refused as a downgrade attempt (real
+//     Raft terms are never 0 once a leader has been elected), and a stamped one
+//     is accepted only when its term is at or above the high-water mark.
+//
+// Every value in the rejection log line is attacker-influenced (a compromised or
+// downgraded controller chooses Command.ID/Type/Term freely — Term is transport-
+// trusted only, not covered by the command signature) and goes through
+// logging.SanitizeLogValue() per this repo's standing log-injection rule.
+func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
+	term := sc.Command.Term
+
+	c.mu.Lock()
+	ratchetSet := c.termRatchetSet
+	highestSeen := c.highestTermSeen
+
+	if term == 0 {
+		if !ratchetSet {
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+		c.logger.Warn("rejected inbound command: raft term fence — missing term after ratchet set",
+			"command_id", logging.SanitizeLogValue(sc.Command.ID),
+			"command_type", logging.SanitizeLogValue(string(sc.Command.Type)),
+			"highest_seen_term", logging.SanitizeLogValue(fmt.Sprintf("%d", highestSeen)),
+		)
+		return fmt.Errorf("%w: command %q omits term but ratchet is set (highest seen %d)",
+			ErrCommandTermFenced, sc.Command.ID, highestSeen)
+	}
+
+	if !ratchetSet || term >= highestSeen {
+		c.termRatchetSet = true
+		c.highestTermSeen = term
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+
+	c.logger.Warn("rejected inbound command: raft term fence — term below highest seen",
+		"command_id", logging.SanitizeLogValue(sc.Command.ID),
+		"command_type", logging.SanitizeLogValue(string(sc.Command.Type)),
+		"claimed_term", logging.SanitizeLogValue(fmt.Sprintf("%d", term)),
+		"highest_seen_term", logging.SanitizeLogValue(fmt.Sprintf("%d", highestSeen)),
+	)
+	return fmt.Errorf("%w: command %q term %d below highest seen %d",
+		ErrCommandTermFenced, sc.Command.ID, term, highestSeen)
 }
 
 // setupCommandHandler creates and configures the command handler with all command types.

@@ -486,6 +486,21 @@ If the controller connection is lost, the steward continues converging on schedu
 
 The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
+### Raft-Term Command Fence (ADR-029 Decision 6)
+
+Every inbound `Command` carries the Raft term the controller cluster was at when it was published (`Command.Term`, #3390). The steward tracks the highest term it has observed and enforces a three-state ratchet on the receive path, ahead of command dispatch:
+
+| Steward state | Unstamped command (`term` missing or 0) | Stamped command (`term > 0`) |
+|---|---|---|
+| Never seen a stamped command | **Accept** — genuine bootstrap, or mid-rollout behind a controller predating #3390 | **Accept**, record the term as the new high-water mark, set the ratchet |
+| Ratchet set | **Reject — downgrade attempt**, not legacy traffic | Accept iff `term >= highest_seen`; reject and leave the high-water mark unchanged otherwise |
+
+A rejected command is a refusal, not a transport error — it never reaches the command dispatch pipeline, and it does not disconnect the control channel or trigger a convergence-loop retry. Rejections are logged at `WARN` (every value derived from the rejected command passes through `logging.SanitizeLogValue()`, including the claimed term).
+
+This story (#3436) implements the in-memory comparison only. The ratchet does **not** currently survive a steward restart, and there is no `clusterID` pairing yet, so it does not yet distinguish a legitimate controller-cluster rebuild (which resets Raft terms to 1) from a downgrade attempt — both the restart-durable ratchet and the authenticated reset path are #3437. Until #3437 lands, treat the fence as defence in depth behind the lease-backed leadership check (#3389), not a standalone guarantee.
+
+Whether a given steward is capable of enforcing the fence at all is determinable from the controller via the existing `GET /api/v1/stewards` `StewardInfo.Version` field — no separate capability flag was introduced. A steward at a fence-capable version that has not yet seen a stamped command is in the accept-unstamped bootstrap state, not actively rejecting anything; that is expected for a freshly enrolled or freshly upgraded steward, not itself a sign of compromise.
+
 ## Entry Paths
 
 The steward binary supports four entry paths:
