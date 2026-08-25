@@ -88,18 +88,33 @@ jobs:
       # race coverage is fully exercised on the Linux unit-tests + integration-tests
       # jobs. Linux/macOS run with -race here.
       #
+      # ./cmd/... added (Issue #3470): Windows-only SCM and service-management code
+      # in cmd/cfgms-steward-launcher, cmd/steward/service, and
+      # cmd/controller/service is //go:build windows and therefore invisible to
+      # the Linux unit-tests job. This is the only job that runs on a Windows
+      # runner, so without ./cmd/... those tests executed in no CI job.
+      #
       # Timeout set to 8m (from 5m) — Issue #2591: features/controller/api grew to
       # 89 files / ~25k LOC with CPU-intensive tests (argon2id credential hashing,
       # TLS certificate rotation). Measured wall-clock on a 16-core Linux dev
       # container: ~42s; 2–3 vCPU macOS/Windows hosted runners at ~7× overhead
       # were hitting the 5m wall consistently. The argon2id TestMain override
       # (Issue #2591) removes the largest hot path; 8m provides a safe margin for
-      # the remaining certificate-rotation tests and Windows file-I/O overhead.
+      # the remaining certificate-rotation tests, Windows file-I/O overhead, and
+      # the SCM / WMI calls in ./cmd/... on Windows.
       run: |
         if [ "${{ matrix.platform }}" = "Windows" ]; then
           go test -short -timeout=8m ./pkg/... ./features/...
+          # -v is scoped to ./cmd/... (Issue #3470): the Windows-only SCM tests in
+          # cmd/cfgms-steward-launcher are the reason this job exists, and a
+          # non-verbose run emits only one "ok <package>" line per package — the
+          # per-test "--- PASS" / "--- SKIP" result each SCM test produces is
+          # absent from the log entirely, so there is no way to tell a passing SCM
+          # test from one that skipped for lack of Administrator rights. Keeping
+          # -v off ./pkg/... and ./features/... holds the rest of the log readable.
+          go test -v -short -timeout=8m ./cmd/...
         else
-          go test -race -short -timeout=8m ./pkg/... ./features/...
+          go test -race -short -timeout=8m ./pkg/... ./features/... ./cmd/...
         fi
 
     - name: Upload Build Artifacts

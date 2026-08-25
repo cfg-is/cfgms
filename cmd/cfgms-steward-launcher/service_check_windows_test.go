@@ -130,7 +130,7 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 
 	cfg, err := s.Config()
 	require.NoError(t, err)
-	assert.Equal(t, mgr.StartAutomatic, cfg.StartType, "start type must match install")
+	assert.Equal(t, uint32(mgr.StartAutomatic), cfg.StartType, "start type must match install")
 	assert.Equal(t, launcherServiceDisplayName, cfg.DisplayName)
 	assert.Equal(t, launcherServiceDescription, cfg.Description)
 	assert.Contains(t, cfg.BinaryPathName, testRepairExePath,
