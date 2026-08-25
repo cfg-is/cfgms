@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -417,6 +419,100 @@ func TestHandleCertBinding_BindMissingSerial(t *testing.T) {
 
 	rec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Label: "no serial"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "missing serial must return 400: %s", rec.Body.String())
+}
+
+// TestHandleCertBinding_InvalidSerialRejected verifies that path-traversal payloads in the
+// serial field are rejected at ingress (go/path-injection defence, Issue #3578 security review).
+func TestHandleCertBinding_InvalidSerialRejected(t *testing.T) {
+	server, _ := setupCertBindingServer(t)
+	createTestAccount(t, server, "alice")
+
+	badSerials := []string{
+		"../../etc/passwd",
+		"../secret",
+		"serial with spaces",
+		strings.Repeat("A", 41), // exceeds 40-char cap
+	}
+	for _, bad := range badSerials {
+		rec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Serial: bad})
+		assert.Equal(t, http.StatusBadRequest, rec.Code,
+			"serial %q must be rejected: %s", bad, rec.Body.String())
+	}
+}
+
+// TestHandleCertBinding_BindCapEnforced verifies that binding more than
+// maxCertBindingsPerAccount certificates to a single account is rejected.
+func TestHandleCertBinding_BindCapEnforced(t *testing.T) {
+	server, certMgr := setupCertBindingServer(t)
+	createTestAccount(t, server, "alice")
+
+	for i := range maxCertBindingsPerAccount {
+		serial := provisionTestClientCert(t, certMgr, "alice-cap-cert")
+		rec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Serial: serial})
+		require.Equal(t, http.StatusCreated, rec.Code, "bind %d: %s", i, rec.Body.String())
+	}
+
+	// One more should be rejected.
+	extra := provisionTestClientCert(t, certMgr, "alice-cap-extra")
+	rec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Serial: extra})
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"binding beyond cap must return 409: %s", rec.Body.String())
+}
+
+// TestHandleCertBinding_TenantIsolation verifies that handlers deny access to accounts
+// outside the caller's tenant subtree.
+func TestHandleCertBinding_TenantIsolation(t *testing.T) {
+	server, certMgr := setupCertBindingServer(t)
+
+	// Create an account in the "default" tenant (done by createTestAccount).
+	createTestAccount(t, server, "alice")
+	serial := provisionTestClientCert(t, certMgr, "alice-tenant-test")
+
+	// Bind alice's cert first using an admin principal (no tenant restriction).
+	bindRec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Serial: serial})
+	require.Equal(t, http.StatusCreated, bindRec.Code)
+
+	// A principal scoped to a sibling tenant must be denied access.
+	siblingTenantPrincipal := &Principal{
+		ID:        "sibling-user",
+		Name:      "api-key:sibling",
+		Assurance: session.AssuranceStrong,
+		TenantID:  "sibling-tenant",
+	}
+
+	withTenant := func(r *http.Request, p *Principal) *http.Request {
+		// Inject the caller TenantID into the context the way authenticationMiddleware does.
+		ctx := context.WithValue(r.Context(), ctxkeys.TenantID, p.TenantID)
+		return r.WithContext(ctx)
+	}
+
+	// Bind endpoint.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts/alice/certs/bind",
+		bytes.NewReader([]byte(`{"serial":"newserial"}`)))
+	req = withPrincipal(req, siblingTenantPrincipal)
+	req = withTenant(req, siblingTenantPrincipal)
+	req = withVars(req, map[string]string{"username": "alice"})
+	rec := httptest.NewRecorder()
+	server.handleBindCert(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "cross-tenant bind must return 403")
+
+	// List endpoint.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/accounts/alice/certs", nil)
+	req = withPrincipal(req, siblingTenantPrincipal)
+	req = withTenant(req, siblingTenantPrincipal)
+	req = withVars(req, map[string]string{"username": "alice"})
+	rec = httptest.NewRecorder()
+	server.handleListCertBindings(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "cross-tenant list must return 403")
+
+	// Revoke endpoint.
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/accounts/alice/certs/revoke/"+serial, nil)
+	req = withPrincipal(req, siblingTenantPrincipal)
+	req = withTenant(req, siblingTenantPrincipal)
+	req = withVars(req, map[string]string{"username": "alice", "serial": serial})
+	rec = httptest.NewRecorder()
+	server.handleRevokeCertBinding(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "cross-tenant revoke must return 403")
 }
 
 // TestHandleCertBinding_PersistedAcrossReload verifies that a bound certificate survives

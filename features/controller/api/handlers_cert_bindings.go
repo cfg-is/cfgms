@@ -15,14 +15,22 @@
 //	     Lists all CertBinding records for the account (public metadata only).
 //
 //	POST /api/v1/accounts/{username}/certs/revoke/{serial}
-//	     Removes the binding AND revokes the certificate via certManager.Revoke.
-//	     Never removes a binding without also revoking the certificate.
-//	     Leadership-gated (mutating).
+//	     Revokes the certificate via certManager.Revoke FIRST (fail-closed), then
+//	     removes the binding from the durable store. Leadership-gated (mutating).
 //
 // Serial is the binding and lookup key — it is the same value that IsRevoked(serial)
 // checks on every admin mTLS request in extractAdminPrincipal (middleware.go), so
 // revoke-binding and "serial no longer resolves to an account" collapse into a single
 // existing check rather than requiring a separately-maintained fingerprint lookup.
+//
+// Security notes:
+//   - req.Serial is validated against certSerialRE at ingress on the bind path; this
+//     prevents path-traversal into the cert-store filesystem (go/path-injection).
+//   - All three handlers enforce tenant-subtree scope via isWithinTenantScope to prevent
+//     IDOR across tenant boundaries.
+//   - The revoke path follows fail-closed ordering: certManager.Revoke fires before the
+//     binding is removed from the durable store. A revocation failure returns 500 with
+//     the binding intact.
 package api
 
 import (
@@ -30,8 +38,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/mux"
 
@@ -39,13 +49,54 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// certSerialRE constrains certificate serial numbers to alphanumeric characters, max 40
+// chars. CFGMS-issued serials are 128-bit random decimals (≤39 digits); external CA
+// serials are commonly hex. Both are purely alphanumeric, so this rejects any
+// path-traversal payload (slashes, dots, etc.) that would otherwise reach filepath.Join
+// inside the cert store. go/path-injection (GHAS #3578).
+var certSerialRE = regexp.MustCompile(`^[0-9a-zA-Z]{1,40}$`)
+
+// fingerprintRE accepts common certificate fingerprint formats: colon-separated hex pairs
+// (AA:BB:...), raw hex strings, and algorithm-prefixed digests (sha256:hex, sha256:base64…).
+// All letters and digits are accepted so that any common format fits without format negotiation.
+// Max 256 chars covers SHA-512 with colons (3 chars per byte × 64 bytes = 192 chars + prefix).
+var fingerprintRE = regexp.MustCompile(`^[0-9a-zA-Z:_.+/=-]{1,256}$`)
+
+// maxCertBindingsPerAccount caps the number of mTLS certificates that can be bound to a
+// single account. The entire CertBindings slice is serialised into the account metadata
+// blob, which is decrypted on the authentication hot path (getAccount/getAccountByID).
+const maxCertBindingsPerAccount = 50
+
 // BindCertRequest is the POST .../certs/bind request body.
-// Serial is the binding key; Fingerprint is stored for defense-in-depth audit
-// correlation. Label is admin-supplied free text (e.g. "primary laptop bundle").
+// Serial is the binding key; Fingerprint is stored for audit correlation. Label is
+// admin-supplied free text (e.g. "primary laptop bundle").
 type BindCertRequest struct {
 	Serial      string `json:"serial"`
 	Fingerprint string `json:"fingerprint"`
 	Label       string `json:"label,omitempty"`
+}
+
+// sanitizeCertLabel strips control characters that could cause terminal-escape injection
+// or confuse CLI consumers of the label field. The CR/LF strip uses the strings.ReplaceAll
+// form that CodeQL's ReplaceSanitizer recognises; the second pass covers remaining C0/C1
+// control characters (NUL, ESC, DEL, C1 block) and Unicode line terminators.
+func sanitizeCertLabel(label string) string {
+	// CodeQL ReplaceSanitizer-recognised form for CR/LF.
+	label = strings.ReplaceAll(strings.ReplaceAll(label, "\n", ""), "\r", "")
+	// Strip remaining control characters.
+	var b strings.Builder
+	for _, r := range label {
+		switch {
+		case r < 0x20: // C0 controls (NUL, BEL, BS, TAB family, ESC, etc.)
+		case r == 0x7F: // DEL
+		case r >= 0x80 && r <= 0x9F: // C1 controls
+		case r == 0x85 || r == 0x2028 || r == 0x2029: // Unicode line terminators
+		case unicode.Is(unicode.Cf, r): // format characters (bidi overrides, ZWJ, etc.)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // handleBindCert handles POST /api/v1/accounts/{username}/certs/bind.
@@ -54,17 +105,16 @@ type BindCertRequest struct {
 // the serial is already bound to a different account — a serial must resolve to at
 // most one account. Calls s.registrationLeaderStatus.HasLeadership() before mutating.
 //
-// The scan for a pre-existing serial is O(n) over the in-memory account cache —
-// the same pattern used by getAccountByID. This is a known scaling limitation: the
-// cache may not include accounts that have never been loaded in this process; a
-// concurrent bind on a different controller node is not detected. Both limitations
-// are accepted and inherited from the existing username-collision check.
-//
-// s.mu.Lock() is held across the entire scan-for-existing-serial + persist as one
+// s.mu.Lock() is held across the entire cross-account serial scan + persist as one
 // critical section. Two goroutines racing to bind the same serial to two different
 // accounts write to two different store keys with no natural collision point — both
 // writes would succeed, leaving the serial bound to both accounts. The mutex closes
 // this race for a single controller process.
+//
+// Known, accepted out-of-scope limitations:
+//   - s.mu is single-process; concurrent binds across HA controller nodes are not caught.
+//   - The cross-account scan covers only the in-memory account cache; accounts that have
+//     never been loaded in this process are not checked.
 func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -87,10 +137,31 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "serial is required", "MISSING_SERIAL")
 		return
 	}
+	// Validate serial format at ingress. certSerialRE accepts only alphanumeric characters,
+	// max 40 chars — matching the path-variable validation in validationMiddleware (line 151).
+	// This prevents path-traversal payloads from reaching filepath.Join in the cert store
+	// (go/path-injection, GHAS #3578). It also ensures bind-side and revoke-side serials use
+	// the same character set, closing the asymmetry that would create unrevokable bindings.
+	if !certSerialRE.MatchString(req.Serial) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"invalid serial format: must be 1-40 alphanumeric characters", "INVALID_SERIAL")
+		return
+	}
 
-	// go/log-injection (CWE-117): strip CR/LF from admin-supplied label at the source,
-	// using the strings.ReplaceAll form that CodeQL's ReplaceSanitizer recognises.
-	req.Label = strings.ReplaceAll(strings.ReplaceAll(req.Label, "\n", ""), "\r", "")
+	if req.Fingerprint != "" && !fingerprintRE.MatchString(req.Fingerprint) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"invalid fingerprint format: must be hex characters and colons, max 128 characters", "INVALID_FINGERPRINT")
+		return
+	}
+
+	// Sanitize label at ingress: strip control characters that could cause terminal-escape
+	// injection or confuse CLI/SPA consumers of the label returned by GET .../certs.
+	req.Label = sanitizeCertLabel(req.Label)
+	if len(req.Label) > 128 {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"label too long: max 128 characters", "LABEL_TOO_LONG")
+		return
+	}
 
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	actingPrincipalID := ""
@@ -114,10 +185,19 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tenant isolation: reject callers that are outside the account's tenant subtree.
+	// An out-of-subtree caller receives 403 regardless of whether any binding exists —
+	// leaking binding state would create an existence oracle across tenants.
+	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		return
+	}
+
 	// ADR-025 operator-clarity note: if the certificate being bound carries the root-scope
 	// marker but the target account is tenant-scoped, log a note. Per Story 7's
 	// principal-resolution story, this is inert — the marker never elevates a tenant-scoped
 	// account's actual access, so this is not a rejected bind and not a security control.
+	// req.Serial is validated above, so it is safe to pass to certManager here.
 	if !acct.RootScope && s.certManager != nil {
 		s.logRootScopeMarkerNote(req.Serial, username)
 	}
@@ -133,12 +213,6 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 	// other account, then persist the new binding. Held as one atomic check+write to prevent
 	// two concurrent bind requests for the same serial from each passing the conflict check
 	// independently and both succeeding — leaving the serial bound to two different accounts.
-	//
-	// Known, accepted, out-of-scope limitation: s.mu is single-process and does not cover
-	// concurrent binds across controller nodes in a clustered/HA deployment. There is no
-	// store-level uniqueness constraint on serial across account records, so two separate
-	// controller processes can still race the same bind. This is the same class of gap the
-	// existing username-collision check already has; it is inherited, not introduced here.
 	s.mu.Lock()
 
 	// O(n) scan of the in-memory cache — same pattern as getAccountByID.
@@ -163,6 +237,13 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 	if cached == nil {
 		s.mu.Unlock()
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	if len(cached.CertBindings) >= maxCertBindingsPerAccount {
+		s.mu.Unlock()
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Maximum certificate bindings per account reached", "BINDING_LIMIT_REACHED")
 		return
 	}
 
@@ -201,6 +282,9 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 		"label", logging.SanitizeLogValue(req.Label),
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
+	s.emitAccountAudit(r.Context(), "account.cert_binding.created", updated.TenantID, actingPrincipalID, username,
+		map[string]interface{}{"serial": req.Serial})
+
 	s.writeResponse(w, http.StatusCreated, CertBindingInfo(newBinding))
 }
 
@@ -226,6 +310,12 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Tenant isolation: an out-of-subtree caller receives 403 regardless of binding state.
+	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		return
+	}
+
 	infos := make([]CertBindingInfo, 0, len(acct.CertBindings))
 	for _, b := range acct.CertBindings {
 		infos = append(infos, CertBindingInfo(b))
@@ -236,10 +326,17 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 
 // handleRevokeCertBinding handles POST /api/v1/accounts/{username}/certs/revoke/{serial}.
 //
-// Removes the binding for the named serial from the account AND revokes the certificate
-// via certManager.Revoke in the same operation. The two steps are intentionally coupled —
-// never remove a binding without also revoking the certificate. Calls
-// s.registrationLeaderStatus.HasLeadership() before mutating.
+// Revokes the named certificate via certManager.Revoke FIRST (fail-closed), then removes
+// the binding from the durable store. Calls s.registrationLeaderStatus.HasLeadership()
+// before mutating.
+//
+// Ordering rationale: revoking the cert first means that if the subsequent persist fails,
+// the cert is already invalid and the operator sees an active-looking binding pointing to
+// a revoked cert. This is preferable to the opposite (binding removed but cert still valid),
+// which would silently leave a valid credential with no associated account record.
+//
+// If certManager is nil (no cert management configured), the binding is removed without
+// revoking the certificate. The response body reflects which operations succeeded.
 func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request) {
 	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -252,6 +349,8 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// The validationMiddleware validates {serial} via certSerialRE before this handler runs.
+	// The empty check is defensive; mux does not route an empty path segment.
 	serial := mux.Vars(r)["serial"]
 	if serial == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "serial is required", "MISSING_SERIAL")
@@ -264,6 +363,7 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 		actingPrincipalID = principal.ID
 	}
 
+	// Load outside lock — getAccount calls cacheAccount which acquires s.mu.Lock internally.
 	acct, err := s.getAccount(r.Context(), username)
 	if err != nil {
 		s.logger.Error("Failed to look up account for cert revoke",
@@ -277,62 +377,106 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	found := false
-	remaining := make([]CertBinding, 0, len(acct.CertBindings))
+	// Tenant isolation: an out-of-subtree caller receives 403 regardless of binding state.
+	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		return
+	}
+
+	// Verify the binding exists before attempting revocation (outside lock — read-only check).
+	bindingFound := false
 	for _, b := range acct.CertBindings {
 		if b.Serial == serial {
-			found = true
-			continue
+			bindingFound = true
+			break
 		}
-		remaining = append(remaining, b)
 	}
-	if !found {
+	if !bindingFound {
 		s.writeErrorResponse(w, http.StatusNotFound,
 			"Certificate binding not found on this account", "BINDING_NOT_FOUND")
 		return
 	}
 
-	updated := *acct
-	updated.CertBindings = remaining
-
-	if err := s.persistAccount(r.Context(), &updated, actingPrincipalID); err != nil {
-		s.logger.Error("Failed to persist cert binding revocation",
-			"error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke cert binding", "STORE_ERROR")
-		return
-	}
-
-	// Revoke the certificate via certManager in the same operation — never remove the binding
-	// without also invalidating the certificate itself. If certManager is nil (no cert
-	// management configured), log a warning and continue; the binding is removed regardless.
+	// Step 1: Revoke the certificate BEFORE removing the binding (fail-closed ordering).
+	// If revocation fails, we return 500 with the binding intact — the caller can retry.
+	// If certManager is nil (cert management not configured), the binding is removed
+	// without revoking, which is the best we can do; we note this in the response.
+	certRevoked := false
 	if s.certManager != nil {
 		if revokeErr := s.certManager.Revoke(serial); revokeErr != nil {
-			s.logger.Error("Failed to revoke certificate via certManager — binding removed but cert may still authenticate",
+			s.logger.Error("Failed to revoke certificate via certManager; binding not removed",
 				"serial", logging.SanitizeLogValue(serial),
 				"username", logging.SanitizeLogValue(username),
 				"error", logging.SanitizeLogValue(revokeErr.Error()))
-			// Do not return an error here: the binding has already been removed from the
-			// durable store. Returning 500 would mislead the caller into believing the binding
-			// is still active. The operator must verify the certificate is also revoked.
+			s.writeErrorResponse(w, http.StatusInternalServerError,
+				"Failed to revoke certificate; binding not removed", "REVOKE_FAILED")
+			return
 		}
+		certRevoked = true
 	} else {
-		s.logger.Warn("certManager not configured — certificate not revoked via manager; binding removed only",
+		s.logger.Warn("certManager not configured — binding removed but certificate not revoked via manager",
 			"serial", logging.SanitizeLogValue(serial),
 			"username", logging.SanitizeLogValue(username))
 	}
 
-	s.cacheAccount(&updated)
+	// Step 2: Remove the binding from the durable store under the write lock.
+	// Re-read from the cache inside the lock so we don't lose concurrent mutations
+	// (e.g. a concurrent bind or passkey change) that modified the account blob
+	// between the getAccount call above and this persist.
+	s.mu.Lock()
+
+	cached := s.accounts[username]
+	if cached == nil {
+		s.mu.Unlock()
+		// The cert has already been revoked at this point. Log the inconsistency.
+		s.logger.Error("Account disappeared from cache after cert revocation; binding state unknown",
+			"serial", logging.SanitizeLogValue(serial),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Account state error after cert revocation", "STATE_ERROR")
+		return
+	}
+
+	remaining := make([]CertBinding, 0, len(cached.CertBindings))
+	for _, b := range cached.CertBindings {
+		if b.Serial != serial {
+			remaining = append(remaining, b)
+		}
+	}
+
+	updated := *cached
+	updated.CertBindings = remaining
+
+	if err := s.persistAccount(r.Context(), &updated, actingPrincipalID); err != nil {
+		s.mu.Unlock()
+		// The cert has already been revoked. Log a prominent warning: the cert is invalid
+		// but the binding still appears active. Manual cleanup may be needed.
+		s.logger.Error("Certificate revoked but binding persist failed; cert is revoked, binding may still appear active",
+			"serial", logging.SanitizeLogValue(serial),
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Certificate revoked but binding removal failed; cert is no longer valid", "PARTIAL_REVOKE")
+		return
+	}
+
+	s.accounts[username] = &updated
+	s.mu.Unlock()
 
 	s.logger.Info("mTLS admin certificate binding revoked",
 		"username", logging.SanitizeLogValue(username),
 		"serial", logging.SanitizeLogValue(serial),
+		"cert_revoked", certRevoked,
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
+	s.emitAccountAudit(r.Context(), "account.cert_binding.revoked", updated.TenantID, actingPrincipalID, username,
+		map[string]interface{}{"serial": serial, "cert_revoked": certRevoked})
+
 	s.writeSuccessResponse(w, map[string]interface{}{
-		"username": username,
-		"serial":   serial,
-		"revoked":  true,
+		"username":     username,
+		"serial":       serial,
+		"cert_revoked": certRevoked,
+		"revoked":      true,
 	})
 }
 
@@ -340,6 +484,8 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 // ADR-025 root-scope marker is being bound to a tenant-scoped account. This is inert
 // (the marker never elevates a tenant-scoped account's actual access) but logged so
 // operators can detect misconfigured cert bundles early.
+//
+// Precondition: serial has been validated against certSerialRE before this call.
 func (s *Server) logRootScopeMarkerNote(serial, username string) {
 	certObj, err := s.certManager.GetCertificate(serial)
 	if err != nil || certObj == nil || len(certObj.CertificatePEM) == 0 {
