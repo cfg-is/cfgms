@@ -362,6 +362,7 @@ by a steward) and have no steward-pull DNA observation path (see Workflow module
 | `activedirectory` | extended (steward) | `os=windows` | Bounded: local AD objects via ADSI; Windows-exclusive interface |
 | `github_runner` | extended (steward) | `os=linux\|windows` | Bounded: runner install state + service state; active on supported platforms |
 | `network_activedirectory` | extended (steward→outpost) | omitted | Remote AD objects via LDAP: no steward DNA fact indicates AD connectivity; domain does not fit local host-state inventory model; outpost relocation candidate (ADR-024 §3) |
+| `osquery` | extended (steward) | omitted (pending) | Bounded, inventory-worthy domain via curated osquery queries (host:cpu/memory/os/bios); observe_when predicate will be added by the ADR-024 epic |
 
 ### Current stdlib members
 
@@ -386,6 +387,7 @@ CFGMS-authored but used on only a subset of the fleet; built as standalone bundl
 - `activedirectory` - Local Active Directory integration (steward)
 - `github_runner` - GitHub Actions self-hosted runner agent lifecycle (install + service management; the module is token-free, never mints/consumes registration tokens). Like `hyperv`, it is currently statically registered in the steward factory as an interim measure pending the future stdlib/extended split-loading story, rather than pulled on-demand per ADR-006.
 - `hyperv` - In-host Hyper-V management via a persistent PowerShell host subprocess (steward kind; runs on the Hyper-V host itself). Statically registered in the steward factory as an interim measure (same as `github_runner` above).
+- `osquery` - Read-only host fact observation via the osquery binary; serves the four curated fact domains `host:cpu`, `host:memory`, `host:os`, and `host:bios`. osquery is never a managed authority — `Set()` permanently returns `ErrNotImplemented`. Before every osquery invocation the module re-verifies the installed bundle rather than trusting the pull-time check alone: `StewardTrustEnforcer.VerifyForLoad` applies `module_trust.mode` and the publisher signature, then `bundle.VerifyInstalledContent` re-derives the content hash from the files on disk and compares it to that signed hash. The module defines no trust scheme of its own; both primitives are the shared ADR-006 ones in `pkg/modules/trust` and `pkg/modules/bundle`. Part of epic #2855 (osquery integration — observe-only host facts via curated allowlist + ad-hoc fleet queries).
 
 **Outpost modules:**
 

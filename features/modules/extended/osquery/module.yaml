@@ -1,0 +1,48 @@
+name: osquery
+version: 0.1.0
+description: >
+  Read-only host fact observation via osquery. Queries the four curated fact
+  domains — host:cpu, host:memory, host:os, host:bios — to supplement the
+  steward's baseline DNA. osquery is never a managed authority; Set() is
+  permanently unimplemented and returns ErrNotImplemented. Get() fact-mapping
+  logic is implemented by S4 of the osquery epic (#2855).
+
+publisher: cfgms
+
+executors:
+  - steward
+
+platforms:
+  - linux
+  - darwin
+  - windows
+
+requirements:
+  os: [linux, darwin, windows]
+  arch: [amd64, arm64]
+
+# observe_when: omitted — pending ADR-024 module-tagging story (bounded,
+# inventory-worthy domain via curated osquery queries; observe_when predicate
+# will be added by the ADR-024 epic).
+
+behavioral_envelope:
+  shells_out_to:
+    - "/usr/bin/osqueryi"                            # Linux/macOS interactive query binary
+    - "C:\\Program Files\\osquery\\osqueryi.exe"     # Windows
+  reads_paths:
+    # host:cpu — CPU model, vendor, architecture, core counts, cache topology
+    # (world-readable on Linux; WMI on Windows; sysctl on macOS)
+    - "/proc/cpuinfo"
+    - "/sys/devices/system/cpu"
+    # host:memory — total physical memory capacity (not current usage)
+    # (world-readable on Linux; WMI on Windows; sysctl hw.memsize on macOS)
+    - "/proc/meminfo"
+    # host:os — OS identity and kernel version (world-readable on Linux)
+    - "/etc/os-release"
+    - "/proc/version"
+    # host:bios — BIOS, system, and baseboard hardware identity via DMI
+    # (world-readable on Linux; WMI on Windows; sysctl on macOS)
+    - "/sys/class/dmi/id"
+  # writes_paths: absent — osquery is read-only; no files are written during
+  # host fact collection. The behavioral envelope intentionally declares no
+  # writes_paths to reflect this constraint.
