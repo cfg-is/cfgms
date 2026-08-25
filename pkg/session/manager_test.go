@@ -1064,3 +1064,327 @@ func TestManagerGetByID_CrossChannelReturnsNotFound(t *testing.T) {
 		t.Errorf("cross-channel GetByID: got %v, want ErrSessionNotFound", err)
 	}
 }
+
+// listAllErrStore wraps MemStore and injects a fixed error from ListAll.
+// Used to exercise the RevokeAllForPrincipal error-return branch without needing
+// a real store that can fail on demand.
+type listAllErrStore struct {
+	*session.MemStore
+	listErr error
+}
+
+func (s *listAllErrStore) ListAll(_ context.Context) ([]*session.Session, error) {
+	return nil, s.listErr
+}
+
+// deleteErrStore wraps MemStore and injects an error from Delete for one specific
+// session ID, letting all other deletes pass through to the real MemStore.
+// Used to exercise the per-session delete-failure branch in RevokeAllForPrincipal.
+type deleteErrStore struct {
+	*session.MemStore
+	failID string
+	delErr error
+}
+
+func (s *deleteErrStore) Delete(ctx context.Context, id string) error {
+	if id == s.failID {
+		return s.delErr
+	}
+	return s.MemStore.Delete(ctx, id)
+}
+
+// dupListStore returns a fixed slice from ListAll, allowing a test to present the
+// same session ID more than once (and a nil entry) to RevokeAllForPrincipal.
+// Delete passes through to the embedded MemStore.
+type dupListStore struct {
+	*session.MemStore
+	list []*session.Session
+}
+
+func (s *dupListStore) ListAll(_ context.Context) ([]*session.Session, error) {
+	return s.list, nil
+}
+
+// TestRevokeAllForPrincipal_DuplicateAndNilEntries verifies the defensive guards in
+// RevokeAllForPrincipal: a store returning the same session ID twice (e.g. one row per
+// token hash) is deduplicated so the count reflects distinct sessions, and a nil entry
+// is skipped rather than dereferenced.
+func TestRevokeAllForPrincipal_DuplicateAndNilEntries(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	memStore := session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(memStore.Close)
+	ctx := context.Background()
+
+	now := clock.Now()
+	dup := &session.Session{
+		ID:                "dup-session",
+		PrincipalID:       "alice",
+		ConnectionName:    "ctrl-a",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+	}
+	// Two token hashes for the same session, as a grace-window store would hold.
+	if err := memStore.Set(ctx, session.HashToken(mustGenerateToken(t)), dup); err != nil {
+		t.Fatalf("Set current hash: %v", err)
+	}
+	if err := memStore.Set(ctx, session.HashToken(mustGenerateToken(t)), dup); err != nil {
+		t.Fatalf("Set prior hash: %v", err)
+	}
+
+	store := &dupListStore{MemStore: memStore, list: []*session.Session{dup, nil, dup}}
+	mgr := session.NewManager(cfg, store, clock.Now)
+
+	count, err := mgr.RevokeAllForPrincipal(ctx, "alice")
+	if err != nil {
+		t.Fatalf("RevokeAllForPrincipal: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("RevokeAllForPrincipal with duplicated rows: count = %d, want 1", count)
+	}
+	if _, gotErr := memStore.GetByID(ctx, dup.ID); !errors.Is(gotErr, session.ErrSessionNotFound) {
+		t.Errorf("after revocation, GetByID = %v, want ErrSessionNotFound", gotErr)
+	}
+}
+
+// TestRevokeAllForPrincipal_StoreSeededSession verifies the cluster-mode case:
+// a session seeded directly into the store (not through this manager's Issue,
+// simulating a session issued on a different controller node) is found and
+// revoked by RevokeAllForPrincipal. This is the core cluster-correctness proof
+// required by the acceptance criteria.
+func TestRevokeAllForPrincipal_StoreSeededSession(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, store := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	// Seed a session directly into the store, bypassing the manager's Issue.
+	// This simulates a session issued on a different controller node: the manager's
+	// in-memory cache is empty, but the shared store holds the session.
+	tok, err := session.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	now := clock.Now()
+	remoteSession := &session.Session{
+		ID:                "remote-session-cluster-test",
+		PrincipalID:       "alice",
+		ConnectionName:    "remote-ctrl",
+		TenantID:          "tenant-a",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(1 * time.Hour),
+		Assurance:         session.AssuranceBasic,
+		Channel:           "cli",
+	}
+	if err := store.Set(ctx, session.HashToken(tok), remoteSession); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+
+	// RevokeAllForPrincipal must find and delete the store-seeded session even
+	// though it was never registered in the manager's in-memory cache.
+	count, err := mgr.RevokeAllForPrincipal(ctx, "alice")
+	if err != nil {
+		t.Fatalf("RevokeAllForPrincipal: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("RevokeAllForPrincipal revoked %d sessions, want 1", count)
+	}
+
+	// The session must be absent from the store.
+	_, err = store.GetByID(ctx, remoteSession.ID)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("after RevokeAllForPrincipal, store.GetByID: got %v, want ErrSessionNotFound", err)
+	}
+}
+
+// TestRevokeAllForPrincipal_SameNode verifies the ordinary same-node case:
+// sessions issued through this manager's own Issue are also found and revoked,
+// and Validate rejects them after revocation.
+func TestRevokeAllForPrincipal_SameNode(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, _ := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	_, tok1, err := mgr.Issue(ctx, "bob", "ctrl-a", "")
+	if err != nil {
+		t.Fatalf("Issue sess1: %v", err)
+	}
+	_, tok2, err := mgr.Issue(ctx, "bob", "ctrl-b", "")
+	if err != nil {
+		t.Fatalf("Issue sess2: %v", err)
+	}
+
+	count, err := mgr.RevokeAllForPrincipal(ctx, "bob")
+	if err != nil {
+		t.Fatalf("RevokeAllForPrincipal: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("RevokeAllForPrincipal revoked %d sessions for bob, want 2", count)
+	}
+
+	// Both sessions must be rejected by Validate after revocation.
+	if _, err := mgr.Validate(ctx, tok1); !errors.Is(err, session.ErrSessionRevoked) {
+		t.Errorf("sess1 after RevokeAllForPrincipal: Validate returned %v, want ErrSessionRevoked", err)
+	}
+	if _, err := mgr.Validate(ctx, tok2); !errors.Is(err, session.ErrSessionRevoked) {
+		t.Errorf("sess2 after RevokeAllForPrincipal: Validate returned %v, want ErrSessionRevoked", err)
+	}
+}
+
+// TestRevokeAllForPrincipal_DifferentPrincipalUntouched verifies that sessions
+// belonging to a different principal are left untouched when revoking by principal ID.
+func TestRevokeAllForPrincipal_DifferentPrincipalUntouched(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	mgr, _ := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	_, _, err := mgr.Issue(ctx, "carol", "ctrl-a", "")
+	if err != nil {
+		t.Fatalf("Issue carol: %v", err)
+	}
+	_, daveTok, err := mgr.Issue(ctx, "dave", "ctrl-b", "")
+	if err != nil {
+		t.Fatalf("Issue dave: %v", err)
+	}
+
+	count, err := mgr.RevokeAllForPrincipal(ctx, "carol")
+	if err != nil {
+		t.Fatalf("RevokeAllForPrincipal: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("RevokeAllForPrincipal revoked %d sessions for carol, want 1", count)
+	}
+
+	// Dave's session must still be valid.
+	if _, err := mgr.Validate(ctx, daveTok); err != nil {
+		t.Errorf("dave session after revoking carol: Validate returned %v, want nil", err)
+	}
+}
+
+// TestRevokeAllForPrincipal_NoPrincipalSessions verifies that RevokeAllForPrincipal
+// returns (0, nil) with no store mutations when no sessions for the principal exist.
+func TestRevokeAllForPrincipal_NoPrincipalSessions(t *testing.T) {
+	cfg := session.DefaultConfig()
+	clock := &fakeClock{t: time.Now()}
+	mgr, _ := newTestManager(t, cfg, clock)
+	ctx := context.Background()
+
+	count, err := mgr.RevokeAllForPrincipal(ctx, "nobody")
+	if err != nil {
+		t.Errorf("RevokeAllForPrincipal with no sessions: unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("RevokeAllForPrincipal with no sessions: count = %d, want 0", count)
+	}
+}
+
+// TestRevokeAllForPrincipal_ListAllError verifies that a Store.ListAll failure causes
+// RevokeAllForPrincipal to return (0, non-nil error) immediately without any deletes.
+func TestRevokeAllForPrincipal_ListAllError(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	memStore := session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(memStore.Close)
+	sentinel := errors.New("simulated ListAll failure")
+	errStore := &listAllErrStore{MemStore: memStore, listErr: sentinel}
+	mgr := session.NewManager(cfg, errStore, clock.Now)
+	ctx := context.Background()
+
+	count, err := mgr.RevokeAllForPrincipal(ctx, "alice")
+	if count != 0 {
+		t.Errorf("RevokeAllForPrincipal on ListAll error: count = %d, want 0", count)
+	}
+	if err == nil {
+		t.Error("RevokeAllForPrincipal on ListAll error: expected non-nil error, got nil")
+	}
+}
+
+// TestRevokeAllForPrincipal_DeleteError verifies best-effort behaviour: when Store.Delete
+// fails for one session, the error is absorbed, the remaining sessions are still deleted,
+// and the returned count reflects only the successful deletes.
+func TestRevokeAllForPrincipal_DeleteError(t *testing.T) {
+	cfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+	clock := &fakeClock{t: time.Now()}
+	memStore := session.NewMemStore(cfg, clock.Now)
+	t.Cleanup(memStore.Close)
+	ctx := context.Background()
+
+	// Seed two sessions for alice directly into the underlying store.
+	tok1 := mustGenerateToken(t)
+	tok2 := mustGenerateToken(t)
+	now := clock.Now()
+	s1 := &session.Session{
+		ID: "del-err-s1", PrincipalID: "alice",
+		ConnectionName:    "ctrl-a",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+	}
+	s2 := &session.Session{
+		ID: "del-err-s2", PrincipalID: "alice",
+		ConnectionName:    "ctrl-b",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+	}
+	if err := memStore.Set(ctx, session.HashToken(tok1), s1); err != nil {
+		t.Fatalf("Set s1: %v", err)
+	}
+	if err := memStore.Set(ctx, session.HashToken(tok2), s2); err != nil {
+		t.Fatalf("Set s2: %v", err)
+	}
+
+	// Inject a Delete error for s1; s2 should be deleted successfully.
+	errStore := &deleteErrStore{
+		MemStore: memStore,
+		failID:   s1.ID,
+		delErr:   errors.New("simulated Delete failure"),
+	}
+	mgr := session.NewManager(cfg, errStore, clock.Now)
+
+	count, err := mgr.RevokeAllForPrincipal(ctx, "alice")
+	if err != nil {
+		t.Errorf("RevokeAllForPrincipal with one delete error: unexpected top-level error: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("RevokeAllForPrincipal with one delete error: count = %d, want 1 (only s2 succeeded)", count)
+	}
+
+	// s2 must be gone from the underlying store.
+	if _, gotErr := memStore.GetByID(ctx, s2.ID); !errors.Is(gotErr, session.ErrSessionNotFound) {
+		t.Errorf("s2 after successful delete: GetByID = %v, want ErrSessionNotFound", gotErr)
+	}
+	// s1 must still be in the underlying store (its delete was injected to fail).
+	if _, gotErr := memStore.GetByID(ctx, s1.ID); gotErr != nil {
+		t.Errorf("s1 after failed delete: GetByID = %v, want nil (session still present)", gotErr)
+	}
+}

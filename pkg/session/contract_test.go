@@ -47,6 +47,9 @@ func (s *stubManager) GetByID(_ context.Context, _ string) (*session.Session, er
 func (s *stubManager) Elevate(_ context.Context, _ string, _ []byte, _ string) (*session.Session, string, error) {
 	return nil, "", nil
 }
+func (s *stubManager) RevokeAllForPrincipal(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
 
 // stubStore satisfies Store for compile-time interface verification.
 type stubStore struct{}

@@ -182,6 +182,16 @@ type Manager interface {
 	// Returns ErrSessionNotFound when no live session exists for id, including when the
 	// session belongs to a different channel (same non-disclosure posture as Revoke).
 	GetByID(ctx context.Context, id string) (*Session, error)
+	// RevokeAllForPrincipal revokes every session belonging to principalID by querying
+	// the durable store directly (never the in-memory cache). This guarantees correctness
+	// in a multi-controller-node cluster where sessions may have been issued on a different
+	// node: every session visible in the shared store is found and deleted regardless of
+	// which node issued it or how long this node has been running.
+	//
+	// Returns the count of sessions successfully revoked. Returns a non-nil error only
+	// if the initial Store.ListAll call fails. Delete failures on individual sessions are
+	// logged and do not stop the remaining deletions (best-effort).
+	RevokeAllForPrincipal(ctx context.Context, principalID string) (int, error)
 }
 
 // Store is the backing store for the session Manager (ADR-014 §2).
