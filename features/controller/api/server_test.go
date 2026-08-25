@@ -1870,25 +1870,25 @@ func TestStartupScan_NoWarnForUnprivilegedKey(t *testing.T) {
 		"scan must not emit an overlapping_permissions warning for a key with no Tier-3 permissions")
 }
 
-// ---- scanWebAccountsForStalePermissions tests (Issue #3574) ----
+// ---- scanAccountsForStalePermissions tests (Issue #3574) ----
 //
 // The web-account rename (web-account:* -> account:*) is a deliberate hard break: a grant
 // stored under an old ID matches nothing isKnownPermission honours. The startup scan is the
 // signal that makes that break observable to an operator, so it needs the same coverage as
 // scanAPIKeysForPrivilegedAccess: the store-failure path, the warn path and the clean path.
 
-// seedWebAccountSecret writes a web-account record straight through the central secrets seam
-// with the same metadata shape persistWebAccount uses, so the scan reads a real stored account
+// seedAccountSecret writes a web-account record straight through the central secrets seam
+// with the same metadata shape persistAccount uses, so the scan reads a real stored account
 // rather than a substituted store.
-func seedWebAccountSecret(t *testing.T, server *Server, username, tenantID, permissions string) {
+func seedAccountSecret(t *testing.T, server *Server, username, tenantID, permissions string) {
 	t.Helper()
 	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
-		Key:       "web-account-" + username,
+		Key:       "account-" + username,
 		Value:     "argon2id$stored-password-hash-" + username,
 		TenantID:  tenantID,
 		CreatedBy: "test",
 		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
+			secretsif.MetadataKeySecretType: accountSecretType,
 			"id":                            "id-" + username,
 			"username":                      username,
 			"permissions":                   permissions,
@@ -1897,10 +1897,10 @@ func seedWebAccountSecret(t *testing.T, server *Server, username, tenantID, perm
 	require.NoError(t, err, "seeding web account %q into secret store must succeed", username)
 }
 
-// TestStartupScan_WebAccounts_ContinuesOnListError verifies that
-// scanWebAccountsForStalePermissions emits a Warn and returns the ListSecrets error to its
+// TestStartupScan_Accounts_ContinuesOnListError verifies that
+// scanAccountsForStalePermissions emits a Warn and returns the ListSecrets error to its
 // caller rather than panicking. New() treats the returned error as non-fatal.
-func TestStartupScan_WebAccounts_ContinuesOnListError(t *testing.T) {
+func TestStartupScan_Accounts_ContinuesOnListError(t *testing.T) {
 	capLog := &auditCapturingLogger{}
 	server := setupTestServerWithLogger(t, capLog)
 
@@ -1912,29 +1912,29 @@ func TestStartupScan_WebAccounts_ContinuesOnListError(t *testing.T) {
 	listErr := fmt.Errorf("secret store unavailable")
 	server.secretStore = &errListSecretStore{SecretStore: server.secretStore, listErr: listErr}
 
-	err := server.scanWebAccountsForStalePermissions(context.Background())
+	err := server.scanAccountsForStalePermissions(context.Background())
 	assert.ErrorIs(t, err, listErr, "scan must return the ListSecrets error to the caller")
 	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn when ListSecrets fails")
 }
 
-// TestStartupScan_WarnsOnStaleWebAccountPermission verifies that an account holding a
+// TestStartupScan_WarnsOnStaleAccountPermission verifies that an account holding a
 // pre-rename "web-account:*" grant produces a Warn naming the username, tenant and the
 // unrecognised permission IDs (Issue #3574).
-func TestStartupScan_WarnsOnStaleWebAccountPermission(t *testing.T) {
+func TestStartupScan_WarnsOnStaleAccountPermission(t *testing.T) {
 	capLog := &auditCapturingLogger{}
 	server := setupTestServerWithLogger(t, capLog)
 
 	const username = "stale-perms-admin"
 	const tenantID = "default"
 	// account:list is current; web-account:delete and web-account:update are the stale IDs.
-	seedWebAccountSecret(t, server, username, tenantID, "account:list,web-account:delete,web-account:update")
+	seedAccountSecret(t, server, username, tenantID, "account:list,web-account:delete,web-account:update")
 
 	// Clear entries accumulated during construction and seeding.
 	capLog.mu.Lock()
 	capLog.entries = nil
 	capLog.mu.Unlock()
 
-	err := server.scanWebAccountsForStalePermissions(context.Background())
+	err := server.scanAccountsForStalePermissions(context.Background())
 	require.NoError(t, err)
 
 	assert.True(t, capLog.hasLevel("WARN"),
@@ -1952,20 +1952,20 @@ func TestStartupScan_WarnsOnStaleWebAccountPermission(t *testing.T) {
 		"stale_permissions must not include grants isKnownPermission still recognizes")
 }
 
-// TestStartupScan_NoWarnForRenamedWebAccountPermissions verifies the clean path: an account
+// TestStartupScan_NoWarnForRenamedAccountPermissions verifies the clean path: an account
 // whose grants are the renamed "account:*" IDs produces no stale-permission warning.
-func TestStartupScan_NoWarnForRenamedWebAccountPermissions(t *testing.T) {
+func TestStartupScan_NoWarnForRenamedAccountPermissions(t *testing.T) {
 	capLog := &auditCapturingLogger{}
 	server := setupTestServerWithLogger(t, capLog)
 
-	seedWebAccountSecret(t, server, "renamed-perms-admin", "default",
+	seedAccountSecret(t, server, "renamed-perms-admin", "default",
 		"account:list,account:create,account:get,account:update,account:delete,account:revoke-enrollment-link")
 
 	capLog.mu.Lock()
 	capLog.entries = nil
 	capLog.mu.Unlock()
 
-	err := server.scanWebAccountsForStalePermissions(context.Background())
+	err := server.scanAccountsForStalePermissions(context.Background())
 	require.NoError(t, err)
 
 	assert.Nil(t, capLog.kvValue("stale_permissions"),

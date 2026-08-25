@@ -148,15 +148,15 @@ var ungatedHandlerBaseline = map[string]bucketedReason{
 	// ── excluded-by-epic-non-goals: web account CRUD ────────────────────────────────────────
 	// Epic #3411 Non-Goals explicitly exclude web account management from authority gating.
 
-	"handleCreateWebAccount": {
+	"handleCreateAccount": {
 		Bucket: bucketExcludedByEpicNonGoals,
 		Reason: "web account CRUD — excluded by epic Non-Goals",
 	},
-	"handleUpdateWebAccount": {
+	"handleUpdateAccount": {
 		Bucket: bucketExcludedByEpicNonGoals,
 		Reason: "web account CRUD — excluded by epic Non-Goals",
 	},
-	"handleDeleteWebAccount": {
+	"handleDeleteAccount": {
 		Bucket: bucketExcludedByEpicNonGoals,
 		Reason: "web account CRUD — excluded by epic Non-Goals",
 	},

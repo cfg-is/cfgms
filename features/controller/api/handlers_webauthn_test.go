@@ -60,7 +60,7 @@ func setupWebAuthnServer(t *testing.T, rpID string, rpOrigins []string) (*Server
 	require.NoError(t, err)
 	server.SetWebAuthn(wa)
 
-	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
 		Username: username,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
@@ -170,7 +170,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 
 	// Fetch account ID once; all subtests that need it reference this variable.
 	// None of the negative finish tests register a credential, so the account is stable.
-	acct, err := server.getWebAccount(context.Background(), username)
+	acct, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 	userID := []byte(acct.ID)
@@ -276,7 +276,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 		const wrongRPID = "wrong.example.com"
 		mismatchServer, mismatchUsername := setupWebAuthnServer(t, wrongRPID, []string{tvOrigin})
 
-		mismatchAcct, err := mismatchServer.getWebAccount(context.Background(), mismatchUsername)
+		mismatchAcct, err := mismatchServer.getAccount(context.Background(), mismatchUsername)
 		require.NoError(t, err)
 		require.NotNil(t, mismatchAcct)
 
@@ -348,7 +348,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 	// credential (UV flag not set by the spec's test authenticator) passes FinishRegistration.
 	// UV enforcement in the production flow is ensured by BeginRegistration using
 	// UserVerification: VerificationRequired — this test is exercising the credential
-	// serialization and persistence path (persistWebAccount / loadWebAccountFromStore).
+	// serialization and persistence path (persistAccount / loadAccountFromStore).
 	t.Run("Finish_Success", func(t *testing.T) {
 		const (
 			svRPID   = "example.org"
@@ -361,7 +361,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 		)
 
 		svServer, svUsername := setupWebAuthnServer(t, svRPID, []string{svOrigin})
-		svAcct, err := svServer.getWebAccount(context.Background(), svUsername)
+		svAcct, err := svServer.getAccount(context.Background(), svUsername)
 		require.NoError(t, err)
 
 		svAttObj, err := hex.DecodeString(svAttObjectHex)
@@ -396,7 +396,7 @@ func TestWebAuthnRegistration(t *testing.T) {
 		rec := doFinish(t, svServer, svUsername, body)
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-		updated, err := svServer.getWebAccount(context.Background(), svUsername)
+		updated, err := svServer.getAccount(context.Background(), svUsername)
 		require.NoError(t, err)
 		require.Len(t, updated.Credentials, 1, "credential must be persisted after successful registration")
 		assert.Equal(t, svCredIDBytes, updated.Credentials[0].ID,
@@ -434,7 +434,7 @@ func doRevokeCredential(t *testing.T, server *Server, username, credIDParam stri
 // bypassing the full registration ceremony.
 func injectCredential(t *testing.T, server *Server, username string, credID []byte) {
 	t.Helper()
-	acct, err := server.getWebAccount(context.Background(), username)
+	acct, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct, "account %q must exist before injecting a credential", username)
 	acct.Credentials = append(acct.Credentials, WebAuthnCredential{
@@ -442,7 +442,7 @@ func injectCredential(t *testing.T, server *Server, username string, credID []by
 		Label:        "injected-test-credential",
 		RegisteredAt: time.Now(),
 	})
-	require.NoError(t, server.persistWebAccount(context.Background(), acct, "test-injector"))
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test-injector"))
 }
 
 // TestWebAuthnListCredentials verifies handleWebAuthnListCredentials (Issue #2783).
@@ -507,7 +507,7 @@ func TestWebAuthnRevokeCredential(t *testing.T) {
 		assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
 		// Verify the credential is gone.
-		acct, err := server.getWebAccount(context.Background(), username)
+		acct, err := server.getAccount(context.Background(), username)
 		require.NoError(t, err)
 		assert.Empty(t, acct.Credentials, "credential must be removed after revocation")
 	})
@@ -548,7 +548,7 @@ func TestWebAuthnRevokeCredential(t *testing.T) {
 // withCookieAuth returns a request with cookieAuthContextKey=true and a principal
 // whose ID is the given web account's UUID — matching the session layout set by
 // authenticationMiddleware for cookie-authenticated requests.
-func withCookieAuth(req *http.Request, acct *webAccount) *http.Request {
+func withCookieAuth(req *http.Request, acct *account) *http.Request {
 	ctx := context.WithValue(req.Context(), cookieAuthContextKey, true)
 	ctx = context.WithValue(ctx, principalContextKey, &Principal{
 		ID:        acct.ID,
@@ -560,7 +560,7 @@ func withCookieAuth(req *http.Request, acct *webAccount) *http.Request {
 
 // doListCredentialsCookieAuth calls handleWebAuthnListCredentials as the account owner
 // via a cookie-authenticated session.
-func doListCredentialsCookieAuth(t *testing.T, server *Server, acct *webAccount, pathUsername string) *httptest.ResponseRecorder {
+func doListCredentialsCookieAuth(t *testing.T, server *Server, acct *account, pathUsername string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/api/v1/accounts/%s/webauthn/credentials", pathUsername), nil)
@@ -573,7 +573,7 @@ func doListCredentialsCookieAuth(t *testing.T, server *Server, acct *webAccount,
 
 // doRevokeCredentialCookieAuth calls handleWebAuthnRevokeCredential as the account
 // owner via a cookie-authenticated session.
-func doRevokeCredentialCookieAuth(t *testing.T, server *Server, acct *webAccount, pathUsername, credIDParam string) *httptest.ResponseRecorder {
+func doRevokeCredentialCookieAuth(t *testing.T, server *Server, acct *account, pathUsername, credIDParam string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost,
 		fmt.Sprintf("/api/v1/accounts/%s/webauthn/revoke/%s", pathUsername, credIDParam), nil)
@@ -590,14 +590,14 @@ func TestWebAuthnCredentialIDOR(t *testing.T) {
 	server, usernameA := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 
 	// Create a second account.
-	recB := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "idor-account-b"})
+	recB := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "idor-account-b"})
 	require.Equal(t, http.StatusCreated, recB.Code)
 
-	acctA, err := server.getWebAccount(context.Background(), usernameA)
+	acctA, err := server.getAccount(context.Background(), usernameA)
 	require.NoError(t, err)
 	require.NotNil(t, acctA)
 
-	acctB, err := server.getWebAccount(context.Background(), "idor-account-b")
+	acctB, err := server.getAccount(context.Background(), "idor-account-b")
 	require.NoError(t, err)
 	require.NotNil(t, acctB)
 
@@ -625,7 +625,7 @@ func TestWebAuthnCredentialIDOR(t *testing.T) {
 	})
 
 	t.Run("credential on acctB still present after blocked revoke attempts", func(t *testing.T) {
-		freshB, err := server.getWebAccount(context.Background(), acctB.Username)
+		freshB, err := server.getAccount(context.Background(), acctB.Username)
 		require.NoError(t, err)
 		require.Len(t, freshB.Credentials, 1, "acctB credential must not have been touched")
 	})
@@ -636,7 +636,7 @@ func TestWebAuthnCredentialIDOR(t *testing.T) {
 func TestWebAuthnAntiLockout(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 
-	acct, err := server.getWebAccount(context.Background(), username)
+	acct, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 
@@ -651,7 +651,7 @@ func TestWebAuthnAntiLockout(t *testing.T) {
 	})
 
 	t.Run("credential still present after blocked revoke", func(t *testing.T) {
-		fresh, err := server.getWebAccount(context.Background(), username)
+		fresh, err := server.getAccount(context.Background(), username)
 		require.NoError(t, err)
 		require.Len(t, fresh.Credentials, 1, "credential must not have been removed")
 	})
@@ -662,13 +662,13 @@ func TestWebAuthnAntiLockout(t *testing.T) {
 		injectCredential(t, server, username, secondCredID)
 
 		// Reload the account (cache may have stale credential count).
-		acct, err = server.getWebAccount(context.Background(), username)
+		acct, err = server.getAccount(context.Background(), username)
 		require.NoError(t, err)
 
 		rec := doRevokeCredentialCookieAuth(t, server, acct, username, credIDParam)
 		assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-		fresh, err := server.getWebAccount(context.Background(), username)
+		fresh, err := server.getAccount(context.Background(), username)
 		require.NoError(t, err)
 		assert.Len(t, fresh.Credentials, 1, "exactly one credential must remain")
 	})
@@ -680,7 +680,7 @@ func TestWebAuthnAntiLockout(t *testing.T) {
 func TestWebAuthnRevokeCAS(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 
-	acct, err := server.getWebAccount(context.Background(), username)
+	acct, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 
@@ -693,7 +693,7 @@ func TestWebAuthnRevokeCAS(t *testing.T) {
 	credBParam := base64.RawURLEncoding.EncodeToString(credB)
 
 	// Reload after injection so the in-memory cache is consistent.
-	acct, err = server.getWebAccount(context.Background(), username)
+	acct, err = server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.Len(t, acct.Credentials, 2)
 
@@ -743,7 +743,7 @@ func TestWebAuthnRevokeCAS(t *testing.T) {
 	assert.Equal(t, 1, conflict, "exactly one revoke must be blocked by the anti-lockout guard (409)")
 
 	// The account must have exactly one credential remaining.
-	final, err := server.getWebAccount(context.Background(), username)
+	final, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	assert.Len(t, final.Credentials, 1, "CAS must leave exactly one credential")
 }
@@ -799,7 +799,7 @@ func TestWebAuthnPresenceBegin(t *testing.T) {
 		credID := []byte("presence-begin-cred-id")
 		injectCredential(t, server, username, credID)
 
-		// Principal ID must match the web-account username so getWebAccount resolves it.
+		// Principal ID must match the web-account username so getAccount resolves it.
 		principal := &Principal{ID: username, Name: username}
 		rec := doPresenceBegin(t, server, principal)
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -853,7 +853,7 @@ func TestWebAuthnPresenceBegin(t *testing.T) {
 	t.Run("NoCredentials_409", func(t *testing.T) {
 		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 		// A freshly-created account has zero credentials. The principal ID must equal
-		// the web-account username so getWebAccount(ctx, principal.ID) finds it.
+		// the web-account username so getAccount(ctx, principal.ID) finds it.
 		principal := &Principal{ID: username, Name: username}
 		rec := doPresenceBegin(t, server, principal)
 		assert.Equal(t, http.StatusConflict, rec.Code)
@@ -900,7 +900,7 @@ func TestWebAuthnPresenceFinish(t *testing.T) {
 		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 		principal := &Principal{ID: username, Name: username}
 
-		acct, err := server.getWebAccount(context.Background(), username)
+		acct, err := server.getAccount(context.Background(), username)
 		require.NoError(t, err)
 		require.NotNil(t, acct)
 
@@ -918,7 +918,7 @@ func TestWebAuthnPresenceFinish(t *testing.T) {
 // setupEnrollServer creates a test server with a WebAuthn RP configured for the
 // supplied rpID/origins, pre-creates a web account for the given username, and
 // returns the server, username, and the raw enrollment magic-link token. The token
-// is minted by handleCreateWebAccount (which issues it for zero-cred accounts).
+// is minted by handleCreateAccount (which issues it for zero-cred accounts).
 func setupEnrollServer(t *testing.T, rpID string, rpOrigins []string, username string) (*Server, string, string) {
 	t.Helper()
 	server := setupTestServer(t)
@@ -926,7 +926,7 @@ func setupEnrollServer(t *testing.T, rpID string, rpOrigins []string, username s
 	require.NoError(t, err)
 	server.SetWebAuthn(wa)
 
-	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: username})
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: username})
 	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
 
 	var outer APIResponse
@@ -999,12 +999,12 @@ func TestPasskeyEnrollBegin(t *testing.T) {
 	t.Run("ExpiredToken", func(t *testing.T) {
 		// Create a separate account and manually expire the enrollment link.
 		srv2, _, tok2 := setupEnrollServer(t, tvRPID, []string{tvOrigin}, "enroll-expired-user")
-		acct2, err := srv2.getWebAccount(context.Background(), "enroll-expired-user")
+		acct2, err := srv2.getAccount(context.Background(), "enroll-expired-user")
 		require.NoError(t, err)
 		// Backdate the expiry by an hour so the token is already expired.
 		acct2.EnrollmentLinkExpiresAt = acct2.EnrollmentLinkExpiresAt.Add(-73 * time.Hour)
-		require.NoError(t, srv2.persistWebAccount(context.Background(), acct2, "test"))
-		srv2.cacheWebAccount(acct2)
+		require.NoError(t, srv2.persistAccount(context.Background(), acct2, "test"))
+		srv2.cacheAccount(acct2)
 
 		rec := doEnrollBegin(t, srv2, tok2)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -1013,11 +1013,11 @@ func TestPasskeyEnrollBegin(t *testing.T) {
 
 	t.Run("RevokedToken", func(t *testing.T) {
 		srv3, _, tok3 := setupEnrollServer(t, tvRPID, []string{tvOrigin}, "enroll-revoked-user")
-		acct3, err := srv3.getWebAccount(context.Background(), "enroll-revoked-user")
+		acct3, err := srv3.getAccount(context.Background(), "enroll-revoked-user")
 		require.NoError(t, err)
 		acct3.EnrollmentLinkRevoked = true
-		require.NoError(t, srv3.persistWebAccount(context.Background(), acct3, "test"))
-		srv3.cacheWebAccount(acct3)
+		require.NoError(t, srv3.persistAccount(context.Background(), acct3, "test"))
+		srv3.cacheAccount(acct3)
 
 		rec := doEnrollBegin(t, srv3, tok3)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -1095,7 +1095,7 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 	// first finish call gets the session data. The second gets NO_ACTIVE_ENROLLMENT.
 	t.Run("ConcurrentRedeem_SecondFailsWithNoActiveCeremony", func(t *testing.T) {
 		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-concurrent-user")
-		acct, err := srv.getWebAccount(context.Background(), "enroll-concurrent-user")
+		acct, err := srv.getAccount(context.Background(), "enroll-concurrent-user")
 		require.NoError(t, err)
 
 		sess := webauthn.SessionData{
@@ -1124,7 +1124,7 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 
 	t.Run("ExpiredSession", func(t *testing.T) {
 		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-expiredsession-user")
-		acct, err := srv.getWebAccount(context.Background(), "enroll-expiredsession-user")
+		acct, err := srv.getAccount(context.Background(), "enroll-expiredsession-user")
 		require.NoError(t, err)
 
 		sess := webauthn.SessionData{
@@ -1141,7 +1141,7 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 	t.Run("TokenInvalidAtFinish", func(t *testing.T) {
 		// Token is revoked between begin and finish: CAS check at finish rejects it.
 		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-tokeninvalid-user")
-		acct, err := srv.getWebAccount(context.Background(), "enroll-tokeninvalid-user")
+		acct, err := srv.getAccount(context.Background(), "enroll-tokeninvalid-user")
 		require.NoError(t, err)
 
 		sess := webauthn.SessionData{
@@ -1156,8 +1156,8 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 
 		// Revoke the token (simulating admin action between begin and finish).
 		acct.EnrollmentLinkRevoked = true
-		require.NoError(t, srv.persistWebAccount(context.Background(), acct, "test-admin"))
-		srv.cacheWebAccount(acct)
+		require.NoError(t, srv.persistAccount(context.Background(), acct, "test-admin"))
+		srv.cacheAccount(acct)
 
 		// Finish should fail with TOKEN_INVALID.
 		// verifyEnrollmentToken runs before wa.FinishRegistration, so the result
@@ -1175,7 +1175,7 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 	t.Run("AlreadyEnrolled_CASPreconditionAtFinish", func(t *testing.T) {
 		// A credential is added between begin and finish: CAS check at finish rejects it.
 		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, "enroll-cas-user")
-		acct, err := srv.getWebAccount(context.Background(), "enroll-cas-user")
+		acct, err := srv.getAccount(context.Background(), "enroll-cas-user")
 		require.NoError(t, err)
 
 		sess := webauthn.SessionData{
@@ -1208,7 +1208,7 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 	// Success test: uses the W3C Level 3 §16.2 NoneES256 spec vector.
 	t.Run("Success_FirstPasskeyPersisted", func(t *testing.T) {
 		srv, _, rawToken := setupEnrollServer(t, svRPID, []string{svOrigin}, svUsername)
-		acct, err := srv.getWebAccount(context.Background(), svUsername)
+		acct, err := srv.getAccount(context.Background(), svUsername)
 		require.NoError(t, err)
 
 		sess := webauthn.SessionData{
@@ -1229,7 +1229,7 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 		// Credential must be persisted.
-		updated, err := srv.getWebAccount(context.Background(), svUsername)
+		updated, err := srv.getAccount(context.Background(), svUsername)
 		require.NoError(t, err)
 		require.Len(t, updated.Credentials, 1, "exactly one credential after enrollment")
 		assert.Equal(t, svCredIDBytes, updated.Credentials[0].ID,
@@ -1247,11 +1247,11 @@ func TestPasskeyEnrollFinish(t *testing.T) {
 		// Audit event must have been written.
 		require.NoError(t, srv.auditManager.Flush(context.Background()))
 		entries, err := srv.auditManager.QueryEntries(context.Background(),
-			&business.AuditFilter{Actions: []string{"web_account.passkey_enrolled"}})
+			&business.AuditFilter{Actions: []string{"account.passkey_enrolled"}})
 		require.NoError(t, err)
-		require.NotEmpty(t, entries, "web_account.passkey_enrolled audit entry must be written on success")
+		require.NotEmpty(t, entries, "account.passkey_enrolled audit entry must be written on success")
 		e := entries[0]
-		assert.Equal(t, "web_account.passkey_enrolled", e.Action)
+		assert.Equal(t, "account.passkey_enrolled", e.Action)
 		assert.Equal(t, svUsername, e.ResourceID)
 	})
 }
@@ -1266,13 +1266,13 @@ func TestPasskeyEnroll_SelfScopedToTokenAccount(t *testing.T) {
 	require.NoError(t, err)
 	server.SetWebAuthn(wa)
 
-	recA := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "enroll-account-a"})
+	recA := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "enroll-account-a"})
 	require.Equal(t, http.StatusCreated, recA.Code)
 	var outerA APIResponse
 	require.NoError(t, json.Unmarshal(recA.Body.Bytes(), &outerA))
 	tokenA := outerA.Data.(map[string]interface{})["enrollment_magic_link"].(string)
 
-	recB := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "enroll-account-b"})
+	recB := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "enroll-account-b"})
 	require.Equal(t, http.StatusCreated, recB.Code)
 	var outerB APIResponse
 	require.NoError(t, json.Unmarshal(recB.Body.Bytes(), &outerB))
@@ -1385,7 +1385,7 @@ func TestPasskeyEnroll_TokenHashing(t *testing.T) {
 	require.NoError(t, err)
 	server.SetWebAuthn(wa)
 
-	rec := postWebAccount(t, server, testAdminPrincipal(), WebAccountRequest{Username: "token-hash-user"})
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "token-hash-user"})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	var outer APIResponse
@@ -1393,7 +1393,7 @@ func TestPasskeyEnroll_TokenHashing(t *testing.T) {
 	rawToken := outer.Data.(map[string]interface{})["enrollment_magic_link"].(string)
 
 	// The stored hash must differ from the raw token.
-	acct, err := server.getWebAccount(context.Background(), "token-hash-user")
+	acct, err := server.getAccount(context.Background(), "token-hash-user")
 	require.NoError(t, err)
 	assert.NotEqual(t, rawToken, acct.EnrollmentLinkHash,
 		"stored hash must not equal the raw token (must be hashed)")

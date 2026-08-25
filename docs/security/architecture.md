@@ -120,11 +120,11 @@ were retired end-to-end (no migration shim; pre-production clean break):
 - **Storage:** accounts hold registered WebAuthn credential public keys only —
   never a password or password hash — persisted through the central
   `pkg/secrets` provider (encrypted at rest, distinct `secret_type:
-  web_account`), with an in-memory map as cache only. Accounts survive
+  account`), with an in-memory map as cache only. Accounts survive
   controller restart.
-- **Provisioning:** AssuranceStrong only (ADR-021). `POST /api/v1/web/accounts` (create, and
+- **Provisioning:** AssuranceStrong only (ADR-021). `POST /api/v1/accounts` (create, and
   admin-driven reset via upsert) and
-  `DELETE /api/v1/web/accounts/{username}` require an admin mTLS certificate;
+  `DELETE /api/v1/accounts/{username}` require an admin mTLS certificate;
   API-key callers receive `403 INSUFFICIENT_PERMISSIONS`; Basic-assurance session callers
   receive `401` with a `WWW-Authenticate: CFGMS-StepUp` challenge. Every
   create/reset/delete emits an audit event with the sanitized username and the
@@ -340,8 +340,8 @@ Routes that require elevated assurance are declared in `permissionAssurance` (`f
 | `refresh:set-policy` | `PUT /api/v1/tenants/{tenant_path}/refresh-policy` |
 | `steward:move` | `POST /api/v1/stewards/{id}/move` |
 | `steward:decommission` | `DELETE /api/v1/stewards/{id}` |
-| `web-account:create` | `POST /api/v1/web/accounts` |
-| `web-account:delete` | `DELETE /api/v1/web/accounts/{username}` |
+| `account:create` | `POST /api/v1/accounts` |
+| `account:delete` | `DELETE /api/v1/accounts/{username}` |
 | `cluster:drain-node` | `POST /api/v1/cluster/nodes/{id}/drain` |
 | `cluster:decommission-node` | `POST /api/v1/cluster/nodes/{id}/decommission` |
 | `session:create` | `POST /api/v1/sessions` |

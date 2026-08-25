@@ -968,7 +968,7 @@ cfg registration ip-trust revoke 10.0.0.0/8 --tenant-id acme-corp
 
 Required API key permissions: `registration:list-pending` for `pending` and for the approve-by-CIDR preview; `registration:approve` for individual approval and `approve-all`; `registration:approve-by-cidr` for `approve-by-cidr`; `registration:deny` for denial; `registration:manage-ip-trust` for ip-trust subcommands.
 
-**Tenant scoping of bulk approval.** `approve-all` and `approve-by-cidr` — and the preview — resolve their target set through `ListPending(ctx, callerTenantID)`, so a caller whose principal carries a tenant (API key or non-root web account) can only approve pending entries belonging to that tenant. A caller with no tenant on its principal (mTLS admin bundle, root-scoped web account) retains fleet-wide reach. Entries outside the caller's scope are never listed, previewed, or mutated.
+**Tenant scoping of bulk approval.** `approve-all` and `approve-by-cidr` — and the preview — resolve their target set through `ListPending(ctx, callerTenantID)`, so a caller whose principal carries a tenant (API key or non-root account) can only approve pending entries belonging to that tenant. A caller with no tenant on its principal (mTLS admin bundle, root-scoped account) retains fleet-wide reach. Entries outside the caller's scope are never listed, previewed, or mutated.
 
 **Presence step-up on `approve-by-cidr`.** `registration:approve-by-cidr` carries `RequireUserPresence: true` (ADR-021 Decision 4): `AssuranceStrong` alone is not enough, and the request must also carry a fresh, single-use `X-Presence-Token` obtained from `POST /api/v1/webauthn/presence/begin` → `/finish`. Without one the call returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"`. Rationale: one call admits every pending steward in an IP range, and RFC1918 ranges collide across tenants, so the match set is a trust-boundary decision. The preview endpoint is deliberately *not* presence-gated — an operator inspects the exact match set first, then spends one gesture on the mutation. The web console blocks the mutating call until the preview has been shown and confirmed.
 
@@ -1060,7 +1060,7 @@ Every authenticated `Principal` carries two independent fields that govern diffe
 
 - **`GlobalScope`** — whether the principal has cross-tenant visibility (`true`) or is confined to its own tenant subtree (`false`). Today all human-authenticated principals (mTLS cert, cfg-Bearer session, web session) have `GlobalScope=true`; all machine principals (API key, relay-script) have `GlobalScope=false`.
 
-These signals are **orthogonal**: a future tenant-scoped web account type would have `Assurance=AssuranceBasic` but `GlobalScope=false` and would be tenant-confined despite its assurance level. A strongly-authenticated but tenant-scoped service account would have `Assurance=AssuranceStrong` but `GlobalScope=false` — it could perform strongly-authenticated operations but only within its own tenant. Do not collapse these two signals back into one; see ADR-021 Context §"It is load-bearing on an unwritten assumption" for the failure mode this separation forecloses.
+These signals are **orthogonal**: a future tenant-scoped account type would have `Assurance=AssuranceBasic` but `GlobalScope=false` and would be tenant-confined despite its assurance level. A strongly-authenticated but tenant-scoped service account would have `Assurance=AssuranceStrong` but `GlobalScope=false` — it could perform strongly-authenticated operations but only within its own tenant. Do not collapse these two signals back into one; see ADR-021 Context §"It is load-bearing on an unwritten assumption" for the failure mode this separation forecloses.
 
 ### Tenant Model
 
@@ -1298,7 +1298,7 @@ The following handler groups were gated during epic #3411. Each story is noted b
 
 The baseline is a ratchet — entries can only be removed as handlers are gated, never added for new handlers. Three bucket values are recognised:
 
-- `excluded-by-epic-non-goals` — handler is explicitly out of scope for epic #3411 (RBAC CRUD, tenant management, web-account CRUD, API keys, session lifecycle, presentation state)
+- `excluded-by-epic-non-goals` — handler is explicitly out of scope for epic #3411 (RBAC CRUD, tenant management, account CRUD, API keys, session lifecycle, presentation state)
 - `gated-via-deprecated-primitive` — handler IS gated, but on the deprecated `IsLeader()` flag rather than `HasLeadership()`; migration tracked separately
 - `unclassified-pending-risk-review` — handler was inventoried during decomposition but not individually risk-reviewed; a follow-up story must either gate it or explicitly reassign its bucket
 

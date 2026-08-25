@@ -102,7 +102,7 @@ func doStepUpFinish(t *testing.T, server *Server, principal *Principal, sessID s
 // account, enabling FinishLogin to perform real cryptographic verification.
 func injectCredentialWithPublicKey(t *testing.T, server *Server, username string, credID, pubKey []byte, signCount uint32) {
 	t.Helper()
-	acct, err := server.getWebAccount(context.Background(), username)
+	acct, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct, "account %q must exist before injecting credential", username)
 	// The W3C NoneES256 spec vector authData has BE=1, BS=1 (both authData bytes 0x59 and 0x19).
@@ -116,8 +116,8 @@ func injectCredentialWithPublicKey(t *testing.T, server *Server, username string
 		BackupEligible: true,
 		BackupState:    true,
 	})
-	require.NoError(t, server.persistWebAccount(context.Background(), acct, "test-injector"))
-	server.cacheWebAccount(acct)
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test-injector"))
+	server.cacheAccount(acct)
 }
 
 // buildAssertionBody constructs a JSON PublicKeyCredential assertion response from raw bytes.
@@ -323,7 +323,7 @@ func TestStepUpFinish_SignCountClone_400(t *testing.T) {
 	// Load the account to obtain its stable UUID for the session UserID field.
 	// FinishLogin checks bytes.Equal(user.WebAuthnID(), session.UserID); the user's
 	// WebAuthnID is []byte(acct.ID) (a UUID, not the username).
-	acct, err := server.getWebAccount(context.Background(), username)
+	acct, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 
@@ -389,7 +389,7 @@ func TestStepUpFinish_Success(t *testing.T) {
 	// Load the account to obtain its stable UUID for the session UserID field.
 	// FinishLogin checks bytes.Equal(user.WebAuthnID(), session.UserID); the user's
 	// WebAuthnID is []byte(acct.ID) (a UUID, not the username).
-	acct, err := server.getWebAccount(context.Background(), username)
+	acct, err := server.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
 

@@ -84,7 +84,7 @@ type Server struct {
 	haManager                      *ha.Manager
 	apiKeys                        map[string]*APIKey                    // In-memory cache for fast lookup
 	secretStore                    secretsif.SecretStore                 // M-AUTH-1: Central secrets provider for API keys
-	webAccounts                    map[string]*webAccount                // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
+	accounts                       map[string]*account                   // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
 	registrationTokenStore         registration.Store                    // Registration token store for steward registration
 	corsConfig                     *CORSConfig                           // CORS configuration
 	signerCertSerial               string                                // Story #378: Serial of cert used for config signing
@@ -345,7 +345,7 @@ func New(
 	// isKnownPermission no longer recognizes (stale grants after the permission-ID
 	// rename in #3574). Those grants match nothing hasPermission will honor; this
 	// log makes the break observable to operators instead of silently denying requests.
-	if err := server.scanWebAccountsForStalePermissions(context.Background()); err != nil {
+	if err := server.scanAccountsForStalePermissions(context.Background()); err != nil {
 		logger.Warn("Startup scan for web accounts with stale permissions failed; continuing", "error", err)
 	}
 
@@ -2376,19 +2376,19 @@ func (s *Server) scanAPIKeysForPrivilegedAccess(ctx context.Context) error {
 	return nil
 }
 
-// Issue #3574: scanWebAccountsForStalePermissions enumerates every web account in the secret
+// Issue #3574: scanAccountsForStalePermissions enumerates every web account in the secret
 // store and logs a warning for any account whose stored Permissions slice contains an ID that
 // isKnownPermission no longer recognizes. Stale grants (permission IDs renamed or removed)
 // silently match nothing hasPermission will honor; this scan makes the break observable at
 // startup so operators can update affected accounts rather than silently seeing all requests
 // denied.
-func (s *Server) scanWebAccountsForStalePermissions(ctx context.Context) error {
+func (s *Server) scanAccountsForStalePermissions(ctx context.Context) error {
 	if s.secretStore == nil {
 		return nil
 	}
 	secrets, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
 		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: webAccountSecretType,
+			secretsif.MetadataKeySecretType: accountSecretType,
 		},
 	})
 	if err != nil {

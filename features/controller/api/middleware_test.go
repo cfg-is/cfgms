@@ -624,9 +624,9 @@ func TestHasPermission_AdminPrincipal(t *testing.T) {
 	assert.True(t, server.hasPermission(admin, "some-future:permission"))
 }
 
-// TestHasPermission_WebAccountPermissions verifies that human assurance does not
+// TestHasPermission_AccountPermissions verifies that human assurance does not
 // erase the explicit, least-privilege grants configured on a web account.
-func TestHasPermission_WebAccountPermissions(t *testing.T) {
+func TestHasPermission_AccountPermissions(t *testing.T) {
 	server := setupTestServer(t)
 	web := &Principal{
 		Assurance:   session.AssuranceBasic,
@@ -1243,7 +1243,7 @@ func TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp(t *test
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
 	// Deliberately no Permissions: breadth must come from the root-scope grant.
-	srv.cacheWebAccount(&webAccount{
+	srv.cacheAccount(&account{
 		ID:        "admin-principal-id",
 		Username:  "root-admin",
 		TenantID:  "",
@@ -1306,7 +1306,7 @@ func TestWebSessionCookie_RootScopeAccountIsImplicitAdminAndStillStepsUp(t *test
 func TestWebSessionCookie_TenantScopedAccountIsEnumerated(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
-	srv.cacheWebAccount(&webAccount{
+	srv.cacheAccount(&account{
 		ID:          "operator-principal-id",
 		Username:    "tenant-operator",
 		TenantID:    "tenant-a",
@@ -2234,7 +2234,7 @@ func TestBearerSession_BoundTenantScopedAccount_PermissionDenied(t *testing.T) {
 	srv.SetSessionManager(mgr)
 
 	// Cache a tenant-scoped account with a limited permission set.
-	srv.cacheWebAccount(&webAccount{
+	srv.cacheAccount(&account{
 		ID:          "bounded-operator-id",
 		Username:    "bounded-operator",
 		TenantID:    "tenant-a",
@@ -2278,14 +2278,14 @@ func TestBearerSession_BoundAccountPermissionChangeLiveWithoutRelogin(t *testing
 	srv.SetSessionManager(mgr)
 
 	// Cache the account with steward:list only.
-	acct := &webAccount{
+	acct := &account{
 		ID:          "live-perm-user-id",
 		Username:    "live-perm-user",
 		TenantID:    "tenant-b",
 		RootScope:   false,
 		Permissions: []string{"steward:list"},
 	}
-	srv.cacheWebAccount(acct)
+	srv.cacheAccount(acct)
 
 	// Issue one session token that both requests will use.
 	token := setupBearerSession(t, mgr, acct.ID, acct.TenantID)
@@ -2310,7 +2310,7 @@ func TestBearerSession_BoundAccountPermissionChangeLiveWithoutRelogin(t *testing
 	updated := *acct
 	updated.Permissions = append([]string{}, acct.Permissions...)
 	updated.Permissions = append(updated.Permissions, "steward:write-config")
-	srv.cacheWebAccount(&updated)
+	srv.cacheAccount(&updated)
 
 	// Request 2: same token, now steward:write-config is in the account's grants → 200.
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test/config", nil)
@@ -2333,7 +2333,7 @@ func TestBearerSession_BoundDisabledAccount_Returns401Revoked(t *testing.T) {
 	srv := setupTestServer(t)
 	srv.SetSessionManager(mgr)
 
-	srv.cacheWebAccount(&webAccount{
+	srv.cacheAccount(&account{
 		ID:       "disabled-cli-id",
 		Username: "disabled-cli-user",
 		TenantID: "tenant-a",
@@ -2403,7 +2403,7 @@ func TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin(t *testing.T) {
 	srv := setupTestServer(t)
 	srv.SetSessionManager(mgr)
 
-	srv.cacheWebAccount(&webAccount{
+	srv.cacheAccount(&account{
 		ID:        "root-cli-admin-id",
 		Username:  "root-cli-admin",
 		TenantID:  "",
@@ -2433,7 +2433,7 @@ func TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin(t *testing.T) {
 
 // TestBearerSession_AccountLookupError_FailsClosed is the [REQUIRED TEST] for the
 // fail-closed account-resolution property of the Bearer branch (Issue #3576 security
-// review). getWebAccountByID returns a real error when the durable store is unhealthy
+// review). getAccountByID returns a real error when the durable store is unhealthy
 // (secret-store/SOPS failure, git storage error, ListSecrets failure, context deadline).
 // Treating that error as "no account found" would leave Permissions nil — the
 // implicit-admin marker hasPermission honours at AssuranceBasic — skip the Issue #3126
@@ -2452,14 +2452,14 @@ func TestBearerSession_AccountLookupError_FailsClosed(t *testing.T) {
 	// Persist a real, tenant-scoped account holding a single grant, so the lookup
 	// exercised below is the same one the middleware performs in production.
 	const username = "failclosed-bearer-operator"
-	rec := postWebAccount(t, srv, testAdminPrincipal(), WebAccountRequest{
+	rec := postAccount(t, srv, testAdminPrincipal(), AccountRequest{
 		Username:    username,
 		TenantID:    "tenant-a",
 		Permissions: []string{"steward:list"},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	acct := cachedWebAccount(srv, username)
+	acct := cachedAccount(srv, username)
 	require.NotNil(t, acct, "account must be cached so the by-ID lookup hits the store re-verify")
 	require.NotEmpty(t, acct.ID)
 

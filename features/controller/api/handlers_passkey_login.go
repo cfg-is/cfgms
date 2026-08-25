@@ -103,7 +103,7 @@ func (s *Server) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request)
 
 	// Validate username format if provided; this does not disclose account existence.
 	if req.Username != "" {
-		if validateErr := validateWebUsername(req.Username); validateErr != nil {
+		if validateErr := validateUsername(req.Username); validateErr != nil {
 			s.writeErrorResponse(w, http.StatusBadRequest, validateErr.Error(), "INVALID_USERNAME")
 			return
 		}
@@ -229,12 +229,12 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	// Always use FinishDiscoverableLogin (matches the always-discoverable begin).
 	// The handler resolves the account from the authenticator-provided userHandle,
 	// which the authenticator stores as the account UUID at registration time.
-	var acct *webAccount
+	var acct *account
 	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
 		if len(userHandle) == 0 {
 			return nil, fmt.Errorf("blank user handle")
 		}
-		found, err := s.getWebAccountByID(r.Context(), string(userHandle))
+		found, err := s.getAccountByID(r.Context(), string(userHandle))
 		if err != nil || found == nil {
 			return nil, err
 		}
@@ -291,10 +291,10 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	}
 
 	// Issue #3126: check whether the account is disabled before issuing a session.
-	// VerifyWebCredential returns ErrInvalidWebCredential for disabled accounts.
+	// VerifyCredential returns ErrInvalidWebCredential for disabled accounts.
 	// The error message is deliberately identical to the WebAuthn verification error
 	// so the response does not disclose the reason for rejection.
-	if credErr := s.VerifyWebCredential(acct); credErr != nil {
+	if credErr := s.VerifyCredential(acct); credErr != nil {
 		s.recordPasskeyLoginFailure("account:" + acct.Username)
 		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
 		s.writeErrorResponse(w, http.StatusBadRequest,
@@ -312,13 +312,13 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
-	if persistErr := s.persistWebAccount(r.Context(), &updatedAcct, acct.Username); persistErr != nil {
+	if persistErr := s.persistAccount(r.Context(), &updatedAcct, acct.Username); persistErr != nil {
 		s.logger.Error("Passkey login finish: failed to persist sign count",
 			"username", logging.SanitizeLogValue(acct.Username),
 			"error", logging.SanitizeLogValue(persistErr.Error()))
 		// Non-fatal: cryptographic verification succeeded; proceed with login.
 	} else {
-		s.cacheWebAccount(&updatedAcct)
+		s.cacheAccount(&updatedAcct)
 	}
 
 	// Session-fixation defence: revoke any pre-existing session cookie before

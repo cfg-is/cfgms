@@ -74,7 +74,7 @@ type webAuthnPendingSession struct {
 	expires time.Time
 }
 
-// webauthnUser adapts a webAccount to the go-webauthn/webauthn User interface.
+// webauthnUser adapts a account to the go-webauthn/webauthn User interface.
 type webauthnUser struct {
 	id          []byte
 	name        string
@@ -87,9 +87,9 @@ func (u *webauthnUser) WebAuthnName() string                       { return u.na
 func (u *webauthnUser) WebAuthnDisplayName() string                { return u.displayName }
 func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential { return u.credentials }
 
-// buildWebauthnUser converts a webAccount into the webauthn.User the library expects.
+// buildWebauthnUser converts a account into the webauthn.User the library expects.
 // Existing credentials are included so BeginRegistration can populate excludeCredentials.
-func buildWebauthnUser(acct *webAccount) *webauthnUser {
+func buildWebauthnUser(acct *account) *webauthnUser {
 	creds := make([]webauthn.Credential, 0, len(acct.Credentials))
 	for _, c := range acct.Credentials {
 		transports := make([]protocol.AuthenticatorTransport, 0, len(c.Transport))
@@ -117,22 +117,22 @@ func buildWebauthnUser(acct *webAccount) *webauthnUser {
 	}
 }
 
-// resolveWebAccountForCredentials enforces caller-scoping for the credential
+// resolveAccountForCredentials enforces caller-scoping for the credential
 // management surface (Issue #2992). Cookie-auth principals (human web accounts,
 // ADR-021 Amendment 1) may only operate on their own account — IDOR prevention.
 // mTLS and API-key principals retain admin-level access via the path {username}.
 //
 // Returns (account, principal, true) on success, or writes an error response and
 // returns (nil, nil, false).
-func (s *Server) resolveWebAccountForCredentials(w http.ResponseWriter, r *http.Request) (*webAccount, *Principal, bool) {
+func (s *Server) resolveAccountForCredentials(w http.ResponseWriter, r *http.Request) (*account, *Principal, bool) {
 	pathUsername := mux.Vars(r)["username"]
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	isCookieAuth, _ := r.Context().Value(cookieAuthContextKey).(bool)
 
 	if isCookieAuth && principal != nil {
 		// Self-service path (human web account): resolve from session, not path.
-		// Session PrincipalID is the account's UUID; getWebAccountByID looks it up.
-		acct, err := s.getWebAccountByID(r.Context(), principal.ID)
+		// Session PrincipalID is the account's UUID; getAccountByID looks it up.
+		acct, err := s.getAccountByID(r.Context(), principal.ID)
 		if err != nil {
 			s.logger.Error("Failed to resolve web account for credential operation",
 				"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -156,11 +156,11 @@ func (s *Server) resolveWebAccountForCredentials(w http.ResponseWriter, r *http.
 	}
 
 	// Admin (mTLS / API-key) path: use path username directly.
-	if err := validateWebUsername(pathUsername); err != nil {
+	if err := validateUsername(pathUsername); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
 		return nil, nil, false
 	}
-	acct, err := s.getWebAccount(r.Context(), pathUsername)
+	acct, err := s.getAccount(r.Context(), pathUsername)
 	if err != nil {
 		s.logger.Error("Failed to resolve web account for credential operation",
 			"username", logging.SanitizeLogValue(pathUsername),
@@ -194,7 +194,7 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	acct, _, ok := s.resolveWebAccountForCredentials(w, r)
+	acct, _, ok := s.resolveAccountForCredentials(w, r)
 	if !ok {
 		return
 	}
@@ -259,7 +259,7 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	acct, principal, ok := s.resolveWebAccountForCredentials(w, r)
+	acct, principal, ok := s.resolveAccountForCredentials(w, r)
 	if !ok {
 		return
 	}
@@ -334,12 +334,12 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 	}
 
 	// Re-persist the account with the appended credential. The account loaded above
-	// (resolveWebAccountForCredentials) already reflects any credentials registered
+	// (resolveAccountForCredentials) already reflects any credentials registered
 	// before this call.
 	updatedAcct := *acct
 	updatedAcct.Credentials = append(append([]WebAuthnCredential(nil), acct.Credentials...), stored)
 
-	if err := s.persistWebAccount(r.Context(), &updatedAcct, actingPrincipalID); err != nil {
+	if err := s.persistAccount(r.Context(), &updatedAcct, actingPrincipalID); err != nil {
 		s.logger.Error("Failed to persist WebAuthn credential",
 			"username", logging.SanitizeLogValue(username),
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -347,7 +347,7 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 			"Failed to persist credential", "STORE_ERROR")
 		return
 	}
-	s.cacheWebAccount(&updatedAcct)
+	s.cacheAccount(&updatedAcct)
 
 	s.logger.Info("WebAuthn credential registered",
 		"username", logging.SanitizeLogValue(username),
@@ -431,7 +431,7 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Presence ceremonies are only meaningful for principals with registered credentials.
-	acct, err := s.getWebAccount(r.Context(), principal.ID)
+	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Failed to look up web account for presence begin",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -513,7 +513,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getWebAccount(r.Context(), principal.ID)
+	acct, err := s.getAccount(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Failed to look up web account for presence finish",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -600,7 +600,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 // Cookie-auth principals are self-scoped: the target account is resolved from the
 // session, not the path parameter (Issue #2992 IDOR fix).
 func (s *Server) handleWebAuthnListCredentials(w http.ResponseWriter, r *http.Request) {
-	acct, _, ok := s.resolveWebAccountForCredentials(w, r)
+	acct, _, ok := s.resolveAccountForCredentials(w, r)
 	if !ok {
 		return
 	}
@@ -655,7 +655,7 @@ func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request
 
 	// Resolve account by token — never by a caller-supplied path variable.
 	// This prevents the cross-account credential injection described in the issue.
-	acct, err := s.getWebAccountByEnrollmentToken(r.Context(), rawToken)
+	acct, err := s.getAccountByEnrollmentToken(r.Context(), rawToken)
 	if err != nil {
 		s.logger.Error("Failed to look up account for enrollment begin",
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -761,7 +761,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 
 	// Resolve account by token for WebAuthn user construction.
 	// We look up from cache here; CAS reload from store follows below.
-	acct, err := s.getWebAccountByEnrollmentToken(r.Context(), rawToken)
+	acct, err := s.getAccountByEnrollmentToken(r.Context(), rawToken)
 	if err != nil {
 		s.logger.Error("Failed to look up account for enrollment finish",
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -808,7 +808,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	// CAS reload: re-read from the durable store (not cache) to detect any
 	// admin-mediated mutations that occurred between begin and finish.
 	// Combined with LoadAndDelete above, this closes the TOCTOU window.
-	freshAcct, freshErr := s.loadWebAccountFromStore(r.Context(), acct.Username, webAccountStorageTenant(acct.TenantID))
+	freshAcct, freshErr := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
 	if freshErr != nil {
 		s.logger.Error("CAS reload failed for enrollment finish",
 			"account_id", logging.SanitizeLogValue(acct.ID),
@@ -836,7 +836,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	updatedAcct.Credentials = []WebAuthnCredential{stored}
 	updatedAcct.EnrollmentLinkRevoked = true
 
-	if err := s.persistWebAccount(r.Context(), &updatedAcct, ""); err != nil {
+	if err := s.persistAccount(r.Context(), &updatedAcct, ""); err != nil {
 		s.logger.Error("Failed to persist enrollment credential",
 			"account_id", logging.SanitizeLogValue(acct.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -844,7 +844,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 			"Failed to persist credential", "STORE_ERROR")
 		return
 	}
-	s.cacheWebAccount(&updatedAcct)
+	s.cacheAccount(&updatedAcct)
 
 	// Audit: record account, credential ID, and delivery channel.
 	credIDStr := base64.RawURLEncoding.EncodeToString(stored.ID)
@@ -861,7 +861,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 }
 
 // emitEnrollmentAudit records a first-passkey enrollment audit event.
-func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *webAccount, credentialID string) {
+func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *account, credentialID string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -872,7 +872,7 @@ func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *webAccount, cred
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
-		Action("web_account.passkey_enrolled").
+		Action("account.passkey_enrolled").
 		User(acct.ID, business.AuditUserTypeHuman).
 		Resource("web-account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).
@@ -908,7 +908,7 @@ func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *webAccount, cred
 // session, not the path parameter (Issue #2992 IDOR fix).
 func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.Request) {
 	// Phase 1: IDOR check and credential ID parsing (outside the CAS mutex).
-	acct, principal, ok := s.resolveWebAccountForCredentials(w, r)
+	acct, principal, ok := s.resolveAccountForCredentials(w, r)
 	if !ok {
 		return
 	}
@@ -936,7 +936,7 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 	// credentials.
 	s.credentialMu.Lock()
 
-	freshAcct, freshErr := s.loadWebAccountFromStore(r.Context(), acct.Username, webAccountStorageTenant(acct.TenantID))
+	freshAcct, freshErr := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
 	if freshErr != nil {
 		s.credentialMu.Unlock()
 		s.logger.Error("Failed to reload web account for credential revocation",
@@ -983,7 +983,7 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 
 	updatedAcct := *freshAcct
 	updatedAcct.Credentials = remaining
-	if persistErr := s.persistWebAccount(r.Context(), &updatedAcct, actingPrincipalID); persistErr != nil {
+	if persistErr := s.persistAccount(r.Context(), &updatedAcct, actingPrincipalID); persistErr != nil {
 		s.credentialMu.Unlock()
 		s.logger.Error("Failed to persist credential revocation",
 			"username", logging.SanitizeLogValue(freshAcct.Username),
@@ -992,7 +992,7 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 			"Failed to persist credential revocation", "STORE_ERROR")
 		return
 	}
-	s.cacheWebAccount(&updatedAcct)
+	s.cacheAccount(&updatedAcct)
 	s.credentialMu.Unlock()
 
 	s.logger.Info("WebAuthn credential revoked",
@@ -1009,7 +1009,7 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 // Called after a successful additional registration (not first-enrollment — that is
 // covered by emitEnrollmentAudit). actingPrincipalID is the session principal UUID,
 // which may differ from acct.ID when an mTLS admin adds a credential on behalf of a user.
-func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *webAccount, credentialID, actingPrincipalID string) {
+func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -1026,7 +1026,7 @@ func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *webAccount, cr
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
-		Action("web_account.passkey_added").
+		Action("account.passkey_added").
 		User(acct.ID, business.AuditUserTypeHuman).
 		Resource("web-account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).
@@ -1042,7 +1042,7 @@ func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *webAccount, cr
 // emitPasskeyRevokedAudit records a passkey-revoked audit event (Issue #2992).
 // actingPrincipalID is the session principal UUID, which may differ from acct.ID when
 // an mTLS admin revokes a credential on behalf of a user.
-func (s *Server) emitPasskeyRevokedAudit(ctx context.Context, acct *webAccount, credentialID, actingPrincipalID string) {
+func (s *Server) emitPasskeyRevokedAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -1059,7 +1059,7 @@ func (s *Server) emitPasskeyRevokedAudit(ctx context.Context, acct *webAccount, 
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
-		Action("web_account.passkey_revoked").
+		Action("account.passkey_revoked").
 		User(acct.ID, business.AuditUserTypeHuman).
 		Resource("web-account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).

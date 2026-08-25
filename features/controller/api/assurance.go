@@ -145,7 +145,7 @@ var permissionAssurance = map[string]Requirement{
 //
 // This mapping is read-side only and deliberately does not apply to grants: knownPermissions /
 // isKnownPermission still reject the old IDs outright, which is the fail-CLOSED direction and
-// is the hard-break behaviour Issue #3574 intends. scanWebAccountsForStalePermissions makes
+// is the hard-break behaviour Issue #3574 intends. scanAccountsForStalePermissions makes
 // those dead grants observable at startup.
 var legacyPermissionIDs = map[string][]string{
 	"account:list":                   {"web-account:list"},

@@ -376,7 +376,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					globalScope := sess.TenantID == ""
 					tenantID := sess.TenantID
 					var permissions []string // nil = implicit-admin marker (default when no account is found)
-					acct, acctErr := s.getWebAccountByID(r.Context(), sess.PrincipalID)
+					acct, acctErr := s.getAccountByID(r.Context(), sess.PrincipalID)
 					if acctErr != nil {
 						// Fail closed. The bound account is the authority for this
 						// principal's permissions, tenant scope and disabled status, so a
@@ -495,7 +495,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// below only for an account that resolved AND carries an explicit
 				// root-scope grant.
 				permissions := []string{}
-				if acct, err := s.getWebAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
+				if acct, err := s.getAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
 					// Issue #3126: an administratively disabled account loses access
 					// immediately, not at session expiry. The login gate in
 					// handlePasskeyLoginFinish only blocks new sessions; without this
