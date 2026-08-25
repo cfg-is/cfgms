@@ -75,14 +75,15 @@ var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 // credentials. It does not remove RBAC role assignments or WebAuthn credentials
 // (Issue #3126: it is a login gate, not a data-removal operation).
 type account struct {
-	ID          string
-	Username    string
-	TenantID    string
-	RootScope   bool // true when TenantID == "" by explicit grant (Issue #2919)
-	Permissions []string
-	Disabled    bool // Issue #3126: login gate — does not remove credentials or roles
-	CreatedAt   time.Time
-	Credentials []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
+	ID           string
+	Username     string
+	TenantID     string
+	RootScope    bool // true when TenantID == "" by explicit grant (Issue #2919)
+	Permissions  []string
+	Disabled     bool // Issue #3126: login gate — does not remove credentials or roles
+	CreatedAt    time.Time
+	Credentials  []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
+	CertBindings []CertBinding        // Issue #3578: bound mTLS admin certificates, keyed by serial
 	// Issue #2974: enrollment magic link (minted on create; #2966 redeems it).
 	// EnrollmentLinkHash stores the SHA-256 hex digest of the raw token — never the plaintext.
 	// EnrollmentLinkExpiresAt is zero when no outstanding link exists.
@@ -379,6 +380,13 @@ func (s *Server) loadAccountFromStore(ctx context.Context, username, tenantHint 
 			acct.Credentials = creds
 		}
 	}
+	// Issue #3578: deserialize bound mTLS certificate bindings (public metadata; non-secret).
+	if bindJSON, ok := m.Metadata["cert_bindings"]; ok && bindJSON != "" {
+		var bindings []CertBinding
+		if err := json.Unmarshal([]byte(bindJSON), &bindings); err == nil {
+			acct.CertBindings = bindings
+		}
+	}
 	// Issue #2974: restore enrollment magic link state (hash only — never plaintext).
 	acct.EnrollmentLinkHash = m.Metadata["enrollment_link_hash"]
 	acct.EnrollmentLinkRevoked = m.Metadata["enrollment_link_revoked"] == "true"
@@ -417,6 +425,13 @@ func (s *Server) persistAccount(ctx context.Context, acct *account, createdBy st
 		credsJSON, err := json.Marshal(acct.Credentials)
 		if err == nil {
 			meta["credentials"] = string(credsJSON)
+		}
+	}
+	// Issue #3578: persist bound mTLS certificate bindings (public metadata) in metadata.
+	if len(acct.CertBindings) > 0 {
+		bindJSON, err := json.Marshal(acct.CertBindings)
+		if err == nil {
+			meta["cert_bindings"] = string(bindJSON)
 		}
 	}
 	// Issue #2974: persist enrollment magic link state (hash only — never plaintext).
