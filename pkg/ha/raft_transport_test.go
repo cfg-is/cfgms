@@ -318,11 +318,15 @@ func TestHandleStatus_BothSurfacesAgreeOnIsLeader(t *testing.T) {
 			5*time.Second, 5*time.Millisecond,
 			"single-node cluster must elect itself leader and establish the lease")
 
-		// Expire the lease by backdating leaseLastAck past leaseDuration.
-		// This reproduces what happens when heartbeat responses stop arriving.
-		leaseDuration := time.Duration(float64(cfg.ElectionTimeout) * 0.8)
+		// Expire the lease stably by zeroing leaseDuration.
+		// HasLeadership() = time.Since(leaseLastAck) < leaseDuration; with leaseDuration=0
+		// every positive elapsed time is ≥ 0, so the window is always closed.
+		// Backdating leaseLastAck alone would race the tick loop, which refreshes
+		// leaseLastAck on every tick (~40ms) for single-node clusters — it can undo the
+		// backdate before callHandleStatus runs. leaseDuration is written once at
+		// construction and never touched by the tick loop, so zeroing it is stable.
 		rc.mu.Lock()
-		rc.leaseLastAck = time.Now().Add(-(leaseDuration + time.Millisecond))
+		rc.leaseDuration = 0
 		rc.mu.Unlock()
 
 		// HasLeadership must now be false; IsRaftLeader must remain true.
