@@ -17,28 +17,35 @@ import (
 
 // --- OsquerySource test doubles ---
 
-// fakeOsquerySource is a deterministic OsquerySource for testing the
-// PartitionHostFactsFromOsquery code path. It is not a mock — it implements
-// the interface directly with controllable behaviour.
-type fakeOsquerySource struct {
+// osquerySourceDouble is a deterministic OsquerySource for testing
+// PartitionHostFactsFromOsquery. It implements the OsquerySource interface
+// defined in this package — not the real osqueryModule — so tests control
+// exactly which kinds succeed, fail, or return nil state. The real
+// osqueryModule's trust-gate logic is tested independently in
+// features/modules/extended/osquery/module_test.go.
+type osquerySourceDouble struct {
 	healthy   bool
 	perKind   map[string]modules.ConfigState
 	failKinds map[string]bool
+	nilKinds  map[string]bool // returns (nil, nil) to test nil-state error path
 }
 
-func (f *fakeOsquerySource) IsActiveAndHealthy() bool { return f.healthy }
+func (s *osquerySourceDouble) IsActiveAndHealthy() bool { return s.healthy }
 
-func (f *fakeOsquerySource) Get(_ context.Context, kind string) (modules.ConfigState, error) {
-	if f.failKinds[kind] {
+func (s *osquerySourceDouble) Get(_ context.Context, kind string) (modules.ConfigState, error) {
+	if s.nilKinds[kind] {
+		return nil, nil
+	}
+	if s.failKinds[kind] {
 		return nil, errors.New("osquery: simulated get failure")
 	}
-	if state, ok := f.perKind[kind]; ok {
+	if state, ok := s.perKind[kind]; ok {
 		return state, nil
 	}
 	return nil, errors.New("osquery: unsupported kind in test double")
 }
 
-var _ OsquerySource = (*fakeOsquerySource)(nil)
+var _ OsquerySource = (*osquerySourceDouble)(nil)
 
 // osqueryStateFixture builds a ConfigState backed by the given string map for
 // use with PartitionHostFactsFromOsquery tests.
@@ -50,10 +57,10 @@ func osqueryStateFixture(data map[string]string) modules.ConfigState {
 	return MapState(m)
 }
 
-// defaultOsquerySource returns a fakeOsquerySource that returns plausible data
+// defaultOsquerySource returns an osquerySourceDouble that returns plausible data
 // for all four curated host:* kinds and reports itself as active and healthy.
-func defaultOsquerySource() *fakeOsquerySource {
-	return &fakeOsquerySource{
+func defaultOsquerySource() *osquerySourceDouble {
+	return &osquerySourceDouble{
 		healthy: true,
 		perKind: map[string]modules.ConfigState{
 			"host:cpu": osqueryStateFixture(map[string]string{
@@ -96,11 +103,14 @@ func TestPartitionHostFactsFromOsquery_ProducesOsqueryKinds(t *testing.T) {
 	assert.True(t, ids["host:os"], "must produce host:os fragment")
 	assert.True(t, ids["host:bios"], "must produce host:bios fragment")
 
+	require.Len(t, envelopes, len(frags), "exactly one envelope must be co-produced per emitted fragment")
 	for _, f := range frags {
 		assert.NotEmpty(t, f.FragmentHash, "fragment %s must have a non-empty hash", f.FragmentId)
 		assert.NotEmpty(t, f.CanonicalBytes, "fragment %s must have non-empty canonical bytes", f.FragmentId)
+		env, ok := envelopes[f.FragmentId]
+		require.True(t, ok, "envelope must exist for fragment %s", f.FragmentId)
+		assert.Equal(t, "osquery", env.Source, "fragment %s: envelope Source must be 'osquery'", f.FragmentId)
 	}
-	_ = envelopes
 }
 
 // TestPartitionHostFactsFromOsquery_AuthorityAndSourceAreOsquery is the REQUIRED
@@ -152,6 +162,25 @@ func TestPartitionHostFactsFromOsquery_FailClosedPerKind(t *testing.T) {
 			"surviving fragment %s must keep Authority:'osquery' even when another kind failed",
 			f.FragmentId)
 	}
+}
+
+// TestPartitionHostFactsFromOsquery_NilStateReturnsError verifies the error return
+// path of PartitionHostFactsFromOsquery: a source that reports success but returns
+// a nil state is an OsquerySource contract violation. The function must return an
+// error and no fragments rather than panicking on nil.AsMap() or emitting a
+// partial pass whose provenance cannot be asserted.
+func TestPartitionHostFactsFromOsquery_NilStateReturnsError(t *testing.T) {
+	src := defaultOsquerySource()
+	src.nilKinds = map[string]bool{"host:memory": true}
+
+	taxonomy := entitygraphtypes.DefaultTaxonomy()
+	frags, envelopes, err := PartitionHostFactsFromOsquery(t.Context(), src, taxonomy, nil)
+
+	require.Error(t, err, "nil state with no error from source must abort the pass with an error")
+	assert.Contains(t, err.Error(), "host:memory",
+		"error must name the kind whose source violated the contract")
+	assert.Nil(t, frags, "no fragments may be returned when the source violated its contract")
+	assert.Nil(t, envelopes, "no envelopes may be returned when the source violated its contract")
 }
 
 // TestPartitionHostFactsFromOsquery_ModuleOwnedKindExcluded verifies that a kind

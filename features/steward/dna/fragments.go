@@ -462,6 +462,12 @@ func PartitionHostFactsFromOsquery(
 			// Never fall back to gatherer data — omit the kind instead.
 			continue
 		}
+		if state == nil {
+			// A nil state with no error is an OsquerySource contract violation.
+			// Abort the whole pass so the caller can log and fall back to the
+			// gatherer rather than silently emitting a zero-valued fragment.
+			return nil, nil, fmt.Errorf("PartitionHostFactsFromOsquery: %s: source returned nil state without error", spec.kind)
+		}
 
 		canonical, err := CanonicalizeFragment(spec.kind, "osquery", state)
 		if err != nil {
