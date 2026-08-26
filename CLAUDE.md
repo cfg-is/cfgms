@@ -326,6 +326,26 @@ See `pkg/README.md` for the full decision tree.
 
 **Detection walk:** the test walks all non-test `.go` files in the package, including handlers registered inline in `server.go` and handlers on non-`*Server` receiver types (`*WorkflowHandler`, `*RollbackHandler`). Files compiled only under `cfgms_test_endpoints` build tag are excluded. Anonymous handler functions (func literals) are not detected — they are an explicit coverage limit documented in the test.
 
+### Architecture Checker: Raw Leader Primitive Rule (Story #3391 / Epic #3386)
+
+`make check-architecture` runs `TestNoRawLeaderPrimitiveOutsidePkgHA` in `pkg/ha/architecture_test.go`. This rule detects calls to `IsRaftLeader()` and the deprecated `IsLeader()` outside `pkg/ha` that lack a reasoned annotation.
+
+**The rule:** every call to `IsRaftLeader()` or `IsLeader()` outside `pkg/ha` must carry an `//architecture:allow-raw-leader` annotation **on the same line** with a written reason:
+
+```go
+raftIsLeader := haManager.IsRaftLeader() //architecture:allow-raw-leader -- <reason>
+```
+
+**Why:** `IsRaftLeader()` is the raw Raft replication-protocol primitive — it reports whether the local node believes itself the Raft leader, which can lag reality during a partition. Outside `pkg/ha`, the correct primitive for authority decisions is `HasLeadership()` (lease-backed, ADR-029). Status and observability handlers that legitimately need to surface protocol state are the only valid use; the annotation forces a written reason at the call site.
+
+**Annotate, don't weaken.** If the rule fires on a legitimate use (a status handler or diagnostic log), add the annotation with the reason — do not add the call site to an exemption list or broaden the exclusion path.
+
+**Known evasion limits:** the rule matches method calls by name. It does not detect the primitive accessed through a local wrapper function that re-exposes `IsRaftLeader` under a different name. Wrappers that smuggle the primitive should be treated as the same violation.
+
+**Do not confuse with `//architecture:allow-nogate`** (Story #3547). The two annotations suppress different rules:
+- `//architecture:allow-raw-leader` — this rule, about `IsRaftLeader()`/`IsLeader()` call sites outside `pkg/ha`
+- `//architecture:allow-nogate` — the authority gating rule, about mutating handler declarations in `features/controller/api` with no `HasLeadership()` gate
+
 ### Modules
 
 The unit of resource management. Three kinds, one runtime per module:

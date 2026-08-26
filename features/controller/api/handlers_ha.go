@@ -63,7 +63,7 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 
 	isLeader := haManager.HasLeadership()
 	// IsRaftLeader: raw Raft replication-protocol state — observational only, not an admission primitive.
-	raftIsLeader := haManager.IsRaftLeader()
+	raftIsLeader := haManager.IsRaftLeader() //architecture:allow-raw-leader -- observational only: status endpoint reports raw protocol state for diagnostics, not an admission decision
 	mode := haManager.GetDeploymentMode().String()
 	health := "healthy"
 
