@@ -87,10 +87,10 @@ if ($goBinDir) {
     # already moved. See the comment in .devcontainer/Dockerfile (Issue #3627).
     $goTools = @(
         @{ Name = 'gosec';         Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.28.0' },
-        @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.1' },
+        @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.2.1' },
         @{ Name = 'gitleaks';      Package = 'github.com/zricethezav/gitleaks/v8@v8.30.1' },
         @{ Name = 'go-licenses';   Package = 'github.com/google/go-licenses/v2@v2.0.1' },
-        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2' }
+        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1' }
     )
 
     foreach ($tool in $goTools) {

@@ -80,7 +80,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Go-based security and quality tools
 # Versions MUST match .github/workflows/dependency-pin-check.yml
 RUN go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
-    && go install honnef.co/go/tools/cmd/staticcheck@2026.1 \
+    && go install honnef.co/go/tools/cmd/staticcheck@2026.2.1 \
     && go install github.com/zricethezav/gitleaks/v8@v8.30.1 \
     && go install github.com/google/go-licenses/v2@v2.0.1
 
@@ -106,9 +106,10 @@ RUN go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
 # install.sh that preceded that, nothing unpinned is executed at image-build time;
 # it additionally drops the per-architecture SHA-256 values this block had to
 # hand-maintain. The version pin below stays the single source of truth and must match
-# .github/workflows/dependency-pin-check.yml, .github/workflows/golangci-lint.yml
-# and windows-setup.ps1.
-RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 \
+# .github/workflows/dependency-pin-check.yml, .github/workflows/golangci-lint.yml,
+# windows-setup.ps1 and the Makefile's GOLANGCI_LINT_VERSION (the `lint` target
+# rebuilds the linter itself when the one on PATH predates a toolchain bump).
+RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 \
     && golangci-lint --version
 
 # Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.74.0 is the

@@ -321,7 +321,7 @@ func (c *Collector) probeETW(_ context.Context, p etwProvider) ReachabilityResul
 	}
 	defer func() { _ = stopNamedTrace(handle, probeName) }()
 
-	ret, _, callErr := procEnableTraceEx2.Call(
+	ret, _, callErr := procEnableTraceEx2.Call( //nolint:staticcheck // SA4023: syscall.LazyProc.Call's error return is always a non-nil syscall.Errno (even success wraps Errno(0), whose Error() is "The operation completed successfully."), so callErr != nil is always true by design — the real check is the string comparison below.
 		handle,
 		uintptr(unsafe.Pointer(&guid)),
 		1, // EVENT_CONTROL_CODE_ENABLE_PROVIDER
@@ -336,7 +336,7 @@ func (c *Collector) probeETW(_ context.Context, p etwProvider) ReachabilityResul
 	reachable := ret == 0 || windows.Errno(ret) == windows.ERROR_TIMEOUT
 	errStr := ""
 	if !reachable {
-		if callErr != nil && callErr.Error() != "The operation completed successfully." {
+		if callErr != nil && callErr.Error() != "The operation completed successfully." { //nolint:staticcheck // SA4023: see the Call() comment above — callErr is never a true nil here, the string comparison is the real check.
 			errStr = callErr.Error()
 		} else {
 			errStr = fmt.Sprintf("EnableTraceEx2 returned %d", ret)

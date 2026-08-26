@@ -37,11 +37,26 @@ RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/g
 # Final stage
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
-# Install the runtime trust store and full wget client used by the verified-TLS
-# healthcheck below. Alpine's BusyBox wget does not support --ca-certificate.
-# Security updates are consumed by updating the pinned base digest rather than
-# performing a non-reproducible package upgrade during the build.
-RUN apk add --no-cache ca-certificates wget
+# Apply pending Alpine security updates, then install the runtime trust store and
+# the full wget client used by the verified-TLS healthcheck below (Alpine's
+# BusyBox wget does not support --ca-certificate).
+#
+# The upgrade is required, not belt-and-braces. Pinning the base digest bounds
+# what the build starts from, but it cannot deliver a fix that upstream has not
+# rebuilt the image with: alpine:3.23 (this digest, alpine 3.23.5) ships
+# libssl3/libcrypto3 3.5.7-r0, which carries CVE-2026-14456 (HIGH) plus three
+# MEDIUM openssl CVEs, all fixed in 3.5.8-r0. There is no newer alpine:3.23
+# digest to move to — the tag still resolves to this digest, no 3.23.6 tag
+# exists, and alpine:3.24 carries the identical openssl CVEs. Only `apk upgrade`
+# closes them, which is why cmd/steward/Dockerfile has always done this and its
+# image scan passes while the controller's did not.
+#
+# This does not trade away reproducibility that the pin was otherwise providing:
+# the `apk add` on the next line already resolves whatever package versions the
+# alpine 3.23 repository serves at build time, so the runtime layer was never
+# byte-reproducible from the digest alone. The digest pin still does its real
+# job — a mutable tag cannot swap the base image out from under a release build.
+RUN apk --no-cache upgrade && apk add --no-cache ca-certificates wget
 
 # Create non-root user
 RUN addgroup -g 1001 cfgms && \

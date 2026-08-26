@@ -549,7 +549,7 @@ func TestMultiTenantManager_GetTenantToken_ExpiredToken_RefreshNotImplemented(t 
 		},
 	}))
 
-	// Store an expired token; refreshTenantToken is called and must return an error.
+	// Store an expired token; the manager cannot renew it and must return an error.
 	require.NoError(t, credStore.StoreToken(tenantID, &auth.AccessToken{
 		Token:     "expired-token",
 		TokenType: "Bearer",

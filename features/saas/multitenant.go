@@ -303,11 +303,16 @@ func (mtm *MultiTenantManager) GetTenantToken(ctx context.Context, provider, ten
 	}
 
 	if tokenSet == nil || tokenSet.IsTokenExpired(5*time.Minute) {
-		// Need to get a new token for this tenant
-		tokenSet, err = mtm.refreshTenantToken(ctx, provider, tenantID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to refresh tenant token: %w", err)
-		}
+		// A stored token that is missing or expired cannot be renewed here. Renewing it
+		// needs a real OAuth2 token exchange against the tenant's authorization endpoint,
+		// which this manager does not perform: callers pre-populate the credential store
+		// once admin consent completes, or re-run the admin consent flow. Failing here is
+		// the whole behaviour, so it is written as a return rather than routed through a
+		// helper whose error result can never be nil — that shape made the `err != nil`
+		// check below it an impossible comparison (staticcheck SA4023).
+		return nil, fmt.Errorf(
+			"failed to refresh tenant token: tenant token refresh is not supported for provider %q tenantID %q: re-run admin consent to obtain a fresh token",
+			provider, tenantID)
 	}
 
 	// Verify the JWT tid claim matches the requested tenantID.
@@ -452,11 +457,4 @@ func (mtm *MultiTenantManager) discoverTenants(ctx context.Context, provider str
 		return nil, fmt.Errorf("no tenant discoverer configured for provider %s", provider)
 	}
 	return mtm.tenantDiscoverer.DiscoverTenants(ctx, tokenSet)
-}
-
-func (mtm *MultiTenantManager) refreshTenantToken(_ context.Context, provider, tenantID string) (*TokenSet, error) {
-	// Per-tenant token refresh requires a real OAuth2 token exchange with the tenant's
-	// authorization endpoint. Callers must pre-populate the credential store (e.g. after
-	// admin consent completes) or re-run the admin consent flow to obtain a fresh token.
-	return nil, fmt.Errorf("tenant token refresh is not supported for provider %q tenantID %q: re-run admin consent to obtain a fresh token", provider, tenantID)
 }
