@@ -505,21 +505,31 @@ func TestRealClusterPartition_MinorityStepsDown(t *testing.T) {
 // less) every 500ms throughout the partition window, asserting no poll round
 // ever finds both sides simultaneously claiming leadership.
 //
-// KNOWN TO FAIL against the live cluster, reproducibly (2.0s and 5.5s overlap
-// windows on two runs). The assertion is the story's AC stated verbatim and is
-// deliberately left un-weakened: the failure is a true finding about the
-// system, not about this test. Vanilla `CheckQuorum` bounds the isolated
-// leader's step-down at (ElectionTimeout, 2xElectionTimeout] while the
-// majority's randomized election lands in [ElectionTimeout, 2xElectionTimeout)
-// — unordered windows, so the two `is_leader` flags can overlap for up to one
-// ElectionTimeout. Write-safety still holds throughout (the isolated node
-// cannot commit without quorum ack); only the status flags disagree. Closing
-// it needs a leader-lease mechanism, which is a design decision rather than a
-// bug fix.
-//
-// Deferred: tracked in #3090 — leader-lease vs. AC-adjustment decision for the
-// dual-leader status window; full analysis and the three options in
+// Originally FAILED against the live cluster, reproducibly (2.0s and 5.5s
+// overlap windows on two pre-fix runs, 2026-08-15). The assertion is the
+// story's AC stated verbatim and was never weakened to close the gap: the
+// pre-fix failure was a true finding about the system, not about this test.
+// Vanilla `CheckQuorum` bounds the isolated leader's step-down at
+// (ElectionTimeout, 2xElectionTimeout] while the majority's randomized
+// election lands in [ElectionTimeout, 2xElectionTimeout) — unordered windows,
+// so the two `is_leader` flags could overlap for up to one ElectionTimeout.
+// Write-safety held throughout even during the pre-fix failure (the isolated
+// node could not commit without quorum ack); only the status flags
+// disagreed. Full root-cause analysis:
 // docs/testing/controller-ha-real-cluster-runbook.md section 5.
+//
+// RESOLVED by story #3389 (epic #3386): lease-backed `HasLeadership()` was
+// separated from `IsRaftLeader()` and the status/admission surfaces this test
+// exercises were re-homed onto it. Re-run unmodified against a #3389 binary
+// rolling-deployed to all three real cfg-lab nodes (2026-08-25/26): 90 paired
+// poll rounds across 45s (500ms interval), 0 dual-leader instants — see the
+// runbook's "Resolved run" subsection (section 5) for the full measurement.
+//
+// This comment was reconciled 2026-08-26 to match that already-recorded
+// runbook result; the fix round that reconciled it had no live cfg-lab
+// access (agent container, DNS-allowlisted egress) and did not independently
+// re-execute this test. The PASS cited above is the runbook's recorded
+// evidence from the #3389 re-run, not a new run performed by this edit.
 func TestRealClusterPartition_NoDualLeader(t *testing.T) {
 	nodes, client, urls, minorityIdx := npPartitionSetup(t)
 	ctx := context.Background()
