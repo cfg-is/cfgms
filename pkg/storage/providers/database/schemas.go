@@ -1379,6 +1379,9 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		// Issue #3402: trigger and push records must be cleaned up between test runs.
 		"DROP TABLE IF EXISTS cfgms_triggers;",
 		"DROP TABLE IF EXISTS cfgms_push_records;",
+		"DROP TABLE IF EXISTS case_content;",
+		"DROP TABLE IF EXISTS case_pins;",
+		"DROP TABLE IF EXISTS cases;",
 	}
 
 	for _, query := range dropQueries {
@@ -1490,6 +1493,56 @@ func (s DatabaseSchemas) CreateAlertStatesTable(ctx context.Context, db *sql.DB)
 	for _, idx := range indexes {
 		if _, err := db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("failed to create cfgms_alert_states index: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateCaseTables creates the three tables backing CaseStore: cases, case_pins,
+// and case_content (ADR-022 §8, Issue #3602).
+func (s DatabaseSchemas) CreateCaseTables(ctx context.Context, db *sql.DB) error {
+	ddls := []string{
+		`CREATE TABLE IF NOT EXISTS cases (
+			id          TEXT PRIMARY KEY,
+			tenant_id   TEXT NOT NULL,
+			status      TEXT NOT NULL DEFAULT 'open',
+			ticket_json TEXT NOT NULL DEFAULT '{}',
+			created_at  TIMESTAMPTZ NOT NULL,
+			updated_at  TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_cases_tenant_id ON cases(tenant_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_cases_status    ON cases(status);`,
+
+		`CREATE TABLE IF NOT EXISTS case_pins (
+			id                 TEXT PRIMARY KEY,
+			case_id            TEXT NOT NULL,
+			ref_kind           TEXT NOT NULL,
+			ref_eid            TEXT NOT NULL DEFAULT '',
+			ref_edge_identity  TEXT NOT NULL DEFAULT '',
+			ref_obs_version    TEXT NOT NULL DEFAULT '',
+			ref_drift_record   TEXT NOT NULL DEFAULT '',
+			ref_subject        TEXT NOT NULL DEFAULT '',
+			ref_range_start    TIMESTAMPTZ,
+			ref_range_end      TIMESTAMPTZ,
+			annotation         TEXT NOT NULL DEFAULT '',
+			author             TEXT NOT NULL DEFAULT '',
+			pinned_at          TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_case_pins_case_id ON case_pins(case_id);`,
+
+		`CREATE TABLE IF NOT EXISTS case_content (
+			id         TEXT PRIMARY KEY,
+			case_id    TEXT NOT NULL,
+			kind       TEXT NOT NULL,
+			body       TEXT NOT NULL DEFAULT '',
+			author     TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_case_content_case_id ON case_content(case_id);`,
+	}
+	for _, ddl := range ddls {
+		if _, err := db.ExecContext(ctx, ddl); err != nil {
+			return fmt.Errorf("failed to create case tables: %w", err)
 		}
 	}
 	return nil

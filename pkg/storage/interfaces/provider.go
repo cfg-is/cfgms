@@ -53,6 +53,7 @@ type BusinessStoreBundle struct {
 	RefreshPolicy       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
 	AssurancePolicy     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
 	TenantCrossing      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	Case                business.CaseStore            // ADR-022 §8: cockpit investigation cases
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -83,6 +84,13 @@ type AssuranceStoreCreator interface {
 // Backends that do not implement this interface leave the store nil in the manager.
 type TenantCrossingStoreCreator interface {
 	CreateTenantCrossingStore(config map[string]interface{}) (business.TenantCrossingStore, error)
+}
+
+// CaseStoreCreator is an optional StorageProvider extension for backends that
+// support cockpit investigation case storage (ADR-022 §8, Issue #3602).
+// Backends that do not implement this interface leave the store nil in the manager.
+type CaseStoreCreator interface {
+	CreateCaseStore(config map[string]interface{}) (business.CaseStore, error)
 }
 
 // StorageProvider defines the interface that all storage backends must implement.
@@ -608,6 +616,7 @@ type StorageManager struct {
 	refreshPolicyStore       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
 	assurancePolicyStore     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
 	tenantCrossingStore      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	caseStore                business.CaseStore            // ADR-022 §8: cockpit investigation cases
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -755,6 +764,17 @@ func (sm *StorageManager) SetTenantCrossingStore(s business.TenantCrossingStore)
 	sm.tenantCrossingStore = s
 }
 
+// GetCaseStore returns the cockpit case store (ADR-022 §8, Issue #3602).
+// Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetCaseStore() business.CaseStore {
+	return sm.caseStore
+}
+
+// SetCaseStore wires the case store after construction.
+func (sm *StorageManager) SetCaseStore(s business.CaseStore) {
+	sm.caseStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -804,6 +824,7 @@ func (sm *StorageManager) Close() error {
 		sm.pendingRefreshStore,
 		sm.assurancePolicyStore,
 		sm.tenantCrossingStore,
+		sm.caseStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -1037,6 +1058,16 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 			sm.SetTenantCrossingStore(tenantCrossingStore)
 		}
 	}
+	// Wire case store if the provider implements CaseStoreCreator (ADR-022 §8, Issue #3602).
+	if csc, ok := provider.(CaseStoreCreator); ok {
+		caseStore, err := csc.CreateCaseStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create case store: %w", err)
+		}
+		if caseStore != nil {
+			sm.SetCaseStore(caseStore)
+		}
+	}
 	return sm, nil
 }
 
@@ -1108,6 +1139,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		sm.SetRefreshPolicyStore(bundle.RefreshPolicy)
 		sm.SetAssurancePolicyStore(bundle.AssurancePolicy)
 		sm.SetTenantCrossingStore(bundle.TenantCrossing)
+		sm.SetCaseStore(bundle.Case)
 		return sm, nil
 	}
 

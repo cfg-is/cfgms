@@ -47,6 +47,7 @@ const (
 	StoreNameRefreshPolicy       StoreName = "RefreshPolicyStore"
 	StoreNameAssurancePolicy     StoreName = "AssurancePolicyStore"
 	StoreNameTenantCrossing      StoreName = "TenantCrossingStore"
+	StoreNameCase                StoreName = "CaseStore"
 )
 
 // RequirementSeverity controls whether a missing store blocks startup.
@@ -138,6 +139,8 @@ func (sm *StorageManager) HasStore(name StoreName) bool {
 		return sm.assurancePolicyStore != nil
 	case StoreNameTenantCrossing:
 		return sm.tenantCrossingStore != nil
+	case StoreNameCase:
+		return sm.caseStore != nil
 	default:
 		return false
 	}

@@ -101,6 +101,7 @@ var shapeCapabilityMatrix = map[deploymentShape][]capabilityEntry{
 		{subsystem: "refresh", store: interfaces.StoreNameRefreshPolicy, required: true},
 		{subsystem: "assurance", store: interfaces.StoreNameAssurancePolicy, required: true},
 		{subsystem: "tenant-crossing", store: interfaces.StoreNameTenantCrossing, required: true},
+		{subsystem: "cockpit-cases", store: interfaces.StoreNameCase, required: true},
 	},
 
 	// Cluster: the database (Postgres) provider is the sole supplier for all
@@ -138,6 +139,7 @@ var shapeCapabilityMatrix = map[deploymentShape][]capabilityEntry{
 		{subsystem: "refresh", store: interfaces.StoreNameRefreshPolicy, required: true},
 		{subsystem: "assurance", store: interfaces.StoreNameAssurancePolicy, required: true},
 		{subsystem: "tenant-crossing", store: interfaces.StoreNameTenantCrossing, required: true},
+		{subsystem: "cockpit-cases", store: interfaces.StoreNameCase, required: true},
 	},
 }
 
@@ -325,6 +327,7 @@ func TestCapabilityMatrix_AllShapesCovered(t *testing.T) {
 		interfaces.StoreNameRefreshPolicy,
 		interfaces.StoreNameAssurancePolicy,
 		interfaces.StoreNameTenantCrossing,
+		interfaces.StoreNameCase,
 	}
 
 	for _, storeName := range allStores {

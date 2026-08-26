@@ -822,6 +822,49 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			channel               TEXT    NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_token_records_session_id ON session_token_records(session_id)`,
+
+		// Cases — cockpit investigation workspaces (ADR-022 §8, Issue #3602).
+		// ticket_json holds the per-field-provenanced Ticket as a JSON object.
+		`CREATE TABLE IF NOT EXISTS cases (
+			id           TEXT PRIMARY KEY,
+			tenant_id    TEXT NOT NULL,
+			status       TEXT NOT NULL DEFAULT 'open',
+			ticket_json  TEXT NOT NULL DEFAULT '{}',
+			created_at   TEXT NOT NULL,
+			updated_at   TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cases_tenant_id  ON cases(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cases_status     ON cases(status)`,
+
+		// Case pins — discriminated graph references attached to cases.
+		// ref_kind identifies which ref_* fields are populated (ADR-022 §8).
+		`CREATE TABLE IF NOT EXISTS case_pins (
+			id                   TEXT PRIMARY KEY,
+			case_id              TEXT NOT NULL,
+			ref_kind             TEXT NOT NULL,
+			ref_eid              TEXT NOT NULL DEFAULT '',
+			ref_edge_identity    TEXT NOT NULL DEFAULT '',
+			ref_obs_version      TEXT NOT NULL DEFAULT '',
+			ref_drift_record     TEXT NOT NULL DEFAULT '',
+			ref_subject          TEXT NOT NULL DEFAULT '',
+			ref_range_start      TEXT,
+			ref_range_end        TEXT,
+			annotation           TEXT NOT NULL DEFAULT '',
+			author               TEXT NOT NULL DEFAULT '',
+			pinned_at            TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_case_pins_case_id ON case_pins(case_id)`,
+
+		// Case content — typed entries: finding, transcript-entry, note (ADR-022 §8).
+		`CREATE TABLE IF NOT EXISTS case_content (
+			id         TEXT PRIMARY KEY,
+			case_id    TEXT NOT NULL,
+			kind       TEXT NOT NULL,
+			body       TEXT NOT NULL DEFAULT '',
+			author     TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_case_content_case_id ON case_content(case_id)`,
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
