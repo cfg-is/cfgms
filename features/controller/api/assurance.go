@@ -134,6 +134,11 @@ var permissionAssurance = map[string]Requirement{
 	// treat it like other consequential write actions already in this map.
 	// alert:acknowledge is intentionally absent: low-risk read-adjacent action.
 	"alert:silence": {Min: session.AssuranceStrong},
+
+	// OSquery ad-hoc fleet query dispatch (Issue #3569): gates POST /api/v1/osquery/query.
+	// RequireUserPresence: true mirrors module:approve/module:reject — catalog templates
+	// may reach sensitive host state, so a fresh hardware-backed assertion is required.
+	"osquery:execute": {Min: session.AssuranceStrong, RequireUserPresence: true},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

@@ -99,6 +99,7 @@ func TestPermissionAssurance_CatastrophicForwardDeclarations(t *testing.T) {
 		"publisher-trust:add",
 		"registration:approve-by-cidr", // Issue #2969: bulk CIDR approval
 		"tenant:approve-delete",        // Issue #3182: ADR-027 dual-control deletion approval
+		"osquery:execute",              // Issue #3569: catalog queries may reach sensitive host state
 	}
 	for _, perm := range catastrophic {
 		req, found := permissionAssurance[perm]
@@ -309,6 +310,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"publisher-trust:add":          true,
 		"registration:approve-by-cidr": true, // Issue #2969
 		"tenant:approve-delete":        true, // Issue #3182: ADR-027 dual-control deletion approval
+		"osquery:execute":              true, // Issue #3569
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {

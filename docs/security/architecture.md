@@ -357,6 +357,8 @@ The canonical source of truth is `permissionAssurance` in `features/controller/a
 |------------|----------|--------------|
 | `module:approve`, `module:reject`, `publisher-trust:add` | _(forward-declared; routes not yet wired)_ | An approved bundle or trusted publisher is code that executes on every managed endpoint |
 | `registration:approve-by-cidr` | `POST /api/v1/registration/approve-by-cidr` | A single call admits every pending steward in an IP range; RFC1918 ranges collide across tenants, so the match set is a trust-boundary decision, not a convenience filter |
+| `osquery:execute` | `POST /api/v1/osquery/query` (Issue #3569) | Ad-hoc catalog queries dispatch SQL to fleet endpoints; catalog templates may expose sensitive host state (process lists, open files, listening sockets) |
+| `tenant:approve-delete` | `POST /api/v1/tenants/{id}/delete/approve` (Issue #3182) | Approving a deletion is irreversible — the subtree and all its resources are permanently removed |
 
 The read-only dry run for the CIDR match set — `GET /api/v1/registration/approve-by-cidr/preview` — is *not* in this set. It mutates nothing and is gated on `registration:list-pending` (Machine assurance), so an operator can inspect exactly which entries a call would approve before spending a presence gesture on the mutation.
 

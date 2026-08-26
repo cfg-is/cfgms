@@ -61,6 +61,7 @@ import (
 	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
 	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
 	"github.com/cfgis/cfgms/features/tenant"
+	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/features/workflow"
 	workflownodes "github.com/cfgis/cfgms/features/workflow/nodes"
@@ -2029,6 +2030,15 @@ func (s *Server) Start() error {
 		composite.SetTerminalHandler(terminalHandler)
 		if s.httpServer != nil {
 			s.httpServer.SetTerminalHandler(http.HandlerFunc(terminalHandler.ServeWebSocket))
+		}
+
+		// Wire osquery ad-hoc fleet query dispatch (Issue #3569).
+		// The controller side of OsqueryHandler manages the stream registry (HandleGRPC,
+		// QuerySteward); Execute is steward-side only so binPath is irrelevant here.
+		osqueryHandler := stewardosquery.NewOsqueryHandler(s.logger, "")
+		composite.SetOsqueryHandler(osqueryHandler)
+		if s.httpServer != nil {
+			s.httpServer.SetOsqueryDispatcher(osqueryHandler)
 		}
 
 		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
