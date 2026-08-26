@@ -14,8 +14,12 @@
 //  4. Run this test suite to confirm all three files are consistent.
 //
 // Columns reliably returning empty values on some platforms (cpu_subtype, build,
-// board_serial) are excluded from schemaSpec — getHostFact omits empty values,
-// so a platform-conditionally-empty column cannot be a required contract.
+// board_serial, patch, board_vendor, board_model, board_version) are excluded
+// from schemaSpec — getHostFact omits empty values, so a platform-conditionally-
+// empty column cannot be a required contract. The last four were live-validated
+// empty on Windows (Issue #3570): os_version.patch has no Windows equivalent of
+// a distro patch level, and this host's DMI baseboard fields were blank (a
+// common firmware trait on OEM prebuilt hardware, not unique to Windows).
 package osquery
 
 import (
@@ -37,8 +41,10 @@ var schemaSpec = map[string][]string{
 		// system_info columns
 		"cpu_brand", "cpu_type", "cpu_physical_cores", "cpu_logical_cores",
 		"cpu_microcode",
-		// cpu_info columns (omit current_clock_speed: ephemeral per ADR-016 clause 4)
-		"model", "manufacturer", "processor_type", "cpu_family",
+		// cpu_info columns (omit current_clock_speed: ephemeral per ADR-016 clause 4).
+		// cpu_family is NOT a cpu_info column on any platform (Issue #3570) — see
+		// the queryCPU comment in get.go.
+		"model", "manufacturer", "processor_type",
 		"max_clock_speed", "number_of_cores", "logical_processors", "address_width",
 	},
 	"host:memory": {
@@ -48,8 +54,9 @@ var schemaSpec = map[string][]string{
 	"host:os": {
 		// os_version.name AS os — pinned alias (Issue #3319/#3358)
 		"os",
-		// os_version columns (build excluded: empty on most Linux platforms)
-		"version", "major", "minor", "patch",
+		// os_version columns (build and patch excluded: empty on most Linux
+		// platforms and on Windows respectively — Issue #3570)
+		"version", "major", "minor",
 		"platform", "platform_like", "codename", "arch",
 		// system_info column — pinned key contract (Issue #3319/#3358)
 		"hostname",
@@ -58,8 +65,8 @@ var schemaSpec = map[string][]string{
 		// system_info hardware-identity columns (board_serial excluded: may be empty)
 		"hardware_vendor", "hardware_model", "hardware_version", "hardware_serial",
 		"uuid",
-		// system_info baseboard columns
-		"board_vendor", "board_model", "board_version",
+		// system_info baseboard columns (board_vendor/model/version excluded:
+		// live-validated empty on Windows — Issue #3570)
 	},
 }
 

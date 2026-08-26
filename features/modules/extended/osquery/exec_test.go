@@ -312,6 +312,55 @@ if defined line (echo [{"stdin_received":"true"}]) else (echo [])
 	}
 }
 
+// TestRunQuery_TerminatesStatementWithSemicolon is the [REQUIRED TEST] gap
+// flagged by story #3570 review: osquery's stdin batch mode requires the
+// statement to be terminated with ";" — a trailing newline alone is not
+// sufficient (Issue #3570; see the comment above the terminated/HasSuffix
+// logic in runQuery). This test exercises that logic directly against a fake
+// binary that echoes back the exact single line it read from stdin, so a
+// regression in the terminator logic (dropped, doubled, or mishandled
+// trailing whitespace) fails in the standard suite — not only in
+// get_windows_test.go's live, env-gated suite, which most CI runs skip for
+// lack of a real pinned Windows binary.
+func TestRunQuery_TerminatesStatementWithSemicolon(t *testing.T) {
+	bin := newFakeOsquery(t,
+		`
+if read -r line; then
+    printf '[{"received":"%s"}]\n' "$line"
+else
+    echo '[]'
+fi`,
+		`set /p line=
+echo [{"received":"%line%"}]
+`,
+	)
+
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{"no trailing semicolon", "SELECT 1", "SELECT 1;"},
+		{"already terminated", "SELECT 1;", "SELECT 1;"},
+		{"trailing whitespace, no semicolon", "SELECT 1  ", "SELECT 1;"},
+		{"trailing whitespace after semicolon", "SELECT 1;   ", "SELECT 1;"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows, err := runQuery(context.Background(), bin, tt.query)
+			if err != nil {
+				t.Fatalf("runQuery(%q) error: %v", tt.query, err)
+			}
+			if len(rows) == 0 {
+				t.Fatalf("runQuery(%q): binary received no stdin input", tt.query)
+			}
+			if got := rows[0]["received"]; got != tt.want {
+				t.Errorf("runQuery(%q): child received %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestRunQuery_MultipleRows verifies parsing of a multi-row JSON result.
 func TestRunQuery_MultipleRows(t *testing.T) {
 	bin := newFakeOsquery(t,
