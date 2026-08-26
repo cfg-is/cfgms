@@ -45,7 +45,7 @@ This guide provides instructions for setting up a local CFGMS development enviro
   `toolchain` directive in `go.mod`. A prebuilt release archive is built with
   whatever Go upstream used and refuses to run once `go.mod` targets a newer one.
   ```bash
-  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
   ```
 
 - **entr** - For watch mode during development
