@@ -1348,6 +1348,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if tcs := storageManager.GetTenantCrossingStore(); tcs != nil {
 		httpServer.SetTenantCrossingStore(tcs)
 	}
+	if cs := storageManager.GetCaseStore(); cs != nil {
+		httpServer.SetCasesStore(cs)
+	}
 	// TenantStore is core and always present; wire unconditionally for the assurance resolver.
 	httpServer.SetTenantStore(storageManager.GetTenantStore())
 	if as := storageManager.GetAuditStore(); as != nil {
