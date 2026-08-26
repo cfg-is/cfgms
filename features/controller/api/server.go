@@ -686,13 +686,17 @@ func (s *Server) setupRouter() {
 	// Configuration deployments endpoint (Issue #1598)
 	api.Handle("/configs/{id}/deployments", s.requirePermission("config", "list-deployments")(http.HandlerFunc(s.handleGetConfigDeployments))).Methods("GET")
 
-	// Session management endpoints (Issue #2232, #2368, #2780).
+	// Session management endpoints (Issue #2232, #2368, #2780, #3584).
 	// POST /sessions mints a new long-lived Bearer credential — requirePermission enforces
-	// session:create which is in permissionAssurance with Min: AssuranceStrong, closing the
-	// self-perpetuating-compromise gap (a web-session principal cannot mint new sessions).
-	// GET /sessions and DELETE /sessions/{id} are ordinary grant permissions (session:list /
-	// session:revoke) deliberately absent from permissionAssurance — revoking a session is
-	// a de-escalation action that must work even when the strong authenticator is unavailable.
+	// session:create (Min: AssuranceStrong in permissionAssurance). A Basic-assurance
+	// caller (web-session cookie or existing cfg-CLI Bearer) cannot satisfy that bar, closing
+	// the self-perpetuating-compromise gap. A tenant-scoped account explicitly granted
+	// session:create can mint a CLI Bearer session after passkey step-up; the resulting
+	// session is confined to the account's permission grants (Issue #3576 ensures the
+	// principal is re-derived from the bound account on every Bearer request).
+	// GET /sessions and DELETE /sessions/{id} are grantable via session:list / session:revoke
+	// (Issue #3584), and intentionally absent from permissionAssurance — revoking a session
+	// is a de-escalation action that must work even when the strong authenticator is unavailable.
 	api.Handle("/sessions", s.requirePermission("session", "create")(http.HandlerFunc(s.handleSessionCreate))).Methods("POST")
 	api.Handle("/sessions", s.requirePermission("session", "list")(http.HandlerFunc(s.handleSessionList))).Methods("GET")
 	api.Handle("/sessions/{id}", s.requirePermission("session", "revoke")(http.HandlerFunc(s.handleSessionRevoke))).Methods("DELETE")
