@@ -22,16 +22,35 @@ import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import InstallerPage, {
   DOWNLOAD_SCOPE_NOTE,
+  INSECURE_ORIGIN_NOTE,
   parseArtifact,
   parseArtifactList,
   formatSize,
   assembleCommand,
+  isSecureControllerOrigin,
   validateToken,
 } from './InstallerPage.tsx'
 
 const fetchMock = vi.fn<typeof fetch>()
 
+// jsdom serves this suite from http://localhost:3000, but a CFGMS controller
+// console is an HTTPS deployment and the assembler refuses to build a command
+// over any other scheme. Point window.location at a realistic https origin for
+// the suite so the tests exercise the deployed shape, and let the insecure-origin
+// tests below override it to prove the refusal fires. A URL exposes the
+// origin/protocol surface the page reads; document.location is a distinct
+// reference and stays untouched, so jsdom's own URL resolution is unaffected.
+const REAL_LOCATION = window.location
+
+function setWindowLocation(href: string) {
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: new URL(href),
+  })
+}
+
 beforeEach(() => {
+  setWindowLocation('https://controller.example.test/installer')
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
   localStorage.clear()
@@ -39,6 +58,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: REAL_LOCATION,
+  })
   vi.useRealTimers()
   vi.unstubAllGlobals()
   cleanup()
@@ -236,6 +259,81 @@ describe('assembleCommand', () => {
   it('embeds the controller origin', () => {
     const cmd = assembleCommand('linux', 'amd64', 'abc2345fg')
     expect(cmd).toContain(window.location.origin)
+  })
+
+  it('embeds an https controller URL', () => {
+    const cmd = assembleCommand('linux', 'amd64', 'abc2345fg')
+    expect(cmd).toContain('--controller-url https://')
+    expect(cmd).not.toContain('http://')
+  })
+})
+
+// ── Controller origin scheme guard ────────────────────────────────────────────
+
+describe('isSecureControllerOrigin', () => {
+  it('accepts https origins', () => {
+    expect(isSecureControllerOrigin('https://controller.example.test')).toBe(true)
+    expect(isSecureControllerOrigin('https://controller.example.test:9443')).toBe(true)
+  })
+
+  it('rejects http origins, including loopback and private addresses', () => {
+    // No dev carve-out: a controller URL is a managed agent's long-lived
+    // endpoint reused from other machines, not a same-origin browser link.
+    expect(isSecureControllerOrigin('http://controller.example.test')).toBe(false)
+    expect(isSecureControllerOrigin('http://localhost:9080')).toBe(false)
+    expect(isSecureControllerOrigin('http://127.0.0.1:9080')).toBe(false)
+    expect(isSecureControllerOrigin('http://10.1.2.3:9080')).toBe(false)
+  })
+
+  it('rejects non-http schemes and opaque origins', () => {
+    expect(isSecureControllerOrigin('file:///tmp')).toBe(false)
+    expect(isSecureControllerOrigin('ftp://controller.example.test')).toBe(false)
+    // A sandboxed frame reports the literal string "null" as its origin.
+    expect(isSecureControllerOrigin('null')).toBe(false)
+    expect(isSecureControllerOrigin('')).toBe(false)
+  })
+
+  it('is not fooled by an https substring in an http origin', () => {
+    expect(isSecureControllerOrigin('http://https.controller.example.test')).toBe(false)
+  })
+})
+
+describe('assembleCommand — insecure controller origin', () => {
+  it('refuses to assemble any command when the console is served over http', () => {
+    // The command passes the registration token to --controller-url and the
+    // steward sends it there on enrolment; NewHTTPClient
+    // (features/steward/registration/client_http.go) never asserts the scheme,
+    // so an http:// URL would put the enrolment credential on the wire in
+    // cleartext from every endpoint enrolled with this command.
+    setWindowLocation('http://controller.example.test/installer')
+    expect(() => assembleCommand('linux', 'amd64', 'abc2345fg')).toThrow(
+      /refusing to assemble command: controller origin .* is not https:/,
+    )
+    expect(() => assembleCommand('darwin', 'arm64', 'abc2345fg')).toThrow(
+      /refusing to assemble command/,
+    )
+    expect(() => assembleCommand('windows', 'amd64', 'abc2345fg')).toThrow(
+      /refusing to assemble command/,
+    )
+  })
+
+  it('refuses over http on loopback — dev is held to the production bar', () => {
+    setWindowLocation('http://localhost:9080/installer')
+    expect(() => assembleCommand('linux', 'amd64', 'abc2345fg')).toThrow(
+      /refusing to assemble command/,
+    )
+  })
+
+  it('never leaks the token in the refusal message', () => {
+    setWindowLocation('http://controller.example.test/installer')
+    let message = ''
+    try {
+      assembleCommand('linux', 'amd64', 'abcde2345testfixture')
+    } catch (cause) {
+      message = cause instanceof Error ? cause.message : String(cause)
+    }
+    expect(message).toMatch(/refusing to assemble command/)
+    expect(message).not.toContain('abcde2345testfixture')
   })
 })
 
@@ -556,6 +654,64 @@ describe('InstallerPage — command assembler', () => {
     fireEvent.click(screen.getByTestId('assembler-copy'))
 
     expect(fetchMock.mock.calls.length).toBe(callsBefore)
+  })
+})
+
+// ── Command assembler over an insecure origin ─────────────────────────────────
+
+describe('InstallerPage — command assembler over http', () => {
+  async function setupOverHttp() {
+    setWindowLocation('http://controller.example.test/installer')
+    fetchMock.mockResolvedValue(makeArtifactListResponse([makeArtifact()]))
+    renderPage()
+    await waitFor(() => screen.getByTestId('artifact-table'))
+  }
+
+  it('replaces the assembler form with a refusal notice', async () => {
+    await setupOverHttp()
+    const notice = screen.getByTestId('assembler-insecure-origin')
+    expect(notice).toBeInTheDocument()
+    expect(notice).toHaveAttribute('role', 'alert')
+    expect(notice).toHaveTextContent(INSECURE_ORIGIN_NOTE)
+    // The section is still identifiable so the operator knows what is missing.
+    expect(
+      screen.getByRole('heading', { name: /assemble install command/i }),
+    ).toBeInTheDocument()
+  })
+
+  it('offers no command field and no copy button', async () => {
+    await setupOverHttp()
+    expect(screen.queryByTestId('assembler-command')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('assembler-copy')).not.toBeInTheDocument()
+  })
+
+  it('offers no token input, so no credential can be pasted into the page', async () => {
+    await setupOverHttp()
+    expect(screen.queryByTestId('assembler-token')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('assembler-platform')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('assembler-arch')).not.toBeInTheDocument()
+  })
+
+  it('renders no assembled command and no http:// controller URL', async () => {
+    await setupOverHttp()
+    const heading = screen.getByRole('heading', { name: /assemble install command/i })
+    const section = heading.closest('section')
+    expect(section).not.toBeNull()
+    const text = section?.textContent ?? ''
+    // The refusal prose names the flag and the scheme on purpose; what must not
+    // appear is a runnable command or the insecure origin itself.
+    expect(text).not.toContain('install --regtoken')
+    expect(text).not.toContain('cfgms-steward')
+    expect(text).not.toContain('http://controller.example.test')
+  })
+
+  it('restores the full assembler when the same page is served over https', async () => {
+    setWindowLocation('https://controller.example.test/installer')
+    fetchMock.mockResolvedValue(makeArtifactListResponse([makeArtifact()]))
+    renderPage()
+    await waitFor(() => screen.getByTestId('artifact-table'))
+    expect(screen.queryByTestId('assembler-insecure-origin')).not.toBeInTheDocument()
+    expect(screen.getByTestId('assembler-token')).toBeInTheDocument()
   })
 })
 

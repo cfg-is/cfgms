@@ -37,6 +37,16 @@
  *     single-quoted in the POSIX command, so a pasted value can never
  *     contribute shell metacharacters to a sudo one-liner
  *
+ * The page not sending the token is not the same as the token staying off the
+ * wire: the command this page hands the operator carries it to
+ * --controller-url on every endpoint it is pasted into. So the origin is
+ * gated too — see isSecureControllerOrigin. Over an http:// console the
+ * assembler refuses to build a command at all and says why, because nothing
+ * downstream catches the scheme (NewHTTPClient in
+ * features/steward/registration/client_http.go never asserts it) and the
+ * enrolment credential would cross the wire in cleartext on every host in the
+ * fleet.
+ *
  * Security A9.1: all server-supplied values reach the DOM as JSX text nodes
  * only — never via dangerouslySetInnerHTML.
  */
@@ -110,6 +120,32 @@ export function validateToken(token: string): boolean {
   return TOKEN_RE.test(token)
 }
 
+// The assembled command is pasted into a root shell on a managed endpoint and
+// passes the registration token — the credential that mints a steward identity
+// — to --controller-url. Over http:// that credential is on the wire in
+// cleartext for every host enrolled from this page, and nothing downstream
+// catches it: NewHTTPClient (features/steward/registration/client_http.go)
+// never asserts the scheme, and only reaches url.Parse when a CA PEM is present
+// (for parsed.Hostname() in the TLS config), so an http:// controller URL
+// silently skips TLS for the whole registration exchange.
+//
+// No loopback or private-network carve-out: unlike a same-origin browser link
+// back to the host the operator is already talking to, a controller URL is a
+// managed agent's long-lived endpoint, reused on every check-in from a
+// different machine. CFGMS holds dev to the production bar here — "if it needs
+// TLS in production, it needs TLS in dev" — so the only accepted scheme is
+// https:. An opaque origin (the literal "null" a sandboxed frame reports) fails
+// to parse and is rejected with everything else.
+export function isSecureControllerOrigin(origin: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return false
+  }
+  return parsed.protocol === 'https:'
+}
+
 // Binary name mirrors installerFilename and the sudo prefix mirrors readmeText
 // (both in handlers_installer.go). The subcommand and flag names come from
 // buildInstallCommand in cmd/steward/main.go — `install --regtoken
@@ -134,6 +170,12 @@ export function assembleCommand(platform: string, arch: string, token: string): 
     throw new Error('refusing to assemble command: registration token is not lowercase base32 (a-z, 2-7)')
   }
   const origin = window.location.origin
+  if (!isSecureControllerOrigin(origin)) {
+    throw new Error(
+      `refusing to assemble command: controller origin ${JSON.stringify(origin)} is not https: — ` +
+        'the registration token would be sent in cleartext by every endpoint enrolled with this command',
+    )
+  }
   if (platform === 'windows') {
     // Not quoted: single quotes are literal in cmd.exe (the exe would receive
     // them as part of the value) while PowerShell strips them. The charset check
@@ -234,6 +276,16 @@ function ArtifactTable({ artifacts }: { artifacts: ArtifactInfo[] }) {
   )
 }
 
+// Text of the insecure-origin refusal. Module constant so the page and its
+// tests share one source of truth.
+export const INSECURE_ORIGIN_NOTE =
+  'This console is being served over an insecure connection, so no install ' +
+  'command can be assembled here. The command passes the registration token to ' +
+  '--controller-url, and the steward sends it to that URL on enrolment — over ' +
+  'http:// the token, which mints a steward identity, would cross the network ' +
+  'in cleartext from every endpoint you enrol. Reach the controller over HTTPS ' +
+  'and reload this page.'
+
 function CommandAssembler() {
   const [platform, setPlatform] = useState('')
   const [arch, setArch] = useState('')
@@ -249,11 +301,13 @@ function CommandAssembler() {
     }
   }, [])
 
+  const originSecure = isSecureControllerOrigin(window.location.origin)
   const tokenValid = token !== '' && validateToken(token)
   const tokenInvalid = token !== '' && !tokenValid
   // Mirrors assembleCommand's own preconditions so the render path can never
   // reach the throw — the function validates independently of this gate.
   const canAssemble =
+    originSecure &&
     (PLATFORMS as readonly string[]).includes(platform) &&
     (ARCHES as readonly string[]).includes(arch) &&
     tokenValid
@@ -266,6 +320,29 @@ function CommandAssembler() {
       if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current)
       copiedTimerRef.current = setTimeout(() => setCopied(false), 2000)
     })
+  }
+
+  // Refuse rather than warn: a rendered form would still hand the operator a
+  // command whose token travels in cleartext, and the token input would invite
+  // pasting a live credential into a page that cannot use it safely. The
+  // refusal is placed where the form would have been, with the reason spelled
+  // out, so the operator can act on it. Returned after the hooks above so the
+  // hook order is identical on both branches.
+  if (!originSecure) {
+    return (
+      <section className="panel" aria-labelledby="assembler-heading">
+        <h2 id="assembler-heading">Assemble install command</h2>
+        <div
+          className="notice err"
+          role="alert"
+          data-testid="assembler-insecure-origin"
+        >
+          <div className="ic">!</div>
+          <h3>HTTPS required to assemble an install command</h3>
+          <p>{INSECURE_ORIGIN_NOTE}</p>
+        </div>
+      </section>
+    )
   }
 
   return (
