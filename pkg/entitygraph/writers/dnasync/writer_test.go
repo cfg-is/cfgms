@@ -897,6 +897,205 @@ func TestD3_NoVerifierDeniesClusterClaim(t *testing.T) {
 		"the fragment must still be recorded under the peer's own authority")
 }
 
+// --- AC Group E: osquery ingest validation (Issue #3568) ---
+
+// TestE1_OsqueryOversizedStringFieldRejected is the REQUIRED test from the acceptance
+// criteria: an osquery-authority host:cpu fragment with a plausible-but-oversized
+// "cpu_model" field (multi-KB string) must be rejected, not silently stored.
+func TestE1_OsqueryOversizedStringFieldRejected(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	// Build a canonical bytes payload where cpu_model is 2 KB — plausible CPU name
+	// length but well beyond the 512-byte limit for host:cpu string fields.
+	oversized := make([]byte, 2048)
+	for i := range oversized {
+		oversized[i] = 'A' // printable ASCII, so the only violation is length
+	}
+	frag := &commonpb.Fragment{
+		FragmentId:     "host:cpu",
+		Authority:      "osquery",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"cpu_model": string(oversized)}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E1",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.Error(t, err, "oversized cpu_model field must be rejected")
+	require.Contains(t, err.Error(), "cpu_model",
+		"error message must identify the offending field")
+
+	// Nothing must be stored.
+	eid := mustParseEID(t, "host:steward-E1/host:cpu")
+	require.Empty(t, stateHistory(t, p, eid), "no observation must be stored for a rejected fragment")
+}
+
+// TestE2_OsqueryNonPrintableASCIIRejected verifies that an osquery-authority
+// host:os fragment whose field contains a null byte is rejected.
+func TestE2_OsqueryNonPrintableASCIIRejected(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	// A null byte is the canonical non-printable injection character.
+	frag := &commonpb.Fragment{
+		FragmentId:     "host:os",
+		Authority:      "osquery",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"os_name": "Ubuntu\x00injected"}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E2",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.Error(t, err, "non-printable character in os_name must be rejected")
+	require.Contains(t, err.Error(), "os_name",
+		"error message must identify the offending field")
+}
+
+// TestE3_OsqueryControlCharacterRejected verifies that an osquery-authority
+// host:bios fragment containing a control character (e.g. tab, newline) is rejected.
+func TestE3_OsqueryControlCharacterRejected(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	frag := &commonpb.Fragment{
+		FragmentId:     "host:bios",
+		Authority:      "osquery",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"bios_version": "F.26\nmalicious"}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E3",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.Error(t, err, "control character in bios_version must be rejected")
+}
+
+// TestE4_GathererAuthorityUnaffectedByOsqueryValidation is the regression test:
+// gatherer-authority fragments are NOT subject to osquery validation, even when
+// they carry oversized or otherwise unusual values. This ensures the validation
+// gate is authority-scoped, not kind-scoped.
+func TestE4_GathererAuthorityUnaffectedByOsqueryValidation(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	oversized := make([]byte, 2048)
+	for i := range oversized {
+		oversized[i] = 'B'
+	}
+	frag := &commonpb.Fragment{
+		FragmentId:     "host:cpu",
+		Authority:      "gatherer", // NOT osquery
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"cpu_model": string(oversized)}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E4",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.NoError(t, err, "gatherer-authority fragments must not be subject to osquery validation")
+
+	eid := mustParseEID(t, "host:steward-E4/host:cpu")
+	require.Len(t, stateHistory(t, p, eid), 1, "gatherer fragment must be stored despite oversized field")
+}
+
+// TestE5_OsqueryCPUFlagsWithinExpandedLimit verifies that a host:cpu fragment
+// with a cpu_flags value up to 4096 bytes passes validation. cpu_flags is a
+// space-separated list of all CPU feature flags; a server CPU can produce ~2 KB.
+func TestE5_OsqueryCPUFlagsWithinExpandedLimit(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	// Build a 3000-byte cpu_flags string: well within the 4096 limit,
+	// well beyond the 512 default (which would wrongly reject it).
+	flags := make([]byte, 3000)
+	for i := range flags {
+		if i%5 == 4 {
+			flags[i] = ' '
+		} else {
+			flags[i] = 'a' + byte(i%26)
+		}
+	}
+	frag := &commonpb.Fragment{
+		FragmentId:     "host:cpu",
+		Authority:      "osquery",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"cpu_flags": string(flags)}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E5",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.NoError(t, err, "cpu_flags within 4096-byte limit must be accepted")
+
+	eid := mustParseEID(t, "host:steward-E5/host:cpu")
+	require.Len(t, stateHistory(t, p, eid), 1, "valid cpu_flags fragment must be stored")
+}
+
+// TestE6_OsqueryCPUFlagsExceedingExpandedLimitRejected verifies that cpu_flags
+// exceeding 4096 bytes is rejected even though other fields allow 512.
+func TestE6_OsqueryCPUFlagsExceedingExpandedLimitRejected(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	flags := make([]byte, 4097) // one byte over the 4096 limit
+	for i := range flags {
+		flags[i] = 'x'
+	}
+	frag := &commonpb.Fragment{
+		FragmentId:     "host:cpu",
+		Authority:      "osquery",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"cpu_flags": string(flags)}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E6",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.Error(t, err, "cpu_flags exceeding 4096-byte limit must be rejected")
+	require.Contains(t, err.Error(), "cpu_flags")
+}
+
+// TestE7_OsqueryValidFragmentStored verifies that a well-formed osquery host:memory
+// fragment is accepted and stored normally.
+func TestE7_OsqueryValidFragmentStored(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	frag := &commonpb.Fragment{
+		FragmentId:     "host:memory",
+		Authority:      "osquery",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"memory_total_kb": "16777216"}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E7",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.NoError(t, err, "valid osquery fragment must be accepted")
+
+	eid := mustParseEID(t, "host:steward-E7/host:memory")
+	require.Len(t, stateHistory(t, p, eid), 1, "valid osquery fragment must be stored")
+}
+
+// TestE8_OsqueryUnknownKindPassesThrough verifies that an osquery-authority fragment
+// whose fragment_id is not one of the four curated kinds (host:cpu/memory/os/bios)
+// passes through validation unchanged — no spurious rejection.
+func TestE8_OsqueryUnknownKindPassesThrough(t *testing.T) {
+	p := newTestProvider(t)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	// An oversized field on an unknown kind — no bounds declared, must pass.
+	oversized := make([]byte, 2048)
+	for i := range oversized {
+		oversized[i] = 'Z'
+	}
+	frag := &commonpb.Fragment{
+		FragmentId:     "service:custom",
+		Authority:      "osquery",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{"description": string(oversized)}),
+	}
+
+	err := w.WriteFragmentDelta(ctx, "steward-E8",
+		[]*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy())
+	require.NoError(t, err, "osquery fragment with unknown kind must pass through without validation")
+}
+
 // TestClusterFragmentHasNoClaimScope verifies that cluster-kind fragments do NOT
 // produce a host-authority ClaimScope. The batch for a cluster-only delta should
 // report zero ClaimScopes so that concurrent stewards' observations are preserved.
