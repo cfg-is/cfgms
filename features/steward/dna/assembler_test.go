@@ -404,6 +404,84 @@ func TestAssembler_ModuleConfidenceOverride(t *testing.T) {
 		"module-declared confidence must override the default 'high'")
 }
 
+// TestAssembler_OsqueryAuthorityPreemptedByModule is the REQUIRED test for
+// AC: "a stdlib module later claiming a host:*-overlapping kind still preempts
+// osquery-sourced output (exercises the existing ownedKinds exclusion in Assemble
+// with an osquery-authored input)."
+//
+// The test constructs osquery-sourced host:* fragments (Authority:"osquery") and
+// feeds them to Assemble alongside an active module that claims host:cpu. The
+// assembler must drop the osquery fragment and use the module's output instead.
+func TestAssembler_OsqueryAuthorityPreemptedByModule(t *testing.T) {
+	ctx := context.Background()
+	a := newTestAssembler()
+
+	// Module claims host:cpu with different data than the osquery fragment.
+	moduleData := map[string]interface{}{"cpu_brand": "ARM Cortex-A72", "cpu_physical_cores": "4"}
+	activeModules := map[string]modules.Module{
+		"cpu-module": stateFixture(moduleData),
+	}
+	ownership := map[string][]modules.OwnershipDeclaration{
+		"cpu-module": {{Kind: "host:cpu"}},
+	}
+
+	// Build osquery-sourced fragments for host:cpu and host:os.
+	osqueryCPU := osqueryHostFactFrag(t, "host:cpu", map[string]interface{}{
+		"cpu_brand":          "Intel(R) Xeon(R)",
+		"cpu_physical_cores": "18",
+	})
+	osqueryOS := osqueryHostFactFrag(t, "host:os", map[string]interface{}{
+		"os":       "Ubuntu",
+		"hostname": "steward-01",
+	})
+	hostFacts := []*commonpb.Fragment{osqueryCPU, osqueryOS}
+
+	frags, envs, err := a.Assemble(ctx, activeModules, ownership, hostFacts)
+	require.NoError(t, err)
+
+	var cpuFrags, osFrags []*commonpb.Fragment
+	for _, f := range frags {
+		switch f.FragmentId {
+		case "host:cpu":
+			cpuFrags = append(cpuFrags, f)
+		case "host:os":
+			osFrags = append(osFrags, f)
+		}
+	}
+
+	// Module must win host:cpu — the osquery-sourced fragment is dropped.
+	require.Len(t, cpuFrags, 1,
+		"[REQUIRED] exactly one host:cpu fragment — module wins, osquery-sourced one dropped")
+	assert.Equal(t, "cpu-module", cpuFrags[0].Authority,
+		"[REQUIRED] host:cpu must carry the module's authority, not 'osquery'")
+	assert.NotEqual(t, osqueryCPU.FragmentHash, cpuFrags[0].FragmentHash,
+		"module fragment must have distinct hash from the osquery fragment (different data)")
+
+	// Unclaimed host:os must be merged in as-is from osquery source.
+	require.Len(t, osFrags, 1, "host:os must be merged in (no module claims it)")
+	assert.Equal(t, "osquery", osFrags[0].Authority,
+		"host:os Authority must remain 'osquery' — assembler must not relabel it")
+	assert.Equal(t, osqueryOS.FragmentHash, osFrags[0].FragmentHash,
+		"osquery host:os fragment must be included unmodified (S2/S3 not re-applied)")
+	assert.Nil(t, envs["host:os"],
+		"assembler must not create an envelope for host-fact fragments (caller's responsibility)")
+}
+
+// osqueryHostFactFrag builds a pre-canonicalized host-fact fragment attributed to
+// "osquery" — the same Authority that PartitionHostFactsFromOsquery emits.
+func osqueryHostFactFrag(t *testing.T, kind string, data map[string]interface{}) *commonpb.Fragment {
+	t.Helper()
+	state := &asmFakeState{data: data}
+	canonical, err := CanonicalizeFragment(kind, "osquery", state)
+	require.NoError(t, err)
+	return &commonpb.Fragment{
+		FragmentId:     kind,
+		Authority:      "osquery",
+		CanonicalBytes: canonical,
+		FragmentHash:   FragmentHash(canonical),
+	}
+}
+
 // TestAssembler_ModuleGetErrorFailsClosed verifies that when Module.Get returns
 // an error, the fragment is not emitted (fail closed) but other modules proceed.
 func TestAssembler_ModuleGetErrorFailsClosed(t *testing.T) {

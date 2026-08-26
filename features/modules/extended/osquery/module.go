@@ -116,6 +116,18 @@ func (m *osqueryModule) verifiedBinPath() (string, error) {
 	)
 }
 
+// IsActiveAndHealthy returns true if the installed bundle passes the complete
+// trust gate (VerifyBeforeExec) without spawning any process. Used by the DNA
+// collector's per-cycle source-selection gate (Issue #3565, ADR-017 Amendment 3).
+//
+// Returns false when no installation is configured (ErrNoVerifiedInstallation)
+// or when the binary fails the on-disk content-hash re-check. No process is
+// started — only the trust gate and hash re-check run.
+func (m *osqueryModule) IsActiveAndHealthy() bool {
+	_, err := m.verifiedBinPath()
+	return err == nil
+}
+
 // Get returns the current host facts for the requested kind from osquery.
 // Supported kinds: "host:cpu", "host:memory", "host:os", "host:bios".
 // Returns an error for unknown kinds. Fails closed on zero osquery rows.

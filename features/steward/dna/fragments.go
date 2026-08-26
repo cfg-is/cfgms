@@ -3,6 +3,7 @@
 package dna
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"time"
@@ -376,6 +377,112 @@ func PartitionHostFacts(
 		})
 		envelopes[spec.kind] = &commonpb.FragmentEnvelope{
 			Source:     "gatherer:" + spec.category,
+			ObservedAt: timestamppb.New(observedAt),
+			Confidence: "high",
+		}
+	}
+
+	return fragments, envelopes, nil
+}
+
+// OsquerySource is the interface the Collector uses to query host:* facts from
+// the osquery binary. The concrete type is features/modules/extended/osquery.osqueryModule,
+// but the interface is narrow so the dna package does not import the osquery package.
+//
+// The interface carries two responsibilities:
+//
+//  1. IsActiveAndHealthy: per-cycle source-selection gate — called once, before
+//     the partition loop. Returns true only when the osquery binary is present,
+//     publisher-trusted, and passes the on-disk content-hash re-check via
+//     PreExecVerifier.VerifyBeforeExec. No process is spawned.
+//
+//  2. Get: returns the current host facts for the requested kind via osquery.
+//     Called once per kind in the partition loop, only when IsActiveAndHealthy
+//     returned true for this cycle.
+//
+// Implementations must not emit gatherer-sourced data from Get — they must
+// return an error instead of falling back silently. PartitionHostFactsFromOsquery
+// enforces the label-source pairing invariant: every emitted fragment is labeled
+// Authority:"osquery" and sourced entirely from Get calls.
+type OsquerySource interface {
+	// IsActiveAndHealthy returns true if the osquery binary is present and passes
+	// the full trust gate (VerifyBeforeExec) this cycle. Called once per Collect
+	// cycle, before any Get call — it is the source-selection gate.
+	IsActiveAndHealthy() bool
+	// Get returns the current host facts for the given kind via osquery.
+	Get(ctx context.Context, kind string) (modules.ConfigState, error)
+}
+
+// PartitionHostFactsFromOsquery queries the osquery binary for each curated
+// host:* kind and assembles ADR-017 fragments with Authority:"osquery".
+//
+// This function is the osquery branch of the per-cycle source-selection gate
+// (ADR-017 Amendment 3, Issue #3565). It is called only when the Collector's
+// OsquerySource is active and healthy this cycle. It must never fall back to
+// gatherer data — any Get failure is fail-closed (the kind is omitted).
+//
+// Label-source pairing invariant: every fragment emitted by this function
+// carries Authority:"osquery" and Source:"osquery", and every byte of its
+// CanonicalBytes comes from src.Get — never from the gatherer attribute map.
+// This invariant is what makes hash-stable DNA and provenance-tracing possible.
+//
+// Fail-closed per kind: if src.Get returns an error for a kind, that kind's
+// fragment is omitted rather than emitted with empty or gatherer data. The rest
+// of the kinds continue normally — one kind failing does not abort the whole pass.
+//
+// Module-owned kinds are excluded (same exclusion as PartitionHostFacts) because
+// module authority always preempts any observe-only source (ADR-017 §2).
+//
+// Never call PartitionHostFacts from inside this function.
+func PartitionHostFactsFromOsquery(
+	ctx context.Context,
+	src OsquerySource,
+	taxonomy *entitygraphtypes.Taxonomy,
+	ownership map[string][]modules.OwnershipDeclaration,
+) ([]*commonpb.Fragment, map[string]*commonpb.FragmentEnvelope, error) {
+	observedAt := time.Now()
+	ownedKinds := buildOwnedKindSet(ownership)
+
+	var fragments []*commonpb.Fragment
+	envelopes := make(map[string]*commonpb.FragmentEnvelope)
+
+	for _, spec := range hostFactFragmentSpecs {
+		// Only emit kinds registered in the taxonomy (defensive, same as PartitionHostFacts).
+		if _, ok := taxonomy.LookupEntityType(spec.kind); !ok {
+			continue
+		}
+		// Skip module-owned kinds — module authority preempts any observe-only source.
+		if ownedKinds[spec.kind] {
+			continue
+		}
+
+		state, err := src.Get(ctx, spec.kind)
+		if err != nil {
+			// Fail-closed per kind: osquery did not produce this kind this cycle.
+			// Never fall back to gatherer data — omit the kind instead.
+			continue
+		}
+		if state == nil {
+			// A nil state with no error is an OsquerySource contract violation.
+			// Abort the whole pass so the caller can log and fall back to the
+			// gatherer rather than silently emitting a zero-valued fragment.
+			return nil, nil, fmt.Errorf("PartitionHostFactsFromOsquery: %s: source returned nil state without error", spec.kind)
+		}
+
+		canonical, err := CanonicalizeFragment(spec.kind, "osquery", state)
+		if err != nil {
+			return nil, nil, fmt.Errorf("PartitionHostFactsFromOsquery: canonicalize %s: %w", spec.kind, err)
+		}
+		hash := FragmentHash(canonical)
+
+		fragments = append(fragments, &commonpb.Fragment{
+			FragmentId:     spec.kind,
+			Authority:      "osquery",
+			CanonicalBytes: canonical,
+			FragmentHash:   hash,
+		})
+		envelopes[spec.kind] = &commonpb.FragmentEnvelope{
+			Source:     "osquery",
 			ObservedAt: timestamppb.New(observedAt),
 			Confidence: "high",
 		}

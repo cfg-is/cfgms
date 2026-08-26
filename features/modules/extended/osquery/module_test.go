@@ -15,6 +15,28 @@ import (
 // Compile-time assertion: osqueryModule satisfies modules.Module.
 var _ modules.Module = (*osqueryModule)(nil)
 
+// TestIsActiveAndHealthy_NoInstallation verifies that IsActiveAndHealthy returns
+// false when the module has no bundle installation. This is the fail-closed
+// case: a zero-value Installation must not be treated as "active".
+func TestIsActiveAndHealthy_NoInstallation(t *testing.T) {
+	m := newForTesting(NewPreExecVerifier(), Installation{})
+	if m.IsActiveAndHealthy() {
+		t.Error("IsActiveAndHealthy() = true with no installation; want false — " +
+			"must not claim healthy when no verified bundle is configured")
+	}
+}
+
+// TestIsActiveAndHealthy_NilVerifier verifies that IsActiveAndHealthy returns
+// false when the verifier is nil — the nil-verifier case is equivalent to no
+// installation and must fail closed.
+func TestIsActiveAndHealthy_NilVerifier(t *testing.T) {
+	m := newForTesting(nil, Installation{})
+	if m.IsActiveAndHealthy() {
+		t.Error("IsActiveAndHealthy() = true with nil verifier; want false — " +
+			"must not claim healthy when verifier is absent")
+	}
+}
+
 func TestSet_ReturnsErrNotImplemented(t *testing.T) {
 	// Set never touches the installation, so the zero value is sufficient here.
 	m := New(Installation{})
