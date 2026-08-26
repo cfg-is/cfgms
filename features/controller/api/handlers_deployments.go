@@ -42,7 +42,7 @@ func (s *Server) handleGetConfigDeployments(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		s.logger.Error("Failed to list push records",
 			"config_id", logging.SanitizeLogValue(configID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to retrieve deployment history", "INTERNAL_ERROR")
 		return
 	}
