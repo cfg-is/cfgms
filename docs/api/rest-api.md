@@ -2834,6 +2834,58 @@ Remove a certificate binding from the account **and** revoke the certificate via
 | 404 | `ACCOUNT_NOT_FOUND` | No account with that username |
 | 404 | `BINDING_NOT_FOUND` | No binding for that serial on this account |
 
+#### POST /api/v1/accounts/{username}/certs/rotate/{old_serial}
+
+Atomically bind a new certificate and revoke the old one as a single resumable operation. The operation is safe to retry: if interrupted after binding the new certificate but before revoking the old one, the account temporarily holds two valid credentials; a repeated call with the same arguments completes the revocation without re-binding or erroring. A repeated call after a fully completed rotation is also idempotent (returns 200, no duplicate binding, no second revocation attempt).
+
+**Authentication:** Required  
+**Required permission:** `cert-binding:rotate`  
+**Assurance:** Strong session required
+
+**Parameters:**
+
+- `username` (path): Username of the account whose certificate is being rotated
+- `old_serial` (path): Serial number of the certificate to revoke
+
+**Request body:**
+
+```json
+{
+  "serial": "new-certificate-serial",
+  "fingerprint": "sha256:newcertfingerprint…"
+}
+```
+
+- `serial` (required): Serial number of the new certificate to bind (must differ from `old_serial`).
+- `fingerprint` (optional): New certificate fingerprint for audit correlation.
+
+**Response (200 OK):**
+
+```json
+{
+  "data": {
+    "username": "alice",
+    "old_serial": "old-serial-value",
+    "new_serial": "new-serial-value",
+    "rotated": true
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+**Resumability:** The two-phase sequence is bind-new-then-revoke-old. A partial failure between the two steps leaves both certificates valid (no lockout window). A repeated call with the same arguments completes step 2 without re-doing step 1.
+
+**Errors:**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `MISSING_SERIAL` | `serial` (new certificate) is absent from the request body |
+| 400 | `SERIAL_UNCHANGED` | `serial` (new) equals `old_serial` (old) |
+| 404 | `ACCOUNT_NOT_FOUND` | No account with that username |
+| 404 | `BINDING_NOT_FOUND` | `old_serial` is not bound to this account and the new serial is also not yet bound (not a valid rotation call) |
+| 409 | `SERIAL_CONFLICT` | New certificate serial is already bound to a different account |
+| 503 | `CERT_MANAGER_UNAVAILABLE` | Certificate management is not configured; the old certificate cannot be revoked |
+
 #### DELETE /api/v1/accounts/{username}
 
 Delete a web admin account. Removes both the in-memory cache entry and the durable secret-store record.

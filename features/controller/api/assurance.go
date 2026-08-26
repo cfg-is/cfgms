@@ -76,12 +76,14 @@ var permissionAssurance = map[string]Requirement{
 	"webauthn:register": {Min: session.AssuranceStrong}, // POST /accounts/{username}/webauthn/register/begin|finish (Issue #3574)
 	"webauthn:revoke":   {Min: session.AssuranceStrong}, // POST /accounts/{username}/webauthn/revoke/{credential_id} (Issue #3574)
 
-	// mTLS admin certificate binding management (Issue #3578).
+	// mTLS admin certificate binding management (Issue #3578, #3579).
 	// bind and revoke are credential-mutation surfaces gated at AssuranceStrong, mirroring
 	// webauthn:register and webauthn:revoke. list is read-only and is intentionally absent
 	// from this map (reads are outside the elevated surface, matching webauthn:list).
+	// rotate composes bind + revoke atomically and is gated at AssuranceStrong.
 	"cert-binding:bind":   {Min: session.AssuranceStrong}, // POST /accounts/{username}/certs/bind
 	"cert-binding:revoke": {Min: session.AssuranceStrong}, // POST /accounts/{username}/certs/revoke/{serial}
+	"cert-binding:rotate": {Min: session.AssuranceStrong}, // POST /accounts/{username}/certs/rotate/{old_serial} (Issue #3579)
 
 	// WebAuthn presence-assertion endpoint (Issue #2784).
 	// Mints a short-lived, single-use presence token consumed by RequireUserPresence-gated

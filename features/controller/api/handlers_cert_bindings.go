@@ -34,9 +34,11 @@
 package api
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -47,6 +49,28 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// Sentinel errors returned by bindCertOnAccount and removeCertBindingFromAccount.
+// Callers switch on these to translate binding-layer outcomes to HTTP responses.
+var (
+	// errCertAlreadyBoundToAccount is returned when the serial is already in the
+	// target account's CertBindings. The rotate handler treats this as already-done
+	// (step 1 previously completed); the bind handler surfaces it as 409.
+	errCertAlreadyBoundToAccount = errors.New("serial already bound to this account")
+
+	// errCertBoundToDifferentAccount is returned when the serial is bound to a
+	// different account in the in-memory cache — both handlers surface it as 409.
+	errCertBoundToDifferentAccount = errors.New("serial already bound to a different account")
+
+	// errBindingCapReached is returned when the account already holds the maximum
+	// number of cert bindings — both handlers surface it as 409.
+	errBindingCapReached = errors.New("maximum certificate bindings per account reached")
+
+	// errAccountDisappearedFromCache is returned when the account is no longer in
+	// the in-memory cache inside the lock — surfaces as 500 (unexpected, since the
+	// caller must have populated the cache via getAccount before acquiring the lock).
+	errAccountDisappearedFromCache = errors.New("account not found in cache")
 )
 
 // certSerialRE constrains certificate serial numbers to alphanumeric characters, max 40
@@ -105,8 +129,9 @@ func sanitizeCertLabel(label string) string {
 // the serial is already bound to a different account — a serial must resolve to at
 // most one account. Calls s.registrationLeaderStatus.HasLeadership() before mutating.
 //
-// s.mu.Lock() is held across the entire cross-account serial scan + persist as one
-// critical section. Two goroutines racing to bind the same serial to two different
+// The critical section (cross-account serial scan + cap check + duplicate check +
+// persist) is delegated to bindCertOnAccount, which holds s.mu.Lock across the whole
+// scan-and-write window. Two goroutines racing to bind the same serial to two different
 // accounts write to two different store keys with no natural collision point — both
 // writes would succeed, leaving the serial bound to both accounts. The mutex closes
 // this race for a single controller process.
@@ -209,72 +234,33 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 		BoundAt:     time.Now().UTC(),
 	}
 
-	// Critical section: scan the in-memory cache for a pre-existing serial binding on any
-	// other account, then persist the new binding. Held as one atomic check+write to prevent
-	// two concurrent bind requests for the same serial from each passing the conflict check
-	// independently and both succeeding — leaving the serial bound to two different accounts.
-	s.mu.Lock()
-
-	// O(n) scan of the in-memory cache — same pattern as getAccountByID.
-	// Known scaling limitation: accounts not yet loaded into the cache are not checked here.
-	for _, other := range s.accounts {
-		if other == nil || other.Username == username {
-			continue
-		}
-		for _, b := range other.CertBindings {
-			if b.Serial == req.Serial {
-				s.mu.Unlock()
-				s.writeErrorResponse(w, http.StatusConflict,
-					"Certificate serial is already bound to a different account", "SERIAL_CONFLICT")
-				return
-			}
-		}
-	}
-
-	// Re-read the target account from the cache (it was populated above by getAccount).
-	// Use the cache entry directly to avoid re-entering store I/O under the lock.
-	cached := s.accounts[username]
-	if cached == nil {
-		s.mu.Unlock()
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
-		return
-	}
-
-	if len(cached.CertBindings) >= maxCertBindingsPerAccount {
-		s.mu.Unlock()
-		s.writeErrorResponse(w, http.StatusConflict,
-			"Maximum certificate bindings per account reached", "BINDING_LIMIT_REACHED")
-		return
-	}
-
-	// Check for duplicate serial on the same account (idempotent bind is not supported —
-	// return 409 so the caller knows the serial is already present).
-	for _, b := range cached.CertBindings {
-		if b.Serial == req.Serial {
-			s.mu.Unlock()
+	if err := s.bindCertOnAccount(r.Context(), username, newBinding, actingPrincipalID); err != nil {
+		switch {
+		case errors.Is(err, errCertBoundToDifferentAccount):
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Certificate serial is already bound to a different account", "SERIAL_CONFLICT")
+			return
+		case errors.Is(err, errCertAlreadyBoundToAccount):
+			// Idempotent bind is not supported on this endpoint — return 409 so the
+			// caller knows the serial is already present.
 			s.writeErrorResponse(w, http.StatusConflict,
 				"Certificate serial is already bound to this account", "SERIAL_CONFLICT")
 			return
+		case errors.Is(err, errBindingCapReached):
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Maximum certificate bindings per account reached", "BINDING_LIMIT_REACHED")
+			return
+		case errors.Is(err, errAccountDisappearedFromCache):
+			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+			return
+		default:
+			s.logger.Error("Failed to persist cert binding",
+				"error", logging.SanitizeLogValue(err.Error()),
+				"username", logging.SanitizeLogValue(username))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist cert binding", "STORE_ERROR")
+			return
 		}
 	}
-
-	updated := *cached
-	updated.CertBindings = append(append([]CertBinding(nil), cached.CertBindings...), newBinding)
-
-	// Persist to the durable store (store I/O under lock — justified by the requirement to
-	// hold the mutex across the full check+write window for single-serial-per-account).
-	if err := s.persistAccount(r.Context(), &updated, actingPrincipalID); err != nil {
-		s.mu.Unlock()
-		s.logger.Error("Failed to persist cert binding",
-			"error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist cert binding", "STORE_ERROR")
-		return
-	}
-
-	// Update the in-memory cache directly (already under write lock — no cacheAccount call needed).
-	s.accounts[username] = &updated
-	s.mu.Unlock()
 
 	s.logger.Info("mTLS admin certificate bound to account",
 		"username", logging.SanitizeLogValue(username),
@@ -282,7 +268,7 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 		"label", logging.SanitizeLogValue(req.Label),
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
-	s.emitAccountAudit(r.Context(), "account.cert_binding.created", updated.TenantID, actingPrincipalID, username,
+	s.emitAccountAudit(r.Context(), "account.cert_binding.created", acct.TenantID, actingPrincipalID, username,
 		map[string]interface{}{"serial": req.Serial})
 
 	s.writeResponse(w, http.StatusCreated, CertBindingInfo(newBinding))
@@ -427,49 +413,32 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 	}
 	certRevoked := true
 
-	// Step 2: Remove the binding from the durable store under the write lock.
-	// Re-read from the cache inside the lock so we don't lose concurrent mutations
-	// (e.g. a concurrent bind or passkey change) that modified the account blob
-	// between the getAccount call above and this persist.
-	s.mu.Lock()
-
-	cached := s.accounts[username]
-	if cached == nil {
-		s.mu.Unlock()
-		// The cert has already been revoked at this point. Log the inconsistency.
-		s.logger.Error("Account disappeared from cache after cert revocation; binding state unknown",
-			"serial", logging.SanitizeLogValue(serial),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Account state error after cert revocation", "STATE_ERROR")
-		return
-	}
-
-	remaining := make([]CertBinding, 0, len(cached.CertBindings))
-	for _, b := range cached.CertBindings {
-		if b.Serial != serial {
-			remaining = append(remaining, b)
+	// Step 2: Remove the binding from the durable store. removeCertBindingFromAccount
+	// re-reads the account from the cache under s.mu.Lock so we don't lose concurrent
+	// mutations (e.g. a concurrent bind or passkey change) that modified the account
+	// blob between the getAccount call above and this persist.
+	if err := s.removeCertBindingFromAccount(r.Context(), username, serial, actingPrincipalID); err != nil {
+		switch {
+		case errors.Is(err, errAccountDisappearedFromCache):
+			// The cert has already been revoked at this point. Log the inconsistency.
+			s.logger.Error("Account disappeared from cache after cert revocation; binding state unknown",
+				"serial", logging.SanitizeLogValue(serial),
+				"username", logging.SanitizeLogValue(username))
+			s.writeErrorResponse(w, http.StatusInternalServerError,
+				"Account state error after cert revocation", "STATE_ERROR")
+			return
+		default:
+			// The cert has already been revoked. Log a prominent warning: the cert is invalid
+			// but the binding still appears active. Manual cleanup may be needed.
+			s.logger.Error("Certificate revoked but binding persist failed; cert is revoked, binding may still appear active",
+				"serial", logging.SanitizeLogValue(serial),
+				"username", logging.SanitizeLogValue(username),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError,
+				"Certificate revoked but binding removal failed; cert is no longer valid", "PARTIAL_REVOKE")
+			return
 		}
 	}
-
-	updated := *cached
-	updated.CertBindings = remaining
-
-	if err := s.persistAccount(r.Context(), &updated, actingPrincipalID); err != nil {
-		s.mu.Unlock()
-		// The cert has already been revoked. Log a prominent warning: the cert is invalid
-		// but the binding still appears active. Manual cleanup may be needed.
-		s.logger.Error("Certificate revoked but binding persist failed; cert is revoked, binding may still appear active",
-			"serial", logging.SanitizeLogValue(serial),
-			"username", logging.SanitizeLogValue(username),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Certificate revoked but binding removal failed; cert is no longer valid", "PARTIAL_REVOKE")
-		return
-	}
-
-	s.accounts[username] = &updated
-	s.mu.Unlock()
 
 	s.logger.Info("mTLS admin certificate binding revoked",
 		"username", logging.SanitizeLogValue(username),
@@ -477,7 +446,7 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 		"cert_revoked", certRevoked,
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
-	s.emitAccountAudit(r.Context(), "account.cert_binding.revoked", updated.TenantID, actingPrincipalID, username,
+	s.emitAccountAudit(r.Context(), "account.cert_binding.revoked", acct.TenantID, actingPrincipalID, username,
 		map[string]interface{}{"serial": serial, "cert_revoked": certRevoked})
 
 	s.writeSuccessResponse(w, map[string]interface{}{
@@ -485,6 +454,350 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 		"serial":       serial,
 		"cert_revoked": certRevoked,
 		"revoked":      true,
+	})
+}
+
+// bindCertOnAccount atomically scans for serial conflicts, then appends newBinding to
+// username's certificate bindings and persists the result. It must be called AFTER
+// s.getAccount(ctx, username) has populated the in-memory cache for username.
+//
+// Acquires s.mu.Lock for the entire scan-and-write critical section — two concurrent bind
+// calls for the same serial on two different accounts must not both succeed.
+//
+// Returns:
+//   - nil on success
+//   - errCertAlreadyBoundToAccount if the serial is already in username's bindings
+//   - errCertBoundToDifferentAccount if the serial is bound to a different account
+//   - errBindingCapReached if the per-account cap is already at the maximum
+//   - errAccountDisappearedFromCache if username is no longer in the cache under the lock
+//   - any error from persistAccount
+func (s *Server) bindCertOnAccount(ctx context.Context, username string, newBinding CertBinding, actingPrincipalID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Cross-account serial conflict scan (O(n) over the in-memory cache).
+	for _, other := range s.accounts {
+		if other == nil || other.Username == username {
+			continue
+		}
+		for _, b := range other.CertBindings {
+			if b.Serial == newBinding.Serial {
+				return errCertBoundToDifferentAccount
+			}
+		}
+	}
+
+	cached := s.accounts[username]
+	if cached == nil {
+		return errAccountDisappearedFromCache
+	}
+
+	if len(cached.CertBindings) >= maxCertBindingsPerAccount {
+		return errBindingCapReached
+	}
+
+	for _, b := range cached.CertBindings {
+		if b.Serial == newBinding.Serial {
+			return errCertAlreadyBoundToAccount
+		}
+	}
+
+	updated := *cached
+	updated.CertBindings = append(append([]CertBinding(nil), cached.CertBindings...), newBinding)
+
+	if err := s.persistAccount(ctx, &updated, actingPrincipalID); err != nil {
+		return err
+	}
+
+	s.accounts[username] = &updated
+	return nil
+}
+
+// removeCertBindingFromAccount removes the binding for serial from username's account
+// under s.mu.Lock and persists the update.
+//
+// It is idempotent: if the binding is not found, the account is not modified and nil
+// is returned. This allows the rotate handler to call it unconditionally even when a
+// prior attempt already removed the binding (e.g. after a process restart between
+// revoke-cert and remove-binding).
+//
+// Must be called AFTER certManager.Revoke(serial) — removing the binding before
+// revoking the certificate would leave a valid credential that resolves through
+// extractAdminPrincipal's bootstrap fallback as unscoped root for tenant-scoped accounts.
+func (s *Server) removeCertBindingFromAccount(ctx context.Context, username, serial, actingPrincipalID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cached := s.accounts[username]
+	if cached == nil {
+		return errAccountDisappearedFromCache
+	}
+
+	remaining := make([]CertBinding, 0, len(cached.CertBindings))
+	removed := false
+	for _, b := range cached.CertBindings {
+		if b.Serial == serial {
+			removed = true
+		} else {
+			remaining = append(remaining, b)
+		}
+	}
+
+	if !removed {
+		return nil // already gone — idempotent success
+	}
+
+	updated := *cached
+	updated.CertBindings = remaining
+
+	if err := s.persistAccount(ctx, &updated, actingPrincipalID); err != nil {
+		return err
+	}
+
+	s.accounts[username] = &updated
+	return nil
+}
+
+// RotateCertRequest is the POST .../certs/rotate/{old_serial} request body.
+// Serial is the new certificate's serial number; Fingerprint is stored for audit correlation.
+type RotateCertRequest struct {
+	Serial      string `json:"serial"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
+// handleRotateCert handles POST /api/v1/accounts/{username}/certs/rotate/{old_serial}.
+//
+// Atomically binds a new certificate and revokes the old one as a single, resumable
+// operation. The two-phase sequence is bind-new-then-revoke-old:
+//
+//   - Step 1: bind the new serial. If the new serial is already bound to this account
+//     (retry of a prior interrupted rotation), treat as already-done and continue.
+//   - Step 2: revoke the old serial via certManager.Revoke and remove its CertBinding.
+//     If the old serial binding is already gone (retry of a fully-completed rotation),
+//     return 200 OK without a second revocation attempt.
+//
+// A partial failure between steps 1 and 2 leaves both certificates bound and valid —
+// a short, safe window where two live credentials exist. A repeated call with the same
+// arguments closes that window by completing step 2 without re-doing step 1.
+//
+// Leadership is gated before any mutation — mirrors handlers_certificates.go's existing
+// certificate lifecycle handlers verbatim.
+func (s *Server) handleRotateCert(w http.ResponseWriter, r *http.Request) {
+	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	username := mux.Vars(r)["username"]
+	if err := validateUsername(username); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
+		return
+	}
+
+	// old_serial is from the URL path; certSerialRE validation matches the bind path.
+	oldSerial := mux.Vars(r)["old_serial"]
+	if oldSerial == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "old_serial is required", "MISSING_SERIAL")
+		return
+	}
+	if !certSerialRE.MatchString(oldSerial) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"invalid old_serial format: must be 1-40 alphanumeric characters", "INVALID_SERIAL")
+		return
+	}
+
+	var req RotateCertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return
+	}
+
+	if req.Serial == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "serial (new certificate serial) is required", "MISSING_SERIAL")
+		return
+	}
+	if !certSerialRE.MatchString(req.Serial) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"invalid serial format: must be 1-40 alphanumeric characters", "INVALID_SERIAL")
+		return
+	}
+	if req.Fingerprint != "" && !fingerprintRE.MatchString(req.Fingerprint) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"invalid fingerprint format: must be hex characters and colons, max 256 characters", "INVALID_FINGERPRINT")
+		return
+	}
+	if req.Serial == oldSerial {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"new certificate serial must differ from the old serial", "SERIAL_UNCHANGED")
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	actingPrincipalID := ""
+	if principal != nil {
+		actingPrincipalID = principal.ID
+	}
+
+	// Load account outside lock — getAccount calls cacheAccount, which acquires s.mu.Lock internally.
+	acct, err := s.getAccount(r.Context(), username)
+	if err != nil {
+		s.logger.Error("Failed to look up account for cert rotation",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
+		return
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		return
+	}
+
+	// Snapshot: is new serial already bound? Is old serial still present?
+	// Read from the snapshot loaded by getAccount — the precise state is re-verified
+	// inside the lock-held helpers (which re-read from s.accounts[username]).
+	newBound := false
+	oldBound := false
+	for _, b := range acct.CertBindings {
+		switch b.Serial {
+		case req.Serial:
+			newBound = true
+		case oldSerial:
+			oldBound = true
+		}
+	}
+
+	// If neither the new serial is bound nor the old one is present, this is not a
+	// valid rotation call (old binding was never there, or was removed without going
+	// through the rotate path).
+	if !newBound && !oldBound {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Old certificate binding not found on this account", "BINDING_NOT_FOUND")
+		return
+	}
+
+	// Step 1: bind the new certificate if not already done.
+	if !newBound {
+		newBinding := CertBinding{
+			Serial:      req.Serial,
+			Fingerprint: req.Fingerprint,
+			BoundAt:     time.Now().UTC(),
+		}
+		if err := s.bindCertOnAccount(r.Context(), username, newBinding, actingPrincipalID); err != nil {
+			switch {
+			case errors.Is(err, errCertAlreadyBoundToAccount):
+				// TOCTOU: another goroutine bound the new serial between our snapshot
+				// and the lock — treat as already-done, same as newBound=true path.
+				s.logger.Info("mTLS certificate rotation: new serial already bound (step 1 already complete, concurrent bind)",
+					"username", logging.SanitizeLogValue(username),
+					"new_serial", logging.SanitizeLogValue(req.Serial))
+			case errors.Is(err, errCertBoundToDifferentAccount):
+				s.writeErrorResponse(w, http.StatusConflict,
+					"New certificate serial is already bound to a different account", "SERIAL_CONFLICT")
+				return
+			case errors.Is(err, errBindingCapReached):
+				s.writeErrorResponse(w, http.StatusConflict,
+					"Maximum certificate bindings per account reached", "BINDING_LIMIT_REACHED")
+				return
+			case errors.Is(err, errAccountDisappearedFromCache):
+				s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+				return
+			default:
+				s.logger.Error("Failed to bind new certificate during rotation",
+					"error", logging.SanitizeLogValue(err.Error()),
+					"username", logging.SanitizeLogValue(username),
+					"new_serial", logging.SanitizeLogValue(req.Serial))
+				s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to bind new certificate", "STORE_ERROR")
+				return
+			}
+		} else {
+			s.logger.Info("mTLS admin certificate bound to account (rotation step 1)",
+				"username", logging.SanitizeLogValue(username),
+				"new_serial", logging.SanitizeLogValue(req.Serial),
+				"principal_id", logging.SanitizeLogValue(actingPrincipalID))
+		}
+	} else {
+		s.logger.Info("mTLS certificate rotation: new serial already bound (step 1 already complete)",
+			"username", logging.SanitizeLogValue(username),
+			"new_serial", logging.SanitizeLogValue(req.Serial))
+	}
+
+	// Step 2: revoke and remove the old certificate if the binding still exists.
+	// If old binding was already gone before step 1, the rotation was fully completed
+	// on a prior attempt — return 200 OK without a redundant revocation attempt.
+	if !oldBound {
+		s.logger.Info("mTLS certificate rotation: old binding already removed (rotation previously completed)",
+			"username", logging.SanitizeLogValue(username),
+			"old_serial", logging.SanitizeLogValue(oldSerial))
+		s.writeSuccessResponse(w, map[string]interface{}{
+			"username":   username,
+			"old_serial": oldSerial,
+			"new_serial": req.Serial,
+			"rotated":    true,
+		})
+		return
+	}
+
+	// Old binding is present. Revoke the certificate before removing the binding
+	// (fail-closed ordering — same rationale as handleRevokeCertBinding).
+	if s.certManager == nil {
+		s.logger.Error("Refusing to complete certificate rotation: certManager not configured, "+
+			"old certificate cannot be revoked",
+			"old_serial", logging.SanitizeLogValue(oldSerial),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Certificate management is not configured; the old certificate cannot be revoked",
+			"CERT_MANAGER_UNAVAILABLE")
+		return
+	}
+
+	// certManager.Revoke is idempotent: if the serial is already in the revocation
+	// list, addAndPersist is a no-op and Revoke returns nil.
+	if revokeErr := s.certManager.Revoke(oldSerial); revokeErr != nil {
+		s.logger.Error("Failed to revoke old certificate during rotation; new cert is bound, old binding not removed",
+			"old_serial", logging.SanitizeLogValue(oldSerial),
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(revokeErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to revoke old certificate; rotation not complete", "REVOKE_FAILED")
+		return
+	}
+
+	// Remove the old binding. removeCertBindingFromAccount is idempotent: if the
+	// binding is already gone (e.g. concurrent removal), it returns nil without error.
+	if removeErr := s.removeCertBindingFromAccount(r.Context(), username, oldSerial, actingPrincipalID); removeErr != nil {
+		// The old certificate has already been revoked at this point. Log a warning: the cert is
+		// invalid but the binding may still appear active. Manual cleanup may be needed.
+		s.logger.Error("Old certificate revoked but binding removal failed; cert is revoked, binding may still appear active",
+			"old_serial", logging.SanitizeLogValue(oldSerial),
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(removeErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Old certificate revoked but binding removal failed; old cert is no longer valid", "PARTIAL_REVOKE")
+		return
+	}
+
+	s.logger.Info("mTLS admin certificate rotated",
+		"username", logging.SanitizeLogValue(username),
+		"old_serial", logging.SanitizeLogValue(oldSerial),
+		"new_serial", logging.SanitizeLogValue(req.Serial),
+		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
+
+	s.emitAccountAudit(r.Context(), "account.cert_binding.rotated", acct.TenantID, actingPrincipalID, username,
+		map[string]interface{}{
+			"old_serial": oldSerial,
+			"new_serial": req.Serial,
+		})
+
+	s.writeSuccessResponse(w, map[string]interface{}{
+		"username":   username,
+		"old_serial": oldSerial,
+		"new_serial": req.Serial,
+		"rotated":    true,
 	})
 }
 
