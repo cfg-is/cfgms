@@ -38,6 +38,7 @@ const NAV_ITEMS = [
   { label: 'Audit', to: '/audit', soon: false },
   { label: 'Accounts', to: '/accounts', soon: false },
   { label: 'Certificates', to: '/certificates', soon: false },
+  { label: 'Installer', to: '/installer', soon: false },
   { label: 'Tenants', to: '/tenants', soon: false },
 ] as const
 
