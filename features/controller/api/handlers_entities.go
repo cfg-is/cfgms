@@ -39,6 +39,7 @@ type egReadProvider interface {
 	GetDriftState(ctx context.Context, eid eginterfaces.EIDRef) (*eginterfaces.DriftState, error)
 	GetDesiredState(ctx context.Context, eid eginterfaces.EIDRef) (*egtypes.DesiredStateView, error)
 	ListDrifted(ctx context.Context, filter eginterfaces.DriftFilter) ([]*eginterfaces.DriftState, error)
+	ResolveIdentity(ctx context.Context, claims eginterfaces.IdentityClaims) ([]eginterfaces.EIDRef, error)
 }
 
 // maxNeighborhoodDepth is the access-contract cap for GetNeighborhood (ADR-022 §9).
