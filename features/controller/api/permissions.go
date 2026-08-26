@@ -201,6 +201,15 @@ var knownPermissions = map[string]bool{
 	// generation.
 	"report:read":     true,
 	"report:generate": true,
+	// Case intake assist (Issue #3604): gates POST /api/v1/cases/intake-assist, the
+	// technician-facing device-claim lookup. It must be listed here so a scoped API
+	// key or a web account can actually hold it — otherwise handleCreateAPIKey and the
+	// account handlers reject it with 400 INVALID_PERMISSION and the only principal
+	// able to reach the route is an implicit-admin one (hasPermission blanket-allows
+	// ImplicitAdmin), forcing admin credentials on intake technicians. Same
+	// cross-registry drift fixed for tenant:create (Issue #3195), cluster:drain-node
+	// et al. (Issue #3303) and entity:write (Issue #3374).
+	"case:intake-assist": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

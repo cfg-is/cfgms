@@ -38,6 +38,7 @@ type egReadProvider interface {
 	GetTimeline(ctx context.Context, eids []eginterfaces.EIDRef, r eginterfaces.TimeRange) ([]*eginterfaces.TimelineEvent, error)
 	GetDriftState(ctx context.Context, eid eginterfaces.EIDRef) (*eginterfaces.DriftState, error)
 	ListDrifted(ctx context.Context, filter eginterfaces.DriftFilter) ([]*eginterfaces.DriftState, error)
+	ResolveIdentity(ctx context.Context, claims eginterfaces.IdentityClaims) ([]eginterfaces.EIDRef, error)
 }
 
 // maxNeighborhoodDepth is the access-contract cap for GetNeighborhood (ADR-022 §9).
