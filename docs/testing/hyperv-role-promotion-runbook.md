@@ -41,13 +41,13 @@ re-run against an already-promoted VM is a no-op.
 
 ## 1. Environment
 
-Live bed: the **cfg-lab** 3-node Hyper-V failover cluster (`lab.cfg.is`).
+Live bed: the **cfg-lab** 3-node Hyper-V failover cluster (`cluster.example.internal`).
 
 | Node | Role |
 |------|------|
-| `CFG-70-02` | cluster member (also the CI/orchestrator host) |
-| `CFG-AB-02` | cluster member |
-| `CFG-C3-02` | cluster member |
+| `HV-HOST-01` | cluster member (also the CI/orchestrator host) |
+| `HV-HOST-02` | cluster member |
+| `HV-HOST-03` | cluster member |
 
 - Shared storage: **CSV01** at `C:\ClusterStorage\CSV01`. The promoted VM's VHD
   is CSV-homed from the start (a standalone VM can use CSV without being
@@ -134,7 +134,7 @@ and must block the epic. A promoted resource that remains in `stewards/<id>` (or
 never appears in `cluster-policies/cfg-lab`) is a **scope-migration failure**. A
 changed VHD path is a **storage-relocation regression** (AC3).
 
-**Live-proven 2026-07-16** on the cfg-lab cluster, run in the `CFG-70-02` steward's
+**Live-proven 2026-07-16** on the cfg-lab cluster, run in the `HV-HOST-01` steward's
 SYSTEM context via `cfg steward exec`:
 `--- PASS: TestPromoteHVRole_StandaloneToClusteredRole (35.94s)` and
 `--- PASS: TestPromoteHVRole_ReRunIsNoOp (39.46s)` — real `New-VM`, storage-location

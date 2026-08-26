@@ -313,7 +313,7 @@ tell "a principal genuinely scoped to the `root` tenant" apart from "a principal
 tenant scope at all." Today it cannot: mTLS admin principals — the primary SaaS-operator
 access path — are constructed with `TenantID: ""` unconditionally
 (`features/controller/api/middleware.go:205-225`, deliberate per that code's own comment,
-tied to a prior incident (CFG-70-02) where hardcoding a fallback tenant broke cross-tenant
+tied to a prior incident (HV-HOST-01) where hardcoding a fallback tenant broke cross-tenant
 admin reads). `isWithinTenantScope`'s empty-`callerTenant` branch already treats that as
 "unrestricted access," which is correct for today's actual unscoped-superadmin case — but
 it means no principal in the system currently presents as "scoped to `root`" in the sense
@@ -324,7 +324,7 @@ This is a real, unresolved design question, not a mechanical bug — options inc
 introducing a genuinely `root`-scoped principal type distinct from unscoped-superadmin, (b)
 treating empty-`callerTenant` as equivalent to `root`-scoped for boundary purposes (changes
 today's "unrestricted access" semantics for every existing empty-`callerTenant` caller,
-including cross-tenant admin reads the CFG-70-02 fix depends on), or (c) something narrower
+including cross-tenant admin reads the HV-HOST-01 fix depends on), or (c) something narrower
 scoped to specific admin-session types. **Left open for #3125 (or a follow-on decision) to
 resolve before Decision 1 can be considered actually enforced** — added as Remaining Tunable
 5 below.
@@ -457,7 +457,7 @@ load-bearing at **31 explicit branches across 14 files** in `features/controller
 { …scope… }` — plus `isWithinTenantScope` (`middleware.go:255-261`), whose own first line
 is `if callerTenant == "" { return true }`, reached from 14 further call sites. Treating
 that condition as "scoped to `root`" (approach (b)) would have changed what every one of
-those branches means, including the CFG-70-02 admin-read behaviour A1.3 itself cites
+those branches means, including the HV-HOST-01 admin-read behaviour A1.3 itself cites
 (`middleware.go`'s comment on `extractAdminPrincipal`: hardcoding a fallback tenant once
 made `handleListStewards` return zero records for an admin on a deployment with
 non-default tenants). Approach (a) touches none of those 31 branches or

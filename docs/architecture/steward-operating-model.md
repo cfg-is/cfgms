@@ -301,7 +301,7 @@ Adding `Monitor` support to additional modules is an ongoing enhancement, priori
 
 ### Monitor Load Budget and Reaction Latency
 
-Measured end-to-end on a live Hyper-V host (Windows Server 2025, CFG-70-02) against the `hyperv` VM-state Monitor, validating both a Windows and a Linux guest VM (Issue #2115). The budget is per active host subscription, not per watched VM — the `hyperv` Monitor uses a single host-level `EvtSubscribe` shared across all watched VMs.
+Measured end-to-end on a live Hyper-V host (Windows Server 2025, HV-HOST-01) against the `hyperv` VM-state Monitor, validating both a Windows and a Linux guest VM (Issue #2115). The budget is per active host subscription, not per watched VM — the `hyperv` Monitor uses a single host-level `EvtSubscribe` shared across all watched VMs.
 
 | Metric | Budget / target | Measured |
 |--------|-----------------|----------|

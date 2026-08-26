@@ -17,13 +17,13 @@ observation.
 
 ## 1. Environment
 
-Live bed: the **cfg-lab** 3-node Hyper-V failover cluster (`lab.cfg.is`).
+Live bed: the **cfg-lab** 3-node Hyper-V failover cluster (`cluster.example.internal`).
 
 | Node | Role |
 |------|------|
-| `CFG-70-02` | cluster member (also the CI/orchestrator host) |
-| `CFG-AB-02` | cluster member |
-| `CFG-C3-02` | cluster member |
+| `HV-HOST-01` | cluster member (also the CI/orchestrator host) |
+| `HV-HOST-02` | cluster member |
+| `HV-HOST-03` | cluster member |
 
 - Shared storage: **CSV01** at `C:\ClusterStorage\CSV01` (the ha_role VM's VHD
   must be CSV-homed so it can fail over).
@@ -60,7 +60,7 @@ faithfully represents **the node it runs on**. Run it **on all three nodes**
 ownership so the local node plays every role under test in turn.
 
 ```powershell
-# On each of CFG-70-02, CFG-AB-02, CFG-C3-02 (elevated shell), from the repo root:
+# On each of HV-HOST-01, HV-HOST-02, HV-HOST-03 (elevated shell), from the repo root:
 $env:CFGMS_E2E_HYPERV_CLUSTER = 'cfg-lab'
 # Optional overrides (defaults shown):
 #   $env:CFGMS_E2E_HAROLE_VM = 'cfgms-e2e-ha-01'
@@ -154,7 +154,7 @@ et al.) and skips cleanly when the idiomatic controls are unset.
 $env:CFGMS_E2E_HYPERV_CLUSTER = 'cfg-lab'
 $env:CFGMS_E2E_CFG_BIN        = 'C:\git\cfgms\bin\cfg-dev.exe'
 $env:CFGMS_E2E_ADMIN_BUNDLE   = 'C:\Users\cfg\admin.bundle.yaml'   # or CFGMS_ADMIN_BUNDLE
-# NOTE: "cfg" here is this Windows host's local account name (CFG-70-02),
+# NOTE: "cfg" here is this Windows host's local account name (HV-HOST-01),
 # unrelated to the "cfg" SSH user retired in the 2026-07-31/08-01 rebuild.
 # Lab VMs are reached over SSH as the `debian` user.
 $env:CFGMS_E2E_MEMBER_IDS     = 'steward-1780659937223058807,steward-1782769671586775983,steward-1782769748587622286'
@@ -209,8 +209,8 @@ to bump the version and re-pull:
         role_names: [cfgms-e2e-ha-01]
         roles:
           cfgms-e2e-ha-01:
-            preferred_owners: [CFG-AB-02, CFG-70-02]   # ordered; Set-ClusterOwnerNode -Group
-            possible_owners:  [CFG-70-02, CFG-AB-02]   # restriction (excludes CFG-C3-02); -Resource
+            preferred_owners: [HV-HOST-02, HV-HOST-01]   # ordered; Set-ClusterOwnerNode -Group
+            possible_owners:  [HV-HOST-01, HV-HOST-02]   # restriction (excludes HV-HOST-03); -Resource
             anti_affinity_class: e2e-ha-affinity        # Set-ClusterGroup -AntiAffinityClass
 ```
 
@@ -225,8 +225,8 @@ $r = @(Get-ClusterResource -Cluster cfg-lab | Where-Object {
 (Get-ClusterGroup -Cluster cfg-lab -Name cfgms-e2e-ha-01).AntiAffinityClassNames         # class
 ```
 
-Live-proven 2026-07-15 (v0.9.29): preferred `{CFG-AB-02, CFG-70-02}`, possible
-`{CFG-70-02, CFG-AB-02}` (C3 excluded), anti-affinity `{e2e-ha-affinity}` — each
+Live-proven 2026-07-15 (v0.9.29): preferred `{HV-HOST-02, HV-HOST-01}`, possible
+`{HV-HOST-01, HV-HOST-02}` (C3 excluded), anti-affinity `{e2e-ha-affinity}` — each
 matching the declared config.
 
 > **Bug the idiomatic path surfaced + fixed (#2577).** On the first push (v0.9.28)
@@ -273,9 +273,9 @@ Procedure:
    quiet (owner-gate skip, no lifecycle writes); exactly one instance throughout.
 
 > **cfg-lab constraint (2026-07-15).** This bed is not ideal for the load path:
-> the cfgms controller itself (`cfgms-ctrl-01`) runs as a **clustered VM on these
+> the cfgms controller itself (`ctrl-node-1`) runs as a **clustered VM on these
 > same nodes**, so stressing nodes to the Level-1 (80%) threshold risks migrating/
-> disrupting the control plane; `CFG-70-02` sits at ~100% memory from the CI VMs
+> disrupting the control plane; `HV-HOST-01` sits at ~100% memory from the CI VMs
 > (no headroom to host the running role); and the balancer's 30-min evaluation
 > makes a single-session result non-deterministic. Run AC3 on a bed where the
 > controller is **not** a cluster VM and nodes have headroom. The cfgms code path
@@ -293,9 +293,9 @@ cfg steward tag rm <member steward-id> e2e-ha-cluster
 cfg config show <member steward-id>   # cfgms-e2e-ha-01 no longer present
 ```
 
-Live-proven 2026-07-15 on CFG-C3-02 (non-owner): effective config `cfgms-e2e-ha-01`
+Live-proven 2026-07-15 on HV-HOST-03 (non-owner): effective config `cfgms-e2e-ha-01`
 occurrences 3 → 0; the VM survived unchanged (same VMId, present only on the owner
-CFG-70-02, one instance, clustered role still present). A dropped cascade
+HV-HOST-01, one instance, clustered role still present). A dropped cascade
 definition is not a `state: absent` demote — no removal is issued (no-prune: untag
 ≠ delete). Re-add the tag to restore full membership.
 

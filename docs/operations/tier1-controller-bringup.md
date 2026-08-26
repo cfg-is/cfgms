@@ -6,12 +6,12 @@ Every Tier 1 rebuild from here on is: provision VM, copy script, run script.
 Storage backend: flatfile + SQLite by default (`tier1-bootstrap.sh` has not
 changed). No git, no external database out of the box.
 
-**`cfgms-ctrl-01` deviates from this default as of 2026-08-05**: its storage
+**`ctrl-node-1` deviates from this default as of 2026-08-05**: its storage
 backend was migrated from flatfile+SQLite to the shared PostgreSQL instance
 provisioned in #3124, via the real, live cutover documented in
 [`controller-ha-real-cluster-runbook.md` §2](../testing/controller-ha-real-cluster-runbook.md#2-storage-migration-story-3127)
 (#3127). The steps below still describe how a *fresh* Tier 1 controller is
-bootstrapped (flatfile+SQLite); they do not describe `cfgms-ctrl-01`'s
+bootstrapped (flatfile+SQLite); they do not describe `ctrl-node-1`'s
 current running configuration.
 
 ---

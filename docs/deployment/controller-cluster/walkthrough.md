@@ -18,9 +18,9 @@ This section summarises the key operational facts derived from that validation.
 
 | Node | Role | `internal_listen_addr` | REST API |
 |---|---|---|---|
-| `cfgms-ctrl-01` | cluster member (original Tier-1 controller) | `<node-private-ip>:9443` | `:9080` |
-| `cfgms-ha-node2` | cluster member | `<node-private-ip>:9443` | `:9080` |
-| `cfgms-ha-node3` | cluster member | `<node-private-ip>:9443` | `:9080` |
+| `ctrl-node-1` | cluster member (original Tier-1 controller) | `<node-private-ip>:9443` | `:9080` |
+| `ctrl-node-2` | cluster member | `<node-private-ip>:9443` | `:9080` |
+| `ctrl-node-3` | cluster member | `<node-private-ip>:9443` | `:9080` |
 
 All three nodes connect to a **shared PostgreSQL backend** and a **shared S3-compatible
 blob store** (MinIO or equivalent). No data replication is done via Raft — Raft owns
