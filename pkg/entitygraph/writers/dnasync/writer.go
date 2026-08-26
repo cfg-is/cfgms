@@ -154,6 +154,16 @@ func (w *Writer) WriteFragmentDelta(
 			}
 		}
 
+		// Validate osquery-authority host:* fragments before storage.
+		// The signed module wrapper proves the code path is trusted, not that the
+		// hardware/OS state it reports is sane (threat model: steward host may be
+		// compromised). Validation is independent of module-wrapper trust.
+		if frag.GetAuthority() == "osquery" {
+			if err := validateOsqueryCanonicalBytes(fragID, frag.GetCanonicalBytes()); err != nil {
+				return fmt.Errorf("dnasync/writer: ingest validation: %w", err)
+			}
+		}
+
 		// Build observation payload: decoded canonical fields merged with
 		// fragment metadata. confidence is always persisted (PO ruling, AC A2).
 		payload := buildPayload(frag, confidence)
