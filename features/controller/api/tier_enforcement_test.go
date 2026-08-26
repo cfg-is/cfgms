@@ -117,10 +117,11 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Alert silence (Issue #3266) — silencing requires AssuranceStrong so a compromised
 	// API key cannot suppress alerts fleet-wide. Acknowledge is Machine-level and absent here.
 	{"POST", "/api/v1/alerts/test-alert-id/silence", "alert:silence"},
-	// mTLS admin certificate binding (Issue #3578) — credential-mutation surface.
+	// mTLS admin certificate binding (Issue #3578, #3579) — credential-mutation surface.
 	// cert-binding:list is permission-only (reads are outside the elevated surface) and absent here.
 	{"POST", "/api/v1/accounts/test-user/certs/bind", "cert-binding:bind"},
 	{"POST", "/api/v1/accounts/test-user/certs/revoke/testserial", "cert-binding:revoke"},
+	{"POST", "/api/v1/accounts/test-user/certs/rotate/testserial", "cert-binding:rotate"},
 	// OSquery ad-hoc fleet query dispatch (Issue #3569) — catalog queries may reach sensitive
 	// host state; RequireUserPresence mirrors module:approve/module:reject.
 	{"POST", "/api/v1/osquery/query", "osquery:execute"},

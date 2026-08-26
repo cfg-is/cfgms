@@ -151,10 +151,11 @@ var knownPermissions = map[string]bool{
 	"webauthn:register": true,
 	"webauthn:list":     true,
 	"webauthn:revoke":   true,
-	// mTLS admin certificate binding management (Issue #3578)
+	// mTLS admin certificate binding management (Issue #3578, #3579)
 	"cert-binding:bind":   true,
 	"cert-binding:list":   true,
 	"cert-binding:revoke": true,
+	"cert-binding:rotate": true, // Issue #3579: atomic resumable certificate rotation
 	// Workflow management (Issue #2725)
 	"workflow:list":    true,
 	"workflow:read":    true,

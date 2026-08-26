@@ -46,10 +46,13 @@ func registerAccountRoutes(s *Server, api *mux.Router) {
 	// mTLS admin certificate binding endpoints (Issue #3578).
 	// bind/revoke: cert-binding:bind / cert-binding:revoke (AssuranceStrong — credential-mutation surface).
 	// list: cert-binding:list (permission-gated only — reads are outside the AssuranceStrong surface).
+	// rotate: cert-binding:rotate (AssuranceStrong — atomic bind-new + revoke-old, Issue #3579).
 	accounts.Handle("/{username}/certs/bind",
 		s.requirePermission("cert-binding", "bind")(http.HandlerFunc(s.handleBindCert))).Methods("POST")
 	accounts.Handle("/{username}/certs",
 		s.requirePermission("cert-binding", "list")(http.HandlerFunc(s.handleListCertBindings))).Methods("GET")
 	accounts.Handle("/{username}/certs/revoke/{serial}",
 		s.requirePermission("cert-binding", "revoke")(http.HandlerFunc(s.handleRevokeCertBinding))).Methods("POST")
+	accounts.Handle("/{username}/certs/rotate/{old_serial}",
+		s.requirePermission("cert-binding", "rotate")(http.HandlerFunc(s.handleRotateCert))).Methods("POST")
 }

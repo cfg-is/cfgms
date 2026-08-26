@@ -344,6 +344,7 @@ Routes that require elevated assurance are declared in `permissionAssurance` (`f
 | `account:delete` | `DELETE /api/v1/accounts/{username}` |
 | `cert-binding:bind` | `POST /api/v1/accounts/{username}/certs/bind` — `cert-binding:list` is permission-gated only (reads are outside the elevated surface) |
 | `cert-binding:revoke` | `POST /api/v1/accounts/{username}/certs/revoke/{serial}` |
+| `cert-binding:rotate` | `POST /api/v1/accounts/{username}/certs/rotate/{old_serial}` — atomically binds a new certificate and revokes the old one; resumable if interrupted mid-operation (Issue #3579) |
 | `cluster:drain-node` | `POST /api/v1/cluster/nodes/{id}/drain` |
 | `cluster:decommission-node` | `POST /api/v1/cluster/nodes/{id}/decommission` |
 | `session:create` | `POST /api/v1/sessions` |
