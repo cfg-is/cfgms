@@ -2,7 +2,7 @@ module github.com/cfgis/cfgms
 
 go 1.26
 
-toolchain go1.26.6
+toolchain go1.27.0
 
 require (
 	github.com/Microsoft/go-winio v0.6.2
