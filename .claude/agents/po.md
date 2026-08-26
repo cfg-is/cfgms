@@ -1107,6 +1107,40 @@ The parser accepts exactly these forms:
 - **Positional / pseudo-references** — `Story A`, `Story 5`, `#761-A`, `#728-S5`. The parser's `#NNN` regex extracts only the leading digits, collapsing `#761-A` to `#761`. If `#761` is the parent epic, the dispatcher treats it as an unsatisfied dep and holds the story forever (parent epics don't close until all children merge).
 - **Any `#NNN` anywhere in the section, including inside an HTML comment.** The regex scans the whole section text with no awareness of markdown or comment syntax, so a placeholder like `<!-- fill in, see epic #1234 -->` is read as a real dependency on `#1234`. Left in a body whose parent epic is `#1234`, that is the parent-epic trap arriving via a comment nobody expects to be parsed. Delete placeholder comments rather than leaving them for later.
 
+**Depending on a `--defer`red story — use its draft item id (Issue #3634).** A
+deferred story is a private project draft with **no issue number** until it is
+materialized at dispatch, so a dependent cannot write `#NNN` for it. Write the
+draft's Projects-V2 item id instead, bare or backticked:
+
+```
+## Dependencies
+- #1140
+- PVTI_lADOCrV4cc4BX5ezzg2MYzs
+```
+
+`create-story --dep-draft <PVTI_id>` (repeatable) splices the id in for you
+rather than hand-editing the section. The dispatch gate resolves each id on the
+board and **holds** the dependent while the draft is unmaterialized, while its
+materialized issue is still open, or if the id cannot be resolved at all — it
+fails closed in all three cases. Before this existed the parser extracted
+nothing from such a section, `open_deps` came out empty, and the story
+dispatched exactly as if it had declared `None`: the mechanism protecting the
+disclosure was the same one silently dropping the ordering guarantee, and
+`--defer` exists precisely for security fixes that other work most needs to be
+sequenced behind. Measured on the epic #2860 decomposition — the deferred
+tenant-scoping fix had seven dependents and none could name it.
+
+Draft ids are read **only** from the `## Dependencies` section, so a `PVTI_` id
+quoted in Implementation Notes is context, not an edge.
+
+**Validate before you create.** `pipeline-helper.sh validate-story-body
+<body_file> [epic_num]` runs the real dispatch parser over a body and creates
+nothing. `create-story` runs it automatically and **refuses** a body whose
+`## Dependencies` has content but no `#NNN`/`PVTI_` ref (dep gate dropped), whose
+`## Files In Scope` has content but no parseable path (conflict detection
+disabled), or which names its own parent epic as a dependency (held forever).
+`--skip-validation` overrides, and should be rare.
+
 **Audit-note form is acceptable** when it contains a real `#NNN`: `None — #1115 merged 2026-05-03; dependency satisfied` is valid. The parser extracts `#1115`, sees it's CLOSED, clears the dep gate. But prefer bare `None` when the dep is already satisfied — keeps the body shorter and the audit trail belongs in the planning summary on the epic, not on individual story bodies.
 
 ### `## Files In Scope`
