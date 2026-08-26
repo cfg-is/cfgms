@@ -87,7 +87,7 @@ func (r *FenceRatchet) Load() (ratchetSet bool, highestTermSeen uint64, err erro
 func (r *FenceRatchet) loadStateLocked() (fenceRatchetState, error) {
 	var state fenceRatchetState
 
-	data, readErr := os.ReadFile(r.filePath())
+	data, readErr := readFenceRatchetFile(r.filePath())
 	if os.IsNotExist(readErr) {
 		r.savedSet, r.savedTerm, r.seeded = false, 0, true
 		return state, nil
@@ -178,7 +178,12 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 		return discardTmp(fmt.Errorf("close fence ratchet tmp: %w", closeErr))
 	}
 	// os.CreateTemp already creates the file with mode 0600, so no chmod is needed.
-	if renameErr := os.Rename(tmpPath, r.filePath()); renameErr != nil {
+	//
+	// renameFenceRatchetFile (not a bare os.Rename) because a concurrent Load
+	// (a fresh FenceRatchet's os.ReadFile) can hold the destination open on
+	// Windows, where plain MoveFileEx-backed rename fails the swap with
+	// ERROR_ACCESS_DENIED. See fence_ratchet_rename_windows.go.
+	if renameErr := renameFenceRatchetFile(tmpPath, r.filePath()); renameErr != nil {
 		return discardTmp(fmt.Errorf("rename fence ratchet: %w", renameErr))
 	}
 
