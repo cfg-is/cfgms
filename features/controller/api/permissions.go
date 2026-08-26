@@ -210,6 +210,10 @@ var knownPermissions = map[string]bool{
 	// cross-registry drift fixed for tenant:create (Issue #3195), cluster:drain-node
 	// et al. (Issue #3303) and entity:write (Issue #3374).
 	"case:intake-assist": true,
+	// OSquery ad-hoc fleet query dispatch (Issue #3569): gates POST /api/v1/osquery/query,
+	// which dispatches catalog queries to targeted stewards. Carries AssuranceStrong +
+	// RequireUserPresence in permissionAssurance (catalog templates may reach sensitive host state).
+	"osquery:execute": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

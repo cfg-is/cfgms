@@ -121,6 +121,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// cert-binding:list is permission-only (reads are outside the elevated surface) and absent here.
 	{"POST", "/api/v1/accounts/test-user/certs/bind", "cert-binding:bind"},
 	{"POST", "/api/v1/accounts/test-user/certs/revoke/testserial", "cert-binding:revoke"},
+	// OSquery ad-hoc fleet query dispatch (Issue #3569) — catalog queries may reach sensitive
+	// host state; RequireUserPresence mirrors module:approve/module:reject.
+	{"POST", "/api/v1/osquery/query", "osquery:execute"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

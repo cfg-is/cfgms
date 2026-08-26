@@ -172,6 +172,7 @@ type Server struct {
 	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
 	tenantCrossingStore            business.TenantCrossingStore          // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	absentCapabilities             []interfaces.AbsentCapability         // Issue #3409: declared-optional capabilities absent in this deployment
+	osqueryDispatcher              stewardOsqueryDispatcher              // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -198,6 +199,16 @@ func (s *Server) SetAbsentCapabilities(caps []interfaces.AbsentCapability) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.absentCapabilities = caps
+}
+
+// SetOsqueryDispatcher wires the steward-side osquery dispatch interface (Issue #3569).
+// When nil (default), POST /api/v1/osquery/query returns 503. Call after New() and
+// before Start(). The dispatcher is implemented by *osquery.OsqueryHandler, which
+// registers connected steward streams via its HandleGRPC method.
+func (s *Server) SetOsqueryDispatcher(d stewardOsqueryDispatcher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.osqueryDispatcher = d
 }
 
 // APIKey represents an API key for external authentication

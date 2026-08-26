@@ -13,7 +13,9 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -439,4 +441,357 @@ func TestOsqueryHandler_HandleGRPC_RecvLoop_NonEOFError(t *testing.T) {
 	require.Error(t, err, "HandleGRPC must propagate non-EOF recv errors")
 	assert.Contains(t, err.Error(), "osquery stream recv",
 		"non-EOF recv error must be wrapped with 'osquery stream recv'")
+}
+
+// ---------------------------------------------------------------------------
+// QuerySteward controller-side dispatch tests (Issue #3569)
+// ---------------------------------------------------------------------------
+
+// loopbackStream is a real in-process bidi stream (not a mock — it has no
+// expectations and no generated behaviour): Send publishes the controller's
+// request on sent, and Recv delivers whatever the test publishes on incoming.
+// Closing incoming ends the stream with io.EOF, the same way a steward
+// disconnect does.
+//
+// registered is closed on the first Recv call. HandleGRPC registers the stream
+// entry before entering its recv loop, so observing that close is a deterministic
+// happens-after signal that QuerySteward can find the steward — no sleeps.
+type loopbackStream struct {
+	ctx      context.Context
+	sent     chan *transportpb.OsqueryQueryRequest
+	incoming chan *transportpb.OsqueryQueryResponse
+	sendErr  error
+
+	registered chan struct{}
+	once       sync.Once
+	closeOnce  sync.Once
+}
+
+// end closes the stream from the steward side; Recv then returns io.EOF, which is
+// what HandleGRPC sees when a steward disconnects. Safe to call more than once.
+func (s *loopbackStream) end() {
+	s.closeOnce.Do(func() { close(s.incoming) })
+}
+
+func newLoopbackStream(ctx context.Context) *loopbackStream {
+	return &loopbackStream{
+		ctx:        ctx,
+		sent:       make(chan *transportpb.OsqueryQueryRequest, 4),
+		incoming:   make(chan *transportpb.OsqueryQueryResponse, 4),
+		registered: make(chan struct{}),
+	}
+}
+
+func (s *loopbackStream) Recv() (*transportpb.OsqueryQueryResponse, error) {
+	s.once.Do(func() { close(s.registered) })
+	resp, ok := <-s.incoming
+	if !ok {
+		return nil, io.EOF
+	}
+	return resp, nil
+}
+
+func (s *loopbackStream) Send(req *transportpb.OsqueryQueryRequest) error {
+	if s.sendErr != nil {
+		return s.sendErr
+	}
+	s.sent <- req
+	return nil
+}
+
+func (s *loopbackStream) SetHeader(metadata.MD) error  { return nil }
+func (s *loopbackStream) SendHeader(metadata.MD) error { return nil }
+func (s *loopbackStream) SetTrailer(metadata.MD)       {}
+func (s *loopbackStream) Context() context.Context     { return s.ctx }
+func (s *loopbackStream) SendMsg(interface{}) error    { return nil }
+func (s *loopbackStream) RecvMsg(interface{}) error    { return nil }
+
+var _ grpc.BidiStreamingServer[transportpb.OsqueryQueryResponse, transportpb.OsqueryQueryRequest] = (*loopbackStream)(nil)
+
+// startStewardStream runs HandleGRPC for stewardID on a loopback stream and
+// blocks until the stream is registered. The returned closer ends the stream and
+// waits for HandleGRPC to return, asserting its result.
+func startStewardStream(t *testing.T, h *osquery.OsqueryHandler, stewardID string) (*loopbackStream, func()) {
+	t.Helper()
+	ca := newTestCA(t)
+	stream := newLoopbackStream(newMTLSContext(t, ca, stewardID))
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- h.HandleGRPC(stream) }()
+
+	select {
+	case <-stream.registered:
+	case err := <-errCh:
+		t.Fatalf("HandleGRPC returned before registering the stream: %v", err)
+	}
+
+	return stream, func() {
+		stream.end()
+		select {
+		case err := <-errCh:
+			require.NoError(t, err, "HandleGRPC must return nil on clean stream end")
+		case <-time.After(5 * time.Second):
+			t.Fatal("HandleGRPC did not return after the stream ended")
+		}
+	}
+}
+
+// TestQuerySteward_SuccessfulDispatch verifies the happy path: QuerySteward sends
+// an OsqueryQueryRequest carrying the steward ID, catalog ID and params on the
+// steward's open stream, and returns the rows from the response HandleGRPC routes
+// back to it.
+func TestQuerySteward_SuccessfulDispatch(t *testing.T) {
+	h := osquery.NewOsqueryHandler(logging.NewNoopLogger(), "/dev/null")
+	stream, stop := startStewardStream(t, h, "steward-dispatch-001")
+	defer stop()
+
+	// Respond to the request the moment it lands on the wire.
+	go func() {
+		req := <-stream.sent
+		stream.incoming <- &transportpb.OsqueryQueryResponse{
+			StewardId: req.GetStewardId(),
+			CatalogId: req.GetCatalogId(),
+			Rows: []*transportpb.OsqueryRow{
+				{Columns: map[string]string{"hostname": "host-a", "path": req.GetParams()["path"]}},
+			},
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := h.QuerySteward(ctx, "steward-dispatch-001", "file_info",
+		map[string]string{"path": "/etc/os-release"})
+
+	require.NoError(t, err, "dispatch to a connected steward must succeed")
+	require.Len(t, rows, 1, "the steward's response rows must be returned to the caller")
+	assert.Equal(t, "host-a", rows[0].GetColumns()["hostname"])
+	assert.Equal(t, "/etc/os-release", rows[0].GetColumns()["path"],
+		"catalog params must reach the steward unchanged")
+}
+
+// TestQuerySteward_NotConnected verifies that dispatching to a steward with no
+// open OsqueryQuery stream returns ErrStewardNotConnected rather than blocking.
+func TestQuerySteward_NotConnected(t *testing.T) {
+	h := osquery.NewOsqueryHandler(logging.NewNoopLogger(), "/dev/null")
+
+	rows, err := h.QuerySteward(context.Background(), "steward-never-connected", "host_info", nil)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, osquery.ErrStewardNotConnected,
+		"an unconnected steward must produce ErrStewardNotConnected so the REST layer can report it per-steward")
+	assert.Nil(t, rows)
+}
+
+// TestQuerySteward_QueryAlreadyInFlight verifies the v1 one-query-per-steward
+// constraint: a second concurrent dispatch to the same steward is rejected
+// immediately rather than queued or blocked.
+func TestQuerySteward_QueryAlreadyInFlight(t *testing.T) {
+	h := osquery.NewOsqueryHandler(logging.NewNoopLogger(), "/dev/null")
+	stream, stop := startStewardStream(t, h, "steward-inflight-001")
+	defer stop()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := h.QuerySteward(context.Background(), "steward-inflight-001", "host_info", nil)
+		firstDone <- err
+	}()
+
+	// Receiving the request proves the first call has registered its waiting
+	// channel (QuerySteward sets entry.waiting before calling Send).
+	var first *transportpb.OsqueryQueryRequest
+	select {
+	case first = <-stream.sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first query never reached the steward stream")
+	}
+
+	rows, err := h.QuerySteward(context.Background(), "steward-inflight-001", "process_list", nil)
+	require.Error(t, err, "a second concurrent query for the same steward must be rejected")
+	assert.Contains(t, err.Error(), "already in-flight")
+	assert.Nil(t, rows)
+	assert.NotErrorIs(t, err, osquery.ErrStewardNotConnected,
+		"an in-flight rejection must be distinguishable from a disconnected steward")
+
+	// Release the first query and confirm it completes normally.
+	stream.incoming <- &transportpb.OsqueryQueryResponse{
+		StewardId: first.GetStewardId(),
+		CatalogId: first.GetCatalogId(),
+	}
+	select {
+	case err := <-firstDone:
+		require.NoError(t, err, "the first in-flight query must still complete")
+	case <-time.After(5 * time.Second):
+		t.Fatal("first query did not complete after its response was delivered")
+	}
+}
+
+// TestQuerySteward_ContextCancelled verifies that cancelling the caller's context
+// while the steward has not yet responded returns ctx.Err() and clears the
+// in-flight slot, so a later query for the same steward is not permanently locked out.
+func TestQuerySteward_ContextCancelled(t *testing.T) {
+	h := osquery.NewOsqueryHandler(logging.NewNoopLogger(), "/dev/null")
+	stream, stop := startStewardStream(t, h, "steward-cancel-001")
+	defer stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := h.QuerySteward(ctx, "steward-cancel-001", "host_info", nil)
+		resultCh <- err
+	}()
+
+	select {
+	case <-stream.sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("query never reached the steward stream")
+	}
+
+	cancel()
+
+	select {
+	case err := <-resultCh:
+		require.Error(t, err, "a cancelled caller must not block waiting for the steward")
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("QuerySteward did not return after context cancellation")
+	}
+
+	// The in-flight slot must have been released: a subsequent query succeeds.
+	go func() {
+		req := <-stream.sent
+		stream.incoming <- &transportpb.OsqueryQueryResponse{
+			StewardId: req.GetStewardId(),
+			CatalogId: req.GetCatalogId(),
+			Rows:      []*transportpb.OsqueryRow{{Columns: map[string]string{"hostname": "after-cancel"}}},
+		}
+	}()
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	rows, err := h.QuerySteward(ctx2, "steward-cancel-001", "host_info", nil)
+	require.NoError(t, err, "cancellation must release the in-flight slot for the next query")
+	require.Len(t, rows, 1)
+	assert.Equal(t, "after-cancel", rows[0].GetColumns()["hostname"])
+}
+
+// TestQuerySteward_StewardDisconnectsDuringQuery verifies that when the steward's
+// stream ends while a query is waiting, the caller is released with a disconnect
+// error instead of hanging until its own context expires.
+func TestQuerySteward_StewardDisconnectsDuringQuery(t *testing.T) {
+	h := osquery.NewOsqueryHandler(logging.NewNoopLogger(), "/dev/null")
+	stream, stop := startStewardStream(t, h, "steward-disconnect-001")
+	defer stop()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := h.QuerySteward(context.Background(), "steward-disconnect-001", "host_info", nil)
+		resultCh <- err
+	}()
+
+	select {
+	case <-stream.sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("query never reached the steward stream")
+	}
+
+	// End the stream: HandleGRPC unregisters the entry and closes entry.done.
+	stream.end()
+
+	select {
+	case err := <-resultCh:
+		require.Error(t, err, "a waiting caller must be released when the steward disconnects")
+		assert.Contains(t, err.Error(), "steward disconnected during query")
+	case <-time.After(5 * time.Second):
+		t.Fatal("QuerySteward did not return after the steward disconnected")
+	}
+
+	// After the disconnect the steward is no longer registered.
+	_, err := h.QuerySteward(context.Background(), "steward-disconnect-001", "host_info", nil)
+	assert.ErrorIs(t, err, osquery.ErrStewardNotConnected,
+		"a disconnected steward must be deregistered from the stream registry")
+}
+
+// TestQuerySteward_SendFailureReleasesSlot verifies that a stream Send failure is
+// reported to the caller and does not leave the steward permanently marked as
+// having a query in flight.
+func TestQuerySteward_SendFailureReleasesSlot(t *testing.T) {
+	h := osquery.NewOsqueryHandler(logging.NewNoopLogger(), "/dev/null")
+	stream, stop := startStewardStream(t, h, "steward-senderr-001")
+	defer stop()
+
+	stream.sendErr = fmt.Errorf("simulated transport failure")
+
+	rows, err := h.QuerySteward(context.Background(), "steward-senderr-001", "host_info", nil)
+	require.Error(t, err, "a Send failure must be surfaced to the caller")
+	assert.Contains(t, err.Error(), "sending request to steward")
+	assert.Nil(t, rows)
+
+	// The in-flight slot must be free again — otherwise one transport blip would
+	// wedge the steward for the lifetime of the stream.
+	stream.sendErr = nil
+	go func() {
+		req := <-stream.sent
+		stream.incoming <- &transportpb.OsqueryQueryResponse{
+			StewardId: req.GetStewardId(),
+			CatalogId: req.GetCatalogId(),
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = h.QuerySteward(ctx, "steward-senderr-001", "host_info", nil)
+	require.NoError(t, err, "a failed Send must release the in-flight slot")
+}
+
+// TestQuerySteward_ConcurrentStewardsIsolated verifies that dispatches to
+// different stewards proceed independently — the one-query-per-steward lock is
+// per stream entry, not global. Run under -race to cover the registry locking.
+func TestQuerySteward_ConcurrentStewardsIsolated(t *testing.T) {
+	h := osquery.NewOsqueryHandler(logging.NewNoopLogger(), "/dev/null")
+
+	const stewardCount = 4
+	streams := make([]*loopbackStream, stewardCount)
+	ids := make([]string, stewardCount)
+	for i := 0; i < stewardCount; i++ {
+		ids[i] = fmt.Sprintf("steward-concurrent-%03d", i)
+		stream, stop := startStewardStream(t, h, ids[i])
+		defer stop()
+		streams[i] = stream
+
+		go func(s *loopbackStream, id string) {
+			req := <-s.sent
+			s.incoming <- &transportpb.OsqueryQueryResponse{
+				StewardId: req.GetStewardId(),
+				CatalogId: req.GetCatalogId(),
+				Rows:      []*transportpb.OsqueryRow{{Columns: map[string]string{"hostname": id}}},
+			}
+		}(stream, ids[i])
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	results := make([]string, stewardCount)
+	errs := make([]error, stewardCount)
+	for i := 0; i < stewardCount; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			rows, err := h.QuerySteward(ctx, ids[idx], "host_info", nil)
+			errs[idx] = err
+			if len(rows) == 1 {
+				results[idx] = rows[0].GetColumns()["hostname"]
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < stewardCount; i++ {
+		require.NoError(t, errs[i], "concurrent dispatch to distinct stewards must not interfere")
+		assert.Equal(t, ids[i], results[i],
+			"each steward's response must be routed back to its own caller")
+	}
 }
