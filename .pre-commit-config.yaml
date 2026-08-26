@@ -46,7 +46,7 @@ repos:
                 staticcheck "$@"
               fi
             else
-              echo "⚠️  staticcheck not installed - skipping (run: go install honnef.co/go/tools/cmd/staticcheck@2026.1)"
+              echo "⚠️  staticcheck not installed - skipping (run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.1)"
               exit 0
             fi
         stages: [commit]
