@@ -117,6 +117,7 @@ var goldenRouteTable = []string{
 	"GET /api/v1/entities/drifted",
 	"GET /api/v1/entities/timeline",
 	"GET /api/v1/entities/{eid:.+}",
+	"GET /api/v1/entities/{eid:.+}/desired-state",
 	"GET /api/v1/entities/{eid:.+}/diff",
 	"GET /api/v1/entities/{eid:.+}/drift",
 	"GET /api/v1/entities/{eid:.+}/edges",

@@ -1217,3 +1217,115 @@ func TestEntityPermissions_EnforcedOnRoutesAreGrantable(t *testing.T) {
 				"knownPermissions, so no scoped API key or web account can ever hold it", permID)
 	}
 }
+
+// ---- /api/v1/entities/{eid}/desired-state (GetDesiredState) ----
+
+// reportDesiredState injects a desired-state observation for the given entity.
+func reportDesiredState(t *testing.T, p *sqlite.SQLiteEntityGraphProvider, eid string, state map[string]interface{}) {
+	t.Helper()
+	now := time.Now().UTC()
+	payload := make(map[string]interface{}, len(state)+1)
+	for k, v := range state {
+		payload[k] = v
+	}
+	payload["config_revision"] = "rev-test-1"
+	err := p.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: "test:desired-state-reporter",
+		Observations: []egtypes.Observation{
+			{
+				Source:     "test:desired-state-reporter",
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    eid,
+				Kind:       egtypes.ObservationKindDesiredState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload:    payload,
+			},
+		},
+	})
+	require.NoError(t, err, "reportDesiredState: %s", eid)
+}
+
+func TestHandleGetDesiredState_NoProvider_Returns503(t *testing.T) {
+	srv := setupTestServer(t)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/host:ds503/desired-state", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+func TestHandleGetDesiredState_EntityNotFound_Returns404(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/host:ds-nope/desired-state", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "desired-state for non-existent entity must return 404")
+}
+
+func TestHandleGetDesiredState_NoDesiredStateRecord_Returns404(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+
+	// Entity exists but has no desired-state observation.
+	reportEntity(t, p, "host:ds-norecord", "test-tenant", "host")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/host:ds-norecord/desired-state", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "entity with no desired-state record must return 404")
+}
+
+// TestHandleGetDesiredState_CrossTenantReturns404 is the required AC test:
+// a request scoped to tenant-a for an entity owned by tenant-b must return 404,
+// not 403 (ADR-022 §7 non-disclosure requirement).
+func TestHandleGetDesiredState_CrossTenantReturns404(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+
+	// Create entity owned by "tenant-b".
+	reportEntity(t, p, "host:ds-secret", "tenant-b", "host")
+	reportDesiredState(t, p, "host:ds-secret", map[string]interface{}{"mode": "managed"})
+
+	// Authenticate as "tenant-a" (different tenant subtree).
+	apiKey := NewEphemeralTestKey(t, srv, []string{"entity:read"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/host:ds-secret/desired-state", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	// Must be 404, not 403 — existence of tenant-b's entity must not be disclosed.
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"cross-tenant desired-state read must return 404, not 403 (ADR-022 §7): got %d", rec.Code)
+}
+
+func TestHandleGetDesiredState_HappyPath_Returns200(t *testing.T) {
+	p := newTestEntityGraphProvider(t)
+	srv := newEntityTestServer(t, p)
+	apiKey := NewTestKey(t, srv, []string{"entity:read"})
+
+	reportEntity(t, p, "host:ds-happy", "test-tenant", "host")
+	reportDesiredState(t, p, "host:ds-happy", map[string]interface{}{"mode": "managed"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/entities/host:ds-happy/desired-state", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "desired-state for existing entity must return 200: %s", rec.Body.String())
+	var view egtypes.DesiredStateView
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &view))
+	assert.Equal(t, "rev-test-1", view.ConfigRevision)
+}
