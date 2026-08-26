@@ -556,7 +556,8 @@ func TestHandleOsqueryQuery_ParamPassthrough(t *testing.T) {
 }
 
 // TestHandleOsqueryQuery_AuditEmitted verifies that a successful dispatch results
-// in an audit event being emitted without blocking the response.
+// in an audit event being emitted, recording the steward target, the catalog
+// query ID, and the caller identity.
 func TestHandleOsqueryQuery_AuditEmitted(t *testing.T) {
 	rows := []*transportpb.OsqueryRow{
 		{Columns: map[string]string{"hostname": "host-audit"}},
@@ -572,7 +573,22 @@ func TestHandleOsqueryQuery_AuditEmitted(t *testing.T) {
 	handler := server.requirePermission("osquery", "execute")(http.HandlerFunc(server.handleOsqueryQuery))
 	handler.ServeHTTP(rec, req)
 
-	// The audit emission is internal; a 200 response confirms emitOsqueryAudit ran.
 	require.Equal(t, http.StatusOK, rec.Code,
 		"audit emission must not prevent a 200 response")
+
+	require.NoError(t, server.auditManager.Flush(context.Background()),
+		"flush so the audit event reaches the store before it is queried")
+
+	auditRec := getAuditEntries(server, "root", "")
+	require.Equal(t, http.StatusOK, auditRec.Code)
+
+	var resp auditResp
+	require.NoError(t, json.NewDecoder(auditRec.Body).Decode(&resp))
+	require.NotEmpty(t, resp.Data.Entries, "expected an audit entry for the osquery dispatch")
+
+	entry := resp.Data.Entries[0]
+	assert.Equal(t, "osquery.query.dispatch", entry.Action)
+	assert.Equal(t, "cert-admin", entry.UserID, "caller identity must be recorded")
+	assert.Equal(t, "host_info", entry.Details["catalog_id"], "catalog query ID must be recorded")
+	assert.Equal(t, "steward-audit", entry.Details["steward_0"], "steward target must be recorded")
 }
