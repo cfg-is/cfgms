@@ -208,6 +208,10 @@ jobs:
         check_version "trivy"       "aquasecurity/trivy"                      "v0.74.0"
         check_version "go-licenses" "google/go-licenses"                      "v2.0.1"
         check_version "golangci-lint" "golangci/golangci-lint"                "v2.12.2"
+        # osquery: the bundled binary version shipped in the publisher-signed module
+        # bundle (features/modules/extended/osquery/module.go pinnedVersion). A bump
+        # here must also update pinnedVersion — the two must stay in lockstep.
+        check_version "osquery"     "osquery/osquery"                         "5.13.1"
 
         # Claude Code CLI freshness check. Installed from npm rather than a
         # GitHub release asset, so check_version's release API doesn't apply —
