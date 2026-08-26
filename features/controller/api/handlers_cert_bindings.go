@@ -335,8 +335,11 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 // a revoked cert. This is preferable to the opposite (binding removed but cert still valid),
 // which would silently leave a valid credential with no associated account record.
 //
-// If certManager is nil (no cert management configured), the binding is removed without
-// revoking the certificate. The response body reflects which operations succeeded.
+// If certManager is nil (no cert management configured) the request is refused with 503.
+// Removing a binding without revoking would leave a still-valid admin-marked certificate
+// with no bound account, which extractAdminPrincipal resolves through the bootstrap
+// fallback as unscoped root — so an unrevokable unbind is a privilege escalation, not a
+// partial success. Revocation is authoritative on this path or the path is closed.
 func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request) {
 	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -399,25 +402,30 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 
 	// Step 1: Revoke the certificate BEFORE removing the binding (fail-closed ordering).
 	// If revocation fails, we return 500 with the binding intact — the caller can retry.
-	// If certManager is nil (cert management not configured), the binding is removed
-	// without revoking, which is the best we can do; we note this in the response.
-	certRevoked := false
-	if s.certManager != nil {
-		if revokeErr := s.certManager.Revoke(serial); revokeErr != nil {
-			s.logger.Error("Failed to revoke certificate via certManager; binding not removed",
-				"serial", logging.SanitizeLogValue(serial),
-				"username", logging.SanitizeLogValue(username),
-				"error", logging.SanitizeLogValue(revokeErr.Error()))
-			s.writeErrorResponse(w, http.StatusInternalServerError,
-				"Failed to revoke certificate; binding not removed", "REVOKE_FAILED")
-			return
-		}
-		certRevoked = true
-	} else {
-		s.logger.Warn("certManager not configured — binding removed but certificate not revoked via manager",
+	// If certManager is nil the certificate cannot be revoked at all, so the unbind is
+	// refused: an unbound-but-valid admin certificate resolves through extractAdminPrincipal's
+	// bootstrap fallback as unscoped root, which would make the unbind an escalation for a
+	// tenant-scoped account. The binding stays intact and the caller gets 503.
+	if s.certManager == nil {
+		s.logger.Error("Refusing to remove certificate binding: certManager not configured, "+
+			"certificate cannot be revoked",
 			"serial", logging.SanitizeLogValue(serial),
 			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Certificate management is not configured; the certificate cannot be revoked, "+
+				"so the binding cannot be removed", "CERT_MANAGER_UNAVAILABLE")
+		return
 	}
+	if revokeErr := s.certManager.Revoke(serial); revokeErr != nil {
+		s.logger.Error("Failed to revoke certificate via certManager; binding not removed",
+			"serial", logging.SanitizeLogValue(serial),
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(revokeErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to revoke certificate; binding not removed", "REVOKE_FAILED")
+		return
+	}
+	certRevoked := true
 
 	// Step 2: Remove the binding from the durable store under the write lock.
 	// Re-read from the cache inside the lock so we don't lose concurrent mutations

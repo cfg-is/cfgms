@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -81,6 +82,12 @@ func (l *auditCapturingLogger) Warn(msg string, kvs ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.entries = append(l.entries, auditLogEntry{level: "WARN", msg: msg, kvs: kvs})
+}
+
+func (l *auditCapturingLogger) Error(msg string, kvs ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, auditLogEntry{level: "ERROR", msg: msg, kvs: kvs})
 }
 
 // formattedOutput renders all captured entries as "key=value" pairs for substring assertions.
@@ -2680,6 +2687,327 @@ func TestResponseEncodeFailuresAreLogged(t *testing.T) {
 	})
 }
 
+// makeAdminCertWithAttrs creates an admin-marked cert with specific serial, CN, and
+// optionally the root-scope marker. Used by the extractAdminPrincipal cross-product tests.
+func makeAdminCertWithAttrs(t *testing.T, serial int64, cn string, withRootScopeMarker bool) *x509.Certificate {
+	t.Helper()
+	key := sharedTestRSAKey()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	cert.SetAdminMarker(template)
+	if withRootScopeMarker {
+		cert.SetRootScopeMarker(template)
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+	parsed, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+	return parsed
+}
+
+// TestExtractAdminPrincipal_BoundAccount_CrossProduct is the [REQUIRED TEST] covering the
+// cross-product of {account.RootScope true/false} × {cert has root-scope marker true/false}
+// for a bound (non-disabled) account. Asserts that GlobalScope, RootScoped, TenantID, and
+// Permissions match the resolution rule in ADR-025 Amendment 3.
+func TestExtractAdminPrincipal_BoundAccount_CrossProduct(t *testing.T) {
+	type tc struct {
+		name               string
+		accountRootScope   bool
+		accountTenantID    string
+		accountPerms       []string
+		certHasRootMarker  bool
+		wantGlobalScope    bool
+		wantRootScoped     bool
+		wantTenantID       string
+		wantPermissionsNil bool
+		wantImplicitAdmin  bool
+	}
+	cases := []tc{
+		{
+			// Certificate carries root-scope marker but account is tenant-scoped.
+			// ADR-025 A2.1/A2.2: RootScoped derives from cert, not account.
+			// The marker is inert — TenantID non-empty means authorizeTenantAccess
+			// uses the account's scope, not the marker.
+			name:               "cert-with-root-marker bound to tenant-scoped account",
+			accountRootScope:   false,
+			accountTenantID:    "msp-a",
+			accountPerms:       []string{"steward:read"},
+			certHasRootMarker:  true,
+			wantGlobalScope:    false,
+			wantRootScoped:     true, // from cert, not account
+			wantTenantID:       "msp-a",
+			wantPermissionsNil: false,
+			wantImplicitAdmin:  false,
+		},
+		{
+			// Certificate without root-scope marker, bound to a root-scope account.
+			// RootScoped must NOT be back-derived from account.RootScope (ADR-025 A2.2).
+			name:               "cert-without-root-marker bound to root-scope account",
+			accountRootScope:   true,
+			accountTenantID:    "",
+			accountPerms:       nil,
+			certHasRootMarker:  false,
+			wantGlobalScope:    true,  // from account.RootScope
+			wantRootScoped:     false, // from cert (no marker)
+			wantTenantID:       "",
+			wantPermissionsNil: true, // nil for root-scope accounts (ImplicitAdmin gate)
+			wantImplicitAdmin:  true,
+		},
+		{
+			// Both root-scope marker and root-scope account.
+			name:               "cert-with-root-marker bound to root-scope account",
+			accountRootScope:   true,
+			accountTenantID:    "",
+			accountPerms:       nil,
+			certHasRootMarker:  true,
+			wantGlobalScope:    true,
+			wantRootScoped:     true,
+			wantTenantID:       "",
+			wantPermissionsNil: true,
+			wantImplicitAdmin:  true,
+		},
+		{
+			// Neither marker: tenant-scoped account, no root-scope marker.
+			name:               "cert-without-root-marker bound to tenant-scoped account",
+			accountRootScope:   false,
+			accountTenantID:    "msp-b",
+			accountPerms:       []string{"steward:list", "steward:read"},
+			certHasRootMarker:  false,
+			wantGlobalScope:    false,
+			wantRootScoped:     false,
+			wantTenantID:       "msp-b",
+			wantPermissionsNil: false,
+			wantImplicitAdmin:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := setupTestServer(t)
+
+			const serialNum = 9991
+			peerCert := makeAdminCertWithAttrs(t, serialNum, "shared-cn", tc.certHasRootMarker)
+			serial := peerCert.SerialNumber.String()
+
+			acct := &account{
+				ID:           "acct-" + tc.name,
+				Username:     "test-operator",
+				TenantID:     tc.accountTenantID,
+				RootScope:    tc.accountRootScope,
+				Permissions:  tc.accountPerms,
+				CertBindings: []CertBinding{{Serial: serial}},
+			}
+			srv.cacheAccount(acct)
+
+			req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+			p := srv.extractAdminPrincipal(req)
+
+			require.NotNil(t, p, "bound, active account must yield a non-nil principal")
+			assert.Equal(t, acct.ID, p.ID,
+				"Principal.ID must be the account ID, never the certificate CN")
+			assert.Equal(t, "mtls-admin:"+acct.Username, p.Name)
+			assert.Equal(t, tc.wantGlobalScope, p.GlobalScope)
+			assert.Equal(t, tc.wantRootScoped, p.RootScoped,
+				"RootScoped derives from cert.HasRootScopeMarker alone, never from account.RootScope")
+			assert.Equal(t, tc.wantTenantID, p.TenantID)
+			assert.Equal(t, tc.wantImplicitAdmin, p.ImplicitAdmin)
+			if tc.wantPermissionsNil {
+				assert.Nil(t, p.Permissions,
+					"root-scope account must have nil Permissions (ImplicitAdmin is the gate)")
+			} else {
+				require.NotNil(t, p.Permissions)
+				assert.Equal(t, tc.accountPerms, p.Permissions)
+			}
+		})
+	}
+}
+
+// TestExtractAdminPrincipal_Unbound_Bootstrap verifies that a cert with no bound account
+// follows the bootstrap fallback path: GlobalScope=true, TenantID="", ImplicitAdmin=true,
+// and Principal.ID equals the certificate CommonName (ADR-025 Amendment 3).
+func TestExtractAdminPrincipal_Unbound_Bootstrap(t *testing.T) {
+	srv := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t) // serial 1234, no bound account
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
+	p := srv.extractAdminPrincipal(req)
+
+	require.NotNil(t, p)
+	assert.Equal(t, "test-admin", p.ID, "bootstrap fallback: ID must be the cert CN")
+	assert.True(t, p.GlobalScope)
+	assert.Equal(t, "", p.TenantID)
+	assert.True(t, p.ImplicitAdmin)
+}
+
+// TestExtractAdminPrincipal_DisabledAccount_RejectsWithNil verifies that a cert bound to
+// a disabled account returns nil — not the bootstrap fallback (ADR-025 Amendment 3).
+func TestExtractAdminPrincipal_DisabledAccount_RejectsWithNil(t *testing.T) {
+	srv := setupTestServer(t)
+
+	const serialNum = 9992
+	peerCert := makeAdminCertWithAttrs(t, serialNum, "disabled-admin", false)
+	serial := peerCert.SerialNumber.String()
+
+	srv.cacheAccount(&account{
+		ID:           "acct-disabled",
+		Username:     "disabled-operator",
+		TenantID:     "msp-a",
+		Disabled:     true,
+		CertBindings: []CertBinding{{Serial: serial}},
+	})
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+	p := srv.extractAdminPrincipal(req)
+
+	assert.Nil(t, p,
+		"a cert bound to a disabled account must be rejected; must not fall through to bootstrap")
+}
+
+// TestExtractAdminPrincipal_AccountLookupError_FailsClosed verifies that a store error
+// during getAccountByCertSerial causes extractAdminPrincipal to return nil, not fall
+// through to the bootstrap fallback (ADR-025 Amendment 3 fail-closed requirement).
+func TestExtractAdminPrincipal_AccountLookupError_FailsClosed(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	srv := setupTestServerWithLogger(t, capLog)
+
+	const serialNum = 9993
+	peerCert := makeAdminCertWithAttrs(t, serialNum, "error-admin", false)
+	serial := peerCert.SerialNumber.String()
+
+	// Inject an account with the serial into the cache. The cache hit will trigger
+	// loadAccountFromStore for re-verification, which will fail with the injected error.
+	srv.cacheAccount(&account{
+		ID:           "acct-error",
+		Username:     "error-operator",
+		TenantID:     "msp-a",
+		CertBindings: []CertBinding{{Serial: serial}},
+	})
+
+	// Break the durable store so the re-verification fails.
+	injected := errors.New("injected store failure")
+	srv.secretStore = &errListSecretStore{SecretStore: srv.secretStore, listErr: injected}
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+	p := srv.extractAdminPrincipal(req)
+
+	assert.Nil(t, p,
+		"account lookup error must fail closed — must not fall through to bootstrap fallback")
+
+	// Verify the error was logged and the bootstrap audit was NOT emitted.
+	out := capLog.formattedOutput()
+	assert.Contains(t, out, "Cert serial account lookup failed",
+		"store error must be logged")
+	assert.NotContains(t, out, "admin.bootstrap_fallback_used",
+		"bootstrap audit must NOT fire when lookup fails (fail closed)")
+}
+
+// TestExtractAdminPrincipal_BootstrapFallback_EmitsAudit verifies that an unbound
+// admin cert emits the admin.bootstrap_fallback_used audit event with the required
+// auth_path field (ADR-025 Amendment 3 audit requirement).
+func TestExtractAdminPrincipal_BootstrapFallback_EmitsAudit(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	srv := setupTestServerWithLogger(t, capLog)
+
+	// Unbound cert (no account in cache with matching serial).
+	adminCert := makeSelfSignedAdminCert(t)
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
+	p := srv.extractAdminPrincipal(req)
+
+	require.NotNil(t, p, "unbound cert must succeed via bootstrap fallback")
+
+	out := capLog.formattedOutput()
+	assert.Contains(t, out, "admin.bootstrap_fallback_used",
+		"bootstrap fallback must emit the admin.bootstrap_fallback_used audit event")
+	assert.Contains(t, out, "bootstrap-fallback",
+		"audit event must include auth_path=bootstrap-fallback")
+}
+
+// TestExtractAdminPrincipal_BootstrapFallback_AnomalousWhenAccountsExist verifies that
+// when accounts exist in the cache, the bootstrap audit event includes accounts_in_cache > 0,
+// making the anomalous combination separately detectable in monitoring (ADR-025 Amendment 3).
+func TestExtractAdminPrincipal_BootstrapFallback_AnomalousWhenAccountsExist(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	srv := setupTestServerWithLogger(t, capLog)
+
+	// Inject an account with a DIFFERENT serial so the presented cert is unbound.
+	srv.cacheAccount(&account{
+		ID:           "existing-acct",
+		Username:     "existing-operator",
+		TenantID:     "msp-a",
+		CertBindings: []CertBinding{{Serial: "99999"}}, // different serial
+	})
+
+	// Present a cert with serial 1234 (makeSelfSignedAdminCert's serial) — no binding.
+	adminCert := makeSelfSignedAdminCert(t)
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
+	p := srv.extractAdminPrincipal(req)
+
+	require.NotNil(t, p, "bootstrap fallback still applies")
+	assert.True(t, p.ImplicitAdmin)
+
+	// The audit log must include accounts_in_cache=1 so the anomaly is detectable.
+	assert.Equal(t, 1, capLog.kvValue("accounts_in_cache"),
+		"accounts_in_cache must be >0 when accounts exist, enabling anomaly detection")
+}
+
+// TestExtractAdminPrincipal_CNReuse_ResolvesToDistinctAccountIDs is the [REQUIRED TEST]
+// for the CN-reuse case: two accounts, each bound to a separately-issued certificate that
+// happens to share the same Subject.CommonName, must resolve to their own distinct
+// Principal.ID (the respective account ID). Reusing a CN across two cert bundles must
+// never cause one account's identity or permissions to apply to the other.
+func TestExtractAdminPrincipal_CNReuse_ResolvesToDistinctAccountIDs(t *testing.T) {
+	srv := setupTestServer(t)
+
+	const sharedCN = "shared-cn-admin"
+
+	// Two certs with the same CN but different serials.
+	cert1 := makeAdminCertWithAttrs(t, 11001, sharedCN, false)
+	cert2 := makeAdminCertWithAttrs(t, 11002, sharedCN, false)
+	serial1 := cert1.SerialNumber.String()
+	serial2 := cert2.SerialNumber.String()
+
+	acct1 := &account{
+		ID:           "account-id-1",
+		Username:     "operator-one",
+		TenantID:     "msp-a",
+		Permissions:  []string{"steward:read"},
+		CertBindings: []CertBinding{{Serial: serial1}},
+	}
+	acct2 := &account{
+		ID:           "account-id-2",
+		Username:     "operator-two",
+		TenantID:     "msp-b",
+		Permissions:  []string{"steward:list"},
+		CertBindings: []CertBinding{{Serial: serial2}},
+	}
+	srv.cacheAccount(acct1)
+	srv.cacheAccount(acct2)
+
+	req1 := requestWithTLSCert(http.MethodGet, "/api/v1/test", cert1)
+	p1 := srv.extractAdminPrincipal(req1)
+	require.NotNil(t, p1)
+	assert.Equal(t, "account-id-1", p1.ID,
+		"cert1 must resolve to acct1's ID regardless of shared CN")
+	assert.Equal(t, "msp-a", p1.TenantID)
+
+	req2 := requestWithTLSCert(http.MethodGet, "/api/v1/test", cert2)
+	p2 := srv.extractAdminPrincipal(req2)
+	require.NotNil(t, p2)
+	assert.Equal(t, "account-id-2", p2.ID,
+		"cert2 must resolve to acct2's ID regardless of shared CN")
+	assert.Equal(t, "msp-b", p2.TenantID)
+
+	assert.NotEqual(t, p1.ID, p2.ID,
+		"two certs with the same CN but different serials must never share the same Principal.ID")
+}
+
 // TestIsWithinTenantScope verifies the helper introduced by Issue #3147.
 func TestIsWithinTenantScope(t *testing.T) {
 	tests := []struct {
@@ -2711,4 +3039,133 @@ func TestIsWithinTenantScope(t *testing.T) {
 				"isWithinTenantScope(%q, %q)", tc.callerTenant, tc.resourceTenant)
 		})
 	}
+}
+
+// TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert verifies that deleting the
+// account a certificate is bound to cannot move that still-valid certificate back onto the
+// unscoped-root bootstrap fallback.
+//
+// Without the guard in handleDeleteAccount, a tenant-scoped administrator holding an
+// admin-marked certificate and carrying account:delete could delete their own account and
+// have their certificate resolve as GlobalScope=true / TenantID="" / ImplicitAdmin=true on
+// the very next request — deprovisioning inverted into a privilege escalation. Deletion is
+// refused with 409 while bindings exist; revoke-then-delete is the supported order, and
+// revocation is authoritative because the certificate is invalid before the account record
+// that scoped it disappears.
+func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) {
+	server, _ := setupCertBindingServer(t)
+
+	rec := postAccount(t, server, strongPrincipal(), AccountRequest{
+		Username:    "tenant-operator",
+		TenantID:    "msp-a",
+		Permissions: []string{"account:delete"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
+
+	peerCert := makeAdminCertWithAttrs(t, 9995, "tenant-operator", false)
+	serial := peerCert.SerialNumber.String()
+
+	bindRec := bindCertReq(t, server, strongPrincipal(), "tenant-operator", BindCertRequest{
+		Serial: serial,
+		Label:  "operator laptop",
+	})
+	require.Equal(t, http.StatusCreated, bindRec.Code, "bind: %s", bindRec.Body.String())
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+	before := server.extractAdminPrincipal(req)
+	require.NotNil(t, before)
+	require.Equal(t, "msp-a", before.TenantID, "bound cert must resolve to the account's tenant")
+	require.False(t, before.GlobalScope)
+	require.False(t, before.ImplicitAdmin)
+
+	delRec := deleteAccount(t, server, strongPrincipal(), "tenant-operator")
+	require.Equal(t, http.StatusConflict, delRec.Code,
+		"deleting an account with live cert bindings must be refused: %s", delRec.Body.String())
+	assert.Contains(t, delRec.Body.String(), "CERT_BINDINGS_PRESENT")
+
+	after := server.extractAdminPrincipal(
+		requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert))
+	require.NotNil(t, after, "the binding must survive the refused delete")
+	assert.Equal(t, "msp-a", after.TenantID,
+		"the certificate must still be tenant-scoped after a refused delete")
+	assert.False(t, after.GlobalScope,
+		"a refused delete must not widen the certificate to unscoped root")
+	assert.False(t, after.ImplicitAdmin,
+		"a refused delete must not put the certificate back on the bootstrap fallback")
+}
+
+// TestExtractAdminPrincipal_AccountResetCannotWidenBoundCert verifies that the
+// POST /api/v1/accounts reset (upsert) path cannot move a still-valid bound certificate
+// back onto the unscoped-root bootstrap fallback.
+//
+// handleCreateAccount builds a fresh account record on every request and carries selected
+// fields forward from the existing one. persistAccount rebuilds the metadata from the record
+// it is handed and writes cert_bindings only when the slice is non-empty, and cacheAccount
+// replaces the in-memory copy that getAccountByCertSerial scans — so an upsert that did not
+// carry CertBindings forward would silently unbind every certificate on the account. A
+// tenant-scoped admin holding account:create could then POST their own username and have
+// their own unrevoked certificate resolve as GlobalScope=true / TenantID="" /
+// ImplicitAdmin=true on the very next request.
+func TestExtractAdminPrincipal_AccountResetCannotWidenBoundCert(t *testing.T) {
+	server, _ := setupCertBindingServer(t)
+
+	rec := postAccount(t, server, strongPrincipal(), AccountRequest{
+		Username:    "tenant-operator",
+		TenantID:    "msp-a",
+		Permissions: []string{"account:create"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
+
+	peerCert := makeAdminCertWithAttrs(t, 9994, "tenant-operator", false)
+	serial := peerCert.SerialNumber.String()
+
+	bindRec := bindCertReq(t, server, strongPrincipal(), "tenant-operator", BindCertRequest{
+		Serial: serial,
+		Label:  "operator laptop",
+	})
+	require.Equal(t, http.StatusCreated, bindRec.Code, "bind: %s", bindRec.Body.String())
+
+	before := server.extractAdminPrincipal(
+		requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert))
+	require.NotNil(t, before)
+	require.Equal(t, "msp-a", before.TenantID, "bound cert must resolve to the account's tenant")
+	require.False(t, before.GlobalScope)
+	require.False(t, before.ImplicitAdmin)
+
+	// The escalation attempt: the tenant admin resets their own account, inside their own
+	// subtree, with the grants they legitimately hold. The reset itself is allowed.
+	resetReq := httptest.NewRequest(http.MethodPost, "/api/v1/accounts",
+		bytes.NewReader([]byte(`{"username":"tenant-operator","tenant_id":"msp-a"}`)))
+	resetReq = withPrincipal(resetReq, &Principal{
+		ID:          before.ID,
+		Name:        before.Name,
+		Assurance:   session.AssuranceStrong,
+		TenantID:    "msp-a",
+		Permissions: []string{"account:create"},
+	})
+	resetReq = resetReq.WithContext(context.WithValue(resetReq.Context(), ctxkeys.TenantID, "msp-a"))
+	resetRec := httptest.NewRecorder()
+	server.handleCreateAccount(resetRec, resetReq)
+	require.Equal(t, http.StatusOK, resetRec.Code, "reset: %s", resetRec.Body.String())
+
+	after := server.extractAdminPrincipal(
+		requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert))
+	require.NotNil(t, after, "the binding must survive an account reset")
+	assert.Equal(t, "msp-a", after.TenantID,
+		"the certificate must still be tenant-scoped after a reset")
+	assert.False(t, after.GlobalScope,
+		"a reset must not widen the certificate to unscoped root")
+	assert.False(t, after.ImplicitAdmin,
+		"a reset must not put the certificate back on the bootstrap fallback")
+
+	// The carry-forward must reach the durable record, not just the cache: a controller
+	// restart after the reset must reload the binding.
+	dropAccountCache(server)
+	afterReload := server.extractAdminPrincipal(
+		requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert))
+	require.NotNil(t, afterReload)
+	assert.Equal(t, "msp-a", afterReload.TenantID,
+		"the binding must be persisted by the reset, not only cached")
+	assert.False(t, afterReload.GlobalScope)
+	assert.False(t, afterReload.ImplicitAdmin)
 }
