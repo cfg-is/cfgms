@@ -144,6 +144,8 @@ type Case struct {
 type CaseStore interface {
 	CreateCase(ctx context.Context, c *Case) error
 	GetCase(ctx context.Context, id string) (*Case, error)
+	// ListCases returns cases within tenantID's subtree: tenantID itself plus any
+	// descendant tenant (tenantID exact match or prefixed with tenantID+"/").
 	ListCases(ctx context.Context, tenantID string) ([]*Case, error)
 	UpdateCase(ctx context.Context, c *Case) error
 	AddPin(ctx context.Context, caseID string, pin *Pin) error

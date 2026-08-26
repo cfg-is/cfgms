@@ -171,6 +171,7 @@ type Server struct {
 	tenantStore                    business.TenantStore                  // Issue #2839: tenant hierarchy for per-tenant assurance resolution
 	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
 	tenantCrossingStore            business.TenantCrossingStore          // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	casesStore                     business.CaseStore                    // Issue #3605: cockpit investigation case CRUD
 	absentCapabilities             []interfaces.AbsentCapability         // Issue #3409: declared-optional capabilities absent in this deployment
 	osqueryDispatcher              stewardOsqueryDispatcher              // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
 
