@@ -3,6 +3,8 @@
 package dna
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +14,213 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
+
+// --- OsquerySource test doubles ---
+
+// fakeOsquerySource is a deterministic OsquerySource for testing the
+// PartitionHostFactsFromOsquery code path. It is not a mock — it implements
+// the interface directly with controllable behaviour.
+type fakeOsquerySource struct {
+	healthy   bool
+	perKind   map[string]modules.ConfigState
+	failKinds map[string]bool
+}
+
+func (f *fakeOsquerySource) IsActiveAndHealthy() bool { return f.healthy }
+
+func (f *fakeOsquerySource) Get(_ context.Context, kind string) (modules.ConfigState, error) {
+	if f.failKinds[kind] {
+		return nil, errors.New("osquery: simulated get failure")
+	}
+	if state, ok := f.perKind[kind]; ok {
+		return state, nil
+	}
+	return nil, errors.New("osquery: unsupported kind in test double")
+}
+
+var _ OsquerySource = (*fakeOsquerySource)(nil)
+
+// osqueryStateFixture builds a ConfigState backed by the given string map for
+// use with PartitionHostFactsFromOsquery tests.
+func osqueryStateFixture(data map[string]string) modules.ConfigState {
+	m := make(map[string]interface{}, len(data))
+	for k, v := range data {
+		m[k] = v
+	}
+	return MapState(m)
+}
+
+// defaultOsquerySource returns a fakeOsquerySource that returns plausible data
+// for all four curated host:* kinds and reports itself as active and healthy.
+func defaultOsquerySource() *fakeOsquerySource {
+	return &fakeOsquerySource{
+		healthy: true,
+		perKind: map[string]modules.ConfigState{
+			"host:cpu": osqueryStateFixture(map[string]string{
+				"cpu_brand":          "Intel(R) Xeon(R) Gold 6154",
+				"cpu_physical_cores": "18",
+				"cpu_logical_cores":  "36",
+			}),
+			"host:memory": osqueryStateFixture(map[string]string{
+				"physical_memory": "137438953472",
+			}),
+			"host:os": osqueryStateFixture(map[string]string{
+				"os":       "Ubuntu",
+				"hostname": "steward-01",
+				"version":  "22.04.3 LTS",
+			}),
+			"host:bios": osqueryStateFixture(map[string]string{
+				"hardware_vendor": "ACME Corp",
+				"hardware_model":  "ProServer 9000",
+				"uuid":            "AAAABBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF",
+			}),
+		},
+		failKinds: nil,
+	}
+}
+
+// --- PartitionHostFactsFromOsquery tests ---
+
+// TestPartitionHostFactsFromOsquery_ProducesOsqueryKinds verifies that when all
+// Get calls succeed, all four host:* kinds are emitted.
+func TestPartitionHostFactsFromOsquery_ProducesOsqueryKinds(t *testing.T) {
+	src := defaultOsquerySource()
+	taxonomy := entitygraphtypes.DefaultTaxonomy()
+
+	frags, envelopes, err := PartitionHostFactsFromOsquery(t.Context(), src, taxonomy, nil)
+	require.NoError(t, err)
+
+	ids := fragmentIDSet(frags)
+	assert.True(t, ids["host:cpu"], "must produce host:cpu fragment")
+	assert.True(t, ids["host:memory"], "must produce host:memory fragment")
+	assert.True(t, ids["host:os"], "must produce host:os fragment")
+	assert.True(t, ids["host:bios"], "must produce host:bios fragment")
+
+	for _, f := range frags {
+		assert.NotEmpty(t, f.FragmentHash, "fragment %s must have a non-empty hash", f.FragmentId)
+		assert.NotEmpty(t, f.CanonicalBytes, "fragment %s must have non-empty canonical bytes", f.FragmentId)
+	}
+	_ = envelopes
+}
+
+// TestPartitionHostFactsFromOsquery_AuthorityAndSourceAreOsquery is the REQUIRED
+// test for the label-source pairing invariant: every emitted fragment must carry
+// Authority:"osquery" and every envelope Source:"osquery".
+func TestPartitionHostFactsFromOsquery_AuthorityAndSourceAreOsquery(t *testing.T) {
+	src := defaultOsquerySource()
+	taxonomy := entitygraphtypes.DefaultTaxonomy()
+
+	frags, envelopes, err := PartitionHostFactsFromOsquery(t.Context(), src, taxonomy, nil)
+	require.NoError(t, err)
+
+	for _, f := range frags {
+		assert.Equal(t, "osquery", f.Authority,
+			"fragment %s: Authority must be 'osquery', not 'gatherer' or anything else", f.FragmentId)
+
+		env, ok := envelopes[f.FragmentId]
+		require.True(t, ok, "envelope must exist for fragment %s", f.FragmentId)
+		assert.Equal(t, "osquery", env.Source,
+			"fragment %s: envelope Source must be 'osquery'", f.FragmentId)
+		assert.Equal(t, "high", env.Confidence,
+			"fragment %s: Confidence must be 'high'", f.FragmentId)
+		assert.NotNil(t, env.ObservedAt,
+			"fragment %s: ObservedAt must be set", f.FragmentId)
+	}
+}
+
+// TestPartitionHostFactsFromOsquery_FailClosedPerKind verifies that a Get failure
+// for one kind omits only that kind — it does not abort the whole pass, and it
+// does NOT substitute gatherer data for the failed kind.
+func TestPartitionHostFactsFromOsquery_FailClosedPerKind(t *testing.T) {
+	src := defaultOsquerySource()
+	src.failKinds = map[string]bool{"host:cpu": true}
+
+	taxonomy := entitygraphtypes.DefaultTaxonomy()
+	frags, _, err := PartitionHostFactsFromOsquery(t.Context(), src, taxonomy, nil)
+	require.NoError(t, err)
+
+	ids := fragmentIDSet(frags)
+	assert.False(t, ids["host:cpu"],
+		"host:cpu must be absent when Get fails — fail-closed, not gatherer-fallback")
+	assert.True(t, ids["host:memory"], "host:memory must still be emitted")
+	assert.True(t, ids["host:os"], "host:os must still be emitted")
+	assert.True(t, ids["host:bios"], "host:bios must still be emitted")
+
+	// The surviving fragments must still carry Authority:"osquery" — not "gatherer".
+	for _, f := range frags {
+		assert.Equal(t, "osquery", f.Authority,
+			"surviving fragment %s must keep Authority:'osquery' even when another kind failed",
+			f.FragmentId)
+	}
+}
+
+// TestPartitionHostFactsFromOsquery_ModuleOwnedKindExcluded verifies that a kind
+// claimed by a module's ownership declaration is excluded from osquery output,
+// mirroring the same exclusion in PartitionHostFacts (ADR-017 §2).
+func TestPartitionHostFactsFromOsquery_ModuleOwnedKindExcluded(t *testing.T) {
+	src := defaultOsquerySource()
+	taxonomy := entitygraphtypes.DefaultTaxonomy()
+	ownership := map[string][]modules.OwnershipDeclaration{
+		"cpu-module": {{Kind: "host:cpu"}},
+	}
+
+	frags, _, err := PartitionHostFactsFromOsquery(t.Context(), src, taxonomy, ownership)
+	require.NoError(t, err)
+
+	ids := fragmentIDSet(frags)
+	assert.False(t, ids["host:cpu"],
+		"host:cpu must be excluded because cpu-module claimed it — module authority preempts osquery")
+	assert.True(t, ids["host:memory"], "host:memory must still be emitted")
+	assert.True(t, ids["host:os"], "host:os must still be emitted")
+}
+
+// TestProvenance_NoGathererDataInOsqueryPath is the REQUIRED test for the
+// label-source pairing invariant: no code path may emit gatherer-sourced fragment
+// content labeled Authority:"osquery", nor osquery-sourced content labeled
+// Authority:"gatherer".
+//
+// This test verifies the invariant by directly inspecting the output of both
+// partition functions: gatherer output never carries "osquery", osquery output
+// never carries "gatherer".
+func TestProvenance_NoGathererDataInOsqueryPath(t *testing.T) {
+	taxonomy := entitygraphtypes.DefaultTaxonomy()
+
+	// Gatherer-sourced fragments must be labeled "gatherer", not "osquery".
+	gatherAttrs := map[string]string{
+		"cpu_count": "4",
+		"cpu_arch":  "amd64",
+		"os":        "linux",
+	}
+	gatherFrags, _, err := PartitionHostFacts(gatherAttrs, taxonomy, nil)
+	require.NoError(t, err)
+	for _, f := range gatherFrags {
+		assert.Equal(t, "gatherer", f.Authority,
+			"[REQUIRED] PartitionHostFacts must label fragments 'gatherer', never 'osquery': fragment %s",
+			f.FragmentId)
+		assert.NotEqual(t, "osquery", f.Authority,
+			"[REQUIRED] gatherer-sourced fragment %s must never carry Authority:'osquery'", f.FragmentId)
+	}
+
+	// Osquery-sourced fragments must be labeled "osquery", not "gatherer".
+	src := defaultOsquerySource()
+	osqueryFrags, osqueryEnvs, err := PartitionHostFactsFromOsquery(t.Context(), src, taxonomy, nil)
+	require.NoError(t, err)
+	for _, f := range osqueryFrags {
+		assert.Equal(t, "osquery", f.Authority,
+			"[REQUIRED] PartitionHostFactsFromOsquery must label fragments 'osquery', never 'gatherer': fragment %s",
+			f.FragmentId)
+		assert.NotEqual(t, "gatherer", f.Authority,
+			"[REQUIRED] osquery-sourced fragment %s must never carry Authority:'gatherer'", f.FragmentId)
+
+		env := osqueryEnvs[f.FragmentId]
+		require.NotNil(t, env)
+		assert.Equal(t, "osquery", env.Source,
+			"[REQUIRED] osquery envelope Source must be 'osquery', not 'gatherer:*': fragment %s",
+			f.FragmentId)
+		assert.NotContains(t, env.Source, "gatherer",
+			"[REQUIRED] osquery envelope Source must not contain 'gatherer': fragment %s", f.FragmentId)
+	}
+}
 
 // hashByID returns the FragmentHash for the given fragment_id, or "" if absent.
 func hashByID(frags []*commonpb.Fragment, id string) string {

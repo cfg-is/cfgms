@@ -38,6 +38,17 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// CollectorOption configures optional Collector behaviour.
+type CollectorOption func(*Collector)
+
+// WithOsquerySource returns an option that wires an OsquerySource for
+// host:* fragment collection. When the source is active and healthy on a cycle,
+// PartitionHostFactsFromOsquery is called instead of PartitionHostFacts (ADR-017
+// Amendment 3, Issue #3565). When nil or inactive, the gatherer path is used.
+func WithOsquerySource(src OsquerySource) CollectorOption {
+	return func(c *Collector) { c.osquery = src }
+}
+
 // Collector collects system DNA (attributes) for identification and targeting.
 //
 // The collector gathers hardware, software, and network information to create
@@ -50,6 +61,13 @@ import (
 // goroutine after the first Collect() call, so startup is never blocked.
 type Collector struct {
 	logger logging.Logger
+
+	// osquery is the optional osquery source for host:* fact collection.
+	// When non-nil and IsActiveAndHealthy() returns true, PartitionHostFactsFromOsquery
+	// is used instead of PartitionHostFacts (ADR-017 Amendment 3, Issue #3565).
+	// Gatherers (collectHardwareInfo, collectNetworkInfo, etc.) and RawAttributes
+	// run unconditionally regardless of which source wins the fragment decision.
+	osquery OsquerySource
 
 	// Hardware cache — static hardware data collected once and reused.
 	hwCacheOnce sync.Once
@@ -66,12 +84,18 @@ type Collector struct {
 // NewCollector creates a new DNA collector.
 //
 // The collector will gather system information using platform-specific methods
-// and create a comprehensive DNA profile for the system.
-func NewCollector(logger logging.Logger) *Collector {
-	return &Collector{
+// and create a comprehensive DNA profile for the system. Optional opts are
+// applied after construction (e.g. WithOsquerySource to enable osquery-sourced
+// host:* fragment collection per ADR-017 Amendment 3).
+func NewCollector(logger logging.Logger, opts ...CollectorOption) *Collector {
+	c := &Collector{
 		logger: logger,
 		bgDone: make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Collect gathers the current system DNA (attributes).
@@ -138,17 +162,34 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 		// Background not yet complete; return fast data only.
 	}
 
-	// Partition the already-populated flat attributes map into host:* fragments
-	// (ADR-017 Amendment 3). The gatherers are reused as-is; this step only reads
-	// the map they already wrote — no re-gathering.
-	hostFragments, hostEnvelopes, fragErr := PartitionHostFacts(
-		attributes,
-		entitygraphtypes.DefaultTaxonomy(),
-		stdlibModuleOwnership(),
+	// Source-selection gate (ADR-017 Amendment 3, Issue #3565): a single
+	// deterministic per-cycle decision — osquery if active and healthy, gatherer
+	// otherwise. The source and its label are set together, never split:
+	// gatherer-sourced content is never labeled "osquery" and vice versa.
+	//
+	// Gatherers (collectHardwareInfo etc.) and RawAttributes run unconditionally
+	// above regardless of which source wins here.
+	var (
+		hostFragments []*commonpb.Fragment
+		hostEnvelopes map[string]*commonpb.FragmentEnvelope
+		fragErr       error
 	)
-	if fragErr != nil {
-		c.logger.Error("Failed to partition host facts into fragments", "error", fragErr)
-		// Non-fatal: continue with flat attributes only; fragment fields stay nil.
+	if c.osquery != nil && c.osquery.IsActiveAndHealthy() {
+		hostFragments, hostEnvelopes, fragErr = PartitionHostFactsFromOsquery(
+			ctx, c.osquery, entitygraphtypes.DefaultTaxonomy(), stdlibModuleOwnership())
+		if fragErr != nil {
+			c.logger.Error("Failed to partition host facts via osquery",
+				"error", logging.SanitizeLogValue(fragErr.Error()))
+			// Non-fatal: continue with nil fragment fields.
+		}
+	} else {
+		hostFragments, hostEnvelopes, fragErr = PartitionHostFacts(
+			attributes, entitygraphtypes.DefaultTaxonomy(), stdlibModuleOwnership())
+		if fragErr != nil {
+			c.logger.Error("Failed to partition host facts into fragments",
+				"error", logging.SanitizeLogValue(fragErr.Error()))
+			// Non-fatal: continue with nil fragment fields.
+		}
 	}
 
 	// Build the sorted manifest and compute the aggregate root for partial-sync.
