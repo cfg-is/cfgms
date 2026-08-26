@@ -2133,7 +2133,7 @@ func (s *Server) Start() error {
 	// HasLeadership(): this is a startup log line, not an admission decision.
 	s.logger.Info("Controller server started (gRPC-over-QUIC transport mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
-		"is_leader", s.haManager.IsRaftLeader())
+		"is_leader", s.haManager.IsRaftLeader()) //architecture:allow-raw-leader -- observational only: startup log records raw protocol state for diagnostics, not an admission decision
 
 	// Issue #1320: On startup, if this node holds lease-backed authority, replay any
 	// push operations that were interrupted before a previous leader could complete

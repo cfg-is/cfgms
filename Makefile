@@ -718,6 +718,8 @@ check-architecture:
 	@echo ""
 	@echo "📦 Checking authority gating on new mutating controller API handlers..."
 	@go test ./features/controller/api/... -run TestNoUngatedMutatingHandler -count=1 -timeout 120s
+	@echo "📦 Checking raw Raft leader primitive usage outside pkg/ha..."
+	@go test ./pkg/ha/... -run TestNoRawLeaderPrimitiveOutsidePkgHA -count=1 -timeout 120s
 
 # License Header Verification
 # Ensures all source files have SPDX license headers
