@@ -750,7 +750,95 @@ elevation. Both real runs above happened to land on `cfgms-ha-node2`
 
 ## 5. Network partition / split-brain validation (story #3095)
 
-*To be filled in when #3095 lands.*
+Live-validated against the real cfg-lab 3-node cluster via
+`test/e2e/ha/network_partition_real_test.go` (`//go:build e2e`, gated by
+`CFGMS_E2E_HA_CLUSTER_NODES`, same convention as §4/§6's suites). Unlike
+`test/integration/ha`'s Docker suite (`TestNetworkPartition`), which simulates a
+partition by stopping/restarting a container, this suite drives a genuine
+`iptables` rule on one real Debian VM host, blocking only the internal Raft
+consensus port (`:9443`, both directions) on the isolated node while
+deliberately leaving the admin REST port (`:9080`) open — so the suite's own
+mTLS polling keeps observing both sides of the partition throughout. A single
+node's rule is sufficient (matches the AC's own wording, "a real `iptables` rule
+on ONE cfg-lab host"): the isolated node's own INPUT/OUTPUT chains block
+consensus traffic in both directions, so the majority side's outbound packets
+simply arrive and get dropped by the isolated node.
+
+### Original run (2026-08-15, `TestRealClusterPartition_NoDualLeader` failing)
+
+| Test | Result | Measured |
+|---|---|---|
+| `TestRealClusterPartition_MinorityStepsDown` | **PASS** | Isolated leader stepped down within 30s, stayed down for the full 45s window; majority-side steward fleet health actively polled throughout. |
+| `TestRealClusterPartition_HealsToSingleLeader` | **PASS** | Reconverged to a single agreed leader in **2.01s** after the firewall rule was removed. |
+| `TestRealClusterPartition_NoDualLeader` | **FAILED reproducibly** (confirmed on 2 separate runs: ~2.0s and ~5.5s overlap windows) | See root cause below. |
+
+**Root cause (a genuine finding, not a bug in this repo's Raft wiring):** traced
+through the vendored `go.etcd.io/raft/v3 v3.6.0` source. `tickHeartbeat`
+(`raft.go:862-877`) raises `MsgCheckQuorum` on a fixed period of exactly
+`electionTimeout` ticks, but `stepLeader`'s `MsgCheckQuorum` handler
+(`raft.go:1273-1285`) only steps down when quorum hasn't been active *since the
+previous check* — landing the actual step-down anywhere in `(ElectionTimeout,
+2×ElectionTimeout]`. The majority's new election uses
+`pastElectionTimeout` (`raft.go:2045-2051`), `randomizedElectionTimeout =
+electionTimeout + rand(electionTimeout)`, uniformly in `[ElectionTimeout,
+2×ElectionTimeout)`. These are two independent, unordered timers with
+overlapping ranges — the majority can complete its election *before* the
+isolated node's own `CheckQuorum` observes the loss, producing a real,
+reproducible window where both report `is_leader:true`.
+
+`CheckQuorum` guarantees write-safety (the isolated node cannot commit without a
+quorum ack), not status-flag agreement — and the gap was not a reporting
+artifact. Tracing the consumers of the pre-fix `IsLeader()` flag
+(`features/controller/api/handlers_push.go:57`, `server.go:408`,
+`features/controller/server/server.go:2018` at the time) showed
+`handleConfigPush` resolves the selector, queries the fleet, writes desired
+state to the entity graph, and fans out to stewards via `commandPublisher` —
+with no Raft commit anywhere in that path. During the overlap window, two nodes
+would both admit config pushes and deliver them to real endpoints. Closing this
+needed a leader-lease mechanism, a design decision (epic #3386, ADR-029)
+rather than a test or logic fix — so the AC was left un-weakened and the
+failure recorded as an honest finding, per the epic's own resolution (comment
+on issue #3095, 2026-08-16): *"this story's AC is correct and unchanged, and
+its test is not to be weakened, softened, or skipped. The system does not yet
+satisfy it."*
+
+### Resolved run (2026-08-25/26, story #3389 — `HasLeadership()` re-homing)
+
+Epic #3386 landed the lease-backed authority split (`HasLeadership()` vs.
+`IsRaftLeader()`, ADR-029) via #3388, then #3435 switched `GET
+/api/v1/raft/status`'s `is_leader` field to source from `HasLeadership()`
+instead of the raw Raft flag, and #3389 re-homed the three side-effecting
+config-push call sites the root-cause analysis above named onto the same
+primitive. All three story #3095 tests were re-run **unmodified** against a
+controller binary built from #3389's branch and rolling-deployed to all three
+real cluster nodes (`cfgms-ctrl-01`, `cfgms-ha-node2`, `cfgms-ha-node3` — one
+node at a time, quorum preserved throughout the deployment itself):
+
+| Test | Result | Measured |
+|---|---|---|
+| `TestRealClusterPartition_NoDualLeader` | **PASS** (previously failed reproducibly) | 90 paired poll rounds across 45s (500ms interval), **0 dual-leader instants**. Partitioned node: `cfgms-ctrl-01` (the leader at the time, isolated as the minority side). |
+| `TestRealClusterPartition_MinorityStepsDown` | **PASS** (no regression) | Isolated leader (`cfgms-ha-node3` this run) stepped down and stayed down for the full 45s observation window. |
+| `TestRealClusterPartition_HealsToSingleLeader` | **PASS** (no regression) | Reconverged to a single agreed leader in **2.0073369s** (bound 90s) — consistent with the original run's 2.01s. |
+
+Full quorum and cleanup verified after each run: `iptables -L
+CFGMS_E2E_PARTITION` absent on all three hosts, `GET /api/v1/health` returns
+`healthy` on all three, and `GET /api/v1/raft/status` agrees on a single leader
+across all three nodes.
+
+**Rolling deployment itself is additional live evidence for the fix.** Each of
+the three sequential `systemctl stop` / binary swap / `systemctl start` cycles
+is a real, brief leadership loss on whichever node was stopped; the cluster
+reconverged within seconds each time with no operator intervention, and the
+final restart (of the then-current leader, `cfgms-ctrl-01`) produced an
+uneventful term bump (11→12) and instant re-election — the same `CheckQuorum`
+/ election-timeout machinery this section's tests exercise deliberately.
+
+**Status: RESOLVED.** #3389 is epic #3386's story that made this AC pass; the
+epic's Definition of Done for this half of the leadership-authority work is
+satisfied. Fencing terms on *outbound* commands (#3390, merged) and the
+steward-side term fence (#3436, merged) are the sibling halves of the epic
+covering the command-dispatch path rather than the status/admission path this
+section validates.
 
 ## 6. Steward fleet continuity through failover (story #3096)
 

@@ -34,17 +34,18 @@ import (
 	sqliteprovider "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
+	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// stubLeaderStatus is a minimal test double for leader-check behavior.
+// stubLeaderStatus is a minimal test double for leadership-check behavior.
 // It is NOT a mock: it has no expectations and carries only a fixed boolean.
 type stubLeaderStatus struct{ leader bool }
 
-func (s *stubLeaderStatus) IsLeader() bool { return s.leader }
+func (s *stubLeaderStatus) HasLeadership() bool { return s.leader }
 
 // validPushPayload returns a minimal valid configPushRequest body.
 // The default selector is "all"; the TenantID is "tenant-abc".
@@ -149,13 +150,19 @@ func TestHandleConfigPush_Leader(t *testing.T) {
 	assert.Equal(t, "accepted", resp.Status)
 }
 
-// TestHandleConfigPush_NonLeader verifies that a request forwarded to a
-// follower node returns 503 Service Unavailable with {"error":"not the leader"}.
-func TestHandleConfigPush_NonLeader(t *testing.T) {
+// TestHandleConfigPush_NoLeadership_Rejects503 is the story #3389 REQUIRED TEST: the
+// push gate rejects with 503 when leadership is held by Raft but the lease has
+// expired. The leaderStatus interface only exposes HasLeadership() (Issue #3389 —
+// IsRaftLeader() is intentionally not reachable through it, ADR-029 Decision 3), so
+// "Raft leader with an expired lease" and "not the Raft leader at all" are the same
+// observable state at this layer: HasLeadership() == false. stubLeaderStatus{leader:
+// false} represents exactly that state — the handler cannot distinguish the two
+// underlying causes, and per the interface's own design it should not need to.
+func TestHandleConfigPush_NoLeadership_Rejects503(t *testing.T) {
 	server := setupTestServer(t)
 	server.pushLeaderStatus = &stubLeaderStatus{leader: false}
 
-	// Leader check runs before principal check — no principal needed here.
+	// Leadership check runs before principal check — no principal needed here.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", marshalPayload(t, validPushPayload()))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -167,6 +174,38 @@ func TestHandleConfigPush_NonLeader(t *testing.T) {
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "not the leader", resp["error"])
+
+	// REQUIRED TEST (promoted from Constraints to an explicit AC, story #3389): the
+	// response must not name or imply which other node currently holds leadership.
+	// respondError's wire shape is always exactly {"error": message} — asserting the
+	// map has no keys beyond "error" is what makes this independently verifiable
+	// rather than an unstated assumption about respondError's implementation.
+	assert.Len(t, resp, 1, "error response must carry no fields beyond \"error\" — no node ID, address, or topology hint")
+}
+
+// TestHandleConfigPush_RealSingleServerMode_AcceptsUnconditionally is the story
+// #3389 REQUIRED TEST: SingleServerMode accepts pushes unconditionally — no new
+// rejection path for OSS single-node. Unlike the other tests in this file, this
+// wires a REAL *ha.Manager (not a nil pushLeaderStatus, which only proves the
+// nil-checker shortcut) constructed in SingleServerMode, proving HasLeadership()
+// itself returns true unconditionally there and that the real type satisfies
+// leaderStatus end to end.
+func TestHandleConfigPush_RealSingleServerMode_AcceptsUnconditionally(t *testing.T) {
+	server := setupTestServer(t)
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+	haManager, err := ha.NewManager(ha.DefaultConfig(), logging.NewNoopLogger(), storageManager, nil, "")
+	require.NoError(t, err)
+	require.Equal(t, ha.SingleServerMode, haManager.GetDeploymentMode())
+
+	server.pushLeaderStatus = haManager
+
+	req := withAdminPrincipal(newPushRequest(t, validPushPayload()))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "a real SingleServerMode ha.Manager must never reject a push")
 }
 
 // TestHandleConfigPush_MissingFields verifies that omitting any required field

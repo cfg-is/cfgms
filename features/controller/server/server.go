@@ -2129,14 +2129,19 @@ func (s *Server) Start() error {
 		s.logger.Info("HTTP API server started")
 	}
 
+	// Observational only (Issue #3389 classification) — stays on IsRaftLeader(), not
+	// HasLeadership(): this is a startup log line, not an admission decision.
 	s.logger.Info("Controller server started (gRPC-over-QUIC transport mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
-		"is_leader", s.haManager.IsLeader())
+		"is_leader", s.haManager.IsRaftLeader())
 
-	// Issue #1320: On startup, if this node is the leader, replay any push
-	// operations that were interrupted before a previous leader could complete
-	// delivery. Nil haManager means OSS single-node mode, which is always leader.
-	if (s.haManager == nil || s.haManager.IsLeader()) && s.commandPublisher != nil {
+	// Issue #1320: On startup, if this node holds lease-backed authority, replay any
+	// push operations that were interrupted before a previous leader could complete
+	// delivery. Nil haManager means OSS single-node mode, which is always authoritative.
+	// HasLeadership(), not IsLeader() (Issue #3389): a replay is side-effecting —
+	// it re-delivers to real stewards outside the replicated log, so it belongs on
+	// the same admission primitive as handleConfigPush, not the raw Raft flag.
+	if (s.haManager == nil || s.haManager.HasLeadership()) && s.commandPublisher != nil {
 		go s.resumePendingPushes(context.Background())
 	}
 
