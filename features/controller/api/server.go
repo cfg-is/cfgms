@@ -438,7 +438,9 @@ func New(
 	// automatically distributes to all active stewards of the affected tenant.
 	if configService != nil && commandPublisher != nil {
 		configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
-			if checker := server.pushLeaderStatus; checker != nil && !checker.IsLeader() {
+			// Side-effecting: fans out to stewards outside the replicated log — same
+			// admission primitive as handleConfigPush (Issue #3389).
+			if checker := server.pushLeaderStatus; checker != nil && !checker.HasLeadership() {
 				return
 			}
 			cfg := &push.StewardConfiguration{

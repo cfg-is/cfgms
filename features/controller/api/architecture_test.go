@@ -56,15 +56,6 @@ const (
 // decomposition did not address; see the epic for the prioritized follow-up plan.
 var ungatedHandlerBaseline = map[string]bucketedReason{
 
-	// ── gated-via-deprecated-primitive ──────────────────────────────────────────────────────
-	// These handlers ARE gated, but on the deprecated raw Raft flag (IsLeader()), not on the
-	// lease-backed HasLeadership(). Migration is tracked under #3389.
-
-	"handleConfigPush": {
-		Bucket: bucketGatedViaDeprecatedPrimitive,
-		Reason: "checks s.pushLeaderStatus.IsLeader() not HasLeadership(); migration tracked under #3389",
-	},
-
 	// ── excluded-by-epic-non-goals: RBAC / subject-role CRUD ────────────────────────────────
 	// Epic #3411 Non-Goals explicitly exclude RBAC management from authority gating.
 
@@ -527,7 +518,6 @@ func TestNoUngatedMutatingHandler(t *testing.T) {
 	}
 
 	// AC6: every baseline entry carries a valid bucket and a non-empty reason.
-	// handleConfigPush must name #3389 in its reason.
 	validBuckets := map[string]bool{
 		bucketExcludedByEpicNonGoals:        true,
 		bucketGatedViaDeprecatedPrimitive:   true,
@@ -538,10 +528,6 @@ func TestNoUngatedMutatingHandler(t *testing.T) {
 			"baseline entry %q has invalid bucket %q", name, entry.Bucket)
 		assert.NotEmpty(t, entry.Reason,
 			"baseline entry %q must have a non-empty reason", name)
-	}
-	if entry, ok := ungatedHandlerBaseline["handleConfigPush"]; ok {
-		assert.Contains(t, entry.Reason, "#3389",
-			"handleConfigPush baseline entry must name issue #3389 (the migration tracking issue)")
 	}
 
 	// Main check: detect violations.
@@ -568,27 +554,42 @@ func TestNoUngatedMutatingHandler(t *testing.T) {
 
 // TestDetectionFiresOnViolation (AC2) proves the rule fires on a handler that lacks
 // HasLeadership() and is not annotated. It also verifies that gated handlers are
-// correctly recognised as gated, and that the baseline is what prevents handleConfigPush
-// from being flagged as a violation.
+// correctly recognised as gated, and that the baseline is what prevents a genuinely
+// ungated handler (handleCreateRole, excluded by epic #3411's own Non-Goals rather
+// than migration debt) from being flagged as a violation.
+//
+// handleConfigPush was this test's original ungated-but-baselined example; story
+// #3389 re-homed it onto HasLeadership() and removed its baseline entry, so it is
+// now asserted on the gated side below instead — proof the rule correctly flips its
+// verdict once a handler's admission primitive actually changes, not just proof the
+// rule's two branches exist in isolation.
 func TestDetectionFiresOnViolation(t *testing.T) {
 	repoRoot := findControllerRepoRoot(t)
 	apiDir := filepath.Join(repoRoot, "features", "controller", "api")
 	result := scanAPIPackage(t, apiDir)
 
-	// handleConfigPush must be detected as a mutating handler.
-	assert.Contains(t, result.mutatingHandlers, "handleConfigPush",
-		"rule must detect handleConfigPush as a mutating handler (it is registered with POST)")
+	// handleCreateRole must be detected as a mutating handler.
+	assert.Contains(t, result.mutatingHandlers, "handleCreateRole",
+		"rule must detect handleCreateRole as a mutating handler (it is registered with POST)")
 
-	// handleConfigPush must NOT be detected as HasLeadership-gated.
-	// It uses the deprecated IsLeader() primitive — the rule correctly distinguishes these.
-	assert.False(t, result.gatedHandlers["handleConfigPush"],
-		"handleConfigPush must not be detected as HasLeadership-gated (it uses the deprecated IsLeader() primitive)")
+	// handleCreateRole must NOT be detected as HasLeadership-gated — RBAC role CRUD is
+	// excluded by epic #3411's Non-Goals, not migrated, so this stays true indefinitely.
+	assert.False(t, result.gatedHandlers["handleCreateRole"],
+		"handleCreateRole must not be detected as HasLeadership-gated (excluded-by-epic-non-goals)")
 
-	// Without the baseline, handleConfigPush would be a violation.
+	// Without the baseline, handleCreateRole would be a violation.
 	// The baseline entry is the only thing preventing the rule from firing here.
-	_, inBaseline := ungatedHandlerBaseline["handleConfigPush"]
+	_, inBaseline := ungatedHandlerBaseline["handleCreateRole"]
 	require.True(t, inBaseline,
-		"handleConfigPush must be in the baseline; without it the rule would fire on this handler, proving the rule works")
+		"handleCreateRole must be in the baseline; without it the rule would fire on this handler, proving the rule works")
+
+	// handleConfigPush (Issue #3389): now re-homed onto HasLeadership() and no longer
+	// in the baseline — the rule must recognise it as gated on its own merits.
+	assert.True(t, result.gatedHandlers["handleConfigPush"],
+		"handleConfigPush must be detected as HasLeadership-gated after #3389's re-home")
+	_, stillBaselined := ungatedHandlerBaseline["handleConfigPush"]
+	assert.False(t, stillBaselined,
+		"handleConfigPush must not remain in the baseline — it no longer needs the exemption")
 
 	// Gated handlers must be detected as gated — the rule correctly passes them.
 	assert.True(t, result.gatedHandlers["handleClusterNodeDrain"],
