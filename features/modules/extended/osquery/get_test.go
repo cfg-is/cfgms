@@ -72,8 +72,10 @@ func osqueryBanned() []string {
 
 // cpuJSON is the canned osquery response for a host:cpu query. It omits
 // current_clock_speed (ephemeral) and includes an empty cpu_subtype to verify
-// that empty-value omission works.
-const cpuJSON = `[{"cpu_brand":"Intel Core i7-10700K","cpu_type":"x86_64","cpu_subtype":"","cpu_physical_cores":"8","cpu_logical_cores":"16","cpu_microcode":"0xf0","model":"Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz","manufacturer":"Intel Corp.","processor_type":"Central Processor","cpu_family":"6","max_clock_speed":"3800","number_of_cores":"8","logical_processors":"16","address_width":"64"}]`
+// that empty-value omission works. cpu_family is deliberately absent: it is
+// not a real cpu_info column on any platform (Issue #3570) — see the queryCPU
+// comment in get.go.
+const cpuJSON = `[{"cpu_brand":"Intel Core i7-10700K","cpu_type":"x86_64","cpu_subtype":"","cpu_physical_cores":"8","cpu_logical_cores":"16","cpu_microcode":"0xf0","model":"Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz","manufacturer":"Intel Corp.","processor_type":"Central Processor","max_clock_speed":"3800","number_of_cores":"8","logical_processors":"16","address_width":"64"}]`
 
 func TestGetCPU_ReturnsExpectedFields(t *testing.T) {
 	m := moduleReturning(t, cpuJSON)
@@ -86,7 +88,7 @@ func TestGetCPU_ReturnsExpectedFields(t *testing.T) {
 	wantPresent := []string{
 		"cpu_brand", "cpu_type", "cpu_physical_cores", "cpu_logical_cores",
 		"cpu_microcode", "model", "manufacturer", "processor_type",
-		"cpu_family", "max_clock_speed", "number_of_cores", "logical_processors",
+		"max_clock_speed", "number_of_cores", "logical_processors",
 		"address_width",
 	}
 	for _, k := range wantPresent {

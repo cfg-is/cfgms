@@ -83,6 +83,17 @@ const (
 	// queryCPU collects CPU hardware identity from system_info and cpu_info.
 	// current_clock_speed is excluded: it changes with CPU throttling and is
 	// therefore ephemeral per ADR-016 clause 4.
+	//
+	// cpu_info has no cpu_family column on any platform — confirmed against the
+	// official osquery 5.13.1 table spec (specs/cpu_info.table: base schema plus
+	// WINDOWS/DARWIN extended_schema, none of which declare cpu_family) and by a
+	// live invocation of the real pinned Windows binary (Issue #3570), which
+	// fails the query outright with "no such column: cpu_info.cpu_family" before
+	// this fix. The column never existed; it was carried over by mistake from
+	// the unrelated native /proc/cpuinfo "cpu family" fact collected in
+	// features/steward/dna/hardware_linux.go, which is a different fact source
+	// entirely (see features/steward/dna/fragments.go's Linux /proc/cpuinfo
+	// allowlist section).
 	queryCPU = `SELECT
 		system_info.cpu_brand,
 		system_info.cpu_type,
@@ -93,7 +104,6 @@ const (
 		cpu_info.model,
 		cpu_info.manufacturer,
 		cpu_info.processor_type,
-		cpu_info.cpu_family,
 		cpu_info.max_clock_speed,
 		cpu_info.number_of_cores,
 		cpu_info.logical_processors,

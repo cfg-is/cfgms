@@ -65,11 +65,41 @@ func runQuery(ctx context.Context, binPath, query string) ([]map[string]string, 
 	// #nosec G204 — binPath is the integrity-verified binary path returned by
 	// PreExecVerifier.VerifyBeforeExec; all args are constant flag strings.
 	cmd := exec.CommandContext(ctx, binPath, "--json")
-	// A trailing newline ensures the SQL statement is terminated before EOF,
-	// satisfying osquery's batch-mode statement detection. io.MultiReader is
-	// used so query content is never concatenated with other strings — the
-	// sanitised-stdin invariant is easier to audit when each reader is separate.
-	cmd.Stdin = io.MultiReader(strings.NewReader(query), strings.NewReader("\n"))
+	// osquery's stdin batch mode requires the statement itself to be
+	// terminated with a semicolon — a trailing newline alone is NOT
+	// sufficient (contrary to what this comment used to claim). Verified live
+	// against the real pinned Windows binary (Issue #3570): every query in
+	// this package's kindToQuery and catalog.go's ad-hoc catalog lacks a
+	// trailing ";", and every one of them produced empty stdout — no error,
+	// just zero bytes, which json.Unmarshal then reports as "unexpected end
+	// of JSON input" — when piped with only a trailing newline. Appending ";"
+	// here, once, centrally, fixes every current and future caller (the
+	// curated host:* queries and the ad-hoc RPC handler alike) without
+	// requiring each query string to remember the contract. A query that
+	// already ends with ";" after trimming trailing whitespace is left alone
+	// — a redundant ";;" is a harmless empty statement to osquery. This is a
+	// plain string comparison/trim on query content already destined for
+	// stdin, not command-line argument construction, so it does not touch the
+	// args-injection invariant above: args stays the fixed two-element slice
+	// it always was.
+	//
+	// io.MultiReader still separates the (possibly semicolon-terminated)
+	// query from the trailing newline reader below, so the terminator and the
+	// final newline remain independently auditable pieces.
+	//
+	// This only trims trailing whitespace before checking for ";" — a query
+	// ending in a SQL line comment (e.g. "... LIMIT 10 -- note") would get the
+	// ";" appended onto the commented-out line, reproducing the same silent
+	// empty-stdout failure this fix exists to close. No caller in this package
+	// constructs a query that way today (catalog.go's parameter admission
+	// gate rejects "--" outright, so only a developer-authored query string
+	// could hit this), but a query added later must not end in a line
+	// comment.
+	terminated := strings.TrimRight(query, " \t\r\n")
+	if !strings.HasSuffix(terminated, ";") {
+		terminated += ";"
+	}
+	cmd.Stdin = io.MultiReader(strings.NewReader(terminated), strings.NewReader("\n"))
 
 	out, err := cmd.Output()
 	if err != nil {
