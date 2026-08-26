@@ -1127,3 +1127,91 @@ func TestCrossChannelListAndRevoke_PostRestartPath(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, revokeRec.Code,
 		"cross-channel revoke must return 404 (session not found on this channel)")
 }
+
+// TestSessionCreate_GrantedAccount_ConfinedToAccountPermissions is a REQUIRED TEST
+// (Issue #3584, AC): a tenant-scoped account granted session:create can mint a CLI
+// Bearer session, but that session is confined to the account's permission grants —
+// it is NOT implicitly admin. The test proves confinement by verifying that the minted
+// session is denied a permission the account does not hold (steward:list).
+//
+// Safety depends on #3576: authenticationMiddleware re-derives the principal from the
+// bound account on every Bearer request, so the session carries only the account's
+// Permissions and never falls back to implicit admin.
+func TestSessionCreate_GrantedAccount_ConfinedToAccountPermissions(t *testing.T) {
+	srv, _, _ := setupTestServerWithSession(t)
+
+	// Inject a tenant-scoped account that holds only session:create.
+	// cacheAccount keys by Username; getAccountByID scans by ID.
+	acct := &account{
+		ID:          "tenant-admin-confinement-001",
+		Username:    "tenant-admin-confinement",
+		TenantID:    "acme-corp",
+		RootScope:   false,
+		Permissions: []string{"session:create"},
+	}
+	srv.cacheAccount(acct)
+
+	// Build a Strong-assurance principal for this account — simulating the passkey
+	// step-up that session:create requires. ImplicitAdmin is false: this is a
+	// tenant-scoped account principal, not an mTLS-admin bootstrap principal.
+	p := &Principal{
+		ID:            acct.ID,
+		Name:          "session:" + acct.Username,
+		Assurance:     session.AssuranceStrong,
+		TenantID:      acct.TenantID,
+		Permissions:   []string{"session:create"},
+		ImplicitAdmin: false,
+	}
+	body := `{"connection_name":"confinement-test-ctrl"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(body))
+	createReq = createReq.WithContext(context.WithValue(createReq.Context(), principalContextKey, p))
+	createRec := httptest.NewRecorder()
+
+	// Mint the session directly via the handler (permission gate is at router level;
+	// we are testing confinement of the *resulting* session, not the issuance gate).
+	srv.handleSessionCreate(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code, "granted account must be able to mint a CLI session: %s", createRec.Body.String())
+
+	var createResp sessionCreateResponse
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
+	token := createResp.Token
+	require.NotEmpty(t, token, "session token must not be empty")
+
+	// Use the minted Bearer token on the router for a route that needs steward:list.
+	// The middleware will re-derive the principal from the bound account (Issue #3576):
+	// acct.RootScope == false → ImplicitAdmin = false; Permissions = ["session:create"].
+	// steward:list is absent from that list → 403 INSUFFICIENT_PERMISSIONS.
+	stewardReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	stewardReq.Header.Set("Authorization", "Bearer "+token)
+	stewardRec := httptest.NewRecorder()
+	srv.router.ServeHTTP(stewardRec, stewardReq)
+
+	if stewardRec.Code != http.StatusForbidden {
+		t.Errorf("confined session: GET /api/v1/stewards status = %d, want 403 "+
+			"(session must be confined to account's grants, not implicit admin); body: %s",
+			stewardRec.Code, stewardRec.Body.String())
+	}
+}
+
+// TestRouterSessionCreate_NoGrantReturns403 is a REQUIRED TEST (Issue #3584, AC):
+// an account that has NOT been granted session:create must still be refused by
+// POST /api/v1/sessions with 403 INSUFFICIENT_PERMISSIONS.
+//
+// Uses a real API key (Machine assurance) with steward:list but not session:create,
+// so requirePermission("session","create") fires on the permission check before the
+// assurance check.
+func TestRouterSessionCreate_NoGrantReturns403(t *testing.T) {
+	srv, _, _ := setupTestServerWithSession(t)
+
+	// API key with steward:list only — no session:create grant.
+	apiKey := NewTestKey(t, srv, []string{"steward:list"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(`{"connection_name":"no-grant-test"}`))
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("no session:create grant: status = %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+}

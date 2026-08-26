@@ -215,6 +215,21 @@ var knownPermissions = map[string]bool{
 	// which dispatches catalog queries to targeted stewards. Carries AssuranceStrong +
 	// RequireUserPresence in permissionAssurance (catalog templates may reach sensitive host state).
 	"osquery:execute": true,
+	// CLI session management (Issue #3584, Epic #3178). These three permissions were
+	// deliberately absent from knownPermissions before #3576 landed: without per-request
+	// account-permission resolution for Bearer sessions, session:create could mint a
+	// session with implicit-admin breadth, defeating tenant-scope confinement. Now that
+	// #3576 re-derives the principal from the bound account on every Bearer request, a
+	// tenant-scoped account's session is confined to its grants — making it safe to let
+	// the account hold session:create in the first place.
+	//
+	// session:create remains in permissionAssurance with Min: AssuranceStrong, so the
+	// passkey-step-up requirement is unchanged. session:list and session:revoke are
+	// intentionally absent from permissionAssurance — revoking a session is a
+	// de-escalation/safety action that must not be gated on strong assurance.
+	"session:create": true,
+	"session:list":   true,
+	"session:revoke": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

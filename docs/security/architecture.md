@@ -347,10 +347,14 @@ Routes that require elevated assurance are declared in `permissionAssurance` (`f
 | `cert-binding:rotate` | `POST /api/v1/accounts/{username}/certs/rotate/{old_serial}` — atomically binds a new certificate and revokes the old one; resumable if interrupted mid-operation (Issue #3579) |
 | `cluster:drain-node` | `POST /api/v1/cluster/nodes/{id}/drain` |
 | `cluster:decommission-node` | `POST /api/v1/cluster/nodes/{id}/decommission` |
-| `session:create` | `POST /api/v1/sessions` |
+| `session:create` | `POST /api/v1/sessions` — grantable to tenant-scoped accounts (Issue #3584); `session:list` and `session:revoke` are also grantable but absent from this table (no elevated assurance required for list/revoke) |
 | `module:approve`, `module:reject`, `publisher-trust:add` | _(forward-declared; routes not yet wired)_ |
 
 The canonical source of truth is `permissionAssurance` in `features/controller/api/assurance.go`. The `TestF2_AssuranceGate_ParityWithPermissionRegistry` test asserts at test time that the wired route set and the registry match — any drift is a test failure.
+
+**Grantable session permissions (Issue #3584):** `session:create`, `session:list`, and `session:revoke` are present in `knownPermissions` and can be explicitly granted to a tenant-scoped account or API key via `POST /api/v1/accounts` or `POST /api/v1/api-keys`. `session:create` retains its `AssuranceStrong` floor — a Basic-assurance session (web-session cookie or existing cfg-CLI Bearer) cannot satisfy the gate, closing the self-perpetuating-compromise gap. `session:list` and `session:revoke` are intentionally absent from `permissionAssurance` (revoking a session is a de-escalation/safety action that must succeed even when the strong authenticator is unavailable).
+
+**Confinement guarantee (Issue #3576 + #3584):** A CLI Bearer session minted by a tenant-scoped account is confined to that account's permission grants on every request. `authenticationMiddleware` re-derives the principal from the bound account on each Bearer request — `ImplicitAdmin` is set only for root-scope or unbound (certificate-derived) sessions; a tenant-scoped account session is held to its `Permissions` slice verbatim. A session minted by an account that holds only `session:create` cannot reach `steward:list`, `rbac:assign-role`, or any other route the account's grants do not cover.
 
 **Presence-gated subset** (`RequireUserPresence: true`, ADR-021 Decision 4): `AssuranceStrong` alone is not sufficient. `requirePermission` additionally requires an `X-Presence-Token` header — a fresh, single-use token minted by `POST /api/v1/webauthn/presence/finish` after a WebAuthn assertion with `userVerification: "required"`. Requests without one receive `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"`.
 
