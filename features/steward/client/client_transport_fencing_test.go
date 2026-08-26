@@ -5,12 +5,15 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 )
 
@@ -138,6 +141,54 @@ func TestReceiveCommand_FencedRejection_NeverDispatches(t *testing.T) {
 	// confirming this is a plain domain error rather than a wrapped transport/gRPC
 	// error that upstream code might special-case for reconnect.
 	assert.True(t, errors.Is(err, ErrCommandTermFenced))
+}
+
+// TestCheckTermFence_ConcurrentCommands_PersistedTermNeverRegresses covers the
+// real dispatch shape: pkg/controlplane/providers/grpc dispatches one goroutine
+// per inbound command, so several accepted commands run checkTermFence — and its
+// persistence call — concurrently and complete in arbitrary order.
+//
+// checkTermFence releases c.mu before persisting (file I/O must not be done under
+// the client lock), so the ordering guarantee has to come from FenceRatchet.Save
+// itself. This test pins the property that matters after a restart: whatever the
+// completion order, the term on disk equals the in-memory high-water mark and the
+// file is parseable — a regressed or truncated file would come back from Load as
+// zero state and leave the fence open.
+func TestCheckTermFence_ConcurrentCommands_PersistedTermNeverRegresses(t *testing.T) {
+	dir := t.TempDir()
+	tc := &TransportClient{
+		logger:       newTestLogger(t),
+		fenceRatchet: stewardconfig.NewFenceRatchet(dir),
+	}
+
+	const commands = 64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 1; i <= commands; i++ {
+		wg.Add(1)
+		go func(term uint64) {
+			defer wg.Done()
+			<-start
+			// Rejections are expected and legitimate here: a command whose term is
+			// below the high-water mark reached by a concurrently admitted command
+			// is exactly what the fence is for. Only the persisted outcome is asserted.
+			_ = tc.checkTermFence(fencedCommand(fmt.Sprintf("cmd-%d", term), term))
+		}(uint64(i))
+	}
+	close(start)
+	wg.Wait()
+
+	tc.mu.RLock()
+	inMemory := tc.highestTermSeen
+	tc.mu.RUnlock()
+	require.Equal(t, uint64(commands), inMemory, "highest term must win in memory")
+
+	// Simulate the restart: a fresh FenceRatchet reading the same directory.
+	ratchetSet, persisted, err := stewardconfig.NewFenceRatchet(dir).Load()
+	require.NoError(t, err, "concurrent persistence must never leave an unreadable file")
+	assert.True(t, ratchetSet, "ratchet-set flag must survive concurrent persistence")
+	assert.Equal(t, inMemory, persisted,
+		"persisted high-water mark must match memory, not an out-of-order lower term")
 }
 
 // TestReceiveCommand_AcceptedCommand_Dispatches verifies the fence does not

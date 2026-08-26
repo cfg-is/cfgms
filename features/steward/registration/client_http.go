@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -87,11 +89,21 @@ type RegistrationPendingResponse struct {
 	Status    string `json:"status"`
 }
 
+// enrollmentStatusClaimed is the registration status the controller reports once a
+// pending registration has been approved and its certificate set issued.
+const enrollmentStatusClaimed = "claimed"
+
 // HTTPClient handles steward registration via REST API
 type HTTPClient struct {
 	controllerURL string
 	httpClient    *http.Client
 	logger        logging.Logger
+
+	// fenceRatchet is the steward's persisted Raft-term fence state (Issue #3437).
+	// It is non-nil only when HTTPConfig.CertStoreDir is set. A completed enrollment
+	// that returns a verified fresh certificate set clears it; see
+	// resetFenceRatchetOnEnrollment.
+	fenceRatchet *stewardconfig.FenceRatchet
 }
 
 // HTTPConfig holds configuration for HTTP registration
@@ -104,8 +116,15 @@ type HTTPConfig struct {
 	CACertPath string
 	// CAPEM is an inline PEM-encoded CA certificate. Takes precedence over CACertPath when set.
 	// Used in install-pinned and TOFU modes to provide the pinned CA without requiring a disk read.
-	CAPEM  string
-	Logger logging.Logger
+	CAPEM string
+	// CertStoreDir is the steward's on-disk state root (the same directory the transport
+	// client uses for the fence ratchet, features/steward/client/client_transport.go).
+	// When set, a completed enrollment whose certificate set verifies clears the persisted
+	// Raft-term fence ratchet stored there (Issue #3437). When empty, the client performs
+	// no ratchet reset at all — callers that do not own the steward's durable state, such
+	// as the certificate-refresh path, leave it unset deliberately.
+	CertStoreDir string
+	Logger       logging.Logger
 }
 
 // NewHTTPClient creates a new HTTP-based registration client
@@ -148,14 +167,19 @@ func NewHTTPClient(cfg *HTTPConfig) (*HTTPClient, error) {
 		transport.TLSClientConfig = tlsCfg
 	}
 
-	return &HTTPClient{
+	client := &HTTPClient{
 		controllerURL: cfg.ControllerURL,
 		httpClient: &http.Client{
 			Timeout:   timeout,
 			Transport: transport,
 		},
 		logger: cfg.Logger,
-	}, nil
+	}
+	if cfg.CertStoreDir != "" {
+		client.fenceRatchet = stewardconfig.NewFenceRatchet(cfg.CertStoreDir)
+	}
+
+	return client, nil
 }
 
 // Register registers the steward with the controller using a registration token.
@@ -206,6 +230,10 @@ func (c *HTTPClient) Register(ctx context.Context, req RegistrationRequest) (*Re
 			"steward_id", regResp.StewardID,
 			"tenant_id", regResp.TenantID,
 			"group", regResp.Group)
+		// Enrollment completed with a fresh certificate set: clear the persisted
+		// Raft-term fence so a rebuilt controller cluster (terms restart at 1) is not
+		// permanently rejected (Issue #3437).
+		c.resetFenceRatchetForEnrollment(regResp.enrollmentCertSet())
 		return &regResp, nil, nil
 
 	case http.StatusAccepted:
@@ -260,7 +288,9 @@ func (c *HTTPClient) PollStatus(ctx context.Context, pendingID, regToken string,
 	}
 
 	if resp.StatusCode == http.StatusGone {
-		return &RegistrationStatusResponse{Status: "claimed"}, nil
+		// Already claimed elsewhere: no certificate set is issued to this caller, so
+		// this is not an enrollment completion and never resets the fence ratchet.
+		return &RegistrationStatusResponse{Status: enrollmentStatusClaimed}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status poll failed with HTTP %d: %s", resp.StatusCode, string(body))
@@ -269,6 +299,11 @@ func (c *HTTPClient) PollStatus(ctx context.Context, pendingID, regToken string,
 	var statusResp RegistrationStatusResponse
 	if err := json.Unmarshal(body, &statusResp); err != nil {
 		return nil, fmt.Errorf("failed to parse status response: %w", err)
+	}
+	if statusResp.Status == enrollmentStatusClaimed {
+		// Approved registration carrying the issued certificate set: same enrollment
+		// completion as Register's HTTP 200 branch, reached via operator approval.
+		c.resetFenceRatchetForEnrollment(statusResp.enrollmentCertSet())
 	}
 	return &statusResp, nil
 }
@@ -394,4 +429,140 @@ func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, no
 	default:
 		return nil, fmt.Errorf("refresh complete failed with HTTP %d: %s", resp.StatusCode, string(body))
 	}
+}
+
+// enrollmentCertSet is the certificate material a completed enrollment exchange
+// returns. It is the evidence the fence-ratchet reset verifies before it touches
+// the steward's persisted fence state.
+type enrollmentCertSet struct {
+	stewardID  string
+	clientCert string
+	clientKey  string
+	caCert     string
+}
+
+// complete reports whether the response carried a full certificate set. Responses
+// that carry none (a 202 pending registration, a 410 already-claimed poll) are not
+// enrollment completions and never trigger the reset.
+func (s enrollmentCertSet) complete() bool {
+	return s.clientCert != "" && s.clientKey != "" && s.caCert != ""
+}
+
+// enrollmentCertSet extracts the certificate material from an approved registration.
+func (r *RegistrationResponse) enrollmentCertSet() enrollmentCertSet {
+	return enrollmentCertSet{
+		stewardID:  r.StewardID,
+		clientCert: r.ClientCert,
+		clientKey:  r.ClientKey,
+		caCert:     r.CACert,
+	}
+}
+
+// enrollmentCertSet extracts the certificate material from a claimed status poll.
+func (r *RegistrationStatusResponse) enrollmentCertSet() enrollmentCertSet {
+	return enrollmentCertSet{
+		stewardID:  r.StewardID,
+		clientCert: r.ClientCert,
+		clientKey:  r.ClientKey,
+		caCert:     r.CACert,
+	}
+}
+
+// verifyEnrollmentCertSet checks that the certificate material really is a freshly
+// issued steward identity from the CA the same exchange presented, rather than any
+// well-formed JSON body that happens to reach the client. It proves three things:
+//
+//  1. The client certificate and private key are a usable pair (the steward can
+//     actually authenticate with what it was handed).
+//  2. The leaf chains to the CA certificate delivered alongside it, is currently
+//     within its validity window, and carries the client-auth EKU.
+//  3. Nothing is missing — a partial set fails rather than half-verifying.
+//
+// It deliberately does not attempt to prove the CA is a *different* cluster's CA:
+// the registration response carries no cluster identity, and inventing one here
+// would be a controller-side protocol change (out of scope for #3437).
+func verifyEnrollmentCertSet(set enrollmentCertSet) error {
+	if !set.complete() {
+		return fmt.Errorf("enrollment response carries no complete certificate set")
+	}
+
+	if _, err := cert.LoadTLSCertificate([]byte(set.clientCert), []byte(set.clientKey)); err != nil {
+		return fmt.Errorf("enrollment client certificate and key are not a usable pair: %w", err)
+	}
+
+	leaf, err := cert.ParseCertificateFromPEM([]byte(set.clientCert))
+	if err != nil {
+		return fmt.Errorf("parse enrollment client certificate: %w", err)
+	}
+
+	roots, err := cert.CertPoolFromPEM([]byte(set.caCert))
+	if err != nil {
+		return fmt.Errorf("build verification pool from enrollment CA certificate: %w", err)
+	}
+
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return fmt.Errorf("enrollment client certificate does not chain to the enrollment CA: %w", err)
+	}
+
+	return nil
+}
+
+// resetFenceRatchetOnEnrollment clears the persisted Raft-term fence ratchet after a
+// steward enrollment into a controller cluster completes, so a legitimate cluster
+// rebuild (which restarts Raft terms at 1) does not permanently lock the steward out.
+//
+// The reset is conditional, not a proxy for ClearRatchet: it runs only after
+// verifyEnrollmentCertSet accepts the certificate set the enrollment exchange
+// returned. A response that carries no certificate set, a mismatched key pair, or a
+// leaf that does not chain to the delivered CA leaves the persisted fence untouched
+// and returns an error.
+//
+// The function is unexported on purpose. Its two call sites are the enrollment
+// completions in this file — Register's HTTP 200 branch and PollStatus's claimed
+// branch — and the Go compiler, not a convention, is what keeps every other package
+// (features/steward/client, the command-receive path, above all) from calling it. The
+// AST-walk test in architecture_test.go covers the underlying ClearRatchet method and
+// this function's name for both packages and any future re-export.
+//
+// Safety contingency: what this verification establishes is that the certificate set
+// came from whichever CA the enrollment exchange presented, over a TLS connection the
+// steward verified against its configured/pinned CA — not that the endpoint is the
+// legitimate controller when no CA is pinned. Closing that gap is a forthcoming story
+// (tracked as a private draft under the parent epic). Until it lands, the reset is
+// safe against routine restarts and legitimate cluster rebuilds but not against a
+// network adversary who can both spoof the registration endpoint and be trusted by
+// the steward's configured trust store. See
+// docs/architecture/steward-operating-model.md §Raft-Term Command Fence.
+func resetFenceRatchetOnEnrollment(r *stewardconfig.FenceRatchet, set enrollmentCertSet) error {
+	if err := verifyEnrollmentCertSet(set); err != nil {
+		return fmt.Errorf("fence ratchet retained: %w", err)
+	}
+	if r == nil {
+		// No durable ratchet configured (CertStoreDir unset): nothing to clear.
+		return nil
+	}
+	return r.ClearRatchet()
+}
+
+// resetFenceRatchetForEnrollment is the wiring between an enrollment completion and
+// the reset. It is a no-op when the client owns no durable ratchet or when the
+// response carried no certificate set, and it never fails the enrollment: a
+// verification failure leaves the fence in place (fail-closed) and is logged.
+func (c *HTTPClient) resetFenceRatchetForEnrollment(set enrollmentCertSet) {
+	if c.fenceRatchet == nil || !set.complete() {
+		return
+	}
+
+	if err := resetFenceRatchetOnEnrollment(c.fenceRatchet, set); err != nil {
+		c.logger.Warn("Raft-term fence ratchet not reset: enrollment certificate set failed verification",
+			"steward_id", logging.SanitizeLogValue(set.stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+
+	c.logger.Info("Raft-term fence ratchet cleared after verified enrollment",
+		"steward_id", logging.SanitizeLogValue(set.stewardID))
 }
