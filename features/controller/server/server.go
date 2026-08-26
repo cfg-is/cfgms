@@ -216,7 +216,11 @@ type egServerProvider interface {
 // would be blind to the whole fleet after a cutover. (Issue #2010)
 //
 // Resolution:
-//   - An absolute cfg.DataDir is honored as-is.
+//   - A rooted cfg.DataDir is honored as-is (config.IsRootedPath, not filepath.IsAbs —
+//     a controller.cfg is a reviewed, hand-authored artefact that ships a POSIX
+//     data_dir right next to cert_path and is parsed on every platform the controller
+//     builds for; filepath.IsAbs answers for the running platform only and would
+//     silently discard a POSIX-rooted DataDir on Windows, Issue #3460).
 //   - An empty OR relative cfg.DataDir is replaced by a root derived from the
 //     configured durable storage paths (SQLitePath dir, then FlatfileRoot dir),
 //     which are absolute in any real deployment, co-locating the DNA store with
@@ -229,7 +233,7 @@ type egServerProvider interface {
 //     real deployment, e.g. ctrl-01, sets absolute Storage.SQLitePath).
 func resolveDNADataRoot(cfg *config.Config) string {
 	root := cfg.DataDir
-	if root == "" || !filepath.IsAbs(root) {
+	if root == "" || !config.IsRootedPath(root) {
 		if cfg.Storage != nil {
 			switch {
 			case cfg.Storage.SQLitePath != "":
@@ -239,7 +243,7 @@ func resolveDNADataRoot(cfg *config.Config) string {
 			}
 		}
 	}
-	if !filepath.IsAbs(root) {
+	if !config.IsRootedPath(root) {
 		if abs, err := filepath.Abs(root); err == nil {
 			root = abs
 		}
