@@ -136,7 +136,7 @@ func (e *CatalogEntry) BuildQuery(params map[string]string) string {
 // publisher signature — the same governance path as any other module capability
 // change.
 //
-// The closed set documented here ships with pinnedVersion (5.13.1). host_info,
+// The closed set documented here ships with pinnedVersion (5.23.1). host_info,
 // process_list, listening_ports, and file_info query cross-platform osquery
 // tables present since v4.x. installed_packages queries Linux-only tables
 // (deb_packages, rpm_packages) and must only be dispatched to Linux stewards.

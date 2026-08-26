@@ -48,7 +48,7 @@ import (
 // binPath through osqueryModule.verifiedBinPath (module.go) on every Get() —
 // the only path in this package that reaches runQuery.
 //
-// osquery 5.13.1 stdin contract: osqueryi reads SQL from stdin when its stdin
+// osquery 5.23.1 stdin contract: osqueryi reads SQL from stdin when its stdin
 // is not a terminal (non-TTY, i.e. programmatic invocation with piped input).
 // The --json flag requests JSON-array output. No SQL argument is passed on the
 // command line — the fixed args slice contains only constant flag strings.

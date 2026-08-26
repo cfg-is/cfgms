@@ -41,7 +41,7 @@ import (
 //
 // The pin is only meaningful because the executed binary comes from the signed
 // bundle: a host-install path would run whatever version is installed there.
-const pinnedVersion = "5.13.1"
+const pinnedVersion = "5.23.1"
 
 // ErrNoVerifiedInstallation is returned by Get() when the module was built
 // without an installed osquery bundle to verify against. It is a fail-closed
