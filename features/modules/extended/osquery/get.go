@@ -85,7 +85,7 @@ const (
 	// therefore ephemeral per ADR-016 clause 4.
 	//
 	// cpu_info has no cpu_family column on any platform — confirmed against the
-	// official osquery 5.13.1 table spec (specs/cpu_info.table: base schema plus
+	// official osquery 5.23.1 table spec (specs/cpu_info.table: base schema plus
 	// WINDOWS/DARWIN extended_schema, none of which declare cpu_family) and by a
 	// live invocation of the real pinned Windows binary (Issue #3570), which
 	// fails the query outright with "no such column: cpu_info.cpu_family" before
