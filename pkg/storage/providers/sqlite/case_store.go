@@ -85,14 +85,16 @@ func (s *SQLiteCaseStore) GetCase(ctx context.Context, id string) (*business.Cas
 	return c, nil
 }
 
-// ListCases returns all cases scoped to the given tenantID, newest first.
+// ListCases returns all cases within the given tenantID's subtree (the tenant
+// itself plus any descendant tenants), newest first.
 func (s *SQLiteCaseStore) ListCases(ctx context.Context, tenantID string) ([]*business.Case, error) {
 	if tenantID == "" {
 		return nil, fmt.Errorf("sqlite: tenant ID cannot be empty")
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, status, ticket_json, created_at, updated_at
-		FROM cases WHERE tenant_id = ? ORDER BY created_at DESC`, tenantID)
+		FROM cases WHERE tenant_id = ? OR tenant_id LIKE ? ORDER BY created_at DESC`,
+		tenantID, tenantID+"/%")
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to list cases for tenant %s: %w", tenantID, err)
 	}

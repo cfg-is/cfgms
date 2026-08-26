@@ -338,6 +338,46 @@ func TestHandleCases_CrossTenantDenial(t *testing.T) {
 		"GET from another tenant must return 404 (same as nonexistent)")
 }
 
+// TestHandleListCases_IncludesDescendantTenant proves GET /api/v1/cases scoped
+// to a parent tenant includes a case belonging to a child tenant beneath it
+// (subtree, not exact-match, semantics), while a sibling tenant's case is
+// still excluded.
+func TestHandleListCases_IncludesDescendantTenant(t *testing.T) {
+	srv := setupCasesTestServer(t)
+	cs := srv.CasesStore()
+
+	caseParent := seedCase(t, cs, "tenant-parent")
+	caseChild := seedCase(t, cs, "tenant-parent/client-1")
+	caseSibling := seedCase(t, cs, "tenant-parent-sibling")
+
+	keyParent := NewEphemeralTestKey(t, srv,
+		[]string{"case:create", "case:list", "case:read", "case:update"},
+		"tenant-parent", 5*time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cases", nil)
+	req.Header.Set("X-API-Key", keyParent)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "list should return 200: %s", rec.Body.String())
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	data, ok := resp["data"].([]interface{})
+	require.True(t, ok, "data must be an array")
+
+	var seenIDs []string
+	for _, item := range data {
+		entry, ok := item.(map[string]interface{})
+		require.True(t, ok)
+		seenIDs = append(seenIDs, entry["id"].(string))
+	}
+
+	assert.Contains(t, seenIDs, caseParent.ID, "parent tenant's own case must be listed")
+	assert.Contains(t, seenIDs, caseChild.ID, "descendant tenant's case must be listed under subtree filtering")
+	assert.NotContains(t, seenIDs, caseSibling.ID, "sibling tenant's case must not be listed")
+}
+
 // ── GET BY ID ───────────────────────────────────────────────────────────────
 
 func TestHandleGetCase_ReturnsCaseWithPins(t *testing.T) {

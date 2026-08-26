@@ -160,6 +160,30 @@ func TestDatabaseCaseStore_ListCases_TenantIsolation(t *testing.T) {
 	assert.Equal(t, cB.ID, listB[0].ID)
 }
 
+// TestDatabaseCaseStore_ListCases_Subtree proves a case in a descendant tenant
+// (tenant-a/client-1) is included in a ListCases call scoped to the parent
+// tenant (tenant-a), while a sibling tenant's case (tenant-ab) is not.
+func TestDatabaseCaseStore_ListCases_Subtree(t *testing.T) {
+	store := newTestCaseStore(t)
+	ctx := context.Background()
+
+	cParent := makeDBCase("db-case-parent-1", "tenant-a")
+	cChild := makeDBCase("db-case-child-1", "tenant-a/client-1")
+	cSibling := makeDBCase("db-case-sibling-1", "tenant-ab")
+	require.NoError(t, store.CreateCase(ctx, cParent))
+	require.NoError(t, store.CreateCase(ctx, cChild))
+	require.NoError(t, store.CreateCase(ctx, cSibling))
+
+	list, err := store.ListCases(ctx, "tenant-a")
+	require.NoError(t, err)
+	ids := make([]string, 0, len(list))
+	for _, c := range list {
+		ids = append(ids, c.ID)
+	}
+	assert.ElementsMatch(t, []string{cParent.ID, cChild.ID}, ids,
+		"parent-scoped list must include the descendant tenant's case and exclude the sibling tenant's case")
+}
+
 // TestDatabaseCaseStore_GetCase_NotFound verifies ErrCaseNotFound for missing IDs.
 func TestDatabaseCaseStore_GetCase_NotFound(t *testing.T) {
 	store := newTestCaseStore(t)
