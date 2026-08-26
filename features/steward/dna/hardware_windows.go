@@ -26,12 +26,28 @@ type WindowsHardwareCollector struct{}
 // commandTimeout is the per-command timeout applied to every WMI and PowerShell call.
 const commandTimeout = 30 * time.Second
 
+// commandWaitDelay bounds how long Output() will wait for a killed command's
+// I/O to drain before its pipes are force-closed. Mirrors darwinCmdWaitDelay
+// in exec_darwin.go (Issue #2361) for the identical root cause on Windows: a
+// child (wmic.exe, powershell.exe) can pass its inherited stdout/stderr pipe
+// handle to a grandchild it spawns, and if the child is killed before that
+// grandchild exits, the pipe never closes — Output() then blocks forever
+// waiting for EOF instead of returning once cmdCtx is cancelled. WaitDelay
+// (Cmd.WaitDelay, added Go 1.20) is exactly the bounded grace period this
+// needs: after cancellation, Go waits at most this long before forcibly
+// closing the pipes regardless of whether the process tree has fully exited.
+const commandWaitDelay = 5 * time.Second
+
 // runCommand executes a command with a 30-second per-command timeout derived from ctx.
-// If the command times out or ctx is cancelled, an error is returned.
+// If the command times out or ctx is cancelled, an error is returned. WaitDelay
+// bounds subprocess cleanup after cancellation (Issue #3600) so a killed
+// command's I/O pipes cannot block this call past the context deadline.
 func runCommand(ctx context.Context, name string, args ...string) (string, error) {
 	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
-	output, err := exec.CommandContext(cmdCtx, name, args...).Output()
+	cmd := exec.CommandContext(cmdCtx, name, args...)
+	cmd.WaitDelay = commandWaitDelay
+	output, err := cmd.Output()
 	return string(output), err
 }
 

@@ -9,6 +9,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -88,4 +89,39 @@ func keyReferencesVMInventory(key string) bool {
 		strings.Contains(k, "vm_count") ||
 		strings.Contains(k, "vm_running") ||
 		strings.Contains(k, "vm_name")
+}
+
+// TestRunCommand_StuckGrandchildDoesNotHang is the regression guard for
+// Issue #3600 (mirroring exec_darwin_test.go's TestDarwinRunCmd_StuckChildDoesNotHang
+// for the identical root cause, Issue #2361). It reproduces the failure mode
+// directly: cmd.exe backgrounds a long-lived grandchild (ping, 60s) via
+// `start /b`, which inherits the stdout pipe Go redirected for Output(), then
+// cmd.exe itself exits almost immediately. The grandchild keeps the pipe's
+// write end open, so without WaitDelay, Output() cannot see EOF and blocks
+// for the grandchild's full lifetime regardless of context cancellation.
+//
+// The passed-in context has a 2-second timeout — well under both
+// commandTimeout (30s) and the grandchild's 60s lifetime — so a hang here is
+// unmistakable: a regression blocks for ~60s (until the grandchild exits or
+// the test's own -timeout fires), while the fixed path returns within
+// roughly commandWaitDelay once the timer starts.
+func TestRunCommand_StuckGrandchildDoesNotHang(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := runCommand(ctx, "cmd", "/c", "start /b ping -n 60 127.0.0.1 >nul & exit")
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "a call whose grandchild outlives it must return an error, not silently succeed with truncated output")
+	require.Less(t, elapsed, 30*time.Second,
+		"runCommand must return within WaitDelay when a grandchild holds the stdout pipe open, not block on it")
+}
+
+// TestRunCommand_NormalCommandSucceeds confirms the WaitDelay fix does not
+// disturb ordinary fast commands: output is returned intact with no error.
+func TestRunCommand_NormalCommandSucceeds(t *testing.T) {
+	out, err := runCommand(context.Background(), "cmd", "/c", "echo cfgms")
+	require.NoError(t, err)
+	assert.Contains(t, out, "cfgms")
 }
