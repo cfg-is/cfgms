@@ -523,6 +523,87 @@ All API-supplied values render as JSX text nodes only (security A9.1); the
 `parsePendingRefreshList` / `parsePendingRefreshEntry` functions shape-validate
 the wire payload before any field reaches the DOM.
 
+## Installer & deploy hand-off (Story #2937)
+
+[`src/installer/InstallerPage.tsx`](src/installer/InstallerPage.tsx) — the
+`/installer` route, accessible from the app shell nav as "Installer".
+
+**Artifact table:** lists installer artifacts for the caller's tenant from
+`GET /api/v1/installer/artifacts` (`{data:[...]}` envelope, served by
+`handleListInstallerArtifacts`). Fixed columns in this order: **Platform,
+Arch, Size, Checksum, Download.** Size renders human-readable (e.g. `48.2 MB`,
+not raw bytes). Checksum renders in the monospace token, truncated to 16 chars
+with the full value available on hover (title attribute). Each Download cell
+links to `GET /api/v1/installer/download/{platform}/{arch}` — the public
+endpoint that returns a tar.gz package including the binary and an install
+README.
+
+**Download scope disclosure.** The table rows are tenant-scoped
+(`handleListInstallerArtifacts` reads `ctxkeys.TenantID`) but the download
+endpoint is unauthenticated and always reads the fixed root tenant
+(`downloadTenantID = "root"` in `handlers_installer.go`, Issue #1704). It also
+returns a tar.gz — binary plus CA material — rather than the raw blob whose
+checksum the row shows. Both mismatches are disclosed in the page rather than
+hidden: a note beneath the table (`installer-download-note`) states that
+Download serves the root-published package and that the Checksum column is the
+inner binary's SHA-256, and each Download link and checksum cell carries a
+matching `aria-label`/`title`. The column is not gated on the principal because
+`AuthContext` holds the principal in memory only — a page reload leaves it
+`null` while the session is still valid, which would blank the column for the
+root operator after every refresh.
+
+**Empty state:** follows the `WorkflowEmpty` shape (icon, heading, one line of
+body copy). Copy reads as "no artifacts published yet", not as a loading stall
+or error.
+
+**Command-assembler form** (below the table): platform/arch pickers, a
+password-type registration-token input, and a read-only assembled-command
+output with a copy button. The operator pastes in a registration token they
+already hold (minted via `cfg` CLI) and the page assembles a copy-paste
+one-liner. The binary name matches `installerFilename` and the `sudo` prefix
+matches `readmeText` (both in `handlers_installer.go`); the subcommand and
+flags come from `buildInstallCommand` in `cmd/steward/main.go`, which the
+packaged `README.txt` does not spell out:
+
+| Platform | Assembled command |
+|---|---|
+| `linux` / `darwin` | `sudo ./cfgms-steward-{arch} install --regtoken '{token}' --controller-url {origin}` |
+| `windows` | `.\cfgms-steward-{arch}.exe install --regtoken {token} --controller-url {origin}` |
+
+The `install` subcommand and the `--regtoken` / `--controller-url` flag names
+are those of the real steward CLI (`buildInstallCommand` in
+`cmd/steward/main.go`) — not `--token` / `--controller`. The POSIX token is
+single-quoted; the Windows one is not, because single quotes are literal in
+`cmd.exe` and would be passed through as part of the value.
+
+`{origin}` is `window.location.origin` (the controller's own URL). The copy
+button is disabled until platform, arch, and token are all supplied; it shows a
+transient "Copied" confirmation on click.
+
+**Security:** the operator-pasted token value is client-side only:
+- never sent in any network request from this page
+- never written to `localStorage` or `sessionStorage`
+- cleared when the component unmounts (navigation away), since it lives in
+  React component state
+
+The token input is `type="password"` with `autocomplete="off"` so the value
+is not shoulder-readable and browsers do not autofill it.
+
+All server-supplied values (platform, arch, checksum) render as JSX text nodes
+only (security A9.1); `parseArtifact` / `parseArtifactList` shape-validate the
+wire payload before any field reaches the DOM.
+
+**Tests:** [`src/installer/InstallerPage.test.tsx`](src/installer/InstallerPage.test.tsx)
+covers data states (loading, empty, error, populated table), column rendering,
+size formatting, checksum truncation, download hrefs, the download-scope
+disclosure note and per-cell labels, token charset rejection, assembler
+disabled state, assembled command content, and three required AC security
+tests:
+- Typing a token triggers zero `fetch` calls beyond the initial artifact list.
+- An empty artifact list renders the empty state (not loading, not error).
+- The token value is absent from `localStorage`, `sessionStorage`, and any
+  outgoing request payload after being entered.
+
 ## Testing
 
 Vitest with jsdom and Testing Library. Suites:
