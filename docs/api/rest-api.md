@@ -2021,11 +2021,11 @@ all clusters.
 {
   "data": [
     {
-      "name": "cfg-lab",
+      "name": "example-cluster",
       "members": ["steward-a", "steward-b"],
       "role_owners": {
-        "csv": "CFG-70-02",
-        "cno": "CFG-AB-02"
+        "csv": "HV-HOST-01",
+        "cno": "HV-HOST-02"
       }
     }
   ],
@@ -2051,18 +2051,18 @@ across tenant boundaries.
 
 **Parameters:**
 
-- `name` (path): Cluster name (e.g., `cfg-lab`)
+- `name` (path): Cluster name (e.g., `example-cluster`)
 
 **Response (200):**
 
 ```json
 {
   "data": {
-    "name": "cfg-lab",
+    "name": "example-cluster",
     "members": ["steward-a", "steward-b"],
     "role_owners": {
-      "csv": "CFG-70-02",
-      "cno": "CFG-AB-02"
+      "csv": "HV-HOST-01",
+      "cno": "HV-HOST-02"
     }
   },
   "timestamp": "2026-07-08T12:00:00Z"
@@ -2090,19 +2090,19 @@ Returns 404 under the same conditions as `GET /api/v1/clusters/{name}`.
 
 **Parameters:**
 
-- `name` (path): Cluster name (e.g., `cfg-lab`)
+- `name` (path): Cluster name (e.g., `example-cluster`)
 
 **Response (200):**
 
 ```json
 {
   "data": {
-    "cluster_name": "cfg-lab",
+    "cluster_name": "example-cluster",
     "resources": [
       {
         "role_name": "csv",
         "status": "present-with-live-owner",
-        "owner_id": "CFG-70-02"
+        "owner_id": "HV-HOST-01"
       },
       {
         "role_name": "vm2",
@@ -2111,17 +2111,17 @@ Returns 404 under the same conditions as `GET /api/v1/clusters/{name}`.
       {
         "role_name": "cno",
         "status": "orphan-dead-owner",
-        "owner_id": "CFG-AB-02"
+        "owner_id": "HV-HOST-02"
       },
       {
         "role_name": "dfs",
         "status": "split-brain",
-        "all_owner_claims": ["CFG-70-02", "CFG-AB-02"]
+        "all_owner_claims": ["HV-HOST-01", "HV-HOST-02"]
       }
     ],
     "alerts": [
       {
-        "id": "cfg-lab/vm2/declared-but-missing",
+        "id": "example-cluster/vm2/declared-but-missing",
         "severity": "critical",
         "title": "Cluster role not created",
         "metric_name": "cluster_role_missing",
@@ -2129,8 +2129,8 @@ Returns 404 under the same conditions as `GET /api/v1/clusters/{name}`.
       }
     ],
     "components": {
-      "cfg-lab/csv": { "name": "cfg-lab/csv", "status": "healthy", "message": "owner is live" },
-      "cfg-lab/vm2": { "name": "cfg-lab/vm2", "status": "unhealthy", "message": "declared but not created" }
+      "example-cluster/csv": { "name": "example-cluster/csv", "status": "healthy", "message": "owner is live" },
+      "example-cluster/vm2": { "name": "example-cluster/vm2", "status": "unhealthy", "message": "declared but not created" }
     }
   },
   "timestamp": "2026-07-16T10:00:00Z"
@@ -2186,7 +2186,7 @@ provider method takes no tenant parameter (`GetHistory`, `Diff`, `GetNeighborhoo
 against the root/subject EID before calling the provider.
 
 **Entity ID (EID) format:** `authority_type:authority_name[/local_id]`, e.g.
-`host:CFG-70-02` or `host:CFG-70-02/disk0`. Path segments use `{eid:.+}` so
+`host:SRV-001` or `host:SRV-001/disk0`. Path segments use `{eid:.+}` so
 an EID containing `/` is matched in full; URL-encode the EID when building request
 paths from untrusted input.
 
@@ -2214,7 +2214,7 @@ List entities matching a filter, paginated.
 ```json
 {
   "Entities": [
-    { "Entity": { "EID": "host:CFG-70-02", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" },
+    { "Entity": { "EID": "host:SRV-001", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" },
       "Sources": [], "Freshness": { "ObservedAt": "2026-08-08T10:00:00Z", "RecordedAt": "2026-08-08T10:00:01Z", "Stale": false },
       "CollapseGroup": null }
   ],
@@ -2282,8 +2282,8 @@ like any other source's edges.
 ```json
 {
   "edge_type": "depends-on",
-  "from_eid": "host:CFG-70-02",
-  "to_eid": "host:CFG-70-03",
+  "from_eid": "host:SRV-001",
+  "to_eid": "host:SRV-002",
   "attributes": {}
 }
 ```
@@ -2326,7 +2326,7 @@ Depth-bounded connected subgraph starting at `{eid}`.
 **Response (200):** `Neighborhood`
 
 ```json
-{ "Root": "host:CFG-70-02", "Nodes": [ { "EID": "host:CFG-70-02", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" } ], "Edges": [] }
+{ "Root": "host:SRV-001", "Nodes": [ { "EID": "host:SRV-001", "Kind": "host", "Attributes": {}, "OwningTenant": "root/msp-a" } ], "Edges": [] }
 ```
 
 **Error responses:**
@@ -2370,7 +2370,7 @@ Attribute-level delta between two points in time for an entity (ADR-022 §5).
 
 ```json
 {
-  "Subject": "host:CFG-70-02",
+  "Subject": "host:SRV-001",
   "T1": "2026-08-01T00:00:00Z",
   "T2": "2026-08-08T00:00:00Z",
   "Changes": [
@@ -2418,7 +2418,7 @@ Persisted desired-vs-actual drift record for one entity (ADR-022 §6).
 
 ```json
 {
-  "EID": "host:CFG-70-02",
+  "EID": "host:SRV-001",
   "DetectedAt": "2026-08-08T09:00:00Z",
   "Fields": [
     { "Attribute": "firewall.enabled", "Desired": true, "Actual": false, "Matching": false }

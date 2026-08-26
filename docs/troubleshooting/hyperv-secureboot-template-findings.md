@@ -4,7 +4,7 @@
 
 The `hyperv.vm` module's `Set-VMFirmware -EnableSecureBoot On -SecureBootTemplate
 MicrosoftUEFICertificateAuthority` call reproducibly failed during the
-2026-07-31/08-01 cfg-lab rebuild, while the identical call succeeded when run
+2026-07-31/08-01 validation lab rebuild, while the identical call succeeded when run
 standalone against a throwaway `-NoVHD` test VM. The isolation experiment
 required by this issue **could not reproduce the failure at all** — including
 in the configuration that was supposed to replicate the original bug exactly.
@@ -15,7 +15,7 @@ Branch A has no confirmed cause to target.
 
 ## Isolation experiment
 
-Run 2026-08-07 on `CFG-70-02` (`Get-VMHost` / `vmms.exe` version
+Run 2026-08-07 on `HV-HOST-01` (`Get-VMHost` / `vmms.exe` version
 `10.0.26100.32684`), against the cluster's `debian-13-generic-amd64.raw` seed
 asset (`C:\ClusterStorage\CSV01\seed-assets\debian-13-generic-amd64.raw`, 3 GB).
 Both variants used the module's own conversion functions verbatim (copied
@@ -42,7 +42,7 @@ Result: **succeeded.**
 
 Full commands are the exact PowerShell reproduced in this issue's isolation
 test script (converted-disk pipeline + both attach variants), run via `cfg
-steward exec` (SYSTEM) against the CFG-70-02 steward, output captured to a
+steward exec` (SYSTEM) against the Hyper-V host steward (`HV-HOST-01`), output captured to a
 local result file. Both VMs and their VHDX files were removed immediately
 after each test.
 
@@ -109,9 +109,9 @@ source:
   given VM class and would rather skip the noise entirely.
 
 This is the same effective workaround already used in production to build
-`cfgms-ctrl-01` and `cfgms-lab-datasvc` by hand
+`ctrl-node-01` and `datasvc-vm` by hand
 (`C:\temp\ctrl-vm-create.ps1` / `C:\temp\datasvc-vm-create.ps1` on
-`CFG-70-02`, both calling `Set-VMFirmware -EnableSecureBoot Off` directly) —
+`HV-HOST-01`, both calling `Set-VMFirmware -EnableSecureBoot Off` directly) —
 this issue makes that workaround a first-class, declared module option
 instead of an undocumented manual bypass.
 

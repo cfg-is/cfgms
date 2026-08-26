@@ -12,7 +12,7 @@
 
 ## Context
 
-The `hyperv` module today **operates existing VMs**: typed `hyperv.vm` and `hyperv.vswitch` resources with create/modify/start/stop/delete, declarative multi-NIC, and idempotent power, proven end-to-end on cfg-lab (PR #2035). It cannot **create a VM from nothing** — i.e. turn install media into a running, managed OS.
+The `hyperv` module today **operates existing VMs**: typed `hyperv.vm` and `hyperv.vswitch` resources with create/modify/start/stop/delete, declarative multi-NIC, and idempotent power, proven end-to-end in the validation lab (PR #2035). It cannot **create a VM from nothing** — i.e. turn install media into a running, managed OS.
 
 That gap blocks two things at once:
 
@@ -82,7 +82,7 @@ A controller restart or a slow install simply resumes from the recorded state.
 
 ### 5. Answer-file delivery via a host-native secondary VHDX; gen1 + gen2
 
-The unattended answer file is delivered on a **secondary VHDX seed disk** attached to the VM, built on the host with **native cmdlets only** — `New-VHD` + `Mount-VHD` + `Format-Volume` + copy — then detached at `finalizing`. This was chosen over a secondary ISO because building an ISO on the host requires `oscdimg` (Windows ADK), which is **not present on a stock Hyper-V host** (verified absent on cfg-lab; `New-VHD`/`Format-Volume`/`Mount-VHD` are present as part of the Hyper-V + Storage roles the host already runs). A VHDX seed therefore adds **no host dependency and no new Go module** (a pure-Go ISO builder was the alternative, rejected to avoid the dependency). It works on **both Gen1 and Gen2** (no floppy needed). Windows Setup auto-discovers `autounattend.xml` from attached media; debian-installer reads `preseed.cfg` from the labeled seed volume. **The install ISO is never repacked/re-signed** (a known cfg-lab failure with signed UEFI boot media). Gen2 secure-boot template is selected by `os_family` (`MicrosoftWindows` vs `MicrosoftUEFICertificateAuthority`); Gen1 has no secure boot.
+The unattended answer file is delivered on a **secondary VHDX seed disk** attached to the VM, built on the host with **native cmdlets only** — `New-VHD` + `Mount-VHD` + `Format-Volume` + copy — then detached at `finalizing`. This was chosen over a secondary ISO because building an ISO on the host requires `oscdimg` (Windows ADK), which is **not present on a stock Hyper-V host** (verified absent on a stock Hyper-V host; `New-VHD`/`Format-Volume`/`Mount-VHD` are present as part of the Hyper-V + Storage roles the host already runs). A VHDX seed therefore adds **no host dependency and no new Go module** (a pure-Go ISO builder was the alternative, rejected to avoid the dependency). It works on **both Gen1 and Gen2** (no floppy needed). Windows Setup auto-discovers `autounattend.xml` from attached media; debian-installer reads `preseed.cfg` from the labeled seed volume. **The install ISO is never repacked/re-signed** (a known failure with signed UEFI boot media on Hyper-V). Gen2 secure-boot template is selected by `os_family` (`MicrosoftWindows` vs `MicrosoftUEFICertificateAuthority`); Gen1 has no secure boot.
 
 ### 6. Cross-OS unattended model
 

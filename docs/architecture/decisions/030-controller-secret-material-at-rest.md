@@ -114,7 +114,7 @@ InaccessiblePaths=/etc/cfgms/secrets.key.cred
 > file through verbatim, so the service would have received the sealed blob rather than the key.
 > The directive that unseals a `systemd-creds`-encrypted credential is
 > **`LoadCredentialEncrypted=`**, and it is what both bootstrap scripts emit. Verified live on
-> `cfgms-ha-node2`: with `LoadCredentialEncrypted=`, the plaintext appears at
+> `ctrl-node-02`: with `LoadCredentialEncrypted=`, the plaintext appears at
 > `$CREDENTIALS_DIRECTORY/<id>` mode 0440; with a blob systemd cannot unseal, the unit refuses to
 > start with `status=243/CREDENTIALS`.
 
@@ -170,8 +170,8 @@ If a future variant of this step genuinely cannot use stdin, it must create the 
 `findmnt -no FSTYPE --target /run` returning `tmpfs`, aborting the bootstrap otherwise. A path that
 is merely *expected* to be tmpfs is not an assertion.
 
-The existing cluster (`cfgms-ctrl-01` on `cfgms-ctrl-01`, `cfgms-ha-node2`,
-`cfgms-ha-node3`) was provisioned before this decision and holds cleartext `secrets.key` files.
+The existing cluster (`ctrl-node-01` on `ctrl-node-01`, `ctrl-node-02`,
+`ctrl-node-03`) was provisioned before this decision and holds cleartext `secrets.key` files.
 Migration requires sealing each node's existing key to its own TPM. #3462 documents and performs
 that upgrade.
 
@@ -181,7 +181,7 @@ that upgrade.
 
 For multi-node cluster deployments, the root of trust is OpenBao
 (`pkg/secrets/providers/openbao`), already deployed as part of the HA stack
-(`cfgms-lab-datasvc:8200`; see `docs/testing/controller-ha-real-cluster-runbook.md` §3).
+(`datasvc-vm:8200`; see `docs/testing/controller-ha-real-cluster-runbook.md` §3).
 
 `secrets.key` and the four HA-cluster secrets (`CFGMS_STORAGE_DB_PASSWORD`,
 `CFGMS_SESSION_HMAC_KEY`, `OPENBAO_TOKEN`/`BAO_TOKEN`) are stored in OpenBao's KV v2 store at
@@ -254,7 +254,7 @@ tested.
 sealed blobs differ per node, but the underlying plaintext is the same value stored in OpenBao.
 This satisfies both requirements: the key is byte-identical in plaintext (all nodes decrypt the
 same secrets), and the sealed blobs are bound to their respective hosts (a stolen VHDX from
-`cfgms-ha-node2` cannot be unsealed on `cfgms-ha-node3`).
+`ctrl-node-02` cannot be unsealed on `ctrl-node-03`).
 
 This replay protection holds only for `key_mode: tpm2` nodes. A node provisioned under
 `--allow-host-key` carries its unsealing key (`/var/lib/systemd/credential.secret`) on the same
@@ -272,7 +272,7 @@ re-seal with the new TPM. The node then restarts cleanly with the correct shared
 `develop` @ `62594a79`):
 
 1. Verify that the four HA secrets and `secrets.key` are already stored in OpenBao on
-   `cfgms-lab-datasvc`. (They were introduced there at cluster founding per the runbook §3; this
+   `datasvc-vm`. (They were introduced there at cluster founding per the runbook §3; this
    step confirms the paths match what #3462's updated bootstrap script expects.)
 2. Run the updated `ha-cluster-node-bootstrap.sh` (#3462) on each node. The script replaces
    `/etc/cfgms/ha-secrets.env` with per-secret sealed credential files and regenerates the unit

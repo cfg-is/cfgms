@@ -301,7 +301,7 @@ Adding `Monitor` support to additional modules is an ongoing enhancement, priori
 
 ### Monitor Load Budget and Reaction Latency
 
-Measured end-to-end on a live Hyper-V host (Windows Server 2025, CFG-70-02) against the `hyperv` VM-state Monitor, validating both a Windows and a Linux guest VM (Issue #2115). The budget is per active host subscription, not per watched VM — the `hyperv` Monitor uses a single host-level `EvtSubscribe` shared across all watched VMs.
+Measured end-to-end on a live Hyper-V host (Windows Server 2025) against the `hyperv` VM-state Monitor, validating both a Windows and a Linux guest VM (Issue #2115). The budget is per active host subscription, not per watched VM — the `hyperv` Monitor uses a single host-level `EvtSubscribe` shared across all watched VMs.
 
 | Metric | Budget / target | Measured |
 |--------|-----------------|----------|
@@ -678,7 +678,7 @@ A steward binary today connects to exactly one controller URL. Multi-controller 
 > options), not multi-controller failover. That was a mis-citation, corrected here.
 
 **What story #3096 established about the scope of this gap.** Measured against the
-real 3-node cfg-lab cluster, a single controller URL is **not** a barrier to
+real 3-node cluster, a single controller URL is **not** a barrier to
 surviving a *leader* failover. A steward attached to a surviving node keeps its
 gRPC-over-QUIC ControlChannel open across a Raft re-election and misses no
 heartbeats — the leader changing is invisible to it, because every node serves

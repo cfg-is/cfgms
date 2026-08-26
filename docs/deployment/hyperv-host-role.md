@@ -45,7 +45,7 @@ fragment is valid on every matched node.
 ## 2. Tag a host — the resource appears in its effective config
 
 ```bash
-STEWARD=<steward-id>     # e.g. the cfg-lab node's steward id
+STEWARD=<steward-id>     # e.g. a Hyper-V host's steward id
 
 cfg steward tag add "$STEWARD" hyperv-host
 cfg steward tag ls  "$STEWARD"           # hyperv-host
@@ -83,7 +83,7 @@ cfg steward exec "id:$STEWARD" \
 > version). Prompt tag-driven convergence — bumping the effective version and/or
 > pushing on a role/tag change — is the DNA-currency concern tracked by epic
 > #2520; this story's scope is the cascade *delivery*, which is immediate and
-> correct. Verified live on cfg-lab 2026-07-15: tagging CFG-70-02 then bumping its
+> correct. Verified live on the validation lab 2026-07-15: tagging HV-HOST-01 then bumping its
 > config version converged `cfgms-role-net` (internal) on the host.
 
 ## 4. Untag — the resource leaves the resolved config

@@ -41,33 +41,33 @@ re-run against an already-promoted VM is a no-op.
 
 ## 1. Environment
 
-Live bed: the **cfg-lab** 3-node Hyper-V failover cluster (`lab.cfg.is`).
+Live bed: the **example-cluster** 3-node Hyper-V failover cluster (`lab.example.com`).
 
 | Node | Role |
 |------|------|
-| `CFG-70-02` | cluster member (also the CI/orchestrator host) |
-| `CFG-AB-02` | cluster member |
-| `CFG-C3-02` | cluster member |
+| `HV-HOST-01` | cluster member (also the CI/orchestrator host) |
+| `HV-HOST-02` | cluster member |
+| `HV-HOST-03` | cluster member |
 
 - Shared storage: **CSV01** at `C:\ClusterStorage\CSV01`. The promoted VM's VHD
   is CSV-homed from the start (a standalone VM can use CSV without being
   clustered), so **promotion never relocates storage** — the VHD path is
   identical before and after. This is the point of AC3.
 - Per-host external switch: `HVSwitch_1G`.
-- The cluster name is `cfg-lab` (`Get-Cluster` on any member; the value passed as
+- The cluster name is `example-cluster` (`Get-Cluster` on any member; the value passed as
   `CFGMS_E2E_HYPERV_CLUSTER`).
 
 ### Privileges
 
 Cluster cmdlets (`Get-Cluster`, `Get-ClusterGroup`, `Move-ClusterGroup`) and VM
 lifecycle (`New-VM`, `Remove-VM`, `Add-ClusterVirtualMachineRole`) require
-**cluster-administrator rights**. The cfg-lab stewards run as `LocalSystem`,
+**cluster-administrator rights**. The example-cluster stewards run as `LocalSystem`,
 whose node computer account has cluster access (per the #2306 ruling — no
 gMSA/run-as). Run the suite either:
 
 - from an **elevated** shell on a member node whose user is a cluster admin, or
 - in the steward's **SYSTEM** context via `cfg steward exec` (SYSTEM has cluster
-  access on cfg-lab).
+  access on example-cluster).
 
 A non-admin shell cannot read the cluster (`Get-Cluster` returns
 "You do not have administrative privileges on the cluster") — the suite then
@@ -87,8 +87,8 @@ run it on **one** member node. The test steers the CNO owner to the local node s
 its convergence performs both the create and the promote registration.
 
 ```powershell
-# On a cfg-lab member node (elevated shell), from the repo root:
-$env:CFGMS_E2E_HYPERV_CLUSTER = 'cfg-lab'
+# On a example-cluster member node (elevated shell), from the repo root:
+$env:CFGMS_E2E_HYPERV_CLUSTER = 'example-cluster'
 # Optional overrides (defaults shown):
 #   $env:CFGMS_E2E_PROMOTE_VM = 'cfgms-e2e-promote-01'   # distinct from the cascade suite's VM
 #   $env:CFGMS_E2E_VHD_DIR    = 'C:\ClusterStorage\CSV01'
@@ -102,7 +102,7 @@ and read it back, per the exec-channel notes):
 
 ```powershell
 cfg steward exec <steward-id-on-node> --shell powershell --command @'
-$env:CFGMS_E2E_HYPERV_CLUSTER = "cfg-lab"
+$env:CFGMS_E2E_HYPERV_CLUSTER = "example-cluster"
 cd C:\git\cfgms
 go test -tags e2e -v -run TestPromoteHVRole -timeout 30m ./test/e2e/hyperv/... *>&1 |
   Out-File C:\ProgramData\cfgms\e2e-role-promotion.log
@@ -122,7 +122,7 @@ config-migration** behavior live.
 
 | Test | Drives | Asserts (epic AC) |
 |------|--------|-------------------|
-| `TestPromoteHVRole_StandaloneToClusteredRole` | creates a standalone VM on the local (CNO-owner) node, then runs `set_ha_role` → module convergence → `move_resource_to_cluster` | the VM starts **not** a clustered role; after the sequence it is **exactly one** CNO-owned clustered role; the resource is **present in `cluster-policies/cfg-lab`** and **absent from `stewards/<id>`**; the VM's **VHD path is unchanged** throughout (no storage relocation) |
+| `TestPromoteHVRole_StandaloneToClusteredRole` | creates a standalone VM on the local (CNO-owner) node, then runs `set_ha_role` → module convergence → `move_resource_to_cluster` | the VM starts **not** a clustered role; after the sequence it is **exactly one** CNO-owned clustered role; the resource is **present in `cluster-policies/example-cluster`** and **absent from `stewards/<id>`**; the VM's **VHD path is unchanged** throughout (no storage relocation) |
 | `TestPromoteHVRole_ReRunIsNoOp` | reaches the promoted state, then re-runs `move_resource_to_cluster` and re-converges the module | the re-run is a **no-op**: the `cluster-policies` document is **byte-identical** (no duplicate write), the resource stays in cluster scope and out of device scope, and there is still **exactly one** clustered role on the same owner with the VHD still unmoved |
 
 Each test cleans up its VM + clustered role (`t.Cleanup` → `ccCleanupRole`).
@@ -131,10 +131,10 @@ Each test cleans up its VM + clustered role (`t.Cleanup` → `ccCleanupRole`).
 
 Both tests `PASS`. Any `2 instances` observation is a **duplicate-VM regression**
 and must block the epic. A promoted resource that remains in `stewards/<id>` (or
-never appears in `cluster-policies/cfg-lab`) is a **scope-migration failure**. A
+never appears in `cluster-policies/example-cluster`) is a **scope-migration failure**. A
 changed VHD path is a **storage-relocation regression** (AC3).
 
-**Live-proven 2026-07-16** on the cfg-lab cluster, run in the `CFG-70-02` steward's
+**Live-proven 2026-07-16** on the example-cluster cluster, run in the `HV-HOST-01` steward's
 SYSTEM context via `cfg steward exec`:
 `--- PASS: TestPromoteHVRole_StandaloneToClusteredRole (35.94s)` and
 `--- PASS: TestPromoteHVRole_ReRunIsNoOp (39.46s)` — real `New-VM`, storage-location
@@ -216,7 +216,7 @@ If a run is interrupted before `ccCleanupRole` runs, remove the test artifacts
 manually (elevated, on any member):
 
 ```powershell
-$c = 'cfg-lab'; $role = 'cfgms-e2e-promote-01'
+$c = 'example-cluster'; $role = 'cfgms-e2e-promote-01'
 try { Remove-ClusterGroup -Cluster $c -Name $role -RemoveResources -Force } catch {}
 foreach ($n in (Get-ClusterNode -Cluster $c).Name) {
   try {
@@ -231,7 +231,7 @@ foreach ($n in (Get-ClusterNode -Cluster $c).Name) {
 ```
 
 Restore the CNO to its normal owner if a test left it moved:
-`Move-ClusterGroup -Cluster cfg-lab -Name 'Cluster Group' -Node <preferred>`.
+`Move-ClusterGroup -Cluster example-cluster -Name 'Cluster Group' -Node <preferred>`.
 
 The config-store artifacts (device- and cluster-scope documents) live in a
 per-test `t.TempDir()` flatfile root and are removed automatically when the test

@@ -18,9 +18,9 @@ This section summarises the key operational facts derived from that validation.
 
 | Node | Role | `internal_listen_addr` | REST API |
 |---|---|---|---|
-| `cfgms-ctrl-01` | cluster member (original Tier-1 controller) | `<node-private-ip>:9443` | `:9080` |
-| `cfgms-ha-node2` | cluster member | `<node-private-ip>:9443` | `:9080` |
-| `cfgms-ha-node3` | cluster member | `<node-private-ip>:9443` | `:9080` |
+| `ctrl-node-01` | cluster member (original Tier-1 controller) | `<node-private-ip>:9443` | `:9080` |
+| `ctrl-node-02` | cluster member | `<node-private-ip>:9443` | `:9080` |
+| `ctrl-node-03` | cluster member | `<node-private-ip>:9443` | `:9080` |
 
 All three nodes connect to a **shared PostgreSQL backend** and a **shared S3-compatible
 blob store** (MinIO or equivalent). No data replication is done via Raft — Raft owns
@@ -51,7 +51,7 @@ Independently generated per-node values produce ciphertext-authentication failur
 
 Each node presents its own certificate (issued by the shared cluster CA) for mTLS on the
 `internal_listen_addr` port (`:9443`). The CA fingerprint is loaded from a shared secret
-store (OpenBao in the cfg-lab validation). Use `ha-cluster-node-bootstrap.sh` to provision
+store (OpenBao in the validation lab). Use `ha-cluster-node-bootstrap.sh` to provision
 new nodes — it generates the per-node certificate, wires `LoadCredentialEncrypted=` secret
 delivery, and validates the bootstrap before starting the service.
 

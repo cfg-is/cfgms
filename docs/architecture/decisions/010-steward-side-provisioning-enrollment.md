@@ -12,7 +12,7 @@
 
 ## Context
 
-The VM-from-ISO provisioning feature (ADR-009, epic #1851) is built and deployed live on cfg-lab. The live E2E surfaced #2077: the answer-file render reads enrollment secrets (`hyperv/enroll/regtoken`, `…/user-password-crypted`) from the **steward's local** SecretStore — an OS-native-encrypted store for the steward's own keys, with **no operator/remote write path**. So a real provision can't render. This forced the open design question from ADR-009 §8: **where is the answer file rendered, and how is the join token handled?**
+The VM-from-ISO provisioning feature (ADR-009, epic #1851) is built and deployed in the maintainer's validation lab. The live E2E surfaced #2077: the answer-file render reads enrollment secrets (`hyperv/enroll/regtoken`, `…/user-password-crypted`) from the **steward's local** SecretStore — an OS-native-encrypted store for the steward's own keys, with **no operator/remote write path**. So a real provision can't render. This forced the open design question from ADR-009 §8: **where is the answer file rendered, and how is the join token handled?**
 
 Two facts decided it:
 

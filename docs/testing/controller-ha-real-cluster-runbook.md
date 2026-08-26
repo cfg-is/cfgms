@@ -1,7 +1,7 @@
 # Controller HA — real-cluster validation runbook
 
 Live-validation runbook for epic **#3090** (Controller HA validation on a real
-multi-node cluster): migrating the Tier-1 `cfg-lab` controller off its
+multi-node cluster): migrating the Tier-1 `example-cluster` controller off its
 single-node storage backend onto shared PostgreSQL + S3-compatible blob
 storage, joining a genuine 3-node `CFGMS_HA_MODE=cluster` deployment across
 separate real hosts, and validating leader election, failover, and
@@ -25,8 +25,8 @@ satisfy epic #3090. Each section was appended by the story that ran the validati
 
 ### Consolidated Results
 
-All figures below were measured on the `cfg-lab` real-host cluster (`cfgms-ctrl-01` /
-`cfgms-ha-node2` / `cfgms-ha-node3`) using production defaults
+All figures below were measured on the `example-cluster` real-host cluster (`ctrl-node-01` /
+`ctrl-node-02` / `ctrl-node-03`) using production defaults
 (`ElectionTimeout: 10s`, `HeartbeatInterval: 2s` — `FastElectionConfig` was deliberately
 not used, as it exists only to keep CPU-contended unit tests fast and would have
 invalidated the comparison).
@@ -77,26 +77,26 @@ Documented during epic #3090; status at epic close:
 
 ## 1. Environment
 
-Live bed: the **cfg-lab** 3-node Hyper-V failover cluster (`lab.cfg.is`),
+Live bed: the **example-cluster** 3-node Hyper-V failover cluster (`lab.example.com`),
 same physical bed as the module-convergence work — see
 [`hyperv-cluster-cascade-runbook.md`](hyperv-cluster-cascade-runbook.md) §1
-for the underlying hypervisor topology (`CFG-70-02` / `CFG-AB-02` /
-`CFG-C3-02`, CSV01, `HVSwitch_1G`).
+for the underlying hypervisor topology (`HV-HOST-01` / `HV-HOST-02` /
+`HV-HOST-03`, CSV01, `HVSwitch_1G`).
 
-`cfgms-ctrl-01` (the Tier-1 controller): `192.168.234.103`, REST API on
-`:9080` (port `443` closed). `cfgms-lab-datasvc` (shared Postgres/MinIO,
-soon OpenBao — see §"Shared data-services VM" below): `192.168.234.105`.
+`ctrl-node-01` (the Tier-1 controller): `192.0.2.103`, REST API on
+`:9080` (port `443` closed). `datasvc-vm` (shared Postgres/MinIO,
+soon OpenBao — see §"Shared data-services VM" below): `192.0.2.105`.
 
 ### Lab rebuild note (2026-07-31/08-01)
 
 While provisioning this story's VM, the lab's exec-dispatch subsystem and
-`CFG-70-02`'s steward wedged in a way that required a full lab reset —
+`HV-HOST-01`'s steward wedged in a way that required a full lab reset —
 all non-DC Hyper-V VMs torn down (CSV01 storage cleaned), the Tier-1
-controller (`cfgms-ctrl-01`) rebuilt from scratch on `CFG-70-02`, and all
+controller (`ctrl-node-01`) rebuilt from scratch on `HV-HOST-01`, and all
 three HV-host stewards re-enrolled. The domain controllers (`cfg-dc1-02`,
 `cfg-dc2-02`) were left untouched throughout.
 
-`cfgms-ctrl-01` is therefore **no longer** the persistent controller from the
+`ctrl-node-01` is therefore **no longer** the persistent controller from the
 original v0.9.7 Tier-1 bringup referenced elsewhere in epic #3090's planning
 — it is a fresh instance (CA regenerated, tenant tree reseeded, fleet
 re-enrolled). Anything in this epic that assumed continuity with the
@@ -111,12 +111,12 @@ stories under this epic (none fixed here — #3124 is infra-provisioning only):
   -SecureBootTemplate MicrosoftUEFICertificateAuthority` call reproducibly
   fails (`'MicrosoftUEFICertificateAuthority' matches none of the secure
   boot templates`) when run as part of the module's actual create sequence,
-  even though the identical call succeeds in isolation. Both `cfgms-ctrl-01`
-  and `cfgms-lab-datasvc` were provisioned manually instead (raw cloud image
+  even though the identical call succeeds in isolation. Both `ctrl-node-01`
+  and `datasvc-vm` were provisioned manually instead (raw cloud image
   → fixed VHD → dynamic VHDX via `C:\temp\raw2vhd`, CIDATA seed built with
   the same mechanics as the module, `-EnableSecureBoot Off`) rather than via
   `cfg config upload` — see `C:\temp\ctrl-vm-create.ps1` /
-  `C:\temp\datasvc-vm-create.ps1` on `CFG-70-02` for the exact recipe.
+  `C:\temp\datasvc-vm-create.ps1` on `HV-HOST-01` for the exact recipe.
 - #3170 — `tier1-bootstrap.sh`'s config template is missing
   `transport.external_address` (controller now refuses to start without it).
 - #3171 — `certificate.ca_path`/`cert_path` is silently ignored in favor of a
@@ -133,18 +133,18 @@ stories under this epic (none fixed here — #3124 is infra-provisioning only):
   worked around here via an SSH tunnel to `localhost` (in the cert's SAN)
   instead of connecting by LAN IP.
 
-### Shared data-services VM (`cfgms-lab-datasvc`) — story #3124
+### Shared data-services VM (`datasvc-vm`) — story #3124
 
 A dedicated Debian VM hosts the PostgreSQL + MinIO backend shared by all
 cluster controller nodes:
 
 | Property | Value |
 |----------|-------|
-| VM name | `cfgms-lab-datasvc` |
-| Hypervisor host | `CFG-70-02` |
+| VM name | `datasvc-vm` |
+| Hypervisor host | `HV-HOST-01` |
 | Tenant | `infra-hyperv` |
 | Provisioning | Manual (see the rebuild note above) — `C:\temp\datasvc-vm-create.ps1` builds the VM, then `scripts/lab-datasvc-bootstrap.sh` (run once over SSH) installs PostgreSQL + MinIO |
-| IP address | `192.168.234.105` (lab LAN, `192.168.234.0/24`, DHCP) |
+| IP address | `192.0.2.105` (lab LAN, `192.0.2.0/24`, DHCP) |
 
 **PostgreSQL:**
 
@@ -153,9 +153,9 @@ cluster controller nodes:
 | Port | `5432` |
 | Database | `cfgms` |
 | Role | `cfgms` (dedicated, non-superuser, `LOGIN` only) |
-| Listen | all interfaces; `pg_hba.conf` restricts inbound to `192.168.234.0/24` and is TLS-only — `hostssl … scram-sha-256` plus `hostnossl … reject`, so a `sslmode=disable` client is refused rather than served in cleartext |
+| Listen | all interfaces; `pg_hba.conf` restricts inbound to `192.0.2.0/24` and is TLS-only — `hostssl … scram-sha-256` plus `hostnossl … reject`, so a `sslmode=disable` client is refused rather than served in cleartext |
 | TLS CA cert | `/etc/postgresql/tls/ca.pem` on the VM (generated by `scripts/lab-datasvc-bootstrap.sh` Step 2.5; path printed at end of bootstrap run). Copy to each controller node as `/etc/cfgms/datasvc-ca.pem` |
-| Connection string shape | `postgres://cfgms:<password>@192.168.234.105:5432/cfgms?sslmode=verify-full&sslrootcert=/etc/cfgms/datasvc-ca.pem` — use the raw `dsn` string config form (not the keyword-builder) to carry `sslrootcert` through unchanged; see story #3127 and `pkg/storage/providers/database/plugin.go` |
+| Connection string shape | `postgres://cfgms:<password>@192.0.2.105:5432/cfgms?sslmode=verify-full&sslrootcert=/etc/cfgms/datasvc-ca.pem` — use the raw `dsn` string config form (not the keyword-builder) to carry `sslrootcert` through unchanged; see story #3127 and `pkg/storage/providers/database/plugin.go` |
 
 **MinIO (S3-compatible blob storage):**
 
@@ -164,7 +164,7 @@ cluster controller nodes:
 | API port | `9000` |
 | Console port | `9001` |
 | Bucket | `cfgms-installer-blobs` |
-| `endpoint_url` | `http://192.168.234.105:9000` |
+| `endpoint_url` | `http://192.0.2.105:9000` |
 
 **Credentials:** the PostgreSQL role password and MinIO root access/secret
 key are generated once by `scripts/lab-datasvc-bootstrap.sh` on first run and
@@ -186,8 +186,8 @@ a non-admin shell cannot create the VM or reach the Hyper-V APIs.
 
 ## 2. Storage migration (story #3127)
 
-Migrates the live Tier-1 controller (`cfgms-ctrl-01`) from its `oss`
-(flatfile+SQLite) backend onto the `cfgms-lab-datasvc` PostgreSQL backend
+Migrates the live Tier-1 controller (`ctrl-node-01`) from its `oss`
+(flatfile+SQLite) backend onto the `datasvc-vm` PostgreSQL backend
 (story #3124) via `cfg migrate --provider storage --from oss --to database`
 — **not** `cfg storage migrate`, which hard-rejects `--to postgres` (see the
 epic Goal). Executed 2026-08-05.
@@ -321,7 +321,7 @@ Migration complete:
 storage:
   provider: database
   config:
-    dsn: "postgres://cfgms:${CFGMS_STORAGE_DB_PASSWORD}@192.168.234.105:5432/cfgms?sslmode=verify-full&sslrootcert=/etc/cfgms/datasvc-ca.pem"
+    dsn: "postgres://cfgms:${CFGMS_STORAGE_DB_PASSWORD}@192.0.2.105:5432/cfgms?sslmode=verify-full&sslrootcert=/etc/cfgms/datasvc-ca.pem"
     session_hmac_key: "${CFGMS_SESSION_HMAC_KEY}"
 ```
 
@@ -330,15 +330,15 @@ The raw `dsn` string form is required here, not the
 keyword builder (`getDSN` in `pkg/storage/providers/database/plugin.go`) emits
 only those six keywords and has no way to carry `sslrootcert`, so
 `sslmode=verify-full` would have no CA to verify against. Copy
-`/etc/postgresql/tls/ca.pem` from `cfgms-lab-datasvc` to
+`/etc/postgresql/tls/ca.pem` from `datasvc-vm` to
 `/etc/cfgms/datasvc-ca.pem` on each controller node (root-owned, mode 644 — it
 is a public certificate) before restarting the controller.
 
 > **History:** the config first applied at the story #3127 migration
 > (2026-08-05) used the keyword form with `sslmode: "disable"`, because
-> server-side TLS did not yet exist on `cfgms-lab-datasvc`. Story #3179
+> server-side TLS did not yet exist on `datasvc-vm`. Story #3179
 > provisions that TLS and the `pg_hba.conf` on the data-services VM now carries
-> a `hostnossl … reject` rule for `192.168.234.0/24`, so a `sslmode=disable`
+> a `hostnossl … reject` rule for `192.0.2.0/24`, so a `sslmode=disable`
 > controller is refused at connect time rather than silently downgraded — the
 > block above is the only configuration that connects.
 
@@ -394,7 +394,7 @@ Executed once against the archive to prove the procedure actually works:
 2. Restored `/etc/cfgms/controller.cfg` and the systemd unit from the
    pre-migration backups taken before the cutover
    (`controller.cfg.pre-3127.bak`, `cfgms-controller.service.pre-3127.bak`,
-   both left in place on `cfgms-ctrl-01` alongside the live config).
+   both left in place on `ctrl-node-01` alongside the live config).
 3. `systemctl daemon-reload && systemctl start cfgms-controller`.
 4. Confirmed `GET /api/v1/health` returned `"status":"healthy"` and the
    startup log showed `backend=flatfile` — the controller was serving the
@@ -405,7 +405,7 @@ Executed once against the archive to prove the procedure actually works:
 The pre-migration flatfile+SQLite data was never deleted or moved — it
 remains at its original paths (`/var/lib/cfgms/storage`,
 `/var/lib/cfgms/cfgms.db`) — and is additionally archived (copied, not
-moved) to `/var/lib/cfgms/archive-pre-3127-migration/` on `cfgms-ctrl-01`.
+moved) to `/var/lib/cfgms/archive-pre-3127-migration/` on `ctrl-node-01`.
 Per the epic, this archive and the rollback path are **not** retired by this
 story; only an explicit founder sign-off retires them.
 
@@ -424,8 +424,8 @@ and untouched; retiring them is a separate, explicit founder decision.
 
 ## 3. Cluster join (story #3130)
 
-Joins two new controller nodes (`cfgms-ha-node2`, `cfgms-ha-node3`) to the
-#3127-migrated Tier-1 controller (`cfgms-ctrl-01`), cutting all three over to
+Joins two new controller nodes (`ctrl-node-02`, `ctrl-node-03`) to the
+#3127-migrated Tier-1 controller (`ctrl-node-01`), cutting all three over to
 a 3-node `ha.mode: cluster` deployment with a shared OpenBao-sourced CA (see
 [`cluster-ca.md`](../operations/cluster-ca.md)) and shared Postgres/MinIO
 backend (see [`cluster-storage-config.md`](../operations/cluster-storage-config.md)).
@@ -435,9 +435,9 @@ Executed 2026-08-11.
 
 Both new nodes: Debian 13, Generation 2, 4 vCPU / 4GB RAM, provisioned via the
 raw2vhd/CIDATA cloud-init recipe (`C:\temp\ctrl-vm-create.ps1`, adapted
-per-host — not yet formalized into the repo). `cfgms-ha-node2` on
-`192.168.234.104` (host CFG-AB-02), `cfgms-ha-node3` on `192.168.234.106`
-(host CFG-C3-02). The provisioning template was fixed during this story to
+per-host — not yet formalized into the repo). `ctrl-node-02` on
+`192.0.2.104` (host HV-HOST-02), `ctrl-node-03` on `192.0.2.106`
+(host HV-HOST-03). The provisioning template was fixed during this story to
 install `hyperv-daemons` (`hv-kvp-daemon` — required for Hyper-V/
 `Get-VMNetworkAdapter` to see the guest's IP at all) and to send the guest's
 **FQDN**, not short hostname, via DHCP so DNS dynamic-update registers it (see
@@ -445,7 +445,7 @@ install `hyperv-daemons` (`hv-kvp-daemon` — required for Hyper-V/
 
 ### DNS registration (client + server-side)
 
-Neither new VM's hostname registered in `lab.cfg.is` DNS despite valid DHCP
+Neither new VM's hostname registered in `lab.example.com` DNS despite valid DHCP
 leases. Root-caused via PSRemoting to both DCs (`cfg-dc1-02`, `cfg-dc2-02`) as
 two independent gaps:
 
@@ -454,14 +454,14 @@ two independent gaps:
    guidance, a DC-hosted DHCP server cannot register DNS on behalf of
    non-domain clients against a Secure-only zone using its own machine
    account — it needs an explicit low-privilege service-account credential,
-   which was never provisioned. Relaxed `lab.cfg.is` and its reverse zone
-   (`234.168.192.in-addr.arpa`) from `Secure` to `NonsecureAndSecure` dynamic
+   which was never provisioned. Relaxed `lab.example.com` and its reverse zone
+   (`2.0.192.in-addr.arpa`) from `Secure` to `NonsecureAndSecure` dynamic
    updates (acceptable for this lab; not recommended in a production AD).
 2. **Client-side**: systemd-networkd's DHCPv4 client only sends option 81
    (Client FQDN — what Windows DHCP's `OnClientRequest` registration mode
    requires) when the configured hostname contains a dot. netplan's
    `dhcp4-overrides`/`dhcp6-overrides` `hostname:` was set to the short
-   hostname; changed to the FQDN (`cfgms-ha-node2.lab.cfg.is`) on both nodes.
+   hostname; changed to the FQDN (`ctrl-node-02.lab.example.com`) on both nodes.
 
 Both fixes verified live via the DHCP server's audit log (`DNS Update
 Request` → `DNS Update Successful` event pairs) and a direct `Get-DnsServerResourceRecord`
@@ -502,7 +502,7 @@ Six genuine bugs surfaced getting the two new nodes to a stable 3-node quorum
    bootstrap scripts (and the now-obsolete
    `TestRun_TopLevelCertPathMustBeAbsolute` regression test removed) once the
    rebase surfaced the conflict; `ca_path` alone is sufficient. This bug was
-   **already latent in `cfgms-ctrl-01`'s live config** (present since #3127)
+   **already latent in `ctrl-node-01`'s live config** (present since #3127)
    and would have hit the Tier-1 controller on its next restart regardless
    of #3130.
 4. **`pkg/secrets/providers/sops` rejected `LoadCredential`-backed key
@@ -569,9 +569,9 @@ both bootstrap scripts' `_test.sh` suites (7/6 passing respectively).
 ### Node bootstrap
 
 Both new nodes bootstrapped via `ha-cluster-node-bootstrap.sh --hostname=<fqdn>
---node-id=<private-ip> --cluster-nodes=192.168.234.103:9443,192.168.234.104:9443,192.168.234.106:9443
---postgres-host=192.168.234.105 --s3-endpoint=http://192.168.234.105:9000
---vault-address=http://192.168.234.105:8200 --vault-key-path=root/cluster-ca`.
+--node-id=<private-ip> --cluster-nodes=192.0.2.103:9443,192.0.2.104:9443,192.0.2.106:9443
+--postgres-host=192.0.2.105 --s3-endpoint=http://192.0.2.105:9000
+--vault-address=http://192.0.2.105:8200 --vault-key-path=root/cluster-ca`.
 `--node-id` uses the node's private IP (not FQDN) for consistency with the
 existing established addressing scheme, even though DNS now works — changing
 the whole cluster's addressing scheme was out of scope for this pass. Both
@@ -580,11 +580,11 @@ from the shared vault, matching each other exactly.
 
 ### Tier-1 cutover
 
-`cfgms-ctrl-01`'s pre-cutover single-node config, systemd unit, and binary
+`ctrl-node-01`'s pre-cutover single-node config, systemd unit, and binary
 were backed up to `/root/pre-cluster-cutover-backup/` before any change. Its
 `controller.cfg` gained (on top of the existing `storage.provider: database`
 block, kept for continuity): a top-level `cert_path` and
-`internal_listen_addr: "192.168.234.103:9443"`, `ha: { mode: cluster }`,
+`internal_listen_addr: "192.0.2.103:9443"`, `ha: { mode: cluster }`,
 `certificate.cluster_ca` (same vault address/key path as the two new nodes),
 and a `storage.cluster` block (`postgres_dsn`, `session_hmac_key`, `s3`)
 alongside the existing `storage.config`. Its systemd unit (an older,
@@ -606,7 +606,7 @@ restart in this story — Raft state is entirely in-memory
 while its peers are already running re-bootstraps as a lone self-elected
 leader and diverges from a peer that later tries to join late (reproduced
 live: `panic: tocommit(4) is out of range [lastIndex(3)]` in
-`go.etcd.io/raft/v3`, from `cfgms-ha-node3` joining after `cfgms-ha-node2`
+`go.etcd.io/raft/v3`, from `ctrl-node-03` joining after `ctrl-node-02`
 had run solo for 13+ minutes during debugging). A coordinated cold start of
 all 3 avoids this entirely.
 
@@ -618,22 +618,22 @@ all 3 avoids this entirely.
 | Rollback drill (cluster → single-node, ctrl-01 only) | 2026-08-11T12:36:32Z | 2026-08-11T12:36:38Z | ~6s |
 | Re-cutover (single-node → cluster, final) | 2026-08-11T12:37:59Z | 2026-08-11T12:38:05Z | ~6s |
 
-The two new nodes (`cfgms-ha-node2`/`3`) were never in the production request
+The two new nodes (`ctrl-node-02`/`3`) were never in the production request
 path (no fleet was pointed at them), so their bootstrap iterations carried no
-production downtime; only the `cfgms-ctrl-01` legs above affected the live
+production downtime; only the `ctrl-node-01` legs above affected the live
 fleet.
 
 ### Rollback drill (tested, not just documented)
 
-Executed once against the live `cfgms-ctrl-01`, mirroring #3127's drill
+Executed once against the live `ctrl-node-01`, mirroring #3127's drill
 pattern:
 
 1. Stopped all 3 nodes together.
-2. Restored `cfgms-ctrl-01`'s pre-cutover `controller.cfg`, systemd unit, and
+2. Restored `ctrl-node-01`'s pre-cutover `controller.cfg`, systemd unit, and
    binary from `/root/pre-cluster-cutover-backup/` (taken before any
    cutover change).
 3. `systemctl daemon-reload && systemctl start cfgms-controller` on
-   `cfgms-ctrl-01` alone.
+   `ctrl-node-01` alone.
 4. Confirmed `GET /api/v1/health` returned `"status":"healthy"` running as a
    plain single-node controller (no `ha:`/`cluster_ca` in its active config).
 5. Re-applied the cluster cutover (rebuilt binary, cluster config, cluster
@@ -641,7 +641,7 @@ pattern:
    leave the cluster running for the health soak below.
 
 The pre-cutover backup at `/root/pre-cluster-cutover-backup/` on
-`cfgms-ctrl-01` is left in place, not retired by this story.
+`ctrl-node-01` is left in place, not retired by this story.
 
 ### Quorum verification
 
@@ -649,9 +649,9 @@ The pre-cutover backup at `/root/pre-cluster-cutover-backup/` on
 re-cutover, agreeing on `term: 2` and the same elected leader:
 
 ```
-cfgms-ctrl-01  {"node_id":11522188196814600707,"is_leader":false,"leader":11522193694372741762,"term":2}
-cfgms-ha-node2 {"node_id":11522193694372741762,"is_leader":true, "leader":11522193694372741762,"term":2}
-cfgms-ha-node3 {"node_id":11522191495349485340,"is_leader":false,"leader":11522193694372741762,"term":2}
+ctrl-node-01  {"node_id":10000000000000000001,"is_leader":false,"leader":10000000000000000002,"term":2}
+ctrl-node-02 {"node_id":10000000000000000002,"is_leader":true, "leader":10000000000000000002,"term":2}
+ctrl-node-03 {"node_id":10000000000000000003,"is_leader":false,"leader":10000000000000000002,"term":2}
 ```
 
 `GET /api/v1/ha/cluster`, after the `pkg/ha` context-lifecycle fix above and a
@@ -699,12 +699,12 @@ predates #3130 entirely and is most likely a gap in #3127's storage
 migration (steward records not carried into the new Postgres schema) —
 flagged as a separate follow-up, not investigated or fixed in this story.
 This story's cutover caused **no additional fleet impact**: there was no live
-steward fleet pointed at `cfgms-ctrl-01` to affect.
+steward fleet pointed at `ctrl-node-01` to affect.
 
 ## 4. Leader election and failover validation (story #3094)
 
 Live-validated 2026-08-15 against the real 3-node cluster #3130 established
-(`cfgms-ctrl-01`, `cfgms-ha-node2`, `cfgms-ha-node3`) via a new automated
+(`ctrl-node-01`, `ctrl-node-02`, `ctrl-node-03`) via a new automated
 suite, `test/e2e/ha/leader_election_real_test.go` (`//go:build e2e`, gated by
 `CFGMS_E2E_HA_CLUSTER_NODES`) — three tests, each run against the live
 cluster, not a one-off manual observation.
@@ -714,8 +714,8 @@ cluster, not a one-off manual observation.
 - **Leader agreement**: mTLS `GET /api/v1/raft/status` (admin bundle client
   cert) against all 3 nodes' REST APIs (`:9080`), polled until all 3 agree on
   the same nonzero leader.
-- **Process-kill failover**: SSH (`debian@<node>.lab.cfg.is`,
-  `~/.ssh/cfgms_lab_ed25519`) to the current leader, `systemctl kill
+- **Process-kill failover**: SSH (`debian@<node>.lab.example.com`,
+  `~/.ssh/cfgms_ed25519`) to the current leader, `systemctl kill
   --kill-who=main -s SIGKILL cfgms-controller.service` — an abrupt kill, not
   a graceful `systemctl stop`, so the OS/network stack resets in-flight TCP
   connections immediately (Implementation Notes' distinction from a host
@@ -723,7 +723,7 @@ cluster, not a one-off manual observation.
   different leader.
 - **Host-kill failover**: `Stop-VM -TurnOff -Force` (hard power-off, not a
   guest shutdown) against the leader's VM, via remote Hyper-V PowerShell
-  (`-ComputerName CFG-AB-02`/`CFG-C3-02` from `CFG-70-02`, the same
+  (`-ComputerName HV-HOST-02`/`HV-HOST-03` from `HV-HOST-01`, the same
   `lab\cfg`-domain-identity pattern the hyperv e2e suites use). Same
   agreement-polling as the process-kill case.
 - **Recovery**: both failover tests bring the cluster back to a healthy
@@ -738,12 +738,12 @@ cluster, not a one-off manual observation.
   starts all 3 together — the same stop-all/start-all discipline as §3's
   rollback drill.
 
-### Measured results (real cfg-lab hardware, 2026-08-15)
+### Measured results (real cluster hardware, 2026-08-15)
 
 | Scenario | Leader killed | New leader | Measured re-election time | Docker target threshold (§ below) |
 |---|---|---|---|---|
-| Process killed (SIGKILL) | `cfgms-ha-node2` | `cfgms-ctrl-01` | **14.02s** | `TestLeaderElectionTiming`: < 15s (`test/integration/ha/leader_election_test.go:224-225`) |
-| Host killed (`Stop-VM -TurnOff`) | `cfgms-ha-node2` | `cfgms-ctrl-01` | **16.02s** | `TestFailoverTiming`: < 40s (`test/integration/ha/failover_test.go:131-135`, AC2 — NODE_TIMEOUT 15s + DISCOVERY_INTERVAL 10s + ELECTION_TIMEOUT 5s + buffer) |
+| Process killed (SIGKILL) | `ctrl-node-02` | `ctrl-node-01` | **14.02s** | `TestLeaderElectionTiming`: < 15s (`test/integration/ha/leader_election_test.go:224-225`) |
+| Host killed (`Stop-VM -TurnOff`) | `ctrl-node-02` | `ctrl-node-01` | **16.02s** | `TestFailoverTiming`: < 40s (`test/integration/ha/failover_test.go:131-135`, AC2 — NODE_TIMEOUT 15s + DISCOVERY_INTERVAL 10s + ELECTION_TIMEOUT 5s + buffer) |
 
 **These are target thresholds, not a previously-proven baseline the real
 numbers beat.** No GitHub Actions workflow runs `go test
@@ -795,24 +795,24 @@ the 5s `RestartSec` window.
 ### Reproduction
 
 ```bash
-export CFGMS_E2E_HA_CLUSTER_NODES="https://192.168.234.103:9080,https://192.168.234.104:9080,https://192.168.234.106:9080"
+export CFGMS_E2E_HA_CLUSTER_NODES="https://192.0.2.103:9080,https://192.0.2.104:9080,https://192.0.2.106:9080"
 export CFGMS_E2E_HA_ADMIN_BUNDLE="C:/Users/cfg/admin.bundle.yaml"   # or ~/.cfgms/admin.bundle.yaml on Linux
 go test -tags e2e -run TestRealCluster -v ./test/e2e/ha/...
 ```
 
-`CFGMS_E2E_HA_SSH_KEY` (default `<home>/.ssh/cfgms_lab_ed25519`) and
+`CFGMS_E2E_HA_SSH_KEY` (default `<home>/.ssh/cfgms_ed25519`) and
 `CFGMS_E2E_HA_SSH_USER` (default `debian`) override the SSH identity used to
 reach the node VMs. The host-kill test's `Stop-VM`/`Start-VM` calls target
-the leader's Hyper-V host by name (`CFG-70-02`/`CFG-AB-02`/`CFG-C3-02`, a
-fixed cfg-lab topology table in the test file); running against a leader
-hosted on `CFG-70-02` requires a locally-elevated session on that host — this
+the leader's Hyper-V host by name (`HV-HOST-01`/`HV-HOST-02`/`HV-HOST-03`, a
+fixed example-cluster topology table in the test file); running against a leader
+hosted on `HV-HOST-01` requires a locally-elevated session on that host — this
 session's local PowerShell was deliberately non-admin, confirmed live
-(`Get-VM` on `CFG-70-02` itself: "You do not have the required permission");
-remote `-ComputerName CFG-AB-02`/`CFG-C3-02` calls worked from the same
+(`Get-VM` on `HV-HOST-01` itself: "You do not have the required permission");
+remote `-ComputerName HV-HOST-02`/`HV-HOST-03` calls worked from the same
 non-elevated session without issue, since Hyper-V's remote-management check
 is against the target host's group membership, not the caller's local
-elevation. Both real runs above happened to land on `cfgms-ha-node2`
-(`CFG-AB-02`), so this gap did not block either measurement.
+elevation. Both real runs above happened to land on `ctrl-node-02`
+(`HV-HOST-02`), so this gap did not block either measurement.
 
 ## 5. Network partition / split-brain validation (story #3095)
 
@@ -823,7 +823,7 @@ run against the live cluster.
 
 ### Method
 
-A genuine `iptables` rule on **one** cfg-lab host (the current leader, chosen
+A genuine `iptables` rule on **one** example-cluster host (the current leader, chosen
 so the test exercises a real `CheckQuorum` step-down rather than a
 never-was-leader no-op) blocks the internal Raft consensus port (`:9443`,
 both `--dport` and `--sport`, both `INPUT` and `OUTPUT`) via a dedicated
@@ -959,14 +959,14 @@ authority): lease-backed `HasLeadership()` separated from `IsRaftLeader()`
 **Resolved run (2026-08-25/26, story #3389).** A controller binary built from
 #3389's branch (re-homing the three side-effecting call sites named above
 onto `HasLeadership()`) was rolling-deployed to all three real cluster nodes
-(`cfgms-ctrl-01`, `cfgms-ha-node2`, `cfgms-ha-node3` — one node at a time,
+(`ctrl-node-01`, `ctrl-node-02`, `ctrl-node-03` — one node at a time,
 quorum preserved throughout the deployment itself), then all three of this
 story's tests were re-run **unmodified**:
 
 | Test | Result | Measured |
 |---|---|---|
-| `TestRealClusterPartition_NoDualLeader` | **PASS** (previously failed reproducibly at 2.0s/5.5s) | 90 paired poll rounds across 45s (500ms interval), **0 dual-leader instants**. Partitioned node: `cfgms-ctrl-01` (the leader at the time, isolated as the minority side). |
-| `TestRealClusterPartition_MinorityStepsDown` | **PASS** (no regression) | Isolated leader (`cfgms-ha-node3` this run) stepped down and stayed down for the full 45s observation window. |
+| `TestRealClusterPartition_NoDualLeader` | **PASS** (previously failed reproducibly at 2.0s/5.5s) | 90 paired poll rounds across 45s (500ms interval), **0 dual-leader instants**. Partitioned node: `ctrl-node-01` (the leader at the time, isolated as the minority side). |
+| `TestRealClusterPartition_MinorityStepsDown` | **PASS** (no regression) | Isolated leader (`ctrl-node-03` this run) stepped down and stayed down for the full 45s observation window. |
 | `TestRealClusterPartition_HealsToSingleLeader` | **PASS** (no regression) | Reconverged to a single agreed leader in **2.0073369s** (bound 90s) — consistent with this section's original 2.01s measurement. |
 
 Full quorum and cleanup verified after each run: `iptables -L
@@ -977,7 +977,7 @@ live evidence for the fix: each of the three sequential `systemctl stop` /
 binary swap / `systemctl start` cycles is a real, brief leadership loss on
 whichever node was stopped, and the cluster reconverged within seconds each
 time with no operator intervention — the final restart (of the
-then-current leader, `cfgms-ctrl-01`) produced an uneventful term bump
+then-current leader, `ctrl-node-01`) produced an uneventful term bump
 (11→12) and instant re-election, the same `CheckQuorum` / election-timeout
 machinery this section's tests exercise deliberately.
 
@@ -1001,8 +1001,8 @@ ssh -i <key> debian@<isolated-node-fqdn> \
 
 ## 6. Steward fleet continuity through failover (story #3096)
 
-Live-validated 2026-08-20 against the same real 3-node cluster (`cfgms-ctrl-01`,
-`cfgms-ha-node2`, `cfgms-ha-node3`), via a new suite
+Live-validated 2026-08-20 against the same real 3-node cluster (`ctrl-node-01`,
+`ctrl-node-02`, `ctrl-node-03`), via a new suite
 `test/e2e/ha/steward_continuity_real_test.go` (`//go:build e2e`, same gating and
 helpers as §4's `leader_election_real_test.go`).
 
@@ -1014,8 +1014,8 @@ change at all.
 
 | Measurement | Value |
 |---|---|
-| Leader killed | `cfgms-ha-node2` (SIGKILL to the main process) |
-| New leader | `cfgms-ha-node3` |
+| Leader killed | `ctrl-node-02` (SIGKILL to the main process) |
+| New leader | `ctrl-node-03` |
 | Re-election time | **12.02s** |
 | Steward's next heartbeat after the kill | **+6s** |
 | Heartbeats missed | **0** (cadence ~25s held straight through) |
@@ -1026,7 +1026,7 @@ The reason is structural, and it is the answer to this story's central
 investigation question: **there is no leader-forwarding step in the steward
 path.** Every node serves steward traffic itself, straight against the shared
 Postgres backend. Confirmed live by registering a steward through
-`cfgms-ctrl-01` while it was a *follower* — HTTP 200, certificate issued, row
+`ctrl-node-01` while it was a *follower* — HTTP 200, certificate issued, row
 written. So the leader is not in a steward's request path, and a leader change
 is invisible to a steward whose own node stays up.
 
@@ -1057,7 +1057,7 @@ brief hypothesised, and it falls out of the no-forwarding finding above.
 ### Reproduction
 
 ```bash
-export CFGMS_E2E_HA_CLUSTER_NODES="https://192.168.234.103:9080,https://192.168.234.104:9080,https://192.168.234.106:9080"
+export CFGMS_E2E_HA_CLUSTER_NODES="https://192.0.2.103:9080,https://192.0.2.104:9080,https://192.0.2.106:9080"
 export CFGMS_E2E_HA_ADMIN_BUNDLE="C:/Users/cfg/admin.bundle.yaml"
 go test -tags e2e -run TestRealClusterStewardContinuity -v ./test/e2e/ha/...
 ```
@@ -1199,7 +1199,7 @@ story and security review rather than riding along in a failover-continuity PR.
 `ControllerService.GetAllStewards()`
 (`features/controller/service/controller_service.go`), an in-process map — not
 the shared store. Measured: a steward actively heartbeating through
-`cfgms-ctrl-01` was reported by that node and **not** by the other two, including
+`ctrl-node-01` was reported by that node and **not** by the other two, including
 the leader, while its row sat in shared Postgres the whole time. The e2e suite
 records this per-node split as a log line rather than an assertion, so it does not
 block on a known gap.
@@ -1277,7 +1277,7 @@ newRaft 9fe70c1e2a553f1c [peers: [], term: 2, commit: 7, applied: 7, ...]
 `GET /api/v1/raft/status` then reports `"leader":0` forever, with terms diverging
 between nodes. Reproduced deterministically across two full stop/start cycles of
 all three nodes. Note the WAL paths differ per node
-(`/var/lib/cfgms/data/raft-log/` on `cfgms-ctrl-01`, `/var/lib/cfgms/raft-log/`
+(`/var/lib/cfgms/data/raft-log/` on `ctrl-node-01`, `/var/lib/cfgms/raft-log/`
 on the other two), and `raft.db.wiped-3095` files on all three show story #3095
 hit this too.
 
@@ -1312,11 +1312,11 @@ true before #3284 and is why those stories' stop-all/start-all drills worked.
 ## 7. Fleet enrollment against the cluster (story #3405)
 
 Executed 2026-08-22 against the 3-node cluster. This is the section to follow to
-rebuild the cfg-lab fleet from scratch.
+rebuild the example-cluster fleet from scratch.
 
 ### Outcome
 
-All three Hyper-V hosts (`CFG-70-02`, `CFG-AB-02`, `CFG-C3-02`) are enrolled
+All three Hyper-V hosts (`HV-HOST-01`, `HV-HOST-02`, `HV-HOST-03`) are enrolled
 against the cluster and were proven end to end:
 
 | Check | Result |
@@ -1377,7 +1377,7 @@ Find the leader before enrolling:
 
 ```bash
 for ip in 103 104 106; do curl -s --cert admin.crt --key admin.key --cacert ca.crt \
-  https://192.168.234.$ip:9080/api/v1/raft/status; done   # pick is_leader:true
+  https://192.0.2.$ip:9080/api/v1/raft/status; done   # pick is_leader:true
 ```
 
 ### Procedure (per host)
@@ -1386,7 +1386,7 @@ for ip in 103 104 106; do curl -s --cert admin.crt --key admin.key --cacert ca.c
    which is too short for a multi-host rollout — set `expires_in`:
    ```
    POST https://<leader>:9080/api/v1/registration/tokens
-   {"tenant_id":"infra-hyperv","controller_url":"192.168.234.103:4433","expires_in":"24h"}
+   {"tenant_id":"infra-hyperv","controller_url":"192.0.2.103:4433","expires_in":"24h"}
    ```
 2. **Stop the steward and clear its identity** so it re-registers rather than
    presenting a certificate the cluster has no record of:
@@ -1412,8 +1412,8 @@ for ip in 103 104 106; do curl -s --cert admin.crt --key admin.key --cacert ca.c
    POST https://<leader>:9080/api/v1/registration/<pending_id>/approve
    ```
 
-`CFG-70-02` hosts the non-admin operator session, so steps 2–4 there need an
-elevated shell run by the maintainer; `CFG-AB-02` and `CFG-C3-02` are reachable
+`HV-HOST-01` hosts the non-admin operator session, so steps 2–4 there need an
+elevated shell run by the maintainer; `HV-HOST-02` and `HV-HOST-03` are reachable
 via `Invoke-Command` with an elevated token from the same account.
 
 ### Verification
@@ -1474,10 +1474,10 @@ Exercised on the live 3-node cluster on 2026-08-22, not only on a fresh install.
 
 ### What changed on each node
 
-Before, `cfgms-ha-node2` and `cfgms-ha-node3` carried
+Before, `ctrl-node-02` and `ctrl-node-03` carried
 `EnvironmentFile=/etc/cfgms/ha-secrets.env` — three secrets in cleartext on disk
 and in the service environment, where `/proc/<pid>/environ` exposes them to root
-and every child process inherits them. `cfgms-ctrl-01` was worse: it kept the
+and every child process inherits them. `ctrl-node-01` was worse: it kept the
 same shape in `/etc/cfgms/storage-secrets.env` *and* read the root key straight
 from the cleartext `/etc/cfgms/secrets.key` with no credential wiring at all.
 
@@ -1509,7 +1509,7 @@ keeps its already-loaded environment, and the new unit takes effect at the next
 start. Only the final restart is an outage.
 
 ```bash
-# 1. On each of cfgms-ha-node2 / cfgms-ha-node3, with the cluster still serving:
+# 1. On each of ctrl-node-02 / ctrl-node-03, with the cluster still serving:
 #    source the node's own existing values, then re-run the updated bootstrap.
 sudo bash -c '
   set -a; . /etc/cfgms/ha-secrets.env; set +a
@@ -1521,7 +1521,7 @@ sudo bash -c '
     --vault-address=... --vault-key-path=root/cluster-ca --skip-smoke
 '
 
-# 2. cfgms-ctrl-01's unit was hand-written during the §3 cutover, not generated
+# 2. ctrl-node-01's unit was hand-written during the §3 cutover, not generated
 #    by either script. Change only its secret-delivery lines: seal the three
 #    values from storage-secrets.env plus the root key, replace
 #    EnvironmentFile= with the four LoadCredentialEncrypted= lines and their
@@ -1549,12 +1549,12 @@ seconds.
 ### Evidence (2026-08-22)
 
 Quorum, identical to the pre-migration baseline (term 2, leader
-`11522188196814600707` = `cfgms-ctrl-01`):
+`10000000000000000001` = `ctrl-node-01`):
 
 ```
-cfgms-ctrl-01  {"node_id":11522188196814600707,"is_leader":true, "leader":11522188196814600707,"term":2,"nodes":3}
-cfgms-ha-node2 {"node_id":11522193694372741762,"is_leader":false,"leader":11522188196814600707,"term":2,"nodes":3}
-cfgms-ha-node3 {"node_id":11522191495349485340,"is_leader":false,"leader":11522188196814600707,"term":2,"nodes":3}
+ctrl-node-01  {"node_id":10000000000000000001,"is_leader":true, "leader":10000000000000000001,"term":2,"nodes":3}
+ctrl-node-02 {"node_id":10000000000000000002,"is_leader":false,"leader":10000000000000000001,"term":2,"nodes":3}
+ctrl-node-03 {"node_id":10000000000000000003,"is_leader":false,"leader":10000000000000000001,"term":2,"nodes":3}
 ```
 
 `GET /api/v1/health` reported `"status":"healthy"` on all three.
@@ -1570,7 +1570,7 @@ OPENBAO_TOKEN_FILE=/run/credentials/cfgms-controller.service/cfgms-openbao-token
 ```
 
 Credentials present and correctly scoped (`0440` with a per-invocation ACL where
-the unit drops to `User=cfgms`; `0400` on `cfgms-ctrl-01`, which still runs as
+the unit drops to `User=cfgms`; `0400` on `ctrl-node-01`, which still runs as
 root):
 
 ```
@@ -1583,7 +1583,7 @@ root):
 `/etc/cfgms` holds no `secrets.key`, `ha-secrets.env` or `storage-secrets.env` on
 any node.
 
-Fail-loudly, verified on `cfgms-ha-node3` with a transient unit rather than the
+Fail-loudly, verified on `ctrl-node-03` with a transient unit rather than the
 cluster service: a sealed blob with one byte flipped makes systemd refuse to
 start the unit with `status=243/CREDENTIALS`, and nothing generates a
 replacement key.
@@ -1621,12 +1621,12 @@ steward restart and the authenticated reset path are #3437.
 
 A steward binary built from the story branch (`v0.0.0-story3436-fencetest`,
 `go build ./cmd/steward`, no ldflags beyond `pkg/version.Version`) was run as a
-**standalone validation instance** on `CFG-70-02` — deliberately *not* the
+**standalone validation instance** on `HV-HOST-01` — deliberately *not* the
 shared `CFGMSSteward` production service on that host, to avoid touching a
 live fleet member other stories depend on. Isolation required overriding two
 environment variables the steward reads independently
 (`ProgramData` for certs/secrets, `CFGMS_LOG_DIR` for logs — the latter is set
-host-wide on `CFG-70-02` to the real `C:\ProgramData\CFGMS\logs`, and a first
+host-wide on `HV-HOST-01` to the real `C:\ProgramData\CFGMS\logs`, and a first
 attempt without overriding it wrote two orphaned log files into that
 production directory before the mistake was caught; no production files were
 modified, and the two stray files were deleted). `CFGMS_HTTP_CA_CERT_PATH` was
@@ -1634,10 +1634,10 @@ pointed at the real cluster CA read-only.
 
 The instance registered fresh (`cfg token create --tenant-id=infra-hyperv`,
 approved via `cfg registration approve`) against the live 3-node
-`cfgms-ctrl-01` / `cfgms-ha-node2` / `cfgms-ha-node3` HA controller cluster
+`ctrl-node-01` / `ctrl-node-02` / `ctrl-node-03` HA controller cluster
 described in §1 — the same cluster whose Raft term this story's fence
 enforces against. Registration and token-creation POSTs only succeeded
-against `192.168.234.106` (the leader at the time); the other two nodes
+against `192.0.2.106` (the leader at the time); the other two nodes
 returned `503` for both, consistent with these being unforwarded
 leader-only writes rather than a fleet problem.
 
@@ -1654,7 +1654,7 @@ regression from the edit/revert cycle.
 The steward (`steward-1787621085452586756`, a disposable validation record —
 left enrolled, consistent with this fleet's existing orphaned-record entries
 noted elsewhere in this doc; no decommission command exists) completed a real
-mTLS + gRPC-over-QUIC connection to `cfgms-ha-node3` and received a genuine
+mTLS + gRPC-over-QUIC connection to `ctrl-node-03` and received a genuine
 inbound `push_signing_cert` command from the live controller as part of its
 on-connect handshake. `checkTermFence` observed it with `claimed_term: 0`
 against an unset ratchet and accepted it via the bootstrap-accept branch —

@@ -163,6 +163,12 @@ check-stdlib-payload-boundary:
 check-stdlib-completeness: check-stdlib-payload-boundary
 	@bash ./scripts/check-stdlib-completeness.sh
 
+# Verify docs/ contains no private-deployment identifiers.
+# See docs/development/documentation-boundaries.md.
+.PHONY: check-docs-boundary
+check-docs-boundary:
+	@bash ./scripts/check-docs-boundary.sh
+
 .PHONY: build-stdlib-modules
 build-stdlib-modules: check-stdlib-payload-boundary
 	@echo "Building stdlib module binaries..."
