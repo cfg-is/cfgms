@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,9 +27,35 @@ import (
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
+// errorInjectingPushStore wraps a real business.PushStore but returns a controlled
+// error from ListPushesByConfigID for a specific config ID. Used to exercise the
+// store-failure path in handleGetConfigDeployments without mocking the store —
+// every other operation is served by the real underlying push store.
+type errorInjectingPushStore struct {
+	business.PushStore
+	errorConfigID string
+	err           error
+}
+
+func (s *errorInjectingPushStore) ListPushesByConfigID(ctx context.Context, configID, tenantID string) ([]*business.PushRecord, error) {
+	if configID == s.errorConfigID {
+		return nil, s.err
+	}
+	return s.PushStore.ListPushesByConfigID(ctx, configID, tenantID)
+}
+
 // setupDeploymentServer creates a test server wired with a real push store
 // so deployment handler tests can exercise the full handler path.
 func setupDeploymentServer(t *testing.T) (*Server, business.PushStore) {
+	t.Helper()
+	return setupDeploymentServerWithPushStore(t, nil)
+}
+
+// setupDeploymentServerWithPushStore creates a test server wired with the real
+// push store from test storage, optionally decorated by wrap (e.g. to inject a
+// store error). The returned PushStore is the undecorated real store so tests can
+// seed push records directly.
+func setupDeploymentServerWithPushStore(t *testing.T, wrap func(business.PushStore) business.PushStore) (*Server, business.PushStore) {
 	t.Helper()
 	setTestSecretsEnv(t)
 
@@ -64,14 +91,19 @@ func setupDeploymentServer(t *testing.T) (*Server, business.PushStore) {
 	pushStore := storageManager.GetPushStore()
 	require.NotNil(t, pushStore, "push store must be available from test storage")
 
+	serverPushStore := pushStore
+	if wrap != nil {
+		serverPushStore = wrap(pushStore)
+	}
+
 	server, err := New(
 		cfg, logger, controllerService, configService, nil, rbacService,
 		nil, tenantManager, rbacManager,
 		nil, nil, nil, "", nil,
 		auditMgr,
-		nil,       // No command publisher needed
-		pushStore, // Real push store
-		nil,       // No blob store needed
+		nil,             // No command publisher needed
+		serverPushStore, // Real push store (optionally error-injecting wrapper)
+		nil,             // No blob store needed
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -360,6 +392,74 @@ func TestHandleGetConfigDeployments_RouteRegistered_NoAuth(t *testing.T) {
 
 	// No API key → 401, not 404. Route exists and auth is enforced.
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleGetConfigDeployments_StoreError exercises the runtime error path in
+// handleGetConfigDeployments: when the push store fails, the handler must return
+// HTTP 500 with code INTERNAL_ERROR and must not leak the underlying store error.
+func TestHandleGetConfigDeployments_StoreError(t *testing.T) {
+	storeErr := errors.New("database connection refused: dsn=postgres://internal-host:5432")
+	server, pushStore := setupDeploymentServerWithPushStore(t, func(real business.PushStore) business.PushStore {
+		return &errorInjectingPushStore{PushStore: real, errorConfigID: "cfg-store-error", err: storeErr}
+	})
+
+	apiKey := deploymentAPIKey(t, server)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/configs/cfg-store-error/deployments", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+
+	body := rr.Body.String()
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal([]byte(body), &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+	assert.Equal(t, "failed to retrieve deployment history", errResp.Error.Message)
+
+	// No information disclosure: the store's internal error text must not reach the client.
+	assert.NotContains(t, body, "database connection refused")
+	assert.NotContains(t, body, "postgres://")
+
+	// The injection is targeted: an unaffected config still succeeds, proving the
+	// 500 came from the store failure and not from a broken server wiring.
+	ctx := context.Background()
+	require.NoError(t, pushStore.CreatePush(ctx, &business.PushRecord{
+		ID:       "push-store-error-control",
+		ConfigID: "cfg-healthy",
+		TenantID: "default",
+		Version:  "v1.0.0",
+		Status:   business.PushStatusCompleted,
+		Data:     []byte(`{}`),
+	}))
+
+	okReq := httptest.NewRequest(http.MethodGet, "/api/v1/configs/cfg-healthy/deployments", nil)
+	okReq.Header.Set("X-API-Key", apiKey)
+	okRR := httptest.NewRecorder()
+	server.router.ServeHTTP(okRR, okReq)
+	require.Equal(t, http.StatusOK, okRR.Code)
+}
+
+// TestHandleGetConfigDeployments_StoreUnavailable covers the guard for a server
+// built without a push store: the handler must return 503 STORE_UNAVAILABLE
+// rather than panicking on a nil store.
+func TestHandleGetConfigDeployments_StoreUnavailable(t *testing.T) {
+	server := setupTestServer(t)
+	require.Nil(t, server.pushStore, "this test requires a server with no push store wired")
+
+	apiKey := NewTestKey(t, server, []string{"config:list-deployments"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/configs/my-cfg/deployments", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "STORE_UNAVAILABLE", errResp.Error.Code)
 }
 
 func TestHandleGetConfigDeployments_MissingPermission(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -903,8 +904,8 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 		if invErr := m.cacheManager.InvalidateSubject(subjectID); invErr != nil {
 			cacheInvalidationFailed = true
 			slog.Warn("rbac: failed to invalidate subject cache after RevokeRole",
-				"subject_id", subjectID,
-				"error", invErr,
+				"subject_id", logging.SanitizeLogValue(subjectID),
+				"error", logging.SanitizeLogValue(invErr.Error()),
 			)
 		}
 	}

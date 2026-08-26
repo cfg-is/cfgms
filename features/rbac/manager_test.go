@@ -14,6 +14,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 func TestManager_Initialize(t *testing.T) {
@@ -947,4 +948,187 @@ func TestManager_DeleteRolesByTenant_InvalidatesTenantCache(t *testing.T) {
 		"user2 cache entry should be nil after DeleteRolesByTenant")
 	assert.NotNil(t, cm.GetCachedAuth(otherReq),
 		"other tenant's cache entry must survive DeleteRolesByTenant")
+}
+
+// newInheritanceTestManager builds an initialized Manager backed by real OSS
+// storage for the role-inheritance tenant boundary tests (M-TENANT-2).
+func newInheritanceTestManager(t *testing.T) *Manager {
+	t.Helper()
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Close(stopCtx)
+	})
+	require.NotNil(t, manager.auditManager, "audit manager must be wired for inheritance audit assertions")
+	require.NoError(t, manager.Initialize(context.Background()))
+	return manager
+}
+
+// TestManager_CreateRole_BlocksCrossTenantInheritance verifies the M-TENANT-2
+// security gate in CreateRole: a role whose ParentRoleId resolves to a role in a
+// different tenant must be rejected, must not be persisted, and must produce a
+// critical RBAC_CROSS_TENANT_INHERITANCE_BLOCKED audit event. This gate prevents
+// privilege escalation across tenant boundaries via role inheritance.
+func TestManager_CreateRole_BlocksCrossTenantInheritance(t *testing.T) {
+	manager := newInheritanceTestManager(t)
+	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: validate cross-tenant role inheritance is blocked")
+
+	const (
+		parentTenant = "tenant-victim"
+		childTenant  = "tenant-attacker"
+		parentRoleID = "tenant-victim.privileged-role"
+		childRoleID  = "tenant-attacker.escalation-role"
+	)
+
+	// Privileged role living in the victim tenant.
+	require.NoError(t, manager.CreateRole(ctxJ, &common.Role{
+		Id:            parentRoleID,
+		Name:          "Victim Privileged Role",
+		TenantId:      parentTenant,
+		PermissionIds: []string{"system.admin"},
+	}))
+
+	// Attempt to inherit it from a role owned by a different tenant.
+	childRole := &common.Role{
+		Id:           childRoleID,
+		Name:         "Attacker Escalation Role",
+		TenantId:     childTenant,
+		ParentRoleId: parentRoleID,
+	}
+	err := manager.CreateRole(ctxJ, childRole)
+	require.Error(t, err, "cross-tenant role inheritance must be rejected")
+	assert.Contains(t, err.Error(), "cross-tenant role inheritance not allowed")
+	assert.Contains(t, err.Error(), "M-TENANT-2")
+
+	// The child role must not exist in either the ephemeral or durable store.
+	_, getErr := manager.GetRole(ctx, childRoleID)
+	require.Error(t, getErr, "blocked role must not be persisted")
+
+	childTenantRoles, listErr := manager.ListRoles(ctx, childTenant)
+	require.NoError(t, listErr)
+	for _, r := range childTenantRoles {
+		assert.NotEqual(t, childRoleID, r.Id, "blocked role must not appear in the child tenant's role list")
+	}
+
+	// Flush pending async audit writes before querying the audit store.
+	require.NoError(t, manager.FlushAudit(ctx))
+
+	entries, queryErr := manager.QueryAuditEntries(ctx, &business.AuditFilter{
+		TenantID:      childTenant,
+		EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
+		Actions:       []string{"create_role"},
+		ResourceTypes: []string{"role"},
+		ResourceIDs:   []string{childRoleID},
+		Limit:         10,
+	})
+	require.NoError(t, queryErr)
+	require.Len(t, entries, 1, "exactly one audit entry must exist for the blocked role creation")
+
+	entry := entries[0]
+	assert.Equal(t, "RBAC_CROSS_TENANT_INHERITANCE_BLOCKED", entry.ErrorCode)
+	assert.Equal(t, business.AuditSeverityCritical, entry.Severity,
+		"cross-tenant inheritance attempts are security-critical")
+	assert.Equal(t, business.AuditResultError, entry.Result)
+	assert.Equal(t, childTenant, entry.TenantID)
+	assert.Equal(t, childRoleID, entry.ResourceID)
+	require.NotNil(t, entry.Details)
+	assert.Equal(t, childTenant, entry.Details["child_tenant"])
+	assert.Equal(t, parentTenant, entry.Details["parent_tenant"])
+	assert.Equal(t, parentRoleID, entry.Details["parent_role_id"])
+	assert.Equal(t, "M-TENANT-2", entry.Details["security_finding"])
+	assert.True(t, manager.auditManager.VerifyIntegrity(entry),
+		"blocked-inheritance audit entry must have a valid integrity checksum")
+}
+
+// TestManager_CreateRole_AllowsSameTenantInheritance is the positive control for
+// the M-TENANT-2 gate: inheritance within a single tenant must still succeed, so
+// the boundary check rejects only genuine cross-tenant escalation attempts.
+func TestManager_CreateRole_AllowsSameTenantInheritance(t *testing.T) {
+	manager := newInheritanceTestManager(t)
+	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: validate same-tenant role inheritance is permitted")
+
+	const (
+		tenantID     = "tenant-single"
+		parentRoleID = "tenant-single.parent-role"
+		childRoleID  = "tenant-single.child-role"
+	)
+
+	require.NoError(t, manager.CreateRole(ctxJ, &common.Role{
+		Id:            parentRoleID,
+		Name:          "Parent Role",
+		TenantId:      tenantID,
+		PermissionIds: []string{"config.read"},
+	}))
+
+	require.NoError(t, manager.CreateRole(ctxJ, &common.Role{
+		Id:           childRoleID,
+		Name:         "Child Role",
+		TenantId:     tenantID,
+		ParentRoleId: parentRoleID,
+	}))
+
+	stored, err := manager.GetRole(ctx, childRoleID)
+	require.NoError(t, err, "same-tenant inheritance must be permitted")
+	assert.Equal(t, parentRoleID, stored.ParentRoleId)
+	assert.Equal(t, tenantID, stored.TenantId)
+}
+
+// TestManager_CreateRole_BlocksInheritanceFromMissingParent verifies the sibling
+// branch of the M-TENANT-2 gate: an unresolvable ParentRoleId is rejected before
+// the role is stored and records a high-severity RBAC_PARENT_ROLE_NOT_FOUND event.
+func TestManager_CreateRole_BlocksInheritanceFromMissingParent(t *testing.T) {
+	manager := newInheritanceTestManager(t)
+	ctx := context.Background()
+	// M-AUTH-2: sensitive operations require justification in context
+	ctxJ := WithSensitiveOperationJustification(ctx, "test: validate unresolvable parent role is rejected")
+
+	const (
+		tenantID    = "tenant-missing-parent"
+		childRoleID = "tenant-missing-parent.child-role"
+	)
+
+	err := manager.CreateRole(ctxJ, &common.Role{
+		Id:           childRoleID,
+		Name:         "Orphan Child Role",
+		TenantId:     tenantID,
+		ParentRoleId: "does-not-exist",
+	})
+	require.Error(t, err, "inheritance from a non-existent parent must be rejected")
+	assert.Contains(t, err.Error(), "parent role does-not-exist not found")
+
+	_, getErr := manager.GetRole(ctx, childRoleID)
+	require.Error(t, getErr, "rejected role must not be persisted")
+
+	require.NoError(t, manager.FlushAudit(ctx))
+
+	entries, queryErr := manager.QueryAuditEntries(ctx, &business.AuditFilter{
+		TenantID:      tenantID,
+		EventTypes:    []business.AuditEventType{business.AuditEventUserManagement},
+		Actions:       []string{"create_role"},
+		ResourceTypes: []string{"role"},
+		ResourceIDs:   []string{childRoleID},
+		Limit:         10,
+	})
+	require.NoError(t, queryErr)
+	require.Len(t, entries, 1, "exactly one audit entry must exist for the rejected role creation")
+
+	entry := entries[0]
+	assert.Equal(t, "RBAC_PARENT_ROLE_NOT_FOUND", entry.ErrorCode)
+	assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
+	assert.Equal(t, business.AuditResultError, entry.Result)
+	assert.Equal(t, "does-not-exist", entry.Details["parent_role_id"])
 }
