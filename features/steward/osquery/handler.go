@@ -67,7 +67,7 @@ type osqueryStreamEntry struct {
 	mu      sync.Mutex
 	stream  grpc.BidiStreamingServer[transportpb.OsqueryQueryResponse, transportpb.OsqueryQueryRequest]
 	waiting chan *transportpb.OsqueryQueryResponse // non-nil while a query is in-flight
-	done    chan struct{}                           // closed when the stream ends
+	done    chan struct{}                          // closed when the stream ends
 }
 
 // OsqueryHandler validates catalog-query requests and executes them via runQuery

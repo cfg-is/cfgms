@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -23,9 +25,14 @@ import (
 
 // stubOsqueryDispatcher is a real (non-mock) dispatcher that carries a fixed
 // response. It records calls for assertion without expectations (not a mock).
+// handleOsqueryQuery fans out to stewards concurrently, so calls is guarded by
+// mu — every test exercising more than one target steward hits this
+// concurrently (verified by `go test -race`).
 type stubOsqueryDispatcher struct {
 	rows []*transportpb.OsqueryRow
 	err  error
+
+	mu sync.Mutex
 	// calls records (stewardID, catalogID, params) for assertion.
 	calls []osqueryDispatchCall
 }
@@ -37,7 +44,9 @@ type osqueryDispatchCall struct {
 }
 
 func (d *stubOsqueryDispatcher) QuerySteward(_ context.Context, stewardID, catalogID string, params map[string]string) ([]*transportpb.OsqueryRow, error) {
+	d.mu.Lock()
 	d.calls = append(d.calls, osqueryDispatchCall{stewardID: stewardID, catalogID: catalogID, params: params})
+	d.mu.Unlock()
 	return d.rows, d.err
 }
 
@@ -95,6 +104,160 @@ func fleetWithStewardIDs(ids ...string) fleet.FleetQuery {
 		}
 	}
 	return seededFleetQuery(data...)
+}
+
+// fleetWithTenantStewards builds a fleet.FleetQuery from stewardID → tenantID pairs.
+func fleetWithTenantStewards(pairs map[string]string) fleet.FleetQuery {
+	data := make([]fleet.StewardData, 0, len(pairs))
+	for id, tenant := range pairs {
+		data = append(data, fleet.StewardData{
+			ID:       id,
+			TenantID: tenant,
+			Status:   "online",
+		})
+	}
+	return seededFleetQuery(data...)
+}
+
+// makeOsqueryRequestForTenant is makeOsqueryRequest with an authenticated caller
+// tenant in the request context — the value the auth middleware installs under
+// ctxkeys.TenantID for API-key, session, and JWT principals.
+func makeOsqueryRequestForTenant(t *testing.T, s *Server, body interface{}, principal *Principal, tenantID string) *http.Request {
+	t.Helper()
+	req := makeOsqueryRequest(t, s, body, principal)
+	if tenantID != "" {
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	}
+	return req
+}
+
+// dispatchedStewardIDs returns the set of steward IDs the stub dispatcher saw.
+func dispatchedStewardIDs(d *stubOsqueryDispatcher) map[string]bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ids := make(map[string]bool, len(d.calls))
+	for _, c := range d.calls {
+		ids[c.stewardID] = true
+	}
+	return ids
+}
+
+// ---- Tests: tenant isolation ------------------------------------------------
+
+// TestHandleOsqueryQuery_CrossTenantSelectorRejected verifies that a tenant-scoped
+// caller cannot target another tenant's subtree by putting a foreign tenant prefix
+// in the selector. Without the authz check, selector.Parse discards the parsed
+// tenant path and fleet.Filter{TenantSubtree: ""} fans the query out fleet-wide,
+// leaking process lists and steward IDs across tenants.
+func TestHandleOsqueryQuery_CrossTenantSelectorRejected(t *testing.T) {
+	server := setupTestServer(t)
+	disp := &stubOsqueryDispatcher{}
+	server.SetOsqueryDispatcher(disp)
+	server.fleetQuery = fleetWithTenantStewards(map[string]string{
+		"steward-a": "msp-a",
+		"steward-b": "msp-b",
+	})
+
+	body := osqueryQueryRequest{CatalogID: "host_info", Selector: "msp-b/all"}
+	req := makeOsqueryRequestForTenant(t, server, body, osqueryStrongPrincipal(), "msp-a")
+	rec := httptest.NewRecorder()
+
+	server.handleOsqueryQuery(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"a selector naming another tenant's subtree must be rejected with 403")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "CROSS_TENANT", errResp.Error.Code,
+		"cross-tenant rejection must carry the CROSS_TENANT code")
+
+	assert.Empty(t, disp.calls,
+		"no steward may be dispatched to when the tenant boundary is violated")
+}
+
+// TestHandleOsqueryQuery_TenantScopedCallerLimitedToOwnSubtree verifies that a
+// tenant-scoped caller sending the unqualified "all" selector reaches only its own
+// tenant and descendants — never a sibling tenant's stewards.
+func TestHandleOsqueryQuery_TenantScopedCallerLimitedToOwnSubtree(t *testing.T) {
+	server := setupTestServer(t)
+	disp := &stubOsqueryDispatcher{}
+	server.SetOsqueryDispatcher(disp)
+	server.fleetQuery = fleetWithTenantStewards(map[string]string{
+		"steward-a":       "msp-a",
+		"steward-a-child": "msp-a/client-1",
+		"steward-b":       "msp-b",
+		"steward-root":    "root",
+	})
+
+	body := osqueryQueryRequest{CatalogID: "host_info", Selector: "all"}
+	req := makeOsqueryRequestForTenant(t, server, body, osqueryStrongPrincipal(), "msp-a")
+	rec := httptest.NewRecorder()
+
+	handler := server.requirePermission("osquery", "execute")(http.HandlerFunc(server.handleOsqueryQuery))
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := dispatchedStewardIDs(disp)
+	assert.True(t, ids["steward-a"], "caller's own tenant must be targeted")
+	assert.True(t, ids["steward-a-child"], "descendant tenants must be targeted")
+	assert.False(t, ids["steward-b"], "sibling tenant steward must not be targeted")
+	assert.False(t, ids["steward-root"], "parent tenant steward must not be targeted")
+	assert.Len(t, ids, 2, "exactly the caller's subtree must be dispatched to")
+}
+
+// TestHandleOsqueryQuery_TenantPrefixWithinSubtreeAllowed verifies that a selector
+// prefix naming a descendant of the caller's tenant narrows the dispatch instead of
+// being rejected.
+func TestHandleOsqueryQuery_TenantPrefixWithinSubtreeAllowed(t *testing.T) {
+	server := setupTestServer(t)
+	disp := &stubOsqueryDispatcher{}
+	server.SetOsqueryDispatcher(disp)
+	server.fleetQuery = fleetWithTenantStewards(map[string]string{
+		"steward-a":       "msp-a",
+		"steward-a-child": "msp-a/client-1",
+		"steward-b":       "msp-b",
+	})
+
+	body := osqueryQueryRequest{CatalogID: "host_info", Selector: "msp-a/client-1/all"}
+	req := makeOsqueryRequestForTenant(t, server, body, osqueryStrongPrincipal(), "msp-a")
+	rec := httptest.NewRecorder()
+
+	handler := server.requirePermission("osquery", "execute")(http.HandlerFunc(server.handleOsqueryQuery))
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := dispatchedStewardIDs(disp)
+	assert.True(t, ids["steward-a-child"], "the named descendant tenant must be targeted")
+	assert.Len(t, ids, 1, "a descendant prefix must narrow the dispatch to that subtree only")
+}
+
+// TestHandleOsqueryQuery_AdminCallerUnrestricted verifies that an admin caller
+// (no tenant in context — e.g. an mTLS cert admin) still reaches the whole fleet,
+// so the tenant check does not regress the admin path.
+func TestHandleOsqueryQuery_AdminCallerUnrestricted(t *testing.T) {
+	server := setupTestServer(t)
+	disp := &stubOsqueryDispatcher{}
+	server.SetOsqueryDispatcher(disp)
+	server.fleetQuery = fleetWithTenantStewards(map[string]string{
+		"steward-a": "msp-a",
+		"steward-b": "msp-b",
+	})
+
+	body := osqueryQueryRequest{CatalogID: "host_info", Selector: "all"}
+	req := makeOsqueryRequest(t, server, body, osqueryStrongPrincipal()) // no ctxkeys.TenantID
+	rec := httptest.NewRecorder()
+
+	handler := server.requirePermission("osquery", "execute")(http.HandlerFunc(server.handleOsqueryQuery))
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	ids := dispatchedStewardIDs(disp)
+	assert.Len(t, ids, 2, "an admin caller with no tenant scope reaches the whole fleet")
 }
 
 // ---- Tests: REQUIRED TEST — leadership gate ---------------------------------

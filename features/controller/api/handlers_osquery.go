@@ -12,6 +12,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -81,13 +82,36 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter, _, err := selector.Parse(req.Selector)
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.logger.Debug("Invalid osquery selector",
 			"selector", logging.SanitizeLogValue(req.Selector),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid selector", "INVALID_SELECTOR")
 		return
+	}
+
+	// Enforce the tenant authz boundary. selector.Parse deliberately does not do
+	// this — it returns the parsed tenant path and leaves the decision to the
+	// caller. fleet.Filter{TenantSubtree: ""} is unrestricted, so an unset
+	// TenantSubtree would fan a catalog query out across every tenant's stewards.
+	// An explicit selector prefix must lie at or below the caller's own node;
+	// an absent prefix defaults to the caller's entire subtree. Admin callers
+	// (empty tenant ID, e.g. mTLS cert admins) remain unrestricted, matching
+	// handleResolveSelector and handleDispatchUpgrade.
+	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if parsedTenantPath != "" {
+		if !isWithinTenantScope(callerTenantID, parsedTenantPath) {
+			s.logger.Info("Osquery selector tenant outside caller subtree",
+				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+				"caller_tenant", logging.SanitizeLogValue(callerTenantID))
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if callerTenantID != "" {
+		filter.TenantSubtree = callerTenantID
 	}
 
 	if s.fleetQuery == nil {
