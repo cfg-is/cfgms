@@ -3045,13 +3045,12 @@ func TestIsWithinTenantScope(t *testing.T) {
 // account a certificate is bound to cannot move that still-valid certificate back onto the
 // unscoped-root bootstrap fallback.
 //
-// Without the guard in handleDeleteAccount, a tenant-scoped administrator holding an
-// admin-marked certificate and carrying account:delete could delete their own account and
-// have their certificate resolve as GlobalScope=true / TenantID="" / ImplicitAdmin=true on
-// the very next request — deprovisioning inverted into a privilege escalation. Deletion is
-// refused with 409 while bindings exist; revoke-then-delete is the supported order, and
-// revocation is authoritative because the certificate is invalid before the account record
-// that scoped it disappears.
+// The offboarding cascade (Issue #3581) prevents the privilege escalation by disabling the
+// account as its very first step. Even when certificate revocation cannot be completed (e.g.
+// the serial is not registered in certManager's store), the account-disabled check fires
+// before the bootstrap fallback in extractAdminPrincipal, so the certificate cannot resolve
+// to GlobalScope=true. The cascade returns 500 (cert revoke failed) in that scenario, leaving
+// the account disabled-but-not-deleted — still fail-closed.
 func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) {
 	server, _ := setupCertBindingServer(t)
 
@@ -3062,6 +3061,9 @@ func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) 
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
 
+	// Use a self-signed cert (serial 9995) that is NOT in certManager's store.
+	// The cascade will attempt to revoke it, fail, and return 500 — leaving the
+	// account disabled (but not deleted) as the fail-closed terminal state.
 	peerCert := makeAdminCertWithAttrs(t, 9995, "tenant-operator", false)
 	serial := peerCert.SerialNumber.String()
 
@@ -3078,20 +3080,20 @@ func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) 
 	require.False(t, before.GlobalScope)
 	require.False(t, before.ImplicitAdmin)
 
+	// Delete returns 500 (cert revoke fails — serial not in certManager store).
+	// Account is disabled (step 1 of the cascade always runs) but not deleted.
 	delRec := deleteAccount(t, server, strongPrincipal(), "tenant-operator")
-	require.Equal(t, http.StatusConflict, delRec.Code,
-		"deleting an account with live cert bindings must be refused: %s", delRec.Body.String())
-	assert.Contains(t, delRec.Body.String(), "CERT_BINDINGS_PRESENT")
+	require.Equal(t, http.StatusInternalServerError, delRec.Code,
+		"cascade fails when cert revocation fails (cert not in certMgr store): %s", delRec.Body.String())
+	assert.Contains(t, delRec.Body.String(), "CERT_REVOKE_FAILED")
 
+	// The certificate must NOT widen to unscoped root. The account is disabled,
+	// so extractAdminPrincipal returns nil — the disabled-account check fires before
+	// the bootstrap fallback, preventing the escalation.
 	after := server.extractAdminPrincipal(
 		requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert))
-	require.NotNil(t, after, "the binding must survive the refused delete")
-	assert.Equal(t, "msp-a", after.TenantID,
-		"the certificate must still be tenant-scoped after a refused delete")
-	assert.False(t, after.GlobalScope,
-		"a refused delete must not widen the certificate to unscoped root")
-	assert.False(t, after.ImplicitAdmin,
-		"a refused delete must not put the certificate back on the bootstrap fallback")
+	assert.Nil(t, after,
+		"cert must not resolve: account is disabled (step 1 completed even though revocation failed)")
 }
 
 // TestExtractAdminPrincipal_AccountResetCannotWidenBoundCert verifies that the

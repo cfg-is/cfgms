@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -2653,16 +2654,13 @@ func TestGetAccountByID_DecryptScopedToTenant(t *testing.T) {
 			"cross-tenant decrypt surface that scoping the lookup avoids")
 }
 
-// TestAccounts_DeleteRefusedWhileCertBindingsExist verifies that handleDeleteAccount refuses
-// to delete an account that still has mTLS certificate bindings, and that the supported
-// deprovisioning order — revoke each binding (which revokes the certificate through
-// certManager), then delete the account — succeeds.
+// TestAccounts_Delete_CascadesRevokesBindingsAndDeletes verifies that handleDeleteAccount
+// implements the offboarding cascade (Issue #3581): it revokes all bound certificates
+// via certManager and then deletes the account in one operation.
 //
-// The refusal is a security control, not a convenience check: extractAdminPrincipal resolves
-// a bound certificate's scope from its account, so dropping the account while the certificate
-// is still valid would return that serial to the unbound bootstrap fallback, which is
-// unscoped root.
-func TestAccounts_DeleteRefusedWhileCertBindingsExist(t *testing.T) {
+// This replaces the prior 409-refusal behavior. The certificate is revoked during the
+// delete — an operator no longer needs to revoke bindings manually before deleting.
+func TestAccounts_Delete_CascadesRevokesBindingsAndDeletes(t *testing.T) {
 	server, certMgr := setupCertBindingServer(t)
 	createTestAccount(t, server, "offboard-me")
 	serial := provisionTestClientCert(t, certMgr, "offboard-me-laptop")
@@ -2672,25 +2670,256 @@ func TestAccounts_DeleteRefusedWhileCertBindingsExist(t *testing.T) {
 		Label:  "offboarding laptop",
 	})
 	require.Equal(t, http.StatusCreated, bindRec.Code, "bind: %s", bindRec.Body.String())
+	assert.False(t, certMgr.IsRevoked(serial), "cert must not be revoked before delete")
 
+	// Delete cascades: revokes the cert and then deletes the account in one step.
 	delRec := deleteAccount(t, server, strongPrincipal(), "offboard-me")
-	require.Equal(t, http.StatusConflict, delRec.Code,
-		"delete with live bindings must be refused: %s", delRec.Body.String())
-	assert.Contains(t, delRec.Body.String(), "CERT_BINDINGS_PRESENT")
-	assert.False(t, certMgr.IsRevoked(serial),
-		"a refused delete must not revoke the certificate as a side effect")
-
-	// The account — and therefore the certificate's tenant scope — is still resolvable.
-	acct, err := server.getAccountByCertSerial(context.Background(), serial)
-	require.NoError(t, err)
-	require.NotNil(t, acct, "the account must survive the refused delete")
-
-	// Supported order: revoke the binding (revokes the cert), then delete the account.
-	revokeRec := revokeCertBindingReq(t, server, strongPrincipal(), "offboard-me", serial)
-	require.Equal(t, http.StatusOK, revokeRec.Code, "revoke: %s", revokeRec.Body.String())
-	require.True(t, certMgr.IsRevoked(serial), "revoke must invalidate the certificate")
-
-	delRec = deleteAccount(t, server, strongPrincipal(), "offboard-me")
 	require.Equal(t, http.StatusOK, delRec.Code,
-		"delete must succeed once no bindings remain: %s", delRec.Body.String())
+		"offboarding cascade must return 200: %s", delRec.Body.String())
+
+	// Certificate must be revoked as part of the cascade.
+	assert.True(t, certMgr.IsRevoked(serial),
+		"delete must revoke every bound certificate via certManager")
+
+	// Account must be gone from the store.
+	dropAccountCache(server)
+	acct, err := server.getAccount(context.Background(), "offboard-me")
+	require.NoError(t, err)
+	assert.Nil(t, acct, "account must be deleted from the store after offboarding")
+}
+
+// setupOffboardingServer creates a server with a real cert manager and both CLI + web
+// session managers wired to a shared durable store — for offboarding cascade tests.
+// Returns the server, cert manager, CLI session manager, web session manager, and store.
+func setupOffboardingServer(t *testing.T) (*Server, *cert.Manager, session.Manager, session.Manager, *session.MemStore) {
+	t.Helper()
+	srv, certMgr := setupCertBindingServer(t)
+
+	cliCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	webCfg := session.Config{
+		IdleTimeout:     60 * time.Minute,
+		AbsoluteTimeout: 12 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "web",
+	}
+	store := session.NewMemStore(cliCfg, time.Now)
+	t.Cleanup(store.Close)
+	cliMgr := session.NewManager(cliCfg, store, time.Now)
+	webMgr := session.NewManager(webCfg, store, time.Now)
+	srv.SetSessionManager(cliMgr)
+	srv.SetWebSessionManager(webMgr)
+
+	return srv, certMgr, cliMgr, webMgr, store
+}
+
+// TestAccounts_Offboarding_RevokesAllCertsAndSessions is the [REQUIRED TEST] for
+// Issue #3581: full offboarding cascade revokes every bound certificate and every live
+// session (web + CLI, including a cross-node-simulated session).
+func TestAccounts_Offboarding_RevokesAllCertsAndSessions(t *testing.T) {
+	srv, certMgr, cliMgr, webMgr, store := setupOffboardingServer(t)
+	ctx := context.Background()
+
+	createTestAccount(t, srv, "cascade-user")
+
+	// Load the account to get its principal ID.
+	acct, err := srv.getAccount(ctx, "cascade-user")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	principalID := acct.ID
+
+	// Provision and bind two real client certificates.
+	serial1 := provisionTestClientCert(t, certMgr, "cascade-laptop-1")
+	serial2 := provisionTestClientCert(t, certMgr, "cascade-laptop-2")
+	rec := bindCertReq(t, srv, strongPrincipal(), "cascade-user", BindCertRequest{Serial: serial1, Label: "laptop 1"})
+	require.Equal(t, http.StatusCreated, rec.Code, "bind cert 1: %s", rec.Body.String())
+	rec = bindCertReq(t, srv, strongPrincipal(), "cascade-user", BindCertRequest{Serial: serial2, Label: "laptop 2"})
+	require.Equal(t, http.StatusCreated, rec.Code, "bind cert 2: %s", rec.Body.String())
+
+	// Issue a CLI session and a web session on "this node".
+	_, _, err = cliMgr.Issue(ctx, principalID, "cli-ctrl", "")
+	require.NoError(t, err)
+	_, _, err = webMgr.Issue(ctx, principalID, "web-ctrl", "")
+	require.NoError(t, err)
+
+	// Simulate a "cross-node" session: a second CLI manager over the same store
+	// mimics a session issued on a different controller node.
+	crossNodeCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	crossNodeMgr := session.NewManager(crossNodeCfg, store, time.Now)
+	_, _, err = crossNodeMgr.Issue(ctx, principalID, "cross-node-ctrl", "")
+	require.NoError(t, err)
+
+	// Delete triggers the offboarding cascade.
+	delRec := deleteAccount(t, srv, strongPrincipal(), "cascade-user")
+	require.Equal(t, http.StatusOK, delRec.Code, "offboarding cascade must succeed: %s", delRec.Body.String())
+
+	// All bound certificates must be revoked.
+	assert.True(t, certMgr.IsRevoked(serial1), "first bound cert must be revoked by cascade")
+	assert.True(t, certMgr.IsRevoked(serial2), "second bound cert must be revoked by cascade")
+
+	// All CLI sessions (including cross-node) must be revoked.
+	cliSessions, listErr := cliMgr.List(ctx)
+	require.NoError(t, listErr)
+	for _, s := range cliSessions {
+		if s != nil {
+			assert.NotEqual(t, principalID, s.PrincipalID,
+				"CLI session for principal must be revoked by cascade (cross-node included)")
+		}
+	}
+
+	// All web sessions must be revoked.
+	webSessions, listErr := webMgr.List(ctx)
+	require.NoError(t, listErr)
+	for _, s := range webSessions {
+		if s != nil {
+			assert.NotEqual(t, principalID, s.PrincipalID,
+				"web session for principal must be revoked by cascade")
+		}
+	}
+
+	// Account must be deleted from the store.
+	dropAccountCache(srv)
+	gone, err := srv.getAccount(ctx, "cascade-user")
+	require.NoError(t, err)
+	assert.Nil(t, gone, "account must be deleted from the store after offboarding")
+
+	// account.offboarded audit event must be emitted with revocation counts.
+	require.NoError(t, srv.auditManager.Flush(ctx))
+	offboardedEntries, err := srv.auditManager.QueryEntries(ctx, &business.AuditFilter{
+		Actions: []string{"account.offboarded"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, offboardedEntries, "account.offboarded audit event must be emitted")
+	offboardedEntry := offboardedEntries[0]
+	assert.Equal(t, "account.offboarded", offboardedEntry.Action)
+	assert.Equal(t, "cascade-user", offboardedEntry.ResourceID)
+	certsRevokedVal, hasCerts := offboardedEntry.Details["certs_revoked"]
+	assert.True(t, hasCerts, "account.offboarded must include certs_revoked count")
+	assert.EqualValues(t, 2, certsRevokedVal, "certs_revoked must be 2")
+
+	// account.deleted audit event must also be emitted.
+	deletedEntries, err := srv.auditManager.QueryEntries(ctx, &business.AuditFilter{
+		Actions: []string{"account.deleted"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, deletedEntries, "account.deleted audit event must be emitted")
+}
+
+// TestAccounts_Offboarding_PartialCertFailureLeavesDisabledAndUndeleted is the [REQUIRED TEST]
+// for Issue #3581: a failure during certificate revocation leaves the account in the
+// more-restrictive state (disabled, not deleted) so that a retry is possible.
+//
+// The scenario: the account has a cert binding for a serial that is not registered in
+// certManager's store (simulating a cert the manager cannot revoke). The cascade disables
+// the account (step 1) but fails at step 2 (cert revocation), returning 500 without
+// proceeding to the delete step.
+func TestAccounts_Offboarding_PartialCertFailureLeavesDisabledAndUndeleted(t *testing.T) {
+	srv, _ := setupCertBindingServer(t)
+	ctx := context.Background()
+
+	createTestAccount(t, srv, "partial-fail-user")
+
+	// Inject a cert binding with a serial that does NOT exist in certManager's store.
+	// This simulates a cert that certManager.Revoke cannot process ("unknown serial").
+	// We bypass handleBindCert's serial-format check by injecting directly into the account.
+	srv.mu.Lock()
+	acctPtr := srv.accounts["partial-fail-user"]
+	require.NotNil(t, acctPtr, "account must be in cache after creation")
+	acctCopy := *acctPtr
+	acctCopy.CertBindings = []CertBinding{
+		{Serial: "UNKNOWNSERIAL001", Fingerprint: "sha256:fake", Label: "injected"},
+	}
+	srv.accounts["partial-fail-user"] = &acctCopy
+	srv.mu.Unlock()
+	// Persist the injected binding so the handler reads it from the store.
+	require.NoError(t, srv.persistAccount(ctx, &acctCopy, "test"))
+
+	// Offboarding cascade: step 1 (disable) succeeds, step 2 (cert revoke) fails
+	// because "UNKNOWNSERIAL001" is not in certManager's store.
+	delRec := deleteAccount(t, srv, strongPrincipal(), "partial-fail-user")
+	require.Equal(t, http.StatusInternalServerError, delRec.Code,
+		"partial cert revocation failure must return 500: %s", delRec.Body.String())
+	assert.Contains(t, delRec.Body.String(), "CERT_REVOKE_FAILED",
+		"response must indicate which step failed")
+
+	// Account must be DISABLED (step 1 completed before the failure).
+	dropAccountCache(srv)
+	surviving, err := srv.getAccount(ctx, "partial-fail-user")
+	require.NoError(t, err)
+	require.NotNil(t, surviving, "account must still exist in the store (not deleted)")
+	assert.True(t, surviving.Disabled,
+		"account must be disabled — the cascade disables before attempting revocations")
+
+	// The account record must still exist in the durable store.
+	metas, err := srv.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Tags:     []string{"account"},
+		Metadata: map[string]string{secretsif.MetadataKeySecretType: accountSecretType, "username": "partial-fail-user"},
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, metas, "account record must remain in the store for retry")
+}
+
+// failingListAllStore wraps a real MemStore and forces ListAll to return an error.
+// It is a real Store implementation — no mock framework — used to verify that
+// RevokeAllForPrincipal failure aborts the offboarding cascade before delete.
+type failingListAllStore struct {
+	*session.MemStore
+	failErr error
+}
+
+func (s *failingListAllStore) ListAll(_ context.Context) ([]*session.Session, error) {
+	return nil, s.failErr
+}
+
+// TestAccounts_Offboarding_SessionRevocationFailureLeavesDisabledAndUndeleted is the
+// [REQUIRED TEST] for Issue #3581 security fix: when session revocation fails (e.g. a
+// transient store outage), the cascade must abort before deleting the account record.
+// Deleting the account without revoking its sessions would cause surviving CLI Bearer
+// tokens to resolve to implicitAdmin=true (the middleware's fail-open for unknown accounts).
+func TestAccounts_Offboarding_SessionRevocationFailureLeavesDisabledAndUndeleted(t *testing.T) {
+	srv, _ := setupCertBindingServer(t)
+	ctx := context.Background()
+
+	// Inject a session manager backed by a store that fails ListAll.
+	// RevokeAllForPrincipal calls store.ListAll, so it returns (0, err) immediately.
+	baseCfg := session.Config{
+		IdleTimeout:     5 * time.Minute,
+		AbsoluteTimeout: 1 * time.Hour,
+		GraceWindow:     30 * time.Second,
+		Channel:         "cli",
+	}
+	baseStore := session.NewMemStore(baseCfg, time.Now)
+	t.Cleanup(baseStore.Close)
+	failStore := &failingListAllStore{MemStore: baseStore, failErr: errors.New("store temporarily unavailable")}
+	cliMgr := session.NewManager(baseCfg, failStore, time.Now)
+	srv.SetSessionManager(cliMgr)
+	// No webSessionManager — web step returns (0, nil) when mgr is nil, so the CLI
+	// failure is what triggers the abort, which is what we are testing.
+
+	createTestAccount(t, srv, "session-fail-user")
+
+	// Offboarding: step 1 (disable) succeeds, step 2 (no cert bindings) succeeds,
+	// step 3 (CLI session revocation) fails → cascade aborts with 500.
+	delRec := deleteAccount(t, srv, strongPrincipal(), "session-fail-user")
+	require.Equal(t, http.StatusInternalServerError, delRec.Code,
+		"session revocation failure must return 500: %s", delRec.Body.String())
+	assert.Contains(t, delRec.Body.String(), "SESSION_REVOKE_FAILED",
+		"response must identify the failing step")
+
+	// Account must be DISABLED (step 1 persisted before the failure).
+	dropAccountCache(srv)
+	surviving, err := srv.getAccount(ctx, "session-fail-user")
+	require.NoError(t, err)
+	require.NotNil(t, surviving, "account must still exist in the store (not deleted)")
+	assert.True(t, surviving.Disabled,
+		"account must be disabled — the cascade disables before attempting revocations")
 }

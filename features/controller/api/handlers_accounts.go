@@ -859,7 +859,10 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// this is the takeover-containment operation, and sessions minted by the passkeys
 	// being wiped would otherwise stay usable for the absolute session lifetime.
 	if existing != nil && req.ResetCredentials {
-		revoked := s.revokeSessionsForPrincipal(r.Context(), acct.ID)
+		// Best-effort: account still exists, so session-revocation failure does not escalate
+		// privileges (the disabled-or-absent-passkey check still rejects the session on next
+		// use). Error is logged inside revokeSessionsForPrincipal.
+		revoked, _ := s.revokeSessionsForPrincipal(r.Context(), acct.ID)
 		s.logger.Info("Revoked live web sessions for credential reset",
 			"username", logging.SanitizeLogValue(acct.Username),
 			"revoked_sessions", revoked)
@@ -1067,46 +1070,76 @@ func (s *Server) VerifyCredential(acct *account) error {
 
 // revokeSessionsForPrincipal revokes every live web session belonging to the
 // given account ID and drops the session-bound CSRF token for each
-// (Issue #3126). Returns the number of sessions revoked.
+// (Issue #3126, retrofitted in Issue #3581). Returns the number of sessions revoked.
 //
-// Revocation is best effort per session: a store failure on one session is logged
-// and does not stop the remaining ones. It is not the only line of defence —
-// authenticationMiddleware re-resolves the account on every request and rejects a
-// disabled one — so a partial failure degrades to "rejected on next request",
-// never to "still authorized".
-func (s *Server) revokeSessionsForPrincipal(ctx context.Context, principalID string) int {
+// The revocation path calls webSessionManager.RevokeAllForPrincipal, which queries
+// the durable store directly — cluster-safe: sessions issued on other controller nodes
+// are found and revoked regardless of this node's in-memory state (Issue #3581, Story 3).
+//
+// CSRF tokens are node-local (in-process map); a preceding List call collects the
+// session IDs visible on this node so their CSRF entries can be dropped before the
+// durable revocation runs. Cross-node session CSRF tokens do not exist in this map.
+//
+// A second pass calls mgr.Revoke on each locally-visible session. This is necessary
+// because the cliMgr.RevokeAllForPrincipal step (step 3) may have already deleted the
+// web sessions from the shared store, leaving this webMgr's in-memory map with sessions
+// that are marked as NOT revoked. Without the individual Revoke calls, webMgr.Validate
+// would still succeed for those tokens on this node until the process restarts.
+//
+// Returns the durable-store revocation count and any error from RevokeAllForPrincipal.
+// The error matters for the offboarding cascade (caller must abort before delete on error);
+// credential-reset callers may discard the error (account still exists; sessions expire).
+func (s *Server) revokeSessionsForPrincipal(ctx context.Context, principalID string) (int, error) {
 	if principalID == "" {
-		return 0
+		return 0, nil
 	}
 	s.mu.RLock()
 	mgr := s.webSessionManager
 	s.mu.RUnlock()
 	if mgr == nil {
-		return 0
+		return 0, nil
 	}
 
-	sessions, err := mgr.List(ctx)
+	// Collect locally-visible sessions for CSRF cleanup and in-memory revocation.
+	var localIDs []string
+	if sessions, listErr := mgr.List(ctx); listErr == nil {
+		for _, sess := range sessions {
+			if sess != nil && sess.PrincipalID == principalID {
+				s.csrfTokens.Delete(sess.ID)
+				localIDs = append(localIDs, sess.ID)
+			}
+		}
+	} else {
+		s.logger.Warn("Failed to list web sessions for CSRF cleanup; CSRF tokens for this principal may linger on this node",
+			"principal_id", logging.SanitizeLogValue(principalID),
+			"error", logging.SanitizeLogValue(listErr.Error()))
+	}
+
+	// RevokeAllForPrincipal queries the durable store directly — cluster-safe.
+	// Returns (0, err) only when the initial ListAll fails; individual delete
+	// failures are logged inside RevokeAllForPrincipal and do not stop the rest.
+	revoked, err := mgr.RevokeAllForPrincipal(ctx, principalID)
 	if err != nil {
-		s.logger.Error("Failed to list web sessions for revocation",
+		s.logger.Error("Failed to revoke all web sessions for principal",
+			"principal_id", logging.SanitizeLogValue(principalID),
 			"error", logging.SanitizeLogValue(err.Error()))
-		return 0
+		return 0, err
 	}
 
-	revoked := 0
-	for _, sess := range sessions {
-		if sess == nil || sess.PrincipalID != principalID {
-			continue
-		}
-		s.csrfTokens.Delete(sess.ID)
-		if revokeErr := mgr.Revoke(ctx, sess.ID); revokeErr != nil {
-			s.logger.Warn("Failed to revoke web session",
-				"session_id", logging.SanitizeLogValue(sess.ID),
+	// Mark each locally-visible session as revoked in this manager's in-memory map.
+	// RevokeAllForPrincipal mirrors in-memory only for sessions it finds in the store.
+	// If step 3 (cliMgr) already deleted them from the store, this ensures the
+	// webMgr's in-memory state is also updated — preventing stale in-memory sessions
+	// from validating on this node.
+	for _, id := range localIDs {
+		if revokeErr := mgr.Revoke(ctx, id); revokeErr != nil {
+			s.logger.Warn("Failed to mark web session as revoked in local state",
+				"session_id", logging.SanitizeLogValue(id),
 				"error", logging.SanitizeLogValue(revokeErr.Error()))
-			continue
 		}
-		revoked++
 	}
-	return revoked
+
+	return revoked, nil
 }
 
 // handleGetAccount handles GET /api/v1/accounts/{username} (Issue #3126).
@@ -1259,7 +1292,10 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	//     minted would leave the attacker's cookie live, so the containment operation
 	//     would not contain.
 	if (disabledChanged && updated.Disabled) || req.ResetCredentials {
-		revoked := s.revokeSessionsForPrincipal(r.Context(), updated.ID)
+		// Best-effort: account still exists, so session-revocation failure does not escalate
+		// privileges (authentication middleware rejects future requests for the account).
+		// Error is logged inside revokeSessionsForPrincipal.
+		revoked, _ := s.revokeSessionsForPrincipal(r.Context(), updated.ID)
 		// go/log-injection: derive from an explicit branch to a string literal so no
 		// value flows from the request to the log sink (CodeQL taint-tracks request
 		// booleans through struct fields regardless of type; strconv.FormatBool would
@@ -1330,19 +1366,21 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteAccount handles DELETE /api/v1/accounts/{username} (Tier-3).
-// It removes the account from the in-memory cache and the central secret store.
+// It executes the offboarding cascade: disable → revoke certs → revoke sessions → delete.
 //
-// Deleting an account that still has mTLS certificate bindings is refused with 409
-// CONFLICT. Once extractAdminPrincipal resolves a bound certificate's scope from its
-// account (ADR-025 Amendment 3), removing the account without revoking its certificates
-// would move every bound serial back onto the unbound bootstrap-fallback path, which is
-// unscoped root — so deleting a tenant-scoped admin would *promote* that admin's still-valid
-// certificate to root over every tenant. The binding must be removed through
-// POST /api/v1/accounts/{username}/certs/revoke/{serial}, which revokes the certificate
-// via certManager before dropping the binding (fail-closed ordering), and only then may the
-// account be deleted. This handler deliberately does not revoke certificates itself:
-// the offboarding cascade is a separate story, and until it lands the safe behaviour is to
-// refuse the deletion rather than to silently widen a live credential's scope.
+// Ordering is the safety property (Issue #3581): the account is disabled before any
+// revocation attempt so that a bound certificate or live session is rejected by the
+// existing disabled-account checks on its very next request, even before the revocation
+// steps complete. Do not reorder steps 1–5 for convenience.
+//
+// Certificate revocation is best-effort per serial: all bindings are attempted even if
+// one fails, but the operation stops before step 5 (delete) if any revocation could not
+// be completed — leaving the account disabled and undeleted for retry. Session revocation
+// (steps 3–4) calls RevokeAllForPrincipal, which is cluster-safe: sessions issued on
+// other controller nodes are revoked via the shared durable store.
+//
+// A partial failure leaves the account in the more-restrictive state (disabled, partially
+// or fully revoked) — never the less-restrictive one — so a repeated delete call is safe.
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]
 	if err := validateUsername(username); err != nil {
@@ -1362,43 +1400,123 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fail closed: an account with live certificate bindings cannot be deleted, because
-	// deletion would return each bound serial to the unscoped-root bootstrap fallback in
-	// extractAdminPrincipal while the certificate is still valid. Revoke the bindings first.
-	if len(acct.CertBindings) > 0 {
-		s.logger.Warn("Refusing to delete account with active certificate bindings",
-			"username", logging.SanitizeLogValue(username),
-			"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-			"binding_count", len(acct.CertBindings))
-		s.writeErrorResponse(w, http.StatusConflict,
-			"Account has active certificate bindings; revoke them before deleting the account",
-			"CERT_BINDINGS_PRESENT")
-		return
-	}
-
-	s.mu.Lock()
-	delete(s.accounts, username)
-	s.mu.Unlock()
-
-	storeKey := fmt.Sprintf("%s/%s", accountStorageTenant(acct.TenantID), accountStoreKey(username))
-	if err := s.secretStore.DeleteSecret(r.Context(), storeKey); err != nil {
-		s.logger.Warn("Failed to delete account from secret store (memory cache already cleared)",
-			"username", logging.SanitizeLogValue(username),
-			"error", logging.SanitizeLogValue(err.Error()))
-		// Continue anyway — mirrors handleDeleteAPIKey; the cache entry is gone and
-		// the durable record will be unreachable once re-listed accounts are pruned.
-	}
-
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	actingPrincipalID := ""
 	if principal != nil {
 		actingPrincipalID = principal.ID
 	}
+
+	// Step 1: disable the account first (fail-closed — the safety property, not an
+	// implementation detail). A bound certificate or live session is rejected on its
+	// very next request by the disabled-account check, even if steps 2–4 haven't run.
+	// Copy before mutating — acct points into the in-memory cache and a concurrent
+	// getAccountByCertSerial iterates s.accounts under RLock; writing a field on the
+	// shared pointer without holding the write lock is a data race.
+	disabled := *acct
+	disabled.Disabled = true
+	if err := s.persistAccount(r.Context(), &disabled, actingPrincipalID); err != nil {
+		s.logger.Error("Failed to disable account before offboarding",
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to disable account before offboarding", "STORE_ERROR")
+		return
+	}
+	s.cacheAccount(&disabled)
+	acct = &disabled
+
+	// Step 2: revoke every bound certificate (best effort per serial — try all even
+	// when one fails, then stop before delete if any revocation could not be completed).
+	certsRevoked := 0
+	var certRevokeFailed bool
+	for _, binding := range acct.CertBindings {
+		if s.certManager == nil {
+			s.logger.Warn("Cannot revoke certificate binding: certManager not configured; account remains disabled",
+				"username", logging.SanitizeLogValue(username),
+				"serial", logging.SanitizeLogValue(binding.Serial))
+			certRevokeFailed = true
+			continue
+		}
+		if revokeErr := s.certManager.Revoke(binding.Serial); revokeErr != nil {
+			s.logger.Warn("Failed to revoke bound certificate during account offboarding; continuing to attempt remaining certs",
+				"username", logging.SanitizeLogValue(username),
+				"serial", logging.SanitizeLogValue(binding.Serial),
+				"error", logging.SanitizeLogValue(revokeErr.Error()))
+			certRevokeFailed = true
+			continue
+		}
+		certsRevoked++
+	}
+	if certRevokeFailed {
+		s.logger.Error("One or more certificate revocations failed during offboarding; account is disabled but not deleted — retry to complete",
+			"username", logging.SanitizeLogValue(username),
+			"certs_revoked", certsRevoked,
+			"binding_count", len(acct.CertBindings))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"One or more certificate revocations failed; account is disabled but not deleted",
+			"CERT_REVOKE_FAILED")
+		return
+	}
+
+	// Step 3: revoke all CLI Bearer sessions (cluster-safe via RevokeAllForPrincipal).
+	// Abort before delete on failure: a surviving session for a deleted account would
+	// resolve to acct==nil in the CLI Bearer middleware, yielding ImplicitAdmin=true.
+	cliSessionsRevoked := 0
+	if s.sessionManager != nil {
+		revoked, revokeErr := s.sessionManager.RevokeAllForPrincipal(r.Context(), acct.ID)
+		if revokeErr != nil {
+			s.logger.Error("Failed to revoke CLI sessions during account offboarding; account is disabled but not deleted — retry to complete",
+				"username", logging.SanitizeLogValue(username),
+				"error", logging.SanitizeLogValue(revokeErr.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError,
+				"One or more session revocations failed; account is disabled but not deleted",
+				"SESSION_REVOKE_FAILED")
+			return
+		}
+		cliSessionsRevoked = revoked
+	}
+
+	// Step 4: revoke all web sessions (cluster-safe via retrofitted revokeSessionsForPrincipal).
+	// Abort before delete on failure — same escalation risk as step 3.
+	webSessionsRevoked, webRevokeErr := s.revokeSessionsForPrincipal(r.Context(), acct.ID)
+	if webRevokeErr != nil {
+		s.logger.Error("Failed to revoke web sessions during account offboarding; account is disabled but not deleted — retry to complete",
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(webRevokeErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"One or more session revocations failed; account is disabled but not deleted",
+			"SESSION_REVOKE_FAILED")
+		return
+	}
+
+	// Step 5: delete the account record. Reached only when all revocations succeeded.
+	s.mu.Lock()
+	delete(s.accounts, username)
+	s.mu.Unlock()
+
+	storeKey := fmt.Sprintf("%s/%s", accountStorageTenant(acct.TenantID), accountStoreKey(username))
+	if delErr := s.secretStore.DeleteSecret(r.Context(), storeKey); delErr != nil {
+		s.logger.Warn("Failed to delete account from secret store (memory cache already cleared)",
+			"username", logging.SanitizeLogValue(username),
+			"error", logging.SanitizeLogValue(delErr.Error()))
+		// Continue — mirrors handleDeleteAPIKey; the cache entry is gone and
+		// the durable record will be unreachable once re-listed accounts are pruned.
+	}
+
+	s.emitAccountAudit(r.Context(), "account.offboarded", acct.TenantID, actingPrincipalID, username,
+		map[string]interface{}{
+			"certs_revoked":        certsRevoked,
+			"cli_sessions_revoked": cliSessionsRevoked,
+			"web_sessions_revoked": webSessionsRevoked,
+		})
 	s.emitAccountAudit(r.Context(), "account.deleted", acct.TenantID, actingPrincipalID, username, nil)
-	s.logger.Info("Web admin account deleted",
+	s.logger.Info("Web admin account offboarded and deleted",
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
 		"root_scope", acct.TenantID == "",
+		"certs_revoked", certsRevoked,
+		"cli_sessions_revoked", cliSessionsRevoked,
+		"web_sessions_revoked", webSessionsRevoked,
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
 	s.writeSuccessResponse(w, map[string]interface{}{
