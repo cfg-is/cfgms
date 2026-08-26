@@ -74,7 +74,12 @@ assert_contains() {
     else
         _fail "$msg — expected to contain: $(printf '%q' "$needle")"
         echo "      Prompt head (20 lines):"
-        echo "$haystack" | head -20 | sed 's/^/        /'
+        # head reads from a here-string, not from a pipe fed by `echo`: assembled
+        # prompts run well past 20 lines, and `echo ... | head -20` would leave the
+        # writer racing head's early close. Under `set -euo pipefail` the resulting
+        # SIGPIPE (141) aborts the whole suite from inside the *failure* branch —
+        # losing every remaining test's result at the moment one assertion fails.
+        head -20 <<< "$haystack" | sed 's/^/        /'
     fi
 }
 
@@ -451,8 +456,19 @@ test_structural_adr015_birth_state() {
     fi
 
     # Extract the create-story case arm body up to its CREATED_ISSUE success echo.
+    #
+    # The line cap is a safety valve for an unterminated awk range (arm renamed, or
+    # the end marker removed), NOT a size assumption about the arm. It is applied
+    # INSIDE awk rather than by piping to `head`, and that distinction is the whole
+    # point: `awk ... | head -N` makes awk race `head`'s early close, so once the arm
+    # outgrows N — Issue #3634 grew it past 80 — awk takes SIGPIPE and the command
+    # substitution returns 141. Under this script's `set -euo pipefail` that aborts
+    # this function before ANY of its three assertions run, silently skipping the
+    # convert-path, lock-at-creation and `internal`-label checks while the suite
+    # still prints the section header. Measured: 120/200 runs returned 141 with the
+    # pipe; 200/200 return 0 without it. No pipe, no SIGPIPE, no silent skip.
     local create_story_body
-    create_story_body=$(awk '/^  create-story\)$/,/CREATED_ISSUE/' "$ph_script" | head -80)
+    create_story_body=$(awk -v cap=400 'n>=cap{exit} /^  create-story\)$/,/CREATED_ISSUE/{print; n++}' "$ph_script")
     if [[ -z "$create_story_body" ]]; then
         _fail "ADR-015: could not extract create-story body — awk range matched nothing (function renamed?)"
         return
@@ -470,8 +486,10 @@ test_structural_adr015_birth_state() {
     fi
 
     # Extract the materialize-issue case arm body up to its MATERIALIZED success echo.
+    # Cap applied inside awk for the same reason as above — piping to `head` would
+    # SIGPIPE-abort this function the moment this arm outgrows the cap.
     local mat_body
-    mat_body=$(awk '/^  materialize-issue\)$/,/MATERIALIZED/' "$ph_script" | head -80)
+    mat_body=$(awk -v cap=400 'n>=cap{exit} /^  materialize-issue\)$/,/MATERIALIZED/{print; n++}' "$ph_script")
     if [[ -z "$mat_body" ]]; then
         _fail "ADR-015: could not extract materialize-issue body — awk range matched nothing"
         return
