@@ -1117,6 +1117,13 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	} else {
 		httpCfg = buildHTTPConfig(controllerURL, 30*time.Second, logger)
 	}
+	// Enrollment into a controller cluster is the one event allowed to clear the
+	// persisted Raft-term fence ratchet, so a rebuilt cluster (terms restart at 1)
+	// does not permanently lock this steward out (Issue #3437). The registration
+	// client clears it only after the enrollment response's certificate set verifies.
+	// The refresh path (refreshAndConnect) deliberately leaves CertStoreDir unset:
+	// re-issuing a certificate for the same cluster is not a cluster rebuild.
+	httpCfg.CertStoreDir = certStoreDir
 	httpClient, err := registration.NewHTTPClient(httpCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)

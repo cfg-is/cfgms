@@ -218,13 +218,14 @@ type TransportClient struct {
 	commandReplayWindow   time.Duration
 	commandMaxParamsBytes int
 
-	// Raft-term fence (Story #3436, ADR-029 Decision 6 — comparison logic only;
-	// persistence across a steward restart and the authenticated reset path are
-	// #3437). Held on TransportClient, not commands.Handler: setupCommandHandler
-	// builds a fresh Handler on every reconnect, so scoping the ratchet there
-	// would let a forced reconnect silently reset it. Guarded by mu.
+	// Raft-term fence (Story #3436, ADR-029 Decision 6). Held on TransportClient,
+	// not commands.Handler: setupCommandHandler builds a fresh Handler on every
+	// reconnect, so scoping the ratchet there would let a forced reconnect silently
+	// reset it. Guarded by mu.
+	// fenceRatchet persists the two fields across restarts (#3437).
 	termRatchetSet  bool
 	highestTermSeen uint64
+	fenceRatchet    *stewardconfig.FenceRatchet
 
 	// Script signature verification policy (Issue #1671). Wired into the command
 	// handler by setupCommandHandler so CommandExecuteScript signature enforcement
@@ -669,6 +670,19 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		return nil, fmt.Errorf("failed to initialize offline queue: %w", err)
 	}
 
+	// Load Raft-term fence ratchet state persisted from a previous run (#3437).
+	// If no state file exists (first boot or after an enrollment reset) both fields
+	// default to zero — the ratchet starts in the "never seen a stamped command"
+	// state and behaves identically to the pre-#3437 in-memory-only behaviour.
+	fenceRatchet := stewardconfig.NewFenceRatchet(cfg.CertStoreDir)
+	ratchetSet, highestTermSeen, err := fenceRatchet.Load()
+	if err != nil {
+		// Corrupt or unreadable state file: log and start fresh rather than
+		// refusing to start. The fence still works in-memory for this run.
+		cfg.Logger.Warn("failed to load persisted fence ratchet state; starting fresh",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+
 	// Seed signingCertPEMs from the multi-cert field if provided; otherwise
 	// fall back to the singular SigningCertPEM for backward compatibility.
 	signingCertPEMs := cfg.SigningCertPEMs
@@ -701,6 +715,9 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		identityPersistFunc:        cfg.IdentityPersistFunc,
 		secretStore:                cfg.SecretStore,
 		certStoreDir:               cfg.CertStoreDir,
+		fenceRatchet:               fenceRatchet,
+		termRatchetSet:             ratchetSet,
+		highestTermSeen:            highestTermSeen,
 		upgradeAllowDowngrade:      cfg.UpgradeAllowDowngrade,
 		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
 		// Self-exit after a pushed-upgrade swap only when a launcher is supervising
@@ -994,9 +1011,8 @@ func (c *TransportClient) receiveCommand(
 	return dispatch(ctx, sc)
 }
 
-// checkTermFence enforces ADR-029 Decision 6's three-state ratchet, comparison
-// logic only (state is in-memory and does not survive a steward restart — that
-// durability, plus the authenticated cluster-rebuild reset path, is #3437):
+// checkTermFence enforces ADR-029 Decision 6's three-state ratchet (Story #3436
+// implements the comparison logic; Story #3437 adds persistence and the reset path):
 //
 //  1. Never seen a stamped (term > 0) command: accept any command, stamped or
 //     not. A stamped command's term becomes the new high-water mark and sets the
@@ -1005,6 +1021,11 @@ func (c *TransportClient) receiveCommand(
 //  2. Ratchet set: an unstamped command is refused as a downgrade attempt (real
 //     Raft terms are never 0 once a leader has been elected), and a stamped one
 //     is accepted only when its term is at or above the high-water mark.
+//
+// When the ratchet advances, the new state is persisted to fenceRatchet so it
+// survives a steward process restart (#3437). Persistence failures are logged
+// and do not block command delivery — the in-memory state remains authoritative
+// for the lifetime of this process.
 //
 // Every value in the rejection log line is attacker-influenced (a compromised or
 // downgraded controller chooses Command.ID/Type/Term freely — Term is transport-
@@ -1036,6 +1057,17 @@ func (c *TransportClient) checkTermFence(sc *cpTypes.SignedCommand) error {
 		c.termRatchetSet = true
 		c.highestTermSeen = term
 		c.mu.Unlock()
+		// Persist the updated ratchet state so it survives a restart (#3437).
+		// Done outside c.mu to avoid holding the client lock during file I/O:
+		// inbound commands run one goroutine per command, so several accepted
+		// commands can reach Save concurrently and in any order. FenceRatchet.Save
+		// is the serialization point — it takes its own mutex, writes through a
+		// uniquely named temp file, and refuses to lower the stored term — so the
+		// persisted high-water mark cannot regress or be truncated by that race.
+		if err := c.fenceRatchet.Save(true, term); err != nil {
+			c.logger.Warn("failed to persist fence ratchet state; in-memory state is still authoritative",
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
 		return nil
 	}
 	c.mu.Unlock()
