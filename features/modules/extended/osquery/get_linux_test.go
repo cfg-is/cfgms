@@ -10,8 +10,8 @@
 // This suite drives a REAL osquery binary — not a mock, not a fixture recorded
 // by hand — through every curated host:* query and asserts its actual output
 // still carries every column get.go and schemaSpec (schema_drift_test.go)
-// expect. Issue #3628 bumped pinnedVersion 5.13.1 -> 5.23.1 (10 minor
-// releases) to fix CVE-2026-54000; the acceptance review for that bump
+// expect. Issue #3628 bumped pinnedVersion forward ten minor releases,
+// to 5.23.1, to fix CVE-2026-54000; the acceptance review for that bump
 // required this live-binary methodology rather than schema_drift_test.go's
 // self-referential fixture, which is built from schemaSpec's own column list
 // and therefore cannot detect a column renamed or removed by the real binary.
