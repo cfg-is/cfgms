@@ -542,3 +542,39 @@ func TestHandleCertBinding_PersistedAcrossReload(t *testing.T) {
 	assert.Equal(t, serial, resp.Data[0].Serial)
 	assert.Equal(t, "persistent cert", resp.Data[0].Label)
 }
+
+// TestHandleCertBinding_RevokeRefusedWithoutCertManager verifies that removing a binding is
+// refused with 503 when no certificate manager is configured.
+//
+// Removing the binding while the certificate stays valid is not a partial success: the
+// unbound certificate resolves through extractAdminPrincipal's bootstrap fallback as
+// unscoped root, so an unrevokable unbind would widen a tenant-scoped administrator's
+// certificate rather than retire it.
+func TestHandleCertBinding_RevokeRefusedWithoutCertManager(t *testing.T) {
+	server := setupTestServer(t)
+	require.Nil(t, server.certManager, "this test requires a server with no cert manager")
+
+	createTestAccount(t, server, "alice")
+	const serial = "aabb1122ccdd"
+
+	bindRec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{
+		Serial: serial,
+		Label:  "no-cert-manager cert",
+	})
+	require.Equal(t, http.StatusCreated, bindRec.Code, "bind: %s", bindRec.Body.String())
+
+	revokeRec := revokeCertBindingReq(t, server, strongPrincipal(), "alice", serial)
+	require.Equal(t, http.StatusServiceUnavailable, revokeRec.Code,
+		"unbind must be refused when the cert cannot be revoked: %s", revokeRec.Body.String())
+	assert.Contains(t, revokeRec.Body.String(), "CERT_MANAGER_UNAVAILABLE")
+
+	// The binding must be intact — the certificate still resolves through its account.
+	listRec := listCertsReq(t, server, testAdminPrincipal(), "alice")
+	require.Equal(t, http.StatusOK, listRec.Code)
+	var resp struct {
+		Data []CertBindingInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1, "the binding must survive a refused revoke")
+	assert.Equal(t, serial, resp.Data[0].Serial)
+}

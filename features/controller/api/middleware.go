@@ -226,8 +226,17 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 // extractAdminPrincipal inspects r.TLS.PeerCertificates[0] for the CFGMS admin extension.
 // Returns a non-nil *Principal when the cert carries the admin marker AND is not revoked.
 // Chain verification is done at the TLS layer (VerifyClientCertIfGiven + ClientCAs).
-// Returns nil when no cert is presented, the cert lacks the admin marker, or the cert
-// serial is in the revoked-serials list (Story D: C2 fix).
+// Returns nil when no cert is presented, the cert lacks the admin marker, the cert
+// serial is in the revoked-serials list (Story D: C2 fix), the cert is bound to a
+// disabled account, or the account-lookup store is unavailable (fail closed).
+//
+// Resolution rule (ADR-025 Amendment 3):
+//   - Bound, active account: principal derives from account (ID, TenantID, GlobalScope,
+//     Permissions). RootScoped derives from cert.HasRootScopeMarker alone — never from
+//     the account (ADR-025 A2.1/A2.2).
+//   - Bound, disabled account: returns nil; does not fall back to bootstrap.
+//   - Account lookup error: returns nil (fail closed); does not fall back to bootstrap.
+//   - No binding found: bootstrap fallback — implicit root, audited on every use.
 func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return nil
@@ -243,11 +252,67 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		return nil
 	}
 	fpSum := sha256.Sum256(peerCert.Raw)
+	fp := hex.EncodeToString(fpSum[:])
+
+	// ADR-025 Amendment 3: resolve the principal from the account bound to this serial.
+	// Fail-closed default: non-nil empty slice as working permissions value, matching
+	// the web-session branch's documented fail-closed default.
+	acct, err := s.getAccountByCertSerial(r.Context(), serial)
+	if err != nil {
+		// Fail closed: a store outage must not fall through to the bootstrap fallback
+		// and grant unscoped root to a cert whose account scope cannot be verified.
+		s.logger.Error("Cert serial account lookup failed; failing closed",
+			"cert_serial", logging.SanitizeLogValue(serial),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil
+	}
+	if acct != nil {
+		if acct.Disabled {
+			// Disabled account: reject; do not fall back to bootstrap.
+			// An admin must not regain access by presenting a cert bound to a
+			// disabled account.
+			return nil
+		}
+		// Bound, active account: derive the principal from account fields.
+		// Principal.ID is the account's ID — never the certificate CommonName.
+		// RootScoped derives from cert.HasRootScopeMarker alone (ADR-025 A2.1/A2.2);
+		// account.RootScope is the field that feeds GlobalScope, not the ADR-025 marker.
+		var permissions []string
+		implicitAdmin := false
+		if acct.RootScope {
+			// Root-scope account: implicit admin (same breadth as the bootstrap fallback);
+			// Permissions is nil — ImplicitAdmin is the gate (ADR-025 Amendment 3).
+			permissions = nil
+			implicitAdmin = true
+		} else {
+			permissions = append([]string{}, acct.Permissions...)
+		}
+		return &Principal{
+			ID:              acct.ID,
+			Name:            "mtls-admin:" + acct.Username,
+			Assurance:       session.AssuranceStrong,
+			GlobalScope:     acct.RootScope,
+			TenantID:        acct.TenantID,
+			CertSerial:      serial,
+			CertFingerprint: fp,
+			CertNotAfter:    peerCert.NotAfter,
+			// RootScoped is read from an explicit certificate extension (ADR-025 A2.1/A2.2) —
+			// never derived from account.RootScope or TenantID being empty.
+			RootScoped:    cert.HasRootScopeMarker(peerCert),
+			Permissions:   permissions,
+			ImplicitAdmin: implicitAdmin,
+		}
+	}
+
+	// No binding found: bootstrap fallback (ADR-025 Amendment 3).
+	// An admin-marked certificate with no bound account keeps implicit root indefinitely.
+	// Every use of this path is audited; the combination with accounts_in_cache > 0
+	// is anomalous and separately detectable in monitoring.
+	s.emitBootstrapFallbackAudit(r.Context(), serial, peerCert.Subject.CommonName)
+
 	return &Principal{
-		ID:          peerCert.Subject.CommonName,
-		Name:        "mtls-admin:" + peerCert.Subject.CommonName,
-		Assurance:   session.AssuranceStrong,
-		GlobalScope: true,
+		ID:   peerCert.Subject.CommonName,
+		Name: "mtls-admin:" + peerCert.Subject.CommonName,
 		// Admin principals have NO tenant scope. Earlier this was
 		// hardcoded to "default" which silently restricted every admin
 		// read to tenant "default" — `cfg steward list` returned 0
@@ -261,9 +326,11 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		// Handlers that need a fallback tenant for admin WRITES (e.g.
 		// handlers_configs.go) already substitute "default" when this
 		// field is empty.
+		Assurance:       session.AssuranceStrong,
+		GlobalScope:     true,
 		TenantID:        "",
 		CertSerial:      serial,
-		CertFingerprint: hex.EncodeToString(fpSum[:]),
+		CertFingerprint: fp,
 		CertNotAfter:    peerCert.NotAfter,
 		// RootScoped is read from an explicit certificate extension (ADR-025 Amendment 1
 		// A1.3) — never inferred from TenantID being empty. Absent on every admin cert
@@ -273,6 +340,25 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		// (ADR-025 Amendment 3). Permissions is left nil; ImplicitAdmin is the gate.
 		ImplicitAdmin: true,
 	}
+}
+
+// emitBootstrapFallbackAudit logs the admin.bootstrap_fallback_used audit event.
+// Called every time an mTLS admin cert with no bound account is accepted via the
+// bootstrap fallback (ADR-025 Amendment 3). The accounts_in_cache field makes the
+// anomalous combination — bootstrap path used while accounts exist — separately
+// detectable in monitoring without a store query on the auth hot path.
+func (s *Server) emitBootstrapFallbackAudit(ctx context.Context, serial, commonName string) {
+	s.mu.RLock()
+	accountsInCache := len(s.accounts)
+	s.mu.RUnlock()
+
+	s.logger.Warn("admin.bootstrap_fallback_used: mTLS cert has no bound account; treating as unscoped root (ADR-025 Amendment 3)",
+		"event_type", "admin.bootstrap_fallback_used",
+		"auth_path", "bootstrap-fallback",
+		"cert_serial", logging.SanitizeLogValue(serial),
+		"cert_cn", logging.SanitizeLogValue(commonName),
+		"accounts_in_cache", accountsInCache,
+	)
 }
 
 // isWithinTenantScope reports whether resourceTenant is within callerTenant's

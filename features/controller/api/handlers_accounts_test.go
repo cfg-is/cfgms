@@ -2652,3 +2652,45 @@ func TestGetAccountByID_DecryptScopedToTenant(t *testing.T) {
 		"an unscoped listing reaches all 7 accounts across both tenants — this is the "+
 			"cross-tenant decrypt surface that scoping the lookup avoids")
 }
+
+// TestAccounts_DeleteRefusedWhileCertBindingsExist verifies that handleDeleteAccount refuses
+// to delete an account that still has mTLS certificate bindings, and that the supported
+// deprovisioning order — revoke each binding (which revokes the certificate through
+// certManager), then delete the account — succeeds.
+//
+// The refusal is a security control, not a convenience check: extractAdminPrincipal resolves
+// a bound certificate's scope from its account, so dropping the account while the certificate
+// is still valid would return that serial to the unbound bootstrap fallback, which is
+// unscoped root.
+func TestAccounts_DeleteRefusedWhileCertBindingsExist(t *testing.T) {
+	server, certMgr := setupCertBindingServer(t)
+	createTestAccount(t, server, "offboard-me")
+	serial := provisionTestClientCert(t, certMgr, "offboard-me-laptop")
+
+	bindRec := bindCertReq(t, server, strongPrincipal(), "offboard-me", BindCertRequest{
+		Serial: serial,
+		Label:  "offboarding laptop",
+	})
+	require.Equal(t, http.StatusCreated, bindRec.Code, "bind: %s", bindRec.Body.String())
+
+	delRec := deleteAccount(t, server, strongPrincipal(), "offboard-me")
+	require.Equal(t, http.StatusConflict, delRec.Code,
+		"delete with live bindings must be refused: %s", delRec.Body.String())
+	assert.Contains(t, delRec.Body.String(), "CERT_BINDINGS_PRESENT")
+	assert.False(t, certMgr.IsRevoked(serial),
+		"a refused delete must not revoke the certificate as a side effect")
+
+	// The account — and therefore the certificate's tenant scope — is still resolvable.
+	acct, err := server.getAccountByCertSerial(context.Background(), serial)
+	require.NoError(t, err)
+	require.NotNil(t, acct, "the account must survive the refused delete")
+
+	// Supported order: revoke the binding (revokes the cert), then delete the account.
+	revokeRec := revokeCertBindingReq(t, server, strongPrincipal(), "offboard-me", serial)
+	require.Equal(t, http.StatusOK, revokeRec.Code, "revoke: %s", revokeRec.Body.String())
+	require.True(t, certMgr.IsRevoked(serial), "revoke must invalidate the certificate")
+
+	delRec = deleteAccount(t, server, strongPrincipal(), "offboard-me")
+	require.Equal(t, http.StatusOK, delRec.Code,
+		"delete must succeed once no bindings remain: %s", delRec.Body.String())
+}

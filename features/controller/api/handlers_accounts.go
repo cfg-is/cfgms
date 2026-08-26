@@ -487,6 +487,86 @@ func (s *Server) emitAccountAudit(ctx context.Context, action, tenantID, actingP
 	}
 }
 
+// getAccountByCertSerial resolves the account whose CertBindings contains serial.
+// Cache scan first (O(n)); re-verifies via the durable store on a cache hit (Issue #3311
+// cross-node disable propagation). On a cache miss performs a full store scan — the same
+// accepted O(n) limitation as the bind-collision scan in handleBindCert.
+//
+// Returns (nil, nil) when no account has serial in its CertBindings.
+func (s *Server) getAccountByCertSerial(ctx context.Context, serial string) (*account, error) {
+	s.mu.RLock()
+	var cached *account
+	for _, acct := range s.accounts {
+		if acct == nil {
+			continue
+		}
+		for _, b := range acct.CertBindings {
+			if b.Serial == serial {
+				cached = acct
+				break
+			}
+		}
+		if cached != nil {
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	if cached != nil {
+		fresh, err := s.loadAccountFromStore(ctx, cached.Username, accountStorageTenant(cached.TenantID))
+		if err != nil {
+			return nil, err
+		}
+		if fresh != nil {
+			// Verify the serial is still in the fresh bindings — it may have been removed
+			// since the cache was last populated (e.g. binding revoked via handleRevokeCertBinding).
+			for _, b := range fresh.CertBindings {
+				if b.Serial == serial {
+					return fresh, nil
+				}
+			}
+			// Serial no longer bound: binding removed after cache was populated.
+			return nil, nil
+		}
+		// Store returned nil: account not persisted (test-injected) or concurrently deleted.
+		return cached, nil
+	}
+
+	// Cache miss: scan all account records in the store.
+	if s.secretStore == nil {
+		return nil, nil
+	}
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Tags: []string{"account"},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: accountSecretType,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list accounts for cert serial lookup: %w", err)
+	}
+	for _, m := range metas {
+		bindJSON, ok := m.Metadata["cert_bindings"]
+		if !ok || bindJSON == "" {
+			continue
+		}
+		var bindings []CertBinding
+		if jsonErr := json.Unmarshal([]byte(bindJSON), &bindings); jsonErr != nil {
+			continue
+		}
+		for _, b := range bindings {
+			if b.Serial == serial {
+				username := m.Metadata["username"]
+				if username == "" {
+					continue
+				}
+				return s.loadAccountFromStore(ctx, username, m.TenantID)
+			}
+		}
+	}
+	return nil, nil
+}
+
 // getAccountByEnrollmentToken finds the account whose enrollment token hash
 // matches hash(rawToken). The scan is necessary because tokens identify accounts —
 // the lookup direction is token→account, not account→token. Cache is checked first;
@@ -664,6 +744,26 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		// passkeys — under an account.reset audit action that never reads as an enable.
 		// Re-enabling is an explicit PUT {"disabled": false}, which emits account.enabled.
 		acct.Disabled = existing.Disabled
+		// Issue #3578: a reset must never drop the account's mTLS certificate bindings.
+		// The bindings are what scope a bound certificate in extractAdminPrincipal; an
+		// account with no bindings sends every one of its still-valid certificates back
+		// to the unbound bootstrap-fallback path, which is unscoped root. persistAccount
+		// rebuilds the metadata from the record it is handed and writes cert_bindings only
+		// when the slice is non-empty, and cacheAccount replaces the in-memory copy, so
+		// omitting this carry-forward would erase the bindings from both the durable record
+		// and the cache that getAccountByCertSerial scans — turning a tenant-scoped admin's
+		// own reset of their own account into root over every tenant, in one request.
+		//
+		// Carry-forward rather than a 409 refusal (the DELETE rule at handleDeleteAccount):
+		// a reset is the takeover-containment operation — it re-provisions to the
+		// zero-authenticator state and terminates live sessions — so refusing it for exactly
+		// the accounts that hold admin certificates would block containment on the most
+		// privileged accounts in the deployment. Unlike a delete, a reset keeps the account
+		// record and its ID, so the record that scopes each binding survives; carrying the
+		// slice forward closes the transition completely. A reset that also moves the
+		// account's scope moves the bindings with it, and the destination scope is already
+		// bounded by the caller's own subtree by the isWithinTenantScope checks below.
+		acct.CertBindings = existing.CertBindings
 		// Issue #2782: preserve registered WebAuthn credentials across account resets,
 		// unless the admin explicitly re-provisions to the zero-authenticator state
 		// (ADR-021 Amendment 1 Decision 4 — reset_credentials invalidates residual
@@ -1231,6 +1331,18 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteAccount handles DELETE /api/v1/accounts/{username} (Tier-3).
 // It removes the account from the in-memory cache and the central secret store.
+//
+// Deleting an account that still has mTLS certificate bindings is refused with 409
+// CONFLICT. Once extractAdminPrincipal resolves a bound certificate's scope from its
+// account (ADR-025 Amendment 3), removing the account without revoking its certificates
+// would move every bound serial back onto the unbound bootstrap-fallback path, which is
+// unscoped root — so deleting a tenant-scoped admin would *promote* that admin's still-valid
+// certificate to root over every tenant. The binding must be removed through
+// POST /api/v1/accounts/{username}/certs/revoke/{serial}, which revokes the certificate
+// via certManager before dropping the binding (fail-closed ordering), and only then may the
+// account be deleted. This handler deliberately does not revoke certificates itself:
+// the offboarding cascade is a separate story, and until it lands the safe behaviour is to
+// refuse the deletion rather than to silently widen a live credential's scope.
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	username := mux.Vars(r)["username"]
 	if err := validateUsername(username); err != nil {
@@ -1247,6 +1359,20 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if acct == nil {
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	// Fail closed: an account with live certificate bindings cannot be deleted, because
+	// deletion would return each bound serial to the unscoped-root bootstrap fallback in
+	// extractAdminPrincipal while the certificate is still valid. Revoke the bindings first.
+	if len(acct.CertBindings) > 0 {
+		s.logger.Warn("Refusing to delete account with active certificate bindings",
+			"username", logging.SanitizeLogValue(username),
+			"tenant_id", logging.SanitizeLogValue(acct.TenantID),
+			"binding_count", len(acct.CertBindings))
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account has active certificate bindings; revoke them before deleting the account",
+			"CERT_BINDINGS_PRESENT")
 		return
 	}
 

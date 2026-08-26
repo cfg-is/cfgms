@@ -1018,6 +1018,26 @@ Three authentication mechanisms, used for different purposes.
 - Scoped, expirable tokens for the steward registration flow described in [Steward Registration](#steward-registration)
 - Not usable for general API authentication after bootstrap
 
+### mTLS Admin Certificate Principal Resolution
+
+When an admin-marked mTLS certificate passes chain verification and revocation check, the controller resolves the authenticating principal from the certificate's bound account (if one exists) rather than hardcoding root scope unconditionally.
+
+**Account-bound path:** If the certificate's serial appears in a `CertBindings` entry on a non-disabled account, the principal derives its `ID`, `TenantID`, `GlobalScope`, and `Permissions` from that account. `Principal.ID` is always the account's ID — never the certificate CommonName — so the audit trail and RBAC subject identity are the same value on every surface. `RootScoped` is read exclusively from the certificate's explicit extension (`cert.HasRootScopeMarker`), never derived from the account (ADR-025 A2.1/A2.2). A certificate carrying the root-scope marker but bound to a tenant-scoped account produces `RootScoped == true` with a non-empty `TenantID`; the marker is therefore inert, because `authorizeTenantAccess` only consults it when `TenantID == ""`.
+
+**Fail-closed paths:** A certificate bound to a disabled account is rejected (HTTP 401) without falling through to any fallback. A store error during account lookup is also rejected — an outage must not become a privilege escalation.
+
+**Bootstrap fallback (ADR-025 Amendment 3):** An admin-marked certificate with no bound account is treated as unscoped root indefinitely. This is a deliberate, permanent design decision: closing the fallback once a first account exists would mean a lost or corrupted account store leaves a freshly issued certificate also unbound and therefore rejected, so holding the CA would no longer suffice to regain access to the deployment. Every request that takes this path emits the `admin.bootstrap_fallback_used` audit event with `auth_path: "bootstrap-fallback"`. The `accounts_in_cache` field in the event makes the anomalous combination — bootstrap path used while accounts exist — separately detectable in monitoring. Revocation remains authoritative: a revoked certificate is rejected before the account lookup, so a stolen unbound certificate cannot bypass revocation by lacking a binding.
+
+**Bound certificates cannot re-enter the fallback.** Because the fallback is unscoped root, any transition from *bound* to *unbound* while the certificate is still valid would widen that certificate's scope — deleting a tenant-scoped administrator would promote their certificate to root over every tenant. Three API paths can reach that transition, and each is closed rather than cascaded. This list is the complete set: every write path that rebuilds an account record must appear here, because `persistAccount` rebuilds the account metadata from the record it is handed and writes `cert_bindings` only when the slice is non-empty, so a write path that drops the field silently unbinds every certificate on the account.
+
+- `POST /api/v1/accounts/{username}/certs/revoke/{serial}` revokes the certificate through `pkg/cert` *before* dropping the binding, and refuses the request with `503 CERT_MANAGER_UNAVAILABLE` when no certificate manager is configured — an unbind that cannot revoke is refused, not completed as a partial success.
+- `DELETE /api/v1/accounts/{username}` refuses with `409 CERT_BINDINGS_PRESENT` while the account still has bindings. Deprovisioning is revoke-then-delete; the certificate is invalid before the account record that scoped it disappears.
+- `POST /api/v1/accounts` on an existing username (reset/upsert) **carries the bindings forward** onto the rebuilt record. It is not refused the way a delete is: a reset is the takeover-containment operation — re-provision to zero authenticators, terminate live sessions — so refusing it while bindings exist would block containment on precisely the most privileged accounts. A reset keeps the account record and its ID, so the record that scopes each binding survives the write; carrying the slice forward closes the transition without weakening containment. A reset that also moves the account's scope moves its bindings with it, and the destination scope is bounded by the caller's own subtree (`isWithinTenantScope`), so no reset can widen a certificate beyond the authority of the admin issuing it.
+
+`PUT /api/v1/accounts/{username}` and the WebAuthn, passkey-login and elevation write paths copy the whole account record before persisting, so they carry bindings forward structurally and are not separate transitions.
+
+See `features/controller/api/middleware.go` (`extractAdminPrincipal`, `emitBootstrapFallbackAudit`) for the implementation.
+
 ### Admin Session Model
 
 The zero-standing-privilege session model (ADR-014) eliminates long-lived admin credentials: a human admin authenticates once with a short-lived mTLS certificate, receives a rolling bearer token, and the token automatically expires if unused.
