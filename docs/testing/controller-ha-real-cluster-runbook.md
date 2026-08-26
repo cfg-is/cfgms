@@ -7,6 +7,72 @@ storage, joining a genuine 3-node `CFGMS_HA_MODE=cluster` deployment across
 separate real hosts, and validating leader election, failover, and
 split-brain resolution on real hardware rather than Docker containers.
 
+## Overview
+
+This runbook consolidates the live-validation output from eight stories (§2–§9) that together
+satisfy epic #3090. Each section was appended by the story that ran the validation.
+
+| Section | Story | Validated |
+|---|---|---|
+| §2 | #3127 | Storage migration — live Tier-1 controller from OSS flatfile to shared PostgreSQL |
+| §3 | #3130 | Cluster join — two new nodes form a 3-node `ha.mode: cluster` Raft cluster |
+| §4 | #3094 | Leader election and automatic failover (process-kill and host-kill scenarios) |
+| §5 | #3095 | Network partition and split-brain resolution |
+| §6 | #3096 | Steward fleet continuity through controller leader failover |
+| §7 | #3405 | Fleet enrollment against the running cluster |
+| §8 | #3462 | Sealed-credential migration (ADR-030, `LoadCredentialEncrypted=`) |
+| §9 | #3436 | Steward-side Raft-term command fence (live wire-path verification) |
+
+### Consolidated Results
+
+All figures below were measured on the `cfg-lab` real-host cluster (`cfgms-ctrl-01` /
+`cfgms-ha-node2` / `cfgms-ha-node3`) using production defaults
+(`ElectionTimeout: 10s`, `HeartbeatInterval: 2s` — `FastElectionConfig` was deliberately
+not used, as it exists only to keep CPU-contended unit tests fast and would have
+invalidated the comparison).
+
+> **Target threshold labelling:** The Docker-suite assertions in the right-hand column are
+> assertions in `test/integration/ha/` that have **never been executed to completion in
+> CI** — no GitHub Actions workflow runs `go test ./test/integration/ha/...` against the
+> 3-controller scenario, and `docker-compose.test.yml` never sets `CFGMS_HA_CA_CERT_PATH`
+> (#3092's Out of Scope). This epic's real-host figures are the first time these thresholds
+> have been proven against any live cluster with real mTLS-authenticated peers. They are
+> cited as **unexecuted-in-CI target thresholds**, not previously-measured baselines.
+> Cite the source assertions directly — `leader_election_test.go:224-225`,
+> `failover_test.go:131-135`, `steward_ha_test.go:233-234` — rather than the
+> `test/integration/ha/README.md` summary table, which restates but does not replace them.
+
+| Metric | Real-cluster result | Docker-suite target | Docker assertion (unexecuted in CI) |
+|---|---|---|---|
+| Election / re-election time — process-kill (SIGKILL) | **14.02s** (§4, 2026-08-15) | < 15s | `TestLeaderElectionTiming` — `leader_election_test.go:224-225`: `assert.Less(t, electionTime, 15*time.Second, ...)` |
+| Failover re-election time — host-kill (hard power-off) | **16.02s** (§4, 2026-08-15) | < 40s | `TestFailoverTiming` — `failover_test.go:131-135`: `assert.Less(t, failoverDuration, 40*time.Second, ...)` |
+| Partition minority step-down (leader isolated as minority) | Within 30s bound; stayed down for 45s observation window (§5, 2026-08-15 / re-run 2026-08-25) | N/A — no `assert.Less` for this metric in Docker suite | `network_partition_test.go` uses `require.Eventually` bounds only |
+| Partition heal — reconvergence to single leader | **2.01s** original run; **2.007s** re-run after #3389 (§5) | N/A — no `assert.Less` for this metric in Docker suite | `network_partition_test.go` uses `require.Eventually` bounds only |
+| Steward continuity through leader failover | **0 reconnects, 0 missed heartbeats**; next heartbeat +6s, re-election 12.02s (§6, 2026-08-20) | < 15s (reconnect to *restarted* controller — a different scenario; see note below) | `steward_ha_test.go:233-234`: `assert.Less(t, failoverDuration, 15*time.Second, ...)`; outer poll bound at line 227: `require.Eventually(..., 90*time.Second, 2*time.Second, ...)` |
+
+> **Steward continuity note:** The < 15s Docker assertion (`steward_ha_test.go:233-234`) tests
+> steward reconnect to a controller that has restarted and rejoined its own cluster — not
+> leader failover. The real-cluster finding (§6) is structural: stewards attach to a
+> specific controller node, not specifically to the leader. Leader changes are invisible to
+> a steward whose own node remains up. The reconnect scenario (steward's own node goes down)
+> is explicitly out of scope per epic Non-Goals; an LB/VIP with a liveness health gate
+> on `GET /api/v1/health` is the operational lever for that case. See §6 and §7 for the
+> enrollment-path caveat (enrollment must gate on leadership, not just liveness, after #3473).
+
+### Known Gaps / Follow-Up
+
+Documented during epic #3090; status at epic close:
+
+| Finding | Story | Status at epic close |
+|---|---|---|
+| `TestRealClusterPartition_NoDualLeader` initially failed — partition window allowed two nodes to simultaneously report `is_leader:true` (Raft `CheckQuorum` step-down timing overlaps followers' election timers; `CheckQuorum` guarantees write-safety, not status-flag agreement) | #3095 | **Resolved** — lease-backed `HasLeadership()` separated from `IsRaftLeader()` by epic #3386; test re-run PASS on 2026-08-25/26 (§5) |
+| Steward single-controller-URL gap: when a steward's own node goes down, it retries that node indefinitely — no automatic failover to a cluster peer exists in the steward | #3096 | **Open** — per epic Non-Goals; documented in `steward-operating-model.md` |
+| RLS unscoped-read bug: `current_setting('app.current_tenant', true)` returns `NULL` (not `''`) when unset, silently filtering all rows for unscoped DB callers | #3096 | **Filed as #3478** — `coalesce(...)` fix pending |
+| Fleet view was node-local: `GET /api/v1/stewards` returned in-process map only, not cluster-wide store | #3096 | **Fixed by #3480** |
+| Refused steward reconnects at ~1 Hz forever (backoff not persisted across reconnect-loop re-entries) | #3096 | **Fixed by #3481** |
+| Raft ConfState not restored on restart — nodes came back with empty voter set; no election possible | #3096 | **Fixed by #3479** |
+| Registration/token endpoints leader-gated via `HasLeadership()` (#3473): enrollment LB must health-gate on leadership (`GET /api/v1/raft/status` → `is_leader`), not just liveness | §7 (post-#3473) | **Documented in §7** — supersedes the plain-liveness-gate conclusion from §6 for enrollment paths |
+
 ---
 
 ## 1. Environment
