@@ -40,8 +40,12 @@ This guide provides instructions for setting up a local CFGMS development enviro
 
 - **Docker** - For integration tests and local deployment
 - **golangci-lint** - Code linting
+
+  Install it from source at the pinned tag, so the Go it is built with matches the
+  `toolchain` directive in `go.mod`. A prebuilt release archive is built with
+  whatever Go upstream used and refuses to run once `go.mod` targets a newer one.
   ```bash
-  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2
+  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
   ```
 
 - **entr** - For watch mode during development

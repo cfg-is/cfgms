@@ -1153,7 +1153,7 @@ security-staticcheck:
 		echo "❌ Error: staticcheck is not installed"; \
 		echo ""; \
 		echo "Install staticcheck using Go:"; \
-		echo "  GOTOOLCHAIN=\$$(go env GOVERSION) go install honnef.co/go/tools/cmd/staticcheck@2026.1"; \
+		echo "  GOTOOLCHAIN=\$$(go env GOVERSION) go install honnef.co/go/tools/cmd/staticcheck@2026.2.1"; \
 		echo ""; \
 		echo "For more info: https://staticcheck.io/"; \
 		exit 1; \
@@ -1381,8 +1381,66 @@ security-remediation-report:
 	fi; \
 	rm -f /tmp/trivy-remediation.json /tmp/nancy-remediation.json /tmp/gosec-remediation.json /tmp/staticcheck-remediation.json
 
+# golangci-lint resolution (Issue #3627).
+#
+# golangci-lint loads its config against the module's *targeted* Go version — the
+# `toolchain` directive in go.mod — and refuses to start when the Go it was itself
+# built with is older ("the Go language version (go1.26) used to build
+# golangci-lint is lower than the targeted Go version (1.27.0)", exit 3). So a
+# linter binary that merely happens to be on PATH silently rots the moment that
+# directive moves, which is what the 1.26.6 -> 1.27.0 bump did to every dev
+# container built before it.
+#
+# Resolve the binary rather than trusting PATH. `golangci-lint config path` is an
+# exact functional probe of the failure: it performs the same config load that
+# `run` does, so a PATH binary that passes it is genuinely usable and is reused
+# as-is (this is the CI case — golangci-lint.yml installs the pinned version the
+# same way). When it fails, build the pinned version with the pinned toolchain
+# into a user-writable cache, which is the identical `go install` path
+# .devcontainer/Dockerfile and .github/workflows/golangci-lint.yml use.
+#
+# That build needs a writable GOPATH even though GOMODCACHE is separate: switching
+# to a toolchain newer than the local `go` downloads golang.org/toolchain, and the
+# verified checksum-database tree head is written to $GOPATH/pkg/sumdb. The image
+# installs its Go tools as root into a root-owned GOPATH, so the probe below falls
+# back to the invoking user's own GOPATH rather than weakening sum verification.
+#
+# GOLANGCI_LINT_VERSION must match .github/workflows/dependency-pin-check.yml,
+# .github/workflows/golangci-lint.yml, .devcontainer/Dockerfile and
+# windows-setup.ps1.
+GOLANGCI_LINT_VERSION ?= v2.13.1
+GO_TOOLCHAIN_VERSION := $(shell awk '$$1 == "toolchain" { print $$2 }' go.mod)
+LINT_TOOLS_BIN := $(HOME)/.cache/cfgms/tools/bin
+
 lint:
-	golangci-lint run
+	@LINTER=""; \
+	for candidate in golangci-lint "$(LINT_TOOLS_BIN)/golangci-lint"; do \
+		command -v "$$candidate" >/dev/null 2>&1 || continue; \
+		"$$candidate" --version 2>/dev/null | grep -q "version $(GOLANGCI_LINT_VERSION:v%=%) " || continue; \
+		"$$candidate" config path >/dev/null 2>&1 || continue; \
+		LINTER="$$candidate"; break; \
+	done; \
+	if [ -z "$$LINTER" ]; then \
+		echo "🔧 No usable golangci-lint $(GOLANGCI_LINT_VERSION); building it with $(GO_TOOLCHAIN_VERSION) into $(LINT_TOOLS_BIN)"; \
+		mkdir -p "$(LINT_TOOLS_BIN)"; \
+		TOOL_GOPATH="$$(go env GOPATH)"; \
+		if ! ( mkdir -p "$$TOOL_GOPATH/pkg/sumdb" && touch "$$TOOL_GOPATH/pkg/sumdb/.cfgms-write-probe" ) 2>/dev/null; then \
+			echo "   ⚠️  GOPATH $$TOOL_GOPATH is not writable by $$(id -un); building under $(HOME)/go instead"; \
+			TOOL_GOPATH="$(HOME)/go"; \
+		else \
+			rm -f "$$TOOL_GOPATH/pkg/sumdb/.cfgms-write-probe"; \
+		fi; \
+		GOPATH="$$TOOL_GOPATH" GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN="$(LINT_TOOLS_BIN)" \
+			go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) || exit 1; \
+		LINTER="$(LINT_TOOLS_BIN)/golangci-lint"; \
+		if ! "$$LINTER" config path >/dev/null 2>&1; then \
+			echo "❌ Freshly built golangci-lint still cannot load .golangci.yml:"; \
+			"$$LINTER" config path 2>&1 | sed 's/^/    /'; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "🔍 $$("$$LINTER" --version)"; \
+	"$$LINTER" run
 
 # Log-injection linter — catches the recurring CodeQL "Log entries created from
 # user input" class at commit time. Walks features/**/api/ by default; pass file

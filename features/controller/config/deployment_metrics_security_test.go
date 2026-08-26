@@ -113,3 +113,28 @@ func TestContainerHealthcheckHasVerifiedTLSClient(t *testing.T) {
 	assert.NotContains(t, dockerfile, "--no-check-certificate")
 	assert.NotContains(t, compose, "--no-check-certificate")
 }
+
+// TestRuntimeImagesApplyPendingAlpineSecurityUpdates locks in the fix for the
+// controller image's Trivy failure (Issue #3627). Pinning the runtime base by
+// digest bounds what a release build starts from, but it cannot deliver a
+// package fix that upstream has not rebuilt the image with — alpine:3.23 still
+// resolves to the digest shipping libssl3/libcrypto3 3.5.7-r0 (CVE-2026-14456,
+// HIGH), there is no 3.23.6 tag, and alpine:3.24 carries the same openssl CVEs.
+// The steward image has always run `apk upgrade` and scanned clean while the
+// controller image, which did not, failed. Both runtime stages must upgrade.
+func TestRuntimeImagesApplyPendingAlpineSecurityUpdates(t *testing.T) {
+	for _, path := range []string{"cmd/controller/Dockerfile", "cmd/steward/Dockerfile"} {
+		t.Run(path, func(t *testing.T) {
+			dockerfile := readDeploymentFile(t, path)
+
+			// Scope the assertion to the runtime stage: an upgrade in a builder
+			// stage is discarded and would not patch the shipped image.
+			lastFrom := strings.LastIndex(dockerfile, "\nFROM ")
+			require.GreaterOrEqual(t, lastFrom, 0, "Dockerfile must declare a runtime stage")
+
+			assert.Contains(t, dockerfile[lastFrom:], "apk --no-cache upgrade",
+				"the runtime stage must apply pending Alpine security updates at build time, "+
+					"because a pinned base digest cannot carry a fix upstream has not rebuilt")
+		})
+	}
+}

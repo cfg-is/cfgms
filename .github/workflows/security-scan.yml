@@ -37,7 +37,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  GO_VERSION: '1.26.6'
+  GO_VERSION: '1.27.0'
 
 permissions: {}
 
@@ -307,7 +307,7 @@ jobs:
         cache: false
 
     - name: Install staticcheck
-      run: GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      run: GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
     
     - name: Run staticcheck Scan
       id: scan
@@ -467,7 +467,7 @@ jobs:
 
         # Install gosec and staticcheck
         go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-        GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.1
+        GOTOOLCHAIN="go${GO_VERSION}" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
     
     - name: Generate Remediation Report on Failure
       if: steps.summary.outputs.issues-found == 'true'
