@@ -434,7 +434,7 @@ staticcheck -version # Should be 2023.1+
 
 # Update to compatible versions
 go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.1
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
 ```
 
 ## Escalation Procedures
@@ -555,7 +555,7 @@ rm -rf ~/.cache/staticcheck
 # Reinstall tools
 make install-nancy
 go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.1
+GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
 
 # Test installations
 trivy --version && nancy --version && gosec -version && staticcheck -version
