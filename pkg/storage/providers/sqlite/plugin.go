@@ -517,6 +517,7 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		RefreshPolicy:       &SQLiteRefreshPolicyStore{db: db},
 		AssurancePolicy:     &SQLiteAssurancePolicyStore{db: db},
 		TenantCrossing:      &SQLiteTenantCrossingStore{db: db},
+		Case:                &SQLiteCaseStore{db: db},
 	}, nil
 }
 
@@ -528,6 +529,16 @@ func (p *SQLiteProvider) CreateTenantCrossingStore(config map[string]interface{}
 		return nil, err
 	}
 	return &SQLiteTenantCrossingStore{db: db}, nil
+}
+
+// CreateCaseStore returns a SQLite-backed CaseStore (ADR-022 §8, Issue #3602).
+// Implements interfaces.CaseStoreCreator.
+func (p *SQLiteProvider) CreateCaseStore(config map[string]interface{}) (business.CaseStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteCaseStore{db: db}, nil
 }
 
 // init auto-registers the SQLite provider so it is available after a blank import.

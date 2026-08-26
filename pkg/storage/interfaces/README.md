@@ -43,6 +43,7 @@ pkg/storage/interfaces/
 | `command_store.go` | `CommandStore`, `CommandRecord`, `CommandStatus`, `CommandTransition` | Durable command dispatch state |
 | `dna_history_store.go` | `DNAHistoryStore` | DNA history access interface used by drift detection |
 | `batch_job_store.go` | `BatchJobStore`, `ErrBatchJobNotFound` | Fleet rolling-batch update job persistence (types in `features/controller/batchjob`) |
+| `case_store.go` | `CaseStore`, `Case`, `Ticket`, `TicketField`, `Pin`, `PinRef`, `ContentEntry` | Cockpit investigation cases: per-field-provenanced ticket, graph-reference pins, typed content entries (ADR-022 §8) |
 
 Sentinel errors live in the sub-packages: `business.ErrNotSupported`,
 `business.ErrImmutable`, `business.ErrStewardNotFound`,

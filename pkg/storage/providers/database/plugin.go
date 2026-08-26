@@ -283,6 +283,19 @@ func (p *DatabaseProvider) CreateTenantCrossingStore(config map[string]interface
 	return store, nil
 }
 
+// CreateCaseStore creates a PostgreSQL-backed CaseStore (ADR-022 §8, Issue #3602).
+func (p *DatabaseProvider) CreateCaseStore(config map[string]interface{}) (business.CaseStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseCaseStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database case store: %w", err)
+	}
+	return store, nil
+}
+
 // CreatePendingRefreshStore creates a PostgreSQL-backed PendingRefreshStore (Issue #2329).
 func (p *DatabaseProvider) CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error) {
 	dsn, err := p.getDSN(config)
