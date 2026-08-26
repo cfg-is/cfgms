@@ -37,6 +37,7 @@ type egReadProvider interface {
 	Diff(ctx context.Context, eid eginterfaces.EIDRef, r eginterfaces.TimeRange) (*eginterfaces.StateDiff, error)
 	GetTimeline(ctx context.Context, eids []eginterfaces.EIDRef, r eginterfaces.TimeRange) ([]*eginterfaces.TimelineEvent, error)
 	GetDriftState(ctx context.Context, eid eginterfaces.EIDRef) (*eginterfaces.DriftState, error)
+	GetDesiredState(ctx context.Context, eid eginterfaces.EIDRef) (*egtypes.DesiredStateView, error)
 	ListDrifted(ctx context.Context, filter eginterfaces.DriftFilter) ([]*eginterfaces.DriftState, error)
 }
 
@@ -546,6 +547,56 @@ func (s *Server) handleGetDriftState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeEntityJSON(w, drift)
+}
+
+// handleGetDesiredState handles GET /api/v1/entities/{eid:.+}/desired-state.
+// GetDesiredState has no tenant filter parameter; access is verified via GetEntity first (ADR-022 §7).
+func (s *Server) handleGetDesiredState(w http.ResponseWriter, r *http.Request) {
+	if s.egProvider == nil {
+		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	eid, err := parseEIDFromPath(r)
+	if err != nil {
+		http.Error(w, "invalid entity ID", http.StatusBadRequest)
+		return
+	}
+
+	// GetDesiredState has no tenant filter parameter — verify access via GetEntity first.
+	ok, accessErr := s.verifyEntityAccess(r.Context(), eid, callerTenantSubtree(r))
+	if accessErr != nil {
+		s.logger.Error("handleGetDesiredState: entity access check failed",
+			"eid", logging.SanitizeLogValue(eid.String()),
+			"error", logging.SanitizeLogValue(accessErr.Error()),
+		)
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	view, err := s.egProvider.GetDesiredState(r.Context(), eid)
+	if err != nil {
+		if isEntityNotFound(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("handleGetDesiredState: query failed",
+			"eid", logging.SanitizeLogValue(eid.String()),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	if view == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	writeEntityJSON(w, view)
 }
 
 // assertEdgeRequest is the JSON body for POST /api/v1/entities/edges (Issue #3374).

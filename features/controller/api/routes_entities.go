@@ -58,6 +58,10 @@ func registerEntityRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("entity", "read")(http.HandlerFunc(s.handleGetDriftState)),
 	).Methods("GET")
 
+	entities.Handle("/{eid:.+}/desired-state",
+		s.requirePermission("entity", "read")(http.HandlerFunc(s.handleGetDesiredState)),
+	).Methods("GET")
+
 	// Single-entity catch-all — must be last so more specific routes above win.
 	entities.Handle("/{eid:.+}",
 		s.requirePermission("entity", "read")(http.HandlerFunc(s.handleGetEntity)),
