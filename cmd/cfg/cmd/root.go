@@ -65,6 +65,7 @@ func init() {
 	rootCmd.AddCommand(disconnectCmd)
 	rootCmd.AddCommand(jobCmd)
 	rootCmd.AddCommand(webAuthnCmd)
+	rootCmd.AddCommand(accountCmd)
 }
 
 // versionCmd represents the version command

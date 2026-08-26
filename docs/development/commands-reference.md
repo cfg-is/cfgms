@@ -1035,6 +1035,195 @@ cfg webauthn revoke Y3JlZGVudGlhbC1pZC0x --username alice --force
 | `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
 | `--api-url` | bundle URL | Override controller URL |
 
+## cfg account — Account Lifecycle and Certificate Credentials (Issue #3582)
+
+Manage web-admin account lifecycle and bound mTLS certificate credentials.
+Account commands call the `/api/v1/accounts` REST endpoints. Certificate binding
+commands call the `/api/v1/accounts/{username}/certs` endpoints.
+
+Authentication is resolved via the standard session-or-bundle chain (same as all
+other `cfg` commands). The server enforces the required permission on each verb.
+
+### cfg account create
+
+Creates a new web-admin account, or resets an existing one (upsert). On creation
+a single-use enrollment magic link is printed once for the admin to share with the
+account holder via a secure channel.
+
+```
+cfg account create --username <u> [--tenant-id <t> | --root-scope] [--permission <p>]... [--json]
+```
+
+Example:
+
+```
+cfg account create --username alice --tenant-id acme-corp
+# Account provisioned: alice
+#   ID:      <uuid>
+#   Tenant:  acme-corp
+#   ...
+#   Enrollment link: deadbeef...
+#   (shown once — share with the account holder via a secure channel)
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--username` | — | Account username (required) |
+| `--tenant-id` | — | Scope account to this tenant |
+| `--root-scope` | false | Grant cross-tenant root scope (mutually exclusive with `--tenant-id`) |
+| `--permission` | — | Permission to grant (repeatable) |
+| `--json` | false | Output as JSON (includes the enrollment link) |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account list
+
+Lists all web-admin accounts visible to the caller's tenant scope.
+
+```
+cfg account list [--json]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | Output as JSON |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account get
+
+Gets account identity and status for a single web-admin account. Returns
+`tenant_id`, `root_scope`, `permissions`, `disabled` state, and whether an
+outstanding enrollment link exists.
+
+```
+cfg account get <username> [--json]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | Output as JSON |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account update
+
+Updates account permissions and/or disabled state. All flags are optional —
+omitted flags retain existing values.
+
+```
+cfg account update <username> [--permission <p>]... [--disabled=true|false] [--json]
+```
+
+Example:
+
+```
+cfg account update alice --disabled=true
+cfg account update alice --permission account:list --permission account:get
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--permission` | — | Permissions to set (repeatable; replaces the full existing set) |
+| `--disabled` | — | Set disabled state: `true` or `false` |
+| `--json` | false | Output as JSON |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account delete
+
+Deletes a web-admin account via the offboarding cascade: disable → revoke bound
+certificates → revoke sessions → delete. Requires `--force` or interactive
+confirmation (mirrors `cfg webauthn revoke`).
+
+```
+cfg account delete <username> [--force]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | false | Skip confirmation prompt |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account bind-cert
+
+Binds an mTLS certificate serial to a web-admin account. A serial can be bound
+to at most one account at a time.
+
+```
+cfg account bind-cert <username> --serial <s> [--label <l>] [--fingerprint <f>]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--serial` | — | Certificate serial number (required; 1-40 alphanumeric chars) |
+| `--fingerprint` | — | Certificate fingerprint (optional; stored for audit correlation) |
+| `--label` | — | Human-readable label for the binding |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account certs
+
+Lists all mTLS certificate bindings for a web-admin account.
+
+```
+cfg account certs <username> [--json]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | Output as JSON |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account revoke-cert
+
+Revokes an mTLS certificate via the controller CA and removes its binding.
+This is irreversible — the certificate is added to the CRL. Requires `--force`
+or interactive confirmation.
+
+```
+cfg account revoke-cert <username> <serial> [--force]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | false | Skip confirmation prompt |
+| `--api-url` | env/bundle | Override controller URL |
+
+### cfg account rotate-cert
+
+Atomically binds a new certificate serial and revokes the old one in a single
+resumable operation. Safe to retry if interrupted — a repeated call with the
+same arguments completes the rotation without a second bind or revocation.
+
+Rotation revokes the old serial through the CA, so it is irreversible in the
+same way `revoke-cert` is and takes the same guard: `--force` or interactive
+confirmation.
+
+```
+cfg account rotate-cert <username> <old_serial> --new-serial <s> [--force]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--new-serial` | — | New certificate serial number (required) |
+| `--fingerprint` | — | New certificate fingerprint (optional; for audit) |
+| `--force` | false | Skip confirmation prompt |
+| `--api-url` | env/bundle | Override controller URL |
+
 ## Step-Up Authentication (ADR-021 Decision 6)
 
 Certain mutating admin commands require an elevated assurance level or a fresh
