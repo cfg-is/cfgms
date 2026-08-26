@@ -324,6 +324,8 @@ test_executable_permissions() {
         "scripts/tier1-bootstrap_test.sh"
         "scripts/check-binary-artifacts.sh"
         "scripts/check-binary-artifacts_test.sh"
+        "scripts/check-docs-boundary.sh"
+        "scripts/check-docs-boundary_test.sh"
         "scripts/verify-nancy-ignore-scope.sh"
         "scripts/verify-nancy-ignore-scope_test.sh"
         "scripts/lab-datasvc-bootstrap.sh"
@@ -779,6 +781,64 @@ test_check_binary_artifacts() {
         log_pass "check-binary-artifacts_test.sh: All fixture tests passed"
     else
         log_fail "check-binary-artifacts_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/check-docs-boundary.sh — the documentation-boundary
+# gate (Issue #3417, Epic #3412). Delegates to scripts/check-docs-boundary_test.sh,
+# which builds throwaway git repositories and asserts both execution paths: exit 0
+# on a clean docs tree and exit 1 (naming the offending file) on every identifier
+# in the gate's own denylist, plus the fail-closed paths.
+#
+# Also runs the gate against the real docs/ tree, so a document reintroducing a
+# private-deployment identifier fails `make test` rather than merging green.
+test_check_docs_boundary() {
+    log_test "Testing check-docs-boundary.sh..."
+
+    local gate_script="scripts/check-docs-boundary.sh"
+    local test_script="scripts/check-docs-boundary_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-docs-boundary.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-docs-boundary.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-docs-boundary_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-docs-boundary_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-docs-boundary_test.sh: All fixture tests passed"
+    else
+        log_fail "check-docs-boundary_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-docs-boundary.sh: Real docs/ tree is clean"
+    else
+        log_fail "check-docs-boundary.sh: Real docs/ tree failed the gate (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -3765,6 +3825,8 @@ echo ""
 test_check_providers
 echo ""
 test_check_binary_artifacts
+echo ""
+test_check_docs_boundary
 echo ""
 test_verify_nancy_ignore_scope
 echo ""

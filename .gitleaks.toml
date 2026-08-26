@@ -110,6 +110,12 @@ regexes = [
     '''00000000-0000-0000-0000-000000000000''',
     '''11111111-1111-1111-1111-111111111111''',
 
+    # Placeholder SSH key *file name* used by the documentation-boundary
+    # convention (docs/development/documentation-boundaries.md) and by the
+    # gate's test fixtures in scripts/. It names a file on disk; it is never
+    # key material. Scoped to the literal so scripts/ stays fully scanned.
+    '''cfgms_ed25519''',
+
     # Test client IDs/secrets in documentation
     '''your-client-id-here''',
     '''your-client-secret-here''',

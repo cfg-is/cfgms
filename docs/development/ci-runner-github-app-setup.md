@@ -106,10 +106,10 @@ External fork PRs fall back to GitHub-hosted runners. Additionally set **repo �
 
 ---
 
-## 6. Lab Provisioning Results (Issue #2335, measured 2026-07-07 on cfg-lab)
+## 6. Lab Provisioning Results (Issue #2335, measured 2026-07-07 on the validation lab cluster)
 
 First Linux CI runner provisioned end-to-end on the lab cluster: VM `cfgms-ci-lin-01`
-(4 vCPU / 8 GB / 60 GB, Debian 13 cloud image) on host CFG-70-02 via the hyperv
+(4 vCPU / 8 GB / 60 GB, Debian 13 cloud image) on a validation lab Hyper-V host via the hyperv
 module cloud-init path (ADR-009 §6a), steward enrolled to tenant `gh-ci-runners`,
 registered to `cfg-is/cfgms` as runner **`cfgms-ci-lin-01`** with labels
 **`self-hosted, Linux, X64, cfgms`** (runner id 21, status `online`).
@@ -152,11 +152,11 @@ GitHub API (same endpoint the App-based provider calls) and delivered over an
 operator SSH session — never composed into a CFGMS command string. Sequence and
 timings otherwise mirror the workflow's steps 1–4.
 
-### Windows runner (Issue #2336, measured 2026-07-07 on cfg-lab)
+### Windows runner (Issue #2336, measured 2026-07-07 on the validation lab cluster)
 
 Windows CI runner provisioned on the same cluster: VM `cfgms-ci-win-01`
 (4 vCPU / 8 GB, Windows Server 2025 SERVERSTANDARD from the eval ISO) on host
-CFG-70-02 via the hyperv module autounattend path (ADR-009 §6), steward v0.9.10
+a validation lab Hyper-V host via the hyperv module autounattend path (ADR-009 §6), steward v0.9.10
 enrolled to tenant `gh-ci-runners`, registered to `cfg-is/cfgms` as runner
 **`CFGMS-CI-WIN-01`** with labels **`self-hosted, Windows, X64, cfgms`** (runner
 id 23, status `online`; GitHub canonicalizes the OS/arch label case, as with the
@@ -299,7 +299,7 @@ executed and passed on the self-hosted Windows runner:
 | Event | `pull_request` (non-fork, branch `feature/story-2379-windows-launcher-msi`) |
 
 `CFGMS-CI-WIN-01` is the VM provisioned in §6 (runner id 23, Windows Server 2025
-SERVERSTANDARD, 4 vCPU / 8 GB, host CFG-70-02). This run built all CFGMS binaries natively
+SERVERSTANDARD, 4 vCPU / 8 GB, a validation lab Hyper-V host). This run built all CFGMS binaries natively
 on Windows (`make build`) and ran the unit test suite
 (`go test -race -short -timeout=5m ./pkg/... ./features/...`), both passing on the
 self-hosted runner.

@@ -8,7 +8,7 @@ cascade + owner-gated `hyperv.vm` convergence epic (**#2418**, stories
 The automated suite proves the epic's **module-convergence** safety properties by
 driving the real `hyperv` module (ps-host transport) as the node it runs on and
 steering ownership with `Move-ClusterGroup`. This runbook covers (a) how to run
-that suite live on the 3-node cfg-lab cluster, and (b) the **controller cascade**
+that suite live on the 3-node example-cluster cluster, and (b) the **controller cascade**
 half (cluster.cfg → each member steward's effective config, and the *leave*
 behavior) which is orchestrated outside the module and is validated by
 observation.
@@ -17,30 +17,30 @@ observation.
 
 ## 1. Environment
 
-Live bed: the **cfg-lab** 3-node Hyper-V failover cluster (`lab.cfg.is`).
+Live bed: the **example-cluster** 3-node Hyper-V failover cluster (`lab.example.com`).
 
 | Node | Role |
 |------|------|
-| `CFG-70-02` | cluster member (also the CI/orchestrator host) |
-| `CFG-AB-02` | cluster member |
-| `CFG-C3-02` | cluster member |
+| `HV-HOST-01` | cluster member (also the CI/orchestrator host) |
+| `HV-HOST-02` | cluster member |
+| `HV-HOST-03` | cluster member |
 
 - Shared storage: **CSV01** at `C:\ClusterStorage\CSV01` (the ha_role VM's VHD
   must be CSV-homed so it can fail over).
 - Per-host external switch: `HVSwitch_1G`.
-- The cluster name is `cfg-lab` (this is `Get-Cluster` on any member; it is the
+- The cluster name is `example-cluster` (this is `Get-Cluster` on any member; it is the
   value passed as `CFGMS_E2E_HYPERV_CLUSTER`).
 
 ### Privileges
 
 Cluster cmdlets (`Get-Cluster`, `Get-ClusterGroup`, `Move-ClusterGroup`) and VM
 lifecycle (`New-VM`, `Remove-VM`) require **cluster-administrator rights**. The
-cfg-lab stewards run as `LocalSystem`, whose node computer account has cluster
+example-cluster stewards run as `LocalSystem`, whose node computer account has cluster
 access (per the #2306 ruling — no gMSA/run-as). Run the suite either:
 
 - from an **elevated** shell on a member node whose user is a cluster admin, or
 - in the steward's **SYSTEM** context via `cfg steward exec` (SYSTEM has cluster
-  access on cfg-lab).
+  access on example-cluster).
 
 A non-admin shell cannot even read the cluster (`Get-Cluster` returns
 "You do not have administrative privileges on the cluster") — the suite then
@@ -60,8 +60,8 @@ faithfully represents **the node it runs on**. Run it **on all three nodes**
 ownership so the local node plays every role under test in turn.
 
 ```powershell
-# On each of CFG-70-02, CFG-AB-02, CFG-C3-02 (elevated shell), from the repo root:
-$env:CFGMS_E2E_HYPERV_CLUSTER = 'cfg-lab'
+# On each of HV-HOST-01, HV-HOST-02, HV-HOST-03 (elevated shell), from the repo root:
+$env:CFGMS_E2E_HYPERV_CLUSTER = 'example-cluster'
 # Optional overrides (defaults shown):
 #   $env:CFGMS_E2E_HAROLE_VM = 'cfgms-e2e-ha-01'
 #   $env:CFGMS_E2E_VHD_DIR   = 'C:\ClusterStorage\CSV01'
@@ -75,7 +75,7 @@ and read it back, per the exec-channel notes):
 
 ```powershell
 cfg steward exec <steward-id-on-node> --shell powershell --command @'
-$env:CFGMS_E2E_HYPERV_CLUSTER = "cfg-lab"
+$env:CFGMS_E2E_HYPERV_CLUSTER = "example-cluster"
 cd C:\git\cfgms
 go test -tags e2e -v -run TestClusterCascade -timeout 30m ./test/e2e/hyperv/... *>&1 |
   Out-File C:\ProgramData\cfgms\e2e-cluster-cascade.log
@@ -106,7 +106,7 @@ The module suite above proves owner-gated convergence. The **cascade** itself
 effective config through the InheritanceResolver) is controller-side and is
 validated by observation:
 
-1. **Cascade in.** Author a cluster-scoped config `cfg-lab.cfg` carrying one
+1. **Cascade in.** Author a cluster-scoped config `example-cluster.cfg` carrying one
    `hyperv.vm` resource with an `ha_role` (CSV-homed VHD). Push it via the
    controller.
 2. **Observe fan-out.** On each of the 3 members, confirm the VM resource now
@@ -150,11 +150,11 @@ effective config + the live cluster. It reuses the Layer-1 harness (`ccVMInstanc
 et al.) and skips cleanly when the idiomatic controls are unset.
 
 ```powershell
-# On a cfg-lab member node, elevated (cluster admin) or via the SYSTEM exec channel:
-$env:CFGMS_E2E_HYPERV_CLUSTER = 'cfg-lab'
+# On a example-cluster member node, elevated (cluster admin) or via the SYSTEM exec channel:
+$env:CFGMS_E2E_HYPERV_CLUSTER = 'example-cluster'
 $env:CFGMS_E2E_CFG_BIN        = 'C:\git\cfgms\bin\cfg-dev.exe'
 $env:CFGMS_E2E_ADMIN_BUNDLE   = 'C:\Users\cfg\admin.bundle.yaml'   # or CFGMS_ADMIN_BUNDLE
-# NOTE: "cfg" here is this Windows host's local account name (CFG-70-02),
+# NOTE: "cfg" here is this Windows host's local account name (HV-HOST-01),
 # unrelated to the "cfg" SSH user retired in the 2026-07-31/08-01 rebuild.
 # Lab VMs are reached over SSH as the `debian` user.
 $env:CFGMS_E2E_MEMBER_IDS     = 'steward-1780659937223058807,steward-1782769671586775983,steward-1782769748587622286'
@@ -178,7 +178,7 @@ Authored as a role config whose selector is a tag on every member:
 ```bash
 cfg role create e2e-ha-cluster --tenant infra-hyperv --selector "tag:e2e-ha-cluster" --config ha-vm.yaml
 cfg steward tag add <each member steward-id> e2e-ha-cluster
-# ha-vm.yaml resources: one hyperv.vm cfgms-e2e-ha-01 with ha_role.cluster_name: cfg-lab,
+# ha-vm.yaml resources: one hyperv.vm cfgms-e2e-ha-01 with ha_role.cluster_name: example-cluster,
 # state: stopped, CSV-homed vhd_path C:\ClusterStorage\CSV01\cfgms-e2e-ha-01.vhdx.
 ```
 
@@ -201,16 +201,16 @@ the CNO's device config — `role_names` + `roles.<vm>`), then `cfg config uploa
 to bump the version and re-pull:
 
 ```yaml
-    - name: cfg-lab
+    - name: example-cluster
       module: hyperv.cluster
       config:
-        name: cfg-lab
+        name: example-cluster
         transport: ps-host
         role_names: [cfgms-e2e-ha-01]
         roles:
           cfgms-e2e-ha-01:
-            preferred_owners: [CFG-AB-02, CFG-70-02]   # ordered; Set-ClusterOwnerNode -Group
-            possible_owners:  [CFG-70-02, CFG-AB-02]   # restriction (excludes CFG-C3-02); -Resource
+            preferred_owners: [HV-HOST-02, HV-HOST-01]   # ordered; Set-ClusterOwnerNode -Group
+            possible_owners:  [HV-HOST-01, HV-HOST-02]   # restriction (excludes HV-HOST-03); -Resource
             anti_affinity_class: e2e-ha-affinity        # Set-ClusterGroup -AntiAffinityClass
 ```
 
@@ -218,15 +218,15 @@ Only the CNO owner reconciles (`reconcileRoleProperties`, `cluster.go`). Confirm
 on the live cluster (read-only):
 
 ```powershell
-(Get-ClusterOwnerNode -Cluster cfg-lab -Group cfgms-e2e-ha-01).OwnerNodes.Name          # preferred, ordered
-$r = @(Get-ClusterResource -Cluster cfg-lab | Where-Object {
+(Get-ClusterOwnerNode -Cluster example-cluster -Group cfgms-e2e-ha-01).OwnerNodes.Name          # preferred, ordered
+$r = @(Get-ClusterResource -Cluster example-cluster | Where-Object {
         [string]$_.OwnerGroup -eq 'cfgms-e2e-ha-01' -and [string]$_.ResourceType -eq 'Virtual Machine' })
-(Get-ClusterOwnerNode -Cluster cfg-lab -Resource $r[0].Name).OwnerNodes.Name             # possible, set
-(Get-ClusterGroup -Cluster cfg-lab -Name cfgms-e2e-ha-01).AntiAffinityClassNames         # class
+(Get-ClusterOwnerNode -Cluster example-cluster -Resource $r[0].Name).OwnerNodes.Name             # possible, set
+(Get-ClusterGroup -Cluster example-cluster -Name cfgms-e2e-ha-01).AntiAffinityClassNames         # class
 ```
 
-Live-proven 2026-07-15 (v0.9.29): preferred `{CFG-AB-02, CFG-70-02}`, possible
-`{CFG-70-02, CFG-AB-02}` (C3 excluded), anti-affinity `{e2e-ha-affinity}` — each
+Live-proven 2026-07-15 (v0.9.29): preferred `{HV-HOST-02, HV-HOST-01}`, possible
+`{HV-HOST-01, HV-HOST-02}` (C3 excluded), anti-affinity `{e2e-ha-affinity}` — each
 matching the declared config.
 
 > **Bug the idiomatic path surfaced + fixed (#2577).** On the first push (v0.9.28)
@@ -258,7 +258,7 @@ Procedure:
    Provision a real bootable image into the ha_role VM first (a `source:` seed on
    the `hyperv.vm` resource), boot it, and confirm `Get-VM` shows a heartbeat
    before proceeding.
-1. Confirm the balancer is on: `(Get-Cluster -Name cfg-lab).AutoBalancerMode` (2 =
+1. Confirm the balancer is on: `(Get-Cluster -Name example-cluster).AutoBalancerMode` (2 =
    load-balance on join + every 30 min) and `.AutoBalancerLevel` (1 = balance when
    a node exceeds 80%).
 2. Ensure `possible_owners` for the role admits a target node with headroom (widen
@@ -272,10 +272,10 @@ Procedure:
 5. Assert: the new owner's convergence adopts the role; the previous owner goes
    quiet (owner-gate skip, no lifecycle writes); exactly one instance throughout.
 
-> **cfg-lab constraint (2026-07-15).** This bed is not ideal for the load path:
-> the cfgms controller itself (`cfgms-ctrl-01`) runs as a **clustered VM on these
+> **example-cluster constraint (2026-07-15).** This bed is not ideal for the load path:
+> the cfgms controller itself (`ctrl-node-01`) runs as a **clustered VM on these
 > same nodes**, so stressing nodes to the Level-1 (80%) threshold risks migrating/
-> disrupting the control plane; `CFG-70-02` sits at ~100% memory from the CI VMs
+> disrupting the control plane; `HV-HOST-01` sits at ~100% memory from the CI VMs
 > (no headroom to host the running role); and the balancer's 30-min evaluation
 > makes a single-session result non-deterministic. Run AC3 on a bed where the
 > controller is **not** a cluster VM and nodes have headroom. The cfgms code path
@@ -293,9 +293,9 @@ cfg steward tag rm <member steward-id> e2e-ha-cluster
 cfg config show <member steward-id>   # cfgms-e2e-ha-01 no longer present
 ```
 
-Live-proven 2026-07-15 on CFG-C3-02 (non-owner): effective config `cfgms-e2e-ha-01`
+Live-proven 2026-07-15 on HV-HOST-03 (non-owner): effective config `cfgms-e2e-ha-01`
 occurrences 3 → 0; the VM survived unchanged (same VMId, present only on the owner
-CFG-70-02, one instance, clustered role still present). A dropped cascade
+HV-HOST-01, one instance, clustered role still present). A dropped cascade
 definition is not a `state: absent` demote — no removal is issued (no-prune: untag
 ≠ delete). Re-add the tag to restore full membership.
 
@@ -307,7 +307,7 @@ If a run is interrupted before `ccCleanupRole` runs, remove the test artifacts
 manually (elevated, on any member):
 
 ```powershell
-$c = 'cfg-lab'; $role = 'cfgms-e2e-ha-01'
+$c = 'example-cluster'; $role = 'cfgms-e2e-ha-01'
 try { Remove-ClusterGroup -Cluster $c -Name $role -RemoveResources -Force } catch {}
 foreach ($n in (Get-ClusterNode -Cluster $c).Name) {
   try {
@@ -322,4 +322,4 @@ foreach ($n in (Get-ClusterNode -Cluster $c).Name) {
 ```
 
 Restore the CNO to its normal owner if a test left it moved:
-`Move-ClusterGroup -Cluster cfg-lab -Name 'Cluster Group' -Node <preferred>`.
+`Move-ClusterGroup -Cluster example-cluster -Name 'Cluster Group' -Node <preferred>`.
