@@ -1036,7 +1036,20 @@ When an admin-marked mTLS certificate passes chain verification and revocation c
 
 `PUT /api/v1/accounts/{username}` and the WebAuthn, passkey-login and elevation write paths copy the whole account record before persisting, so they carry bindings forward structurally and are not separate transitions.
 
-See `features/controller/api/middleware.go` (`extractAdminPrincipal`, `emitBootstrapFallbackAudit`) for the implementation.
+**The identity pin.** An operator authenticating with a certificate bound to `account-foo` is identified as `account-foo` on every request — direct mTLS and Bearer-token CLI sessions alike. `handleSessionCreate` mints the CLI session under the cert principal, so the session's `PrincipalID` is that same account ID, and the Bearer path re-reads the account record by it. The certificate's CommonName is never the acting identity on any surface, and no caller-supplied string can be substituted for the account ID.
+
+**What authorizes a request is the account record, not a role assignment.** `requirePermission` → `hasPermission` consults `Principal.Permissions` only, and `Permissions` is populated exclusively from the authenticated account's `Permissions` field (all three branches: mTLS cert, Bearer session, web cookie). Root-scope accounts carry `ImplicitAdmin` instead and hold every permission. **RBAC subject-role assignments (`POST /api/v1/rbac/subjects/{id}/roles`) are stored and readable, but no request path resolves them into effective permissions** — every `rbacService` call site in `features/controller/api` is CRUD or read, and `handleAssignSubjectRole` writes to the RBAC store without touching the account record.
+
+Two operational consequences follow, and both cut against the operator's expectation:
+
+- **Granting a role does not grant API or web access.** The permission must be present on the account record (`account.Permissions`) for any surface to honour it.
+- **Revoking a role assignment does not revoke access.** This is the direction that matters for containment: a grant already written to `account.Permissions` keeps authorizing after the role assignment is removed. Removing a permission from the account record — or disabling the account, which is rejected at authentication on every surface — is what actually revokes it.
+
+Unifying the two — resolving subject-role assignments into effective permissions on the request path, so the RBAC surface becomes the authoritative grant source for both web and CLI/API — is production work not yet done. *Deferred: tracked in #3178 — wire subject-role → effective-permission resolution into the API authorization path.* Until it lands, treat the RBAC subject-role surface as role modelling, and `account.Permissions` as the enforced grant set.
+
+When a role *is* assigned, the subject ID must be the account ID returned by `GET /api/v1/accounts/{username}` — never the certificate's CN field. `handleAssignSubjectRole` validates no foreign key against the account type, so a CN string is accepted as a subject ID and records a grant against an identity the auth chain never produces.
+
+See `features/controller/api/middleware.go` (`extractAdminPrincipal`, `authenticationMiddleware`, `requirePermission`, `hasPermission`, `emitBootstrapFallbackAudit`) for the implementation. `features/controller/api/account_rbac_integration_test.go` asserts both properties above end-to-end (Issue #3583): the identity pin, and that a role carrying `config:list` assigned to the account's own subject ID leaves a `config:list`-gated request denied.
 
 ### Admin Session Model
 
