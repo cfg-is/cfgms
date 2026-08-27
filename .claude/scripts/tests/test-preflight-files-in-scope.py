@@ -578,6 +578,48 @@ class TestScopeCorpusDifferential(unittest.TestCase):
             ],
         )
 
+    def test_3577_separator_inside_unclosed_parenthetical_is_not_the_items_boundary(self):
+        # #3577, verbatim (issue body). This item's real separator is on its
+        # LAST line ("— update every renamed symbol..."). An earlier line
+        # carries a " — " that reads like a separator but sits inside a
+        # parenthetical opened on a prior line and not closed until three
+        # lines later ("(rename the four `ungatedHandlerBaseline` map ...
+        # unless the four keys are updated in the same commit as the function
+        # renames),") -- it must not be read as the item's boundary, or every
+        # file declared after it (7 of them) is silently dropped.
+        section = (
+            "- `features/controller/api/handlers_web_accounts_test.go` (rename to\n"
+            "  features/controller/api/handlers_accounts_test.go),\n"
+            "  `features/controller/api/architecture_test.go` (rename the four `ungatedHandlerBaseline` map\n"
+            "  string-literal keys — `\"handleCreateWebAccount\"`, `\"handleUpdateWebAccount\"`,\n"
+            "  `\"handleDeleteWebAccount\"`, `\"handleRevokeEnrollmentLink\"` — to their renamed equivalents, e.g.\n"
+            "  `\"handleCreateAccount\"`. This is a silent failure mode, not a compiler-caught one: the map is\n"
+            "  keyed by string literals, so renaming the Go functions does not touch these strings, and\n"
+            "  `make check-architecture` fails post-rename (the renamed function is now unbaselined, ungated,\n"
+            "  unannotated) unless the four keys are updated in the same commit as the function renames),\n"
+            "  `features/controller/api/assurance_test.go`,\n"
+            "  `features/controller/api/handlers_web_session_test.go`,\n"
+            "  `features/controller/api/handlers_webauthn_elevate_test.go`,\n"
+            "  `features/controller/api/handlers_webauthn_test.go`, `features/controller/api/middleware_test.go`,\n"
+            "  `features/controller/api/handlers_entities_test.go`, `features/controller/api/tier_enforcement_test.go`\n"
+            "  — update every renamed symbol these tests reference.\n"
+        )
+        self.assertEqual(
+            scope(section),
+            sorted([
+                "features/controller/api/handlers_web_accounts_test.go",
+                "features/controller/api/handlers_accounts_test.go",
+                "features/controller/api/architecture_test.go",
+                "features/controller/api/assurance_test.go",
+                "features/controller/api/handlers_web_session_test.go",
+                "features/controller/api/handlers_webauthn_elevate_test.go",
+                "features/controller/api/handlers_webauthn_test.go",
+                "features/controller/api/middleware_test.go",
+                "features/controller/api/handlers_entities_test.go",
+                "features/controller/api/tier_enforcement_test.go",
+            ]),
+        )
+
     def test_table_form_modeled_on_3620_real_alert_locations(self):
         section = (
             "| File | Line | Fix |\n"

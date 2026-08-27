@@ -1227,6 +1227,23 @@ split across wrapped lines as above. Do not rely on a file named only in a
 commentary tail (after the separator has already appeared) to register as in
 scope — give it its own list item instead.
 
+**A separator inside an unclosed parenthetical does not close the subject.**
+The parser tracks paren depth across an item's lines and only treats a
+` — `/` – `/` -- `/` - ` as the real boundary when it appears outside any
+open `(...)`. A parenthetical aside that itself contains one of those dashes,
+and that doesn't close until a later line, is still commentary-within-subject,
+not the item's separator:
+
+```
+- `handlers.go` (rename the four `ungatedHandlerBaseline` keys — see below —
+  before merging), `handlers_test.go`, `middleware_test.go`
+  — update every renamed symbol these tests reference.
+```
+
+All three files are declared here; the ` — see below — ` inside the
+parenthetical does not end the subject early, so `handlers_test.go` and
+`middleware_test.go` are still read as declarations rather than commentary.
+
 What it does **not** accept:
 
 - **Bare directory entries.** `test/integration/controller/` matches nothing — the path regexes require a file extension (or a known extensionless name like `Makefile`/`Dockerfile`). A directory-scoped story therefore takes the no-files branch and loses conflict checking, which is easy to write by accident. List representative files instead, or name the directory in prose *and* list the files you will actually touch.
