@@ -14,18 +14,50 @@
  * aria-selected, and aria-controls. Panels use role="tabpanel".
  * ArrowLeft/ArrowRight cycle between tabs (roving tabindex).
  */
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ContentEntry } from './caseTypes.ts'
 
 type TabKey = 'investigation' | 'chat'
 
 interface InvestigationRailProps {
   content: ContentEntry[]
+  isLive?: boolean
+  connectedSince?: Date | null
 }
 
-export default function InvestigationRail({ content }: InvestigationRailProps) {
+// formatElapsed renders mm:ss since the given instant, matching the mockup's
+// monospace elapsed form (LIVE · 02:14).
+function formatElapsed(since: Date): string {
+  const secs = Math.max(0, Math.floor((Date.now() - since.getTime()) / 1000))
+  const mm = String(Math.floor(secs / 60)).padStart(2, '0')
+  const ss = String(secs % 60).padStart(2, '0')
+  return `${mm}:${ss}`
+}
+
+export default function InvestigationRail({ content, isLive = false, connectedSince = null }: InvestigationRailProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('investigation')
   const tabRefs = useRef<Map<TabKey, HTMLButtonElement>>(new Map())
+  // Elapsed timer: counts from connectedSince, resets on disconnect/reconnect.
+  // State holds a tick counter rather than the formatted string — the string is
+  // derived at render time, so it resets with connectedSince instead of needing a
+  // setState in the effect body (which causes a cascading render), and can never
+  // display the previous session's time for a frame after a reconnect.
+  const [, setTick] = useState(0)
+
+  useEffect(() => {
+    if (!isLive || !connectedSince) return
+    const id = setInterval(() => setTick((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [isLive, connectedSince])
+
+  const elapsed = isLive && connectedSince ? formatElapsed(connectedSince) : '00:00'
+
+  // Pulse animation is suppressed under prefers-reduced-motion: we check via
+  // matchMedia and conditionally apply the animate class so the test can
+  // assert absence of the class without relying on jsdom CSS cascade.
+  const reducedMotion =
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 
   const findings = content.filter((e) => e.kind === 'finding')
 
@@ -79,6 +111,21 @@ export default function InvestigationRail({ content }: InvestigationRailProps) {
           </button>
         ))}
       </div>
+
+      {/* Context row: LIVE indicator per mockup (.ctx > .ctx-live) */}
+      {isLive && (
+        <div className="ctx">
+          <span className="ctx-live live-ind" aria-live="polite" aria-label="Live connection active">
+            <span
+              className={reducedMotion ? 'dot' : 'dot dot--pulse'}
+              aria-hidden="true"
+            />
+            {'LIVE'}
+            <span aria-hidden="true"> · </span>
+            <span className="mono">{elapsed}</span>
+          </span>
+        </div>
+      )}
 
       <div
         id="cockpit-panel-investigation"
