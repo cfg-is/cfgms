@@ -14,7 +14,7 @@
  * All fetches are mocked — no live server required.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router'
 import CockpitView from './CockpitView.tsx'
 import type { Case } from './caseTypes.ts'
@@ -168,15 +168,24 @@ describe('CockpitView', () => {
   })
 
   it('Chat tab renders as a static placeholder with no backend call for it', async () => {
+    // The case's default pin is an `eid` pin, which the drift-diff evidence
+    // card (Story #3609) also fetches against — so the total fetch count
+    // across the ready cockpit is no longer just the case GET. That's the
+    // evidence card's traffic, not the Chat tab's, so this test scopes to
+    // the Chat tab itself: switching to it must add zero further fetches.
     fetchMock.mockResolvedValue(jsonResponse(200, makeCase()))
     renderCockpit()
     await waitFor(() =>
       expect(screen.getByRole('tab', { name: /chat/i })).toBeInTheDocument(),
     )
-    // Only one fetch call was made (GET /api/v1/cases/case-001) — no chat backend.
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    // The Chat tab is present.
-    expect(screen.getByRole('tab', { name: /chat/i })).toBeInTheDocument()
+    // Let any evidence-card fetches from the ready state settle before
+    // taking the baseline count.
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+    const callsBeforeChatTab = fetchMock.mock.calls.length
+
+    fireEvent.click(screen.getByRole('tab', { name: /chat/i }))
+    expect(screen.getByText('Chat is not yet available.')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeChatTab)
   })
 
   it('percent-encodes the :id route parameter into the GET path', async () => {
