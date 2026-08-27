@@ -1,0 +1,191 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Remediation evidence card styles (Story #3612).
+ *
+ * Colour and spacing tokens consumed from docs/design/web-ui-design-tokens.css
+ * (aliased as @design-tokens in vite.config.ts).
+ *
+ * Reference: docs/design/mockups/troubleshooting-cockpit.html §.card.remedy
+ */
+
+@import '@design-tokens';
+
+/* ── Card shell ──────────────────────────────────────────────────────────────*/
+
+.remediation-card {
+  background: var(--tint-green);
+  border: 1px solid var(--state-ok);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.remediation-card--none,
+.remediation-card--error {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────────*/
+
+.remediation-card__header {
+  margin: 0;
+  padding: 11px var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--state-ok);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.remediation-card--none .remediation-card__header,
+.remediation-card--error .remediation-card__header {
+  color: inherit;
+}
+
+.remediation-card__pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid currentColor;
+}
+
+.remediation-card__pill--ok {
+  color: var(--state-ok);
+}
+
+.remediation-card__pill--warn {
+  color: var(--state-warn);
+}
+
+.remediation-card__pill--crit {
+  color: var(--state-crit);
+}
+
+/* ── Body ────────────────────────────────────────────────────────────────────*/
+
+.remediation-card__body {
+  padding: 13px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  background: var(--bg-surface);
+}
+
+.remediation-card__plan {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.remediation-card__mono {
+  font-family: var(--font-mono);
+}
+
+/* ── Facts row ───────────────────────────────────────────────────────────────*/
+
+.remediation-card__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.remediation-card__fact {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 9px;
+}
+
+/* ── Actions row ─────────────────────────────────────────────────────────────*/
+
+.remediation-card__acts {
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.remediation-card__btn {
+  appearance: none;
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 600;
+  padding: 9px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.remediation-card__btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.remediation-card__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.remediation-card__btn--primary {
+  background: var(--state-ok);
+  color: #fff;
+  border: 1px solid var(--state-ok);
+}
+
+.remediation-card__btn--ghost {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+/* ── Loading / empty / error states ─────────────────────────────────────────*/
+
+.remediation-card__loading,
+.remediation-card__none,
+.remediation-card__error {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.remediation-card__error {
+  color: var(--state-crit);
+}
+
+/* ── Preview diff panel ──────────────────────────────────────────────────────*/
+
+.remediation-card__preview {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunk);
+}
+
+.remediation-card__preview-pre {
+  margin: 0 0 var(--space-2) 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.remediation-card__preview-pre:last-child {
+  margin-bottom: 0;
+}
+
+.remediation-card__preview-empty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
