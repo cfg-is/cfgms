@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -346,6 +348,302 @@ func (s *Server) handleUpdateCase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeResponse(w, http.StatusOK, caseToResponse(existing))
+}
+
+// loadCallerCase retrieves a case by ID and verifies it falls within the
+// caller's tenant subtree. Writes the appropriate HTTP error and returns nil
+// when access is denied, so callers should return immediately on nil.
+func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id string) *business.Case {
+	c, err := s.casesStore.GetCase(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, business.ErrCaseNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return nil
+		}
+		s.logger.Error("loadCallerCase: store failed",
+			"case_id", logging.SanitizeLogValue(id),
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to get case", http.StatusInternalServerError)
+		return nil
+	}
+	if !caseInCallerSubtree(c.TenantID, callerTenantSubtree(r)) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return nil
+	}
+	return c
+}
+
+// addPinRequest is the JSON body for POST /api/v1/cases/{id}/pins.
+type addPinRequest struct {
+	Kind               string    `json:"kind"`
+	EID                string    `json:"eid,omitempty"`
+	EdgeType           string    `json:"edge_type,omitempty"`
+	FromEID            string    `json:"from_eid,omitempty"`
+	ToEID              string    `json:"to_eid,omitempty"`
+	ObservationVersion string    `json:"observation_version,omitempty"`
+	DriftRecord        string    `json:"drift_record,omitempty"`
+	Subject            string    `json:"subject,omitempty"`
+	TimeRangeStart     time.Time `json:"time_range_start,omitempty"`
+	TimeRangeEnd       time.Time `json:"time_range_end,omitempty"`
+	Annotation         string    `json:"annotation,omitempty"`
+}
+
+// buildPinRef validates addPinRequest and returns the corresponding PinRef.
+// For entity-referencing kinds (eid, edge-identity, subject-time-range) it
+// calls verifyEntityAccess against caseTenantID — the case's own tenant ceiling,
+// not the caller's ambient tenant (binding PO constraint, ADR-022 §7). Returns
+// (ref, true) on success; writes the HTTP error and returns false on failure.
+func (s *Server) buildPinRef(w http.ResponseWriter, r *http.Request, req addPinRequest, caseTenantID string) (business.PinRef, bool) {
+	switch business.PinRefKind(req.Kind) {
+
+	case business.PinRefKindEID:
+		if req.EID == "" {
+			http.Error(w, "eid is required for kind 'eid'", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		eid, err := egtypes.ParseEID(req.EID)
+		if err != nil {
+			http.Error(w, "invalid eid", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		if s.egProvider == nil {
+			http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
+			return business.PinRef{}, false
+		}
+		ok, accessErr := s.verifyEntityAccess(r.Context(), eid, caseTenantID)
+		if accessErr != nil {
+			s.logger.Error("handleAddPin: eid access check failed",
+				"error", logging.SanitizeLogValue(accessErr.Error()))
+			http.Error(w, "lookup failed", http.StatusInternalServerError)
+			return business.PinRef{}, false
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return business.PinRef{}, false
+		}
+		return business.PinRef{Kind: business.PinRefKindEID, EID: eid.String()}, true
+
+	case business.PinRefKindEdgeIdentity:
+		if req.FromEID == "" || req.ToEID == "" {
+			http.Error(w, "from_eid and to_eid are required for kind 'edge-identity'", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		// edge_type is the first field of the three-field edge subject and is
+		// concatenated below, so it gets the same treatment as the endpoints:
+		// non-empty, delimiter-free, and a taxonomy kind. Without this an
+		// operator could smuggle extra '|'-separated fields into the stored
+		// identity and shift the field boundaries a three-way split recovers,
+		// naming endpoints that never passed the tenant check (ADR-022 §2/§4).
+		if err := validateAssertedEdgeType(req.EdgeType); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		fromEID, err := egtypes.ParseEID(req.FromEID)
+		if err != nil || strings.Contains(fromEID.String(), edgeSubjectDelimiter) {
+			http.Error(w, "invalid from_eid", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		toEID, err := egtypes.ParseEID(req.ToEID)
+		if err != nil || strings.Contains(toEID.String(), edgeSubjectDelimiter) {
+			http.Error(w, "invalid to_eid", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		if s.egProvider == nil {
+			http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
+			return business.PinRef{}, false
+		}
+		// Both endpoints must resolve within the case's tenant subtree (ADR-022 §7).
+		ok, accessErr := s.verifyEntityAccess(r.Context(), fromEID, caseTenantID)
+		if accessErr != nil {
+			s.logger.Error("handleAddPin: from_eid access check failed",
+				"error", logging.SanitizeLogValue(accessErr.Error()))
+			http.Error(w, "lookup failed", http.StatusInternalServerError)
+			return business.PinRef{}, false
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return business.PinRef{}, false
+		}
+		ok, accessErr = s.verifyEntityAccess(r.Context(), toEID, caseTenantID)
+		if accessErr != nil {
+			s.logger.Error("handleAddPin: to_eid access check failed",
+				"error", logging.SanitizeLogValue(accessErr.Error()))
+			http.Error(w, "lookup failed", http.StatusInternalServerError)
+			return business.PinRef{}, false
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return business.PinRef{}, false
+		}
+		edgeIdentity := req.EdgeType + edgeSubjectDelimiter + fromEID.String() + edgeSubjectDelimiter + toEID.String()
+		return business.PinRef{Kind: business.PinRefKindEdgeIdentity, EdgeIdentity: edgeIdentity}, true
+
+	case business.PinRefKindObservationVersion:
+		if req.ObservationVersion == "" {
+			http.Error(w, "observation_version is required for kind 'observation-version'", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		return business.PinRef{Kind: business.PinRefKindObservationVersion, ObservationVersion: req.ObservationVersion}, true
+
+	case business.PinRefKindDriftRecord:
+		if req.DriftRecord == "" {
+			http.Error(w, "drift_record is required for kind 'drift-record'", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		return business.PinRef{Kind: business.PinRefKindDriftRecord, DriftRecord: req.DriftRecord}, true
+
+	case business.PinRefKindSubjectTimeRange:
+		if req.Subject == "" {
+			http.Error(w, "subject is required for kind 'subject-time-range'", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		if req.TimeRangeStart.IsZero() || req.TimeRangeEnd.IsZero() {
+			http.Error(w, "time_range_start and time_range_end are required for kind 'subject-time-range'", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		subjectEID, err := egtypes.ParseEID(req.Subject)
+		if err != nil {
+			http.Error(w, "invalid subject eid", http.StatusBadRequest)
+			return business.PinRef{}, false
+		}
+		if s.egProvider == nil {
+			http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)
+			return business.PinRef{}, false
+		}
+		ok, accessErr := s.verifyEntityAccess(r.Context(), subjectEID, caseTenantID)
+		if accessErr != nil {
+			s.logger.Error("handleAddPin: subject access check failed",
+				"error", logging.SanitizeLogValue(accessErr.Error()))
+			http.Error(w, "lookup failed", http.StatusInternalServerError)
+			return business.PinRef{}, false
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return business.PinRef{}, false
+		}
+		return business.PinRef{
+			Kind:           business.PinRefKindSubjectTimeRange,
+			Subject:        subjectEID.String(),
+			TimeRangeStart: req.TimeRangeStart,
+			TimeRangeEnd:   req.TimeRangeEnd,
+		}, true
+
+	default:
+		if req.Kind == "" {
+			http.Error(w, "kind is required", http.StatusBadRequest)
+		} else {
+			http.Error(w, "kind must be one of: eid, edge-identity, observation-version, drift-record, subject-time-range", http.StatusBadRequest)
+		}
+		return business.PinRef{}, false
+	}
+}
+
+// handleAddPin handles POST /api/v1/cases/{id}/pins.
+// Adds a pin whose graph reference must resolve within the case's own tenant
+// subtree — checked against the case's TenantID, not the caller's ambient
+// tenant (binding PO constraint). Calls HasLeadership() per the architecture-
+// checker rule.
+func (s *Server) handleAddPin(w http.ResponseWriter, r *http.Request) {
+	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if s.casesStore == nil {
+		http.Error(w, "cases store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		http.Error(w, "case id is required", http.StatusBadRequest)
+		return
+	}
+
+	c := s.loadCallerCase(w, r, id)
+	if c == nil {
+		return
+	}
+
+	var req addPinRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ref, ok := s.buildPinRef(w, r, req, c.TenantID)
+	if !ok {
+		return
+	}
+
+	callerID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+	if callerID == "" {
+		callerID = "unknown"
+	}
+
+	pin := &business.Pin{
+		ID:         uuid.New().String(),
+		CaseID:     c.ID,
+		Ref:        ref,
+		Annotation: req.Annotation,
+		Author:     callerID,
+		PinnedAt:   time.Now().UTC(),
+	}
+
+	if err := s.casesStore.AddPin(r.Context(), c.ID, pin); err != nil {
+		s.logger.Error("handleAddPin: store failed",
+			"case_id", logging.SanitizeLogValue(c.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to add pin", http.StatusInternalServerError)
+		return
+	}
+
+	s.writeResponse(w, http.StatusCreated, pinToResponse(pin))
+}
+
+// handleRemovePin handles DELETE /api/v1/cases/{id}/pins/{pin_id}.
+// Removes a pin from a case, gated by the same case-tenant check used for add.
+// Calls HasLeadership() per the architecture-checker rule.
+func (s *Server) handleRemovePin(w http.ResponseWriter, r *http.Request) {
+	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if s.casesStore == nil {
+		http.Error(w, "cases store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+	pinID := vars["pin_id"]
+	if id == "" {
+		http.Error(w, "case id is required", http.StatusBadRequest)
+		return
+	}
+	if pinID == "" {
+		http.Error(w, "pin id is required", http.StatusBadRequest)
+		return
+	}
+
+	c := s.loadCallerCase(w, r, id)
+	if c == nil {
+		return
+	}
+
+	if err := s.casesStore.RemovePin(r.Context(), c.ID, pinID); err != nil {
+		if errors.Is(err, business.ErrPinNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("handleRemovePin: store failed",
+			"case_id", logging.SanitizeLogValue(c.ID),
+			"pin_id", logging.SanitizeLogValue(pinID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to remove pin", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ── JSON response types ────────────────────────────────────────────────────

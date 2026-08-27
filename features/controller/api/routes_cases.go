@@ -31,4 +31,12 @@ func registerCaseRoutes(s *Server, api *mux.Router) {
 	cases.Handle("/{id}",
 		s.requirePermission("case", "update")(http.HandlerFunc(s.handleUpdateCase)),
 	).Methods("PUT")
+
+	cases.Handle("/{id}/pins",
+		s.requirePermission("case", "update")(http.HandlerFunc(s.handleAddPin)),
+	).Methods("POST")
+
+	cases.Handle("/{id}/pins/{pin_id}",
+		s.requirePermission("case", "update")(http.HandlerFunc(s.handleRemovePin)),
+	).Methods("DELETE")
 }
