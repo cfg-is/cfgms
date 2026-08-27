@@ -44,6 +44,7 @@ package cert
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -216,6 +217,24 @@ func (m *Manager) GenerateServerCertificate(config *ServerCertConfig) (*Certific
 // GenerateClientCertificate creates a new client certificate
 func (m *Manager) GenerateClientCertificate(config *ClientCertConfig) (*Certificate, error) {
 	cert, err := m.ca.GenerateClientCertificate(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store the certificate
+	if err := m.store.StoreCertificate(cert); err != nil {
+		return nil, fmt.Errorf("failed to store client certificate: %w", err)
+	}
+
+	return cert, nil
+}
+
+// SignClientCertificateRequest signs a caller-supplied public key into a client
+// certificate and stores it. The CA never generates or sees a private key for this
+// credential, so the stored Certificate.PrivateKeyPEM is empty and FileStore never
+// writes a key.pem for it.
+func (m *Manager) SignClientCertificateRequest(pubKey crypto.PublicKey, config *ClientCertConfig) (*Certificate, error) {
+	cert, err := m.ca.SignClientCertificateRequest(pubKey, config)
 	if err != nil {
 		return nil, err
 	}

@@ -127,6 +127,64 @@ func TestManager_GenerateServerCertificate(t *testing.T) {
 	assert.Equal(t, cert.CommonName, storedCert.CommonName)
 }
 
+func TestManager_SignClientCertificateRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	manager, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &CAConfig{
+			Organization: "Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	// Caller generates its own keypair locally; the manager never sees the private key.
+	callerKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	clientConfig := &ClientCertConfig{
+		CommonName:   "payload-signer",
+		Organization: "Test Org",
+		ClientID:     "payload-signer-001",
+		ValidityDays: 365,
+	}
+
+	cert, err := manager.SignClientCertificateRequest(&callerKey.PublicKey, clientConfig)
+	require.NoError(t, err)
+	require.NotNil(t, cert)
+
+	// Verify certificate properties
+	assert.Equal(t, CertificateTypeClient, cert.Type)
+	assert.Equal(t, "payload-signer", cert.CommonName)
+	assert.Equal(t, "payload-signer-001", cert.ClientID)
+	assert.NotEmpty(t, cert.SerialNumber)
+	assert.NotEmpty(t, cert.CertificatePEM)
+
+	// [REQUIRED TEST] no private key is returned or persisted for a CSR-issued cert.
+	assert.Empty(t, cert.PrivateKeyPEM)
+
+	clientResult, err := manager.ValidateCertificate(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, clientResult.IsValid)
+
+	// Verify certificate is stored (metadata + cert.pem)
+	storedCert, err := manager.GetCertificate(cert.SerialNumber)
+	require.NoError(t, err)
+	assert.Equal(t, cert.CommonName, storedCert.CommonName)
+
+	// [REQUIRED TEST] FileStore must not write a key.pem file for a CSR-issued
+	// certificate — there is no private key to persist.
+	keyPath := filepath.Join(tempDir, cert.SerialNumber, "key.pem")
+	_, statErr := os.Stat(keyPath)
+	assert.True(t, os.IsNotExist(statErr), "key.pem must not be written for a CSR-issued certificate")
+
+	// cert.pem must still be written.
+	certPath := filepath.Join(tempDir, cert.SerialNumber, "cert.pem")
+	_, statErr = os.Stat(certPath)
+	assert.NoError(t, statErr)
+}
+
 func TestManager_GenerateClientCertificate(t *testing.T) {
 	tempDir := t.TempDir()
 	manager, err := NewManager(&ManagerConfig{

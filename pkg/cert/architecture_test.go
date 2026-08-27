@@ -468,6 +468,59 @@ func TestSetRootScopeMarker_Architecture(t *testing.T) {
 			"add to allow-list or move to an allowed file: %v", violations)
 }
 
+// TestSetPayloadSigningMarker_Architecture enforces the restricted-caller rule for
+// SetPayloadSigningMarker. Any production file outside the allow-list that calls
+// cert.SetPayloadSigningMarker fails this test. Test files (_test.go) are excluded —
+// they are test infrastructure, not production code paths.
+//
+// The allow-list is currently empty: this story (#3692) adds the primitive without
+// wiring in a caller — Story S10's CSR issuance handler is the intended sole
+// production caller and must add itself here when it lands.
+func TestSetPayloadSigningMarker_Architecture(t *testing.T) {
+	allowList := map[string]bool{
+		// Story S10: CSR-based payload-signing certificate issuance handler.
+		// Add the handler's path here when Story S10 lands.
+	}
+
+	repoRoot := findRepoRoot(t)
+
+	var violations []string
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == "worktrees" || d.Name() == ".cache" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path) // #nosec G304 -- repo scan reads controlled source files
+		if err != nil {
+			return nil
+		}
+		if bytes.Contains(content, []byte("cert.SetPayloadSigningMarker")) {
+			rel, relErr := filepath.Rel(repoRoot, path)
+			if relErr != nil {
+				rel = path
+			}
+			rel = filepath.ToSlash(rel)
+			if !allowList[rel] {
+				violations = append(violations, rel)
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, violations,
+		"unauthorized production callers of cert.SetPayloadSigningMarker; "+
+			"add to allow-list or move to an allowed file: %v", violations)
+}
+
 // findRepoRoot walks up from the working directory to find the repository root (go.mod presence).
 func findRepoRoot(t *testing.T) string {
 	t.Helper()

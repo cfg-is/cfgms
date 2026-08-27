@@ -4,6 +4,7 @@ package cert
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -395,6 +396,94 @@ func (ca *CA) GenerateClientCertificate(config *ClientCertConfig) (*Certificate,
 		IsValid:        true,
 		CertificatePEM: certPEM,
 		PrivateKeyPEM:  keyPEM,
+		Fingerprint:    fingerprint,
+		Issuer:         ca.certificate.Subject.CommonName,
+		ClientID:       config.ClientID,
+	}, nil
+}
+
+// SignClientCertificateRequest signs a caller-supplied public key into a client
+// certificate. Unlike GenerateClientCertificate, the CA never generates or sees a
+// private key for this credential: the caller generates the keypair locally and
+// submits only pubKey. The returned Certificate.PrivateKeyPEM is empty — there is
+// no private key for the CA to return or for FileStore to persist.
+//
+// This is the CA-side primitive for both the CLI-driven CSR flow (Story S10) and a
+// future browser-based enrollment flow (admin authenticates via passkey, the CLI
+// generates a keypair locally, the controller signs the submitted public key) —
+// it is not designed to be reachable only from one caller.
+func (ca *CA) SignClientCertificateRequest(pubKey crypto.PublicKey, config *ClientCertConfig) (*Certificate, error) {
+	if !ca.initialized {
+		return nil, fmt.Errorf("CA is not initialized")
+	}
+
+	if config == nil {
+		return nil, fmt.Errorf("client certificate config is required")
+	}
+
+	if pubKey == nil {
+		return nil, fmt.Errorf("public key is required")
+	}
+
+	// Set defaults
+	if config.ValidityDays == 0 {
+		config.ValidityDays = 365
+	}
+	if config.Organization == "" {
+		config.Organization = ca.config.Organization
+	}
+
+	// Generate serial number
+	serialNumber, err := ca.generateSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	// Create client certificate template
+	subject := pkix.Name{
+		Organization: []string{config.Organization},
+		CommonName:   config.CommonName,
+	}
+	if config.OrganizationalUnit != "" {
+		subject.OrganizationalUnit = []string{config.OrganizationalUnit}
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      subject,
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	if config.TemplateModifier != nil {
+		config.TemplateModifier(template)
+	}
+
+	// Sign the caller-supplied public key directly — the CA never generates or
+	// holds a private key for this credential.
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, pubKey, ca.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client certificate: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certDER,
+	})
+
+	fingerprint := ca.calculateFingerprint(certDER)
+
+	return &Certificate{
+		Type:           CertificateTypeClient,
+		CommonName:     config.CommonName,
+		SerialNumber:   serialNumber.String(),
+		CreatedAt:      template.NotBefore,
+		ExpiresAt:      template.NotAfter,
+		IsValid:        true,
+		CertificatePEM: certPEM,
+		PrivateKeyPEM:  nil,
 		Fingerprint:    fingerprint,
 		Issuer:         ca.certificate.Subject.CommonName,
 		ClientID:       config.ClientID,
