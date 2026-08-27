@@ -189,7 +189,7 @@ describe('BlastRadiusCard', () => {
     })
 
     // Confirm the subject EID was used in the neighborhood request path.
-    const requested = fetchStub.mock.calls.map((c) => String(c[0]))
+    const requested = (fetchStub.mock.calls as unknown[][]).map((c) => String(c[0]))
     expect(requested[0]).toContain(
       `/api/v1/entities/${encodeURIComponent('eid:root/msp-a/client-1/sql-primary')}/neighborhood`,
     )
@@ -212,7 +212,7 @@ describe('BlastRadiusCard', () => {
       expect(fetchStub).toHaveBeenCalled()
     })
 
-    const requested = fetchStub.mock.calls.map((c) => String(c[0]))
+    const requested = (fetchStub.mock.calls as unknown[][]).map((c) => String(c[0]))
     expect(requested[0]).toContain(
       `/api/v1/entities/${encodeURIComponent('eid:root/../../api/v1/tenants?x=#')}/neighborhood`,
     )
