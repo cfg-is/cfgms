@@ -71,6 +71,20 @@ LINE_SUFFIX_RE = re.compile(
 #: passing does not become a requirement.
 LIST_OR_TABLE_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\|)")
 
+#: A list item's declaration is its SUBJECT -- the text up to (but not
+#: including) its first description separator. Everything from the separator
+#: onward is commentary (Issue #3683). All four dash/em-dash forms the house
+#: convention uses; each requires surrounding spaces so it never matches inside
+#: a hyphenated path or identifier.
+ITEM_SEPARATOR_RE = re.compile(r" — | – | -- | - ")
+
+#: A wrapped continuation line of the list item above it: indented and not
+#: itself a new list/table item. The house convention wraps a long item's
+#: prose onto indented lines rather than one long physical line (see #3611);
+#: a continuation line is always commentary, same as text after the separator
+#: on the item's own opening line.
+ITEM_CONTINUATION_RE = re.compile(r"^[ \t]+\S")
+
 #: "None — documentation only.", "None (no code changes)", "none." and friends:
 #: an explicit declaration that the story touches no files. Only matched when the
 #: section OPENS with it, so a section that merely mentions "none" in prose still
@@ -1159,26 +1173,74 @@ def extract_scope_paths(section):
       under-extraction -> two agents collide on one file, or a coverage gate
                           passes a PR that skipped declared work
 
-    Handled per line: a `:<line>` or `:<line>-<line>` suffix is stripped first;
-    list items and table rows contribute bare and backticked paths; any other
-    line contributes only backticked paths.
+    Handled per line: a `:<line>` or `:<line>-<line>` suffix is stripped first.
+    A list item or table row is a DECLARATION, but only its SUBJECT counts --
+    the text up to (not including) its first description separator (`ITEM_SEPARATOR_RE`:
+    " — ", " – ", " -- ", " - "). Text after that separator, and every wrapped
+    continuation line belonging to the same item (`ITEM_CONTINUATION_RE`: an
+    indented line that is not itself a new list/table item), is commentary and
+    contributes nothing -- bare or backticked. A standalone prose line (not a
+    list item, table row, or continuation of one) still contributes its
+    backticked paths, same as always.
 
+    This is what fixes #3683: a bullet that names a file only to say a *second*
+    file does NOT need editing --
+    "`ChangeTimelineCard.tsx` -- new file, default export picked up by
+    `EvidenceCanvas.tsx`'s glob -- no edit to that file needed." -- wrapped
+    `EvidenceCanvas.tsx` onto an indented continuation line. Scanning every
+    line for backticked paths (the old behavior) recorded it as declared; the
+    dispatcher then held two unrelated stories on a false shared-file conflict.
     Structure alone decides this -- no attempt is made to read intent from the
     wording. A phrasing filter was tried and removed: real story bodies say "do
     NOT" and "never" in instructions ABOUT a file they are declaring
     ("`assurance.go` -- do NOT lower `webauthn:register`"), so keying on those
-    words dropped legitimate declarations from three live stories. The known
-    residual limitation is therefore that a path a story backticks in order to
-    exclude still parses as in scope; write such a path unbackticked in prose.
+    words dropped legitimate declarations from three live stories -- see
+    TestPhrasingIsNotIntent. Because "do NOT lower `webauthn:register`" sits
+    entirely inside the item's own commentary tail, this rule already leaves it
+    alone without needing to read it.
+
+    Residual limitation, narrower than before: a backticked path on a
+    STANDALONE PROSE LINE (not part of any list item) still parses as in scope
+    even when the sentence excludes it -- "Do NOT touch `features/.../server.go`."
+    as its own line still declares that file, because prose lines have no
+    subject/commentary split to apply. Escape hatch: write such a path
+    unbackticked in prose, or -- if it must be declared as excluded from
+    inside a list item -- put it in that item's commentary tail (after the
+    separator, or on a wrapped continuation line), where it is now correctly
+    excluded. A path that must declare more than one file keeps every file
+    before the item's separator: `` - `a/b/x.go` and `a/b/x_test.go` -- add the
+    guard. ``.
     """
     if not section:
         return []
     found = set()
+    in_item = False
     for raw_line in section.splitlines():
         line = LINE_SUFFIX_RE.sub(r"\1", raw_line)
-        found.update(BACKTICK_PATH_RE.findall(line))
-        if LIST_OR_TABLE_RE.match(line):
-            found.update(BARE_PATH_RE.findall(line))
+        marker = LIST_OR_TABLE_RE.match(line)
+        is_item_start = marker is not None
+
+        if not is_item_start and in_item and ITEM_CONTINUATION_RE.match(line):
+            continue  # wrapped commentary belonging to the previous item
+
+        in_item = is_item_start
+
+        if is_item_start:
+            # Search for the separator only AFTER the item's own list marker.
+            # " - " is one of the separator forms, so on an INDENTED dash bullet
+            # ("  - `pkg/a.go` — x") an unanchored search matches the bullet
+            # marker itself at index 1, collapsing the subject to the leading
+            # whitespace and extracting nothing. Indented `*` and `1.` items were
+            # unaffected, so the failure hit exactly the house convention's
+            # nested-dash form -- silently, as an empty files_parsed that reads
+            # downstream as "cannot check conflicts" and dispatches with
+            # file-overlap detection disabled.
+            sep = ITEM_SEPARATOR_RE.search(line, marker.end())
+            subject = line[:sep.start()] if sep else line
+            found.update(BACKTICK_PATH_RE.findall(subject))
+            found.update(BARE_PATH_RE.findall(subject))
+        else:
+            found.update(BACKTICK_PATH_RE.findall(line))
     return sorted(found)
 
 
