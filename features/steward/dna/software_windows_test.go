@@ -190,6 +190,9 @@ func TestWindowsSoftwareCollector_CollectServices(t *testing.T) {
 	assert.GreaterOrEqual(t, stopped, 0)
 	assert.LessOrEqual(t, running+stopped, total,
 		"running and stopped are disjoint subsets of the total")
+	assert.Greater(t, auto, 0,
+		"start modes must be readable without elevation — a 0 auto-start count beside a "+
+			"non-zero total means every per-service config read was refused")
 	assert.LessOrEqual(t, auto+manual, total,
 		"auto-start and demand-start are disjoint subsets of the total")
 
@@ -207,20 +210,20 @@ func TestWindowsSoftwareCollector_CollectServices(t *testing.T) {
 }
 
 // TestWindowsSoftwareCollector_CollectServicesViaSCM exercises the native Service
-// Control Manager path on its own. mgr.Connect asks for SC_MANAGER_ALL_ACCESS, so
-// an unelevated host is refused — in that case the function must fail without
-// writing partial counters, which is what makes the wmic fallback in
-// CollectServices safe to run afterwards.
+// Control Manager path on its own, and pins the least-privilege access masks it
+// opens with. The SCM and per-service handles are requested read-only
+// (SC_MANAGER_CONNECT|SC_MANAGER_ENUMERATE_SERVICE, then
+// SERVICE_QUERY_CONFIG|SERVICE_QUERY_STATUS), all of which the default security
+// descriptors grant to any authenticated user — so this must succeed whether or
+// not the test process is elevated. A regression to SC_MANAGER_ALL_ACCESS /
+// SERVICE_ALL_ACCESS fails here on an unelevated host instead of silently
+// falling through to a wmic binary that no longer ships with Windows.
 func TestWindowsSoftwareCollector_CollectServicesViaSCM(t *testing.T) {
 	col := &WindowsSoftwareCollector{}
 	attrs := make(map[string]string)
 
-	err := col.collectServicesViaSCM(attrs)
-	if err != nil {
-		assert.Empty(t, attrs,
-			"a failed SCM connection must leave the attribute map untouched for the fallback")
-		return
-	}
+	require.NoError(t, col.collectServicesViaSCM(attrs),
+		"the read-only SCM path must work without elevation")
 
 	total := intAttr(t, attrs, "total_service_count")
 	assert.Greater(t, total, 0, "ListServices must enumerate at least one service")
@@ -228,9 +231,16 @@ func TestWindowsSoftwareCollector_CollectServicesViaSCM(t *testing.T) {
 	stopped := intAttr(t, attrs, "stopped_service_count")
 	assert.Greater(t, running, 0, "core Windows services are always running")
 	assert.LessOrEqual(t, running+stopped, total)
-	assert.LessOrEqual(t,
-		intAttr(t, attrs, "auto_start_service_count")+intAttr(t, attrs, "manual_start_service_count"),
-		total)
+
+	// Start modes come from a second call (Service.Config) behind a different
+	// access right than the state query, so they are asserted non-zero
+	// independently: an auto-start count of 0 beside a non-zero total means every
+	// per-service open or config read was refused.
+	auto := intAttr(t, attrs, "auto_start_service_count")
+	manual := intAttr(t, attrs, "manual_start_service_count")
+	assert.Greater(t, auto, 0,
+		"Service.Config must be readable — a Windows host always has auto-start services")
+	assert.LessOrEqual(t, auto+manual, total)
 }
 
 // TestWindowsSoftwareCollector_CollectProcesses runs CollectProcesses against the
