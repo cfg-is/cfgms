@@ -3,6 +3,7 @@
 package workflow
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -42,19 +43,32 @@ func TestResolveWorkflowFilePath_WindowsSpellingsHonored(t *testing.T) {
 // a bare/relative workflow file name is still resolved by joining it onto workflowPaths,
 // not honored verbatim like a rooted path is.
 //
-// Note: fileExists (integration.go) does not actually probe the filesystem — a
-// pre-existing, unrelated defect (it round-trips filepath.Abs twice and never returns
-// false for a syntactically valid path) — so every candidate "exists." That defect is
-// out of scope for #3460 (no filepath.IsAbs re-anchor decision involved); this test
-// only asserts the search-vs-verbatim branch, using the always-true fileExists as a
-// given rather than asserting real existence-checking.
+// fileExists (integration.go) now genuinely probes the filesystem (Issue #3650), so the
+// candidate file must actually exist under dir for this to find it.
 func TestResolveWorkflowFilePath_RelativeSearchesPaths(t *testing.T) {
 	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte("x"), 0o600))
 
 	got, found := resolveWorkflowFilePath("deploy.yaml", []string{dir})
 
 	require.True(t, found)
 	assert.Equal(t, filepath.Join(dir, "deploy.yaml"), got, "a relative workflow file must be joined onto a search path, not honored verbatim")
+}
+
+// TestResolveWorkflowFilePath_RelativeSkipsMissingSearchPath is the Issue #3650
+// regression: before the fix, fileExists always returned true, so the FIRST search path
+// was always reported as a match even when the file only existed under a later one — a
+// real correctness bug for any config with more than one workflowPaths entry, not just
+// dead code.
+func TestResolveWorkflowFilePath_RelativeSkipsMissingSearchPath(t *testing.T) {
+	empty := t.TempDir()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte("x"), 0o600))
+
+	got, found := resolveWorkflowFilePath("deploy.yaml", []string{empty, dir})
+
+	require.True(t, found, "must fall through to the search path where the file actually exists")
+	assert.Equal(t, filepath.Join(dir, "deploy.yaml"), got)
 }
 
 // TestResolveWorkflowFilePath_RelativeNotFoundWithNoSearchPaths is the paired negative

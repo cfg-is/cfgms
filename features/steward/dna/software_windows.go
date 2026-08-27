@@ -117,22 +117,32 @@ func (w *WindowsSoftwareCollector) CollectPackages(ctx context.Context, attribut
 // Manager API with wmic fallback, process count via snapshot, and startup
 // programs from registry.
 func (w *WindowsSoftwareCollector) CollectServices(ctx context.Context, attributes map[string]string) error {
-	// Primary: native SCM API (requires service manager access — steward runs as SYSTEM)
-	if err := w.collectServicesViaSCM(attributes); err != nil {
-		// Fallback: wmic (works with limited access)
-		if output, wmicErr := runCommand(ctx, "wmic", "service", "get",
-			"Name,State,StartMode,ServiceType", "/format:csv"); wmicErr == nil {
+	// Primary: native SCM API, opened read-only so it works whether or not the
+	// steward is elevated.
+	serviceErr := w.collectServicesViaSCM(attributes)
+	if serviceErr != nil {
+		// Fallback: wmic. Present only on older SKUs — it was removed in Windows 11
+		// 24H2 and Windows Server 2025 — so its absence is expected, not an outage.
+		output, wmicErr := runCommand(ctx, "wmic", "service", "get",
+			"Name,State,StartMode,ServiceType", "/format:csv")
+		if wmicErr == nil {
 			w.parseWMIServicesOutput(output, attributes)
+			serviceErr = nil
+		} else {
+			serviceErr = fmt.Errorf("service counts unavailable: scm: %w; wmic fallback: %v", serviceErr, wmicErr)
 		}
 	}
 
-	// Native: process count via snapshot
+	// Native: process count via snapshot. Collected regardless of the service
+	// outcome so a service-side failure never costs the process and startup facts.
 	attributes["running_process_count"] = fmt.Sprintf("%d", countProcesses())
 
 	// Native: startup programs from Run/RunOnce registry keys
 	w.collectStartupPrograms(attributes)
 
-	return nil
+	// Reported rather than swallowed: without this, a host on which neither path
+	// works emits a DNA fragment silently missing every service counter.
+	return serviceErr
 }
 
 // CollectProcesses gathers process information using CreateToolhelp32Snapshot
@@ -544,10 +554,46 @@ func (w *WindowsSoftwareCollector) collectWindowsStoreApps(ctx context.Context, 
 
 // ---------- Service helpers ----------
 
+// scmReadAccess is the least-privilege access mask required to enumerate the
+// service database. mgr.Connect opens the SCM with SC_MANAGER_ALL_ACCESS, which
+// the default SCM security descriptor grants only to administrators — DNA
+// collection only ever reads, so asking for write rights it never uses makes the
+// whole native path fail on any unelevated steward.
+const scmReadAccess = windows.SC_MANAGER_CONNECT | windows.SC_MANAGER_ENUMERATE_SERVICE
+
+// serviceReadAccess is the least-privilege access mask for a single service
+// handle: QUERY_STATUS backs Service.Query and QUERY_CONFIG backs
+// Service.Config. mgr.OpenService asks for SERVICE_ALL_ACCESS, which is denied
+// to non-administrators on most services and would silently drop them from the
+// state and start-mode tallies.
+const serviceReadAccess = windows.SERVICE_QUERY_CONFIG | windows.SERVICE_QUERY_STATUS
+
+// openSCMReadOnly opens the local service control manager with read-only rights.
+func openSCMReadOnly() (*mgr.Mgr, error) {
+	handle, err := windows.OpenSCManager(nil, nil, scmReadAccess)
+	if err != nil {
+		return nil, fmt.Errorf("open service control manager: %w", err)
+	}
+	return &mgr.Mgr{Handle: handle}, nil
+}
+
+// openServiceReadOnly opens a single service with read-only rights.
+func openServiceReadOnly(m *mgr.Mgr, name string) (*mgr.Service, error) {
+	namePtr, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.OpenService(m.Handle, namePtr, serviceReadAccess)
+	if err != nil {
+		return nil, err
+	}
+	return &mgr.Service{Name: name, Handle: handle}, nil
+}
+
 // collectServicesViaSCM enumerates Windows services using the native Service
 // Control Manager API. Replaces wmic service.
 func (w *WindowsSoftwareCollector) collectServicesViaSCM(attributes map[string]string) error {
-	m, err := mgr.Connect()
+	m, err := openSCMReadOnly()
 	if err != nil {
 		return err
 	}
@@ -555,7 +601,7 @@ func (w *WindowsSoftwareCollector) collectServicesViaSCM(attributes map[string]s
 
 	serviceNames, err := m.ListServices()
 	if err != nil {
-		return err
+		return fmt.Errorf("enumerate services: %w", err)
 	}
 
 	totalServices := len(serviceNames)
@@ -563,7 +609,7 @@ func (w *WindowsSoftwareCollector) collectServicesViaSCM(attributes map[string]s
 	var autoStartServices, manualStartServices int
 
 	for _, name := range serviceNames {
-		s, err := m.OpenService(name)
+		s, err := openServiceReadOnly(m, name)
 		if err != nil {
 			// Skip services we can't access (permission restricted)
 			continue

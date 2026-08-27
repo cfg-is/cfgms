@@ -5,6 +5,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -151,8 +152,8 @@ func (m *Manager) ExecuteWorkflowConfigs(ctx context.Context, workflowConfigs []
 			if loadErr != nil {
 				m.logger.Error("Failed to load workflow from file",
 					"workflow", workflowConfig.Name,
-					"file", workflowConfig.WorkflowFile,
-					"error", loadErr)
+					"file", logging.SanitizeLogValue(workflowConfig.WorkflowFile),
+					"error", logging.SanitizeLogValue(loadErr.Error()))
 				continue
 			}
 
@@ -217,10 +218,6 @@ func (m *Manager) ExecuteResourcesAsWorkflow(ctx context.Context, resources []co
 
 // fileExists checks if a file exists
 func fileExists(filename string) bool {
-	info, err := filepath.Abs(filename)
-	if err != nil {
-		return false
-	}
-	_, err = filepath.Abs(info)
+	_, err := os.Stat(filename)
 	return err == nil
 }

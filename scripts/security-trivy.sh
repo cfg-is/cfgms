@@ -28,16 +28,23 @@ _is_init_error() {
 # --- Blocking vulnerability, secret, and misconfiguration scan ---
 echo "🔍 Comprehensive Security Scan (Blocking Issues):"
 
-vuln_output=""
+# Stream trivy's output live via tee instead of buffering the whole scan through
+# $(...) — a slow run and a genuinely stuck run were indistinguishable without
+# external process monitoring before this (Issue #3650). set -euo pipefail is
+# already active above, so the pipeline's reported exit status is trivy's own
+# (tee itself only fails on a write error, which pipefail would still surface).
+tmp_file="$(mktemp)"
+trap 'rm -f "$tmp_file"' EXIT
+
 vuln_exit=0
-vuln_output=$("$TRIVY_CMD" fs "$SCAN_TARGET" \
+"$TRIVY_CMD" fs "$SCAN_TARGET" \
     --scanners vuln,secret,misconfig \
     --format table \
     --severity UNKNOWN,CRITICAL,HIGH,MEDIUM \
     --skip-dirs .cache \
-    --exit-code 1 2>&1) || vuln_exit=$?
+    --exit-code 1 2>&1 | tee "$tmp_file" || vuln_exit=$?
 
-echo "$vuln_output"
+vuln_output=$(cat "$tmp_file")
 
 if [[ $vuln_exit -ne 0 ]]; then
     if _is_init_error "$vuln_output"; then
