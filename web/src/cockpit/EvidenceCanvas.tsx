@@ -28,15 +28,30 @@ interface EvidenceCanvasProps {
 // Eager glob — resolved by Vite at transform time. Each value is a module with a
 // default export that implements EvidenceCardProps. Cards drop a file here and are
 // automatically included; no change to this file is ever needed.
-const cardModules = import.meta.glob('./cards/*.tsx', { eager: true }) as Record<
-  string,
-  { default: ComponentType<EvidenceCardProps> }
->
+//
+// Colocated *.test.tsx files are excluded explicitly. A bare './cards/*.tsx' also
+// matches './cards/DriftDiffCard.test.tsx', and an eager glob *imports* every match
+// for its side effects — so a card story following this repo's colocated-test
+// convention would pull its test module (and its vitest / @testing-library imports)
+// into the application graph and the production bundle. The `!` pattern keeps the
+// seam to card components only.
+const cardModules = import.meta.glob(['./cards/*.tsx', '!./cards/*.test.tsx'], {
+  eager: true,
+}) as Record<string, { default: ComponentType<EvidenceCardProps> }>
 
 // Stable array of (path, Card) pairs for keyed rendering.
 const cardEntries = Object.entries(cardModules)
   .filter(([, m]) => Boolean(m.default))
   .map(([path, m]) => ({ path, Card: m.default as ComponentType<EvidenceCardProps> }))
+
+/**
+ * Every module path the discovery glob actually imported — the raw glob keys, not
+ * the renderable subset. Exported so the seam is assertable at the point where it
+ * can go wrong: a test module swept in by too broad a pattern is dropped from
+ * `cardEntries` by the `default` filter above and so never renders, but it has
+ * still been imported for its side effects by then. Only the glob keys show that.
+ */
+export const importedCardModulePaths: string[] = Object.keys(cardModules)
 
 export default function EvidenceCanvas({ pins }: EvidenceCanvasProps) {
   if (pins.length === 0) {

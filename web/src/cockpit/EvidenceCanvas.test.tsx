@@ -15,7 +15,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import EvidenceCanvas from './EvidenceCanvas.tsx'
+import EvidenceCanvas, { importedCardModulePaths } from './EvidenceCanvas.tsx'
 import type { Pin } from './evidenceTypes.ts'
 
 // ── Fixture pins ─────────────────────────────────────────────────────────────
@@ -109,5 +109,15 @@ describe('EvidenceCanvas', () => {
     const card = screen.getByTestId('evidence-fixture-card')
     // data-pin-count reflects what the card received — canvas must not filter.
     expect(card).toHaveAttribute('data-pin-count', String(ALL_FIXTURE_PINS.length))
+  })
+
+  it('discovers card components in cards/ but never their colocated test files', () => {
+    // cards/FixtureCard.test.tsx exists and is the canary here. A bare
+    // './cards/*.tsx' glob matches it, and an eager glob imports every match for
+    // its side effects — dragging vitest/@testing-library into the app graph and
+    // the production bundle once Story 6 wires this canvas into CockpitView.
+    // Stories 8-11 will each add a colocated card test, so this must stay true.
+    expect(importedCardModulePaths).toContain('./cards/FixtureCard.tsx')
+    expect(importedCardModulePaths.filter((p) => p.includes('.test.'))).toEqual([])
   })
 })
