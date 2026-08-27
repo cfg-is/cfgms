@@ -310,7 +310,6 @@ steps:
 
 func TestWorkflowRunCmd_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, workflowRunCmd.Flags().Lookup("url"), "--url flag must be registered")
-	assert.NotNil(t, workflowRunCmd.Flags().Lookup("api-key"), "--api-key flag must be registered")
 	assert.NotNil(t, workflowRunCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
 	assert.NotNil(t, workflowRunCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
 }
@@ -448,7 +447,6 @@ func TestWorkflowList_NonOKStatus_ReturnsError(t *testing.T) {
 
 func TestWorkflowList_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, workflowListCmd.Flags().Lookup("url"), "--url flag must be registered on workflow list")
-	assert.NotNil(t, workflowListCmd.Flags().Lookup("api-key"), "--api-key flag must be registered on workflow list")
 	assert.NotNil(t, workflowListCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered on workflow list")
 	assert.NotNil(t, workflowListCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered on workflow list")
 }
@@ -534,7 +532,6 @@ func TestWorkflowStatus_InvalidExecutionID_ReturnsError(t *testing.T) {
 func TestWorkflowStatus_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("url"), "--url flag must be registered on workflow status")
 	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("workflow"), "--workflow flag must be registered on workflow status")
-	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("api-key"))
 	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("tls-ca-cert"))
 	assert.NotNil(t, workflowStatusCmd.Flags().Lookup("tls-insecure"))
 }
@@ -646,7 +643,6 @@ func TestWorkflowCancel_InvalidExecutionID_ReturnsError(t *testing.T) {
 func TestWorkflowCancel_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("url"), "--url flag must be registered on workflow cancel")
 	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("workflow"), "--workflow flag must be registered on workflow cancel")
-	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("api-key"))
 	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("tls-ca-cert"))
 	assert.NotNil(t, workflowCancelCmd.Flags().Lookup("tls-insecure"))
 }
@@ -1017,7 +1013,6 @@ func TestRunWorkflowPromoteHVRole_ExecuteBodyContainsAllVariables(t *testing.T) 
 
 func TestWorkflowPromoteHVRoleCmd_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("url"))
-	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("api-key"))
 	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("tls-ca-cert"))
 	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("tls-insecure"))
 	assert.NotNil(t, workflowPromoteHVRoleCmd.Flags().Lookup("cluster"), "--cluster must be registered")

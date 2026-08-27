@@ -29,7 +29,6 @@ type roleConfig struct {
 
 var (
 	roleURL         string
-	roleAPIKey      string
 	roleTLSCACert   string
 	roleTLSInsecure bool
 	roleServerName  string
@@ -81,7 +80,7 @@ Examples:
   cfg role create github-runners \
     --selector "os:windows tag:github-runner" \
     --config fragment.yaml \
-    --url https://controller.example.com --api-key mykey`,
+    --url https://controller.example.com --bundle /path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRoleCreate,
 }
@@ -93,7 +92,7 @@ var roleLsCmd = &cobra.Command{
 	Long: `List all role configs for the authenticated tenant.
 
 Examples:
-  cfg role ls --url https://controller.example.com --api-key mykey`,
+  cfg role ls --url https://controller.example.com --bundle /path/to/admin.bundle.yaml`,
 	RunE: runRoleLs,
 }
 
@@ -104,7 +103,7 @@ var roleShowCmd = &cobra.Command{
 	Long: `Display a role config including its selector and fragment.
 
 Examples:
-  cfg role show github-runners --url https://controller.example.com --api-key mykey`,
+  cfg role show github-runners --url https://controller.example.com --bundle /path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRoleShow,
 }
@@ -116,7 +115,7 @@ var roleDeleteCmd = &cobra.Command{
 	Long: `Delete a role config by name.
 
 Examples:
-  cfg role delete github-runners --url https://controller.example.com --api-key mykey`,
+  cfg role delete github-runners --url https://controller.example.com --bundle /path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRoleDelete,
 }
@@ -125,7 +124,6 @@ func init() {
 	commonFlags := []*cobra.Command{roleCreateCmd, roleLsCmd, roleShowCmd, roleDeleteCmd}
 	for _, cmd := range commonFlags {
 		cmd.Flags().StringVar(&roleURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
-		cmd.Flags().StringVar(&roleAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&roleTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&roleTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 		cmd.Flags().StringVar(&roleServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -158,25 +156,7 @@ func getRoleClient() (*APIClient, error) {
 	}
 	serverName := roleServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := roleAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := roleTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runRoleCreate(cmd *cobra.Command, args []string) error {

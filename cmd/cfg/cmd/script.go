@@ -68,7 +68,6 @@ Exit codes:
 
 var (
 	scriptLibURL         string
-	scriptLibAPIKey      string
 	scriptLibTLSCACert   string
 	scriptLibTLSInsecure bool
 	scriptLibServerName  string
@@ -87,7 +86,7 @@ var scriptListCmd = &cobra.Command{
 	Long: `Display scripts from the git-backed script library on the controller.
 
 Examples:
-  cfg script list --url=https://controller.example.com --api-key=mykey`,
+  cfg script list --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	RunE: runScriptList,
 }
 
@@ -98,7 +97,7 @@ var scriptShowCmd = &cobra.Command{
 	Long: `Display metadata and content for a specific script from the controller's library.
 
 Examples:
-  cfg script show backup-all --url=https://controller.example.com --api-key=mykey`,
+  cfg script show backup-all --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runScriptShow,
 }
@@ -116,7 +115,7 @@ Caller must hold every scope they grant and must have steward:read-dna to bind D
 
 Examples:
   cfg script set-privilege backup-all --scope steward:execute-scripts \
-    --url=https://controller.example.com --api-key=mykey`,
+    --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runScriptSetPrivilege,
 }
@@ -125,7 +124,6 @@ func init() {
 	// Library subcommand flags
 	for _, cmd := range []*cobra.Command{scriptListCmd, scriptShowCmd, scriptSetPrivilegeCmd} {
 		cmd.Flags().StringVar(&scriptLibURL, "url", "", "Controller API URL")
-		cmd.Flags().StringVar(&scriptLibAPIKey, "api-key", "", "API key for authentication")
 		cmd.Flags().StringVar(&scriptLibTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&scriptLibTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 		cmd.Flags().StringVar(&scriptLibServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -154,25 +152,7 @@ func getScriptLibClient() (*APIClient, error) {
 	}
 	serverName := scriptLibServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := scriptLibAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := scriptLibTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runScriptList(cmd *cobra.Command, _ []string) error {

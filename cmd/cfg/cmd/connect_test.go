@@ -497,7 +497,7 @@ func TestConnectReconnectDisconnect(t *testing.T) {
 
 	revokedClient, err := NewAPIClient(&APIClientConfig{
 		BaseURL:     srv.URL,
-		APIKey:      preRevoke.Token,
+		BearerToken: preRevoke.Token,
 		TLSInsecure: true,
 	})
 	require.NoError(t, err)
@@ -996,10 +996,10 @@ func TestServerNameOverrideVerifiesWithoutDisablingVerification(t *testing.T) {
 
 	t.Run("session client with server name in SAN succeeds without tls-insecure", func(t *testing.T) {
 		client, err := NewAPIClient(&APIClientConfig{
-			BaseURL:    srv.URL,
-			APIKey:     strings.Repeat("H", 43),
-			CACertPEM:  certs.caCertPEM,
-			ServerName: sanHost,
+			BaseURL:     srv.URL,
+			BearerToken: strings.Repeat("H", 43),
+			CACertPEM:   certs.caCertPEM,
+			ServerName:  sanHost,
 		})
 		require.NoError(t, err)
 

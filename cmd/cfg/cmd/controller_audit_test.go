@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,24 +15,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupAuditTestServer creates a test server and wires the controller URL to it.
-// Returns a cleanup function and a channel that receives the last request URL.
+// setupAuditTestServer creates a test server and wires the controller URL to it,
+// authenticated via a generated admin mTLS bundle (Issue #3688: API-key auth was
+// removed from the cfg CLI, so tests must use a bundle or session credential).
 func setupAuditTestServer(t *testing.T, handler http.HandlerFunc) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
+	bundleFilePath := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, srv.URL)
+
 	origURL := healthURL
 	origInsecure := controllerTLSInsecure
-	origAPIKey := healthAPIKey
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
 	t.Cleanup(func() {
 		healthURL = origURL
 		controllerTLSInsecure = origInsecure
-		healthAPIKey = origAPIKey
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
 	})
 	healthURL = srv.URL
 	controllerTLSInsecure = true
-	healthAPIKey = "test-key"
+	bundlePath = bundleFilePath
+	noBundle = false
 }
 
 // resetAuditFlags restores default values for audit list command flags.

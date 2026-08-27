@@ -5,15 +5,48 @@ package cmd
 import (
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	certbundle "github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// TestMain wires systemBundlePathFn's default (lowest-priority) candidate to a
+// generated admin mTLS bundle for the whole cmd test binary. API-key auth was
+// removed from the cfg CLI (Issue #3688), so command tests that exercise a real
+// get*Client() path now need SOME resolvable credential; most of them don't care
+// which one, so a shared "system" bundle keeps every such test from having to wire
+// its own. Tests that specifically exercise "no credential is available" override
+// systemBundlePathFn (and userConfigDirFn, bundlePath, noBundle, CFGMS_ADMIN_BUNDLE)
+// themselves and restore them via t.Cleanup, which shadows this default for their
+// duration.
+func TestMain(m *testing.M) {
+	tmpDir, err := os.MkdirTemp("", "cfg-cmd-test-bundle-*")
+	if err != nil {
+		panic(err)
+	}
+
+	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
+	b, err := buildTestAdminBundle("https://placeholder.local:9443")
+	if err != nil {
+		panic(err)
+	}
+	if err := certbundle.Write(bundleFilePath, b); err != nil {
+		panic(err)
+	}
+
+	systemBundlePathFn = func() string { return bundleFilePath }
+
+	code := m.Run()
+	_ = os.RemoveAll(tmpDir)
+	os.Exit(code)
+}
+
 func TestNewClientFromFlags_EmptyCACert_SystemPool(t *testing.T) {
-	client, err := newClientFromFlags("https://example.com", "test-key", "", false)
+	client, err := newClientFromFlags("https://example.com", "", false)
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -23,7 +56,7 @@ func TestNewClientFromFlags_EmptyCACert_SystemPool(t *testing.T) {
 }
 
 func TestNewClientFromFlags_Insecure(t *testing.T) {
-	client, err := newClientFromFlags("https://example.com", "test-key", "", true)
+	client, err := newClientFromFlags("https://example.com", "", true)
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -40,7 +73,7 @@ func TestNewClientFromFlags_ValidCACert(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, tmpFile.Close())
 
-	client, err := newClientFromFlags("https://example.com", "test-key", tmpFile.Name(), false)
+	client, err := newClientFromFlags("https://example.com", tmpFile.Name(), false)
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
@@ -50,7 +83,7 @@ func TestNewClientFromFlags_ValidCACert(t *testing.T) {
 }
 
 func TestNewClientFromFlags_MissingCACertFile(t *testing.T) {
-	client, err := newClientFromFlags("https://example.com", "test-key", "/nonexistent/path/ca.pem", false)
+	client, err := newClientFromFlags("https://example.com", "/nonexistent/path/ca.pem", false)
 	assert.Nil(t, client)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to read CA certificate")

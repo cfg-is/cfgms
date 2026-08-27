@@ -34,7 +34,7 @@ func TestListPendingRefreshes_Empty(t *testing.T) {
 	srv := httptest.NewServer(pendingRefreshHandler(t, nil))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	entries, err := client.ListPendingRefreshes(context.Background(), "")
@@ -68,7 +68,7 @@ func TestListPendingRefreshes_WithEntries(t *testing.T) {
 	srv := httptest.NewServer(pendingRefreshHandler(t, fixture))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	entries, err := client.ListPendingRefreshes(context.Background(), "acme-corp")
@@ -99,7 +99,7 @@ func TestApproveRefresh_Success(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	result, err := client.ApproveRefresh(context.Background(), pendingID)
@@ -115,7 +115,7 @@ func TestApproveRefresh_NotFound(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	_, err = client.ApproveRefresh(context.Background(), "nonexistent")
@@ -142,7 +142,7 @@ func TestRejectRefresh_Success(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	err = client.RejectRefresh(context.Background(), pendingID, "Device decommissioned")
@@ -156,7 +156,7 @@ func TestRejectRefresh_NoReason(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	err = client.RejectRefresh(context.Background(), "refresh-no-reason", "")
@@ -182,7 +182,7 @@ func TestGetRefreshPolicy_Success(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	policy, err := client.GetRefreshPolicy(context.Background(), "acme-corp")
@@ -220,7 +220,7 @@ func TestSetRefreshPolicy_Success(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	days := 60
@@ -243,7 +243,7 @@ func TestSetRefreshPolicy_NoDormancy(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	err = client.SetRefreshPolicy(context.Background(), "acme-corp", "reject", nil)

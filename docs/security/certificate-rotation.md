@@ -75,8 +75,7 @@ FLAGS:
   --overlap-days int   Days the old signing certificate remains valid after rotation
                        (default: 30)
   --url string         Controller API URL (required, or set CFGMS_API_URL)
-  --api-key string     API key for authentication
-  --bundle string      Path to admin bundle file for mTLS auth
+  --bundle string      Path to admin bundle file for mTLS auth (env: CFGMS_ADMIN_BUNDLE)
   --tls-ca-cert string Path to CA cert for TLS verification
   --tls-insecure       Skip TLS verification (dev only)
 ```

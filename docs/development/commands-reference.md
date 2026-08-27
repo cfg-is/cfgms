@@ -394,6 +394,17 @@ For automation of these commands, use the CFGMS slash commands: `/story-start`, 
 
 `cfg connect` and `cfg disconnect` manage zero-standing-privilege controller sessions. The session token is stored exclusively in the OS-native secret store (macOS Keychain, Windows Credential Manager, Linux Secret Service) — never written to any file on disk.
 
+### Authentication requirement (all commands)
+
+Every `cfg` command that talks to the controller REST API accepts exactly two credentials — an admin mTLS bundle or an active passkey-authenticated session (`cfg connect`) — and nothing else. The `cfg` CLI has never accepted a bare API key as a matter of design intent; commands resolve a credential via, in order:
+
+1. An active session from `cfg connect` (Bearer session token, OS keychain).
+2. An admin mTLS bundle, discovered via `--bundle <path>`, `CFGMS_ADMIN_BUNDLE`, `~/.config/cfgms/admin.bundle.yaml`, or `/etc/cfgms/admin.bundle.yaml`.
+
+If neither resolves, the command fails immediately with an error naming the required credential (`no credential found: provide an admin mTLS bundle (--bundle, CFGMS_ADMIN_BUNDLE, or the default bundle path) or an active session (run 'cfg connect' first)`) — it never silently falls back to a weaker credential.
+
+**Migrating automation off `CFGMS_API_KEY` (Issue #3688):** earlier releases of the `cfg` binary read `CFGMS_API_KEY` as a fallback whenever a bundle was missing or a session had expired, and the command still succeeded — a silent downgrade from the credential the operator believed they were using, with no signal a weaker one had been substituted. That fallback has been removed entirely from the `cfg` binary; every `--api-key` flag it registered is gone with it. Scripts and CI jobs that previously exported `CFGMS_API_KEY` for `cfg` should export `CFGMS_ADMIN_BUNDLE=/path/to/admin.bundle.yaml` instead — an mTLS bundle is exactly as usable non-interactively (CI, cron, unattended scripts) as an API key was, just a stronger credential; this is a configuration change, not a lost capability. This does **not** affect genuine external API consumers: the controller's REST API still accepts API keys directly for callers that talk to it without going through `cfg`.
+
 ### cfg connect (first-time import)
 
 Import an admin bundle and start a controller session.
@@ -515,7 +526,7 @@ List all workflow definitions registered on the controller.
 
 ```bash
 cfg workflow list --url=https://controller.example.com
-cfg workflow list --url=https://controller.example.com --api-key=mykey
+cfg workflow list --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml
 ```
 
 Prints a plain-text table with columns: NAME, VERSION, STEPS.
@@ -539,7 +550,6 @@ No workflows registered.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--url` | — | Controller API URL (required) |
-| `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
 | `--server-name` | — | Override TLS server name for certificate verification |
@@ -571,7 +581,6 @@ error:         -
 |------|---------|-------------|
 | `--workflow` | — | Workflow name (required) |
 | `--url` | — | Controller API URL (required) |
-| `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
 | `--server-name` | — | Override TLS server name for certificate verification |
@@ -598,7 +607,6 @@ Cancelled execution exec_1782879897336049056_1
 |------|---------|-------------|
 | `--workflow` | — | Workflow name (required) |
 | `--url` | — | Controller API URL (required) |
-| `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
 | `--server-name` | — | Override TLS server name for certificate verification |
@@ -655,7 +663,6 @@ cfg workflow promote-hv-role MyVM hv01 --cluster fc-east --url=https://controlle
 |------|---------|-------------|
 | `--cluster` | — | Cluster name (required only when the host belongs to more than one cluster) |
 | `--url` | — | Controller API URL (required) |
-| `--api-key` | — | API key for authentication |
 | `--tls-ca-cert` | — | Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
 | `--server-name` | — | Override TLS server name for certificate verification |
@@ -678,7 +685,7 @@ These are distinct from `config.update` (ADR-026 decision 3).
 **Common flags:**
 ```
 --url <url>              Controller API URL (env: CFGMS_API_URL)
---api-key <key>          API key (env: CFGMS_API_KEY)
+--bundle <path>          Admin mTLS bundle path (env: CFGMS_ADMIN_BUNDLE)
 --tls-ca-cert <path>     CA certificate path (env: CFGMS_TLS_CA_CERT)
 --tls-insecure           Skip TLS verification (env: CFGMS_TLS_INSECURE)
 --server-name <name>     Override TLS server name for certificate verification
@@ -779,7 +786,7 @@ Example:
 cfg role create github-runners \
   --selector "os:windows tag:github-runner" \
   --config runner-fragment.yaml \
-  --url=https://controller.example.com --api-key=mykey
+  --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml
 ```
 
 Output on success:
@@ -795,7 +802,6 @@ Created role config "github-runners" (selector: os:windows tag:github-runner)
 | `--selector` | — | Fleet selector expression (required) |
 | `--config` | — | Path to StewardConfig fragment YAML file (required) |
 | `--url` | — | Controller API URL (env: CFGMS_API_URL) |
-| `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
 | `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |
 | `--server-name` | — | Override TLS server name for certificate verification |
@@ -817,7 +823,7 @@ github-runners   os:windows tag:github-runner    ops-admin
 debug-nodes      tag:debug                       ops-admin
 ```
 
-**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
+**Flags:** `--url`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
 
 ### cfg role show
 
@@ -827,7 +833,7 @@ Display a role config including its selector and fragment.
 cfg role show <name> --url=https://controller.example.com
 ```
 
-**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
+**Flags:** `--url`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
 
 ### cfg role delete
 
@@ -845,7 +851,7 @@ Output on success:
 Deleted role config "github-runners"
 ```
 
-**Flags:** `--url`, `--api-key`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
+**Flags:** `--url`, `--tls-ca-cert`, `--tls-insecure`, `--server-name` (same as above).
 
 ## cfg steward tag — Steward Tag Management (Issue #2545)
 
@@ -863,14 +869,14 @@ Examples: `prod`, `web-server`, `github-runner`.
 Add one or more tags to a steward. Adding a tag that already exists is a no-op (idempotent).
 
 ```bash
-cfg steward tag add <steward-id> <tag> [tag...] --url=https://controller.example.com --api-key=mykey
+cfg steward tag add <steward-id> <tag> [tag...] --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml
 ```
 
 Example:
 
 ```bash
 cfg steward tag add steward-abc123 prod web-server \
-  --url https://controller.example.com --api-key mykey
+  --url https://controller.example.com --bundle /path/to/admin.bundle.yaml
 ```
 
 Output on success:
@@ -884,7 +890,7 @@ Tags on steward-abc123: prod, web-server
 Remove one or more tags from a steward. Removing a tag that does not exist is a no-op (idempotent).
 
 ```bash
-cfg steward tag rm <steward-id> <tag> [tag...] --url=https://controller.example.com --api-key=mykey
+cfg steward tag rm <steward-id> <tag> [tag...] --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml
 ```
 
 Output on success:
@@ -898,7 +904,7 @@ Tags on steward-abc123: prod
 List all operator-assigned tags on a steward.
 
 ```bash
-cfg steward tag ls <steward-id> --url=https://controller.example.com --api-key=mykey
+cfg steward tag ls <steward-id> --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml
 ```
 
 Example output:
@@ -915,7 +921,6 @@ web-server
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--url` | — | Controller API URL (env: CFGMS_API_URL) |
-| `--api-key` | — | API key for authentication (env: CFGMS_API_KEY) |
 | `--tls-ca-cert` | — | Path to CA certificate (env: CFGMS_TLS_CA_CERT) |
 | `--tls-insecure` | false | Skip TLS verification (env: CFGMS_TLS_INSECURE) |
 | `--server-name` | — | Override TLS server name for certificate verification |

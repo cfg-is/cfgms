@@ -15,7 +15,6 @@ import (
 
 var (
 	refreshAPIURL      string
-	refreshAPIKey      string
 	refreshTLSCACert   string
 	refreshTLSInsecure bool
 	refreshServerName  string
@@ -39,10 +38,11 @@ tenant's refresh policy, the request may be queued for manual operator review.
 Use these commands to list, approve, or reject pending refresh requests and to
 get or set the per-tenant refresh policy.
 
-This command communicates with the controller's REST API. The controller URL and
-API key can be provided via flags or environment variables:
+This command communicates with the controller's REST API and requires an admin mTLS
+bundle or an active session (cfg connect). The controller URL can be provided via
+flags or environment variables:
   - CFGMS_API_URL: Controller REST API URL (default: http://localhost:9080)
-  - CFGMS_API_KEY: API key for authentication
+  - CFGMS_ADMIN_BUNDLE: Path to the admin mTLS bundle
   - CFGMS_TLS_CA_CERT: Path to CA certificate for TLS verification
   - CFGMS_TLS_INSECURE: Skip TLS verification (development only)
 
@@ -149,7 +149,6 @@ Examples:
 func init() {
 	// Persistent flags available on all refresh subcommands.
 	refreshCmd.PersistentFlags().StringVar(&refreshAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	refreshCmd.PersistentFlags().StringVar(&refreshAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	refreshCmd.PersistentFlags().StringVar(&refreshTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	refreshCmd.PersistentFlags().BoolVar(&refreshTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	refreshCmd.PersistentFlags().StringVar(&refreshServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -194,29 +193,7 @@ func getRefreshClient() (*APIClient, error) {
 	}
 	serverName := refreshServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	if apiURL == "" {
-		apiURL = "http://localhost:9080"
-	}
-
-	apiKey := refreshAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := refreshTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runRefreshList(_ *cobra.Command, _ []string) error {

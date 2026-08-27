@@ -73,7 +73,7 @@ func requireTLSInsecureForSession() error {
 // APIClient provides HTTP client functionality for communicating with the controller API
 type APIClient struct {
 	baseURL          string
-	apiKey           string
+	bearerToken      string
 	httpClient       *http.Client
 	onTokenRenewed   func(newToken string) error
 	onUnauthorized   func() (*APIClient, error)
@@ -82,8 +82,11 @@ type APIClient struct {
 
 // APIClientConfig contains configuration for creating an API client
 type APIClientConfig struct {
-	BaseURL       string
-	APIKey        string
+	BaseURL string
+	// BearerToken is sent as "Authorization: Bearer <token>". It carries a
+	// session token (resolveSessionOrBundleClient) — never an API key; the cfg
+	// CLI accepts only mTLS-bundle or session-token credentials (Issue #3688).
+	BearerToken   string
 	CACertPEM     []byte // CA certificate for server verification (nil to skip verification)
 	ClientCertPEM []byte // Client certificate for mTLS authentication
 	ClientKeyPEM  []byte // Client private key for mTLS authentication
@@ -196,7 +199,7 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 
 	return &APIClient{
 		baseURL:          cfg.BaseURL,
-		apiKey:           cfg.APIKey,
+		bearerToken:      cfg.BearerToken,
 		onTokenRenewed:   cfg.OnTokenRenewed,
 		onUnauthorized:   cfg.OnUnauthorized,
 		onStepUpRequired: cfg.OnStepUpRequired,
@@ -579,8 +582,8 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
 	}
 	if presenceToken != "" {
 		req.Header.Set("X-Presence-Token", presenceToken)

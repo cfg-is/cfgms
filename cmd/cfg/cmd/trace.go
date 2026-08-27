@@ -19,7 +19,6 @@ import (
 var (
 	// Trace command flags
 	traceURL         string
-	traceAPIKey      string
 	traceFormat      string
 	traceTLSCACert   string
 	traceTLSInsecure bool
@@ -50,7 +49,6 @@ Examples:
 
 func init() {
 	traceCmd.Flags().StringVar(&traceURL, "url", "", "Controller API URL (required)")
-	traceCmd.Flags().StringVar(&traceAPIKey, "api-key", "", "API key for authentication")
 	traceCmd.Flags().StringVar(&traceFormat, "format", "text", "Output format (text, json)")
 	traceCmd.Flags().StringVar(&traceTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	traceCmd.Flags().BoolVar(&traceTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
@@ -59,8 +57,7 @@ func init() {
 	_ = traceCmd.MarkFlagRequired("url")
 }
 
-// getTraceClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getTraceClient creates an API client using an active session or an admin mTLS bundle.
 func getTraceClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(traceURL, "/")
 	if apiURL == "" {
@@ -73,27 +70,7 @@ func getTraceClient() (*APIClient, error) {
 	}
 	serverName := traceServerName
 
-	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	// Fallback: API key path
-	apiKey := traceAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := traceTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runTrace(cmd *cobra.Command, args []string) error {

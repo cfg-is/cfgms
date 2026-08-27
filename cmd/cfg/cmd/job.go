@@ -21,7 +21,6 @@ import (
 
 var (
 	jobURL         string
-	jobAPIKey      string
 	jobTLSCACert   string
 	jobTLSInsecure bool
 	jobServerName  string
@@ -66,7 +65,6 @@ Examples:
 
 func init() {
 	jobSubmitCmd.Flags().StringVar(&jobURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
-	jobSubmitCmd.Flags().StringVar(&jobAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	jobSubmitCmd.Flags().StringVar(&jobTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	jobSubmitCmd.Flags().BoolVar(&jobTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	jobSubmitCmd.Flags().StringVar(&jobServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -75,7 +73,6 @@ func init() {
 	_ = jobSubmitCmd.MarkFlagRequired("selector")
 
 	jobStatusCmd.Flags().StringVar(&jobURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
-	jobStatusCmd.Flags().StringVar(&jobAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	jobStatusCmd.Flags().StringVar(&jobTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	jobStatusCmd.Flags().BoolVar(&jobTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	jobStatusCmd.Flags().StringVar(&jobServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -83,8 +80,7 @@ func init() {
 	jobCmd.AddCommand(jobSubmitCmd, jobStatusCmd)
 }
 
-// getJobClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getJobClient creates an API client using an active session or an admin mTLS bundle.
 func getJobClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(jobURL, "/")
 	if apiURL == "" {
@@ -97,25 +93,7 @@ func getJobClient() (*APIClient, error) {
 	}
 	serverName := jobServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := jobAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := jobTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 // jobSubmitBody is the JSON body for POST /api/v1/jobs.

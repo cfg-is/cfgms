@@ -27,7 +27,6 @@ import (
 
 var (
 	stewardURL              string
-	stewardAPIKey           string
 	stewardTLSCACert        string
 	stewardTLSInsecure      bool
 	stewardServerName       string
@@ -713,20 +712,17 @@ func runStewardLogs(_ *cobra.Command, args []string) error {
 
 func init() {
 	stewardListCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardListCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardListCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardListCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardListCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	stewardStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardStatusCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardStatusCmd.Flags().BoolVar(&stewardStatusJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	stewardDNACmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardDNACmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardDNACmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardDNACmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardDNACmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -735,7 +731,6 @@ func init() {
 
 	// run-script flags
 	stewardRunScriptCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunScriptCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunScriptCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunScriptCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardRunScriptCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -750,7 +745,6 @@ func init() {
 
 	// run-command flags
 	stewardRunCommandCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunCommandCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunCommandCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardRunCommandCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -764,7 +758,6 @@ func init() {
 
 	// exec flags (single-steward ad-hoc run)
 	stewardExecCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardExecCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardExecCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardExecCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardExecCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -775,14 +768,12 @@ func init() {
 
 	// run-status flags
 	stewardRunStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardRunStatusCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// run-result flags
 	stewardRunResultCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunResultCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunResultCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunResultCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardRunResultCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -790,14 +781,12 @@ func init() {
 
 	// run-cancel flags
 	stewardRunCancelCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunCancelCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunCancelCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunCancelCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardRunCancelCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// modules flags
 	stewardModulesCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardModulesCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardModulesCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardModulesCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
 	stewardModulesCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -805,7 +794,6 @@ func init() {
 
 	// logs flags
 	stewardLogsCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardLogsCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardLogsCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardLogsCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardLogsCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -817,7 +805,6 @@ func init() {
 
 	// move flags (Issue #2342, #2444)
 	stewardMoveCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardMoveCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardMoveCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardMoveCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardMoveCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -829,7 +816,6 @@ func init() {
 
 	// decommission flags (Issue #2408, #2444)
 	stewardDecommissionCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardDecommissionCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardDecommissionCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardDecommissionCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardDecommissionCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -857,7 +843,6 @@ func init() {
 
 	// upgrade subcommands
 	stewardUpgradeCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardUpgradeCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardUpgradeCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeVersion, "version", "", "Target steward version (required)")
 	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradePlatform, "platform", "", "Target platform (e.g. linux, windows; auto-detected if omitted)")
@@ -867,12 +852,10 @@ func init() {
 	stewardUpgradeCmd.Flags().BoolVar(&stewardUpgradeJSONOutput, "json", false, "Emit keyed-by-steward JSON dispatch results")
 
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardUpgradeStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to query directly")
 
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to roll back")
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeToVersion, "to-version", "", "Target version to roll back to (optional; used with --upgrade-id)")
@@ -885,8 +868,7 @@ func init() {
 	stewardCmd.AddCommand(refreshCmd)
 }
 
-// getStewardClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getStewardClient creates an API client using an active session or an admin mTLS bundle.
 func getStewardClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(stewardURL, "/")
 	if apiURL == "" {
@@ -899,25 +881,7 @@ func getStewardClient() (*APIClient, error) {
 	}
 	serverName := stewardServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := stewardAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := stewardTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 // stewardEntry is a local representation of a steward from the API response.
