@@ -166,6 +166,146 @@ func TestCA_GenerateServerCertificate(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestCA_SignClientCertificateRequest(t *testing.T) {
+	// Setup CA
+	caConfig := &CAConfig{
+		Organization: "Test CA",
+		Country:      "US",
+		ValidityDays: 365,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	require.NoError(t, err)
+
+	// Caller generates its own keypair locally; the CA never sees the private key.
+	callerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	config := &ClientCertConfig{
+		CommonName:         "payload-signer-001",
+		Organization:       "Test Client Org",
+		OrganizationalUnit: "Engineering",
+		ClientID:           "payload-signer-001",
+		ValidityDays:       365,
+	}
+
+	cert, err := ca.SignClientCertificateRequest(&callerKey.PublicKey, config)
+	require.NoError(t, err)
+	require.NotNil(t, cert)
+
+	// Verify certificate properties
+	assert.Equal(t, CertificateTypeClient, cert.Type)
+	assert.Equal(t, "payload-signer-001", cert.CommonName)
+	assert.Equal(t, "payload-signer-001", cert.ClientID)
+	assert.NotEmpty(t, cert.SerialNumber)
+	assert.NotEmpty(t, cert.CertificatePEM)
+	assert.NotEmpty(t, cert.Fingerprint)
+
+	// [REQUIRED TEST] no private key ever exists for a CSR-issued certificate.
+	assert.Empty(t, cert.PrivateKeyPEM, "CA must never generate or return a private key for a caller-supplied public key")
+
+	// Parse and verify the generated certificate
+	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
+	require.NoError(t, err)
+
+	assert.False(t, x509Cert.IsCA)
+	assert.Equal(t, "payload-signer-001", x509Cert.Subject.CommonName)
+	assert.Contains(t, x509Cert.Subject.Organization, "Test Client Org")
+	assert.Contains(t, x509Cert.Subject.OrganizationalUnit, "Engineering")
+
+	// Verify extended key usage
+	assert.Contains(t, x509Cert.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
+
+	// [REQUIRED TEST] the issued certificate's public key equals the exact pubKey
+	// passed in — proves no substitution/regeneration happened.
+	issuedPubKey, ok := x509Cert.PublicKey.(*ecdsa.PublicKey)
+	require.True(t, ok, "issued certificate public key must be the ECDSA key supplied by the caller")
+	assert.True(t, issuedPubKey.Equal(&callerKey.PublicKey), "issued certificate public key must equal the caller-supplied public key")
+
+	// Verify the certificate is signed by the CA
+	caCertPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+	caCert, err := ParseCertificateFromPEM(caCertPEM)
+	require.NoError(t, err)
+
+	err = x509Cert.CheckSignatureFrom(caCert)
+	assert.NoError(t, err)
+
+	// [REQUIRED TEST] a certificate issued via SignClientCertificateRequest passes
+	// the same x509.Verify chain check used by verifyOperatorCert /
+	// validatePublicBetaCommandSignature — drop-in compatible with existing
+	// verification, no changes needed there.
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+	_, err = x509Cert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	assert.NoError(t, err)
+}
+
+func TestCA_SignClientCertificateRequest_PayloadSigningMarker(t *testing.T) {
+	caConfig := &CAConfig{
+		Organization: "Test CA",
+		Country:      "US",
+		ValidityDays: 365,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	require.NoError(t, err)
+
+	callerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	config := &ClientCertConfig{
+		CommonName:       "payload-signer-002",
+		TemplateModifier: SetPayloadSigningMarker,
+	}
+
+	cert, err := ca.SignClientCertificateRequest(&callerKey.PublicKey, config)
+	require.NoError(t, err)
+
+	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
+	require.NoError(t, err)
+
+	assert.True(t, HasPayloadSigningMarker(x509Cert))
+}
+
+// TestAdminCertificate_DoesNotCarryPayloadSigningMarker proves an ordinary admin
+// transport bundle (AdminMarkerOID only) is not usable as a payload-signing
+// credential — [REQUIRED TEST].
+func TestAdminCertificate_DoesNotCarryPayloadSigningMarker(t *testing.T) {
+	caConfig := &CAConfig{
+		Organization: "Test CA",
+		Country:      "US",
+		ValidityDays: 365,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	require.NoError(t, err)
+
+	config := &ClientCertConfig{
+		CommonName:       "admin-001",
+		ValidityDays:     365,
+		TemplateModifier: SetAdminMarker,
+	}
+
+	cert, err := ca.GenerateClientCertificate(config)
+	require.NoError(t, err)
+
+	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
+	require.NoError(t, err)
+
+	assert.True(t, HasAdminMarker(x509Cert))
+	assert.False(t, HasPayloadSigningMarker(x509Cert), "an admin transport bundle must not be usable as a payload-signing credential")
+}
+
 func TestCA_GenerateClientCertificate(t *testing.T) {
 	// Setup CA
 	caConfig := &CAConfig{
