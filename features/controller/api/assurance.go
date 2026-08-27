@@ -141,6 +141,23 @@ var permissionAssurance = map[string]Requirement{
 	// RequireUserPresence: true mirrors module:approve/module:reject — catalog templates
 	// may reach sensitive host state, so a fresh hardware-backed assertion is required.
 	"osquery:execute": {Min: session.AssuranceStrong, RequireUserPresence: true},
+
+	// Strong-credential floor for script execution and CSR/WebAuthn permission
+	// registry (Issue #3687, Epic #3665). Before this entry, resolveAssuranceRequirement
+	// returned found=false for steward:execute-scripts and script:admin, so any
+	// AssuranceMachine (API-key) principal holding either permission could reach code
+	// execution or script-library administration. Neither carries RequireUserPresence.
+	"steward:execute-scripts": {Min: session.AssuranceStrong}, // POST /runs/script, /runs/command; DELETE /runs/{run_id}
+	"script:admin":            {Min: session.AssuranceStrong}, // GET/PUT /scripts, /scripts/{id}, /scripts/{id}/privilege
+
+	// Forward-declared for stories consuming this registry entry — no live route yet.
+	// operator-payload:sign is consumed by story S6; signing-credential:request (with
+	// RequireUserPresence: true, mirroring module:approve/osquery:execute — the operation
+	// mints a CSR-signing credential) by story S10. Both are registered here, not by
+	// their consuming stories, per Issue #3687: this story is the sole owner of
+	// permissions.go, assurance.go, and knownFuturePermissions for the whole epic.
+	"operator-payload:sign":      {Min: session.AssuranceStrong},
+	"signing-credential:request": {Min: session.AssuranceStrong, RequireUserPresence: true},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

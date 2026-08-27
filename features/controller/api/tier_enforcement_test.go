@@ -125,12 +125,29 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// OSquery ad-hoc fleet query dispatch (Issue #3569) — catalog queries may reach sensitive
 	// host state; RequireUserPresence mirrors module:approve/module:reject.
 	{"POST", "/api/v1/osquery/query", "osquery:execute"},
+	// Strong-credential floor for script execution (Issue #3687) - a compromised or
+	// stolen API key can no longer dispatch/cancel scripts or command runs.
+	{"POST", "/api/v1/runs/script", "steward:execute-scripts"},
+	{"POST", "/api/v1/runs/command", "steward:execute-scripts"},
+	{"DELETE", "/api/v1/runs/test-run-id", "steward:execute-scripts"},
+	{"POST", "/api/v1/stewards/test-steward-id/scripts/executions/test-execution-id/retry", "steward:execute-scripts"},
+	// Strong-credential floor for script library administration (Issue #3687) -
+	// all three routes share script:admin, so all three must appear here for the
+	// parity check to verify the full set (mirrors registration:approve above).
+	{"GET", "/api/v1/scripts", "script:admin"},
+	{"GET", "/api/v1/scripts/test-script-id", "script:admin"},
+	{"PUT", "/api/v1/scripts/test-script-id/privilege", "script:admin"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
 // that have no REST routes yet — forward-declared for future stories.
 var knownFuturePermissions = map[string]bool{
 	"publisher-trust:add": true,
+	// Issue #3687: registered in permissionAssurance ahead of the routes that will
+	// consume them. operator-payload:sign is consumed by story S6, signing-credential:request
+	// by story S10 — neither route exists yet when this story lands.
+	"operator-payload:sign":      true,
+	"signing-credential:request": true,
 }
 
 // allStrongAssurancePermissions collects the unique permission IDs from

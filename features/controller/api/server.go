@@ -173,6 +173,8 @@ type Server struct {
 	tenantCrossingStore            business.TenantCrossingStore          // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	casesStore                     business.CaseStore                    // Issue #3605: cockpit investigation case CRUD
 	egWatchProv                    egWatchProvider                       // Issue #3613: cockpit Watch cursor fan-out to browser WebSocket
+	watchPongWait                  time.Duration                         // Issue #3613: cockpit watch keepalive window; 0 = defaultWatchPongWait
+	watchPingInterval              time.Duration                         // Issue #3613: cockpit watch ping cadence; 0 = defaultWatchPingInterval
 	absentCapabilities             []interfaces.AbsentCapability         // Issue #3409: declared-optional capabilities absent in this deployment
 	osqueryDispatcher              stewardOsqueryDispatcher              // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
 

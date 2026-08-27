@@ -115,33 +115,50 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 	return server, manager, queue
 }
 
-// postRunScript sends POST /api/v1/runs/script with the given request body.
-func postRunScript(t *testing.T, server *Server, apiKey string, body interface{}) *httptest.ResponseRecorder {
+// runPrincipal returns a Strong-assurance principal holding exactly the given
+// permissions, for the given tenant. steward:execute-scripts requires
+// AssuranceStrong as of Issue #3687, so a Machine-assurance API-key principal can
+// no longer reach POST/DELETE /runs/* — postRunScript, postRunCommand and deleteRun
+// present this principal through requirePermission directly instead of X-API-Key.
+// Strong assurance is safe to use unconditionally here even for negative-permission
+// tests: hasPermission is checked before the assurance floor, so a principal missing
+// the relevant permission still gets 403 regardless of its assurance level.
+func runPrincipal(id string, perms []string, tenantID string) *Principal {
+	return &Principal{ID: id, Assurance: session.AssuranceStrong, Permissions: perms, TenantID: tenantID}
+}
+
+// postRunScript sends POST /api/v1/runs/script through the same
+// requirePermission("steward","execute-scripts") gate routes_runs.go registers.
+func postRunScript(t *testing.T, server *Server, principal *Principal, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/script", bytes.NewReader(b))
-	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostRunScript))
+	handler.ServeHTTP(rec, req)
 	return rec
 }
 
-// postRunCommand sends POST /api/v1/runs/command with the given request body.
-func postRunCommand(t *testing.T, server *Server, apiKey string, body interface{}) *httptest.ResponseRecorder {
+// postRunCommand sends POST /api/v1/runs/command through the same
+// requirePermission("steward","execute-scripts") gate routes_runs.go registers.
+func postRunCommand(t *testing.T, server *Server, principal *Principal, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/command", bytes.NewReader(b))
-	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handlePostRunCommand))
+	handler.ServeHTTP(rec, req)
 	return rec
 }
 
-// getRun sends GET /api/v1/runs/{runID}.
+// getRun sends GET /api/v1/runs/{runID}. steward:read-scripts is unaffected by
+// Issue #3687, so this keeps going through the router with an X-API-Key credential.
 func getRun(t *testing.T, server *Server, apiKey, runID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID, nil)
@@ -151,7 +168,9 @@ func getRun(t *testing.T, server *Server, apiKey, runID string) *httptest.Respon
 	return rec
 }
 
-// getRunJobs sends GET /api/v1/runs/{runID}/jobs.
+// getRunJobs sends GET /api/v1/runs/{runID}/jobs. steward:read-scripts is
+// unaffected by Issue #3687, so this keeps going through the router with an
+// X-API-Key credential.
 func getRunJobs(t *testing.T, server *Server, apiKey, runID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/jobs", nil)
@@ -161,13 +180,16 @@ func getRunJobs(t *testing.T, server *Server, apiKey, runID string) *httptest.Re
 	return rec
 }
 
-// deleteRun sends DELETE /api/v1/runs/{runID}.
-func deleteRun(t *testing.T, server *Server, apiKey, runID string) *httptest.ResponseRecorder {
+// deleteRun sends DELETE /api/v1/runs/{runID} through the same
+// requirePermission("steward","execute-scripts") gate routes_runs.go registers.
+func deleteRun(t *testing.T, server *Server, principal *Principal, runID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/runs/"+runID, nil)
-	req.Header.Set("X-API-Key", apiKey)
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"run_id": runID})
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	handler := server.requirePermission("steward", "execute-scripts")(http.HandlerFunc(server.handleDeleteRun))
+	handler.ServeHTTP(rec, req)
 	return rec
 }
 
@@ -182,9 +204,9 @@ func TestPostRunScript_TwoStewardFanout(t *testing.T) {
 		{ID: "steward-002", TenantID: "test-tenant"},
 	}
 	server, manager, queue := setupRunServer(t, stewards)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunScript(t, server, apiKey, map[string]interface{}{
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/deploy.sh",
 		"params":    map[string]string{"env": "prod"},
@@ -411,11 +433,11 @@ func TestGetRunJobs_ReturnsCorrectDeviceAndExecutionIDs(t *testing.T) {
 		{ID: "device-B", TenantID: "test-tenant"},
 	}
 	server, _, queue := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
 	// Create the run
-	rec := postRunScript(t, server, execKey, map[string]interface{}{
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/check.sh",
 	})
@@ -466,18 +488,19 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-perm", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
 
-	readOnlyKey := NewTestKey(t, server, []string{"steward:read-scripts"})
+	readOnlyPrincipal := runPrincipal("read-only-caller", []string{"steward:read-scripts"}, "test-tenant")
+	execOnlyPrincipal := runPrincipal("exec-only-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	execOnlyKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
 
 	// POST /runs/script requires execute-scripts
-	rec := postRunScript(t, server, readOnlyKey, map[string]interface{}{
+	rec := postRunScript(t, server, readOnlyPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/test.sh",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "POST /runs/script must require execute-scripts")
 
 	// POST /runs/command requires execute-scripts
-	rec = postRunCommand(t, server, readOnlyKey, map[string]interface{}{
+	rec = postRunCommand(t, server, readOnlyPrincipal, map[string]interface{}{
 		"target":  "all",
 		"content": base64.StdEncoding.EncodeToString([]byte("echo hi")),
 		"shell":   "bash",
@@ -486,7 +509,7 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 
 	// GET /runs/{run_id} requires read-scripts
 	// Create a run first with exec key
-	createRec := postRunScript(t, server, execOnlyKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execOnlyPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/test.sh",
 	})
@@ -502,7 +525,7 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "GET /runs/{id}/jobs must require read-scripts")
 
 	// DELETE requires execute-scripts
-	rec = deleteRun(t, server, readOnlyKey, runID)
+	rec = deleteRun(t, server, readOnlyPrincipal, runID)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "DELETE /runs/{id} must require execute-scripts")
 }
 
@@ -513,11 +536,11 @@ func TestRunEndpoints_PermissionGates(t *testing.T) {
 func TestDeleteRun_Success(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-del", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
 	// Create a run
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/cleanup.sh",
 	})
@@ -527,7 +550,7 @@ func TestDeleteRun_Success(t *testing.T) {
 	runID := createResp.Data.(map[string]interface{})["run_id"].(string)
 
 	// Cancel it
-	delRec := deleteRun(t, server, execKey, runID)
+	delRec := deleteRun(t, server, execPrincipal, runID)
 	require.Equal(t, http.StatusOK, delRec.Code, "DELETE must return 200 for a non-terminal run; body: %s", delRec.Body.String())
 
 	var delResp APIResponse
@@ -549,9 +572,9 @@ func TestDeleteRun_Success(t *testing.T) {
 // TestDeleteRun_NotFound verifies that DELETE on an unknown run returns 404.
 func TestDeleteRun_NotFound(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := deleteRun(t, server, apiKey, "no-such-run-id")
+	rec := deleteRun(t, server, execPrincipal, "no-such-run-id")
 	assert.Equal(t, http.StatusNotFound, rec.Code, "DELETE on unknown run must return 404")
 
 	var resp ErrorResponse
@@ -564,10 +587,10 @@ func TestDeleteRun_NotFound(t *testing.T) {
 func TestDeleteRun_AlreadyTerminal(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-term", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
 	// Create and cancel a run (so it's in a terminal state)
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/test.sh",
 	})
@@ -577,10 +600,10 @@ func TestDeleteRun_AlreadyTerminal(t *testing.T) {
 	runID := createResp.Data.(map[string]interface{})["run_id"].(string)
 
 	// Cancel it once
-	require.Equal(t, http.StatusOK, deleteRun(t, server, execKey, runID).Code)
+	require.Equal(t, http.StatusOK, deleteRun(t, server, execPrincipal, runID).Code)
 
 	// Cancel it again — must return 409
-	rec := deleteRun(t, server, execKey, runID)
+	rec := deleteRun(t, server, execPrincipal, runID)
 	assert.Equal(t, http.StatusConflict, rec.Code, "DELETE on terminal run must return 409")
 
 	var resp ErrorResponse
@@ -594,10 +617,10 @@ func TestDeleteRun_AlreadyTerminal(t *testing.T) {
 func TestGetRun_Found(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "device-get", TenantID: "test-tenant"}}
 	server, _, _ := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/get-test.sh",
 	})
@@ -628,9 +651,9 @@ func TestGetRun_NotFound(t *testing.T) {
 
 func TestPostRunScript_MissingScriptID_ReturnsBadRequest(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunScript(t, server, apiKey, map[string]interface{}{
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target": "all",
 		// script_id intentionally omitted
 	})
@@ -648,10 +671,10 @@ func TestPostRunCommand_TwoStewardFanout(t *testing.T) {
 		{ID: "cmd-dev-2", TenantID: "test-tenant"},
 	}
 	server, manager, queue := setupRunServer(t, stewards)
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
 	content := base64.StdEncoding.EncodeToString([]byte("#!/bin/bash\necho hello"))
-	rec := postRunCommand(t, server, execKey, map[string]interface{}{
+	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
@@ -679,9 +702,9 @@ func TestPostRunCommand_TwoStewardFanout(t *testing.T) {
 
 func TestPostRunCommand_InvalidBase64_ReturnsBadRequest(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
 		"target":  "all",
 		"content": "not-valid-base64!!!",
 		"shell":   "bash",
@@ -691,9 +714,9 @@ func TestPostRunCommand_InvalidBase64_ReturnsBadRequest(t *testing.T) {
 
 func TestPostRunCommand_MissingContent_ReturnsBadRequest(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
 		"target": "all",
 		"shell":  "bash",
 	})
@@ -710,8 +733,8 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 	server, _, _ := setupRunServer(t, stewards)
 
 	// Create a run as the default test-tenant (tenantID = "test-tenant")
-	execKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
-	createRec := postRunScript(t, server, execKey, map[string]interface{}{
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	createRec := postRunScript(t, server, execPrincipal, map[string]interface{}{
 		"target":    "all",
 		"script_id": "scripts/iso-test.sh",
 	})
@@ -731,8 +754,8 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant GET jobs must return 404")
 
 	// Cross-tenant DELETE must return 404.
-	otherExecKey := NewEphemeralTestKey(t, server, []string{"steward:execute-scripts"}, "other-tenant", 5*60*1000000000)
-	rec = deleteRun(t, server, otherExecKey, runID)
+	otherExecPrincipal := runPrincipal("other-tenant-exec-caller", []string{"steward:execute-scripts"}, "other-tenant")
+	rec = deleteRun(t, server, otherExecPrincipal, runID)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant DELETE must return 404")
 }
 
@@ -913,7 +936,7 @@ func TestAuthRunAccess_DoesNotConsultGlobalScope(t *testing.T) {
 // prohibited command pattern (CLAUDE.md §Modules, execution path 3).
 func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
 	server, _, _ := setupRunServer(t, nil)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
 	cases := []struct {
 		name    string
@@ -930,7 +953,7 @@ func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+			rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
 				"target":  "id:steward-abc",
 				"content": base64.StdEncoding.EncodeToString([]byte(tc.command)),
 				"shell":   "bash",
@@ -960,9 +983,9 @@ func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
 	server, _, _ := setupRunServer(t, stewards)
 
 	// test-tenant principal: cannot access stewards in msp-a.
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts"})
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunCommand(t, server, apiKey, map[string]interface{}{
+	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
 		"target":  "id:steward-cross",
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "bash",
@@ -980,37 +1003,32 @@ func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
 
 func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewTestKey(t, server, []string{"steward:execute-scripts", "steward:read-scripts"})
+	// steward:execute-scripts requires AssuranceStrong (Issue #3687); POST/DELETE
+	// routes present a Strong-assurance principal directly instead of an X-API-Key
+	// credential (Machine-assurance, which can no longer reach these gates).
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	readKey := NewTestKey(t, server, []string{"steward:read-scripts"})
 
-	for _, tc := range []struct {
-		method string
-		path   string
-		body   interface{}
-	}{
-		{"POST", "/api/v1/runs/script", map[string]interface{}{"script_id": "s.sh"}},
-		{"POST", "/api/v1/runs/command", map[string]interface{}{"content": "X", "shell": "bash"}},
-		{"GET", "/api/v1/runs/some-id", nil},
-		{"GET", "/api/v1/runs/some-id/jobs", nil},
-		{"DELETE", "/api/v1/runs/some-id", nil},
-	} {
-		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			var body *bytes.Reader
-			if tc.body != nil {
-				b, err := json.Marshal(tc.body)
-				require.NoError(t, err)
-				body = bytes.NewReader(b)
-			} else {
-				body = bytes.NewReader(nil)
-			}
-			req := httptest.NewRequest(tc.method, tc.path, body)
-			req.Header.Set("X-API-Key", apiKey)
-			req.Header.Set("Content-Type", "application/json")
-			rec := httptest.NewRecorder()
-			server.router.ServeHTTP(rec, req)
-			assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
-				"%s %s must return 503 when run manager is not wired", tc.method, tc.path)
-		})
-	}
+	t.Run("POST /api/v1/runs/script", func(t *testing.T) {
+		rec := postRunScript(t, server, execPrincipal, map[string]interface{}{"script_id": "s.sh"})
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("POST /api/v1/runs/command", func(t *testing.T) {
+		rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{"content": "X", "shell": "bash"})
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("GET /api/v1/runs/some-id", func(t *testing.T) {
+		rec := getRun(t, server, readKey, "some-id")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("GET /api/v1/runs/some-id/jobs", func(t *testing.T) {
+		rec := getRunJobs(t, server, readKey, "some-id")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+	t.Run("DELETE /api/v1/runs/some-id", func(t *testing.T) {
+		rec := deleteRun(t, server, execPrincipal, "some-id")
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
 }
 
 // TestAllowedShellsMatchesExecutorTaxonomy pins the controller allow-list to the

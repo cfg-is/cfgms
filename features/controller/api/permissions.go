@@ -230,6 +230,14 @@ var knownPermissions = map[string]bool{
 	"session:create": true,
 	"session:list":   true,
 	"session:revoke": true,
+	// Assurance floor for script execution and CSR/WebAuthn credential requests
+	// (Issue #3687). Registered here so a least-privilege API key or account can
+	// actually hold them; both carry Min: AssuranceStrong in permissionAssurance,
+	// so no AssuranceMachine (API-key) principal can satisfy either. Not yet
+	// consumed by any route — operator-payload:sign is consumed by story S6,
+	// signing-credential:request by story S10.
+	"operator-payload:sign":      true,
+	"signing-credential:request": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
