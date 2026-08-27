@@ -1327,6 +1327,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Also wire the same provider as the write path so operator-asserted edge
 	// assertions share the same store (Issue #3374).
 	httpServer.SetEntityGraphWriteProvider(egProvider)
+	// Issue #3613: Also wire the same provider as the watch path so the cockpit
+	// WebSocket handler's Watch subscription is reachable in a running
+	// controller (else s.egWatchProv stays nil and every /watch request 503s).
+	httpServer.SetEntityGraphWatchProvider(egProvider)
 
 	// Issue #2098: Wire registration-refresh stores into the HTTP API server so the
 	// challenge/complete endpoints and the admin approve/reject/policy endpoints are
