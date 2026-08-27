@@ -278,6 +278,21 @@ For each story (one pin, or one group):
    - `{{FROM_PATTERN}}` / `{{TO_PATTERN}}` — regex-escaped version strings for grep verification
    - `{{SCOPE_PATHS}}` — comma-separated paths to grep within (derived from `locations`)
    - `{{COOLDOWN_BLOCK}}` — "Cooldown elapsed (N days since release)" OR "Cooldown OVERRIDE: CVE-X blocking <gate>"
+
+   **Executing vs. prose (for AC2's grep verification):** a version string
+   surviving in the tree after the bump is not automatically a failure — only
+   an *executing* reference (a live pin, an install command, a dependency
+   declaration) fails the check. A version string inside a `//`/`#` comment,
+   inside a quoted string passed to `echo`/`printf`/`Sprintf`/`console.log`,
+   or anywhere in a `.md` file, is prose and must not block the story.
+   `scripts/verify_pin_clean.py` implements this classification (see the
+   script's own docstring for the full rule order); the story template's AC2
+   already invokes it. Two real cases this exists to prevent: a `.pre-commit-
+   config.yaml`-style echoed `"... run: go install
+   honnef.co/go/tools/cmd/staticcheck@2026.1"` help string (story #3627/PR
+   #3642), and a `// Issue #3628 bumped pinnedVersion 5.13.1 -> 5.23.1`
+   file-header comment (story #3628/PR #3646). Both are prose; neither should
+   ever fail AC2 again.
 3. Write the instantiated body to `/tmp/refresh-pins-<slug>.md`
 4. Create the story as a PRIVATE project draft (never a public issue). Pass the
    dependency-pins tracking epic as the parent, or `0` if there is none:
