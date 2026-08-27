@@ -204,7 +204,12 @@ test_real_host_binary_blocked() {
     local repo od_path
     od_path="$(command -v od)"
     repo="$(new_repo)"
-    cp -- "$od_path" "$repo/vendor-tool"
+    # `cat` redirection, not `cp` (Issue #3686): Windows/Git-Bash `cp` silently
+    # appends `.exe` to an extensionless destination when the source is an
+    # executable, so the subsequent `git add -- vendor-tool` below fails with
+    # "pathspec 'vendor-tool' did not match any files".
+    cat -- "$od_path" > "$repo/vendor-tool"
+    chmod +x "$repo/vendor-tool"
     track "$repo" vendor-tool
 
     run_gate "$repo"

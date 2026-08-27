@@ -61,7 +61,7 @@ def grep_files(pattern: re.Pattern, files: list[Path], root: Path) -> list[dict]
             for i, line in enumerate(f.read_text().splitlines(), 1):
                 if pattern.search(line):
                     locations.append({
-                        "file": str(f.relative_to(root)),
+                        "file": f.relative_to(root).as_posix(),
                         "line": i,
                         "match": line.strip(),
                     })
@@ -159,7 +159,7 @@ def discover_base_images(root: Path) -> list[dict]:
             lines = df.read_text().splitlines()
         except (UnicodeDecodeError, OSError):
             continue
-        rel = str(df.relative_to(root))
+        rel = df.relative_to(root).as_posix()
         for i, line in enumerate(lines, 1):
             if line.lstrip().startswith("#"):
                 continue
@@ -548,7 +548,7 @@ def discover_github_actions(root: Path) -> list[dict]:
             if entry["hint"] is None and hint is not None:
                 entry["hint"] = hint
             entry["locations"].append({
-                "file": str(wf.relative_to(root)),
+                "file": wf.relative_to(root).as_posix(),
                 "line": i,
                 "match": line.strip(),
             })
@@ -630,7 +630,7 @@ def discover_mcp_pins(root: Path) -> list[dict]:
                 docker_lines = dockerfile.read_text().splitlines()
             except (UnicodeDecodeError, OSError):
                 continue
-            rel = str(dockerfile.relative_to(root))
+            rel = dockerfile.relative_to(root).as_posix()
             for i, line in enumerate(docker_lines, 1):
                 dmatch = git_ref.search(line)
                 if dmatch and dmatch.group(1) == owner and dmatch.group(2) == repo:
