@@ -339,20 +339,20 @@ REST surface found the backend substantially ahead of the UI: most day-to-day op
 have working endpoints the SPA never calls. These four epics close the gap to a console an
 operator can run daily. Ordered by how much each unblocks basic operation.
 
-- [ ] Epic #2857 — **Enrollment & fleet operations**: registration console (tokens, approvals,
+- [x] Epic #2857 — **Enrollment & fleet operations**: registration console (tokens, approvals,
       IP-trust, installer artifacts), steward row and bulk actions (tag, move-tenant,
       decommission, refresh, logs, modules), auth session probe on mount. Predominantly UI
       against live APIs. *Without this a device cannot be onboarded from the web UI at all, and
       the fleet table offers no action on any row.*
-- [ ] Epic #2858 — **Tenant & access administration**: tenant list/update/delete API + tenant
+- [x] Epic #2858 — **Tenant & access administration**: tenant list/update/delete API + tenant
       tree UI, account update API + edit/password/disable UI, role write surfaces and
       subject↔role binding, certificate lifecycle. Needs real API work — the tenant surface is
       genuinely incomplete server-side, so no tenant tree can be rendered today.
-- [ ] Epic #2859 — **Operator completeness**: config create + structured diff + per-steward push
+- [x] Epic #2859 — **Operator completeness**: config create + structured diff + per-steward push
       results, workflow step authoring beyond a raw-JSON textarea, execute-with-parameters,
       per-step logs, trigger schedule/webhook configuration, script and job execution surface,
       audit detail and export.
-- [ ] Epic #2860 — **Visibility surfaces**: reports dashboard, compliance views, monitoring
+- [x] Epic #2860 — **Visibility surfaces**: reports dashboard, compliance views, monitoring
       surfaces, alert center with acknowledge/silence, and the design-system chart and stat-tile
       conventions later surfaces inherit. Also fixes the dead `POST /api/v1/webhooks/git-push`
       route (registered after the SPA catch-all, so it 404s).
@@ -404,10 +404,10 @@ engineering gaps are narrower than this section originally assumed.
 
 Opened after this document's 2026-07-21 pass; not yet placed in a named milestone.
 
-- [ ] Epic #2737 — Identity assurance levels and step-up authentication (ADR-021): replaces the single `IsAdmin` bit with graduated assurance levels maintained by silent cryptographic device proof, requiring a fresh human-presence gesture for fleet-wide-blast-radius actions
-- [ ] Epic #2931 — WebAuthn step-up (implements #2737 for the web session): gives a password-authenticated web operator a path to `AssuranceStrong` so privileged enrollment/fleet actions stop 401'ing with `WWW-Authenticate: CFGMS-StepUp`
-- [ ] Epic #2890 — Capability-driven observe DNA (ADR-024): decouples DNA observation from convergence so a steward reports rich state for everything it can see, not only what it's told to manage. `twin`
-- [ ] Epic #2911 — DNA clean-break: `commonpb.DNA.attributes` removed (Issue #3331); retires the legacy flat `DNARecord` store once all consumers are re-homed onto the fragment model / entity graph — deferred tail of #2852. `twin`
+- [x] Epic #2737 — Identity assurance levels and step-up authentication (ADR-021): replaces the single `IsAdmin` bit with graduated assurance levels maintained by silent cryptographic device proof, requiring a fresh human-presence gesture for fleet-wide-blast-radius actions
+- [x] Epic #2931 — WebAuthn step-up (implements #2737 for the web session): gives a password-authenticated web operator a path to `AssuranceStrong` so privileged enrollment/fleet actions stop 401'ing with `WWW-Authenticate: CFGMS-StepUp`
+- [x] Epic #2890 — Capability-driven observe DNA (ADR-024): decouples DNA observation from convergence so a steward reports rich state for everything it can see, not only what it's told to manage. `twin`
+- [x] Epic #2911 — DNA clean-break: `commonpb.DNA.attributes` removed (Issue #3331); retires the legacy flat `DNARecord` store once all consumers are re-homed onto the fragment model / entity graph — deferred tail of #2852. `twin`
 - [ ] Epic #2898 — Reboot windows: policy-declared device-scoped reboot gating with tenant inheritance and structured schedules, closing the silent-noop left by #2892 rejecting `maintenance.window` at validation. `cms`
 
 #### v0.11.0 - Outpost Foundation
