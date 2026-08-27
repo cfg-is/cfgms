@@ -5,7 +5,7 @@
  * App root: router + auth provider + route guard around the authenticated
  * app shell (Story #2496).
  *
- * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733, #2941, #2968, #2992, #2937):
+ * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733, #2941, #2968, #2992, #2937, #3608):
  *   /enroll/:token   → Enroll (unauthenticated — magic-link redemption)
  *   /                → AppShell layout → FleetOverview
  *   /stewards/:id    → AppShell layout → StewardAssetPage
@@ -23,6 +23,7 @@
  *   /monitoring      → AppShell layout → MonitoringView
  *   /tenants         → AppShell layout → TenantAdminView
  *   /installer       → AppShell layout → InstallerPage
+ *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
  *
  * Session presence is inferred from API responses, never from reading
  * cookies (#2495). The fleet view's own data call (GET /api/v1/stewards,
@@ -57,6 +58,7 @@ import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
 import MonitoringView from './monitoring/MonitoringView.tsx'
 import TenantAdminView from './tenants/TenantAdminView.tsx'
 import InstallerPage from './installer/InstallerPage.tsx'
+import CockpitView from './cockpit/CockpitView.tsx'
 
 function App() {
   return (
@@ -89,6 +91,7 @@ function App() {
                   <Route path="monitoring" element={<MonitoringView />} />
                   <Route path="tenants" element={<TenantAdminView />} />
                   <Route path="installer" element={<InstallerPage />} />
+                  <Route path="cases/:id" element={<CockpitView />} />
                 </Route>
               </Routes>
             </RequireAuth>
