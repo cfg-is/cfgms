@@ -2,9 +2,9 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * InvestigationRail tests (Story #3608).
+ * InvestigationRail tests (Story #3608 + Story #3613).
  *
- * Verifies:
+ * Story #3608 verifies:
  *  - Investigation tab is active by default.
  *  - Findings (kind="finding") render in the Investigation pane.
  *  - Non-finding content entries do not render in the Investigation pane.
@@ -14,13 +14,23 @@
  *  - ArrowRight/ArrowLeft keyboard navigation cycles between tabs.
  *  - Roving tabindex: exactly one tab carries tabIndex=0 and it is the active
  *    one; activation moves DOM focus onto the newly active tab.
+ *
+ * Story #3613 adds:
+ *  - LIVE indicator is absent when isLive=false.
+ *  - LIVE indicator is present when isLive=true.
+ *  - LIVE indicator disappears when isLive transitions from true to false
+ *    (the disconnect assertion is load-bearing — proves the indicator is not
+ *    hardcoded to visible).
+ *  - The pulse animation class is absent when prefers-reduced-motion: reduce
+ *    is set (accessibility requirement).
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import InvestigationRail from './InvestigationRail.tsx'
 import type { ContentEntry } from './caseTypes.ts'
 
 afterEach(() => {
+  vi.unstubAllGlobals()
   cleanup()
 })
 
@@ -147,5 +157,94 @@ describe('InvestigationRail', () => {
     expect(chatTab).toHaveAttribute('tabindex', '0')
     expect(invTab).toHaveAttribute('tabindex', '-1')
     expect(document.activeElement).toBe(chatTab)
+  })
+})
+
+// ── LIVE indicator (Story #3613) ───────────────────────────────────────────
+
+describe('InvestigationRail LIVE indicator', () => {
+  // [REQUIRED TEST] Indicator state test: absent before connect, present after
+  // connect, and absent again after disconnect. The disconnect assertion is the
+  // load-bearing half — it proves the indicator is driven by real connection
+  // state, not hardcoded to visible.
+  it('is absent when isLive=false (not connected)', () => {
+    render(<InvestigationRail content={[]} isLive={false} />)
+    expect(document.querySelector('.ctx-live')).toBeNull()
+    expect(document.querySelector('.ctx')).toBeNull()
+  })
+
+  it('is present when isLive=true (connected)', () => {
+    render(<InvestigationRail content={[]} isLive={true} connectedSince={new Date()} />)
+    const indicator = document.querySelector('.ctx-live')
+    expect(indicator).not.toBeNull()
+    expect(indicator!.textContent).toContain('LIVE')
+  })
+
+  it('disappears when isLive transitions from true to false (disconnect)', () => {
+    const connectedSince = new Date()
+    const { rerender } = render(
+      <InvestigationRail content={[]} isLive={true} connectedSince={connectedSince} />,
+    )
+    expect(document.querySelector('.ctx-live')).not.toBeNull()
+
+    // Simulate socket disconnect by re-rendering with isLive=false.
+    rerender(<InvestigationRail content={[]} isLive={false} connectedSince={null} />)
+    expect(document.querySelector('.ctx-live')).toBeNull()
+  })
+
+  it('renders the elapsed timer in mm:ss monospace form', () => {
+    render(<InvestigationRail content={[]} isLive={true} connectedSince={new Date()} />)
+    // The mono span renders an elapsed time; at t≈0 it should be "00:00".
+    const mono = document.querySelector('.ctx-live .mono')
+    expect(mono).not.toBeNull()
+    expect(mono!.textContent).toMatch(/^\d{2}:\d{2}$/)
+  })
+
+  // [REQUIRED TEST] Reduced-motion test: the pulse animation class must not be
+  // applied to the dot when prefers-reduced-motion: reduce is set.
+  it('omits the pulse animation class when prefers-reduced-motion: reduce is set', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('prefers-reduced-motion'),
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }))
+
+    render(<InvestigationRail content={[]} isLive={true} connectedSince={new Date()} />)
+    const dot = document.querySelector('.ctx-live .dot')
+    expect(dot).not.toBeNull()
+    expect(dot!.classList.contains('dot--pulse')).toBe(false)
+  })
+
+  it('applies the pulse animation class when prefers-reduced-motion is not set', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: false, // reduced motion not active
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }))
+
+    render(<InvestigationRail content={[]} isLive={true} connectedSince={new Date()} />)
+    const dot = document.querySelector('.ctx-live .dot')
+    expect(dot).not.toBeNull()
+    expect(dot!.classList.contains('dot--pulse')).toBe(true)
+  })
+
+  it('uses --crit colour token via CSS class (not inline style)', () => {
+    render(<InvestigationRail content={[]} isLive={true} connectedSince={new Date()} />)
+    const indicator = document.querySelector('.ctx-live')
+    expect(indicator).not.toBeNull()
+    // The live-ind class must be present so CSS can apply var(--crit).
+    expect(indicator!.classList.contains('live-ind')).toBe(true)
+    // No inline color — colour must come from the design token via CSS class.
+    expect((indicator as HTMLElement).style.color).toBe('')
   })
 })

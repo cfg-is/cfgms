@@ -292,6 +292,52 @@
   border-radius: 2px;
 }
 
+/* ── Context row / LIVE indicator ──────────────────────────────────────────── */
+
+/* The rail's context row. In the mockup it lives inside `.tabs` and is pushed
+   right with `margin-left:auto`; here it is a sibling row beneath the tab strip,
+   so the same right alignment comes from `justify-content`. */
+.ctx {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 0 var(--space-3) 6px;
+  font-size: 11px;
+}
+
+/* Colour comes from the critical-state design token
+   (docs/design/web-ui-design-tokens.css), never a hand-picked value. The `.dot`
+   is `background: currentColor`, so it inherits the same token. */
+.live-ind {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--state-crit);
+  font-weight: 600;
+}
+
+.dot--pulse {
+  animation: cockpit-pulse 1.4s infinite;
+}
+
+/* Timing and opacity steps match the mockup exactly. The name is namespaced per
+   this file's convention (cf. cockpit-spin above): @keyframes are global once the
+   stylesheets are bundled, so the mockup's bare `pulse` would be collision-prone. */
+@keyframes cockpit-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* Accessibility requirement carried over from the mockup, not a stylistic
+   detail. InvestigationRail also omits the class via matchMedia at render time;
+   this media query is the CSS-level backstop for a preference changed after mount. */
+@media (prefers-reduced-motion: reduce) {
+  .dot--pulse {
+    animation: none;
+  }
+}
+
 .tabpane {
   flex: 1;
   min-height: 0;

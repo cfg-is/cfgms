@@ -2,28 +2,73 @@
 // Copyright 2026 Jordan Ritz
 
 /*
- * CockpitView tests (Story #3608).
+ * CockpitView tests (Story #3608 + Story #3613).
  *
- * Verifies:
+ * Story #3608 verifies:
  *  - Loading state renders while fetch is in-flight.
  *  - Error state (case fetch 404) renders distinctly from loading and ready.
  *  - Ready state renders the case bar, ticket quick reference, and tabbed rail.
  *  - EvidenceCanvas is mounted with the case's pins (no local placeholder).
  *  - Chat tab renders as a static placeholder pane (no backend call for it).
  *
- * All fetches are mocked — no live server required.
+ * Story #3613 adds:
+ *  - [REQUIRED TEST] Render CockpitView, drive a mocked WebSocket to emit a
+ *    WatchEvent, and assert a mounted card's rendered output changes in response.
+ *    This test proves useCaseWatch IS mounted in CockpitView, not just tested
+ *    in isolation — an unmounted hook with passing unit tests is the same
+ *    masking failure the Tech Lead caught in Story 1/4's storage wiring.
+ *
+ * All fetches and WebSocket connections are mocked — no live server required.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router'
 import CockpitView from './CockpitView.tsx'
 import type { Case } from './caseTypes.ts'
 
+// FakeWebSocket — replaces global WebSocket for watch-endpoint tests.
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = []
+
+  readyState: number = WebSocket.CONNECTING
+  onopen: ((e: Event) => void) | null = null
+  onmessage: ((e: MessageEvent) => void) | null = null
+  onclose: ((e: CloseEvent) => void) | null = null
+  onerror: ((e: Event) => void) | null = null
+
+  url: string
+
+  constructor(url: string) {
+    // Explicit field + assignment: TS parameter properties are not erasable
+    // syntax, which this project's tsconfig disallows.
+    this.url = url
+    FakeWebSocket.instances.push(this)
+  }
+
+  close() {
+    this.readyState = WebSocket.CLOSED
+    this.onclose?.(new CloseEvent('close'))
+  }
+
+  simulateOpen() {
+    this.readyState = WebSocket.OPEN
+    this.onopen?.(new Event('open'))
+  }
+
+  simulateMessage(data: string) {
+    this.onmessage?.(new MessageEvent('message', { data }))
+  }
+
+  send() {}
+}
+
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
+  FakeWebSocket.instances = []
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('WebSocket', FakeWebSocket)
   Object.defineProperty(document, 'cookie', {
     get: () => 'cfgms_csrf=test-csrf-token',
     configurable: true,
@@ -223,5 +268,63 @@ describe('CockpitView', () => {
     renderCockpit()
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
     expect(screen.queryByRole('status')).toBeNull()
+  })
+})
+
+// ── useCaseWatch mounting (Story #3613) ────────────────────────────────────
+
+// [REQUIRED TEST] Mount test: render CockpitView itself (not useCaseWatch in
+// isolation), drive a mocked WebSocket to emit a WatchEvent, and assert a
+// mounted card's rendered output changes in response.
+//
+// This test would FAIL if useCaseWatch were not called inside CockpitView —
+// a hook that exists but is never mounted never creates a WebSocket, so
+// FakeWebSocket.instances stays empty and the act() calls below would throw.
+// That is exactly the masking-failure this test exists to catch.
+describe('CockpitView + useCaseWatch mount integration', () => {
+  it('[REQUIRED] WatchEvent emitted from mocked WebSocket reaches FixtureCard', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, makeCase()))
+    renderCockpit()
+
+    // Wait for the case to load so CockpitView is in the ready state.
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+
+    // useCaseWatch is mounted in CockpitView — exactly one WebSocket was created.
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    const socket = FakeWebSocket.instances[0]!
+
+    // The FixtureCard starts with no watch event.
+    const card = screen.getByTestId('evidence-fixture-card')
+    expect(card).toHaveAttribute('data-last-event-kind', '')
+
+    // Simulate the WebSocket lifecycle: open → message.
+    act(() => { socket.simulateOpen() })
+    act(() => {
+      socket.simulateMessage(
+        JSON.stringify({
+          type: 'event',
+          subject: 'cfgms:agent1/host/sql-primary',
+          event_kind: 'drift-updated',
+          version: 5,
+          at: '2026-08-01T10:00:00Z',
+        }),
+      )
+    })
+
+    // FixtureCard's rendered output must reflect the event — proves the
+    // WatchEventContext chain (CockpitView provides → FixtureCard consumes).
+    await waitFor(() =>
+      expect(screen.getByTestId('evidence-fixture-card')).toHaveAttribute(
+        'data-last-event-kind',
+        'drift-updated',
+      ),
+    )
+  })
+
+  it('[REQUIRED] WebSocket URL includes the case ID from the route param', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, makeCase({ id: 'case-xyz' })))
+    renderCockpit('case-xyz')
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(0))
+    expect(FakeWebSocket.instances[0]!.url).toContain('case-xyz')
   })
 })

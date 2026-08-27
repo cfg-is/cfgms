@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -150,6 +151,17 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker so that WebSocket upgrade handlers can take
+// over the raw TCP connection even when the ResponseWriter is wrapped by the
+// logging middleware. Without this, gorilla/websocket's Upgrade() fails because
+// the type assertion w.(http.Hijacker) returns false on the wrapped writer.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("responseWriter: underlying ResponseWriter does not implement http.Hijacker")
 }
 
 // corsMiddleware handles CORS headers

@@ -14,10 +14,20 @@
  * exist, it can be removed once the test coverage it provides is superseded.
  */
 import type { EvidenceCardProps } from '../evidenceTypes.ts'
+import { useWatchEvent } from '../useCaseWatch.ts'
 
 export default function FixtureCard({ pins }: EvidenceCardProps) {
+  // Hooks run unconditionally — the DEV-only early return must come after them,
+  // or the hook order changes between builds (rules-of-hooks).
+  const watchEvent = useWatchEvent()
   // Render nothing in production — this fixture exists only to verify the
   // glob-based self-registration seam during development and tests.
   if (!import.meta.env.DEV) return null
-  return <div data-testid="evidence-fixture-card" data-pin-count={pins.length} />
+  return (
+    <div
+      data-testid="evidence-fixture-card"
+      data-pin-count={pins.length}
+      data-last-event-kind={watchEvent?.event_kind ?? ''}
+    />
+  )
 }

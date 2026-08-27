@@ -172,6 +172,7 @@ type Server struct {
 	assurancePolicyStore           business.AssurancePolicyStore         // Issue #2839: per-tenant assurance-policy overrides
 	tenantCrossingStore            business.TenantCrossingStore          // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	casesStore                     business.CaseStore                    // Issue #3605: cockpit investigation case CRUD
+	egWatchProv                    egWatchProvider                       // Issue #3613: cockpit Watch cursor fan-out to browser WebSocket
 	absentCapabilities             []interfaces.AbsentCapability         // Issue #3409: declared-optional capabilities absent in this deployment
 	osqueryDispatcher              stewardOsqueryDispatcher              // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
 
@@ -1709,6 +1710,23 @@ func (s *Server) SetEntityGraphWriteProvider(p egWriteProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.egWriter = p
+}
+
+// SetEntityGraphWatchProvider wires the entity graph watch provider into the REST
+// API, enabling the GET /api/v1/cases/{id}/watch WebSocket endpoint (Issue #3613).
+// When nil (default), the endpoint returns 503. Call after New() but before Start().
+func (s *Server) SetEntityGraphWatchProvider(p egWatchProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egWatchProv = p
+}
+
+// EntityGraphWatchProvider returns the wired watch provider, or nil when unwired.
+// Exposed so controller startup wiring can be regression-tested (Issue #3613).
+func (s *Server) EntityGraphWatchProvider() egWatchProvider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egWatchProv
 }
 
 // EntityGraphProvider returns the wired entity graph read provider, or nil when
