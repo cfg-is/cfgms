@@ -1,0 +1,116 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Change-timeline evidence card styles (Story #3611).
+ *
+ * Colour and spacing tokens consumed from docs/design/web-ui-design-tokens.css
+ * (aliased as @design-tokens in vite.config.ts). Structure and state classes
+ * follow the mockup's .tl/.ev convention:
+ *   .ev        → default (neutral) event row
+ *   .ev.crit   → drift-detected event — uses --state-crit token
+ *   .ev.now    → the chronologically most recent event — uses --accent token
+ *
+ * Reference: docs/design/mockups/troubleshooting-cockpit.html §.card.timeline
+ */
+
+@import '@design-tokens';
+
+/* ── Card shell ──────────────────────────────────────────────────────────────*/
+
+.change-timeline-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────────*/
+
+.change-timeline-card__header {
+  margin: 0;
+  padding: 11px var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Event list ──────────────────────────────────────────────────────────────*/
+
+.change-timeline-card__list {
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  background: var(--tint-blue);
+}
+
+.change-timeline-card__event {
+  display: grid;
+  grid-template-columns: 52px 14px 1fr;
+  gap: 10px;
+  padding: 7px 0;
+  position: relative;
+  align-items: start;
+}
+
+.change-timeline-card__event:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 58px;
+  top: 19px;
+  bottom: -7px;
+  width: 1.5px;
+  background: var(--border);
+}
+
+.change-timeline-card__time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: right;
+  padding-top: 1px;
+}
+
+.change-timeline-card__marker {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--state-neutral);
+  margin: 4px auto 0;
+}
+
+.change-timeline-card__event--crit .change-timeline-card__marker {
+  background: var(--state-crit);
+}
+
+.change-timeline-card__event--now .change-timeline-card__marker {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(74, 107, 124, 0.2);
+}
+
+.change-timeline-card__body {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.change-timeline-card__body b {
+  font-weight: 600;
+}
+
+.change-timeline-card__body small {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* ── Loading / empty / error states ───────────────────────────────────────────*/
+
+.change-timeline-card__loading,
+.change-timeline-card__empty,
+.change-timeline-card__error {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.change-timeline-card__error {
+  color: var(--state-crit);
+}

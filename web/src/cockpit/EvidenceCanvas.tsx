@@ -23,6 +23,8 @@ import './EvidenceCanvas.css'
 
 interface EvidenceCanvasProps {
   pins: Pin[]
+  /** Case's created_at, forwarded to cards (e.g. ChangeTimelineCard, Story #3611). */
+  caseCreatedAt?: string
 }
 
 // Eager glob — resolved by Vite at transform time. Each value is a module with a
@@ -53,7 +55,7 @@ const cardEntries = Object.entries(cardModules)
  */
 export const importedCardModulePaths: string[] = Object.keys(cardModules)
 
-export default function EvidenceCanvas({ pins }: EvidenceCanvasProps) {
+export default function EvidenceCanvas({ pins, caseCreatedAt }: EvidenceCanvasProps) {
   if (pins.length === 0) {
     return (
       <div className="evidence-canvas evidence-canvas--empty">
@@ -67,7 +69,7 @@ export default function EvidenceCanvas({ pins }: EvidenceCanvasProps) {
   return (
     <div className="evidence-canvas">
       {cardEntries.map(({ path, Card }) => (
-        <Card key={path} pins={pins} />
+        <Card key={path} pins={pins} caseCreatedAt={caseCreatedAt} />
       ))}
     </div>
   )

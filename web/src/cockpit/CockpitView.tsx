@@ -117,7 +117,7 @@ export default function CockpitView() {
           <InvestigationRail content={caseData.content} />
         </div>
         <main className="cockpit-canvas">
-          <EvidenceCanvas pins={caseData.pins} />
+          <EvidenceCanvas pins={caseData.pins} caseCreatedAt={caseData.created_at} />
         </main>
       </div>
     </div>

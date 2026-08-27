@@ -57,7 +57,14 @@ export interface Pin {
  * Cards receive the full case pin list and decide for themselves which pins
  * are relevant — the canvas does not pre-filter. A card that finds no relevant
  * pins should render its own "no evidence of this kind yet" state.
+ *
+ * `caseCreatedAt` (Story #3611) is the case's `created_at` timestamp — read
+ * directly off the `Case` object CockpitView already fetched (Story #3608),
+ * no new fetch. Optional and additive: existing cards that only destructure
+ * `pins` are unaffected.
  */
 export interface EvidenceCardProps {
   pins: Pin[]
+  /** ISO 8601 timestamp string; the case's `created_at` (Story #3611). */
+  caseCreatedAt?: string
 }
