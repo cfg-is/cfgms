@@ -237,7 +237,7 @@ Run the full autonomous pipeline cycle once. Use when the founder says "cron", "
 This runs **locally** with full Docker access for dispatch and fix cycles. The remote `po-cron` trigger runs the same logic but sets project status `Blocked` for Docker-dependent steps (3 and 4) since it has no Docker access.
 
 **Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because the Planning Team is a **live team of named `Agent` teammates that coordinate via `SendMessage`** — teammates address the orchestrator as `main`, so the team is driven from the main conversation, not from a backgrounded `po` subagent. (The old `TeamCreate`/`TeamDelete` tools no longer exist; the session has a **single implicit team** — you create teammates simply by spawning named background `Agent`s. See Step 7.) When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
-- **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent (synchronous — see next bullet) that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
+- **No `Skill` tool.** Run the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by reading the skill's `SKILL.md` and executing its steps **inline with Bash** — equivalent to the inline `Skill:` call, and the only method that has reliably produced results. Spawning a `general-purpose` runner for them is discouraged; see the next bullet for why.
 - **Nested `Agent` spawns are asynchronous, whatever you ask for — plan around it.** `run_in_background: false` is **not honoured** for a nested spawn from a `po` subagent. An earlier revision of this bullet asserted the opposite and cited a 2026-07-02 verification that a foreground spawn returned inline in ~2s. That is superseded, not disputed: whatever held in July, it does not hold now. Between 2026-08-26 and 2026-08-27 every nested spawn went to the background regardless of the flag, across many cycles, and the sweep runner returned **no result at all four consecutive times**. Do not re-add the synchronous claim without re-verifying it and dating the new evidence.
   Two consequences follow, and both have already cost cycles:
   - **A backgrounded `po` parent is not re-invoked when a nested child finishes, and the child dies with the parent.** So if you end your turn to wait, the result is lost *and* any lease you hold is stranded. Two cycles were lost exactly this way; one had to be nudged from the main session to close out. You also cannot `TaskStop` your own child — the task is owned by the session that started the cycle, not by you.
@@ -453,6 +453,19 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    ```
    Skill: refresh-pins
    ```
+   **Running as a subagent, you have no `Skill` tool — read
+   `.claude/skills/refresh-pins/SKILL.md` and run its steps INLINE with Bash.**
+   Do not spawn a nested runner for it, for the reasons in §4.
+
+   **If you spawn anyway and get no result back:** do not wait, and do not invent
+   bump-story numbers for the marker. Record the step as `UNKNOWN — no result
+   received`, **release the lease** —
+   `./scripts/pipeline-helper.sh lease-release "pin-refresh-<latest_check>"` —
+   and do **not** post the `po-pin-refresh` marker. Skipping the marker is what
+   makes the next cycle re-sweep the same weekly check, which is the correct
+   recovery; posting it would record a sweep that never happened and suppress
+   the retry. The lease must be released on **every** exit path, including this
+   one — a stranded `pin-refresh-*` lease blocks the other host for its full TTL.
 
 4. After it returns, record the marker so later cycles (and the other host) don't re-sweep the same weekly check. Include the story numbers the skill reported:
    ```bash
@@ -911,8 +924,15 @@ If active milestone >80% complete and next milestone has no epics, create a `hig
 **Step 9 — Session log:**
 Post timestamped summary on each active epic. Skip if no actions taken.
 
-**Step 10 — (no reap needed):**
-Nested `Agent` spawns are now **synchronous** (§4): they complete and are consumed on the same turn, leaving no orphaned task-registry entries. There is nothing to `TaskStop`. Do **not** re-introduce a background-spawn + reap step — that was a workaround for the abandoned async-spawn model that caused the cron subagent to stall.
+**Step 10 — (no reap possible):**
+Nested `Agent` spawns are backgrounded whatever you request (§4), so they *can*
+leave orphaned task-registry entries — but you cannot reap them. `TaskStop`
+refuses: the task is owned by the session that started the cycle, not by this
+subagent. Do not add a reap step that cannot work, and do not treat an
+un-reaped entry as an error you caused. An earlier revision of this step
+asserted spawns were synchronous and there was "nothing to `TaskStop`"; the
+conclusion still holds, but for the opposite reason, so do not re-derive the
+synchronous claim from it.
 
 **Step 11 — Close the cycle manifest (Issue #3053):**
 Always run this last, even if an earlier step failed or was skipped — a
