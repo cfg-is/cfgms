@@ -238,7 +238,12 @@ This runs **locally** with full Docker access for dispatch and fix cycles. The r
 
 **Execution context — inline vs subagent.** `/po cron` is routed to a **clean-context `po` subagent** (see `.claude/commands/po.md` Path B); `/po cycle` and `/po decompose` run **inline** in the main session because the Planning Team is a **live team of named `Agent` teammates that coordinate via `SendMessage`** — teammates address the orchestrator as `main`, so the team is driven from the main conversation, not from a backgrounded `po` subagent. (The old `TeamCreate`/`TeamDelete` tools no longer exist; the session has a **single implicit team** — you create teammates simply by spawning named background `Agent`s. See Step 7.) When this cycle runs **as a subagent**, two adaptations apply (they do NOT change behavior when run inline):
 - **No `Skill` tool.** Invoke the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills by spawning a `general-purpose` Agent (synchronous — see next bullet) that reads and runs the skill's `SKILL.md` inline — equivalent to the inline `Skill:` call.
-- **Nested `Agent` spawns are synchronous — never background them.** Spawn every nested `Agent` this cycle needs (the pin-refresh runner in Step 1.6, the pipeline-sweep runner in Step 7.5, and the Tech Lead in Step 2) with `run_in_background: false` (the default). A foreground spawn **blocks and returns its result on the same turn**, so you consume each result inline and move straight to the next step — no waiting, no orphaned task entries, nothing to reap. Do **NOT** set `run_in_background: true`, and do **NOT** end your turn after spawning in the expectation that the harness will re-invoke you when the child finishes: a backgrounded `po` subagent parent is **not** re-invoked on a nested child's completion, so the cycle stalls in a spawn-and-pause loop (this is the failure the async model in earlier revisions caused; verified 2026-07-02 that a `run_in_background: false` nested spawn from a `po` subagent completes and returns control inline in ~2s). The dispatch/review/fix **containers** are unaffected (they are docker, not `Agent` subagents).
+- **Nested `Agent` spawns are asynchronous, whatever you ask for — plan around it.** `run_in_background: false` is **not honoured** for a nested spawn from a `po` subagent. An earlier revision of this bullet asserted the opposite and cited a 2026-07-02 verification that a foreground spawn returned inline in ~2s. That is superseded, not disputed: whatever held in July, it does not hold now. Between 2026-08-26 and 2026-08-27 every nested spawn went to the background regardless of the flag, across many cycles, and the sweep runner returned **no result at all four consecutive times**. Do not re-add the synchronous claim without re-verifying it and dating the new evidence.
+  Two consequences follow, and both have already cost cycles:
+  - **A backgrounded `po` parent is not re-invoked when a nested child finishes, and the child dies with the parent.** So if you end your turn to wait, the result is lost *and* any lease you hold is stranded. Two cycles were lost exactly this way; one had to be nudged from the main session to close out. You also cannot `TaskStop` your own child — the task is owned by the session that started the cycle, not by you.
+  - **Prefer not to spawn at all.** For the pin-refresh (Step 1.6) and pipeline-sweep (Step 7.5) skills, read the skill's `SKILL.md` and run its steps **inline with Bash**. That is the only method that has reliably produced real numbers. Spawn only when the work genuinely needs a separate agent, such as the Tech Lead in Step 2.
+  When you do spawn: stay in-turn, do other steps while it runs, and consume the real completion notification when it arrives. If you reach the end of all other work with no result in hand, do **not** wait — record that step as `UNKNOWN — no result received`, release its lease, run `cycle-end`, and say so in the summary. An honest UNKNOWN is correct; a stranded lease is not.
+  **Never infer completion from a side channel.** The only valid signal is the value the spawn actually returns to you. Not output-file size, not mtime, not the process table, not CPU usage. In particular `$D/tasks/<agentId>.output` is a **symlink of constant size** — polling it for a "stable" size reports done immediately and always, and means nothing. On 2026-08-26 a cycle did exactly that, released the `sweep` lease, closed its manifest, and reported specific counts ("0 epics closed, 0 remediation drafts, 0 status mismatches") that no agent had ever returned. The manifest recorded `agents: []`, which is how the fabrication was proven. **Never synthesise plausible-looking counts** — a fabricated all-clear is indistinguishable from a real one to every downstream reader, and that is far worse than a gap. The dispatch/review/fix **containers** are unaffected by any of this (they are docker, not `Agent` subagents).
 
 ### 4.-1 Multi-host coordination (stateless cron — run on many hosts at once)
 
@@ -478,8 +483,10 @@ the queue when its body is updated. For the remaining drafts, collect their issu
 numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech
 Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent
 executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item
-<ITEM_ID_NNN>"`, mode `auto`, `run_in_background: false` (synchronous — the
-verdicts return on the same turn; see the §4 nested-spawn adaptation).
+<ITEM_ID_NNN>"`, mode `auto`. The spawn will be backgrounded regardless of
+the flag (see the §4 nested-spawn adaptation), so do not end your turn waiting
+for the verdicts — carry on with other steps and consume the result when it
+arrives, or record the step UNKNOWN if it never does.
 
 The Tech Lead agent (`.claude/agents/tech-lead.md`) validates dependency
 ordering, implementation notes, scope, constraints, and ambiguity, and resolves
@@ -886,7 +893,15 @@ run the skill, then release `sweep`:
 ```
 Skill: pipeline-sweep
 ```
-After it returns: `./scripts/pipeline-helper.sh lease-release "sweep"`.
+**Running as a subagent, you have no `Skill` tool — read
+`.claude/skills/pipeline-sweep/SKILL.md` and run both phases INLINE with Bash.**
+Do not spawn a nested runner for it. A nested sweep runner returned no result
+four consecutive times (2026-08-26/27), while the inline method has produced
+real measured numbers every time since. See the §4 nested-spawn adaptation.
+
+After it returns: `./scripts/pipeline-helper.sh lease-release "sweep"`. Release
+the lease on **every** exit path, including the one where you record the step
+`UNKNOWN — no result received`.
 
 Include the sweep's headline + verdict tables in the cycle summary you return to the founder. If the sweep surfaces a "Needs founder review" Blocked anomaly (project item Blocked but GH issue closed — e.g. a founder action was completed but the project status was not advanced), flag it in the §6 (Cron PO) section of the cycle report.
 
