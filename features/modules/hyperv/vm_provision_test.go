@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1133,4 +1134,67 @@ func TestProvision_SweepDeletesStaleSeedMedia(t *testing.T) {
 			}
 		}
 	}
+}
+
+// ── REQUIRED TEST: seed-attach → VM-start timing trace (#3664 / #3168) ──────
+
+// TestProvisionVM_CloudInitSeedAttachToVMStartTimingLogged asserts both timing
+// log points fire during the cloud-init provisioning happy path and that the
+// computed seed-attach → VM-start gap is non-negative. This provides diagnostic
+// evidence for #3168 (CIDATA seed race) from ordinary lab usage without
+// requiring a specially scheduled provisioning batch.
+func TestProvisionVM_CloudInitSeedAttachToVMStartTimingLogged(t *testing.T) {
+	transport := &testWinRMTransport{perCallOutputs: []string{`{"found":false}`}}
+	m := provisionModuleWithTransport(t, transport)
+	m.enrollStewardPath = `C:\seed-assets\cfgms-steward-linux`
+	m.enrollLauncherPath = `C:\seed-assets\cfgms-steward-launcher-linux`
+	m.enrollCAPath = `C:\seed-assets\controller-ca.crt`
+
+	capLog := logging.NewCapturingLogger()
+	require.NoError(t, m.SetLogger(capLog))
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(2)}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	// Both timing log points must fire.
+	attachEntry, attachFound := capLog.FindInfo("hyperv: cidata seed attach complete")
+	require.True(t, attachFound, "seed attach log point must fire during cloud-init provisioning")
+
+	startEntry, startFound := capLog.FindInfo("hyperv: vm start invoked after cidata seed attach")
+	require.True(t, startFound, "vm-start log point must fire immediately after provisionCloudInit returns")
+
+	// Both entries must carry the vm_name field.
+	assert.Equal(t, "stw-01", attachEntry["vm_name"], "attach log must carry vm_name")
+	assert.Equal(t, "stw-01", startEntry["vm_name"], "vm-start log must carry vm_name")
+
+	// The timestamps must be present and parseable.
+	seedAttachedAtRaw, hasSeedAt := attachEntry["seed_attached_at"]
+	require.True(t, hasSeedAt, "attach log must carry seed_attached_at")
+	seedAttachedAtNano, ok := seedAttachedAtRaw.(int64)
+	require.True(t, ok, "seed_attached_at must be int64 (UnixNano)")
+
+	vmStartAtRaw, hasVMStart := startEntry["vm_start_at"]
+	require.True(t, hasVMStart, "vm-start log must carry vm_start_at")
+	vmStartAtNano, ok := vmStartAtRaw.(int64)
+	require.True(t, ok, "vm_start_at must be int64 (UnixNano)")
+
+	// The computed gap in the vm-start entry must be non-negative.
+	gapRaw, hasGap := startEntry["seed_to_vmstart_gap_ms"]
+	require.True(t, hasGap, "vm-start log must carry seed_to_vmstart_gap_ms")
+	gapMs, ok := gapRaw.(int64)
+	require.True(t, ok, "seed_to_vmstart_gap_ms must be int64")
+	assert.GreaterOrEqual(t, gapMs, int64(0), "seed-attach → vm-start gap must be non-negative")
+
+	// The vm-start entry must also echo seed_attached_at so both points are
+	// machine-correlatable without joining on vm_name + wall-clock proximity.
+	seedAtInStart, hasSeedAtInStart := startEntry["seed_attached_at"]
+	require.True(t, hasSeedAtInStart, "vm-start log must echo seed_attached_at for correlation")
+	seedAtInStartNano, ok := seedAtInStart.(int64)
+	require.True(t, ok, "seed_attached_at in vm-start log must be int64 (UnixNano)")
+
+	// vm_start_at >= seed_attached_at (time only moves forward).
+	assert.GreaterOrEqual(t, vmStartAtNano, seedAttachedAtNano,
+		"vm_start_at must be >= seed_attached_at")
+	assert.Equal(t, seedAttachedAtNano, seedAtInStartNano,
+		"seed_attached_at in vm-start log must match the value from the attach log")
 }
