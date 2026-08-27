@@ -37,6 +37,17 @@ jf() {
   # jf <json_line> <python_expr_on_rec> — evaluate a field from a JSON line.
   python3 -c "import json,sys; rec=json.loads(sys.argv[1]); print($2)" "$1" 2>/dev/null
 }
+iso_ago() {
+  # iso_ago <minutes> — an ISO-8601 UTC timestamp <minutes> in the past.
+  # Exit records take their `ts` from docker's `.State.FinishedAt`, and the
+  # ledger-report assertions at the bottom of this file query a ROLLING N-day
+  # window. A literal timestamp in the docker stubs therefore ages out of that
+  # window on a calendar boundary and reds this suite without any regression
+  # having occurred, so every stubbed FinishedAt is anchored to "now" instead.
+  python3 -c 'import sys
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) - timedelta(minutes=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
+}
 
 echo "dispatch_ledger.test.sh"
 echo "------------------------"
@@ -89,10 +100,11 @@ else bad "has_exit false for an unknown container" "expected 1"; fi
 
 printf '\n== ledger_reconcile_exit: clean run (agent-result available) ==\n'
 # Stub docker inspect so this is hermetic (no real container needed).
+finished_clean="$(iso_ago 10)"
 _ledger_docker_inspect() {
   case "$1" in
     '{{.State.ExitCode}}')   echo "0" ;;
-    '{{.State.FinishedAt}}') echo "2026-07-28T05:00:00Z" ;;
+    '{{.State.FinishedAt}}') echo "$finished_clean" ;;
   esac
 }
 result_file="${SANDBOX}/agent-result-clean.json"
@@ -103,6 +115,7 @@ ledger_append_launch "cfg-agent-9003" "issue" "9003" "" "" "dev-agent" ""
 ledger_reconcile_exit "cfg-agent-9003" "$result_file"
 rec="$(tail -1 "$AGENT_LEDGER_FILE")"
 check_eq "clean-run source" "$(jf "$rec" 'rec["source"]')" "agent-result"
+check_eq "clean-run ts is docker's FinishedAt" "$(jf "$rec" 'rec["ts"]')" "$finished_clean"
 check_eq "clean-run exit_code" "$(jf "$rec" 'rec["exit_code"]')" "0"
 check_eq "clean-run duration" "$(jf "$rec" 'rec["duration_seconds"]')" "900"
 check_eq "clean-run pr_url" "$(jf "$rec" 'rec["pr_url"]')" "https://github.com/cfg-is/cfgms/pull/1"
@@ -117,16 +130,18 @@ after_lines=$(wc -l < "$AGENT_LEDGER_FILE")
 check_eq "second reconcile call for the same container writes nothing" "$after_lines" "$before_lines"
 
 printf '\n== ledger_reconcile_exit: hard-killed (AC4: no agent-result at all) ==\n'
+finished_killed="$(iso_ago 5)"
 _ledger_docker_inspect() {
   case "$1" in
     '{{.State.ExitCode}}')   echo "137" ;;
-    '{{.State.FinishedAt}}') echo "2026-07-28T05:05:00Z" ;;
+    '{{.State.FinishedAt}}') echo "$finished_killed" ;;
   esac
 }
 ledger_append_launch "cfg-agent-9004" "fix-pr" "" "9004" "" "fix-agent" "pr-9004"
 ledger_reconcile_exit "cfg-agent-9004" "/nonexistent/agent-result.json"
 rec="$(tail -1 "$AGENT_LEDGER_FILE")"
 check_eq "hard-killed source" "$(jf "$rec" 'rec["source"]')" "docker-inspect-only"
+check_eq "hard-killed ts is docker's FinishedAt" "$(jf "$rec" 'rec["ts"]')" "$finished_killed"
 check_eq "hard-killed exit_code from docker inspect" "$(jf "$rec" 'rec["exit_code"]')" "137"
 check_eq "hard-killed has no usage" "$(jf "$rec" 'rec["usage"]')" "None"
 check_eq "hard-killed has no pr_url" "$(jf "$rec" 'rec["pr_url"]')" "None"

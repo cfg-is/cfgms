@@ -30,6 +30,25 @@ type egWatchProvider interface {
 // watchWriteTimeout bounds a single frame write to a connected browser client.
 const watchWriteTimeout = 10 * time.Second
 
+// watchPongWait bounds how long the server waits for any frame from the
+// client (a pong, or otherwise) before treating the connection as dead.
+// Mirrors the terminal WebSocket handler's 60s keepalive window
+// (features/terminal/websocket.go). A client that vanishes without a clean
+// close frame — laptop sleep, network drop, browser crash — must have its
+// read pump unblock and cancel the session context within a bounded time,
+// or the derived ctx (and the provider's watchLoop polling goroutine it
+// keeps alive) leaks until the controller process restarts.
+//
+// Declared as a var, not a const, so tests can shrink the window instead of
+// waiting out the real 60s deadline.
+var watchPongWait = 60 * time.Second
+
+// watchPingInterval is how often the server sends a ping frame to refresh
+// its own liveness signal to the client. Must stay below watchPongWait so a
+// healthy connection's deadline is renewed (via the pong handler) before it
+// expires.
+var watchPingInterval = 54 * time.Second
+
 // watchConnWriter serializes all writes to a single WebSocket connection.
 // gorilla/websocket supports at most one concurrent writer per connection;
 // the event-fan-out goroutine is the sole writer, but holding the mutex is
@@ -49,6 +68,16 @@ func (w *watchConnWriter) writeJSON(v interface{}) error {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
 	return w.conn.WriteJSON(v)
+}
+
+// writePing serializes a ping control frame under the write lock.
+func (w *watchConnWriter) writePing() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.conn.SetWriteDeadline(time.Now().Add(watchWriteTimeout)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	return w.conn.WriteMessage(websocket.PingMessage, nil)
 }
 
 // watchFrame is the JSON shape sent to browser clients on the watch WebSocket.
@@ -186,9 +215,25 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 
 	// Drain the read pump so control frames (ping/pong/close) are processed.
 	// The client sends no application frames; close frames from the client cancel ctx.
+	//
+	// The initial deadline plus the pong handler's refresh are what bound a dead
+	// connection: a client that disappears without a close frame — sleep, network
+	// drop, crash — never sends a pong, so ReadMessage unblocks with a timeout
+	// once watchPongWait elapses instead of hanging forever. Both must be set on
+	// conn before this goroutine starts reading, since gorilla/websocket invokes
+	// the pong handler synchronously from inside ReadMessage.
+	conn.SetReadLimit(256)
+	if err := conn.SetReadDeadline(time.Now().Add(watchPongWait)); err != nil {
+		s.logger.Warn("handleCockpitWatch: set initial read deadline failed",
+			"case_id", logging.SanitizeLogValue(id),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(watchPongWait))
+	})
+
 	go func() {
 		defer cancel()
-		conn.SetReadLimit(256)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -220,10 +265,20 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("handleCockpitWatch: WebSocket session opened",
 		"case_id", logging.SanitizeLogValue(id))
 
+	pingTicker := time.NewTicker(watchPingInterval)
+	defer pingTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-pingTicker.C:
+			if err := cw.writePing(); err != nil {
+				s.logger.Warn("handleCockpitWatch: ping failed",
+					"case_id", logging.SanitizeLogValue(id),
+					"error", logging.SanitizeLogValue(err.Error()))
+				return
+			}
 		case event, ok := <-events:
 			if !ok {
 				// Provider closed the channel; session ends.

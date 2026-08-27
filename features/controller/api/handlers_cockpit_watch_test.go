@@ -53,8 +53,9 @@ type watchProbe struct {
 	bypassFilters bool
 	cursor        string
 
-	mu         sync.Mutex
-	lastFilter eginterfaces.WatchFilter
+	mu          sync.Mutex
+	lastFilter  eginterfaces.WatchFilter
+	lastChannel <-chan eginterfaces.WatchEvent
 }
 
 func newWatchProbe(t *testing.T) *watchProbe {
@@ -79,12 +80,27 @@ func (p *watchProbe) Watch(ctx context.Context, filter eginterfaces.WatchFilter,
 	}
 
 	ch, err := p.SQLiteEntityGraphProvider.Watch(ctx, filter, cursor)
+	p.mu.Lock()
+	p.lastChannel = ch
+	p.mu.Unlock()
 	// Signal after the real Watch returns: at that point the provider has already
 	// resolved its start cursor, so the caller may commit observations without
 	// racing the subscription. Signalled on the error path too, so error tests
 	// need no separate coordination.
 	p.once.Do(func() { close(p.subscribed) })
 	return ch, err
+}
+
+// watchChannel returns the channel the real provider's Watch call returned,
+// so a test can observe it closing when the handler's session context is
+// cancelled (features/entitygraph/providers/sqlite/watch.go's watchLoop
+// closes its channel only on ctx.Done()).
+func (p *watchProbe) watchChannel(t *testing.T) <-chan eginterfaces.WatchEvent {
+	t.Helper()
+	p.waitSubscribed(t)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastChannel
 }
 
 // waitSubscribed blocks until the handler has established its Watch subscription.
@@ -504,6 +520,54 @@ func TestHandleCockpitWatch_SubscriptionScopedToCaseTenant(t *testing.T) {
 	filter := probe.watchFilter(t)
 	assert.Equal(t, "watch-msp/client-1", filter.TenantFilter,
 		"the feed must be scoped to the case's tenant, not the caller's subtree")
+}
+
+// ── Dead connection is detected and the session context is cancelled ──────
+
+// TestHandleCockpitWatch_DeadConnectionCancelsContext reproduces the leak the
+// review flagged: a client that vanishes without sending a WebSocket close
+// frame (laptop sleep, network drop, browser crash) must not block the read
+// pump forever. Without a read deadline, conn.ReadMessage() never returns,
+// cancel() is never called, and the derived ctx — and the provider's
+// watchLoop polling goroutine it keeps alive (pkg/entitygraph/providers/
+// sqlite/watch.go) — leaks until the controller process restarts.
+//
+// The test shrinks watchPongWait so it doesn't have to wait out the real 60s
+// window, opens a client connection and deliberately never reads from it (so
+// it never processes, let alone responds to, a server ping — the same
+// failure mode as a truly dead peer), then asserts that the channel the real
+// provider's Watch returned is closed within a bounded time. watchLoop closes
+// its channel only when ctx.Done() fires, so an observed close is direct
+// proof the read pump's deadline fired and cancel() ran.
+func TestHandleCockpitWatch_DeadConnectionCancelsContext(t *testing.T) {
+	originalPongWait := watchPongWait
+	originalPingInterval := watchPingInterval
+	watchPongWait = 200 * time.Millisecond
+	watchPingInterval = 50 * time.Millisecond
+	t.Cleanup(func() {
+		watchPongWait = originalPongWait
+		watchPingInterval = originalPingInterval
+	})
+
+	probe := newWatchProbe(t)
+	srv := setupCockpitWatchServer(t, probe)
+	c, _ := seedWatchCase(t, srv.CasesStore(), "test-tenant")
+
+	_, teardown := dialWatchWS(t, srv, c.ID, "test-tenant")
+	defer teardown()
+	// Deliberately never call ReadMessage on the client connection: a client
+	// that isn't reading cannot process or answer a ping, which is
+	// indistinguishable server-side from a peer that vanished mid-session.
+
+	probe.waitSubscribed(t)
+	ch := probe.watchChannel(t)
+
+	select {
+	case _, ok := <-ch:
+		assert.False(t, ok, "provider channel should be closed, not deliver an event")
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider's watch channel was not closed — dead connection's read pump never cancelled the session context")
+	}
 }
 
 // ── SetEntityGraphWatchProvider wiring round-trip ──────────────────────────
