@@ -400,8 +400,21 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 	// first boot. Build + attach that seed, make the OS disk the first boot
 	// device, and we're done (no DVD, no keypress).
 	if cfg.Source.isCloudInit() {
-		if err := m.provisionCloudInit(ctx, vmName, hostName, cfg, record, generation); err != nil {
+		seedAttachedAt, err := m.provisionCloudInit(ctx, vmName, hostName, cfg, record, generation)
+		if err != nil {
 			return err
+		}
+		// Log the VM-start timestamp and the gap since seed attachment for #3168
+		// diagnosis. This seam — seed disk attached but VM not yet powered on — is
+		// where the CIDATA race window opens.
+		vmStartAt := time.Now()
+		if logger, ok := m.GetLogger(); ok {
+			logger.Info("hyperv: vm start invoked after cidata seed attach",
+				"vm_name", logging.SanitizeLogValue(vmName),
+				"vm_start_at", vmStartAt.UnixNano(),
+				"seed_attached_at", seedAttachedAt.UnixNano(),
+				"seed_to_vmstart_gap_ms", vmStartAt.Sub(seedAttachedAt).Milliseconds(),
+			)
 		}
 		if err := m.execStartVM(ctx, cfgResourceID, hostName,
 			map[string]interface{}{"state": "stopped"},
@@ -615,14 +628,17 @@ func cloudInitMetaData(vmName, correlationID string) string {
 // already prepared from the cloud image by createVM. No install ISO, no keypress
 // — cloud-init auto-detects the CIDATA seed on first boot. The caller powers the
 // VM on and advances the record to installing.
-func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName string, cfg *VMConfig, record *ProvisionRecord, generation int) error {
+//
+// Returns the timestamp at which the CIDATA seed disk attach completed so the
+// caller can compute the seed-attach → VM-start gap for #3168 diagnosis.
+func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName string, cfg *VMConfig, record *ProvisionRecord, generation int) (time.Time, error) {
 	cfgResourceID := "vm:" + vmName
 
 	// Render the cloud-init user-data (resolves the built-in or operator
 	// cloud-init profile). CorrelationID is baked in for controller-side matching.
 	userData, renderErr := m.renderSeedAnswerFile(ctx, vmName, cfg.Source, record.CorrelationID)
 	if renderErr != nil {
-		return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: render cloud-init user-data for VM %q: %w", vmName, renderErr))
+		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: render cloud-init user-data for VM %q: %w", vmName, renderErr))
 	}
 	metaData := cloudInitMetaData(vmName, record.CorrelationID)
 
@@ -633,14 +649,14 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 	// path — Mount-VHD against a CSV-resident VHDX hangs (seed_dir handles this).
 	seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
 	if err := validateSeedPath(seedPath); err != nil {
-		return m.failProvision(ctx, cfg, vmName, record, err)
+		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, err)
 	}
 	if _, psErr := m.transport.ExecutePS(ctx, psNewSeedVHD, map[string]string{
 		"Path":      seedPath,
 		"SizeBytes": "268435456",
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", cfgResourceID, nil, nil, psErr)
-		return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: create CIDATA seed VHDX for VM %q: %w", vmName, psErr))
+		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: create CIDATA seed VHDX for VM %q: %w", vmName, psErr))
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "New-VHD", cfgResourceID, nil, nil, nil)
 	if _, psErr := m.transport.ExecutePS(ctx, psMountSeedVHD, map[string]string{
@@ -648,7 +664,7 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 		"Label": cidataVolumeLabel,
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", cfgResourceID, nil, nil, psErr)
-		return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: format CIDATA seed VHDX for VM %q: %w", vmName, psErr))
+		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: format CIDATA seed VHDX for VM %q: %w", vmName, psErr))
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Format-Volume", cfgResourceID, nil, nil, nil)
 	if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
@@ -665,7 +681,7 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 		"CASrc":        m.enrollCAPath,
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", cfgResourceID, nil, nil, psErr)
-		return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: write cloud-init seed for VM %q: %w", vmName, psErr))
+		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: write cloud-init seed for VM %q: %w", vmName, psErr))
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-Content", cfgResourceID, nil, nil, nil)
 	if _, psErr := m.transport.ExecutePS(ctx, psAttachSeedDisk, map[string]string{
@@ -673,9 +689,20 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 		"SeedPath": seedPath,
 	}); psErr != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", cfgResourceID, nil, nil, psErr)
-		return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: attach CIDATA seed to VM %q: %w", vmName, psErr))
+		return time.Time{}, m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: attach CIDATA seed to VM %q: %w", vmName, psErr))
 	}
 	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Add-VMHardDiskDrive", cfgResourceID, nil, nil, nil)
+
+	// Timestamp the seed-attach completion for the seed-attach → VM-start gap
+	// diagnostic (#3168). Logged here so the gap is bounded to just the seam
+	// between disk attachment and power-on, not the full provisionCloudInit call.
+	seedAttachedAt := time.Now()
+	if logger, ok := m.GetLogger(); ok {
+		logger.Info("hyperv: cidata seed attach complete",
+			"vm_name", logging.SanitizeLogValue(vmName),
+			"seed_attached_at", seedAttachedAt.UnixNano(),
+		)
+	}
 
 	// Make the OS disk (the converted cloud image) the first boot device so the
 	// VM boots the cloud image rather than the attached CIDATA seed. Gen1 uses
@@ -686,11 +713,11 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 			"VHDPath": cfg.VHDPath,
 		}); psErr != nil {
 			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, psErr)
-			return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: set OS-disk first boot for VM %q: %w", vmName, psErr))
+			return time.Time{}, m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: set OS-disk first boot for VM %q: %w", vmName, psErr))
 		}
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.host, "Set-VMFirmware", cfgResourceID, nil, nil, nil)
 	}
-	return nil
+	return seedAttachedAt, nil
 }
 
 // cidataVolumeLabel is the NoCloud seed volume label cloud-init auto-detects.
