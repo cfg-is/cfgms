@@ -1193,11 +1193,10 @@ What the parser accepts:
 
 **Only a list item's SUBJECT is a declaration (Issue #3683).** A list/numbered/table
 item's subject is the text up to (not including) its first description
-separator — ` — `, ` – `, ` -- `, or ` - `. Everything after that separator, and
-every wrapped continuation line belonging to the same item (however indented),
-is commentary: it is **not** scanned for paths, backticked or bare. This
-matters because the natural way to write "this file exists but does not need
-editing" is to name it in the commentary tail:
+separator — ` — `, ` – `, ` -- `, or ` - `. Everything after that separator is
+commentary: it is **not** scanned for paths, backticked or bare. This matters
+because the natural way to write "this file exists but does not need editing"
+is to name it in the commentary tail:
 
 ```
 - `ChangeTimelineCard.tsx` — new file, default export picked up by
@@ -1209,16 +1208,30 @@ correctly excluded because it appears after the separator, on a wrapped line.
 Before the fix, both parsed as declared, and two stories that each carried this
 exact bullet were held against each other on a file neither one touched.
 
-If an item genuinely declares **more than one file**, list every file *before*
-the separator: `` - `a/b/x.go` and `a/b/x_test.go` — add the guard. `` declares
-both. Do not rely on a file named only in the commentary tail to register as
-in scope — give it its own list item instead.
+**A wrapped continuation line is commentary only once the item's separator has
+already appeared.** While the subject is still open, a continuation line is
+still subject — this is how a multi-file subject wraps across lines in the
+house convention, with the separator arriving on the *last* wrapped line
+rather than the item's opening line:
+
+```
+- `web/src/cockpit/CockpitView.test.tsx`,
+  `web/src/cockpit/TicketQuickReference.test.tsx` — new test files.
+```
+
+Both files are declared here; the separator only appears on the second line,
+so the first line is still subject. If an item genuinely declares **more than
+one file**, list every file *before* the separator — whether that's on the
+opening line (`` - `a/b/x.go` and `a/b/x_test.go` — add the guard. ``) or
+split across wrapped lines as above. Do not rely on a file named only in a
+commentary tail (after the separator has already appeared) to register as in
+scope — give it its own list item instead.
 
 What it does **not** accept:
 
 - **Bare directory entries.** `test/integration/controller/` matches nothing — the path regexes require a file extension (or a known extensionless name like `Makefile`/`Dockerfile`). A directory-scoped story therefore takes the no-files branch and loses conflict checking, which is easy to write by accident. List representative files instead, or name the directory in prose *and* list the files you will actually touch.
 - **Prose-only lists** such as "all controller package files".
-- **A file named only in a list item's commentary tail or continuation line** — see above. Give it its own item before the separator instead.
+- **A file named only in a list item's commentary tail** (after the item's separator has already appeared, whether on the same line or a later wrapped line) — see above. Give it its own item before the separator instead.
 
 When a story genuinely cannot enumerate its files up front, say so and expect the dispatch recommendation to carry `no_files_parsed_cannot_check_conflicts` — then verify overlap by hand against the open PRs before dispatching. A held story costs a cycle; a story dispatched blind into a file another agent is editing costs a rebase and a merge-queue round trip.
 

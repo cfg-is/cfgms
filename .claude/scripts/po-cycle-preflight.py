@@ -1176,12 +1176,18 @@ def extract_scope_paths(section):
     Handled per line: a `:<line>` or `:<line>-<line>` suffix is stripped first.
     A list item or table row is a DECLARATION, but only its SUBJECT counts --
     the text up to (not including) its first description separator (`ITEM_SEPARATOR_RE`:
-    " — ", " – ", " -- ", " - "). Text after that separator, and every wrapped
-    continuation line belonging to the same item (`ITEM_CONTINUATION_RE`: an
-    indented line that is not itself a new list/table item), is commentary and
-    contributes nothing -- bare or backticked. A standalone prose line (not a
-    list item, table row, or continuation of one) still contributes its
-    backticked paths, same as always.
+    " — ", " – ", " -- ", " - "). Text after that separator is commentary and
+    contributes nothing -- bare or backticked. A wrapped continuation line
+    (`ITEM_CONTINUATION_RE`: an indented line that is not itself a new
+    list/table item) is commentary ONLY once the item's separator has already
+    appeared on an earlier line of that item; while the subject is still open
+    (no separator seen yet), a continuation line is still subject and keeps
+    contributing paths -- the house convention wraps a multi-file subject
+    across lines too, with the separator arriving on the LAST wrapped line
+    rather than the item's opening line (`` - `a.go`,\\n  `b.go` — tests. ``
+    declares both `a.go` and `b.go`). A standalone prose line (not a list
+    item, table row, or continuation of one) still contributes its backticked
+    paths, same as always.
 
     This is what fixes #3683: a bullet that names a file only to say a *second*
     file does NOT need editing --
@@ -1205,23 +1211,37 @@ def extract_scope_paths(section):
     as its own line still declares that file, because prose lines have no
     subject/commentary split to apply. Escape hatch: write such a path
     unbackticked in prose, or -- if it must be declared as excluded from
-    inside a list item -- put it in that item's commentary tail (after the
-    separator, or on a wrapped continuation line), where it is now correctly
+    inside a list item -- put it after that item's separator has already
+    appeared (same line or a later wrapped line), where it is now correctly
     excluded. A path that must declare more than one file keeps every file
-    before the item's separator: `` - `a/b/x.go` and `a/b/x_test.go` -- add the
-    guard. ``.
+    before the item's separator, whether on the opening line or a wrapped
+    continuation line that precedes the separator:
+    `` - `a/b/x.go` and `a/b/x_test.go` -- add the guard. ``.
     """
     if not section:
         return []
     found = set()
     in_item = False
+    sep_seen = False  # has this item's separator appeared on an earlier line?
     for raw_line in section.splitlines():
         line = LINE_SUFFIX_RE.sub(r"\1", raw_line)
         marker = LIST_OR_TABLE_RE.match(line)
         is_item_start = marker is not None
 
         if not is_item_start and in_item and ITEM_CONTINUATION_RE.match(line):
-            continue  # wrapped commentary belonging to the previous item
+            if sep_seen:
+                continue  # wrapped commentary, after the item's separator
+            # The subject is still open -- this continuation line is the
+            # wrapped tail of a multi-file subject (#3608, #3388), not
+            # commentary. Extract up to the separator if this line carries
+            # it; otherwise the whole line is still subject.
+            sep = ITEM_SEPARATOR_RE.search(line)
+            subject = line[:sep.start()] if sep else line
+            found.update(BACKTICK_PATH_RE.findall(subject))
+            found.update(BARE_PATH_RE.findall(subject))
+            if sep:
+                sep_seen = True
+            continue
 
         in_item = is_item_start
 
@@ -1239,6 +1259,7 @@ def extract_scope_paths(section):
             subject = line[:sep.start()] if sep else line
             found.update(BACKTICK_PATH_RE.findall(subject))
             found.update(BARE_PATH_RE.findall(subject))
+            sep_seen = sep is not None
         else:
             found.update(BACKTICK_PATH_RE.findall(line))
     return sorted(found)

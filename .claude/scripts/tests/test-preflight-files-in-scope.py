@@ -542,6 +542,42 @@ class TestScopeCorpusDifferential(unittest.TestCase):
             ["pkg/a.go"],
         )
 
+    def test_3608_wrapped_multi_file_subject_declares_the_wrapped_file(self):
+        # #3608, verbatim. A multi-file subject can wrap its SECOND file onto
+        # an indented continuation line, with the separator arriving only on
+        # that later line -- not on the item's opening line. A continuation
+        # line is commentary only once the item's separator has already
+        # appeared; while the subject is still open, a continuation line is
+        # still subject and must keep contributing paths.
+        section = (
+            "- `web/src/cockpit/CockpitView.test.tsx`,\n"
+            "  `web/src/cockpit/TicketQuickReference.test.tsx` — new test files.\n"
+        )
+        self.assertEqual(
+            scope(section),
+            [
+                "web/src/cockpit/CockpitView.test.tsx",
+                "web/src/cockpit/TicketQuickReference.test.tsx",
+            ],
+        )
+
+    def test_3388_wrapped_three_file_subject_declares_every_file(self):
+        # #3388, verbatim. Same shape as #3608 but with three files split
+        # across the wrap instead of two, pinning that the rule isn't
+        # accidentally limited to a two-file subject.
+        section = (
+            "- `pkg/ha/raft_consensus_test.go`, `pkg/ha/manager_test.go`,\n"
+            "  `pkg/ha/config_test.go` — tests.\n"
+        )
+        self.assertEqual(
+            scope(section),
+            [
+                "pkg/ha/config_test.go",
+                "pkg/ha/manager_test.go",
+                "pkg/ha/raft_consensus_test.go",
+            ],
+        )
+
     def test_table_form_modeled_on_3620_real_alert_locations(self):
         section = (
             "| File | Line | Fix |\n"
