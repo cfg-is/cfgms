@@ -359,7 +359,7 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 	}
 	client, err := NewAPIClient(&APIClientConfig{
 		BaseURL:     rec.ControllerURL,
-		APIKey:      rec.Token,
+		BearerToken: rec.Token,
 		CACertPEM:   caCertPEM,
 		TLSInsecure: tlsInsecure,
 		ServerName:  serverName,

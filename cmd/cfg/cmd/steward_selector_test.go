@@ -43,7 +43,7 @@ func TestResolveOrFailFast_ZeroMatch_FailsWithClearError(t *testing.T) {
 	srv := newResolveSelectorServer(t, []StewardInfo{})
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	_, err = resolveOrFailFast(context.Background(), client, "name:nonexistent")
@@ -60,7 +60,7 @@ func TestResolveOrFailFast_NonZeroMatch_ReturnsMatches(t *testing.T) {
 	srv := newResolveSelectorServer(t, fixtures)
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	matches, err := resolveOrFailFast(context.Background(), client, "all")
@@ -76,7 +76,7 @@ func TestResolveOrFailFast_ServerError_PropagatesError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := newClientFromFlags(srv.URL, "test-key", "", false)
+	client, err := newClientFromFlags(srv.URL, "", false)
 	require.NoError(t, err)
 
 	_, err = resolveOrFailFast(context.Background(), client, "all")

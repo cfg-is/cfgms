@@ -24,7 +24,6 @@ var moduleRefRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+@[a-zA-Z0-
 
 var (
 	moduleAPIURL      string
-	moduleAPIKey      string
 	moduleTLSCACert   string
 	moduleTLSInsecure bool
 	moduleServerName  string
@@ -44,10 +43,11 @@ Modules are fetched from configured git sources, verified, and staged in the
 controller's content-addressed cache. Use these commands to inspect and manage
 the approval state of cached module bundles.
 
-This command communicates with the controller's REST API. The controller URL can
-be provided via flags or environment variables:
+This command communicates with the controller's REST API and requires an admin mTLS
+bundle or an active session (cfg connect). The controller URL can be provided via
+flags or environment variables:
   - CFGMS_API_URL: Controller REST API URL (default: http://localhost:9080)
-  - CFGMS_API_KEY: API key for authentication (optional; mTLS bundle preferred)
+  - CFGMS_ADMIN_BUNDLE: Path to the admin mTLS bundle
   - CFGMS_TLS_CA_CERT: Path to CA certificate for TLS verification
   - CFGMS_TLS_INSECURE: Skip TLS verification (development only)
 
@@ -104,7 +104,6 @@ Examples:
 
 func init() {
 	moduleCmd.PersistentFlags().StringVar(&moduleAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	moduleCmd.PersistentFlags().StringVar(&moduleAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	moduleCmd.PersistentFlags().StringVar(&moduleTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	moduleCmd.PersistentFlags().BoolVar(&moduleTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	moduleCmd.PersistentFlags().StringVar(&moduleServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -129,29 +128,7 @@ func getModuleAPIClient() (*APIClient, error) {
 	}
 	serverName := moduleServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	if apiURL == "" {
-		apiURL = "http://localhost:9080"
-	}
-
-	apiKey := moduleAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := moduleTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 // moduleCacheEntry mirrors the JSON response from GET /api/v1/modules.

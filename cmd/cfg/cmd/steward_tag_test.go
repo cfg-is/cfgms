@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,18 +16,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setStewardTagFlags wires the module-level flags for a test run and returns a cleanup func.
-func setStewardTagFlags(serverURL, apiKey string) func() {
+// setStewardTagFlags wires the module-level flags for a test run, authenticated via a
+// generated admin mTLS bundle (Issue #3688: API-key auth was removed from the cfg
+// CLI). The bundle's ControllerURL doesn't matter — serverURL overrides it via the
+// apiURL parameter. Returns a cleanup func.
+func setStewardTagFlags(t *testing.T, serverURL string) func() {
+	t.Helper()
+	bundleFilePath := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://placeholder.local:9443")
+
 	origURL := stewardTagURL
-	origKey := stewardTagAPIKey
 	origInsecure := stewardTagTLSInsecure
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
 	stewardTagURL = serverURL
-	stewardTagAPIKey = apiKey
 	stewardTagTLSInsecure = true
+	bundlePath = bundleFilePath
+	noBundle = false
 	return func() {
 		stewardTagURL = origURL
-		stewardTagAPIKey = origKey
 		stewardTagTLSInsecure = origInsecure
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
 	}
 }
 
@@ -52,7 +63,7 @@ func TestStewardTagAddCmd_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -75,7 +86,7 @@ func TestStewardTagAddCmd_NotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runStewardTagAdd(stewardTagAddCmd, []string{"no-such", "prod"})
@@ -90,7 +101,7 @@ func TestStewardTagAddCmd_Forbidden(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runStewardTagAdd(stewardTagAddCmd, []string{"other-tenant-steward", "prod"})
@@ -113,7 +124,7 @@ func TestStewardTagRmCmd_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -137,7 +148,7 @@ func TestStewardTagRmCmd_AllRemoved(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -154,7 +165,7 @@ func TestStewardTagRmCmd_NotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runStewardTagRm(stewardTagRmCmd, []string{"no-such", "prod"})
@@ -174,7 +185,7 @@ func TestStewardTagLsCmd_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -196,7 +207,7 @@ func TestStewardTagLsCmd_Empty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -213,7 +224,7 @@ func TestStewardTagLsCmd_NotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runStewardTagLs(stewardTagLsCmd, []string{"no-such"})
@@ -228,7 +239,7 @@ func TestStewardTagRmCmd_Forbidden(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runStewardTagRm(stewardTagRmCmd, []string{"other-tenant-steward", "prod"})
@@ -244,7 +255,7 @@ func TestStewardTagLsCmd_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setStewardTagFlags(srv.URL, "test-key")
+	cleanup := setStewardTagFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runStewardTagLs(stewardTagLsCmd, []string{"steward-abc"})

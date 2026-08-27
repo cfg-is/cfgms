@@ -60,7 +60,7 @@ Connected as "controller.acme-corp.example" (expires 2026-06-29T16:00:00Z)
 
 The session is now active. All subsequent `cfg` subcommands in this shell will
 use the stored session token automatically — you do not need to pass `--bundle`
-or `--api-key` to individual commands.
+to individual commands.
 
 ### Custom connection name
 
@@ -184,19 +184,22 @@ return an error until you run `cfg connect` again.
 
 The session model is the default for interactive operator use. For scripted or
 CI-style automation where storing a session is undesirable, every `cfg`
-subcommand accepts one-shot credential flags that bypass the session entirely:
+subcommand accepts a one-shot `--bundle` flag that bypasses the session entirely:
 
 ```bash
 # Provide the bundle file directly on each invocation
 cfg config list --bundle /etc/cfgms/admin.bundle.yaml
 
-# Provide an API key and URL on each invocation
-cfg config list --api-url https://controller.acme-corp.example:9443 \
-                --api-key "$CFGMS_API_KEY"
+# Equivalently, via environment variable (e.g. in CI)
+CFGMS_ADMIN_BUNDLE=/etc/cfgms/admin.bundle.yaml cfg config list --api-url https://controller.acme-corp.example:9443
 ```
 
-These flags take precedence over any stored session token. Use the session model
-for interactive operator access; use one-shot flags for unattended scripts.
+`--bundle` / `CFGMS_ADMIN_BUNDLE` take precedence over any stored session token.
+Use the session model for interactive operator access; use the one-shot bundle
+for unattended scripts. `cfg` accepts only these two credentials — an admin mTLS
+bundle or a session from `cfg connect` — never a bare API key (Issue #3688):
+automation that used to export `CFGMS_API_KEY` should export `CFGMS_ADMIN_BUNDLE`
+instead, as shown above.
 
 ## 8. The Zero-Standing-Privilege Model
 

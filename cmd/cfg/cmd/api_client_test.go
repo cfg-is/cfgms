@@ -67,8 +67,8 @@ func TestNewAPIClient(t *testing.T) {
 
 	t.Run("default config creates client with system CA", func(t *testing.T) {
 		cfg := &APIClientConfig{
-			BaseURL: "https://example.com",
-			APIKey:  "test-key",
+			BaseURL:     "https://example.com",
+			BearerToken: "test-key",
 		}
 
 		client, err := NewAPIClient(cfg)
@@ -76,7 +76,7 @@ func TestNewAPIClient(t *testing.T) {
 		require.NotNil(t, client)
 
 		assert.Equal(t, "https://example.com", client.baseURL)
-		assert.Equal(t, "test-key", client.apiKey)
+		assert.Equal(t, "test-key", client.bearerToken)
 		assert.NotNil(t, client.httpClient)
 	})
 
@@ -279,7 +279,7 @@ func TestAPIClientCreateToken(t *testing.T) {
 
 		cfg := &APIClientConfig{
 			BaseURL:     server.URL,
-			APIKey:      "test-api-key",
+			BearerToken: "test-api-key",
 			TLSInsecure: true,
 		}
 
@@ -543,7 +543,7 @@ func TestAPIClientRotateToken(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &APIClientConfig{BaseURL: server.URL, APIKey: "test-key", TLSInsecure: true}
+		cfg := &APIClientConfig{BaseURL: server.URL, BearerToken: "test-key", TLSInsecure: true}
 		client, err := NewAPIClient(cfg)
 		require.NoError(t, err)
 
@@ -652,7 +652,7 @@ func TestAPIClientAuthentication(t *testing.T) {
 
 		cfg := &APIClientConfig{
 			BaseURL:     server.URL,
-			APIKey:      "my-secret-key",
+			BearerToken: "my-secret-key",
 			TLSInsecure: true,
 		}
 
@@ -768,7 +768,7 @@ func TestAPIClientGet(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &APIClientConfig{BaseURL: server.URL, APIKey: "test-key", TLSInsecure: true}
+		cfg := &APIClientConfig{BaseURL: server.URL, BearerToken: "test-key", TLSInsecure: true}
 		client, err := NewAPIClient(cfg)
 		require.NoError(t, err)
 

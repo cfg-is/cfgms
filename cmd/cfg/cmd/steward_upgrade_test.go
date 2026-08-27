@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,11 +17,14 @@ import (
 )
 
 // saveStewardUpgradeGlobals captures all upgrade-command global vars and restores
-// them via t.Cleanup so tests cannot pollute each other's state.
+// them via t.Cleanup so tests cannot pollute each other's state. It also wires a
+// default admin mTLS bundle so getStewardClient can resolve a credential without an
+// API key (Issue #3688: API-key auth was removed from the cfg CLI). The bundle's
+// ControllerURL doesn't matter — each test's stewardURL assignment overrides it via
+// the apiURL parameter.
 func saveStewardUpgradeGlobals(t *testing.T) {
 	t.Helper()
 	origURL := stewardURL
-	origAPIKey := stewardAPIKey
 	origTLSCACert := stewardTLSCACert
 	origInsecure := stewardTLSInsecure
 	origVersion := stewardUpgradeVersion
@@ -39,7 +43,6 @@ func saveStewardUpgradeGlobals(t *testing.T) {
 	origJSONOutput := stewardUpgradeJSONOutput
 	t.Cleanup(func() {
 		stewardURL = origURL
-		stewardAPIKey = origAPIKey
 		stewardTLSCACert = origTLSCACert
 		stewardTLSInsecure = origInsecure
 		stewardUpgradeVersion = origVersion
@@ -57,6 +60,11 @@ func saveStewardUpgradeGlobals(t *testing.T) {
 		stewardYes = origYes
 		stewardUpgradeJSONOutput = origJSONOutput
 	})
+
+	bundleFilePath := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://placeholder.local:9443")
+	bundlePath = bundleFilePath
+	noBundle = false
 }
 
 // writeEnvelopedResponse mirrors the controller's writeResponse: it wraps the
@@ -658,7 +666,7 @@ func TestStewardUpgradeCommandsRegistered(t *testing.T) {
 }
 
 func TestStewardUpgradeFlagsRegistered(t *testing.T) {
-	for _, flag := range []string{"url", "api-key", "tls-ca-cert", "version", "platform", "arch", "wait", "wait-timeout", "json"} {
+	for _, flag := range []string{"url", "tls-ca-cert", "version", "platform", "arch", "wait", "wait-timeout", "json"} {
 		assert.NotNil(t, stewardUpgradeCmd.Flags().Lookup(flag), "upgrade must have --%s flag", flag)
 	}
 	// --tls-insecure must NOT be registered on the upgrade command
@@ -666,14 +674,14 @@ func TestStewardUpgradeFlagsRegistered(t *testing.T) {
 }
 
 func TestStewardUpgradeStatusFlagsRegistered(t *testing.T) {
-	for _, flag := range []string{"url", "api-key", "tls-ca-cert", "upgrade-id"} {
+	for _, flag := range []string{"url", "tls-ca-cert", "upgrade-id"} {
 		assert.NotNil(t, stewardUpgradeStatusCmd.Flags().Lookup(flag), "upgrade status must have --%s flag", flag)
 	}
 	assert.Nil(t, stewardUpgradeStatusCmd.Flags().Lookup("tls-insecure"), "upgrade status must NOT have --tls-insecure flag")
 }
 
 func TestStewardUpgradeRollbackFlagsRegistered(t *testing.T) {
-	for _, flag := range []string{"url", "api-key", "tls-ca-cert", "upgrade-id", "to-version"} {
+	for _, flag := range []string{"url", "tls-ca-cert", "upgrade-id", "to-version"} {
 		assert.NotNil(t, stewardUpgradeRollbackCmd.Flags().Lookup(flag), "upgrade rollback must have --%s flag", flag)
 	}
 	assert.Nil(t, stewardUpgradeRollbackCmd.Flags().Lookup("tls-insecure"), "upgrade rollback must NOT have --tls-insecure flag")

@@ -174,7 +174,11 @@ func TestGetTraceClient_BundleFound_UsesMTLS(t *testing.T) {
 	assert.Equal(t, "https://flag-trace-url.local:9443", client.baseURL)
 }
 
-func TestGetTraceClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
+// TestGetTraceClient_NoBundleFlag_FailsWithNoCredential proves the API-key
+// downgrade path is gone: --no-bundle opts out of bundle discovery, and with
+// no active session either, getTraceClient must fail naming the required
+// credential instead of silently falling back to an API key (Issue #3688).
+func TestGetTraceClient_NoBundleFlag_FailsWithNoCredential(t *testing.T) {
 	tmpDir := t.TempDir()
 	bundleFilePath := filepath.Join(tmpDir, "admin.bundle.yaml")
 	generateTestBundleFile(t, bundleFilePath, "https://bundle-trace-controller.local:9443")
@@ -184,14 +188,12 @@ func TestGetTraceClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
 	origBundlePath := bundlePath
 	origNoBundle := noBundle
 	origTraceURL := traceURL
-	origTraceAPIKey := traceAPIKey
 	t.Cleanup(func() {
 		userConfigDirFn = origUserConfigDirFn
 		systemBundlePathFn = origSystemBundlePathFn
 		bundlePath = origBundlePath
 		noBundle = origNoBundle
 		traceURL = origTraceURL
-		traceAPIKey = origTraceAPIKey
 	})
 	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "no-userconfig"), nil }
 	systemBundlePathFn = func() string { return filepath.Join(tmpDir, "no-system.bundle.yaml") }
@@ -200,17 +202,11 @@ func TestGetTraceClient_NoBundleFlag_FallsBackToAPIKey(t *testing.T) {
 	bundlePath = bundleFilePath
 	noBundle = true // explicit opt-out
 	traceURL = "https://api-key-trace.local:9080"
-	traceAPIKey = "trace-test-key"
 
 	client, err := getTraceClient()
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// --no-bundle means API key path; no mTLS certificates
-	assert.Equal(t, "https://api-key-trace.local:9080", client.baseURL)
-	assert.Equal(t, "trace-test-key", client.apiKey)
-	transport := client.httpClient.Transport.(*http.Transport)
-	assert.Empty(t, transport.TLSClientConfig.Certificates)
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.ErrorIs(t, err, errNoCredential)
 }
 
 func newTraceServer(t *testing.T, requestID string) *httptest.Server {

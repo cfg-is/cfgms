@@ -18,14 +18,15 @@ cfg steward move <steward-id> --to-tenant <tenant-path>
 |------|-------------|
 | `--to-tenant` | Destination tenant path (required). Accepts flat IDs (`corp`) or slash-separated hierarchical paths (`msp-a/client-1`). |
 | `--url` | Controller base URL. Falls back to `CFGMS_API_URL`. |
-| `--api-key` | API key. Falls back to `CFGMS_API_KEY`. Not accepted on this endpoint — requires AssuranceStrong (admin mTLS cert, ADR-021). |
+| `--bundle` | Path to admin mTLS bundle. Falls back to `CFGMS_ADMIN_BUNDLE`. |
 | `--tls-ca-cert` | Path to CA certificate for TLS verification. Falls back to `CFGMS_TLS_CA_CERT`. |
 | `--tls-insecure` | Skip TLS verification (development only). |
 
 **Authentication**
 
 `cfg steward move` requires AssuranceStrong (admin mTLS cert, ADR-021). The CLI resolves the
-controller session per ADR-014. An API key is rejected with 403 (Machine assurance is insufficient).
+controller session per ADR-014. `cfg` itself never sends an API key — a direct REST caller
+presenting one is rejected with 403 (Machine assurance is insufficient).
 
 **Authorization**
 

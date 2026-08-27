@@ -17,18 +17,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setRoleFlags wires the module-level flags for a test run and returns a cleanup func.
-func setRoleFlags(url, apiKey string) func() {
+// setRoleFlags wires the module-level flags for a test run, authenticated via a
+// generated admin mTLS bundle (Issue #3688: API-key auth was removed from the cfg
+// CLI). The bundle's ControllerURL doesn't matter — url overrides it via the apiURL
+// parameter. Returns a cleanup func.
+func setRoleFlags(t *testing.T, url string) func() {
+	t.Helper()
+	bundleFilePath := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://placeholder.local:9443")
+
 	origURL := roleURL
-	origKey := roleAPIKey
 	origInsecure := roleTLSInsecure
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
 	roleURL = url
-	roleAPIKey = apiKey
 	roleTLSInsecure = true
+	bundlePath = bundleFilePath
+	noBundle = false
 	return func() {
 		roleURL = origURL
-		roleAPIKey = origKey
 		roleTLSInsecure = origInsecure
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
 	}
 }
 
@@ -51,7 +61,7 @@ func TestRoleCreateCmd_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	// Write a minimal fragment YAML file.
@@ -88,7 +98,7 @@ func TestRoleCreateCmd_MissingFile(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	origConfigFile := roleConfigFile
@@ -115,7 +125,7 @@ func TestRoleLsCmd_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -137,7 +147,7 @@ func TestRoleLsCmd_Empty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -164,7 +174,7 @@ func TestRoleShowCmd_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -184,7 +194,7 @@ func TestRoleShowCmd_NotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runRoleShow(roleShowCmd, []string{"missing"})
@@ -202,7 +212,7 @@ func TestRoleDeleteCmd_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	var out bytes.Buffer
@@ -219,7 +229,7 @@ func TestRoleDeleteCmd_NotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRoleFlags(srv.URL, "test-key")
+	cleanup := setRoleFlags(t, srv.URL)
 	defer cleanup()
 
 	err := runRoleDelete(roleDeleteCmd, []string{"missing"})

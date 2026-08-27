@@ -87,7 +87,6 @@ cfg steward upgrade <selector> --version <version>
 | `--wait` | No | Block until all dispatched stewards reach a terminal state |
 | `--wait-timeout` | No | Maximum wait duration when `--wait` is set (default: `2m`) |
 | `--url` | No | Controller API URL (overrides `CFGMS_API_URL`) |
-| `--api-key` | No | API key for authentication |
 | `--tls-ca-cert` | No | Path to CA certificate for TLS verification |
 
 Note: `--tls-insecure` is not available on the upgrade command.
@@ -151,7 +150,6 @@ cfg steward upgrade status --upgrade-id <id>
 |------|-------------|
 | `--upgrade-id` | Query a specific upgrade record by ID |
 | `--url` | Controller API URL |
-| `--api-key` | API key for authentication |
 | `--tls-ca-cert` | Path to CA certificate |
 
 Pass either a positional selector argument or `--upgrade-id`. If a selector is
@@ -194,7 +192,6 @@ cfg steward upgrade rollback --upgrade-id <id> [--to-version <ver>]
 | `--upgrade-id` | Yes | Upgrade record ID to roll back |
 | `--to-version` | No | Target version to roll back to (optional; used with `--upgrade-id`) |
 | `--url` | No | Controller API URL |
-| `--api-key` | No | API key for authentication |
 | `--tls-ca-cert` | No | Path to CA certificate |
 
 Rollback requires an explicit `--upgrade-id`. There is no selector-based

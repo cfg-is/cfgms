@@ -85,13 +85,32 @@ func newTokenServer(t *testing.T) *httptest.Server {
 	}))
 }
 
+// withTokenTestBundle points bundle discovery at a generated admin mTLS bundle for
+// controllerURL, restoring bundlePath/noBundle on cleanup. The test servers in this
+// file don't assert on the credential value — only that getAPIClient can resolve one,
+// since API-key auth was removed from the cfg CLI (Issue #3688).
+func withTokenTestBundle(t *testing.T, controllerURL string) {
+	t.Helper()
+	bundleFilePath := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, controllerURL)
+
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
+	t.Cleanup(func() {
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
+	})
+	bundlePath = bundleFilePath
+	noBundle = false
+}
+
 func TestRunTokenCreate_JSONOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	// Save and restore package-level flag vars
 	origAPIURL := tokenAPIURL
-	origAPIKey := tokenAPIKey
 	origTLSInsecure := tokenTLSInsecure
 	origTenantID := tokenTenantID
 	origControllerURL := tokenControllerURL
@@ -100,7 +119,6 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 	origJSON := tokenJSONOutput
 	t.Cleanup(func() {
 		tokenAPIURL = origAPIURL
-		tokenAPIKey = origAPIKey
 		tokenTLSInsecure = origTLSInsecure
 		tokenTenantID = origTenantID
 		tokenControllerURL = origControllerURL
@@ -138,9 +156,9 @@ func TestRunTokenCreate_JSONOutput(t *testing.T) {
 func TestRunTokenCreate_TextOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
-	origAPIKey := tokenAPIKey
 	origTLSInsecure := tokenTLSInsecure
 	origTenantID := tokenTenantID
 	origControllerURL := tokenControllerURL
@@ -149,7 +167,6 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 	origJSON := tokenJSONOutput
 	t.Cleanup(func() {
 		tokenAPIURL = origAPIURL
-		tokenAPIKey = origAPIKey
 		tokenTLSInsecure = origTLSInsecure
 		tokenTenantID = origTenantID
 		tokenControllerURL = origControllerURL
@@ -187,6 +204,7 @@ func TestRunTokenCreate_APIError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
 	}))
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -215,6 +233,7 @@ func TestRunTokenCreate_APIError(t *testing.T) {
 func TestRunTokenRotate_JSONOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -256,6 +275,7 @@ func TestRunTokenRotate_JSONOutput(t *testing.T) {
 func TestRunTokenRotate_TextOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -297,6 +317,7 @@ func TestRunTokenRotate_NoActiveTokens(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"no active tokens found for the specified tenant/group"}`))
 	}))
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -325,6 +346,7 @@ func TestRunTokenRotate_NoActiveTokens(t *testing.T) {
 func TestRunTokenList_JSONOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -363,6 +385,7 @@ func TestRunTokenList_JSONOutput(t *testing.T) {
 func TestRunTokenList_TextOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -397,6 +420,7 @@ func TestRunTokenList_JSONOutput_EmptyList(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -432,6 +456,7 @@ func TestRunTokenList_APIError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"service unavailable"}`))
 	}))
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -457,6 +482,7 @@ func TestRunTokenList_APIError(t *testing.T) {
 func TestRunTokenGet_TextOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -490,6 +516,7 @@ func TestRunTokenGet_TextOutput(t *testing.T) {
 func TestRunTokenGet_JSONOutput(t *testing.T) {
 	server := newTokenServer(t)
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -529,6 +556,7 @@ func TestRunTokenGet_NotFound(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"token not found"}`))
 	}))
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -555,6 +583,7 @@ func TestRunTokenGet_APIError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
 	}))
 	defer server.Close()
+	withTokenTestBundle(t, server.URL)
 
 	origAPIURL := tokenAPIURL
 	origTLSInsecure := tokenTLSInsecure
@@ -577,12 +606,14 @@ func TestRunTokenGet_APIError(t *testing.T) {
 
 // generateTestBundleFile writes a real admin bundle with valid mTLS certs to path.
 // controllerURL is stored as the bundle's ControllerURL so tests can distinguish bundles.
-func generateTestBundleFile(t *testing.T, path, controllerURL string) {
-	t.Helper()
-
+// buildTestAdminBundle generates a real mTLS cert chain and returns it as an admin
+// bundle. Pure (no *testing.T) so it can also be used from TestMain.
+func buildTestAdminBundle(controllerURL string) (*certbundle.Bundle, error) {
 	// Generate CA key and self-signed cert
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	caTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -594,19 +625,27 @@ func generateTestBundleFile(t *testing.T, path, controllerURL string) {
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 	}
 	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertDER})
 
 	// Generate client key and cert signed by the CA
 	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	clientKeyBytes, err := x509.MarshalECPrivateKey(clientKey)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 	clientKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: clientKeyBytes})
 
 	caCert, err := x509.ParseCertificate(caCertDER)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	clientTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
@@ -616,16 +655,26 @@ func generateTestBundleFile(t *testing.T, path, controllerURL string) {
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	clientCertDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, caCert, &clientKey.PublicKey, caKey)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 	clientCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientCertDER})
 
-	b := &certbundle.Bundle{
+	return &certbundle.Bundle{
 		CertPEM:       string(clientCertPEM),
 		KeyPEM:        string(clientKeyPEM),
 		CAPEM:         string(caCertPEM),
 		ControllerURL: controllerURL,
 		AuditSubject:  "admin:test-admin",
-	}
+	}, nil
+}
+
+// generateTestBundleFile writes a real admin bundle with valid mTLS certs to path.
+// controllerURL is stored as the bundle's ControllerURL so tests can distinguish bundles.
+func generateTestBundleFile(t *testing.T, path, controllerURL string) {
+	t.Helper()
+	b, err := buildTestAdminBundle(controllerURL)
+	require.NoError(t, err)
 	require.NoError(t, certbundle.Write(path, b))
 }
 
@@ -741,14 +790,12 @@ func TestGetAPIClient_NoBundleFlag(t *testing.T) {
 	origBundlePath := bundlePath
 	origNoBundle := noBundle
 	origTokenAPIURL := tokenAPIURL
-	origTokenAPIKey := tokenAPIKey
 	t.Cleanup(func() {
 		userConfigDirFn = origUserConfigDirFn
 		systemBundlePathFn = origSystemBundlePathFn
 		bundlePath = origBundlePath
 		noBundle = origNoBundle
 		tokenAPIURL = origTokenAPIURL
-		tokenAPIKey = origTokenAPIKey
 	})
 
 	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "userconfig"), nil }
@@ -758,17 +805,14 @@ func TestGetAPIClient_NoBundleFlag(t *testing.T) {
 	bundlePath = bundleFlagPath
 	noBundle = true // explicit opt-out
 	tokenAPIURL = "https://api-key-controller.local:9080"
-	tokenAPIKey = "test-api-key"
 
+	// --no-bundle opts out and there's no active session: getAPIClient must fail
+	// naming the required credential, not silently fall back to an API key
+	// (Issue #3688).
 	client, err := getAPIClient()
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// Client must use the API key path, not the bundle (no mTLS certificates)
-	assert.Equal(t, "https://api-key-controller.local:9080", client.baseURL)
-	assert.Equal(t, "test-api-key", client.apiKey)
-	transport := client.httpClient.Transport.(*http.Transport)
-	assert.Empty(t, transport.TLSClientConfig.Certificates)
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.ErrorIs(t, err, errNoCredential)
 }
 
 func TestGetAPIClient_EmptyBundleEnvVar(t *testing.T) {
@@ -788,14 +832,12 @@ func TestGetAPIClient_EmptyBundleEnvVar(t *testing.T) {
 	origBundlePath := bundlePath
 	origNoBundle := noBundle
 	origTokenAPIURL := tokenAPIURL
-	origTokenAPIKey := tokenAPIKey
 	t.Cleanup(func() {
 		userConfigDirFn = origUserConfigDirFn
 		systemBundlePathFn = origSystemBundlePathFn
 		bundlePath = origBundlePath
 		noBundle = origNoBundle
 		tokenAPIURL = origTokenAPIURL
-		tokenAPIKey = origTokenAPIKey
 	})
 
 	userConfigDirFn = func() (string, error) { return filepath.Join(tmpDir, "userconfig"), nil }
@@ -807,20 +849,20 @@ func TestGetAPIClient_EmptyBundleEnvVar(t *testing.T) {
 	bundlePath = ""
 	noBundle = false
 	tokenAPIURL = "https://api-key-controller.local:9080"
-	tokenAPIKey = "test-api-key"
 
+	// Empty env var is explicit opt-out and there's no active session:
+	// getAPIClient must fail naming the required credential (Issue #3688).
 	client, err := getAPIClient()
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// Empty env var is explicit opt-out — must use API key path
-	assert.Equal(t, "https://api-key-controller.local:9080", client.baseURL)
-	assert.Equal(t, "test-api-key", client.apiKey)
-	transport := client.httpClient.Transport.(*http.Transport)
-	assert.Empty(t, transport.TLSClientConfig.Certificates)
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.ErrorIs(t, err, errNoCredential)
 }
 
-func TestGetAPIClient_BundleAbsent_FallbackToAPIKey(t *testing.T) {
+// TestGetAPIClient_BundleAbsent_FailsWithNoCredential proves the API-key downgrade
+// path is gone: with no bundle discoverable anywhere and no active session,
+// getAPIClient must fail naming the required credential instead of silently
+// falling back to an API key (Issue #3688).
+func TestGetAPIClient_BundleAbsent_FailsWithNoCredential(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origUserConfigDirFn := userConfigDirFn
@@ -828,14 +870,12 @@ func TestGetAPIClient_BundleAbsent_FallbackToAPIKey(t *testing.T) {
 	origBundlePath := bundlePath
 	origNoBundle := noBundle
 	origTokenAPIURL := tokenAPIURL
-	origTokenAPIKey := tokenAPIKey
 	t.Cleanup(func() {
 		userConfigDirFn = origUserConfigDirFn
 		systemBundlePathFn = origSystemBundlePathFn
 		bundlePath = origBundlePath
 		noBundle = origNoBundle
 		tokenAPIURL = origTokenAPIURL
-		tokenAPIKey = origTokenAPIKey
 	})
 
 	// Point all candidates to non-existent paths inside tmpDir
@@ -856,15 +896,9 @@ func TestGetAPIClient_BundleAbsent_FallbackToAPIKey(t *testing.T) {
 	bundlePath = ""
 	noBundle = false
 	tokenAPIURL = "https://fallback-controller.local:9080"
-	tokenAPIKey = "fallback-api-key"
 
 	client, err := getAPIClient()
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// No bundle anywhere → must fall through to API key path, no error
-	assert.Equal(t, "https://fallback-controller.local:9080", client.baseURL)
-	assert.Equal(t, "fallback-api-key", client.apiKey)
-	transport := client.httpClient.Transport.(*http.Transport)
-	assert.Empty(t, transport.TLSClientConfig.Certificates)
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.ErrorIs(t, err, errNoCredential)
 }

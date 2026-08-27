@@ -33,7 +33,6 @@ type rebootWindowPutRequest struct {
 
 var (
 	rebootWindowURL          string
-	rebootWindowAPIKey       string
 	rebootWindowTLSCACert    string
 	rebootWindowTLSInsecure  bool
 	rebootWindowServerName   string
@@ -98,7 +97,6 @@ Examples:
 func init() {
 	for _, cmd := range []*cobra.Command{rebootWindowSetCmd, rebootWindowShowCmd} {
 		cmd.Flags().StringVar(&rebootWindowURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
-		cmd.Flags().StringVar(&rebootWindowAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&rebootWindowTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&rebootWindowTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 		cmd.Flags().StringVar(&rebootWindowServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -126,25 +124,7 @@ func getRebootWindowClient() (*APIClient, error) {
 	}
 	serverName := rebootWindowServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := rebootWindowAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := rebootWindowTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runRebootWindowSet(cmd *cobra.Command, _ []string) error {

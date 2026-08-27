@@ -20,7 +20,6 @@ var (
 	installerPlatform    string
 	installerArch        string
 	installerAPIURL      string
-	installerAPIKey      string
 	installerTLSCACert   string
 	installerTLSInsecure bool
 	installerServerName  string
@@ -101,7 +100,6 @@ func init() {
 	installerUploadCmd.Flags().StringVar(&installerPlatform, "platform", "", "Target platform: windows, darwin, linux (required)")
 	installerUploadCmd.Flags().StringVar(&installerArch, "arch", "", "Target architecture: amd64, arm64 (required)")
 	installerUploadCmd.Flags().StringVar(&installerAPIURL, "api-url", "", "Controller API URL (env: CFGMS_API_URL)")
-	installerUploadCmd.Flags().StringVar(&installerAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	installerUploadCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	installerUploadCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	installerUploadCmd.Flags().StringVar(&installerServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -122,7 +120,6 @@ func init() {
 	installerPublishCmd.Flags().StringVar(&publishSignature, "signature", "", "Path to the Ed25519 signature file (required)")
 	installerPublishCmd.Flags().BoolVar(&publishForce, "force", false, "Overwrite an existing binary with the same version/platform/arch")
 	installerPublishCmd.Flags().StringVar(&installerAPIURL, "api-url", "", "Controller API URL (env: CFGMS_API_URL)")
-	installerPublishCmd.Flags().StringVar(&installerAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	installerPublishCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	installerPublishCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	installerPublishCmd.Flags().StringVar(&installerServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -150,25 +147,7 @@ func getInstallerClient() (*APIClient, error) {
 	}
 	serverName := installerServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, insecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := installerAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	caCertPath := installerTLSCACert
-	if caCertPath == "" {
-		caCertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, caCertPath, insecure)
+	return requireSessionOrBundleClient(apiURL, insecure, serverName)
 }
 
 func runInstallerUpload(cmd *cobra.Command, args []string) error {

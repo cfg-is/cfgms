@@ -15,18 +15,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setRebootWindowFlags wires module-level flags for reboot-window test runs.
-func setRebootWindowFlags(url, apiKey string) func() {
+// setRebootWindowFlags wires module-level flags for reboot-window test runs,
+// authenticated via a generated admin mTLS bundle (Issue #3688: API-key auth was
+// removed from the cfg CLI). The bundle's ControllerURL doesn't matter — url
+// overrides it via the apiURL parameter.
+func setRebootWindowFlags(t *testing.T, url string) func() {
+	t.Helper()
+	bundleFilePath := filepath.Join(t.TempDir(), "admin.bundle.yaml")
+	generateTestBundleFile(t, bundleFilePath, "https://placeholder.local:9443")
+
 	origURL := rebootWindowURL
-	origKey := rebootWindowAPIKey
 	origInsecure := rebootWindowTLSInsecure
+	origBundlePath := bundlePath
+	origNoBundle := noBundle
 	rebootWindowURL = url
-	rebootWindowAPIKey = apiKey
 	rebootWindowTLSInsecure = true
+	bundlePath = bundleFilePath
+	noBundle = false
 	return func() {
 		rebootWindowURL = origURL
-		rebootWindowAPIKey = origKey
 		rebootWindowTLSInsecure = origInsecure
+		bundlePath = origBundlePath
+		noBundle = origNoBundle
 	}
 }
 
@@ -65,7 +75,7 @@ func TestRebootWindowSetCmd_TenantHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowTenantID = "acme-corp"
@@ -101,7 +111,7 @@ func TestRebootWindowSetCmd_StewardHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowStewardID = "sw-1234"
@@ -123,7 +133,7 @@ func TestRebootWindowSetCmd_MutuallyExclusiveTargets(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowTenantID = "acme-corp"
@@ -155,7 +165,7 @@ func TestRebootWindowSetCmd_MissingFile(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowTenantID = "acme-corp"
@@ -184,7 +194,7 @@ func TestRebootWindowShowCmd_TenantHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowTenantID = "acme-corp"
@@ -215,7 +225,7 @@ func TestRebootWindowShowCmd_Unrestricted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowTenantID = "acme-corp"
@@ -245,7 +255,7 @@ func TestRebootWindowShowCmd_StewardHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowStewardID = "sw-1234"
@@ -273,7 +283,7 @@ func TestRebootWindowSetCmd_WithTimezone(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cleanup := setRebootWindowFlags(srv.URL, "test-key")
+	cleanup := setRebootWindowFlags(t, srv.URL)
 	defer cleanup()
 	defer resetRebootWindowTargets()
 	rebootWindowTenantID = "acme-corp"

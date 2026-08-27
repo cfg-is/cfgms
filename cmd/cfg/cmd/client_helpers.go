@@ -27,10 +27,13 @@ func defaultSystemBundlePath() string {
 	return "/etc/cfgms/admin.bundle.yaml"
 }
 
-// newClientFromFlags creates an APIClient from resolved flag values.
-// Reads the CA cert from disk if caCertPath is non-empty, then delegates to NewAPIClient.
-// Env var resolution is the responsibility of each command's get*Client() function.
-func newClientFromFlags(url, apiKey, caCertPath string, insecure bool) (*APIClient, error) {
+// newClientFromFlags creates an unauthenticated (or CA-pinned) APIClient from resolved
+// flag values. Reads the CA cert from disk if caCertPath is non-empty, then delegates to
+// NewAPIClient. Env var resolution is the responsibility of each command's get*Client()
+// function. This does not attach any credential — it exists for pre-authentication
+// bootstrap calls (e.g. tenant creation against a fresh controller); everything else
+// must go through resolveSessionOrBundleClient / requireSessionOrBundleClient.
+func newClientFromFlags(url, caCertPath string, insecure bool) (*APIClient, error) {
 	var caCertPEM []byte
 	if caCertPath != "" {
 		var err error
@@ -44,7 +47,6 @@ func newClientFromFlags(url, apiKey, caCertPath string, insecure bool) (*APIClie
 
 	cfg := &APIClientConfig{
 		BaseURL:     url,
-		APIKey:      apiKey,
 		CACertPEM:   caCertPEM,
 		TLSInsecure: insecure,
 	}
@@ -166,7 +168,7 @@ func resolveSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName st
 	var client *APIClient
 	cfg := &APIClientConfig{
 		BaseURL:     rec.ControllerURL,
-		APIKey:      rec.Token,
+		BearerToken: rec.Token,
 		CACertPEM:   caCertPEM,
 		TLSInsecure: tlsInsecure,
 		ServerName:  serverName,
@@ -184,6 +186,28 @@ func resolveSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName st
 	}
 	client, err = NewAPIClient(cfg)
 	return client, err
+}
+
+// errNoCredential is returned when neither an active session nor an admin mTLS bundle
+// can be resolved. The cfg CLI accepts only those two credentials — API-key
+// authentication was removed as a silent downgrade path (Issue #3688): a caller whose
+// bundle was missing or whose session had expired used to fall through to
+// CFGMS_API_KEY transparently and the command would still succeed. Automation that
+// exported CFGMS_API_KEY should export CFGMS_ADMIN_BUNDLE instead.
+var errNoCredential = fmt.Errorf("no credential found: provide an admin mTLS bundle (--bundle, CFGMS_ADMIN_BUNDLE, or the default bundle path) or an active session (run 'cfg connect' first)")
+
+// requireSessionOrBundleClient resolves a client via resolveSessionOrBundleClient and
+// fails explicitly with errNoCredential when neither a session nor a bundle credential
+// is available, instead of silently falling back to a weaker credential.
+func requireSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
+	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
+	if err != nil {
+		return nil, fmt.Errorf("bundle lookup failed: %w", err)
+	}
+	if client == nil {
+		return nil, errNoCredential
+	}
+	return client, nil
 }
 
 // findBundlePath walks the bundle lookup chain and returns the first path that exists.

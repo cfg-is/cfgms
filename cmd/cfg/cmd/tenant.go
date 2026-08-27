@@ -92,7 +92,7 @@ func getTenantAPIClient() (*APIClient, error) {
 		apiURL = "http://localhost:9080"
 	}
 
-	return newClientFromFlags(apiURL, "", "", tlsInsecure)
+	return newClientFromFlags(apiURL, "", tlsInsecure)
 }
 
 func runTenantCreate(_ *cobra.Command, _ []string) error {

@@ -128,7 +128,6 @@ func TestStewardList_EmptyList(t *testing.T) {
 
 func TestStewardList_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, stewardListCmd.Flags().Lookup("url"), "--url flag must be registered")
-	assert.NotNil(t, stewardListCmd.Flags().Lookup("api-key"), "--api-key flag must be registered")
 	assert.NotNil(t, stewardListCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
 	assert.NotNil(t, stewardListCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
 }
@@ -966,7 +965,6 @@ func TestStewardMove_StewardNotFound_Returns404Error(t *testing.T) {
 
 func TestStewardMove_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("url"), "--url flag must be registered")
-	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("api-key"), "--api-key flag must be registered")
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
 	assert.NotNil(t, stewardMoveCmd.Flags().Lookup("to-tenant"), "--to-tenant flag must be registered")
@@ -1148,7 +1146,6 @@ func TestStewardDecommission_OtherHTTPError_ReturnsStatusAndBody(t *testing.T) {
 
 func TestStewardDecommission_FlagsRegistered(t *testing.T) {
 	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("url"), "--url flag must be registered")
-	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("api-key"), "--api-key flag must be registered")
 	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("tls-ca-cert"), "--tls-ca-cert flag must be registered")
 	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("tls-insecure"), "--tls-insecure flag must be registered")
 	assert.NotNil(t, stewardDecommissionCmd.Flags().Lookup("json"), "--json flag must be registered")

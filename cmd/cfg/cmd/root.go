@@ -43,7 +43,7 @@ func init() {
 
 	// Admin bundle flags for mTLS authentication
 	rootCmd.PersistentFlags().StringVar(&bundlePath, "bundle", "", "Path to admin bundle file for mTLS auth (env: CFGMS_ADMIN_BUNDLE)")
-	rootCmd.PersistentFlags().BoolVar(&noBundle, "no-bundle", false, "Skip admin bundle auto-discovery and use API key auth")
+	rootCmd.PersistentFlags().BoolVar(&noBundle, "no-bundle", false, "Skip admin bundle auto-discovery and the active session (most commands will then fail — no fallback credential exists)")
 
 	// Add subcommands
 	rootCmd.AddCommand(diffCmd)

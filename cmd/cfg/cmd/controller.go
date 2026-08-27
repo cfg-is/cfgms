@@ -21,7 +21,6 @@ import (
 var (
 	// Controller command flags
 	healthURL             string
-	healthAPIKey          string
 	healthFormat          string
 	controllerTLSCACert   string
 	controllerTLSInsecure bool
@@ -68,8 +67,8 @@ Examples:
   # Check controller status
   cfg controller status --url=https://controller.example.com
 
-  # With API key authentication
-  cfg controller status --url=https://controller.example.com --api-key=your-key`,
+  # With an admin mTLS bundle
+  cfg controller status --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	RunE: runControllerStatus,
 }
 
@@ -180,7 +179,6 @@ Examples:
 func init() {
 	// Controller command flags
 	controllerCmd.PersistentFlags().StringVar(&healthURL, "url", "", "Controller API URL (required)")
-	controllerCmd.PersistentFlags().StringVar(&healthAPIKey, "api-key", "", "API key for authentication")
 	controllerCmd.PersistentFlags().StringVar(&healthFormat, "format", "text", "Output format (text, json)")
 	controllerCmd.PersistentFlags().StringVar(&controllerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	controllerCmd.PersistentFlags().BoolVar(&controllerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
@@ -205,8 +203,7 @@ func init() {
 	controllerCmd.AddCommand(clusterCmd)
 }
 
-// getControllerClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getControllerClient creates an API client using an active session or an admin mTLS bundle.
 func getControllerClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(healthURL, "/")
 	if apiURL == "" {
@@ -219,27 +216,7 @@ func getControllerClient() (*APIClient, error) {
 	}
 	serverName := controllerServerName
 
-	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	// Fallback: API key path
-	apiKey := healthAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := controllerTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runControllerStatus(cmd *cobra.Command, args []string) error {

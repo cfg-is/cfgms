@@ -19,7 +19,6 @@ import (
 
 var (
 	stewardTagURL         string
-	stewardTagAPIKey      string
 	stewardTagTLSCACert   string
 	stewardTagTLSInsecure bool
 	stewardTagServerName  string
@@ -50,7 +49,7 @@ Adding a tag that already exists is a no-op (idempotent).
 
 Examples:
   cfg steward tag add steward-abc123 prod web-server \
-    --url https://controller.example.com --api-key mykey`,
+    --url https://controller.example.com --bundle /path/to/admin.bundle.yaml`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: runStewardTagAdd,
 }
@@ -65,7 +64,7 @@ Removing a tag that does not exist is a no-op (idempotent).
 
 Examples:
   cfg steward tag rm steward-abc123 debug \
-    --url https://controller.example.com --api-key mykey`,
+    --url https://controller.example.com --bundle /path/to/admin.bundle.yaml`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: runStewardTagRm,
 }
@@ -78,7 +77,7 @@ var stewardTagLsCmd = &cobra.Command{
 
 Examples:
   cfg steward tag ls steward-abc123 \
-    --url https://controller.example.com --api-key mykey`,
+    --url https://controller.example.com --bundle /path/to/admin.bundle.yaml`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardTagLs,
 }
@@ -86,7 +85,6 @@ Examples:
 func init() {
 	for _, cmd := range []*cobra.Command{stewardTagAddCmd, stewardTagRmCmd, stewardTagLsCmd} {
 		cmd.Flags().StringVar(&stewardTagURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
-		cmd.Flags().StringVar(&stewardTagAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 		cmd.Flags().StringVar(&stewardTagTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		cmd.Flags().BoolVar(&stewardTagTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 		cmd.Flags().StringVar(&stewardTagServerName, "server-name", "", "Override TLS server name for certificate verification")
@@ -111,25 +109,7 @@ func getStewardTagClient() (*APIClient, error) {
 	}
 	serverName := stewardTagServerName
 
-	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := stewardTagAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
-	tlsCACertPath := stewardTagTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runStewardTagAdd(cmd *cobra.Command, args []string) error {
