@@ -381,6 +381,103 @@ func TestHandleCockpitWatch_CrossTenant_Returns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
+// ── Same-origin guard (cross-origin WebSocket hijacking) ──────────────────
+
+// TestHandleCockpitWatch_RejectsDisallowedOrigin exercises both rejection
+// branches of cockpitWatchOriginAllowed end to end: an absent Origin header, and
+// an Origin whose Host does not match the request Host. This check is the sole
+// guard against cross-origin WebSocket hijacking of the cockpit watch feed — a
+// page on an attacker-controlled origin can open a WebSocket to the controller
+// carrying the browser's ambient credentials, and nothing else in the request
+// path stops it (corsMiddleware only withholds response headers; it does not
+// refuse non-preflight requests).
+//
+// Every case must fail the handshake with 403 rather than switching protocols,
+// and must never reach the provider subscription — a rejected upgrade that still
+// opened a Watch would leak the case's event stream into a goroutine the caller
+// was never authorised to start.
+func TestHandleCockpitWatch_RejectsDisallowedOrigin(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string // "" means the Origin header is omitted entirely
+	}{
+		{name: "absent Origin header", origin: ""},
+		{name: "foreign host", origin: "https://evil.example.com"},
+		{name: "same host, different port", origin: "http://127.0.0.1:1"},
+		{name: "unparseable Origin", origin: "http://%zz"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := newWatchProbe(t)
+			srv := setupCockpitWatchServer(t, probe)
+			c, _ := seedWatchCase(t, srv.CasesStore(), "test-tenant")
+
+			apiKey := NewEphemeralTestKey(t, srv, []string{"case:read"}, "test-tenant", 5*time.Minute)
+			ts := httptest.NewServer(srv.router)
+			defer ts.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/cases/" + c.ID + "/watch"
+			hdr := http.Header{"Authorization": []string{"Bearer " + apiKey}}
+			if tc.origin != "" {
+				hdr.Set("Origin", tc.origin)
+			}
+
+			conn, resp, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			require.Error(t, err, "the upgrade must not succeed for origin %q", tc.origin)
+			require.NotNil(t, resp, "a refused upgrade must still carry an HTTP response")
+			assert.NotEqual(t, http.StatusSwitchingProtocols, resp.StatusCode,
+				"a disallowed origin must never reach the protocol switch")
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode,
+				"the same-origin guard rejects the upgrade with 403")
+
+			// The upgrade is refused before Watch is called, so the provider
+			// subscription (and the poll goroutine behind it) never starts.
+			select {
+			case <-probe.subscribed:
+				t.Fatal("a rejected upgrade must not open a provider subscription")
+			default:
+			}
+		})
+	}
+}
+
+// TestCockpitWatchOriginAllowed covers the guard's decision directly, including
+// the case-insensitive host comparison and the default port asymmetry that makes
+// a literal string comparison against r.Host wrong.
+func TestCockpitWatchOriginAllowed(t *testing.T) {
+	tests := []struct {
+		name   string
+		host   string
+		origin string
+		setHdr bool
+		want   bool
+	}{
+		{name: "same host and port", host: "cfgms.example.com:8443", origin: "https://cfgms.example.com:8443", setHdr: true, want: true},
+		{name: "host differing only in case", host: "CFGMS.example.com", origin: "https://cfgms.EXAMPLE.com", setHdr: true, want: true},
+		{name: "no Origin header", host: "cfgms.example.com", setHdr: false, want: false},
+		{name: "empty Origin header", host: "cfgms.example.com", origin: "", setHdr: true, want: false},
+		{name: "foreign host", host: "cfgms.example.com", origin: "https://evil.example.com", setHdr: true, want: false},
+		{name: "same host, different port", host: "cfgms.example.com:8443", origin: "https://cfgms.example.com:9443", setHdr: true, want: false},
+		{name: "unparseable Origin", host: "cfgms.example.com", origin: "http://%zz", setHdr: true, want: false},
+		{name: "Origin with no host", host: "cfgms.example.com", origin: "null", setHdr: true, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/v1/cases/some-case/watch", nil)
+			req.Host = tc.host
+			if tc.setHdr {
+				req.Header.Set("Origin", tc.origin)
+			}
+			assert.Equal(t, tc.want, cockpitWatchOriginAllowed(req))
+		})
+	}
+}
+
 // ── ErrCursorExpired sends resync frame ────────────────────────────────────
 
 // TestHandleCockpitWatch_CursorExpired_SendsResync drives the real provider's own
