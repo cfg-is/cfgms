@@ -158,6 +158,23 @@ describe('CockpitView', () => {
     expect(card).toHaveAttribute('data-pin-count', String(twoPinCase.pins.length))
   })
 
+  it('forwards the case created_at to evidence cards via caseCreatedAt (Story #3611)', async () => {
+    // ChangeTimelineCard (Story #3611) is the first card to consume the
+    // caseCreatedAt prop EvidenceCanvas forwards from CockpitView's fetched
+    // Case object — it renders a "Case created" event when that prop is set.
+    // A CockpitView that stopped forwarding it would silently drop that event.
+    //
+    // mockImplementation (not mockResolvedValue) so every concurrent fetch —
+    // case GET plus the drift/desired-state/timeline GETs the mounted evidence
+    // cards fire — gets its own Response instance; a single shared Response's
+    // body can only be read once, and every reader after the first throws
+    // "Body has already been read".
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, makeCase())))
+    renderCockpit()
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+    await waitFor(() => expect(screen.getByText('Case created')).toBeInTheDocument())
+  })
+
   it('renders the empty EvidenceCanvas state when the case has no pins', async () => {
     // Counterpart to the test above: proves the assertions there actually
     // discriminate, by showing the empty branch is reachable through CockpitView.
