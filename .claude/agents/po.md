@@ -1186,15 +1186,69 @@ Every file the story will touch listed in either backtick-quoted form (`` `path/
 
 What the parser accepts:
 
-- **Backticked paths anywhere in the section**, including inside a prose sentence. Backticks are an explicit declaration marker.
+- **Backticked paths anywhere in a prose line**, i.e. a line that is not itself a list item, numbered item, or table row. Backticks are an explicit declaration marker.
 - **Bare paths in list items, numbered items and table rows only.** A bare path in a prose sentence is treated as commentary and ignored — that is deliberate, so `Do NOT touch features/.../server.go — owned by #2839` does not become a declaration.
 - **A trailing line reference is stripped**, so `` `handlers_runs.go:114` `` and `` `ci.yml:208-214` `` both resolve to the file. Extensionless names are covered too (`` `Dockerfile:155` ``).
 - **An explicit `None`** — `None`, `n/a`, or a section opening `None — documentation only.` / `None (no code changes)` — is read as a real declaration that the story touches no files, and produces **no** warning.
+
+**Only a list item's SUBJECT is a declaration (Issue #3683).** A list/numbered/table
+item's subject is the text up to (not including) its first description
+separator — ` — `, ` – `, ` -- `, or ` - `. Everything after that separator is
+commentary: it is **not** scanned for paths, backticked or bare. This matters
+because the natural way to write "this file exists but does not need editing"
+is to name it in the commentary tail:
+
+```
+- `ChangeTimelineCard.tsx` — new file, default export picked up by
+  `EvidenceCanvas.tsx`'s glob — no edit to that file needed.
+```
+
+Here only `ChangeTimelineCard.tsx` is declared; `EvidenceCanvas.tsx` is
+correctly excluded because it appears after the separator, on a wrapped line.
+Before the fix, both parsed as declared, and two stories that each carried this
+exact bullet were held against each other on a file neither one touched.
+
+**A wrapped continuation line is commentary only once the item's separator has
+already appeared.** While the subject is still open, a continuation line is
+still subject — this is how a multi-file subject wraps across lines in the
+house convention, with the separator arriving on the *last* wrapped line
+rather than the item's opening line:
+
+```
+- `web/src/cockpit/CockpitView.test.tsx`,
+  `web/src/cockpit/TicketQuickReference.test.tsx` — new test files.
+```
+
+Both files are declared here; the separator only appears on the second line,
+so the first line is still subject. If an item genuinely declares **more than
+one file**, list every file *before* the separator — whether that's on the
+opening line (`` - `a/b/x.go` and `a/b/x_test.go` — add the guard. ``) or
+split across wrapped lines as above. Do not rely on a file named only in a
+commentary tail (after the separator has already appeared) to register as in
+scope — give it its own list item instead.
+
+**A separator inside an unclosed parenthetical does not close the subject.**
+The parser tracks paren depth across an item's lines and only treats a
+` — `/` – `/` -- `/` - ` as the real boundary when it appears outside any
+open `(...)`. A parenthetical aside that itself contains one of those dashes,
+and that doesn't close until a later line, is still commentary-within-subject,
+not the item's separator:
+
+```
+- `handlers.go` (rename the four `ungatedHandlerBaseline` keys — see below —
+  before merging), `handlers_test.go`, `middleware_test.go`
+  — update every renamed symbol these tests reference.
+```
+
+All three files are declared here; the ` — see below — ` inside the
+parenthetical does not end the subject early, so `handlers_test.go` and
+`middleware_test.go` are still read as declarations rather than commentary.
 
 What it does **not** accept:
 
 - **Bare directory entries.** `test/integration/controller/` matches nothing — the path regexes require a file extension (or a known extensionless name like `Makefile`/`Dockerfile`). A directory-scoped story therefore takes the no-files branch and loses conflict checking, which is easy to write by accident. List representative files instead, or name the directory in prose *and* list the files you will actually touch.
 - **Prose-only lists** such as "all controller package files".
+- **A file named only in a list item's commentary tail** (after the item's separator has already appeared, whether on the same line or a later wrapped line) — see above. Give it its own item before the separator instead.
 
 When a story genuinely cannot enumerate its files up front, say so and expect the dispatch recommendation to carry `no_files_parsed_cannot_check_conflicts` — then verify overlap by hand against the open PRs before dispatching. A held story costs a cycle; a story dispatched blind into a file another agent is editing costs a rebase and a merge-queue round trip.
 
