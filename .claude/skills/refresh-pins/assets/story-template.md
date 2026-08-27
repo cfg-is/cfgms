@@ -13,7 +13,7 @@ Bump `{{NAME}}` from `{{FROM}}` to `{{TO}}`.
 ## Acceptance Criteria
 
 1. Every location listed above is updated from `{{FROM}}` to `{{TO}}`. No file left at the old version.
-2. **Verification — old version absent**: `grep -rE "{{FROM_PATTERN}}" {{SCOPE_PATHS}}` returns **0 matches**.
+2. **Verification — old version absent**: `python3 .claude/skills/refresh-pins/scripts/verify_pin_clean.py --pattern "{{FROM_PATTERN}}" --scope "{{SCOPE_PATHS}}"` exits **0**. This classifies every grep hit as an executing reference (a live pin, an install command, a dependency declaration) or as prose (a comment, an echoed help string, changelog narrative) — see `SKILL.md` Phase 4 "Per-story mechanics" for the classification rules. A hit inside a comment or a printed message does not fail this check; a real pin left at the old version does.
 3. **Verification — new version present**: `grep -rE "{{TO_PATTERN}}" {{SCOPE_PATHS}}` returns **{{LOCATION_COUNT}} matches**.
 4. `make test` passes locally before the PR is opened.
 5. CI required checks all pass — all ten contexts required by the `develop` ruleset, not just `unit-tests`, `integration-tests`, `Build Gate` and `security-deployment-gate`. Read the full set from the ruleset rather than trusting a copy of it: `gh api repos/cfg-is/cfgms/rulesets/11647684 --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'`.
