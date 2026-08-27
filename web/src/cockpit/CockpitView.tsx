@@ -34,6 +34,7 @@ import CaseBar from './CaseBar.tsx'
 import TicketQuickReference from './TicketQuickReference.tsx'
 import InvestigationRail from './InvestigationRail.tsx'
 import EvidenceCanvas from './EvidenceCanvas.tsx'
+import { useCaseWatch, WatchEventContext } from './useCaseWatch.ts'
 import './CockpitView.css'
 
 interface FetchOutcome {
@@ -45,6 +46,7 @@ interface FetchOutcome {
 export default function CockpitView() {
   const { id: caseId = '' } = useParams<{ id: string }>()
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
+  const { isLive, connectedSince, lastEvent } = useCaseWatch(caseId)
 
   useEffect(() => {
     const key = caseId
@@ -105,21 +107,27 @@ export default function CockpitView() {
   const caseData = current.caseData!
 
   return (
-    <div className="cockpit">
-      <CaseBar caseData={caseData} />
-      <div className="cockpit-work">
-        <div className="cockpit-leftcol">
-          <TicketQuickReference
-            caseId={caseId}
-            ticket={caseData.ticket}
-            onTicketUpdated={onTicketUpdated}
-          />
-          <InvestigationRail content={caseData.content} />
+    <WatchEventContext.Provider value={lastEvent}>
+      <div className="cockpit">
+        <CaseBar caseData={caseData} />
+        <div className="cockpit-work">
+          <div className="cockpit-leftcol">
+            <TicketQuickReference
+              caseId={caseId}
+              ticket={caseData.ticket}
+              onTicketUpdated={onTicketUpdated}
+            />
+            <InvestigationRail
+              content={caseData.content}
+              isLive={isLive}
+              connectedSince={connectedSince}
+            />
+          </div>
+          <main className="cockpit-canvas">
+            <EvidenceCanvas pins={caseData.pins} caseCreatedAt={caseData.created_at} />
+          </main>
         </div>
-        <main className="cockpit-canvas">
-          <EvidenceCanvas pins={caseData.pins} caseCreatedAt={caseData.created_at} />
-        </main>
       </div>
-    </div>
+    </WatchEventContext.Provider>
   )
 }
