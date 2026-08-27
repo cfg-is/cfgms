@@ -28,6 +28,7 @@ export interface AppShellContext {
 
 const NAV_ITEMS = [
   { label: 'Fleet', to: '/', soon: false },
+  { label: 'Cases', to: '/cases', soon: false },
   { label: 'Modules', to: '/modules', soon: false },
   { label: 'Config', to: '/config', soon: false },
   { label: 'Workflows', to: '/workflows', soon: false },

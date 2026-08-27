@@ -431,7 +431,7 @@ func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[stri
 
 	// Collect service information
 	if err := swCollector.CollectServices(ctx, attributes); err != nil {
-		c.logger.Error("Failed to collect service information", "error", err)
+		c.logger.Error("Failed to collect service information", "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Collect process information

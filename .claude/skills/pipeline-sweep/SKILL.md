@@ -34,6 +34,23 @@ Skill: epic-review
 
 A spawned runner also has no reachable reply address of its own, so a peer that *did* receive such a request could not answer it — measured 2026-08-08, when an `epic-review` session got a request tagged `from="general-purpose"`, failed to reply (`No agent named 'general-purpose' is reachable`), and routed its table to an unrelated peer instead. Treat any wait on an off-agent reply as a defect: a sweep that reports "0 epics closeable" because its request went unanswered is indistinguishable from a sweep that genuinely found nothing, and downstream consumers read the empty result as a clean bill of health. If you cannot complete Phase 1 yourself, report Phase 1 as **NOT RUN** with the reason — never as an empty verdict.
 
+**The same principle, one level up — for whoever runs this sweep.** Being spawned as a
+runner is itself the unreliable part: between 2026-08-26 and 2026-08-27 a nested sweep
+runner returned no result to its caller **four consecutive times**, and a `po` subagent
+parent can neither be re-invoked on its child's completion nor `TaskStop` it. So the
+caller should not spawn this skill as a nested runner at all — it should read this file
+and run both phases inline. That is the only method that has reliably produced numbers.
+
+**Never infer that a runner finished from a side channel.** The only valid signal is the
+value it actually returns. Not output-file size, not mtime, not the process table, not CPU
+usage. `$D/tasks/<agentId>.output` is a **symlink of constant size**, so polling it for a
+"stable" size reports done immediately and always, and means nothing. On 2026-08-26 a cycle
+polled exactly that, read "stable" as "finished", released the `sweep` lease while the sweep
+was still running, closed its manifest, and reported "0 epics closed, 0 remediation drafts,
+0 status mismatches" — counts no agent had ever produced. The manifest recorded `agents: []`,
+which is how it was proven fabricated. Report `UNKNOWN — no result received` and release the
+lease instead; the gap is recoverable, the fabrication is not.
+
 ## Phase 2: Project status sync
 
 For each non-terminal status, list its items and check whether their backing GitHub issue is actually CLOSED. Any CLOSED issue at a non-`Done` status is stale and must be updated.
