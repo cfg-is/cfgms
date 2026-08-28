@@ -405,6 +405,8 @@ If neither resolves, the command fails immediately with an error naming the requ
 
 **Migrating automation off `CFGMS_API_KEY` (Issue #3688):** earlier releases of the `cfg` binary read `CFGMS_API_KEY` as a fallback whenever a bundle was missing or a session had expired, and the command still succeeded — a silent downgrade from the credential the operator believed they were using, with no signal a weaker one had been substituted. That fallback has been removed entirely from the `cfg` binary; every `--api-key` flag it registered is gone with it. Scripts and CI jobs that previously exported `CFGMS_API_KEY` for `cfg` should export `CFGMS_ADMIN_BUNDLE=/path/to/admin.bundle.yaml` instead — an mTLS bundle is exactly as usable non-interactively (CI, cron, unattended scripts) as an API key was, just a stronger credential; this is a configuration change, not a lost capability. This does **not** affect genuine external API consumers: the controller's REST API still accepts API keys directly for callers that talk to it without going through `cfg`.
 
+This admin mTLS bundle / session pair authenticates `cfg` itself against the controller (transport auth). It is a distinct credential from the payload-signing certificate issued by `cfg credential request-signing-cert` (below), which exists solely to sign `operatorpayload.Envelope`s — see [Signing Credential Management](#signing-credential-management). With `CFGMS_API_KEY` gone (Issue #3688), `cfg credential request-signing-cert` is the only CLI path to a signing credential; there is no `--api-key` alternative.
+
 ### cfg connect (first-time import)
 
 Import an admin bundle and start a controller session.
@@ -515,6 +517,53 @@ No connections configured.
 | Flag | Description |
 |------|-------------|
 | `--json` | Emit a JSON array instead of a human-readable table |
+
+## Signing Credential Management
+
+`cfg credential` subcommands manage payload-signing credentials — a purpose distinct
+from the mTLS admin bundle covered under [Connection Management](#connection-management).
+
+### cfg credential request-signing-cert (Issue #3693)
+
+Generate an ECDSA P-256 keypair locally and request a signed payload-signing
+certificate from the controller. This is the primary — and, since `CFGMS_API_KEY`
+was removed (Issue #3688), the only — CLI path to a signing credential: there is no
+`--api-key` alternative.
+
+```bash
+cfg credential request-signing-cert
+
+cfg credential request-signing-cert \
+  --key-out ~/.config/cfgms/signing-key.pem \
+  --cert-out ~/.config/cfgms/signing-cert.pem
+```
+
+The private key is generated on the operator's machine and never transmitted —
+only the PEM-encoded public key crosses the wire, in a `POST
+/api/v1/signing-credential/request` request body that carries no other field. The
+controller signs the submitted public key (never generating or seeing a private
+key for it) and returns a certificate carrying the CFGMS payload-signing marker —
+not the admin marker used by mTLS transport bundles, so the two credential types
+remain distinguishable by construction. The resulting keypair signs
+`operatorpayload.Envelope`s (a future `cfg payload sign` command); it is never
+used for mTLS session authentication.
+
+The endpoint is gated by the `signing-credential:request` permission at
+`AssuranceStrong` plus a fresh user-presence proof, so this command requires an
+authenticated admin mTLS bundle or session (see [Connection
+Management](#connection-management)) and completes a WebAuthn presence ceremony —
+the CLI opens a browser automatically when one is needed, the same flow used by
+other presence-gated commands.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--key-out` | `<user config dir>/cfgms/signing-key.pem` | Path to write the generated private key PEM (mode 0600) |
+| `--cert-out` | `<user config dir>/cfgms/signing-cert.pem` | Path to write the issued certificate PEM (mode 0600) |
+| `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
+| `--server-name` | — | Override the TLS server name used for certificate verification |
 
 ## Workflow Management
 

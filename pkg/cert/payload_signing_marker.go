@@ -28,7 +28,7 @@ var PayloadSigningMarkerOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1, 
 // IMPORTANT — restricted callers (enforced by TestSetPayloadSigningMarker_Architecture
 // in architecture_test.go). Do not call from any production path outside the
 // allow-list without PO approval:
-//   - (populated by Story S10's CSR issuance handler)
+//   - features/controller/api/handlers_signing_credential.go (Issue #3693)
 func SetPayloadSigningMarker(template *x509.Certificate) {
 	// ASN.1 DER encoding of boolean TRUE: 0x01 (BOOLEAN) 0x01 (length) 0xFF (TRUE)
 	template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{

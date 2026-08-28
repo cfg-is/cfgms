@@ -478,8 +478,9 @@ func TestSetRootScopeMarker_Architecture(t *testing.T) {
 // production caller and must add itself here when it lands.
 func TestSetPayloadSigningMarker_Architecture(t *testing.T) {
 	allowList := map[string]bool{
-		// Story S10: CSR-based payload-signing certificate issuance handler.
-		// Add the handler's path here when Story S10 lands.
+		// Issue #3693: CSR-based payload-signing certificate issuance handler —
+		// the sole production caller of cert.SetPayloadSigningMarker.
+		"features/controller/api/handlers_signing_credential.go": true,
 	}
 
 	repoRoot := findRepoRoot(t)
