@@ -1313,10 +1313,15 @@ func TestExecuteScriptHandler_LibraryScript_ValidTrustedKey_Accepted(t *testing.
 }
 
 // TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted verifies AC6 (inline):
-// an inline command signed by a cert chaining to the controller CA is accepted.
+// an inline command signed by a cert chaining to the controller CA, with the admin
+// marker (Issue #3689), is accepted.
 func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing.T) {
 	ca, caPool := sigTestCA(t)
-	operatorCert := sigTestOperatorCert(t, ca, nil) // valid, chained, not expired
+	// Admin marker required (Issue #3689): verifyOperatorCert now rejects any cert
+	// lacking cert.HasAdminMarker, matching the controller-side
+	// validatePublicBetaCommandSignature check. Test files are exempt from
+	// SetAdminMarker's restricted-caller allow-list (TestSetAdminMarker_Architecture).
+	operatorCert := sigTestOperatorCert(t, ca, cert.SetAdminMarker) // valid, chained, not expired, admin-marked
 
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
@@ -1346,4 +1351,37 @@ func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing
 
 	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
 	require.NotNil(t, evt, "inline command signed by valid controller-CA-chained cert must be accepted")
+}
+
+// TestExecuteScriptHandler_InlineScript_NonAdminCert_Rejected verifies Issue #3689's
+// acceptance criteria: a certificate chaining to controllerCARoots with valid
+// ExtKeyUsageClientAuth but WITHOUT the admin marker is rejected by
+// preflightScriptSignature when RequireSignedAdhoc is true. Before this fix,
+// verifyOperatorCert checked only chain + EKU, so any client-auth cert issued by the
+// controller CA — including a non-admin steward's own mTLS client cert — passed
+// steward-side verification; the controller-side equivalent
+// (validatePublicBetaCommandSignature) already enforced cert.HasAdminMarker.
+func TestExecuteScriptHandler_InlineScript_NonAdminCert_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	// No TemplateModifier: a validly chained, unexpired, client-auth cert with no
+	// admin marker — e.g. an ordinary steward's own mTLS client certificate.
+	nonAdminCert := sigTestOperatorCert(t, ca, nil)
+
+	h := newHandlerWithSigning(t, nil, true, caPool)
+
+	content := []byte(echoScriptBody("hello"))
+	sigValue := sigTestSignWithCert(t, nonAdminCert.PrivateKeyPEM, content)
+
+	sc := testSignedCommandWithParams("sig-nonadmin-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                platformShell(),
+		"execution_id":         "sig-nonadmin-001",
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": string(nonAdminCert.CertificatePEM),
+	})
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a chained, unexpired, client-auth cert WITHOUT the admin marker must be rejected")
 }
