@@ -368,6 +368,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"tenant:approve-delete":        true, // Issue #3182: ADR-027 dual-control deletion approval
 		"osquery:execute":              true, // Issue #3569
 		"signing-credential:request":   true, // Issue #3687: mints a CSR-signing credential
+		"credential-request:approve":   true, // Issue #3718: decides the marker set/account binding for a credential
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {

@@ -781,3 +781,65 @@ func TestSweepDoesNotRemoveSpentTokens(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, stillThere, "a spent token must not be removed by the sweep even after its expiry")
 }
+
+// ---- approval record fields (Issue #3718) ---------------------------------------------
+
+// TestPendingCredentialRequest_ApprovalFieldsRoundTrip verifies that the fields the
+// approve endpoint writes — ApprovedAt, ApprovedBy, BoundAccountID, GrantedMarkers and
+// SelfApproved — survive a persist/reload cycle through the central secret store.
+func TestPendingCredentialRequest_ApprovalFieldsRoundTrip(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	approvedAt := time.Now().UTC().Truncate(time.Second)
+	req := &pendingCredentialRequest{
+		ID:                   "cr-approval-roundtrip",
+		TenantID:             "roundtrip-tenant",
+		Status:               credentialRequestStatusApproved,
+		PublicKeyFingerprint: "roundtrip-fp",
+		CreatedAt:            time.Now().UTC(),
+		ExpiresAt:            time.Now().UTC().Add(time.Hour),
+		CollectSecretHash:    "roundtrip-hash",
+		ApprovedAt:           &approvedAt,
+		ApprovedBy:           "approver-roundtrip",
+		BoundAccountID:       "account-roundtrip",
+		GrantedMarkers:       []string{credentialMarkerAdmin, credentialMarkerPayloadSigning},
+		SelfApproved:         true,
+	}
+	require.NoError(t, server.persistPendingCredentialRequest(ctx, req))
+
+	reloaded, err := server.getPendingCredentialRequestByID(ctx, req.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+
+	assert.Equal(t, credentialRequestStatusApproved, reloaded.Status)
+	require.NotNil(t, reloaded.ApprovedAt)
+	assert.True(t, approvedAt.Equal(*reloaded.ApprovedAt))
+	assert.Equal(t, "approver-roundtrip", reloaded.ApprovedBy)
+	assert.Equal(t, "account-roundtrip", reloaded.BoundAccountID)
+	assert.Equal(t, []string{credentialMarkerAdmin, credentialMarkerPayloadSigning}, reloaded.GrantedMarkers)
+	assert.True(t, reloaded.SelfApproved)
+}
+
+// TestPendingCredentialRequest_UnapprovedRecordHasNoApprovalFields verifies that a
+// pending (never-approved) record round-trips with every approval field at its zero
+// value — approval must never leave residue on a request that was denied instead.
+func TestPendingCredentialRequest_UnapprovedRecordHasNoApprovalFields(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+	minted := mintTestEnrolmentToken(t, server, "unapproved-tenant")
+	lodgeRec := lodgeCredentialRequest(t, server, minted.Token, LodgeCredentialRequestBody{
+		CSRPEM: generateTestCSR(t, "unapproved-device"),
+	})
+	require.Equal(t, http.StatusCreated, lodgeRec.Code)
+	lodgeResp := decodeLodgeResponse(t, lodgeRec)
+
+	stored, err := server.getPendingCredentialRequestByID(ctx, lodgeResp.RequestID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Nil(t, stored.ApprovedAt)
+	assert.Empty(t, stored.ApprovedBy)
+	assert.Empty(t, stored.BoundAccountID)
+	assert.Empty(t, stored.GrantedMarkers)
+	assert.False(t, stored.SelfApproved)
+}
