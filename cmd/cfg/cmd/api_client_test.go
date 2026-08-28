@@ -977,3 +977,277 @@ func TestAPIClientRevokeIPTrust(t *testing.T) {
 		assert.Contains(t, err.Error(), "ip trust entry not found")
 	})
 }
+
+// ── Enrolment tokens and headless credential enrolment (Issue #3720) ─────────────
+
+func TestAPIClientMintEnrolmentToken(t *testing.T) {
+	t.Run("sends tenant_id and returns the one-time token", func(t *testing.T) {
+		var capturedMethod, capturedPath, capturedBody string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedMethod = r.Method
+			capturedPath = r.URL.Path
+			buf := make([]byte, 256)
+			n, _ := r.Body.Read(buf)
+			capturedBody = string(buf[:n])
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"id":           "et-test-1",
+					"token":        "raw-token-value",
+					"token_prefix": "raw-to",
+					"tenant_id":    "root/msp-a",
+					"created_at":   time.Now().UTC().Format(time.RFC3339),
+					"expires_at":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+					"revoked":      false,
+				},
+			})
+		}))
+		defer server.Close()
+
+		client, err := NewAPIClient(&APIClientConfig{BaseURL: server.URL, TLSInsecure: true})
+		require.NoError(t, err)
+
+		resp, err := client.MintEnrolmentToken(context.Background(), "root/msp-a")
+		require.NoError(t, err)
+		assert.Equal(t, "POST", capturedMethod)
+		assert.Equal(t, "/api/v1/enrolment-tokens", capturedPath)
+		assert.Contains(t, capturedBody, "root/msp-a")
+		assert.Equal(t, "et-test-1", resp.ID)
+		assert.Equal(t, "raw-token-value", resp.Token)
+		assert.Equal(t, "root/msp-a", resp.TenantID)
+	})
+
+	t.Run("API error is returned", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"target tenant is outside caller's tenant subtree"}`))
+		}))
+		defer server.Close()
+
+		client, err := NewAPIClient(&APIClientConfig{BaseURL: server.URL, TLSInsecure: true})
+		require.NoError(t, err)
+
+		_, err = client.MintEnrolmentToken(context.Background(), "root/other")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "outside caller's tenant subtree")
+	})
+}
+
+func TestAPIClientRevokeEnrolmentToken(t *testing.T) {
+	t.Run("sends POST to the revoke path and returns the redacted token", func(t *testing.T) {
+		var capturedMethod, capturedPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedMethod = r.Method
+			capturedPath = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"id":           "et-test-1",
+					"token_prefix": "raw-to",
+					"tenant_id":    "root/msp-a",
+					"revoked":      true,
+				},
+			})
+		}))
+		defer server.Close()
+
+		client, err := NewAPIClient(&APIClientConfig{BaseURL: server.URL, TLSInsecure: true})
+		require.NoError(t, err)
+
+		resp, err := client.RevokeEnrolmentToken(context.Background(), "et-test-1")
+		require.NoError(t, err)
+		assert.Equal(t, "POST", capturedMethod)
+		assert.Equal(t, "/api/v1/enrolment-tokens/et-test-1/revoke", capturedPath)
+		assert.True(t, resp.Revoked)
+		assert.Empty(t, resp.Token, "revoke response must never carry the raw token value")
+	})
+
+	t.Run("already-spent token returns error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"Enrolment token has already been spent"}`))
+		}))
+		defer server.Close()
+
+		client, err := NewAPIClient(&APIClientConfig{BaseURL: server.URL, TLSInsecure: true})
+		require.NoError(t, err)
+
+		_, err = client.RevokeEnrolmentToken(context.Background(), "et-test-1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already been spent")
+	})
+}
+
+func TestAPIClientLodgeCredentialRequest(t *testing.T) {
+	t.Run("sends the bearer enrolment token and CSR-only body", func(t *testing.T) {
+		var capturedAuth, capturedBody string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedAuth = r.Header.Get("Authorization")
+			buf := make([]byte, 4096)
+			n, _ := r.Body.Read(buf)
+			capturedBody = string(buf[:n])
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"request_id":                   "cr-test-1",
+					"public_key_fingerprint":       "full-fp",
+					"public_key_fingerprint_short": "AB12-CD34",
+					"collect_secret":               "collect-secret-value",
+					"expires_at":                   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				},
+			})
+		}))
+		defer server.Close()
+
+		client, err := NewAPIClient(&APIClientConfig{
+			BaseURL:     server.URL,
+			BearerToken: "the-enrolment-token",
+			TLSInsecure: true,
+		})
+		require.NoError(t, err)
+
+		resp, err := client.LodgeCredentialRequest(context.Background(), LodgeCredentialRequestBody{
+			CSRPEM:   "-----BEGIN CERTIFICATE REQUEST-----\nfake\n-----END CERTIFICATE REQUEST-----\n",
+			Hostname: "laptop-01",
+			Platform: "linux",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "Bearer the-enrolment-token", capturedAuth)
+		assert.Contains(t, capturedBody, "CERTIFICATE REQUEST")
+		assert.Contains(t, capturedBody, "laptop-01")
+		assert.NotContains(t, capturedBody, "PRIVATE KEY")
+		assert.Equal(t, "cr-test-1", resp.RequestID)
+		assert.Equal(t, "AB12-CD34", resp.PublicKeyFingerprintShort)
+		assert.Equal(t, "collect-secret-value", resp.CollectSecret)
+	})
+
+	t.Run("unauthorized token returns error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="cfgms-credential-requests"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}))
+		defer server.Close()
+
+		client, err := NewAPIClient(&APIClientConfig{BaseURL: server.URL, BearerToken: "bad-token", TLSInsecure: true})
+		require.NoError(t, err)
+
+		_, err = client.LodgeCredentialRequest(context.Background(), LodgeCredentialRequestBody{CSRPEM: "x"})
+		require.Error(t, err)
+	})
+}
+
+func TestAPIClientCollectCredentialRequest(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		body       string
+		assertFn   func(t *testing.T, result *CollectCredentialRequestResult, err error)
+	}{
+		{
+			name:       "pending",
+			statusCode: http.StatusOK,
+			body:       `{"data":{"status":"pending"}}`,
+			assertFn: func(t *testing.T, result *CollectCredentialRequestResult, err error) {
+				require.NoError(t, err)
+				assert.Equal(t, "pending", result.Status)
+				assert.Nil(t, result.Certificate)
+				assert.False(t, result.AlreadyGone)
+			},
+		},
+		{
+			name:       "denied",
+			statusCode: http.StatusOK,
+			body:       `{"data":{"status":"denied"}}`,
+			assertFn: func(t *testing.T, result *CollectCredentialRequestResult, err error) {
+				require.NoError(t, err)
+				assert.Equal(t, "denied", result.Status)
+			},
+		},
+		{
+			name:       "expired",
+			statusCode: http.StatusOK,
+			body:       `{"data":{"status":"expired"}}`,
+			assertFn: func(t *testing.T, result *CollectCredentialRequestResult, err error) {
+				require.NoError(t, err)
+				assert.Equal(t, "expired", result.Status)
+			},
+		},
+		{
+			name:       "already collected (410 Gone)",
+			statusCode: http.StatusGone,
+			body:       "",
+			assertFn: func(t *testing.T, result *CollectCredentialRequestResult, err error) {
+				require.NoError(t, err)
+				assert.True(t, result.AlreadyGone)
+			},
+		},
+		{
+			name:       "not the authoritative node (503) is a retryable status, not an error",
+			statusCode: http.StatusServiceUnavailable,
+			body:       "service unavailable",
+			assertFn: func(t *testing.T, result *CollectCredentialRequestResult, err error) {
+				require.NoError(t, err)
+				assert.Equal(t, "retry", result.Status)
+			},
+		},
+		{
+			name:       "unknown id or wrong secret (404) is an error",
+			statusCode: http.StatusNotFound,
+			body:       `{"error":"Credential request not found"}`,
+			assertFn: func(t *testing.T, result *CollectCredentialRequestResult, err error) {
+				require.Error(t, err)
+				assert.Nil(t, result)
+			},
+		},
+		{
+			name:       "success returns the certificate",
+			statusCode: http.StatusOK,
+			body: `{"data":{"certificate_pem":"CERT","ca_certificate_pem":"CA","serial_number":"42",` +
+				`"account_id":"acct-1","granted_markers":["admin"],"expires_at":"2027-01-01T00:00:00Z"}}`,
+			assertFn: func(t *testing.T, result *CollectCredentialRequestResult, err error) {
+				require.NoError(t, err)
+				require.NotNil(t, result.Certificate)
+				assert.Equal(t, "CERT", result.Certificate.CertificatePEM)
+				assert.Equal(t, "CA", result.Certificate.CACertificatePEM)
+				assert.Equal(t, "42", result.Certificate.SerialNumber)
+				assert.Equal(t, "acct-1", result.Certificate.AccountID)
+				assert.Equal(t, []string{"admin"}, result.Certificate.GrantedMarkers)
+				assert.Empty(t, result.Status)
+				assert.False(t, result.AlreadyGone)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedAuth string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedAuth = r.Header.Get("Authorization")
+				assert.Equal(t, "POST", r.Method)
+				assert.Equal(t, "/api/v1/credential-requests/cr-test-1/collect", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.statusCode)
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
+				}
+			}))
+			defer server.Close()
+
+			client, err := NewAPIClient(&APIClientConfig{
+				BaseURL:     server.URL,
+				BearerToken: "the-collect-secret",
+				TLSInsecure: true,
+			})
+			require.NoError(t, err)
+
+			result, err := client.CollectCredentialRequest(context.Background(), "cr-test-1")
+			tc.assertFn(t, result, err)
+			assert.Equal(t, "Bearer the-collect-secret", capturedAuth)
+		})
+	}
+}

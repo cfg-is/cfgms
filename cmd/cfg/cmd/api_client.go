@@ -1258,6 +1258,200 @@ func (c *APIClient) WebAuthnPresenceFinish(ctx context.Context, assertionRespons
 	return result.PresenceToken, nil
 }
 
+// --- Enrolment tokens and headless credential enrolment (Issue #3720) ---
+
+// MintEnrolmentTokenResponse mirrors api.EnrolmentTokenResponse on the controller.
+// Token carries the raw secret only in the mint response; every other path
+// (including revoke) leaves it empty.
+type MintEnrolmentTokenResponse struct {
+	ID          string  `json:"id"`
+	Token       string  `json:"token,omitempty"`
+	TokenPrefix string  `json:"token_prefix"`
+	TenantID    string  `json:"tenant_id"`
+	CreatedAt   string  `json:"created_at"`
+	ExpiresAt   string  `json:"expires_at"`
+	Revoked     bool    `json:"revoked"`
+	RevokedAt   *string `json:"revoked_at,omitempty"`
+}
+
+// MintEnrolmentToken calls POST /api/v1/enrolment-tokens. The caller must already be
+// authenticated (admin mTLS bundle or a stepped-up session) — this method attaches no
+// credential of its own, it only sends the request through whatever bearer/mTLS
+// configuration c already carries.
+func (c *APIClient) MintEnrolmentToken(ctx context.Context, tenantID string) (*MintEnrolmentTokenResponse, error) {
+	body, err := json.Marshal(struct {
+		TenantID string `json:"tenant_id"`
+	}{TenantID: tenantID})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/enrolment-tokens", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data MintEnrolmentTokenResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+// RevokeEnrolmentToken calls POST /api/v1/enrolment-tokens/{id}/revoke. The response
+// never carries the raw token value — revocation does not re-disclose a secret that
+// was already shown once at mint time.
+func (c *APIClient) RevokeEnrolmentToken(ctx context.Context, id string) (*MintEnrolmentTokenResponse, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/enrolment-tokens/"+url.PathEscape(id)+"/revoke", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data MintEnrolmentTokenResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+// LodgeCredentialRequestBody mirrors api.LodgeCredentialRequestBody on the controller.
+// CSRPEM is the only field that carries key material, and it carries only the public
+// key: it is a PEM CERTIFICATE REQUEST self-signed by a private key that never appears
+// in this struct, or anywhere else in a lodge request (Issue #3720 [REQUIRED TEST]).
+// Hostname, Label, Platform and Purpose are display-only text.
+type LodgeCredentialRequestBody struct {
+	CSRPEM   string `json:"csr_pem"`
+	Hostname string `json:"hostname,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Platform string `json:"platform,omitempty"`
+	Purpose  string `json:"purpose,omitempty"`
+}
+
+// LodgeCredentialRequestResponse mirrors api.LodgeCredentialRequestResponse.
+// CollectSecret is returned exactly once, by this call alone — no later call ever
+// re-discloses it.
+type LodgeCredentialRequestResponse struct {
+	RequestID                 string `json:"request_id"`
+	PublicKeyFingerprint      string `json:"public_key_fingerprint"`
+	PublicKeyFingerprintShort string `json:"public_key_fingerprint_short"`
+	CollectSecret             string `json:"collect_secret"`
+	ExpiresAt                 string `json:"expires_at"`
+}
+
+// LodgeCredentialRequest calls POST /api/v1/credential-requests/lodge, authenticated
+// by this client's bearer token — the enrolment token itself. Unlike every other
+// method in this file the controller accepts no API key, mTLS certificate, or session
+// on this call; the enrolment token is the only credential involved.
+func (c *APIClient) LodgeCredentialRequest(ctx context.Context, body LodgeCredentialRequestBody) (*LodgeCredentialRequestResponse, error) {
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/credential-requests/lodge", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data LodgeCredentialRequestResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+// CollectCredentialRequestResponse mirrors api.CollectCredentialRequestResponse —
+// the signed certificate, returned exactly once on a successful collection.
+type CollectCredentialRequestResponse struct {
+	CertificatePEM   string   `json:"certificate_pem"`
+	CACertificatePEM string   `json:"ca_certificate_pem"`
+	SerialNumber     string   `json:"serial_number"`
+	AccountID        string   `json:"account_id"`
+	GrantedMarkers   []string `json:"granted_markers"`
+	ExpiresAt        string   `json:"expires_at"`
+}
+
+// CollectCredentialRequestResult is the outcome of one poll against the collect
+// endpoint. Exactly one of Certificate, AlreadyGone, or a non-empty Status is
+// meaningful: Status is one of "pending", "denied", "expired" (echoed from the
+// controller), or the client-synthesized "retry" for a 503 (the controller is not the
+// authoritative node for minting right now; the request itself is untouched).
+type CollectCredentialRequestResult struct {
+	Status      string
+	Certificate *CollectCredentialRequestResponse
+	AlreadyGone bool
+}
+
+// CollectCredentialRequest calls POST /api/v1/credential-requests/{id}/collect,
+// authenticated by this client's bearer token — the collect secret returned once by
+// LodgeCredentialRequest. It performs exactly one poll; the caller decides whether and
+// how often to call it again. An unknown request ID and a wrong collect secret are
+// indistinguishable on the wire (both 404) and are surfaced here as an error, since
+// that condition can never resolve itself by polling again.
+func (c *APIClient) CollectCredentialRequest(ctx context.Context, requestID string) (*CollectCredentialRequestResult, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/credential-requests/"+url.PathEscape(requestID)+"/collect", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusGone:
+		return &CollectCredentialRequestResult{AlreadyGone: true}, nil
+	case http.StatusServiceUnavailable:
+		return &CollectCredentialRequestResult{Status: "retry"}, nil
+	case http.StatusOK:
+		var envelope struct {
+			Data struct {
+				Status           string   `json:"status,omitempty"`
+				CertificatePEM   string   `json:"certificate_pem,omitempty"`
+				CACertificatePEM string   `json:"ca_certificate_pem,omitempty"`
+				SerialNumber     string   `json:"serial_number,omitempty"`
+				AccountID        string   `json:"account_id,omitempty"`
+				GrantedMarkers   []string `json:"granted_markers,omitempty"`
+				ExpiresAt        string   `json:"expires_at,omitempty"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+		if envelope.Data.Status != "" {
+			return &CollectCredentialRequestResult{Status: envelope.Data.Status}, nil
+		}
+		return &CollectCredentialRequestResult{Certificate: &CollectCredentialRequestResponse{
+			CertificatePEM:   envelope.Data.CertificatePEM,
+			CACertificatePEM: envelope.Data.CACertificatePEM,
+			SerialNumber:     envelope.Data.SerialNumber,
+			AccountID:        envelope.Data.AccountID,
+			GrantedMarkers:   envelope.Data.GrantedMarkers,
+			ExpiresAt:        envelope.Data.ExpiresAt,
+		}}, nil
+	default:
+		return nil, c.parseError(resp)
+	}
+}
+
 // WebAuthnRevokeCredential calls POST /api/v1/accounts/{username}/webauthn/revoke/{credential_id}
 // to remove the specified credential from the account. credential_id must be the base64url-encoded
 // credential ID (as returned by WebAuthnListCredentials).

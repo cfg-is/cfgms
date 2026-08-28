@@ -606,9 +606,123 @@ enrolment token and hands it to a machine out of band (e.g. read over a phone ca
 pasted into a terminal). That machine, holding no certificate yet, spends the token to
 lodge a certificate signing request carrying only a public key. The request lands in a
 durable pending queue that administrators can list and deny. Story #3718 adds the
-approval decision, and story #3719 (below) adds the single-use collect call that signs
-the certificate and binds it to an account. There is no `cfg` CLI command yet; the
-endpoints below are REST-only until that follow-on work lands.
+approval decision, and story #3719 adds the single-use collect call that signs the
+certificate and binds it to an account. Story #3720 (below) adds the `cfg` CLI commands
+that drive both halves — minting/revoking from the administrator's workstation, and the
+headless machine's own enrolment. The REST reference for every endpoint these commands
+call follows the CLI sections.
+
+### cfg credential enrolment-token mint / revoke (Issue #3720)
+
+Run by the **administrator**, from an already-authenticated workstation (an admin mTLS
+bundle or an active session — see [Connection Management](#connection-management)).
+
+```bash
+cfg credential enrolment-token mint --tenant-id root/msp-a/client-1
+```
+
+Mints a single-use, one-hour token and prints the raw value **exactly once** — it cannot
+be retrieved again afterward, only its non-secret prefix (in a future list command, or
+in audit events). Hand that value to the enrolling machine out of band, then have its
+operator run `cfg credential enrol` there. Requires `enrolment-token:mint` at
+`AssuranceStrong`.
+
+```bash
+cfg credential enrolment-token revoke <id>
+```
+
+Revokes an unspent token before it is used. A token that has already been spent cannot
+be revoked — its one use is already consumed, and the command reports the server's `409`
+as an error naming that condition. Requires `enrolment-token:revoke` at
+`AssuranceStrong`.
+
+**Flags (both subcommands):**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
+| `--server-name` | — | Override the TLS server name used for certificate verification |
+
+`mint` additionally requires `--tenant-id` (no default — a tenant-scoped caller may only
+mint within its own subtree).
+
+### cfg credential enrol (Issue #3720)
+
+Run by the **operator on the headless machine** — the one with no `cfg` credential yet.
+
+```bash
+cfg credential enrol --token <token> --url https://controller:9443
+cfg credential enrol --token <token> --url https://controller:9443 --name prod
+```
+
+Generates an ECDSA P-256 keypair locally, builds a certificate signing request over the
+public half, and lodges it authenticated by `--token` — the private key never leaves
+this machine, and never appears in the request body (only the CSR, which carries the
+public key alone). On success the command prints, together and prominently:
+
+```
+Credential request lodged (id: cr-...)
+Public key fingerprint: AB12-CD34-EF56-7890
+Compare this fingerprint with the administrator before they approve the request.
+Approval endpoint (an administrator lists and approves pending requests here): https://controller:9443/api/v1/credential-requests
+Expires: 2026-08-28T11:00:00Z
+```
+
+**The fingerprint comparison is the actual security check** — read it to the
+administrator (phone, chat, in person) before they approve. `public_key_fingerprint_short`
+is a deterministic function of the public key alone, so the value the administrator sees
+next to the pending request in their own tooling must match what this command printed;
+approving a request whose fingerprint was never compared is a bare row click on a
+credential the approver is about to mark admin-capable.
+
+The command then polls the collect endpoint (`--poll-interval`, default 5s) until an
+administrator decides, printing `Waiting for administrator approval...` between polls,
+and exits with one of four distinct outcomes — the first three leave no credential file
+anywhere on disk:
+
+| Outcome | What happened | Message |
+|---|---|---|
+| Denied | An administrator denied the request | `credential request was denied by an administrator` |
+| Expired | No decision arrived within the request's one-hour lifetime | `credential request expired before it was approved` |
+| Interrupted | The operator pressed Ctrl-C while waiting | `enrolment interrupted; no credential was stored` |
+| Collected | Approved, and this command already collected it (should not normally occur — see below) | `credential request was already collected` |
+| **Success** | Approved and collected | `Enrolled as "<name>" (expires ...)` |
+
+On success the command collects the signed certificate, then finishes the same way
+`cfg connect --bundle` does on first import: it registers the connection in the local
+registry, stores the certificate and private key through the encrypted credential store
+(never cleartext), builds an mTLS client from them, exchanges the certificate for a
+session via `POST /api/v1/sessions`, and stores that session token in the OS keychain.
+The next ordinary `cfg` command against this controller works without any further step.
+
+The collect secret the lodge call returns is held only in a local variable for the life
+of the process — it is never written to disk and never appears in this command's output,
+at any verbosity.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--token` | — | Enrolment token minted by an administrator (env: `CFGMS_ENROLMENT_TOKEN`); required |
+| `--url` | — | Controller HTTPS URL; required, and must be HTTPS for any non-loopback address (same rule as `cfg connect`) |
+| `--name` | derived from URL host | Connection name to register |
+| `--hostname` | this machine's hostname | Display-only text sent with the request (shown to the administrator alongside the fingerprint) |
+| `--label` | — | Display-only label sent with the request |
+| `--platform` | — | Display-only platform sent with the request |
+| `--purpose` | `cli enrolment` | Display-only purpose sent with the request |
+| `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
+| `--server-name` | — | Override the TLS server name used for certificate verification |
+| `--poll-interval` | 5s | Interval between collect polls |
+
+None of these flags select the certificate's markers (admin, payload-signing, root
+scope) — that set is decided entirely by the administrator at approval time, never by
+the requesting machine.
+
+### REST reference
+
+The sections below document the endpoints the two commands above call. They remain
+accurate for a direct API consumer that does not go through `cfg`.
 
 ### Minting and revoking an enrolment token
 
