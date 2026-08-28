@@ -162,6 +162,15 @@ type managerOption func(*Manager, context.Context) error
 // not exist it is generated and stored. Corrupt or unavailable durable storage
 // fails construction; silently rotating or using an ephemeral key would make
 // previously persisted chains unverifiable.
+//
+// Adversary bound (ADR-004, Issue #3727): the key loaded here is read from the
+// controller's own secrets store and stays resident in m.hmacKey for the life
+// of the process. It defends the chain against an actor with audit-storage
+// access who does not hold this key — it does NOT defend against the
+// controller process itself, or anyone who compromises the controller host.
+// That actor holds this key by construction and can rewrite audit history
+// into a chain VerifyChain reports as fully consistent. See
+// docs/architecture/decisions/004-audit-chain-integrity.md#adversary-bound-issue-3727.
 func WithSecretsStore(store secretsInterfaces.SecretStore) managerOption {
 	return func(m *Manager, ctx context.Context) error {
 		const keyName = "audit/hmac-key"
@@ -584,6 +593,14 @@ func (m *Manager) generateChecksum(entry *business.AuditEntry) string {
 //   - Sequence gap (a sequence number is missing between two consecutive entries)
 //
 // Entries with SequenceNumber == 0 are pre-chain legacy entries and are skipped.
+//
+// Adversary bound (ADR-004, Issue #3727): these checks detect an actor who
+// modifies, deletes, or reorders entries WITHOUT recomputing SequenceNumber,
+// PreviousChecksum, and Checksum in order using m.hmacKey — i.e. an actor who
+// does not hold the key. An actor who does hold the key (see WithSecretsStore)
+// can recompute a fully consistent chain over rewritten content, and this
+// function will report zero breaks for it. That is not a defect in this
+// function; it is the documented bound of a keyed hash chain.
 func (m *Manager) VerifyChain(entries []*business.AuditEntry) []ChainBreak {
 	// Sort a working copy by SequenceNumber ascending so callers don't have to.
 	sorted := make([]*business.AuditEntry, len(entries))

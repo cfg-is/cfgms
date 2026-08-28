@@ -4,6 +4,16 @@
 **Date:** 2026-04-21  
 **Issue:** #767
 
+> **Amended 2026-08-28 (Issue #3727) — Adversary Bound.** This ADR's Threat Model
+> table always noted that a key holder who recomputes checksums defeats the chain
+> (see the original row below), but did not name who that key holder is by
+> construction. It is the controller itself: `WithSecretsStore` loads the HMAC key
+> from the controller's own secrets store, so a controller compromised at the host
+> level holds the key. See [Adversary Bound](#adversary-bound-issue-3727) for the
+> precise statement and its proof. Any architecture decision that names this chain
+> as a compensating control for a compromised-controller scenario is describing a
+> control that does not apply there — see ADR-021's qualification.
+
 ---
 
 ## Context
@@ -51,10 +61,72 @@ Use a **per-tenant HMAC-keyed hash chain** with the following design:
 | Attacker without HMAC key modifies a row | Yes | Checksum mismatch |
 | Attacker without HMAC key deletes a row | Yes | Sequence gap |
 | Attacker without HMAC key reorders rows | Yes | PreviousChecksum mismatch |
-| Attacker WITH HMAC key recomputes all checksums after modification | No | Inherent limitation of keyed hash chains |
+| Attacker WITH HMAC key recomputes all checksums after modification | No | Inherent limitation of keyed hash chains. By construction this includes **the controller itself when host-compromised** — see [Adversary Bound](#adversary-bound-issue-3727) |
 | Attacker modifies pre-chain (SequenceNumber==0) legacy entries | Partial | Per-entry checksum mismatch only; no chain linkage for legacy entries |
 
 The chain does **not** protect against a sufficiently privileged administrator who possesses the HMAC key recomputing all subsequent checksums. Closing this gap would require an external immutable anchor (e.g. a Merkle root published to an external system), which is out of scope for this story.
+
+---
+
+## Adversary Bound (Issue #3727)
+
+This chain detects exactly one class of adversary, and the distinction between
+"detects" and "does not detect" is not symmetric with "external" vs. "insider" — it
+is **whether the actor holds the HMAC key**, and the key's storage location
+determines who that is.
+
+**Detected: an actor with write/delete access to the audit storage backend who does
+not hold the chain's HMAC key.** A database administrator, a support engineer with
+direct SQL/filesystem access, or anyone else who can edit or delete rows in the
+flatfile, SQLite, or PostgreSQL backend but cannot reach `pkg/secrets` falls here.
+Deleting a row produces a sequence gap; reordering breaks `PreviousChecksum`;
+editing a field breaks `Checksum`. `VerifyChain` reports all three as `ChainBreak`s.
+This is the adversary the chain was designed for (`## Requirements` above), and the
+chain closes that gap completely for entries written after Issue #767.
+
+**Not detected: an actor who holds the HMAC key.** By construction, that actor
+includes **the controller process itself**, whenever `WithSecretsStore` is wired —
+which is the production configuration, not an edge case. The key is loaded from the
+controller's own secrets store (`audit/hmac-key`) and stays resident in the
+`Manager`'s memory for the life of the process. A controller compromised at the host
+level (the adversary CLAUDE.md's Threat Model section names explicitly — "Admin
+accounts may be phished or taken over for short periods") therefore already holds
+the key. Such an actor can rewrite any entry's content and recompute
+`SequenceNumber`, `PreviousChecksum`, and `Checksum` for every entry from that point
+forward, in order — producing a chain `VerifyChain` reports as fully consistent. A
+verifier sees a valid chain and nothing anomalous. This is not a bug in
+`VerifyChain`; it is the inherent bound of a keyed hash chain whose key is
+reachable by the party being defended against.
+
+`pkg/audit/manager_test.go`'s `TestVerifyChain_KeyHolderCanForgeConsistentChain`
+proves this mechanically: it takes real recorded entries, rewrites their content,
+recomputes the chain fields using the same manager (i.e. the same key) that
+recorded them, and shows `VerifyChain` reports zero breaks despite every entry's
+content differing from what was originally recorded.
+`TestVerifyChain_DetectsTampering`, `TestVerifyChain_DetectsPreviousChecksumMismatch`,
+and `TestVerifyChain_DetectsDeletion` prove the complementary half of the bound: the
+same package's protection against an actor who does *not* hold the key remains
+intact.
+
+**What this means for callers of this ADR.** "The audit trail" is not a single
+guarantee usable everywhere the phrase appears. It is strong evidence against
+storage-layer tampering by someone outside the controller's own trust boundary, and
+it is **no evidence at all** against the controller's own host being compromised —
+the exact scenario several other architecture decisions gesture at when they invoke
+"audit" as a backstop. Each such decision must say which adversary it means. ADR-021
+(`docs/architecture/decisions/021-identity-assurance-levels.md`) is qualified
+accordingly as part of this issue.
+
+**Interim disposition.** Closing this bound requires either (a) a signing key the
+controller cannot read after startup (external signer/HSM/KMS), or (b) an
+append-only sink outside the controller's trust boundary that the controller can
+append to but not rewrite. Both are larger than a documentation change and are
+deliberately not attempted here — see Issue #3727's Implementation Notes. The
+follow-up work is tracked as a private project draft
+(`PVTI_lADOCrV4cc4BX5ezzg4Z7eM`, materializes to a public issue at dispatch) titled
+"audit: move audit-chain signing key outside controller's post-startup reach." Until
+that work lands, the chain above should be read with this bound in mind: it is a
+compensating control against storage tampering, not against controller compromise.
 
 ---
 
