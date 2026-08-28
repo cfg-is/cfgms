@@ -387,10 +387,75 @@ const certBindingLastUsedCoalesceWindow = 5 * time.Minute
 // different serial on the same account, which is accepted (see persistCertBindingLastUsed).
 const certBindingLastUsedKeyPrefix = "cert-binding-last-used:"
 
-// certBindingLastUsedStoreKey returns the secret-store lookup key for username's
-// certificate-binding last-used record.
+const (
+	// certBindingLastUsedTag is the store tag carried by every last-used record; it is
+	// the coarse filter for the metadata lookup that locates one (see
+	// findCertBindingLastUsedRecord).
+	certBindingLastUsedTag = "cert-binding-last-used"
+
+	// certBindingLastUsedSecretType is the secret_type metadata value that, together
+	// with the username metadata field, identifies exactly one record within a tenant.
+	certBindingLastUsedSecretType = "cert_binding_last_used"
+
+	// certBindingLastUsedUsernameKey is the metadata field the record is looked up by.
+	certBindingLastUsedUsernameKey = "username"
+
+	// certBindingLastUsedSerialPrefix namespaces the serial -> RFC3339 timestamp entries
+	// inside the record's metadata map, keeping them disjoint from the identifying
+	// fields above so a serial can never collide with (or be mistaken for) one.
+	certBindingLastUsedSerialPrefix = "serial:"
+)
+
+// certBindingLastUsedStoreKey returns the secret-store write key for username's
+// certificate-binding last-used record. Reads never compose this key with a tenant
+// prefix — see findCertBindingLastUsedRecord.
 func certBindingLastUsedStoreKey(username string) string {
 	return certBindingLastUsedKeyPrefix + username
+}
+
+// certBindingLastUsedSerialKey returns the metadata key holding serial's timestamp.
+func certBindingLastUsedSerialKey(serial string) string {
+	return certBindingLastUsedSerialPrefix + serial
+}
+
+// findCertBindingLastUsedRecord locates username's certificate-binding last-used record
+// within storageTenant, returning (nil, nil) when none exists.
+//
+// The record is resolved by metadata filter, never by composing a "tenant/key" string for
+// GetSecret: GetSecret takes a single key and splits it on the FIRST slash to recover the
+// tenant, so for a multi-level tenant such as root/msp-a/client-1 — the documented CFGMS
+// tenancy shape — "root/msp-a/client-1/cert-binding-last-used:alice" resolves to tenant
+// "root" with name "msp-a/client-1/cert-binding-last-used:alice". That is a different
+// record in a different tenant's namespace than the one StoreSecret wrote (StoreSecret
+// takes TenantID as a separate field, so the write path is unaffected by the split).
+// Reading through that composition would silently return not-found for every multi-level
+// tenant: the listing would report "never used" for a certificate in daily use, and the
+// read-merge-write below would drop every other serial's timestamp on each write.
+// loadAccountFromStore resolves account records the same way for the same reason.
+func (s *Server) findCertBindingLastUsedRecord(ctx context.Context, username, storageTenant string) (*secretsif.SecretMetadata, error) {
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		TenantID: storageTenant,
+		Tags:     []string{certBindingLastUsedTag},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: certBindingLastUsedSecretType,
+			certBindingLastUsedUsernameKey:  username,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list certificate binding last-used records: %w", err)
+	}
+	// Re-check the identifying fields rather than trusting the filter: providers differ in
+	// how much of SecretFilter they honour, and returning another tenant's or another
+	// account's record here would cross exactly the boundary this lookup exists to keep.
+	for _, m := range metas {
+		if m == nil {
+			continue
+		}
+		if m.TenantID == storageTenant && m.Metadata[certBindingLastUsedUsernameKey] == username {
+			return m, nil
+		}
+	}
+	return nil, nil
 }
 
 // recordCertBindingUse asynchronously records that serial was just used to authenticate
@@ -410,6 +475,9 @@ func certBindingLastUsedStoreKey(username string) string {
 // A failed persist is logged, rate-limited by the same coalescing window, but never fails
 // the request that triggered it — recording use is an observability signal, not part of
 // the authorization decision.
+//
+// Tracked in s.certBindingLastUsedWG so Close() can wait for in-flight goroutines to
+// finish before secretStore is closed underneath them.
 func (s *Server) recordCertBindingUse(username, tenantID, serial string) {
 	now := time.Now().UTC()
 	if last, ok := s.certBindingLastUsedThrottle.Load(serial); ok {
@@ -419,7 +487,9 @@ func (s *Server) recordCertBindingUse(username, tenantID, serial string) {
 	}
 	s.certBindingLastUsedThrottle.Store(serial, now)
 
+	s.certBindingLastUsedWG.Add(1)
 	go func() {
+		defer s.certBindingLastUsedWG.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		err := s.persistCertBindingLastUsed(ctx, username, tenantID, serial, now)
@@ -450,32 +520,33 @@ func (s *Server) persistCertBindingLastUsed(ctx context.Context, username, tenan
 		return nil
 	}
 	storageTenant := accountStorageTenant(tenantID)
-	key := certBindingLastUsedStoreKey(username)
-	// GetSecret takes a single "tenant_id/key" string (no separate tenant parameter),
-	// while StoreSecret takes the bare key and tenant as distinct fields — same asymmetry
-	// the API-key store already works around (see loadAPIKeyFromStore's credentialRef).
-	getKey := storageTenant + "/" + key
 
-	uses := map[string]string{}
-	existing, err := s.secretStore.GetSecret(ctx, getKey)
-	switch {
-	case err == nil && existing != nil:
-		for k, v := range existing.Metadata {
-			uses[k] = v
-		}
-	case errors.Is(err, secretsif.ErrSecretNotFound):
-		// No prior recordings for this account — start fresh.
-	case err != nil:
+	// Identifying fields are rewritten on every store so the record stays locatable by
+	// findCertBindingLastUsedRecord regardless of which write created it.
+	uses := map[string]string{
+		secretsif.MetadataKeySecretType: certBindingLastUsedSecretType,
+		certBindingLastUsedUsernameKey:  username,
+	}
+	existing, err := s.findCertBindingLastUsedRecord(ctx, username, storageTenant)
+	if err != nil {
 		return err
 	}
+	if existing != nil {
+		// Carry forward only the serial entries; the identifying fields are set above.
+		for k, v := range existing.Metadata {
+			if strings.HasPrefix(k, certBindingLastUsedSerialPrefix) {
+				uses[k] = v
+			}
+		}
+	}
 
-	uses[serial] = usedAt.Format(time.RFC3339)
+	uses[certBindingLastUsedSerialKey(serial)] = usedAt.Format(time.RFC3339)
 
 	return s.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
-		Key:         key,
+		Key:         certBindingLastUsedStoreKey(username),
 		TenantID:    storageTenant,
 		Description: "certificate binding last-used timestamps",
-		Tags:        []string{"cert-binding-last-used"},
+		Tags:        []string{certBindingLastUsedTag},
 		Metadata:    uses,
 	})
 }
@@ -487,16 +558,19 @@ func (s *Server) loadCertBindingLastUsed(ctx context.Context, username, tenantID
 	if s.secretStore == nil {
 		return nil, nil
 	}
-	getKey := accountStorageTenant(tenantID) + "/" + certBindingLastUsedStoreKey(username)
-	secret, err := s.secretStore.GetSecret(ctx, getKey)
+	record, err := s.findCertBindingLastUsedRecord(ctx, username, accountStorageTenant(tenantID))
 	if err != nil {
-		if errors.Is(err, secretsif.ErrSecretNotFound) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	uses := make(map[string]time.Time, len(secret.Metadata))
-	for serial, ts := range secret.Metadata {
+	if record == nil {
+		return nil, nil
+	}
+	uses := make(map[string]time.Time, len(record.Metadata))
+	for k, ts := range record.Metadata {
+		serial, isSerialEntry := strings.CutPrefix(k, certBindingLastUsedSerialPrefix)
+		if !isSerialEntry {
+			continue // identifying field (secret_type, username), not a recorded use
+		}
 		parsed, parseErr := time.Parse(time.RFC3339, ts)
 		if parseErr != nil {
 			continue // corrupt/unparseable entry — skip rather than fail the whole lookup

@@ -178,6 +178,7 @@ type Server struct {
 	absentCapabilities             []interfaces.AbsentCapability            // Issue #3409: declared-optional capabilities absent in this deployment
 	osqueryDispatcher              stewardOsqueryDispatcher                 // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
 	certBindingLastUsedThrottle    sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
+	certBindingLastUsedWG          sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
 	onCertBindingLastUsedPersisted func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
 
 	// Listeners retained so Close can shut them regardless of whether their serve
@@ -1060,6 +1061,24 @@ func (s *Server) Close(ctx context.Context) error {
 		// Stop the config service's router cache goroutine (configrouting source cache).
 		if s.configService != nil {
 			s.configService.Close()
+		}
+
+		// Issue #3715: wait for any in-flight cert-binding last-used persistence
+		// goroutines (spawned by recordCertBindingUse) to finish before secretStore
+		// is closed below — otherwise a goroutine can still be writing to the store
+		// after Close() returns, racing whatever the caller does next (e.g. a test's
+		// t.TempDir() cleanup deleting the directory out from under an in-flight write).
+		certBindingDone := make(chan struct{})
+		go func() {
+			s.certBindingLastUsedWG.Wait()
+			close(certBindingDone)
+		}()
+		select {
+		case <-certBindingDone:
+		case <-ctx.Done():
+			if firstErr == nil {
+				firstErr = fmt.Errorf("api server close: timed out waiting for cert-binding last-used persistence: %w", ctx.Err())
+			}
 		}
 
 		s.mu.Lock()

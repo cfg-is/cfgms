@@ -3359,3 +3359,52 @@ func TestRecordCertBindingUse_StoreFailureDoesNotFailAuth(t *testing.T) {
 	assert.Contains(t, out, "Failed to persist certificate binding last-used timestamp",
 		"a failed update must be logged, not silent")
 }
+
+// TestCertBindingLastUsed_MultiLevelTenantRoundTrip verifies that a last-used record
+// written for a multi-level tenant ID (root/msp-a/client-1 — the documented CFGMS tenancy
+// shape) is read back by the same tenant, and is not visible to the tenant that a
+// first-slash key split would resolve to. Composing "tenant/key" for GetSecret resolved
+// the read to TenantID "root" with the rest of the path folded into the name, so the read
+// silently missed the written record: the listing reported "never used" for a certificate
+// in daily use, and the merge below dropped the other serial's timestamp on each write.
+func TestCertBindingLastUsed_MultiLevelTenantRoundTrip(t *testing.T) {
+	srv := setupTestServer(t)
+	ctx := context.Background()
+
+	const tenantID = "root/msp-a/client-1"
+	firstUse := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	secondUse := time.Now().UTC().Truncate(time.Second)
+
+	require.NoError(t, srv.persistCertBindingLastUsed(ctx, "alice", tenantID, "serial-aaa", firstUse))
+
+	uses, err := srv.loadCertBindingLastUsed(ctx, "alice", tenantID)
+	require.NoError(t, err)
+	require.Contains(t, uses, "serial-aaa", "record written for a multi-level tenant must be readable")
+	assert.True(t, firstUse.Equal(uses["serial-aaa"]), "expected %s, got %s", firstUse, uses["serial-aaa"])
+
+	// A second serial on the same account must merge, not clobber: the read side of the
+	// read-merge-write has to resolve the record that the write side created.
+	require.NoError(t, srv.persistCertBindingLastUsed(ctx, "alice", tenantID, "serial-bbb", secondUse))
+
+	uses, err = srv.loadCertBindingLastUsed(ctx, "alice", tenantID)
+	require.NoError(t, err)
+	require.Len(t, uses, 2, "recording a second serial must preserve the first")
+	assert.True(t, firstUse.Equal(uses["serial-aaa"]))
+	assert.True(t, secondUse.Equal(uses["serial-bbb"]))
+
+	// The record belongs to root/msp-a/client-1 only — the parent tenant a first-slash
+	// split would land on must not resolve it.
+	parentUses, err := srv.loadCertBindingLastUsed(ctx, "alice", "root")
+	require.NoError(t, err)
+	assert.Empty(t, parentUses, "another tenant must not resolve this account's record")
+}
+
+// TestCertBindingLastUsed_NoRecordReturnsEmpty verifies that an account which has never
+// recorded a use reads back as empty without error (never-used, not an error condition).
+func TestCertBindingLastUsed_NoRecordReturnsEmpty(t *testing.T) {
+	srv := setupTestServer(t)
+
+	uses, err := srv.loadCertBindingLastUsed(context.Background(), "never-authenticated", "root/msp-a")
+	require.NoError(t, err)
+	assert.Empty(t, uses)
+}
