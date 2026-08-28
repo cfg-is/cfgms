@@ -534,8 +534,10 @@ was removed (Issue #3688), the only — CLI path to a signing credential: there 
 cfg credential request-signing-cert
 
 cfg credential request-signing-cert \
-  --key-out ~/.config/cfgms/signing-key.pem \
   --cert-out ~/.config/cfgms/signing-cert.pem
+
+# Development only: also drop an unencrypted copy of the key on disk
+cfg credential request-signing-cert --export-plaintext-key --key-out ./dev-signing-key.pem
 ```
 
 The private key is generated on the operator's machine and never transmitted —
@@ -555,12 +557,28 @@ Management](#connection-management)) and completes a WebAuthn presence ceremony 
 the CLI opens a browser automatically when one is needed, the same flow used by
 other presence-gated commands.
 
+**Where the private key is kept:** the generated key is stored encrypted at rest in
+the machine-bound credential store — `<user config dir>/cfgms/credentials/signing-key.enc`,
+the same store `cfg connect` uses for the admin bundle's private key — not as a
+cleartext PEM file. Mode 0600 alone is access control, not encryption at rest: it
+does not protect the key from another process running as the operator, from a
+backup, or from a cloud-synced config directory. Only the certificate, which
+carries no secret, is written to `--cert-out`.
+
+A cleartext export is available for development interop, but only on explicit
+opt-in: `--key-out` without `--export-plaintext-key` is refused with an error
+rather than silently writing an unencrypted key. With the opt-in, the encrypted
+copy is still written, the export is mode 0600, and the command prints a warning
+naming the exported path.
+
 **Flags:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--key-out` | `<user config dir>/cfgms/signing-key.pem` | Path to write the generated private key PEM (mode 0600) |
 | `--cert-out` | `<user config dir>/cfgms/signing-cert.pem` | Path to write the issued certificate PEM (mode 0600) |
+| `--credential-name` | `signing-key` | Name the encrypted signing key is stored under in the credential store |
+| `--export-plaintext-key` | false | Also export the private key as a cleartext PEM (development only); required to use `--key-out` |
+| `--key-out` | `<user config dir>/cfgms/signing-key.pem` | Path for the cleartext key export; ignored unless `--export-plaintext-key` is passed, and an error if passed without it |
 | `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
