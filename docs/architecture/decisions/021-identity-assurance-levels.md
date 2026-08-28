@@ -989,14 +989,21 @@ an operator and have them authorise another — Epic #3711 D10, inherited
 unchanged from Epic #3571 D2. This amendment does not close that gap.
 Cryptographic forgery is in scope for the assurance model as a whole; a
 controller that lies about what it is showing a human is not. The
-compensating controls are the ones Epic #3711 names: the server-side
-blast-radius bound described above — which, once Story #3696 lands, will mean
-an admin-marked certificate, however obtained, cannot sign a payload a steward
-will run, and which today does not hold at all (see the [GAP] above) — and the
-audit trail (every bootstrap-fallback authentication is logged —
-`emitBootstrapFallbackAudit`, `features/controller/api/middleware.go`). Epic
-#3711's decomposition notes that the audit trail's strength against a
-host-compromised controller is weaker than that phrase implies, because the
-ADR-004 audit chain's signing key lives in the same controller's secret store
-(tracked separately, #3727) — that weakness is real and is not resolved by
-this amendment.
+compensating control is the server-side blast-radius bound described above —
+which, once Story #3696 lands, will mean an admin-marked certificate, however
+obtained, cannot sign a payload a steward will run, and which today does not
+hold at all (see the [GAP] above).
+
+The audit trail is not a second compensating control here. Every
+bootstrap-fallback authentication is logged (`emitBootstrapFallbackAudit`,
+`features/controller/api/middleware.go`), but per this ADR's own
+[Non-Goals](#non-goals) — established by ADR-004's
+[Adversary Bound](004-audit-chain-integrity.md#adversary-bound-issue-3727)
+(Issue #3727, closed) — the audit trail is not a compensating control for a
+host-compromised controller: `pkg/audit`'s chain is tamper-evident only
+against an actor who does not hold its HMAC key, and a host-compromised
+controller holds that key and can rewrite its own history into a chain that
+still verifies. `emitBootstrapFallbackAudit` writes a structured log line
+under the same controller's custody, not an independent witness, so it is
+bounded the same way. The gap this amendment does not close is therefore
+uncompensated, not weakly compensated.
