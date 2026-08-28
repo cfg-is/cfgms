@@ -385,7 +385,16 @@ const certBindingLastUsedCoalesceWindow = 5 * time.Minute
 // write here can never touch — and therefore can never regress — any security-relevant
 // account field. The only residual race is against another last-used write for a
 // different serial on the same account, which is accepted (see persistCertBindingLastUsed).
-const certBindingLastUsedKeyPrefix = "cert-binding-last-used:"
+// The trailing "-" (not ":") is deliberate: this key is written as a filename by the
+// flatfile-backed secret store, and ":" is legal in a POSIX filename but illegal on
+// Windows (NTFS reserves it as the alternate-data-stream separator) — a colon here
+// made every write of this key fail on Windows while passing on Linux (Issue #3715
+// merge-queue diagnosis, 2026-08-28). "-" matches the separator every sibling prefix
+// in this package already uses (enrolmentTokenKeyPrefix, credentialRequestKeyPrefix,
+// accountKeyPrefix) and is filename-safe on every supported platform. "/" is
+// deliberately avoided too — see findCertBindingLastUsedRecord for why a slash in a
+// composed key is unsafe for multi-level tenants.
+const certBindingLastUsedKeyPrefix = "cert-binding-last-used-"
 
 const (
 	// certBindingLastUsedTag is the store tag carried by every last-used record; it is
@@ -424,8 +433,8 @@ func certBindingLastUsedSerialKey(serial string) string {
 // The record is resolved by metadata filter, never by composing a "tenant/key" string for
 // GetSecret: GetSecret takes a single key and splits it on the FIRST slash to recover the
 // tenant, so for a multi-level tenant such as root/msp-a/client-1 — the documented CFGMS
-// tenancy shape — "root/msp-a/client-1/cert-binding-last-used:alice" resolves to tenant
-// "root" with name "msp-a/client-1/cert-binding-last-used:alice". That is a different
+// tenancy shape — "root/msp-a/client-1/cert-binding-last-used-alice" resolves to tenant
+// "root" with name "msp-a/client-1/cert-binding-last-used-alice". That is a different
 // record in a different tenant's namespace than the one StoreSecret wrote (StoreSecret
 // takes TenantID as a separate field, so the write path is unaffected by the split).
 // Reading through that composition would silently return not-found for every multi-level

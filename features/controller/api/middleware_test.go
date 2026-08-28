@@ -3408,3 +3408,23 @@ func TestCertBindingLastUsed_NoRecordReturnsEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, uses)
 }
+
+// TestCertBindingLastUsedStoreKey_WindowsFilenameSafe guards against the regression
+// diagnosed in the merge queue on 2026-08-28: certBindingLastUsedStoreKey used to
+// separate its prefix from the username with ":", which is legal in a POSIX filename
+// but illegal on Windows (NTFS reserves it as the alternate-data-stream separator).
+// The flatfile-backed secret store writes this key straight to a filename, so every
+// write of the record failed on Windows (rename ...cert-binding-last-used:alice.json:
+// "The filename, directory name, or volume label syntax is incorrect") while passing
+// on Linux — this test would have caught it without needing a Windows runner.
+func TestCertBindingLastUsedStoreKey_WindowsFilenameSafe(t *testing.T) {
+	const windowsReservedChars = `<>:"/\|?*`
+
+	for _, username := range []string{"alice", "bob.smith", "svc-account"} {
+		key := certBindingLastUsedStoreKey(username)
+		for _, c := range windowsReservedChars {
+			assert.False(t, strings.ContainsRune(key, c),
+				"store key %q must not contain Windows-reserved filename character %q", key, c)
+		}
+	}
+}
