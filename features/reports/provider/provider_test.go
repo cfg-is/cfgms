@@ -936,6 +936,52 @@ func TestTrendFixtureStep_UsesOriginalSpacingAwayFromMidnight(t *testing.T) {
 		"away from midnight the fixture keeps its original 5-minute spacing")
 }
 
+// TestTrendFixtureStep_RecordsNearMidnightAreNotDoubleCounted is the Issue #3707
+// regression guard. TestTrendFixtureStep_KeepsEveryRecordInsideTodaysBucket only
+// checks time.Time arithmetic — that every record's timestamp falls on or after
+// midnight — and that check passes at every offset below, both before and after
+// the fix. It could not have caught this bug, because the fault was never in
+// where the fixture places its records; it was in how the entity graph's SQLite
+// provider compared already-correctly-placed records against a bucket boundary.
+//
+// Mechanism (see rfc3339's doc comment in
+// pkg/entitygraph/providers/sqlite/observations.go for the full explanation):
+// time.RFC3339Nano trims trailing zero fractional digits, so UTC midnight
+// formats as "...T00:00:00Z" (no fraction) while a timestamp a few hundred
+// milliseconds later in the *same* second formats as "...T00:00:00.5Z". Byte
+// comparison of those two strings ranks the later instant first ('.' sorts
+// before 'Z'), so SQLite's `observed_at <= ?` on the yesterday bucket's
+// midnight upper bound wrongly matched a record that was actually in today's
+// bucket. This walk drives the real fixture and the real GetTrendData
+// "device_count" path — not just field arithmetic — across the offsets where
+// records land inside that first vulnerable second, and fails if any of them
+// gets attributed to yesterday.
+//
+// Offset 0 itself (elapsed exactly zero) is excluded: at that exact instant a
+// record can equal the bucket boundary precisely, which both getDeviceCountTrends's
+// per-day range and GetHistory's SQL predicate treat as inclusive on both ends —
+// a distinct, separate double-count edge case that requires hitting the exact
+// UTC-midnight nanosecond and cannot occur at any of the offsets used by
+// trendFixtureStep for real wall-clock now.Now() values. Fixing that boundary
+// semantics question is a redesign of trend bucketing, which issue #3707
+// explicitly puts out of scope; only the string-comparison bug is fixed here.
+func TestTrendFixtureStep_RecordsNearMidnightAreNotDoubleCounted(t *testing.T) {
+	day := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+
+	for ms := 1; ms <= 10000; ms += 50 {
+		now := day.Add(time.Duration(ms) * time.Millisecond)
+
+		p, query := newTrendFixtureAt(t, now)
+		points, err := p.GetTrendData(context.Background(), "device_count", query)
+		require.NoError(t, err, "offset=%s", time.Duration(ms)*time.Millisecond)
+		require.Len(t, points, 2, "offset=%s", time.Duration(ms)*time.Millisecond)
+
+		assert.Equal(t, 0.0, points[0].Value,
+			"offset=%s: a record stored this soon after midnight must not be attributed to yesterday's bucket",
+			time.Duration(ms)*time.Millisecond)
+	}
+}
+
 // newTrendFixture seeds the entity graph with two devices (device-a and device-b)
 // and returns a provider plus a query spanning exactly two daily buckets.
 //
@@ -948,9 +994,17 @@ func TestTrendFixtureStep_UsesOriginalSpacingAwayFromMidnight(t *testing.T) {
 //	device-b — one host-entity observation: counted as a device, no drift event.
 func newTrendFixture(t *testing.T) (*DataProvider, interfaces.DataQuery) {
 	t.Helper()
+	return newTrendFixtureAt(t, time.Now().UTC())
+}
+
+// newTrendFixtureAt is newTrendFixture with an injectable "now", used to drive
+// the fixture at exact, named offsets from UTC midnight instead of at
+// wall-clock time.Now() — see TestGetTrendData_DeviceCount_RecordWithinSameSecondAsMidnight_NotCountedYesterday
+// and TestTrendFixtureStep_RecordsNearMidnightAreNotDoubleCounted (Issue #3707).
+func newTrendFixtureAt(t *testing.T, now time.Time) (*DataProvider, interfaces.DataQuery) {
+	t.Helper()
 
 	egp := newTestEGProvider(t)
-	now := time.Now().UTC()
 	midnightUTC := now.Truncate(24 * time.Hour)
 
 	// Space the fixture's four records across the part of today's bucket that has
@@ -1051,6 +1105,40 @@ func TestGetTrendData_DeviceCount_CountsUniqueDevicesPerDailyBucket(t *testing.T
 	assert.Equal(t, 2.0, points[1].Value,
 		"device-a and device-b both have observations today — two unique devices")
 	assert.Equal(t, "2 devices", points[1].Label)
+}
+
+// TestGetTrendData_DeviceCount_RecordWithinSameSecondAsMidnight_NotCountedYesterday
+// is the Issue #3707 deterministic reproduction: at exactly 2.5 seconds after UTC
+// midnight, trendFixtureStep computes a 500ms step, which places device-a's
+// earliest observation (now-4*step) 500ms after midnight — inside the same UTC
+// second as the day boundary but still, correctly, in today's bucket.
+//
+// On unmodified develop this FAILS: `expected 0, got 1`. The entity graph's
+// SQLite provider formatted "500ms after midnight" as "...T00:00:00.5Z" and
+// midnight itself as "...T00:00:00Z" (time.RFC3339Nano trims the whole
+// fractional field when it's exactly zero), and compared them as raw SQLite TEXT.
+// Byte-wise, ".5Z" sorts before "Z" ('.' is 0x2E, 'Z' is 0x5A), so
+// "...T00:00:00.5Z" <= "...T00:00:00Z" was true even though 500ms-after-midnight
+// is chronologically *later*. getDeviceCountTrends's yesterday-bucket day-range
+// query (`observed_at <= <midnight>`) matched the record on that inverted
+// ordering and attributed device-a to yesterday.
+//
+// Fixed in pkg/entitygraph/providers/sqlite/observations.go: rfc3339 now formats
+// with a fixed-width, zero-padded fractional field, so text order always matches
+// chronological order.
+func TestGetTrendData_DeviceCount_RecordWithinSameSecondAsMidnight_NotCountedYesterday(t *testing.T) {
+	day := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	now := day.Add(2500 * time.Millisecond) // named offset: +2.5s past UTC midnight
+
+	p, query := newTrendFixtureAt(t, now)
+
+	points, err := p.GetTrendData(context.Background(), "device_count", query)
+
+	require.NoError(t, err)
+	assertDailyBuckets(t, query, points)
+
+	assert.Equal(t, 0.0, points[0].Value,
+		"a record placed 500ms after midnight belongs to today's bucket, not yesterday's")
 }
 
 // ── GetTrendData day-query failure paths ─────────────────────────────────────

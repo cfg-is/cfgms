@@ -299,6 +299,46 @@ func TestSubjectKind(t *testing.T) {
 	require.Equal(t, "edge", subjectKind("contains|host:a|host:b"))
 }
 
+// TestRFC3339_LexicographicallySortable is the Issue #3707 root-cause guard:
+// GetHistory and every other time-range read in this package compares rfc3339
+// output as raw SQLite TEXT (`observed_at >= ? AND observed_at <= ?`), so text
+// order must equal chronological order for every pair of timestamps a caller
+// could plausibly compare, not just ones that happen to share the same
+// fractional-second width.
+//
+// time.RFC3339Nano trims trailing zero fractional digits: an exact second (e.g.
+// UTC midnight) formats with no fractional part at all ("...T00:00:00Z"), while
+// a timestamp a fraction of a second later in the *same* second keeps its
+// fraction ("...T00:00:00.5Z"). Byte-wise, '.' (0x2E) sorts before 'Z' (0x5A),
+// so the chronologically later string sorts first — a query bounded by the
+// exact-second value wrongly matches the later one too. Reproduced via
+// features/reports/provider's device_count trend, which queries this provider
+// with a UTC-midnight bucket boundary.
+func TestRFC3339_LexicographicallySortable(t *testing.T) {
+	midnight := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name   string
+		before time.Time
+		after  time.Time
+	}{
+		{"exact second vs sub-second later in the same second", midnight, midnight.Add(500 * time.Millisecond)},
+		{"exact second vs one nanosecond later", midnight, midnight.Add(1 * time.Nanosecond)},
+		{"sub-second vs a later sub-second in the same second", midnight.Add(100 * time.Millisecond), midnight.Add(900 * time.Millisecond)},
+		{"whole second vs the next whole second", midnight, midnight.Add(1 * time.Second)},
+		{"across a day boundary", midnight.Add(-1 * time.Nanosecond), midnight},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.True(t, tc.before.Before(tc.after), "test case invariant: before must precede after")
+			require.Less(t, rfc3339(tc.before), rfc3339(tc.after),
+				"rfc3339(%s)=%q must sort before rfc3339(%s)=%q to match chronological order",
+				tc.before, rfc3339(tc.before), tc.after, rfc3339(tc.after))
+		})
+	}
+}
+
 func TestParseEdgeSubject(t *testing.T) {
 	edgeType, from, to, err := parseEdgeSubject("contains|host:a|host:b")
 	require.NoError(t, err)

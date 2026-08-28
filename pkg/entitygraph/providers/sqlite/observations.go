@@ -47,8 +47,22 @@ func subjectKind(subject string) string {
 	return "edge"
 }
 
+// fixedWidthRFC3339Nano is time.RFC3339Nano with the fractional-second field
+// written as "0"s instead of "9"s. The "9" pattern is what makes
+// time.RFC3339Nano trim trailing zero fractional digits on Format — e.g.
+// midnight formats as "...T00:00:00Z" (no fraction at all) while 500ms after
+// midnight formats as "...T00:00:00.5Z". Byte-for-byte lexicographic
+// comparison of those two strings puts the ".5Z" one first ('.' sorts before
+// 'Z'), even though it is chronologically later — an ordering inversion for
+// any pair of timestamps that share the same whole second. "0"s force a
+// fixed-width, zero-padded fraction on every Format call, which keeps text
+// order equal to time order. time.Parse(time.RFC3339Nano, ...) accepts any
+// digit count in the fractional field, so the zero-padded form round-trips
+// through the existing "9"-pattern parse calls unchanged.
+const fixedWidthRFC3339Nano = "2006-01-02T15:04:05.000000000Z07:00"
+
 // rfc3339 formats a timestamp for storage as a sortable TEXT column value.
-func rfc3339(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+func rfc3339(t time.Time) string { return t.UTC().Format(fixedWidthRFC3339Nano) }
 
 // ReportObservations ingests a batch of observations from one source. Each
 // observation is content-hash-deduped, appended to the observation log, and
