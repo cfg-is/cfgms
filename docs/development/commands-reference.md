@@ -598,6 +598,140 @@ naming the exported path.
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
 
+## Enrolment Tokens and the Pending Credential-Request Queue (Issue #3717)
+
+Story #3717 (Epic #3711 — browser-authenticated CLI enrolment) adds the first half of
+zero-custody operator enrolment: an administrator mints a short-lived, single-use
+enrolment token and hands it to a machine out of band (e.g. read over a phone call, or
+pasted into a terminal). That machine, holding no certificate yet, spends the token to
+lodge a certificate signing request carrying only a public key. The request lands in a
+durable pending queue that administrators can list and deny. **This story issues no
+certificate, binds no account, and collects no credential** — those are the next two
+stories in the epic. There is no `cfg` CLI command yet; the endpoints below are REST-only
+until that follow-on work lands.
+
+### Minting and revoking an enrolment token
+
+```
+POST /api/v1/enrolment-tokens
+{"tenant_id": "root/msp-a/client-1"}
+```
+
+Requires the `enrolment-token:mint` permission at `AssuranceStrong` (mTLS admin bundle or
+a stepped-up web/CLI session — see [Connection Management](#connection-management)).
+`tenant_id` is required; a tenant-scoped caller may only mint within its own subtree. The
+response includes the raw token value **exactly once**:
+
+```json
+{
+  "data": {
+    "id": "et-<uuid>",
+    "token": "<64-char hex — shown only here>",
+    "token_prefix": "a1b2c3",
+    "tenant_id": "root/msp-a/client-1",
+    "created_at": "2026-08-28T10:00:00Z",
+    "expires_at": "2026-08-28T11:00:00Z",
+    "revoked": false
+  }
+}
+```
+
+Hand the `token` value to the enrolling machine out of band. It is single-use — spent the
+moment a lodge succeeds against it, whether or not the resulting request is ever
+approved — and expires on its own an hour after minting. Only `token_prefix` (its first 6
+characters) is ever shown again, in logs or elsewhere; the full value cannot be retrieved
+after this response.
+
+To revoke an unspent token before it is used:
+
+```
+POST /api/v1/enrolment-tokens/{id}/revoke
+```
+
+Requires `enrolment-token:revoke` at `AssuranceStrong`. A token that has already been
+spent cannot be revoked (409) — its one use is already consumed.
+
+### Lodging a signing request
+
+```
+POST /api/v1/credential-requests/lodge
+Authorization: Bearer <enrolment token>
+{"csr_pem": "-----BEGIN CERTIFICATE REQUEST-----...", "hostname": "laptop-01", "label": "sales laptop", "platform": "linux", "purpose": "cli enrolment"}
+```
+
+This is the one endpoint in the epic that carries no API key, mTLS certificate, or web
+session — only the enrolment token as a bearer credential, exactly as `POST
+/api/v1/register` is unauthenticated by design. An absent, unknown, revoked, expired, or
+already-spent token all return `401` with an identical body, so no response ever
+discloses which of those five conditions applied.
+
+`csr_pem` must be a single PEM `CERTIFICATE REQUEST` block whose own signature verifies
+against the public key it carries; a body that also contains any private-key PEM block is
+rejected outright. `hostname`, `label`, `platform`, and `purpose` are display-only text —
+they are never trusted for any authorization decision, and no caller-supplied field (a
+`tenant_id`, `permission`, `account`, or similar claim slipped into the body) has any
+effect: the tenant is always derived from the token record.
+
+On success the response is returned **once**:
+
+```json
+{
+  "data": {
+    "request_id": "cr-<uuid>",
+    "public_key_fingerprint": "<64-char hex SHA-256 over the public key>",
+    "public_key_fingerprint_short": "AB12-CD34-EF56-7890",
+    "collect_secret": "<64-char hex — shown only here>",
+    "expires_at": "2026-08-28T11:00:00Z"
+  }
+}
+```
+
+`public_key_fingerprint_short` is a deterministic function of the public key alone — the
+enrolling machine can compute and print the same value locally, so an administrator
+reviewing the pending queue can visually match what is on screen against what the machine
+printed before approving. `collect_secret` is consumed by a later story; only its hash is
+persisted here.
+
+Lodge is rate limited per source address and bounded by a per-tenant outstanding-pending
+cap: once a tenant's queue is full, further lodges are refused (`503`) rather than
+evicting older entries — the cap is a ceiling, not a queue-flush primitive.
+
+### Listing and denying pending requests
+
+```
+GET /api/v1/credential-requests
+```
+
+Requires `credential-request:list`. Returns pending requests scoped to the caller's
+tenant subtree (an unscoped mTLS admin sees all), including the fingerprint, its short
+comparable form, source address, requested purpose, and expiry — never the CSR, the
+collect-secret hash, or which token lodged it.
+
+```
+POST /api/v1/credential-requests/{id}/deny
+{"reason": "unrecognized device"}
+```
+
+Requires `credential-request:deny`. Denial is terminal: a denied request can never later
+be approved or collected, and denying it twice returns `409`.
+
+### Expiry
+
+Both unspent enrolment tokens and pending requests expire on a one-hour lifetime and are
+removed by a background sweep that runs independently of any read — an expired record is
+not merely hidden on the next list call, it is deleted. Spent tokens and denied requests
+are left in place; the sweep only removes records that are still live but past their
+expiry.
+
+### Permissions
+
+| Permission | Assurance floor | Notes |
+|------------|------------------|-------|
+| `enrolment-token:mint` | `AssuranceStrong` | Mints a single-use, short-lived token |
+| `enrolment-token:revoke` | `AssuranceStrong` | Revokes an unspent token |
+| `credential-request:list` | none | Read-only; outside the elevated-assurance surface |
+| `credential-request:deny` | none | De-escalation action, mirrors `registration:deny` |
+
 ## Workflow Management
 
 `cfg workflow` subcommands manage workflow definitions and their executions on the controller.

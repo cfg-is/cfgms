@@ -145,6 +145,12 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// sha256(operatorpayload.CanonicalBytes(envelope)).
 	{"POST", "/api/v1/operator-payload/sign/begin", "operator-payload:sign"},
 	{"POST", "/api/v1/operator-payload/sign/finish", "operator-payload:sign"},
+	// Enrolment tokens (Issue #3717, Epic #3711) — mint and revoke are the
+	// credential-minting/destroying surfaces for the browser-authenticated CLI
+	// enrolment queue; credential-request:list and :deny are intentionally absent
+	// (read and de-escalation actions, mirroring registration:list-pending / :deny).
+	{"POST", "/api/v1/enrolment-tokens", "enrolment-token:mint"},
+	{"POST", "/api/v1/enrolment-tokens/test-token-id/revoke", "enrolment-token:revoke"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
