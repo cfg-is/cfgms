@@ -192,7 +192,73 @@ reference](../development/commands-reference.md#cfg-credential-enrol-issue-3720)
 and leaves no credential file anywhere on this machine — safe to simply mint a
 fresh token and re-run `cfg credential enrol`.
 
-## 4. Reconnecting in a Fresh Shell
+## 4. Containing a Compromised Enrolment
+
+If an enrolment token or a headless-enrolled host is believed compromised —
+the token leaked before the intended machine used it, or a device enrolled via
+"Headless Enrolment" above needs its credential pulled — `cfg credential`
+carries the containment commands to shut it down. See [Revoking and
+Containing Enrolment-Issued Credentials](../development/commands-reference.md#revoking-and-containing-enrolment-issued-credentials-issue-3725)
+for the full command and flag reference; this section is the procedure to
+follow when you suspect a problem, on the administrator's own already-connected
+workstation.
+
+**The token itself was never used, or you want to stop it from being used
+again.** If you minted a token and it has not yet produced a credential (or
+you no longer trust the channel it was handed over), revoke the token
+directly:
+
+```bash
+cfg credential enrolment-token revoke <token-id>
+```
+
+**A credential was already issued from the token (or you are not sure), and
+you want every trace of it gone.** Revoke every certificate issued from the
+token and block any of its requests still sitting in `pending` or `approved`
+from ever producing one, in a single action:
+
+```bash
+cfg credential revoke-by-token <token-id>
+```
+
+This reports one outcome per affected request (`contained` /
+`already_contained` / `error`) rather than an all-or-nothing result — read
+every line before treating the containment as complete. If a certificate
+proves too far along to unbind cleanly (an `error` outcome), re-run the same
+command; the underlying revoke and unbind steps are both safe to retry.
+
+**A request was approved but the machine never collected it** — the
+administrator approved, but the headless machine's `cfg credential enrol`
+never finished (network trouble, the operator walked away, or the request now
+looks suspicious). Cancel it so it can never later be collected:
+
+```bash
+cfg credential cancel-request <request-id>
+```
+
+This does not revoke a certificate — approval signs nothing, so there is
+nothing yet to revoke. It is a state transition that permanently blocks
+collection. If a certificate has already been collected, use
+`revoke-by-token` (above) or the orphaned-certificate commands (below)
+instead — `cancel-request` refuses with a distinct error in that case.
+
+**You suspect a certificate exists with no account behind it** — a controller
+crash between signing and account-binding during collect leaves exactly this
+state, closed automatically within a few minutes by a background sweep, but
+you do not have to wait:
+
+```bash
+cfg credential list-orphaned
+cfg credential revoke-orphaned <serial>
+```
+
+`list-orphaned` only reads; nothing is revoked until you separately run
+`revoke-orphaned` against a serial it printed.
+
+All of the mutating commands above are destructive and prompt for
+confirmation — pass `--force` to skip the prompt in a script.
+
+## 5. Reconnecting in a Fresh Shell
 
 When you open a new terminal, or after your session has expired, reconnect by
 name:
@@ -221,7 +287,7 @@ On reconnect `cfg` decrypts the stored bundle using the machine-bound key
 (no interactive passphrase), authenticates with the controller over mTLS,
 and stores the new session token. The bundle itself is never re-imported.
 
-## 5. Checking the Active Session
+## 6. Checking the Active Session
 
 ```bash
 cfg connections current
@@ -242,7 +308,7 @@ Output when no session is active (or the token has passed its absolute expiry):
 no active session
 ```
 
-## 6. Listing Registered Connections
+## 7. Listing Registered Connections
 
 ```bash
 cfg connections list
@@ -262,7 +328,7 @@ For machine-parseable output:
 cfg connections list --json
 ```
 
-## 7. Disconnecting
+## 8. Disconnecting
 
 ```bash
 cfg disconnect
@@ -290,7 +356,7 @@ No active session.
 After disconnecting, any `cfg` subcommand that requires authentication will
 return an error until you run `cfg connect` again.
 
-## 8. One-Shot Use Without a Session
+## 9. One-Shot Use Without a Session
 
 The session model is the default for interactive operator use. For scripted or
 CI-style automation where storing a session is undesirable, every `cfg`
@@ -311,7 +377,7 @@ bundle or a session from `cfg connect` — never a bare API key (Issue #3688):
 automation that used to export `CFGMS_API_KEY` should export `CFGMS_ADMIN_BUNDLE`
 instead, as shown above.
 
-## 9. The Zero-Standing-Privilege Model
+## 10. The Zero-Standing-Privilege Model
 
 CFGMS admin sessions follow a zero-standing-privilege design: no long-lived
 credential is ever exchanged between operator and controller. Each session is
@@ -394,6 +460,10 @@ Token values are also sanitised from all controller log output.
 | Mint an enrolment token (administrator) | `cfg credential enrolment-token mint --tenant-id <id>` |
 | Revoke an unspent enrolment token (administrator) | `cfg credential enrolment-token revoke <id>` |
 | Enrol a headless machine (operator, on that machine) | `cfg credential enrol --token <token> --url <url>` |
+| Revoke every credential issued from a token (administrator) | `cfg credential revoke-by-token <token-id>` |
+| Cancel an approved-but-uncollected request (administrator) | `cfg credential cancel-request <request-id>` |
+| List unbound enrolment-flow certificates (administrator) | `cfg credential list-orphaned` |
+| Revoke a listed unbound certificate (administrator) | `cfg credential revoke-orphaned <serial>` |
 | Check active session | `cfg connections current` |
 | List all connections | `cfg connections list` |
 | Disconnect | `cfg disconnect` |
@@ -405,3 +475,4 @@ Token values are also sanitised from all controller log output.
 - [Controller Operating Model](../architecture/controller-operating-model.md) — Admin Session Model internals
 - [Steward Refresh Management](steward-refresh-management.md) — managing offline steward re-registration
 - [Commands Reference: Enrolment Tokens and the Pending Credential-Request Queue](../development/commands-reference.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717) — full flag and REST reference for headless enrolment
+- [Commands Reference: Revoking and Containing Enrolment-Issued Credentials](../development/commands-reference.md#revoking-and-containing-enrolment-issued-credentials-issue-3725) — full flag and REST reference for containment

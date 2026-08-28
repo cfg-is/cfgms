@@ -719,6 +719,55 @@ None of these flags select the certificate's markers (admin, payload-signing, ro
 scope) — that set is decided entirely by the administrator at approval time, never by
 the requesting machine.
 
+### cfg credential revoke-by-token / cancel-request / list-orphaned / revoke-orphaned (Issue #3725)
+
+Run by the **administrator** when an enrolment token or an enrolled host is believed
+compromised. Minting (above) and un-minting ship together: this is the containment
+half. All four subcommands require `--force` or an interactive `y` confirmation
+(`confirmDestructive`, the same guard `cfg account revoke-cert` and `cfg account
+delete` use).
+
+```bash
+cfg credential revoke-by-token <token-id>
+```
+
+Revokes every certificate already issued from one enrolment token and blocks every
+still-`pending`/`approved` request under that token from ever producing one. Prints a
+per-request outcome (`contained` / `already_contained` / `error`) rather than an
+all-or-nothing result. A token with no lodged requests is reported as a failure (non-zero
+exit) rather than a silent success — a mistyped or already-exhausted token ID should
+never look like "nothing to do."
+
+```bash
+cfg credential cancel-request <request-id>
+```
+
+Cancels a request that is `approved` but not yet `collected` — this is a state
+transition, not a certificate revocation, because collect (not approval) mints the
+certificate. Refused with a distinct error for a request that is `pending` (not yet
+approved — use `deny` instead), already `collected` (use `revoke-by-token` or
+`revoke-orphaned` instead), or already `denied`.
+
+```bash
+cfg credential list-orphaned
+cfg credential revoke-orphaned <serial>
+```
+
+`list-orphaned` finds `collected` enrolment-flow certificates whose bound account no
+longer carries a matching binding — the on-demand equivalent of the background sweep
+(below) for an administrator who wants to act immediately. Listing never revokes
+anything; `revoke-orphaned` is a separate, explicit action on a serial the list
+surfaced. It refuses (409) a serial that is still bound to an account (not orphaned) or
+already revoked.
+
+**Flags (all four subcommands):**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--force` | false | Skip the interactive confirmation prompt (not on `list-orphaned`) |
+| `--json` | false | Emit JSON output (`list-orphaned` only) |
+
 ### REST reference
 
 The sections below document the endpoints the two commands above call. They remain
@@ -960,6 +1009,98 @@ Collect is rate limited per source address, and the collect secret expires with 
 request it belongs to (the same one-hour lifetime and the same background sweep
 described above) — a captured secret has a bounded life.
 
+### Revoking and containing enrolment-issued credentials (Issue #3725)
+
+Story #3725 closes the loop on the other side: when an enrolment goes wrong, an
+administrator can revoke every certificate already issued from one enrolment token,
+cancel a request that was approved but never collected, and find — and, as a separate
+explicit action, revoke — enrolment-issued certificates that exist with no account
+binding. Minting and un-minting ship together.
+
+```
+POST /api/v1/enrolment-tokens/{id}/revoke-issued-credentials
+```
+
+Requires `enrolment-token:revoke-issued` at `AssuranceStrong`. Walks every credential
+request lodged against the token and, per request:
+
+- `collected`: revokes the issued certificate via the same fail-closed
+  revoke-then-unbind ordering `POST /accounts/{username}/certs/revoke/{serial}` uses —
+  a failure after the revoke leaves a revoked-but-still-bound certificate, never a live
+  unbound one.
+- `pending` or `approved`: transitions the request to `denied`, so it can never later be
+  approved or collected — this is what makes the containment complete, not just a
+  revoke of what has already been signed.
+- `denied` already: no-op, reported as already contained.
+
+The response reports one outcome per request rather than failing the whole call on the
+first error:
+
+```json
+{
+  "data": {
+    "token_id": "et-<uuid>",
+    "results": [
+      {"request_id": "cr-<uuid>", "outcome": "contained"},
+      {"request_id": "cr-<uuid>", "outcome": "already_contained"},
+      {"request_id": "cr-<uuid>", "outcome": "error", "detail": "certificate revoked but binding removal failed"}
+    ]
+  }
+}
+```
+
+```
+POST /api/v1/credential-requests/{id}/cancel
+```
+
+Requires `credential-request:cancel` at `AssuranceStrong`. Cancels a request that is
+`approved` but not yet `collected` — a state transition (`approved` → `denied`, the same
+terminal status `deny` uses; there is no separate "cancelled" status), not a certificate
+revocation, since collect — not approval — is what mints the certificate. Refuses (409)
+with a distinct error code for every other status: `REQUEST_NOT_APPROVED` (still
+`pending`), `REQUEST_ALREADY_COLLECTED` (a live certificate exists — use
+`revoke-issued-credentials` or the orphaned-certificate endpoints instead), or
+`REQUEST_ALREADY_DENIED`. Takes the same lock the collect endpoint's
+approved→collected compare-and-set uses, so a cancel and an in-flight collect for the
+same request can never both observe `approved`.
+
+```
+GET /api/v1/credential-requests/orphaned
+```
+
+Requires `credential-request:list-orphaned` (no assurance floor — a read surface,
+mirroring `credential-request:list`). Lists `collected` requests whose recorded serial
+does not appear in its bound account's `CertBindings` — the exact window the background
+orphan sweep (above) closes on its own interval, surfaced on demand:
+
+```json
+{
+  "data": [
+    {
+      "request_id": "cr-<uuid>",
+      "tenant_id": "root/msp-a/client-1",
+      "serial": "...",
+      "account_id": "<the account recorded at approval>",
+      "collected_at": "2026-08-28T10:00:00Z"
+    }
+  ]
+}
+```
+
+```
+POST /api/v1/credential-requests/orphaned/{serial}/revoke
+```
+
+Requires `credential-request:revoke-orphaned` at `AssuranceStrong`. Revokes a listed
+serial — a separate explicit action from listing. Re-verifies the serial is still
+orphaned immediately before revoking (409 `NOT_ORPHANED` if a binding now exists, 409
+`ALREADY_REVOKED` if already revoked), so this endpoint can never be used as a side
+channel to revoke a live, properly bound credential.
+
+Every revocation and every cancel emits a durable audit event, and every mutating
+handler here calls the same lease-backed leadership check the rest of this package
+uses (`503` when not the authoritative node).
+
 ### Permissions
 
 | Permission | Assurance floor | Notes |
@@ -969,6 +1110,10 @@ described above) — a captured secret has a bounded life.
 | `credential-request:list` | none | Read-only; outside the elevated-assurance surface |
 | `credential-request:deny` | none | De-escalation action, mirrors `registration:deny` |
 | `credential-request:approve` | `AssuranceStrong` + presence | Decides the marker set and account binding (Issue #3718); signs nothing |
+| `enrolment-token:revoke-issued` | `AssuranceStrong` | Revokes every certificate issued from a token and blocks its outstanding requests (Issue #3725) |
+| `credential-request:cancel` | `AssuranceStrong` | Cancels an approved-but-uncollected request (Issue #3725) |
+| `credential-request:list-orphaned` | none | Read-only; outside the elevated-assurance surface |
+| `credential-request:revoke-orphaned` | `AssuranceStrong` | Revokes a listed orphaned certificate (Issue #3725) |
 
 ## Workflow Management
 

@@ -154,6 +154,13 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Credential-request approve decision (Issue #3718, Epic #3711) — RequireUserPresence:
 	// true confines the retained bootstrap admin credential (ADR-021 Amendment 5).
 	{"POST", "/api/v1/credential-requests/test-request-id/approve", "credential-request:approve"},
+	// Revocation and containment for enrolment-issued credentials (Issue #3725, Epic
+	// #3711) — revoke-issued-credentials, cancel and revoke-orphaned are credential-
+	// destroying surfaces; credential-request:list-orphaned is intentionally absent
+	// (read surface, mirroring credential-request:list / cert-binding:list).
+	{"POST", "/api/v1/enrolment-tokens/test-token-id/revoke-issued-credentials", "enrolment-token:revoke-issued"},
+	{"POST", "/api/v1/credential-requests/test-request-id/cancel", "credential-request:cancel"},
+	{"POST", "/api/v1/credential-requests/orphaned/testserial/revoke", "credential-request:revoke-orphaned"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

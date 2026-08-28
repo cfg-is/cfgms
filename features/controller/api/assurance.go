@@ -175,6 +175,17 @@ var permissionAssurance = map[string]Requirement{
 	// retained bootstrap admin credential here (ADR-021 Amendment 5) — it resolves to
 	// no bound account, so no presence token can ever be minted for it.
 	"credential-request:approve": {Min: session.AssuranceStrong, RequireUserPresence: true},
+
+	// Revocation and containment for enrolment-issued credentials (Issue #3725, Epic
+	// #3711): revoke-issued-credentials, cancel and revoke-orphaned are credential-
+	// destroying surfaces, gated at AssuranceStrong like cert-binding:revoke — no
+	// RequireUserPresence, mirroring that entry rather than credential-request:approve
+	// (containment is a destructive admin action, not a new-credential-minting one).
+	// credential-request:list-orphaned (read) is intentionally absent, mirroring
+	// credential-request:list / cert-binding:list.
+	"enrolment-token:revoke-issued":      {Min: session.AssuranceStrong},
+	"credential-request:cancel":          {Min: session.AssuranceStrong},
+	"credential-request:revoke-orphaned": {Min: session.AssuranceStrong},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the
