@@ -137,17 +137,33 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"GET", "/api/v1/scripts", "script:admin"},
 	{"GET", "/api/v1/scripts/test-script-id", "script:admin"},
 	{"PUT", "/api/v1/scripts/test-script-id/privilege", "script:admin"},
+	// CSR-based payload-signing credential issuance (Issue #3693) — mints a credential
+	// distinguishable from the mTLS admin bundle by cert.PayloadSigningMarkerOID.
+	{"POST", "/api/v1/signing-credential/request", "signing-credential:request"},
+	// WebAuthn operator-payload signing (Issue #3695) — a browser-only operator (no
+	// mTLS bundle) signs an operatorpayload.Envelope via a WebAuthn assertion over
+	// sha256(operatorpayload.CanonicalBytes(envelope)).
+	{"POST", "/api/v1/operator-payload/sign/begin", "operator-payload:sign"},
+	{"POST", "/api/v1/operator-payload/sign/finish", "operator-payload:sign"},
+	// Enrolment tokens (Issue #3717, Epic #3711) — mint and revoke are the
+	// credential-minting/destroying surfaces for the browser-authenticated CLI
+	// enrolment queue; credential-request:list and :deny are intentionally absent
+	// (read and de-escalation actions, mirroring registration:list-pending / :deny).
+	{"POST", "/api/v1/enrolment-tokens", "enrolment-token:mint"},
+	{"POST", "/api/v1/enrolment-tokens/test-token-id/revoke", "enrolment-token:revoke"},
+	// Credential-request approve decision (Issue #3718, Epic #3711) — RequireUserPresence:
+	// true confines the retained bootstrap admin credential (ADR-021 Amendment 5).
+	{"POST", "/api/v1/credential-requests/test-request-id/approve", "credential-request:approve"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
 // that have no REST routes yet — forward-declared for future stories.
 var knownFuturePermissions = map[string]bool{
 	"publisher-trust:add": true,
-	// Issue #3687: registered in permissionAssurance ahead of the routes that will
-	// consume them. operator-payload:sign is consumed by story S6, signing-credential:request
-	// by story S10 — neither route exists yet when this story lands.
-	"operator-payload:sign":      true,
-	"signing-credential:request": true,
+	// Issue #3687: registered in permissionAssurance ahead of the route that will
+	// consume it. signing-credential:request's route landed in Issue #3693 and
+	// operator-payload:sign's routes landed in Issue #3695 — both now have real
+	// entries in strongAssuranceRouteTable above.
 }
 
 // allStrongAssurancePermissions collects the unique permission IDs from

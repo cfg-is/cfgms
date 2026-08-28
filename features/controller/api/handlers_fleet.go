@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -37,6 +38,60 @@ type SelectorResolveRequest struct {
 	Selector string `json:"selector"`
 }
 
+// selectorResolveError carries the HTTP status/code/message a selector-resolution failure
+// should produce. It lets resolveSelectorFilter be shared between handleResolveSelector and
+// handleOperatorPayloadSignBegin (Issue #3695) while each handler keeps its own response
+// envelope and success-path shaping.
+type selectorResolveError struct {
+	status  int
+	message string
+	code    string
+}
+
+// resolveSelectorFilter parses selectorExpr and enforces the caller's tenant subtree scope,
+// returning a filter ready for fleetQuery.Search. An explicit tenant prefix in the selector
+// must be at or below the caller's own node; an absent prefix defaults to the caller's entire
+// subtree. Admin callers (empty tid, from ctxkeys.TenantID) are unrestricted.
+//
+// This is the sole tenant-scoping enforcement path for selector-driven target resolution —
+// shared rather than duplicated so every caller (handleResolveSelector,
+// handleOperatorPayloadSignBegin) enforces identical cross-tenant boundaries.
+func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string) (fleet.Filter, *selectorResolveError) {
+	if selectorExpr == "" {
+		return fleet.Filter{}, &selectorResolveError{
+			status: http.StatusBadRequest, code: "MISSING_SELECTOR",
+			message: "selector is required: use 'all' to match all stewards",
+		}
+	}
+
+	filter, parsedTenantPath, err := selector.Parse(selectorExpr)
+	if err != nil {
+		s.logger.Info("Invalid selector expression",
+			"selector", logging.SanitizeLogValue(selectorExpr), "error", logging.SanitizeLogValue(err.Error()))
+		return fleet.Filter{}, &selectorResolveError{
+			status: http.StatusBadRequest, code: "INVALID_SELECTOR", message: err.Error(),
+		}
+	}
+
+	tid, _ := ctx.Value(ctxkeys.TenantID).(string)
+	if parsedTenantPath != "" {
+		if tid != "" && parsedTenantPath != tid && !strings.HasPrefix(parsedTenantPath, tid+"/") {
+			s.logger.Info("Selector tenant outside caller subtree",
+				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+				"caller_tenant", logging.SanitizeLogValue(tid))
+			return fleet.Filter{}, &selectorResolveError{
+				status: http.StatusForbidden, code: "CROSS_TENANT",
+				message: "Target tenant is outside the caller's authorized subtree",
+			}
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if tid != "" {
+		filter.TenantSubtree = tid
+	}
+
+	return filter, nil
+}
+
 // handleResolveSelector resolves a steward filter expression to a concrete steward set.
 //
 // POST /api/v1/fleet/resolve
@@ -51,36 +106,10 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Selector == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"selector is required: use 'all' to match all stewards", "MISSING_SELECTOR")
+	filter, rerr := s.resolveSelectorFilter(r.Context(), req.Selector)
+	if rerr != nil {
+		s.writeErrorResponse(w, rerr.status, rerr.message, rerr.code)
 		return
-	}
-
-	filter, parsedTenantPath, err := selector.Parse(req.Selector)
-	if err != nil {
-		s.logger.Info("Invalid selector expression",
-			"selector", logging.SanitizeLogValue(req.Selector), "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SELECTOR")
-		return
-	}
-
-	// Enforce tenant subtree scope. An explicit tenant prefix in the selector
-	// must be at or below the caller's own node; absent prefix defaults to the
-	// caller's entire subtree. Admin callers (empty tid) are unrestricted.
-	tid, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if parsedTenantPath != "" {
-		if tid != "" && parsedTenantPath != tid && !strings.HasPrefix(parsedTenantPath, tid+"/") {
-			s.logger.Info("Selector tenant outside caller subtree",
-				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
-				"caller_tenant", logging.SanitizeLogValue(tid))
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
-			return
-		}
-		filter.TenantSubtree = parsedTenantPath
-	} else if tid != "" {
-		filter.TenantSubtree = tid
 	}
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)

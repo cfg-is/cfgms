@@ -54,6 +54,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -386,9 +387,24 @@ func (s *Server) SetWebAuthn(wa *webauthn.WebAuthn) {
 }
 
 // NewWebAuthnFromConfig creates a webauthn.WebAuthn instance from the provided values.
-// Returns an error when RPID or RPOrigins are invalid.
+// Returns an error when rpID is empty, rpOrigins is empty, or any origin is not HTTPS.
+// There is no local-development bypass: an insecure origin is refused unconditionally,
+// because a plausible-looking exception here would make a phishing-resistant
+// authenticator verify against the wrong origin (Issue #3713).
 // Intended for use during controller startup and in integration tests.
 func NewWebAuthnFromConfig(rpID, rpDisplayName string, rpOrigins []string) (*webauthn.WebAuthn, error) {
+	if rpID == "" {
+		return nil, fmt.Errorf("webauthn config invalid: rp_id must not be empty")
+	}
+	if len(rpOrigins) == 0 {
+		return nil, fmt.Errorf("webauthn config invalid: rp_origins must not be empty")
+	}
+	for _, origin := range rpOrigins {
+		if !strings.HasPrefix(origin, "https://") {
+			return nil, fmt.Errorf("webauthn config invalid: origin %q must use https", origin)
+		}
+	}
+
 	cfg := &webauthn.Config{
 		RPID:          rpID,
 		RPDisplayName: rpDisplayName,

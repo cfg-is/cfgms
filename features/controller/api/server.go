@@ -62,124 +62,133 @@ import (
 
 // Server represents the REST API server component of the controller
 type Server struct {
-	mu                             sync.RWMutex
-	cfg                            *config.Config
-	logger                         logging.Logger
-	httpServer                     *http.Server
-	metricsHTTPServer              *http.Server
-	internalHTTPServer             *http.Server
-	router                         *mux.Router
-	metricsRouter                  *mux.Router
-	internalRouter                 *mux.Router
-	apiRouter                      *mux.Router // /api/v1 subrouter; used by Set* methods for lazy route registration
-	controllerService              *service.ControllerService
-	configService                  *service.ConfigurationServiceV2
-	certProvisioningService        *service.CertificateProvisioningService
-	rbacService                    *service.RBACService
-	certManager                    *cert.Manager
-	tenantManager                  *tenant.Manager
-	rbacManager                    *rbac.Manager
-	systemMonitor                  *monitoring.SystemMonitor
-	healthCollector                *health.Collector
-	haManager                      *ha.Manager
-	apiKeys                        map[string]*APIKey                       // In-memory cache for fast lookup
-	secretStore                    secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
-	accounts                       map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
-	registrationTokenStore         registration.Store                       // Registration token store for steward registration
-	corsConfig                     *CORSConfig                              // CORS configuration
-	signerCertSerial               string                                   // Story #378: Serial of cert used for config signing
-	authDefense                    *authdefense.AuthDefenseSystem           // Story #380: Three-tier auth defense
-	publicDownloadGuard            *publicDownloadGuard                     // PB-015: successful anonymous-download rate/concurrency budgets
-	publicDownloadCache            *publicDownloadCache                     // PB-015: bounded/coalesced installer and steward-binary response cache
-	rollbackManager                rollback.RollbackManager                 // Story #416: Rollback system
-	reportsHandler                 *reportapi.Handler                       // Story #416: Reports engine
-	dataProvider                   reportinterfaces.DataProvider            // Issue #3265: drift-based compliance derivation
-	workflowHandler                *WorkflowHandler                         // Story #414: Workflow engine REST API
-	approvalHook                   RegistrationApprovalHook                 // Issue #422: Registration approval hook
-	fleetQuery                     fleet.FleetQuery                         // Issue #603: node-local (controllerServiceAdapter); dispatch-safe consumers only
-	clusterFleetQuery              fleet.FleetQuery                         // Issue #3495: cluster-wide (clusterServiceAdapter); individually-vetted consumers only
-	gitSyncWebhookHandler          http.Handler                             // Issue #666: git-sync webhook endpoint (optional)
-	auditManager                   *audit.Manager                           // Issue #775: registration audit events
-	scriptTracker                  script.ExecutionTracker                  // Issue #708: durable execution audit records
-	scriptAuditLogger              *script.AuditLogger                      // Issue #708: in-memory execution metrics
-	scriptMonitor                  *script.ExecutionMonitor                 // Issue #708: active execution tracking
-	scriptRepo                     script.ScriptRepository                  // Issue #1670: git-backed script library
-	privilegeStore                 cfgconfig.ConfigStore                    // Issue #1670: controller-side script privilege metadata
-	pushLeaderStatus               leaderStatus                             // Issue #1318: leader check for config push (nil = leader)
-	registrationLeaderStatus       registrationLeaderStatus                 // Issue #3471: leader check for registration/token endpoints (nil = always leader)
-	commandPublisher               *commands.Publisher                      // Issue #1319: fan-out config push to active stewards
-	pushStore                      business.PushStore                       // Issue #1320: durable push-state persistence for HA failover
-	registry                       registry.Registry                        // Issue #1323: active steward connection registry
-	mountPointValidator            MountPointValidator                      // Issue #1396: config source connection test
-	configSourceSecretStore        secretsif.SecretStore                    // Issue #1396: secrets for config source validator
-	configSourceRateLimits         sync.Map                                 // Issue #1396: per-tenant rate-limit counters
-	pendingStore                   business.PendingRegistrationStore        // Issue #1696: durable pending-registration queue
-	ipTrustStore                   business.IPTrustStore                    // Issue #1698: operator IP-trust management
-	alertStore                     business.AlertStore                      // Issue #3266: alert acknowledge and silence
-	runManager                     *controllerrun.Manager                   // Issue #1673: run/job/execution model
-	runExecutionQueue              *script.ExecutionQueue                   // Issue #1673: queue for ad-hoc run synthesis
-	trustedProxies                 []net.IPNet                              // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
-	blobStore                      blob.BlobStore                           // Issue #1702: installer artifact storage
-	signingRotationService         *service.SigningRotationService          // Issue #1816: signing cert rotation endpoint
-	moduleCacheLister              resolution.CacheLister                   // Issue #1884: controller module cache for required_modules resolution
-	moduleBundleResolver           resolution.BundleResolver                // Issue #1884: git source resolver for uncached modules
-	moduleBundleApprover           resolution.BundleApprover                // Issue #1884: approval workflow for newly resolved modules
-	moduleTrustStore               trust.TrustStore                         // Issue #1884: publisher trust store consulted during approval
-	moduleBundleReviewer           resolution.BundleReviewer                // Issue #2728: human approve/reject for queued module bundles
-	stewardBinaryTrustStore        trust.TrustStore                         // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
-	testAutoApproveStewardBinaries bool                                     // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
-	upgradeStore                   business.UpgradeStore                    // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
-	stewardStore                   business.StewardStore                    // Issue #2096: durable fleet-registry store for device-ID refresh gate
-	pendingRefreshStore            business.PendingRefreshStore             // Issue #2096: durable pending-refresh queue
-	refreshPolicyStore             business.RefreshPolicyStore              // Issue #2096: per-tenant refresh policy
-	auditStore                     business.AuditStore                      // Issue #2098: direct audit store for test-mode count endpoint
-	nonceCache                     *cache.Cache                             // Issue #2096: in-memory nonce store (TTL 65s)
-	popVerifier                    PoPVerifier                              // Issue #2096: injectable for revoked-before-PoP testing
-	isolationEngine                *tenantsecurity.TenantIsolationEngine    // Issue #2123: tenant isolation enforcement for scoped API keys
-	stewardEventLoggingManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
-	sessionManager                 session.Manager                          // Issue #2232: admin session token issuance/revocation
-	sessionCfg                     session.Config                           // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
-	webSessionManager              session.Manager                          // Issue #2492: second session manager for browser cookie auth (ADR-018 §1,2)
-	csrfTokens                     sync.Map                                 // Issue #2493: sessionID → session-bound CSRF token; populated on login, deleted on logout/revoke
-	membershipStore                cluster.MembershipStore                  // Issue #2283: cluster node membership (nil when cluster not configured)
-	clusterDraining                atomic.Bool                              // Issue #2283: true after drain is initiated; causes /health to return 503
-	batchJobStore                  business.BatchJobStore                   // Issue #2296: durable batch-job persistence
-	batchJobExecutor               jobExecutor                              // Issue #2296: rolling-batch executor for fleet-wide updates
-	rolloutStore                   business.RolloutStore                    // Issue #2340: durable rollout-orchestration-state persistence
-	onRolloutSoak                  func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
-	onRolloutTerminal              func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
-	stopCleanup                    chan struct{}                            // signals startAPIKeyCleanup to exit
-	cleanupDone                    chan struct{}                            // closed when cleanup goroutine exits
-	closeOnce                      sync.Once                                // idempotent Close
-	roleConfigStore                cfgconfig.ConfigStore                    // Issue #2543: role-config storage under role-policies namespace
-	tagStore                       *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
-	webAuthn                       *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
-	webAuthnSessions               sync.Map                                 // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
-	webAuthnPresenceSessions       sync.Map                                 // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
-	presenceTokens                 sync.Map                                 // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
-	webAuthnElevateSessions        sync.Map                                 // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
-	webAuthnElevateThrottle        sync.Map                                 // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
-	passkeyLoginSessions           sync.Map                                 // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
-	passkeyLoginThrottle           sync.Map                                 // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
-	passkeyEnrollSessions          sync.Map                                 // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
-	credentialMu                   sync.Mutex                               // Issue #2992: guards the credential CAS section in handleWebAuthnRevokeCredential
-	telemetryHandler               http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler
-	egConfigstoreWriter            egConfigstoreIngestor                    // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
-	egProvider                     egReadProvider                           // Issue #2880: entity graph read API
-	egWriter                       egWriteProvider                          // Issue #3374: operator edge assertion write path
-	terminalHandler                http.Handler                             // Issue #2761: terminal WebSocket relay handler
-	tenantStore                    business.TenantStore                     // Issue #2839: tenant hierarchy for per-tenant assurance resolution
-	assurancePolicyStore           business.AssurancePolicyStore            // Issue #2839: per-tenant assurance-policy overrides
-	tenantCrossingStore            business.TenantCrossingStore             // ADR-025 Decision 2: tenant-crossing grants and break-glass
-	casesStore                     business.CaseStore                       // Issue #3605: cockpit investigation case CRUD
-	egWatchProv                    egWatchProvider                          // Issue #3613: cockpit Watch cursor fan-out to browser WebSocket
-	watchPongWait                  time.Duration                            // Issue #3613: cockpit watch keepalive window; 0 = defaultWatchPongWait
-	watchPingInterval              time.Duration                            // Issue #3613: cockpit watch ping cadence; 0 = defaultWatchPingInterval
-	absentCapabilities             []interfaces.AbsentCapability            // Issue #3409: declared-optional capabilities absent in this deployment
-	osqueryDispatcher              stewardOsqueryDispatcher                 // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
-	certBindingLastUsedThrottle    sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
-	certBindingLastUsedWG          sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
-	onCertBindingLastUsedPersisted func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
+	mu                              sync.RWMutex
+	cfg                             *config.Config
+	logger                          logging.Logger
+	httpServer                      *http.Server
+	metricsHTTPServer               *http.Server
+	internalHTTPServer              *http.Server
+	router                          *mux.Router
+	metricsRouter                   *mux.Router
+	internalRouter                  *mux.Router
+	apiRouter                       *mux.Router // /api/v1 subrouter; used by Set* methods for lazy route registration
+	controllerService               *service.ControllerService
+	configService                   *service.ConfigurationServiceV2
+	certProvisioningService         *service.CertificateProvisioningService
+	rbacService                     *service.RBACService
+	certManager                     *cert.Manager
+	tenantManager                   *tenant.Manager
+	rbacManager                     *rbac.Manager
+	systemMonitor                   *monitoring.SystemMonitor
+	healthCollector                 *health.Collector
+	haManager                       *ha.Manager
+	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup
+	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
+	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
+	registrationTokenStore          registration.Store                       // Registration token store for steward registration
+	corsConfig                      *CORSConfig                              // CORS configuration
+	signerCertSerial                string                                   // Story #378: Serial of cert used for config signing
+	authDefense                     *authdefense.AuthDefenseSystem           // Story #380: Three-tier auth defense
+	publicDownloadGuard             *publicDownloadGuard                     // PB-015: successful anonymous-download rate/concurrency budgets
+	publicDownloadCache             *publicDownloadCache                     // PB-015: bounded/coalesced installer and steward-binary response cache
+	rollbackManager                 rollback.RollbackManager                 // Story #416: Rollback system
+	reportsHandler                  *reportapi.Handler                       // Story #416: Reports engine
+	dataProvider                    reportinterfaces.DataProvider            // Issue #3265: drift-based compliance derivation
+	workflowHandler                 *WorkflowHandler                         // Story #414: Workflow engine REST API
+	approvalHook                    RegistrationApprovalHook                 // Issue #422: Registration approval hook
+	fleetQuery                      fleet.FleetQuery                         // Issue #603: node-local (controllerServiceAdapter); dispatch-safe consumers only
+	clusterFleetQuery               fleet.FleetQuery                         // Issue #3495: cluster-wide (clusterServiceAdapter); individually-vetted consumers only
+	gitSyncWebhookHandler           http.Handler                             // Issue #666: git-sync webhook endpoint (optional)
+	auditManager                    *audit.Manager                           // Issue #775: registration audit events
+	scriptTracker                   script.ExecutionTracker                  // Issue #708: durable execution audit records
+	scriptAuditLogger               *script.AuditLogger                      // Issue #708: in-memory execution metrics
+	scriptMonitor                   *script.ExecutionMonitor                 // Issue #708: active execution tracking
+	scriptRepo                      script.ScriptRepository                  // Issue #1670: git-backed script library
+	privilegeStore                  cfgconfig.ConfigStore                    // Issue #1670: controller-side script privilege metadata
+	pushLeaderStatus                leaderStatus                             // Issue #1318: leader check for config push (nil = leader)
+	registrationLeaderStatus        registrationLeaderStatus                 // Issue #3471: leader check for registration/token endpoints (nil = always leader)
+	commandPublisher                *commands.Publisher                      // Issue #1319: fan-out config push to active stewards
+	pushStore                       business.PushStore                       // Issue #1320: durable push-state persistence for HA failover
+	registry                        registry.Registry                        // Issue #1323: active steward connection registry
+	mountPointValidator             MountPointValidator                      // Issue #1396: config source connection test
+	configSourceSecretStore         secretsif.SecretStore                    // Issue #1396: secrets for config source validator
+	configSourceRateLimits          sync.Map                                 // Issue #1396: per-tenant rate-limit counters
+	pendingStore                    business.PendingRegistrationStore        // Issue #1696: durable pending-registration queue
+	ipTrustStore                    business.IPTrustStore                    // Issue #1698: operator IP-trust management
+	alertStore                      business.AlertStore                      // Issue #3266: alert acknowledge and silence
+	runManager                      *controllerrun.Manager                   // Issue #1673: run/job/execution model
+	runExecutionQueue               *script.ExecutionQueue                   // Issue #1673: queue for ad-hoc run synthesis
+	trustedProxies                  []net.IPNet                              // Issue #1695: parsed from TrustedProxies config; XFF honored only when peer is in this list
+	blobStore                       blob.BlobStore                           // Issue #1702: installer artifact storage
+	signingRotationService          *service.SigningRotationService          // Issue #1816: signing cert rotation endpoint
+	moduleCacheLister               resolution.CacheLister                   // Issue #1884: controller module cache for required_modules resolution
+	moduleBundleResolver            resolution.BundleResolver                // Issue #1884: git source resolver for uncached modules
+	moduleBundleApprover            resolution.BundleApprover                // Issue #1884: approval workflow for newly resolved modules
+	moduleTrustStore                trust.TrustStore                         // Issue #1884: publisher trust store consulted during approval
+	moduleBundleReviewer            resolution.BundleReviewer                // Issue #2728: human approve/reject for queued module bundles
+	stewardBinaryTrustStore         trust.TrustStore                         // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
+	testAutoApproveStewardBinaries  bool                                     // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
+	upgradeStore                    business.UpgradeStore                    // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
+	stewardStore                    business.StewardStore                    // Issue #2096: durable fleet-registry store for device-ID refresh gate
+	pendingRefreshStore             business.PendingRefreshStore             // Issue #2096: durable pending-refresh queue
+	refreshPolicyStore              business.RefreshPolicyStore              // Issue #2096: per-tenant refresh policy
+	auditStore                      business.AuditStore                      // Issue #2098: direct audit store for test-mode count endpoint
+	nonceCache                      *cache.Cache                             // Issue #2096: in-memory nonce store (TTL 65s)
+	popVerifier                     PoPVerifier                              // Issue #2096: injectable for revoked-before-PoP testing
+	isolationEngine                 *tenantsecurity.TenantIsolationEngine    // Issue #2123: tenant isolation enforcement for scoped API keys
+	stewardEventLoggingManager      *logging.LoggingManager                  // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
+	sessionManager                  session.Manager                          // Issue #2232: admin session token issuance/revocation
+	sessionCfg                      session.Config                           // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
+	webSessionManager               session.Manager                          // Issue #2492: second session manager for browser cookie auth (ADR-018 §1,2)
+	csrfTokens                      sync.Map                                 // Issue #2493: sessionID → session-bound CSRF token; populated on login, deleted on logout/revoke
+	membershipStore                 cluster.MembershipStore                  // Issue #2283: cluster node membership (nil when cluster not configured)
+	clusterDraining                 atomic.Bool                              // Issue #2283: true after drain is initiated; causes /health to return 503
+	batchJobStore                   business.BatchJobStore                   // Issue #2296: durable batch-job persistence
+	batchJobExecutor                jobExecutor                              // Issue #2296: rolling-batch executor for fleet-wide updates
+	rolloutStore                    business.RolloutStore                    // Issue #2340: durable rollout-orchestration-state persistence
+	onRolloutSoak                   func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
+	onRolloutTerminal               func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
+	stopCleanup                     chan struct{}                            // signals startAPIKeyCleanup to exit
+	cleanupDone                     chan struct{}                            // closed when cleanup goroutine exits
+	closeOnce                       sync.Once                                // idempotent Close
+	roleConfigStore                 cfgconfig.ConfigStore                    // Issue #2543: role-config storage under role-policies namespace
+	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
+	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
+	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
+	webAuthnPresenceSessions        sync.Map                                 // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession
+	presenceTokens                  sync.Map                                 // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
+	webAuthnElevateSessions         sync.Map                                 // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
+	webAuthnElevateThrottle         sync.Map                                 // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	operatorPayloadSignSessions     sync.Map                                 // Issue #3695: pending operator-payload sign ceremonies; key=sessionID, value=*operatorPayloadSignSession
+	operatorPayloadSignThrottle     sync.Map                                 // Issue #3695: per-session/per-IP failed sign-ceremony throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyLoginSessions            sync.Map                                 // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
+	passkeyLoginThrottle            sync.Map                                 // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
+	passkeyEnrollSessions           sync.Map                                 // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
+	credentialMu                    sync.Mutex                               // Issue #2992: guards the credential CAS section in handleWebAuthnRevokeCredential
+	telemetryHandler                http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler
+	egConfigstoreWriter             egConfigstoreIngestor                    // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
+	egProvider                      egReadProvider                           // Issue #2880: entity graph read API
+	egWriter                        egWriteProvider                          // Issue #3374: operator edge assertion write path
+	terminalHandler                 http.Handler                             // Issue #2761: terminal WebSocket relay handler
+	tenantStore                     business.TenantStore                     // Issue #2839: tenant hierarchy for per-tenant assurance resolution
+	assurancePolicyStore            business.AssurancePolicyStore            // Issue #2839: per-tenant assurance-policy overrides
+	tenantCrossingStore             business.TenantCrossingStore             // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	casesStore                      business.CaseStore                       // Issue #3605: cockpit investigation case CRUD
+	egWatchProv                     egWatchProvider                          // Issue #3613: cockpit Watch cursor fan-out to browser WebSocket
+	watchPongWait                   time.Duration                            // Issue #3613: cockpit watch keepalive window; 0 = defaultWatchPongWait
+	watchPingInterval               time.Duration                            // Issue #3613: cockpit watch ping cadence; 0 = defaultWatchPingInterval
+	absentCapabilities              []interfaces.AbsentCapability            // Issue #3409: declared-optional capabilities absent in this deployment
+	osqueryDispatcher               stewardOsqueryDispatcher                 // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
+	enrolmentTokenMintLimiter       *sourceRateLimiter                       // Issue #3717: per-source rate limit on enrolment-token mint
+	credentialRequestLodgeLimiter   *sourceRateLimiter                       // Issue #3717: per-source rate limit on credential-request lodge
+	credentialRequestMu             sync.Mutex                               // Issue #3717: serializes enrolment-token spend-then-lodge on this node
+	stopCredentialRequestSweep      chan struct{}                            // Issue #3717: signals runCredentialRequestExpirySweep to exit
+	credentialRequestSweepDone      chan struct{}                            // Issue #3717: closed when the sweep goroutine exits
+	credentialRequestCollectLimiter *sourceRateLimiter                       // Issue #3719: per-source rate limit on credential-request collect
+	credentialRequestCollectMu      sync.Mutex                               // Issue #3719: serializes the approved->collected compare-and-set
+	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
+	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
+	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -318,6 +327,16 @@ func New(
 		sessionCfg:              session.DefaultConfig(), // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
+		// Issue #3717: per-source rate limits on enrolment-token mint and credential-request
+		// lodge. Limits are deliberately generous (mint is an occasional admin action; lodge
+		// is a one-shot per enrolling machine) — they exist to bound abuse, not normal use.
+		enrolmentTokenMintLimiter:     newSourceRateLimiter(10, time.Minute),
+		credentialRequestLodgeLimiter: newSourceRateLimiter(20, time.Minute),
+		stopCredentialRequestSweep:    make(chan struct{}),
+		credentialRequestSweepDone:    make(chan struct{}),
+		// Issue #3719: collect is polled by a waiting machine, so its budget is more
+		// generous than lodge's one-shot allowance.
+		credentialRequestCollectLimiter: newSourceRateLimiter(30, time.Minute),
 	}
 
 	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
@@ -491,6 +510,10 @@ func New(
 
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
+
+	// Issue #3717: background sweep for expired enrolment tokens and pending
+	// credential requests — reaped on a timer, not only lazily on read.
+	server.startCredentialRequestSweep()
 
 	return server, nil
 }
@@ -1038,6 +1061,22 @@ func (s *Server) Close(ctx context.Context) error {
 		case <-s.cleanupDone:
 		case <-ctx.Done():
 			firstErr = fmt.Errorf("api server close: timed out waiting for cleanup goroutine: %w", ctx.Err())
+		}
+
+		// Issue #3717: signal the credential-request expiry sweep to exit alongside
+		// the API-key cleanup goroutine. Guarded by nil checks (unlike stopCleanup
+		// above) because several tests build a *Server literal directly without
+		// going through New(), and startCredentialRequestSweep — unlike
+		// startAPIKeyCleanup — is never separately special-cased by those helpers.
+		if s.stopCredentialRequestSweep != nil {
+			close(s.stopCredentialRequestSweep)
+			select {
+			case <-s.credentialRequestSweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for credential-request sweep goroutine: %w", ctx.Err())
+				}
+			}
 		}
 
 		// Stop audit manager before closing the HTTP server so that any

@@ -1447,3 +1447,100 @@ func TestWebAuthnTOTPSeparation(t *testing.T) {
 			"%s (%s) must not reference totp", f.path, f.desc)
 	}
 }
+
+// --- Issue #3713: NewWebAuthnFromConfig constructor validation ---
+//
+// These are the tests referenced by Issue #3713's acceptance criteria: the
+// constructor (previously delegated all validation to the go-webauthn library) must
+// itself refuse an insecure origin and an empty origin list, tightening the surface
+// that cmd/controller/main.go now calls at real startup.
+
+// TestNewWebAuthnFromConfig_RejectsEmptyRPID verifies the constructor refuses an
+// empty relying-party identifier rather than deferring to the library's error.
+func TestNewWebAuthnFromConfig_RejectsEmptyRPID(t *testing.T) {
+	wa, err := NewWebAuthnFromConfig("", "Display Name", []string{"https://cfgms.example.com"})
+	require.Error(t, err)
+	assert.Nil(t, wa)
+	assert.Contains(t, err.Error(), "rp_id must not be empty")
+}
+
+// TestNewWebAuthnFromConfig_RejectsEmptyOrigins is a REQUIRED test (Issue #3713 AC):
+// a configuration setting the identifier with an empty origin list is rejected.
+func TestNewWebAuthnFromConfig_RejectsEmptyOrigins(t *testing.T) {
+	wa, err := NewWebAuthnFromConfig("cfgms.example.com", "Display Name", nil)
+	require.Error(t, err)
+	assert.Nil(t, wa)
+	assert.Contains(t, err.Error(), "rp_origins must not be empty")
+}
+
+// TestNewWebAuthnFromConfig_RejectsNonHTTPSOrigin is a REQUIRED test (Issue #3713 AC):
+// a configuration listing a non-HTTPS origin is rejected.
+func TestNewWebAuthnFromConfig_RejectsNonHTTPSOrigin(t *testing.T) {
+	wa, err := NewWebAuthnFromConfig("cfgms.example.com", "Display Name",
+		[]string{"http://cfgms.example.com"})
+	require.Error(t, err)
+	assert.Nil(t, wa)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestNewWebAuthnFromConfig_RejectsLoopbackHTTPOrigin guards the specific
+// resolution the Issue #3713 amendment forbids: the constructor must refuse a bare
+// http://127.0.0.1 origin exactly like any other insecure origin. Making the CLI's
+// loopback relay ceremonies work by admitting a loopback origin here would make a
+// plaintext loopback origin permanently valid for every ceremony the controller ever
+// runs — there is no exception path for it.
+func TestNewWebAuthnFromConfig_RejectsLoopbackHTTPOrigin(t *testing.T) {
+	wa, err := NewWebAuthnFromConfig("cfgms.example.com", "Display Name",
+		[]string{"http://127.0.0.1"})
+	require.Error(t, err)
+	assert.Nil(t, wa)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestNewWebAuthnFromConfig_AcceptsValidHTTPSConfig verifies the constructor still
+// accepts a well-formed HTTPS relying-party configuration — the tightened validation
+// must not reject the shape every existing test in this package already uses.
+func TestNewWebAuthnFromConfig_AcceptsValidHTTPSConfig(t *testing.T) {
+	wa, err := NewWebAuthnFromConfig("cfgms.example.com", "CFGMS Controller",
+		[]string{"https://cfgms.example.com"})
+	require.NoError(t, err)
+	require.NotNil(t, wa)
+	assert.Equal(t, "cfgms.example.com", wa.Config.RPID)
+}
+
+// TestHandlePasskeyLoginBegin_AnswersWithWiredWebAuthn is a REQUIRED test
+// (Issue #3713 AC): once a representative production relying party is constructed
+// and installed via SetWebAuthn — the exact call shape cmd/controller/main.go now
+// performs at startup — POST /api/v1/web/passkey/login/begin must answer with
+// something other than 503 WEBAUTHN_NOT_CONFIGURED.
+func TestHandlePasskeyLoginBegin_AnswersWithWiredWebAuthn(t *testing.T) {
+	server, _ := setupWebAuthnServer(t, "cfgms.example.com", []string{"https://cfgms.example.com"})
+	server.SetWebSessionManager(session.NewManager(
+		session.Config{IdleTimeout: 60 * time.Minute, AbsoluteTimeout: 12 * time.Hour, GraceWindow: 30 * time.Second},
+		session.NewMemStore(session.Config{IdleTimeout: 60 * time.Minute, AbsoluteTimeout: 12 * time.Hour, GraceWindow: 30 * time.Second}, time.Now),
+		time.Now,
+	))
+
+	csrfReq := httptest.NewRequest(http.MethodGet, "/api/v1/web/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	server.router.ServeHTTP(csrfRec, csrfReq)
+	require.Equal(t, http.StatusOK, csrfRec.Code)
+
+	resp := &http.Response{Header: csrfRec.Result().Header}
+	var csrfToken string
+	for _, c := range resp.Cookies() {
+		if c.Name == "cfgms_csrf_pre" {
+			csrfToken = c.Value
+		}
+	}
+	require.NotEmpty(t, csrfToken)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/begin", nil)
+	req.Header.Set("X-CSRF-Token", csrfToken)
+	req.AddCookie(&http.Cookie{Name: "cfgms_csrf_pre", Value: csrfToken})
+	rec := httptest.NewRecorder()
+	server.handlePasskeyLoginBegin(rec, req)
+
+	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code,
+		"a wired relying party must not leave the passkey login begin endpoint at 503")
+}

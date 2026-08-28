@@ -518,10 +518,16 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		"script_content": encodedContent,
 		"shell":          string(exec.Shell),
 	}
-	for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key"} {
+	for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key", "nonce", "expires_at"} {
 		if value, ok := exec.Metadata[key].(string); ok && value != "" {
 			params[key] = value
 		}
+	}
+	// Issue #3694: forward the operator-signed target list alongside the signature
+	// metadata above — the steward independently verifies its own ID is a member
+	// before executing an inline command.
+	if targets := extractMetaStringSlice(exec.Metadata, "targets"); len(targets) > 0 {
+		params["targets"] = targets
 	}
 	if d.requireSignedAdhoc && exec.ScriptRef == "" {
 		for _, key := range []string{"signature_algorithm", "signature_value", "signature_public_key"} {

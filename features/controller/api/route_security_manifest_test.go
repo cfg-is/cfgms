@@ -48,6 +48,15 @@ var publicRouteSecurityPolicies = map[string]routeSecurityPolicy{
 	// fails closed: a binding without a webhook secret is rejected with 401 rather
 	// than synced unauthenticated (pkg/gitsync/webhook.go).
 	"POST /api/v1/webhooks/git-push": publicWritePolicy("mandatory HMAC-SHA256 request signature per matched binding", "webhook.git-push"),
+	// Lodge (Issue #3717): the enrolling machine holds no API key or mTLS credential —
+	// only the pre-shared, single-use enrolment token as a bearer value, resolved and
+	// validated before any store write (handleLodgeCredentialRequest).
+	"POST /api/v1/credential-requests/lodge": publicWritePolicy("single-use enrolment token (bearer)", "credential_request.lodged"),
+	// Collect (Issue #3719): the enrolling machine holds no API key or mTLS credential —
+	// only the single-use collect secret returned exactly once at lodge time, compared
+	// in constant time against its stored hash before anything is disclosed or minted
+	// (handleCollectCredentialRequest).
+	"POST /api/v1/credential-requests/{id}/collect": publicWritePolicy("single-use collect secret (bearer)", "credential_request.collected"),
 }
 
 func publicReadPolicy(authentication, event string) routeSecurityPolicy {

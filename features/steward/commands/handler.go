@@ -71,6 +71,14 @@ type Handler struct {
 	// replayCache detects duplicate command IDs within the replay window.
 	replayCache *ttlReplayCache
 
+	// envelopeNonceCache detects a reused operator-payload envelope nonce
+	// (Issue #3694), independently of replayCache: replayCache dedups the outer
+	// SignedCommand.ID, which a compromised controller (or a stale relay) could
+	// rewrap with a fresh ID and timestamp around a captured, still-validly-signed
+	// inner envelope. envelopeNonceCache catches that case because it keys on the
+	// operator's own signed nonce, not on anything the outer command controls.
+	envelopeNonceCache *ttlReplayCache
+
 	// maxParamsBytes is the maximum allowed JSON-serialized size of Command.Params.
 	maxParamsBytes int
 
@@ -159,6 +167,14 @@ type Config struct {
 const (
 	defaultReplayWindow  = 5 * time.Minute
 	defaultMaxParamBytes = 64 * 1024
+
+	// envelopeNonceCacheTTL bounds how long an operator-payload envelope nonce is
+	// remembered for replay detection (Issue #3694). It is independent of — and
+	// deliberately longer-lived than — replayWindow: an envelope's own ExpiresAt
+	// is the authorization bound, but a nonce must stay in the dedup cache at
+	// least that long to catch a replay near the end of a long-lived envelope's
+	// validity window.
+	envelopeNonceCacheTTL = 24 * time.Hour
 )
 
 // New creates a new command handler and, when a CommandStore is configured,
@@ -194,6 +210,7 @@ func New(cfg *Config) (*Handler, error) {
 		verifier:           cfg.Verifier,
 		replayWindow:       replayWindow,
 		replayCache:        newReplayCache(replayWindow),
+		envelopeNonceCache: newReplayCache(envelopeNonceCacheTTL),
 		maxParamsBytes:     maxParamsBytes,
 		signingConfig:      cfg.SigningConfig,
 		requireSignedAdhoc: cfg.RequireSignedAdhoc,

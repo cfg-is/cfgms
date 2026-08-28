@@ -15,10 +15,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
@@ -27,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -94,23 +95,50 @@ type postRunScriptRequest struct {
 
 // postRunCommandRequest is the body of POST /api/v1/runs/command.
 // Content is the inline script body, base64-encoded.
+//
+// Targets, Nonce, and ExpiresAt (Issue #3694) are the client-resolved, signed
+// coordinates of the operator's operatorpayload.Envelope: Targets is the frozen list
+// of steward IDs the signature authorizes, Nonce is a single-use replay token, and
+// ExpiresAt (RFC3339) bounds the envelope's validity. All three are forwarded to the
+// steward unmodified — the controller never re-signs or strips them.
 type postRunCommandRequest struct {
-	Target    string                `json:"target"`    // fleet selector string
-	Content   string                `json:"content"`   // base64-encoded inline script
-	Shell     string                `json:"shell"`     // shell to use (e.g. "bash")
-	Params    map[string]string     `json:"params"`    // script parameters
-	Signature *execCommandSignature `json:"signature"` // optional mTLS signing envelope
+	Target    string                `json:"target"`     // fleet selector string
+	Content   string                `json:"content"`    // base64-encoded inline script
+	Shell     string                `json:"shell"`      // shell to use (e.g. "bash")
+	Params    map[string]string     `json:"params"`     // script parameters
+	Signature *execCommandSignature `json:"signature"`  // operator signing envelope (mandatory)
+	Targets   []string              `json:"targets"`    // resolved steward IDs the signature binds
+	Nonce     string                `json:"nonce"`      // single-use replay-prevention token
+	ExpiresAt string                `json:"expires_at"` // RFC3339 envelope expiry
 }
 
-func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, sig *execCommandSignature) error {
-	if s.cfg == nil || s.cfg.SecurityProfile != config.SecurityProfilePublicBeta {
-		return nil
-	}
+// validatePublicBetaCommandSignature verifies the operator signature over the
+// reconstructed operatorpayload.Envelope canonical bytes (content, shell, targets,
+// nonce, expiry) — never over content alone. It runs unconditionally for every caller
+// of POST /api/v1/runs/command (Issue #3694): the prior SecurityProfilePublicBeta gate
+// is gone, so this now changes behavior for every deployment, not just public-beta
+// ones. It performs cryptographic verification plus operator-credential trust
+// (CA chain, admin marker, revocation); expiry and nonce-replay enforcement are the
+// steward's responsibility (independent of the outer command's own replay window),
+// not re-checked here.
+func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, targets []string, nonce string, expiresAt time.Time, sig *execCommandSignature) error {
 	if sig == nil || sig.Algorithm == "" || sig.Value == "" || sig.PublicKey == "" {
-		return fmt.Errorf("public-beta ad-hoc execution requires an operator signature")
+		return fmt.Errorf("ad-hoc execution requires an operator signature")
 	}
 	if s.certManager == nil {
-		return fmt.Errorf("public-beta ad-hoc execution requires loaded controller signing roots")
+		return fmt.Errorf("ad-hoc execution requires loaded controller signing roots")
+	}
+
+	envelope := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: expiresAt,
+	}
+	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
+	if err != nil {
+		return fmt.Errorf("invalid operator envelope: %w", err)
 	}
 
 	scriptSig := &scriptmodule.ScriptSignature{
@@ -119,7 +147,7 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 		PublicKey: sig.PublicKey,
 	}
 	if err := scriptmodule.VerifyScriptSignature(
-		content,
+		canonicalBytes,
 		scriptSig,
 		scriptmodule.ShellType(shell),
 		scriptmodule.ModuleSigningConfig{TrustMode: scriptmodule.TrustModeAnyValid},
@@ -324,7 +352,12 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "content must be base64-encoded", "INVALID_CONTENT")
 		return
 	}
-	if err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Signature); err != nil {
+	expiresAt, err := time.Parse(time.RFC3339, req.ExpiresAt)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "expires_at must be RFC3339", "INVALID_EXPIRES_AT")
+		return
+	}
+	if err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
 		return
 	}
@@ -390,6 +423,9 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		scriptmodule.ShellType(req.Shell),
 		req.Params,
 		commandSignature,
+		req.Targets,
+		req.Nonce,
+		expiresAt,
 	)
 	if err != nil {
 		s.logger.Error("Failed to synthesize command run",

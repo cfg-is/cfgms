@@ -96,6 +96,7 @@ verify these fields:
 | `certificate.server.dns_names` | All hostnames stewards use to reach the controller |
 | `certificate.server.ip_addresses` | All IPs stewards use to reach the controller |
 | `transport.listen_addr` | `"0.0.0.0:4433"` (all interfaces, not just localhost) |
+| `webauthn.rp_id` / `webauthn.rp_origins` | Optional — required only for browser passkey login. `rp_id` must be the public hostname admins use to reach the controller (e.g. `ctrl.mylab.local`); `rp_origins` must list every `https://` origin they log in from. See the [single-controller walkthrough's WebAuthn section](../single-controller/walkthrough.md#browser-passkey-login-optional). |
 
 > **Storage note**: If `controller.cfg` still has `storage.provider: "git"`, replace the
 > `storage:` block before running `--init` — the git provider has been removed. Use:
@@ -115,6 +116,29 @@ Once the single-controller walkthrough's Step 4 checklist passes, continue here.
 `cfgms-controller --init` writes an admin credential bundle to
 `/etc/cfgms/admin.bundle.yaml` on the controller. This file contains everything
 the `cfg` CLI needs to authenticate to the controller REST API via mTLS.
+
+This bundle is the one-time bootstrap exception: a fresh controller has no
+account yet for anyone to log in against, so `--init` generates this
+certificate's keypair itself and hands you both halves — the one CFGMS
+credential whose private key the controller ever holds. It cannot approve a
+credential enrolment or renew itself, and is *intended* also to be unable to
+authorise code execution on a managed endpoint
+(see [ADR-021 Amendment 5](../../architecture/decisions/021-identity-assurance-levels.md));
+read the second gap note below before relying on that last part. The ordinary
+way to obtain every credential after this first one is `cfg login`, a browser
+passkey assertion, not another bundle.
+
+> **[GAP: `cfg login` is not yet shipped — see Epic #3711, Story #3721. Until it
+> lands, the bundle path below is how every operator on the fleet obtains a
+> credential.]**
+
+> **[GAP: the bundle's confinement against endpoint code execution is not yet
+> enforced — see Epic #3711, Story #3696. Signer verification on both the steward
+> (`features/steward/commands/execute_script.go`) and the controller
+> (`features/controller/api/handlers_runs.go`) accepts any admin-marked
+> certificate and does not require the payload-signing marker, so a bundle
+> **can** today authorise code execution across the fleet. Protect and transfer
+> every bundle file accordingly.]**
 
 Copy the bundle from the controller to your workstation:
 
@@ -702,8 +726,11 @@ Steward mTLS certificates are renewed automatically when they approach expiry �
 controller issues a new cert on the next heartbeat before the old one expires. No manual
 intervention is needed for routine renewal.
 
-Admin operator bundle certificates (in `admin.bundle.yaml`) are valid for 365 days. To
-renew an admin bundle:
+Admin operator bundle certificates (in `admin.bundle.yaml`) are valid for 365 days and
+cannot renew themselves — self-renewal is a user-presence-gated action, and a bootstrap
+bundle has no account to obtain user presence through (ADR-021 Amendment 5). Renewal is
+therefore always this manual re-issue-and-revoke procedure, run by an operator holding a
+separate, already-valid credential:
 
 ```bash
 # Issue a new bundle for the operator
@@ -796,6 +823,8 @@ The table below collects all `[GAP: ...]` markers from this walkthrough for easy
 | apply/monitor mode toggle not implemented | [#1524](https://github.com/cfg-is/cfgms/issues/1524) | Phase 8 |
 | `modules.Monitor()` not implemented by any module | [#1590](https://github.com/cfg-is/cfgms/issues/1590) | Phase 8 |
 | Multi-controller / failover not supported | (backlog) | Phase 4 |
+| `cfg login` (browser passkey, the ordinary credential path) not implemented | Epic #3711, Story #3721 | Phase 2 |
+| Bundle confinement against endpoint code execution not enforced (signer verification requires only the admin marker) | Epic #3711, Story #3696 | Phase 2 |
 
 ---
 

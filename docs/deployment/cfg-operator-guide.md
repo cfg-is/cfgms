@@ -5,6 +5,35 @@ installation through first connect, daily reconnect, checking the active session
 and disconnect — and explains the zero-standing-privilege session model that
 governs every admin interaction with the controller.
 
+**Two ways to obtain a credential.** `cfg login` — a browser passkey assertion —
+is the ordinary way an operator obtains a credential, and is the path described
+by "Reconnecting" and everything after it in this guide. The admin bundle
+described in "First Connect" below exists for exactly one moment: the very
+first credential on a controller that has no account yet to log in against.
+`controller bootstrap-admin` generates that bundle's keypair itself and hands
+you both halves in a file — the one CFGMS credential whose private key the
+controller ever holds. It administers the controller, and it cannot approve a
+credential enrolment or renew itself: both require a fresh passkey presence
+assertion, which a bootstrap certificate can never obtain. It is *intended* also
+to be unable to authorise code execution on a managed endpoint (see
+[ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md));
+read the gap note below before relying on that. Every credential after the first
+one should come from `cfg login`, not another bundle.
+
+> **[GAP: `cfg login` is not yet shipped — see Epic #3711, Story #3721. Until it
+> lands, the bundle path below is the only way to obtain a credential; issue
+> additional operator bundles with `bootstrap-admin --output`, documented in
+> [Adding Operators](single-controller/walkthrough.md#adding-operators).]**
+
+> **[GAP: the bundle's confinement against endpoint code execution is not yet
+> enforced — see Epic #3711, Story #3696. Signer verification on both the steward
+> (`features/steward/commands/execute_script.go`) and the controller
+> (`features/controller/api/handlers_runs.go`) currently accepts any
+> admin-marked certificate and does not require the payload-signing marker, so a
+> bundle **can** today authorise code execution on a managed endpoint. Handle the
+> bundle file as a credential that can run code across your fleet — protect it
+> like a root SSH key, and revoke it if it is ever copied or exposed.]**
+
 ## Prerequisites
 
 - A CFGMS controller is running and reachable over HTTPS.
@@ -31,10 +60,12 @@ make build-cli && make install-cfg
 cfg version
 ```
 
-## 2. First Connect (Bundle Import)
+## 2. First Connect (Bootstrap Bundle — One Time Only)
 
-The first time you connect from a workstation you import the admin bundle and
-register the connection locally.
+The first time you connect from a workstation — before any account exists on
+the controller — you import the bootstrap admin bundle and register the
+connection locally. This is the bootstrap exception, not the ordinary path;
+see the note at the top of this guide.
 
 ```bash
 cfg connect --bundle /etc/cfgms/admin.bundle.yaml --url https://controller.acme-corp.example:9443

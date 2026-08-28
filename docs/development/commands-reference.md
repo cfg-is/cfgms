@@ -405,9 +405,26 @@ If neither resolves, the command fails immediately with an error naming the requ
 
 **Migrating automation off `CFGMS_API_KEY` (Issue #3688):** earlier releases of the `cfg` binary read `CFGMS_API_KEY` as a fallback whenever a bundle was missing or a session had expired, and the command still succeeded — a silent downgrade from the credential the operator believed they were using, with no signal a weaker one had been substituted. That fallback has been removed entirely from the `cfg` binary; every `--api-key` flag it registered is gone with it. Scripts and CI jobs that previously exported `CFGMS_API_KEY` for `cfg` should export `CFGMS_ADMIN_BUNDLE=/path/to/admin.bundle.yaml` instead — an mTLS bundle is exactly as usable non-interactively (CI, cron, unattended scripts) as an API key was, just a stronger credential; this is a configuration change, not a lost capability. This does **not** affect genuine external API consumers: the controller's REST API still accepts API keys directly for callers that talk to it without going through `cfg`.
 
-### cfg connect (first-time import)
+This admin mTLS bundle / session pair authenticates `cfg` itself against the controller (transport auth). It is a distinct credential from the payload-signing certificate issued by `cfg credential request-signing-cert` (below), which exists solely to sign `operatorpayload.Envelope`s — see [Signing Credential Management](#signing-credential-management). With `CFGMS_API_KEY` gone (Issue #3688), `cfg credential request-signing-cert` is the only CLI path to a signing credential; there is no `--api-key` alternative.
 
-Import an admin bundle and start a controller session.
+### cfg connect (first-time import) — bootstrap only
+
+Import an admin bundle and start a controller session. This is the bootstrap
+exception: an admin bundle is a credential whose private key the controller
+itself generated and held, confined accordingly (it cannot approve a credential
+enrolment or renew itself, both of which require a passkey presence assertion it
+can never obtain; it is *intended* also to be unable to authorise endpoint
+execution — [GAP: that requirement is not yet enforced, see Epic #3711, Story
+#3696. `verifyOperatorCert` in `features/steward/commands/execute_script.go` and
+the operator-signature check in `features/controller/api/handlers_runs.go` both
+accept any admin-marked certificate and never require the payload-signing
+marker, so a bundle can authorise endpoint execution today] — see
+[ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md)).
+The ordinary way to obtain a session is `cfg login`
+[GAP: not yet shipped — see Epic #3711, Story #3721], a browser passkey
+assertion; this bundle-import route is for the very first credential on a
+controller with no account yet to log in against, or for re-running
+`bootstrap-admin` to issue another one while `cfg login` is unavailable.
 
 ```bash
 cfg connect --bundle /path/to/admin.bundle.yaml --url https://controller:9443
@@ -515,6 +532,329 @@ No connections configured.
 | Flag | Description |
 |------|-------------|
 | `--json` | Emit a JSON array instead of a human-readable table |
+
+## Signing Credential Management
+
+`cfg credential` subcommands manage payload-signing credentials — a purpose distinct
+from the mTLS admin bundle covered under [Connection Management](#connection-management).
+
+### cfg credential request-signing-cert (Issue #3693)
+
+Generate an ECDSA P-256 keypair locally and request a signed payload-signing
+certificate from the controller. This is the primary — and, since `CFGMS_API_KEY`
+was removed (Issue #3688), the only — CLI path to a signing credential: there is no
+`--api-key` alternative.
+
+```bash
+cfg credential request-signing-cert
+
+cfg credential request-signing-cert \
+  --cert-out ~/.config/cfgms/signing-cert.pem
+
+# Development only: also drop an unencrypted copy of the key on disk
+cfg credential request-signing-cert --export-plaintext-key --key-out ./dev-signing-key.pem
+```
+
+The private key is generated on the operator's machine and never transmitted —
+only the PEM-encoded public key crosses the wire, in a `POST
+/api/v1/signing-credential/request` request body that carries no other field. The
+controller signs the submitted public key (never generating or seeing a private
+key for it) and returns a certificate carrying the CFGMS payload-signing marker —
+not the admin marker used by mTLS transport bundles, so the two credential types
+remain distinguishable by construction. The resulting keypair signs
+`operatorpayload.Envelope`s (a future `cfg payload sign` command); it is never
+used for mTLS session authentication.
+
+The endpoint is gated by the `signing-credential:request` permission at
+`AssuranceStrong` plus a fresh user-presence proof, so this command requires an
+authenticated admin mTLS bundle or session (see [Connection
+Management](#connection-management)) and completes a WebAuthn presence ceremony —
+the CLI opens a browser automatically when one is needed, the same flow used by
+other presence-gated commands.
+
+**Where the private key is kept:** the generated key is stored encrypted at rest in
+the machine-bound credential store — `<user config dir>/cfgms/credentials/signing-key.enc`,
+the same store `cfg connect` uses for the admin bundle's private key — not as a
+cleartext PEM file. Mode 0600 alone is access control, not encryption at rest: it
+does not protect the key from another process running as the operator, from a
+backup, or from a cloud-synced config directory. Only the certificate, which
+carries no secret, is written to `--cert-out`.
+
+A cleartext export is available for development interop, but only on explicit
+opt-in: `--key-out` without `--export-plaintext-key` is refused with an error
+rather than silently writing an unencrypted key. With the opt-in, the encrypted
+copy is still written, the export is mode 0600, and the command prints a warning
+naming the exported path.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cert-out` | `<user config dir>/cfgms/signing-cert.pem` | Path to write the issued certificate PEM (mode 0600) |
+| `--credential-name` | `signing-key` | Name the encrypted signing key is stored under in the credential store |
+| `--export-plaintext-key` | false | Also export the private key as a cleartext PEM (development only); required to use `--key-out` |
+| `--key-out` | `<user config dir>/cfgms/signing-key.pem` | Path for the cleartext key export; ignored unless `--export-plaintext-key` is passed, and an error if passed without it |
+| `--api-url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
+| `--server-name` | — | Override the TLS server name used for certificate verification |
+
+## Enrolment Tokens and the Pending Credential-Request Queue (Issue #3717)
+
+Story #3717 (Epic #3711 — browser-authenticated CLI enrolment) adds the first half of
+zero-custody operator enrolment: an administrator mints a short-lived, single-use
+enrolment token and hands it to a machine out of band (e.g. read over a phone call, or
+pasted into a terminal). That machine, holding no certificate yet, spends the token to
+lodge a certificate signing request carrying only a public key. The request lands in a
+durable pending queue that administrators can list and deny. Story #3718 adds the
+approval decision, and story #3719 (below) adds the single-use collect call that signs
+the certificate and binds it to an account. There is no `cfg` CLI command yet; the
+endpoints below are REST-only until that follow-on work lands.
+
+### Minting and revoking an enrolment token
+
+```
+POST /api/v1/enrolment-tokens
+{"tenant_id": "root/msp-a/client-1"}
+```
+
+Requires the `enrolment-token:mint` permission at `AssuranceStrong` (mTLS admin bundle or
+a stepped-up web/CLI session — see [Connection Management](#connection-management)).
+`tenant_id` is required; a tenant-scoped caller may only mint within its own subtree. The
+response includes the raw token value **exactly once**:
+
+```json
+{
+  "data": {
+    "id": "et-<uuid>",
+    "token": "<64-char hex — shown only here>",
+    "token_prefix": "a1b2c3",
+    "tenant_id": "root/msp-a/client-1",
+    "created_at": "2026-08-28T10:00:00Z",
+    "expires_at": "2026-08-28T11:00:00Z",
+    "revoked": false
+  }
+}
+```
+
+Hand the `token` value to the enrolling machine out of band. It is single-use — spent the
+moment a lodge succeeds against it, whether or not the resulting request is ever
+approved — and expires on its own an hour after minting. Only `token_prefix` (its first 6
+characters) is ever shown again, in logs or elsewhere; the full value cannot be retrieved
+after this response.
+
+To revoke an unspent token before it is used:
+
+```
+POST /api/v1/enrolment-tokens/{id}/revoke
+```
+
+Requires `enrolment-token:revoke` at `AssuranceStrong`. A token that has already been
+spent cannot be revoked (409) — its one use is already consumed.
+
+### Lodging a signing request
+
+```
+POST /api/v1/credential-requests/lodge
+Authorization: Bearer <enrolment token>
+{"csr_pem": "-----BEGIN CERTIFICATE REQUEST-----...", "hostname": "laptop-01", "label": "sales laptop", "platform": "linux", "purpose": "cli enrolment"}
+```
+
+This is the one endpoint in the epic that carries no API key, mTLS certificate, or web
+session — only the enrolment token as a bearer credential, exactly as `POST
+/api/v1/register` is unauthenticated by design. An absent, unknown, revoked, expired, or
+already-spent token all return `401` with an identical body, so no response ever
+discloses which of those five conditions applied.
+
+`csr_pem` must be a single PEM `CERTIFICATE REQUEST` block whose own signature verifies
+against the public key it carries; a body that also contains any private-key PEM block is
+rejected outright. `hostname`, `label`, `platform`, and `purpose` are display-only text —
+they are never trusted for any authorization decision, and no caller-supplied field (a
+`tenant_id`, `permission`, `account`, or similar claim slipped into the body) has any
+effect: the tenant is always derived from the token record.
+
+On success the response is returned **once**:
+
+```json
+{
+  "data": {
+    "request_id": "cr-<uuid>",
+    "public_key_fingerprint": "<64-char hex SHA-256 over the public key>",
+    "public_key_fingerprint_short": "AB12-CD34-EF56-7890",
+    "collect_secret": "<64-char hex — shown only here>",
+    "expires_at": "2026-08-28T11:00:00Z"
+  }
+}
+```
+
+`public_key_fingerprint_short` is a deterministic function of the public key alone — the
+enrolling machine can compute and print the same value locally, so an administrator
+reviewing the pending queue can visually match what is on screen against what the machine
+printed before approving. `collect_secret` is consumed by a later story; only its hash is
+persisted here.
+
+Lodge is rate limited per source address and bounded by a per-tenant outstanding-pending
+cap: once a tenant's queue is full, further lodges are refused (`503`) rather than
+evicting older entries — the cap is a ceiling, not a queue-flush primitive.
+
+### Listing and denying pending requests
+
+```
+GET /api/v1/credential-requests
+```
+
+Requires `credential-request:list`. Returns pending requests scoped to the caller's
+tenant subtree (an unscoped mTLS admin sees all), including the fingerprint, its short
+comparable form, source address, requested purpose, and expiry — never the CSR, the
+collect-secret hash, or which token lodged it.
+
+```
+POST /api/v1/credential-requests/{id}/deny
+{"reason": "unrecognized device"}
+```
+
+Requires `credential-request:deny`. Denial is terminal: a denied request can never later
+be approved or collected, and denying it twice returns `409`.
+
+### Expiry
+
+Both unspent enrolment tokens and pending requests expire on a one-hour lifetime and are
+removed by a background sweep that runs independently of any read — an expired record is
+not merely hidden on the next list call, it is deleted. Spent tokens and denied requests
+are left in place; the sweep only removes records that are still live but past their
+expiry.
+
+### Approving a pending request (Issue #3718)
+
+Story #3718 adds the approval decision. **Approving signs nothing** — the shipped steward
+registration path already works this way (`handleApproveRegistration`'s own doc comment:
+"no cert is generated here, generate-on-claim") and this endpoint mirrors it: it validates
+the approver's own authority, decides which certificate markers the eventual credential
+will carry, selects or creates the account it will bind to, and records all three together
+on the pending request before moving it to `approved`. No certificate exists at the end of
+this call — signing the lodged public key and writing the account binding atomically is the
+collect story that follows.
+
+```
+POST /api/v1/credential-requests/{id}/approve
+{
+  "fingerprint": "AB12-CD34-EF56-7890",
+  "account_id": "<existing account UUID>",
+  "grant_admin_marker": true,
+  "grant_payload_signing_marker": false,
+  "grant_root_scope_marker": false
+}
+```
+
+`fingerprint` must match the fingerprint recorded at lodge time — full or short form both
+accepted — or the call is rejected with `409`. This closes the window where a second lodge
+re-sorts the queue between rendering the list and clicking approve.
+
+Exactly one of `account_id` (select an existing account within the caller's tenant subtree)
+or `new_account_username` (plus optional `new_account_tenant_id`, defaulting to the
+request's own tenant) must be supplied. A headless host is represented by its own account,
+created through the same durable account-persistence path `POST /api/v1/accounts` uses.
+
+Each of the three certificate markers (Epic #3711 D3) is granted only when explicitly
+requested **and** only when the approver holds the authority for it — the default is
+nothing, and a marker the approver cannot grant refuses the whole call (`403`) rather than
+silently dropping it:
+
+| Marker | Requested field | Requires |
+|---|---|---|
+| `AdminMarkerOID` | `grant_admin_marker` | The approver is themselves a platform administrator (`Principal.ImplicitAdmin`) |
+| `PayloadSigningMarkerOID` | `grant_payload_signing_marker` | The approver holds `signing-credential:request` at `AssuranceStrong` — the same gate `POST /api/v1/signing-credential/request` enforces on itself |
+| `RootScopeMarkerOID` | `grant_root_scope_marker` | The approver's own request was authenticated by a certified, non-revoked root-scope-marked certificate (`Principal.RootScoped && Principal.CertSerial != ""`) — a session or a cookie can never satisfy this, however many permissions it holds |
+
+An approver can therefore never mint a credential stronger than their own — which is also
+what makes **self-approval safe**: approving one's own request (the selected or created
+account is the approver's own) grants nothing the approver did not already have. The
+approve endpoint records `self_approved` on the audit event so this is visible, not
+something a reviewer has to infer.
+
+Requires `credential-request:approve` at `AssuranceStrong` with a fresh user-presence
+proof. The presence requirement is what actually confines the retained bootstrap admin
+credential here ([ADR-021](../architecture/decisions/021-identity-assurance-levels.md)
+Amendment 5): its `ImplicitAdmin` flag satisfies every permission-string check by
+construction, but it resolves to no bound account, so no presence token can ever be minted
+for it.
+
+### Collecting the signed certificate (Issue #3719)
+
+Story #3719 closes the loop: this is where the certificate is actually signed. The
+machine that lodged the request, and only that machine, collects it — authenticated by
+the `collect_secret` the lodge response returned exactly once, never by the request ID
+or the public-key fingerprint (both are values an observer of the approval screen has
+already seen). There is no API key, mTLS certificate, or web session on this call, and
+no permission gate — the endpoint is not on the elevated-assurance surface at all,
+exactly like lodge.
+
+```
+POST /api/v1/credential-requests/{id}/collect
+Authorization: Bearer <collect secret>
+```
+
+The waiting machine polls this endpoint. Every response is one of:
+
+| Response | Meaning |
+|---|---|
+| `404 REQUEST_NOT_FOUND` | Unknown ID, **or** a valid ID with the wrong (or absent) collect secret — the two are indistinguishable by design; the endpoint never confirms a request ID exists to an unauthenticated caller |
+| `200 {"status": "pending"}` | Correct secret, but no admin decision yet — keep polling |
+| `200 {"status": "denied"}` | The request was denied; it will never become collectible |
+| `200 {"status": "expired"}` | The request (and its collect secret) passed its one-hour lifetime before it was collected |
+| `410 Gone` | Already collected — by this machine's own earlier call, or by the winner of a concurrent race. There is never a second certificate for one request |
+| `503` | Not the authoritative node for minting; the request is untouched — retry |
+| `200` with a certificate body | Success (below) |
+
+A successful collection returns:
+
+```json
+{
+  "data": {
+    "certificate_pem": "-----BEGIN CERTIFICATE-----...",
+    "ca_certificate_pem": "-----BEGIN CERTIFICATE-----...",
+    "serial_number": "...",
+    "account_id": "<the account recorded at approval>",
+    "granted_markers": ["admin"],
+    "expires_at": "2027-08-28T10:00:00Z"
+  }
+}
+```
+
+The certificate is signed from exactly the marker set and account recorded at approval
+— never recomputed, re-derived, or widened at collect, and never read from the bound
+account's own attributes. There is no authenticated principal on this call to derive
+anything else from. An approved request that is never collected leaves no certificate
+in existence: nothing is signed until collect runs.
+
+Collection is single-use, enforced as a conditional durable state transition
+(`approved` → `collected`) that commits **before** the certificate is signed — so a
+restart between the transition and the response can never produce a second
+certificate, and the loser of a concurrent collect race always receives `410` rather
+than a duplicate. The account binding is written **before** the certificate is
+returned to the caller, and any failure after signing revokes the just-issued
+certificate immediately: a signed certificate is never left observable in a state
+where it resolves to no account (that state would otherwise fall through to the mTLS
+middleware's bootstrap-fallback path and be granted implicit root).
+
+Minting is leadership-gated, but only on the branch that actually mints: an approved
+request found on a non-authoritative node returns `503` and stays `approved` untouched,
+while every polling response above (`pending`/`denied`/`expired`/not-found) remains
+available regardless of leadership — a waiting machine's poll loop does not stall
+during a leadership change.
+
+Collect is rate limited per source address, and the collect secret expires with the
+request it belongs to (the same one-hour lifetime and the same background sweep
+described above) — a captured secret has a bounded life.
+
+### Permissions
+
+| Permission | Assurance floor | Notes |
+|------------|------------------|-------|
+| `enrolment-token:mint` | `AssuranceStrong` | Mints a single-use, short-lived token |
+| `enrolment-token:revoke` | `AssuranceStrong` | Revokes an unspent token |
+| `credential-request:list` | none | Read-only; outside the elevated-assurance surface |
+| `credential-request:deny` | none | De-escalation action, mirrors `registration:deny` |
+| `credential-request:approve` | `AssuranceStrong` + presence | Decides the marker set and account binding (Issue #3718); signs nothing |
 
 ## Workflow Management
 

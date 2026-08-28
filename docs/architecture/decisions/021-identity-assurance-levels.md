@@ -338,6 +338,25 @@ maximizes the lifetime of the most valuable credential and defeats the purpose.
 - **No blanket re-authentication timer** (see Decision 2).
 - **No new credential storage backend.** WebAuthn credentials are public keys —
   they extend the existing web-account record; they do not need secret storage.
+- **No protection against a host-compromised controller substituting what the
+  operator sees or acts on.** Every mechanism in this ADR — WebAuthn verification,
+  assurance-level computation, the `RequireUserPresence` gesture, session state —
+  executes on the controller. A controller compromised at the host level can serve
+  the operator arbitrary content (e.g. a benign-looking module description while
+  approving a different bundle) and the operator's step-up gesture or presence
+  touch will not detect the substitution; it authenticates *that a human acted*,
+  not *that the human saw the truth*. This is an accepted non-goal of the
+  assurance model, not a gap introduced by it — no browser-side control can verify
+  the honesty of the server rendering its UI. **The audit trail is not a
+  compensating control for this scenario.** `pkg/audit`'s chain (ADR-004) is
+  tamper-evident only against an actor who does not hold its HMAC key; the key is
+  loaded from the controller's own secrets store, so a host-compromised controller
+  holds it and can rewrite its own audit history into a chain that verifies (see
+  ADR-004's [Adversary Bound](004-audit-chain-integrity.md#adversary-bound-issue-3727),
+  Issue #3727). Where this ADR or any other names "the audit trail" as backstopping
+  a compromised-controller scenario, read that claim as bounded by ADR-004: it
+  detects storage-layer tampering by an actor without the key, not tampering by the
+  controller itself.
 
 ---
 
@@ -788,6 +807,21 @@ decomposes into the elevation assertion handler (this amendment), the browser se
 backend + UI (Amendment 1), the step-up modal + `apiFetch` interceptor, and the held write-action
 wiring (W1–W5) that becomes reachable once elevation works.
 
+### Cross-reference: reused for operator-payload signing (Issue #3695)
+
+The ceremony shape above — single-use server-generated challenge, WebAuthn assertion with
+origin binding, signature-counter clone detection — is reused verbatim by
+`POST /api/v1/operator-payload/sign/begin|finish` (`features/controller/api/handlers_operator_payload_sign.go`),
+with one substitution: the challenge is not an opaque server-generated value but
+`sha256(operatorpayload.CanonicalBytes(envelope))` — the hash of the exact command/target
+envelope the operator is authorizing. The authenticator therefore signs the envelope itself,
+not an unrelated proof-of-presence value, so a successful assertion is simultaneously the
+step-up ceremony's replay/clone protection *and* a binding signature over the payload. This is
+a distinct operation from elevation: it does not raise a session's assurance level, and it is
+only reachable by a caller who already holds `AssuranceStrong` (`operator-payload:sign`,
+`Min: AssuranceStrong`, Issue #3687). See `docs/architecture/operating-model.md` for the
+residual-risk comparison against the mTLS payload-signing path (Issue #3693/#3692).
+
 ---
 
 ## Amendment 3 (2026-08-13): Self-service passkey management UI, IDOR fix, and server-side anti-lockout guard
@@ -819,3 +853,245 @@ Amendment 1 established that human accounts are passkey-only, that adding/removi
 §7 states "the cert path" as the recovery route for a lost sole authenticator. This is accurate for mTLS-authenticated principals (CLI operators, service accounts). It is **not applicable to human web accounts** (Amendment 1): human web accounts are passkey-only and have no associated mTLS client certificate. A human who loses all passkeys cannot recover via cert — they require an admin-mediated account reset (Decision 4 of Amendment 1: "an operator at `AssuranceStrong` re-provisions the account to the zero-authenticator state and issues a fresh single-use magic link"). The server-side anti-lockout guard (Decision 2 above) enforces this: it prevents the browser-self-service path from reaching zero credentials, leaving the emergency reset path as the only way out of a total lockout.
 
 **Implementation reference (Issue #2992):** IDOR fix via `resolveWebAccountForCredentials` helper; anti-lockout guard + CAS under `credentialMu` in `handleWebAuthnRevokeCredential`; self-service passkeys page at `web/src/passkeys/PasskeysView.tsx`; audit helpers `emitPasskeyAddedAudit` / `emitPasskeyRevokedAudit` in `features/controller/api/handlers_webauthn.go`.
+
+## Amendment 4 (2026-08-28): Relying party is configuration, has no default, and wiring it exposed a CLI-relay regression
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** none (closes a wiring gap; documents a consequence)
+
+### Context
+
+`NewWebAuthnFromConfig` and `SetWebAuthn` (`features/controller/api/handlers_webauthn.go`) — the
+constructor and installer for the WebAuthn relying party every handler in this ADR depends on —
+had no caller in the controller binary. Every shipped controller answered
+`/api/v1/web/passkey/login/begin`, `/api/v1/web/passkey/login/finish`, and
+`/api/v1/webauthn/presence/begin|finish` with `503 WEBAUTHN_NOT_CONFIGURED`, unconditionally. All
+of §3 (silent device proof) and §4 (human-presence gesture) of this ADR, and Amendments 1–3 built
+on top of them, were unreachable from a browser. Issue #3713 closes this: `cmd/controller/main.go`
+now builds the relying party from a new `webauthn:` controller-configuration block
+(`features/controller/config.WebAuthnConfig`: `rp_id`, `rp_display_name`, `rp_origins`) and installs
+it via `SetWebAuthn` before the API server starts.
+
+**There is no default.** An absent or empty `rp_id` leaves every passkey endpoint at 503, exactly
+as before this issue — the same behavior a pre-#3713 controller always had. A plausible-looking
+fallback identifier (e.g. `localhost`) would let a phishing-resistant authenticator complete a
+ceremony against an identifier the operator never chose, which is worse than refusing the request.
+`ValidateWebAuthn` (`features/controller/config/config.go`) and `NewWebAuthnFromConfig` both refuse,
+loudly, at startup: `rp_id` set with no `rp_origins`, or any `rp_origins` entry that is not `https://`.
+There is no local-development bypass for either check.
+
+### The regression this wiring causes, and the fix it does not accept
+
+Two existing `cfg` CLI commands run a WebAuthn ceremony from a page served at
+`http://127.0.0.1:<random-port>`: the presence relay in `cmd/cfg/cmd/stepup.go` (used by the
+non-interactive step-up flow) and the registration relay in `cmd/cfg/cmd/webauthn.go` (`cfg webauthn
+register`). A browser enforces that the relying-party identifier is the calling origin's effective
+domain (or a registrable suffix of it) before it will run `navigator.credentials.create()` /
+`.get()` at all — an IP-literal origin like `http://127.0.0.1` can only satisfy an RPID of exactly
+`127.0.0.1`, never a real domain. Before this issue, this was invisible: both relays hit the
+begin endpoint first, which always answered 503 before the browser ever ran the ceremony. **Once a
+production `rp_id` is configured, that masking disappears** — the begin call now succeeds, the
+browser opens the ceremony at the loopback origin, and the browser itself refuses it with a
+same-origin/RPID mismatch. Both commands break for real, for every deployment that configures
+`webauthn:` to make browser login work.
+
+**Adding `http://127.0.0.1` (or `http://localhost`) to `rp_origins` was considered and rejected.**
+`rp_origins` is the relying party's permitted-origin list for every WebAuthn ceremony the controller
+ever runs — login, step-up, and passkey registration — not a per-command allowlist. Admitting a
+loopback origin would make a plaintext, unauthenticated-by-TLS origin a permanently valid target for
+any of them, for every deployment that ever needs the CLI relay to work — the exact class of
+weakening Epic #3711's adversarial review already rejected once for the browser-enrolment surface.
+No loopback or non-HTTPS origin was added as part of #3713, and `ValidateWebAuthn` /
+`NewWebAuthnFromConfig` reject one unconditionally if it ever is.
+
+**Disposition: accepted as a known regression, not fixed by #3713.** The correct fix is for the
+loopback relay to run the ceremony under an origin that actually matches the controller's `rp_id` —
+e.g. the CLI opens a controller-served relay page (`https://<rp_id>/cli-relay/...`) that
+`fetch()`s the result back to the local CLI process, rather than serving the ceremony page from the
+CLI itself. That is CLI-relay redirect work, not a config-wiring fix, and is out of scope for #3713
+(which is explicitly barred from touching any part of Epic #3711's browser-authenticated-CLI-enrolment
+work). It is tracked as a follow-up story under Epic #3711.
+
+### Consequences
+
+- Positive: browser passkey login and passkey step-up (§3, §4, Amendments 1–3) become reachable for
+  the first time in a production deployment that sets `webauthn:` in `controller.cfg`.
+- Positive: an unconfigured or misconfigured relying party still fails safe — 503 when unset, a
+  loud startup error when `rp_id` is set without HTTPS origins.
+- Negative (accepted): `cfg stepup`'s presence relay and `cfg webauthn register` stop completing
+  their browser ceremony as soon as an operator sets a production `rp_id`. Both commands print the
+  relay URL and wait for the browser POST as before; the browser itself refuses the ceremony with a
+  same-origin/RPID mismatch, so the operator sees a stuck "waiting for browser ceremony" prompt that
+  eventually times out. `cfg webauthn list` / `cfg webauthn revoke` (no ceremony, pure REST calls)
+  and the mTLS admin-bundle bootstrap path are unaffected. The admin can still recover via the mTLS
+  cert path (§7) or `cfg registration approve` while the follow-up relay-redirect fix lands.
+
+**Implementation reference (Issue #3713):** `features/controller/config.WebAuthnConfig` +
+`Config.ValidateWebAuthn`; tightened `NewWebAuthnFromConfig` validation in
+`features/controller/api/handlers_webauthn.go`; startup wiring in `cmd/controller/main.go`
+(`buildWebAuthnRelyingParty`, called between `server.New` and `runControllerServer`).
+
+---
+
+## Amendment 5 (2026-08-28): Bootstrap credential confinement (Epic #3711)
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Extends:** §7 and Decision 4
+
+### Context
+
+Epic #3711 replaces the file-transfer bundle as the ordinary way to obtain a
+`cfg` credential with `cfg login` — a browser passkey assertion that mints a
+session token and never hands the operator a private key the controller ever
+held. `controller bootstrap-admin` remains, because a fresh controller has no
+account yet for anyone to log in against: the chicken-and-egg has to break
+somewhere. This amendment records what confines the credential that step
+produces, so its continued existence is a documented, bounded decision rather
+than an unexamined exception.
+
+### The bootstrap credential is controller-custody by construction
+
+`IssueAdminBundle` (`features/controller/initialization/admin_bundle.go`)
+generates the certificate's keypair itself and writes both halves into the
+bundle file — the controller holds the private key at the moment of issuance.
+Every other credential this epic introduces is CSR-based: the requesting party
+generates its own keypair and the controller only ever sees the public half
+(Epic #3711 D2). The bootstrap bundle is the one credential in the system for
+which that is not true, and it is confined precisely because of it.
+
+### What the confinement covers
+
+The bundle's certificate carries `AdminMarkerOID` (`pkg/cert/admin_marker.go`)
+and — for a `--root-scoped` bundle — also `RootScopeMarkerOID`. It never
+carries `PayloadSigningMarkerOID` (`pkg/cert/payload_signing_marker.go`):
+`IssueAdminBundle`'s `TemplateModifier` composes only the admin marker and,
+conditionally, the root-scope marker, on every path (Epic #3711 D4). Once signer
+verification positively requires the payload-signing marker, a steward will
+refuse to execute a payload whose signer lacks it, and the bootstrap credential
+— however it is obtained, copied, or misused — will not be able to reach code
+execution on a managed endpoint. That is the confinement Epic #3711 D4 names:
+*"a credential whose private key the controller has held cannot reach an
+endpoint."* It is a stated intent, not a shipped control:
+
+> **[GAP: the positive payload-signing-marker requirement is not yet enforced —
+> see Epic #3711, Story #3696. Both signer-verification sites accept any
+> admin-marked certificate and never consult the payload-signing marker:
+> `verifyOperatorCert` (`features/steward/commands/execute_script.go`) for
+> steward-side script execution, and the operator-signature check in
+> `features/controller/api/handlers_runs.go` for controller-side ad-hoc runs.
+> Both test `cert.HasAdminMarker`; `cert.HasPayloadSigningMarker`
+> (`pkg/cert/payload_signing_marker.go`) has no non-test caller repo-wide, and
+> `SetPayloadSigningMarker` has no issuance path yet. `IssueAdminBundle` does
+> stamp `AdminMarkerOID`, `steward:execute-scripts` carries no
+> `RequireUserPresence`, and the bootstrap principal is `ImplicitAdmin` — so
+> until #3696 lands, a bootstrap bundle **can** authorise endpoint code
+> execution. The bundle's absence of the payload-signing marker (locked by
+> `TestIssueAdminBundle_NeverCarriesPayloadSigningMarker`) is a precondition for
+> this confinement, not the confinement itself.]**
+
+The same certificate also cannot approve a credential enrolment or renew
+itself. Both are catastrophic, credential-granting actions and, like
+`module:approve`, require a fresh per-action WebAuthn presence assertion
+(Decision 4) — obtainable only for a principal that resolves to a provisioned
+account holding registered credentials (`handlePresenceBegin`,
+`features/controller/api/handlers_webauthn.go`). `IssueAdminBundle` never
+creates an account binding for the certificate it issues, so every request
+authenticated with a bootstrap bundle resolves through
+`extractAdminPrincipal`'s "no binding found" bootstrap fallback
+(`features/controller/api/middleware.go`): an implicit-admin principal keyed
+by the certificate's `CommonName`, not by any account. `ImplicitAdmin`
+satisfies every *permission* check by construction, but the presence ceremony
+resolves the principal to an account by that same `CommonName` and finds
+none, so no presence token can ever be minted for it. What blocks the
+bootstrap credential here is the presence requirement itself, not an absent
+permission string — the principal holds every permission and is refused
+anyway.
+
+### What the confinement does not cover
+
+The bootstrap credential still administers the controller: every permission
+that does not carry `RequireUserPresence` is available to it, unconditionally,
+for as long as the certificate is valid or until it is revoked. At
+controller-management actions it is exactly as powerful as any other unscoped
+mTLS admin certificate. The confinement is specifically about endpoint
+execution and about the narrow set of actions this ADR gates on human
+presence — not about the controller's own administration surface.
+
+### Interface substitution remains an accepted non-goal
+
+The controller serves the same browser interface used for both `cfg login`
+and enrolment approval, so a compromised controller can present one thing to
+an operator and have them authorise another — Epic #3711 D10, inherited
+unchanged from Epic #3571 D2. This amendment does not close that gap.
+Cryptographic forgery is in scope for the assurance model as a whole; a
+controller that lies about what it is showing a human is not. The
+compensating control is the server-side blast-radius bound described above —
+which, once Story #3696 lands, will mean an admin-marked certificate, however
+obtained, cannot sign a payload a steward will run, and which today does not
+hold at all (see the [GAP] above).
+
+The audit trail is not a second compensating control here. Every
+bootstrap-fallback authentication is logged (`emitBootstrapFallbackAudit`,
+`features/controller/api/middleware.go`), but per this ADR's own
+[Non-Goals](#non-goals) — established by ADR-004's
+[Adversary Bound](004-audit-chain-integrity.md#adversary-bound-issue-3727)
+(Issue #3727, closed) — the audit trail is not a compensating control for a
+host-compromised controller: `pkg/audit`'s chain is tamper-evident only
+against an actor who does not hold its HMAC key, and a host-compromised
+controller holds that key and can rewrite its own history into a chain that
+still verifies. `emitBootstrapFallbackAudit` writes a structured log line
+under the same controller's custody, not an independent witness, so it is
+bounded the same way. The gap this amendment does not close is therefore
+uncompensated, not weakly compensated.
+
+## Amendment 6 (2026-08-28): Credential marker authority is bounded by the approver's own authority (Epic #3711 Story #3718)
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Extends:** Amendment 5
+
+Approving a pending credential-request enrolment (`POST
+/api/v1/credential-requests/{id}/approve`,
+`features/controller/api/handlers_credential_requests_approve.go`) decides which
+certificate markers (`AdminMarkerOID`, `PayloadSigningMarkerOID`, `RootScopeMarkerOID` —
+Epic #3711 D3) the eventual credential will carry. The rule this amendment records: **an
+approver can only ever mint a credential weaker than or equal to their own.**
+
+- Granting `AdminMarkerOID` requires the approver to already be a platform administrator
+  (`Principal.ImplicitAdmin`) — the same three construction sites named in Amendment 3's
+  `hasPermission` doc comment.
+- Granting `PayloadSigningMarkerOID` requires the approver to hold
+  `signing-credential:request` at `AssuranceStrong` — the same gate
+  `handleRequestSigningCredential` (#3693) enforces on itself when minting one's own.
+- Granting `RootScopeMarkerOID` requires the approver's own request to have been
+  authenticated by a certified, non-revoked root-scope-marked certificate:
+  `Principal.RootScoped && Principal.CertSerial != ""`. This is deliberately narrower than
+  the first two: a root-scope-account session or web-cookie principal can carry
+  `RootScoped: true` (or, for an `ImplicitAdmin` principal, satisfy any permission-string
+  check by construction) without ever presenting the certificate this ADR treats as the
+  root of trust for that scope. `CertSerial` is set in exactly two places, both inside
+  `extractAdminPrincipal`, both after its revocation check — see that function's doc
+  comment and Amendment 5.
+
+**Why this makes self-approval safe.** Because the rule is "weaker than or equal to," an
+administrator approving their own pending request — the ordinary shape of enrolling a
+second device — grants themselves nothing they did not already hold. The approve endpoint
+records `self_approved` on the audit event precisely so this is visible, not something a
+reviewer has to infer.
+
+**Why the gate cannot be a bare permission-string check for `RootScopeMarkerOID`.**
+`hasPermission` returns true for any `ImplicitAdmin` principal by construction (Amendment
+3); an ordinary admin-marked mTLS certificate with no root-scope marker of its own is
+`ImplicitAdmin: true`. A permission check alone would let any platform administrator mint a
+root-scope-marked credential regardless of their own scope — exactly the escalation this
+rule exists to prevent. `Principal.RootScoped` alone is equally insufficient: it is always
+false for every browser-authenticated caller today, so the check would look correct while
+being unexercised, and would silently reopen the day a passkey session is amended to carry
+it. Reading the raw presented certificate (`r.TLS.PeerCertificates[0]`) directly instead of
+the derived principal is a revocation bypass: the server accepts a client certificate the
+TLS handshake did not require (`tls.VerifyClientCertIfGiven`, no `VerifyPeerCertificate`
+callback), and revocation is checked in exactly one place — `extractAdminPrincipal` — which
+a direct read of the raw certificate skips entirely.
+
+**Implementation reference (Issue #3718):** the three gates are named predicates —
+`principalMayAdministerController`, `principalMayGrantPayloadSigningMarker`, and
+`principalHasCertifiedRootScope` — each with a single call site in
+`resolveGrantedMarkers`. A structural test
+(`TestCertSerial_OnlySetByExtractAdminPrincipal`) asserts no other code path in the package
+sets `CertSerial` on a `Principal`, so the root-scope gate's assumption cannot rot silently.

@@ -939,6 +939,14 @@ func TestChain_PreviousChecksumLinked(t *testing.T) {
 	}
 }
 
+// TestVerifyChain_DetectsTampering, TestVerifyChain_DetectsPreviousChecksumMismatch,
+// and TestVerifyChain_DetectsDeletion together prove one half of the ADR-004
+// adversary bound (Issue #3727): an actor who alters, reorders, or deletes
+// entries WITHOUT recomputing the chain fields using the manager's HMAC key —
+// i.e. an actor who does not hold the key — is caught by VerifyChain. See
+// TestVerifyChain_KeyHolderCanForgeConsistentChain below for the other half:
+// an actor who does hold the key is not caught.
+
 // TestVerifyChain_DetectsTampering records 3 entries, then tampers with the
 // middle entry's Action field in-memory and verifies VerifyChain reports a
 // ChainBreak for it.
@@ -1105,6 +1113,74 @@ func TestVerifyChain_DetectsDeletion(t *testing.T) {
 		}
 	}
 	assert.True(t, foundGap, "ChainBreak must report a sequence gap for the entry after the deletion")
+}
+
+// TestVerifyChain_KeyHolderCanForgeConsistentChain proves the ADR-004 adversary
+// bound (Issue #3727): an actor who holds the chain's HMAC key can rewrite entry
+// content and recompute SequenceNumber, PreviousChecksum, and Checksum for every
+// entry in order — exactly as writeBatch does for legitimate writes — producing a
+// chain VerifyChain reports as fully consistent, despite every entry's content
+// differing from what was originally recorded.
+//
+// This models a host-compromised controller: WithSecretsStore loads the HMAC key
+// from the controller's own secrets store, so the controller process itself is
+// this "key holder" whenever a secrets store is wired — the production
+// configuration, not a hypothetical. The manager under test stands in for that
+// actor because it already holds the same key that produced the original chain.
+//
+// This is not a defect in VerifyChain; it demonstrates the documented bound of a
+// keyed hash chain and is why the audit trail is not a compensating control
+// against a compromised controller (see ADR-021's qualification).
+func TestVerifyChain_KeyHolderCanForgeConsistentChain(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("forge-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("original_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "forge-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	originalActions := make([]string, len(entries))
+	for i, e := range entries {
+		originalActions[i] = e.Action
+	}
+
+	// The key holder rewrites every entry's content and recomputes the chain
+	// fields in sequence order — the same recompute writeBatch performs for a
+	// legitimate write, available to anyone who holds m.hmacKey.
+	forged := make([]*business.AuditEntry, len(entries))
+	var prevChecksum string
+	for i, e := range entries {
+		f := *e
+		f.Action = fmt.Sprintf("forged_action_%d", i)
+		f.PreviousChecksum = prevChecksum
+		f.Checksum = audit.GenerateChecksum(manager, &f)
+		prevChecksum = f.Checksum
+		forged[i] = &f
+	}
+
+	breaks := manager.VerifyChain(forged)
+	assert.Empty(t, breaks,
+		"an actor holding the HMAC key can recompute a fully consistent chain over rewritten content — VerifyChain must not report this as broken")
+
+	for i, f := range forged {
+		assert.NotEqual(t, originalActions[i], f.Action,
+			"forged entry content must differ from what was originally recorded, proving the chain is consistent but false")
+	}
 }
 
 // TestManager_Flush verifies that after RecordEvent returns successfully and

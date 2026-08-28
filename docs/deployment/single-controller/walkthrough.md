@@ -129,6 +129,33 @@ The metrics API is not registered on that product listener. Query
 `https://localhost:9090/api/v1/monitoring/metrics` locally with a key carrying
 `monitoring:read-metrics`.
 
+### Browser passkey login (optional)
+
+Browser-based passkey login and passkey step-up (the "My Passkeys" UI, presence-gated
+actions) require a `webauthn:` block in `controller.cfg`. There is no default: without
+it, the passkey endpoints answer `503 WEBAUTHN_NOT_CONFIGURED` and the mTLS admin
+bundle remains the only login path — which is a valid, supported deployment shape.
+
+```yaml
+webauthn:
+  rp_id: ctrl.mylab.local            # the controller's effective domain — no scheme, no port
+  rp_display_name: "CFGMS Controller" # shown by the authenticator/browser prompt
+  rp_origins:
+    - "https://ctrl.mylab.local"      # every fully qualified origin admins log in from
+```
+
+`rp_id` must be the domain in the URL admins use to reach the controller's REST API —
+not an IP address, and not `localhost` unless the controller is genuinely only ever
+reached at `https://localhost`. Every entry in `rp_origins` must be `https://`; startup
+refuses the config otherwise. Setting `rp_id` without `rp_origins` (or the reverse) is
+also a startup error. There is no local-development exception — WebAuthn requires a
+real TLS certificate the browser trusts (a certificate from this controller's own CA,
+imported into the browser's trust store, is sufficient; a self-signed cert the browser
+warns about is not enough because a WebAuthn ceremony refuses to run past a certificate
+error).
+
+
+
 ### Install the systemd service
 
 Copy [cfgms-controller.service](cfgms-controller.service) to `/etc/systemd/system/`:
@@ -206,7 +233,7 @@ sudo sh -c 'printf %s "<base64 from backup>" | base64 -d | systemd-creds encrypt
 
 ### Admin credential bundle
 
-`--init` writes an admin credential bundle to `/etc/cfgms/admin.bundle.yaml` (mode `0600`, owned by the `cfgms` daemon user). The bundle contains:
+`--init` writes an admin credential bundle to `/etc/cfgms/admin.bundle.yaml` (mode `0600`, owned by the `cfgms` daemon user). This is the one-time bootstrap exception: a fresh controller has no account yet for anyone to log in against, so `controller --init` generates this certificate's keypair itself and hands you both halves. Every credential after this first one should come from the ordinary path, `cfg login`, described in the [cfg Operator Guide](../cfg-operator-guide.md) — not from another bundle. The bundle contains:
 
 - The admin mTLS client certificate and private key
 - The CA certificate for server verification
@@ -396,8 +423,26 @@ sudo cfgms-steward --config /etc/cfgms/controller-steward.cfg 2>&1 | grep -i err
 
 ## Adding Operators
 
-After initialization, you can issue additional admin credential bundles for team members
-or automation systems. Each bundle grants full admin access to the controller REST API.
+The ordinary way for a team member to obtain a credential is `cfg login` — a
+browser passkey assertion that mints a session token, never a file containing a
+private key. Issuing another bundle with `bootstrap-admin` is the bootstrap
+exception, not the routine way to add an operator: every bundle the controller
+issues is a credential whose private key the controller itself generated and
+held. It cannot approve a credential enrolment or renew itself, and is
+*intended* also to be unable to authorise code execution on a managed endpoint
+(see
+[ADR-021 Amendment 5](../../architecture/decisions/021-identity-assurance-levels.md));
+read the second gap note below before relying on that last part.
+
+> **[GAP: `cfg login` is not yet shipped — see Epic #3711, Story #3721. Until it
+> lands, this is the only way to issue additional operator credentials.]**
+
+> **[GAP: the bundle's confinement against endpoint code execution is not yet
+> enforced — see Epic #3711, Story #3696. Signer verification on both the steward
+> (`features/steward/commands/execute_script.go`) and the controller
+> (`features/controller/api/handlers_runs.go`) accepts any admin-marked
+> certificate and does not require the payload-signing marker, so any bundle you
+> issue here **can** today authorise code execution on managed endpoints.]**
 
 ```bash
 sudo cfgms-controller bootstrap-admin \

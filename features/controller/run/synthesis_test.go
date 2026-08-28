@@ -5,6 +5,7 @@ package run
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -223,6 +224,7 @@ func TestSynthesizeCommandRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 		scriptmodule.ShellBash,
 		nil,
 		nil,
+		nil, "", time.Time{},
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -403,6 +405,7 @@ func TestSynthesizeCommandRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {
 		scriptmodule.ShellBash,
 		nil,
 		nil,
+		nil, "", time.Time{},
 	)
 	require.NoError(t, err)
 

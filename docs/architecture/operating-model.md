@@ -124,6 +124,10 @@ When connected to a controller, the steward also supports:
 5. **Execute ad-hoc scripts** — The controller can push one-off scripts for immediate execution outside the cfg (e.g., emergency remediation, diagnostics). Results are reported back to the controller
 6. **Remote terminal** — The controller can establish an interactive terminal session to the device through the steward for live troubleshooting
 
+**Operator signature is mandatory for inline ad-hoc commands (Issue #3694).** Every inline command (`cfg steward run-command`, `cfg steward exec`) is signed by the operator before submission, and both the controller and the receiving steward verify that signature — neither side accepts an unsigned inline command, regardless of `require_signed_adhoc` configuration. The signature covers a canonical envelope (`pkg/operatorpayload`), not the command content alone: content, shell, the resolved list of authorized target steward IDs, a single-use nonce, and a bounded expiry are all bound into the signed bytes. This closes two gaps the content-only signature left open — a legitimately-signed command re-addressed to a different target set in transit, and replay of a captured signature — without requiring the steward to parse fleet selectors: it only checks whether its own ID is a member of the signed target list. The steward enforces expiry and nonce-replay independently of the outer `SignedCommand`'s own replay window, so a captured operator-signed envelope re-wrapped in a fresh outer command is still rejected.
+
+This is an interim state: the client still signs with the operator's controller-issued admin-bundle credential (the same mTLS key used for API auth), so the controller could in principle still request a command signed under an operator's identity if it held that key — the controller does not hold it today, but the credential's issuance path means the epic's zero-custody constraint (the controller never able to produce an operator signature) is not yet closed. A later story cuts the signing credential over to a controller-never-custodied WebAuthn assertion; `OperatorCredentialVerifier` in `features/steward/commands/execute_script.go` is the seam that swap lands on.
+
 These capabilities require an active controller connection and are not available in standalone mode. They do not replace or bypass the cfg — they are operational tools for administrators.
 
 **What the steward is NOT:**
@@ -202,6 +206,25 @@ YAML containing cert + key + CA inline. The `cfg` CLI auto-discovers via: `--bun
 **Revoked admin certs are exported as a signed manifest.** `pkg/cert.Manager.ListRevoked()` is controller-local: on its own, no steward can check operator-cert revocation independently of a live, trusted controller assertion. `GET /api/v1/certificates/revocation-manifest` exports that state as `{Kind: "operator-cert-revocation", Version, RevokedSerials}`, serialized with sorted serials for byte-stable signing, then signed with the controller's current `PurposeSigning` certificate via `signature.NewSigner` — the same signer construction config/DNA signing uses (`features/controller/service/signing_rotation.go`). The `Kind` field is what keeps a revocation manifest from ever being mistaken for a signed config/DNA payload sharing that same signing cert. `Version` is the count of revoked serials, which only grows since `Revoke` has no inverse. Publishing only: steward-side fetch, verification, and enforcement against it are a later story.
 
 **The manifest is fleet-wide, so the endpoint is unscoped-callers-only.** It is gated at the read-only `certificate:list` permission (no elevated assurance — this is a read of state that `certificate:revoke` already produced), and the handler additionally requires an unscoped principal: a caller carrying a tenant scope receives `403`. Revocation status is *not* public — a tenant-scoped operator cannot otherwise enumerate other tenants' serials, and the revocation store holds steward-cert serials as well as operator-cert ones (`certificates/{serial}/revoke` writes into it). Filtering the manifest per tenant is not the alternative: a steward verifying the signature must see every revoked serial, and `Version` is the fleet-wide revoked count, so a subset would be a validly signed manifest that silently omits revocations. Tenant-scoped visibility of certificate data stays on `GET /api/v1/certificates` and `GET /api/v1/certificates/{serial}`, which filter by the caller's tenant subtree.
+
+**Two residual-risk profiles for payload signing.** CFGMS has two independent paths for an
+operator to produce a signature the steward will trust: the CSR-issued mTLS signing credential
+(`POST /api/v1/signing-credential/request`, Issue #3693/#3692) and the WebAuthn operator-payload
+signature (`POST /api/v1/operator-payload/sign/begin|finish`, Issue #3695, ADR-021 Amendment 2
+cross-reference). Both require `AssuranceStrong`, but the credential each rests on has a
+different failure mode if the controller is compromised. The mTLS path issues a certificate over
+a CSR the operator generates — the private key never crosses the wire — but the *resulting
+certificate* is an ordinary bearer credential the controller subsequently sees and could, if
+compromised, mint again for an attacker without the legitimate operator noticing: the deeper risk
+is a controller that silently steals or extends trust in a credential that already exists and is
+expected to keep working unattended for its validity period. The WebAuthn path has no credential
+of that shape at all — a WebAuthn private key is generated and held **only** inside the
+authenticator hardware and never exists server-side, at rest or in transit, so "the controller
+durably retains an extractable private key indefinitely" is not a risk this path can have; a
+compromised controller can at most mint a bogus WebAuthn *registration* for an attacker-controlled
+public key (bounded by `webauthn:register`'s existing `AssuranceStrong` gate, and visible to the
+legitimate operator as an unrecognized credential the next time they list their passkeys), which
+is a shallower failure than silently retaining a credential capable of unattended reuse.
 
 ### Outpost (Future)
 

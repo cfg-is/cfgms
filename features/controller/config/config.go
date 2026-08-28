@@ -273,6 +273,49 @@ type ExecutionSecurityConfig struct {
 	RequireSignedAdhoc bool `yaml:"require_signed_adhoc"`
 }
 
+// WebAuthnConfig holds the WebAuthn relying-party settings the controller uses for
+// browser passkey login and passkey step-up (Issue #3713). There is no default: an
+// absent or empty RPID leaves the passkey endpoints answering 503, exactly as before
+// this config block existed — a plausible-looking fallback identifier would make a
+// phishing-resistant authenticator verify against the wrong origin.
+type WebAuthnConfig struct {
+	// RPID is the relying-party identifier: the controller's effective domain
+	// (e.g. "cfgms.example.com"). Must not include a scheme or port.
+	RPID string `yaml:"rp_id"`
+
+	// RPDisplayName is the human-readable name shown by the authenticator/browser
+	// during the ceremony. Defaults to RPID when empty.
+	RPDisplayName string `yaml:"rp_display_name,omitempty"`
+
+	// RPOrigins lists the fully qualified origins permitted to complete a WebAuthn
+	// ceremony against this relying party (e.g. "https://cfgms.example.com").
+	// Required and must be HTTPS when RPID is set — see ValidateWebAuthn.
+	RPOrigins []string `yaml:"rp_origins,omitempty"`
+}
+
+// ValidateWebAuthn enforces the WebAuthn relying-party configuration contract at
+// controller startup: unset is always valid (endpoints stay 503); once RPID is set,
+// at least one origin is required and every origin must be HTTPS. There is no
+// local-development bypass — a plausible-looking insecure default here would make a
+// phishing-resistant authenticator verify against the wrong origin (Issue #3713).
+func (c *Config) ValidateWebAuthn() error {
+	if c.WebAuthn == nil || c.WebAuthn.RPID == "" {
+		if c.WebAuthn != nil && len(c.WebAuthn.RPOrigins) > 0 {
+			return fmt.Errorf("webauthn.rp_id must be set when webauthn.rp_origins is provided")
+		}
+		return nil
+	}
+	if len(c.WebAuthn.RPOrigins) == 0 {
+		return fmt.Errorf("webauthn.rp_origins must not be empty when webauthn.rp_id is set")
+	}
+	for _, origin := range c.WebAuthn.RPOrigins {
+		if !strings.HasPrefix(origin, "https://") {
+			return fmt.Errorf("webauthn.rp_origins: origin %q must use https", origin)
+		}
+	}
+	return nil
+}
+
 // TenantAdminConfig holds global tenant-administration policy settings (ADR-027, Issue #3182).
 type TenantAdminConfig struct {
 	// DeleteHoldPeriod is the minimum time between RequestTenantDeletion and
@@ -373,6 +416,11 @@ type Config struct {
 
 	// TenantAdmin holds global tenant-administration policy (ADR-027 Decisions 3-4, Issue #3182).
 	TenantAdmin *TenantAdminConfig `yaml:"tenant_admin,omitempty"`
+
+	// WebAuthn configures the browser passkey relying party (Issue #3713). Absent by
+	// default — browser passkey login and passkey step-up answer 503 until an operator
+	// explicitly sets rp_id and rp_origins.
+	WebAuthn *WebAuthnConfig `yaml:"webauthn,omitempty"`
 }
 
 // EffectiveRings returns the deployment ring configuration with defaults applied.
@@ -1276,6 +1324,10 @@ func LoadWithPath(configPath string) (*Config, error) {
 		if err := ValidateCAPath(cfg.Certificate.CAPath); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := cfg.ValidateWebAuthn(); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil

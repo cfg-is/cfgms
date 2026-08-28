@@ -1132,3 +1132,172 @@ func TestTenantAdminConfig_YAMLRoundTrip(t *testing.T) {
 		assert.False(t, cfg.TenantAdmin.GetDeleteRequiresDualControl())
 	})
 }
+
+// --- Issue #3713: WebAuthn relying-party configuration ---
+
+// TestWebAuthnConfig_YAML verifies the webauthn: section parses into WebAuthnConfig.
+func TestWebAuthnConfig_YAML(t *testing.T) {
+	var cfg Config
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+  rp_display_name: "CFGMS Controller"
+  rp_origins:
+    - "https://cfgms.example.com"
+    - "https://admin.cfgms.example.com"
+`
+	require.NoError(t, yaml.Unmarshal([]byte(content), &cfg))
+	require.NotNil(t, cfg.WebAuthn)
+	assert.Equal(t, "cfgms.example.com", cfg.WebAuthn.RPID)
+	assert.Equal(t, "CFGMS Controller", cfg.WebAuthn.RPDisplayName)
+	assert.Equal(t, []string{"https://cfgms.example.com", "https://admin.cfgms.example.com"}, cfg.WebAuthn.RPOrigins)
+}
+
+// TestWebAuthnConfig_Absent verifies that an omitted webauthn: section leaves
+// cfg.WebAuthn nil — the passkey endpoints must stay at 503 (no silent default).
+func TestWebAuthnConfig_Absent(t *testing.T) {
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte("listen_addr: 0.0.0.0:8443\n"), &cfg))
+	assert.Nil(t, cfg.WebAuthn)
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
+// TestConfig_ValidateWebAuthn_NilIsValid verifies the zero-value Config (WebAuthn unset)
+// is always a valid startup configuration — REQUIRED per Issue #3713 AC: an unset
+// relying-party configuration must never be rejected and must never fall back to a
+// local-development identifier.
+func TestConfig_ValidateWebAuthn_NilIsValid(t *testing.T) {
+	cfg := &Config{}
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
+// TestConfig_ValidateWebAuthn_RejectsEmptyOrigins is a REQUIRED test (Issue #3713 AC):
+// a configuration that sets rp_id but lists no origins must be rejected at startup.
+func TestConfig_ValidateWebAuthn_RejectsEmptyOrigins(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{RPID: "cfgms.example.com"}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rp_origins must not be empty")
+}
+
+// TestConfig_ValidateWebAuthn_RejectsNonHTTPSOrigin is a REQUIRED test (Issue #3713 AC):
+// a configuration listing a non-HTTPS origin must be rejected at startup.
+func TestConfig_ValidateWebAuthn_RejectsNonHTTPSOrigin(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPID:      "cfgms.example.com",
+		RPOrigins: []string{"http://cfgms.example.com"},
+	}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestConfig_ValidateWebAuthn_RejectsLoopbackOrigin guards against exactly the
+// resolution the Issue #3713 amendment forbids: adding a loopback origin to make the
+// two `cfg` CLI browser relays (stepup.go, webauthn.go) work again would make a
+// plaintext loopback origin permanently valid for every passkey ceremony the
+// controller ever runs. A bare http:// loopback origin must be rejected the same as
+// any other non-HTTPS origin — there is no exception path here.
+func TestConfig_ValidateWebAuthn_RejectsLoopbackOrigin(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPID:      "cfgms.example.com",
+		RPOrigins: []string{"http://127.0.0.1"},
+	}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestConfig_ValidateWebAuthn_RejectsOriginsWithoutRPID verifies that a config
+// listing origins without an rp_id is rejected rather than silently ignored.
+func TestConfig_ValidateWebAuthn_RejectsOriginsWithoutRPID(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPOrigins: []string{"https://cfgms.example.com"},
+	}}
+	err := cfg.ValidateWebAuthn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rp_id must be set")
+}
+
+// TestConfig_ValidateWebAuthn_AcceptsValidConfig verifies a well-formed relying-party
+// configuration passes validation.
+func TestConfig_ValidateWebAuthn_AcceptsValidConfig(t *testing.T) {
+	cfg := &Config{WebAuthn: &WebAuthnConfig{
+		RPID:          "cfgms.example.com",
+		RPDisplayName: "CFGMS Controller",
+		RPOrigins:     []string{"https://cfgms.example.com"},
+	}}
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
+// TestLoadWithPath_WebAuthnRejectsInsecureOriginAtStartup is a REQUIRED test
+// (Issue #3713 AC): LoadWithPath must fail closed when the config file sets an
+// insecure origin, so the controller never starts with a broken relying party.
+func TestLoadWithPath_WebAuthnRejectsInsecureOriginAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+  rp_origins:
+    - "http://cfgms.example.com"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	_, err := LoadWithPath(configPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// TestLoadWithPath_WebAuthnRejectsEmptyOriginsAtStartup is a REQUIRED test
+// (Issue #3713 AC): LoadWithPath must fail closed when rp_id is set with no origins.
+func TestLoadWithPath_WebAuthnRejectsEmptyOriginsAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	_, err := LoadWithPath(configPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rp_origins must not be empty")
+}
+
+// TestLoadWithPath_WebAuthnUnsetLeavesDefaultsUntouched is a REQUIRED test
+// (Issue #3713 AC): a config file with no webauthn: section loads successfully with
+// cfg.WebAuthn nil — never a local-development fallback identifier.
+func TestLoadWithPath_WebAuthnUnsetLeavesDefaultsUntouched(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := "listen_addr: \"127.0.0.1:8080\"\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.WebAuthn)
+}
+
+// TestLoadWithPath_WebAuthnValidConfigLoads is a REQUIRED test (Issue #3713 AC): a
+// representative production configuration with rp_id, rp_display_name, and an HTTPS
+// origin list loads successfully.
+func TestLoadWithPath_WebAuthnValidConfigLoads(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+  rp_display_name: "CFGMS Controller"
+  rp_origins:
+    - "https://cfgms.example.com"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.WebAuthn)
+	assert.Equal(t, "cfgms.example.com", cfg.WebAuthn.RPID)
+	assert.Equal(t, "CFGMS Controller", cfg.WebAuthn.RPDisplayName)
+	assert.Equal(t, []string{"https://cfgms.example.com"}, cfg.WebAuthn.RPOrigins)
+}
