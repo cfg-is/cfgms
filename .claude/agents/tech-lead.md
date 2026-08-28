@@ -89,10 +89,13 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
 
 - Does the story have a single concern? One focused change?
 - If the story mixes unrelated work (e.g., "add X and also refactor Y"), it fails
-- **AC ceiling**: more than 6 acceptance criteria (excluding `make test-complete`) means the story is too broad — return for a split (revision)
-- **Module ceiling**: files in scope spanning more than 2 packages means the story is too broad — return for a split by package or capability (revision)
+- **Size triggers (judgment, not auto-reject)**: more than 6 acceptance criteria (excluding `make test-complete`) or files in scope spanning more than 3 packages flags the story for a size check. Over-threshold stories must carry a **Size Note** at the top of `## Implementation Notes` explaining why the story is one coherent concern and why a split would be worse. Your job is to judge the note:
+  - Note is present and holds up (the work shares one contract, one mirrored pattern, or a split would leave a non-compiling half) → the size is fine, continue validation
+  - Note is missing, or the note fails the seam test below → **Revision Needed** with concrete split boundaries
+- **Known valid over-threshold shape**: a central-provider interface change (e.g. a field added in `pkg/storage/interfaces`) legitimately spans the interface + every provider implementation + in-memory mirror structs — 6-7 packages, one unit (verified on #2944). Do not return it for a package-count split; the valid split is plumbing story → dependent feature story.
+- **The seam test**: a split is only valid where each half compiles on its own and has a testable contract at the boundary. A split whose second story must re-edit the first story's files is wrong — reject the split, not the story.
 - **Out of Scope section required**: every story must have a `## Out of Scope` section. Return any story missing it for revision. Issue #957 shipped a WIP because the agent refactored `examples/` which was implicitly out of scope but never explicitly excluded
-- For story-too-broad cases (AC or module ceiling exceeded), this is a **Revision Needed** outcome, not Blocked — splitting is a planning/decomposition task an agent resolves, not a founder decision. Set the story to Draft (see "Outcomes" section) and put the suggested split boundaries in the comment — do NOT create a parallel tracking issue
+- For story-too-broad cases (size trigger with a missing or failed Size Note), this is a **Revision Needed** outcome, not Blocked — splitting is a planning/decomposition task an agent resolves, not a founder decision. Set the story to Draft (see "Outcomes" section) and put the suggested split boundaries in the comment — do NOT create a parallel tracking issue
 
 ### 4. Constraint Flagging
 
@@ -422,7 +425,7 @@ When spawned as a teammate (with a `name`, as a background agent), you operate a
 
 ### Engaging with the Team
 
-- **Challenge the BA on feasibility (directly):** "Story 3 touches 6 files across 3 packages — too broad for one dev agent. Split the provider implementation from the CLI wiring." — `SendMessage(to: "ba")`
+- **Challenge the BA on feasibility (directly):** "Story 3 touches 6 files across 3 packages with no Size Note. Either justify it as one concern or split the provider implementation from the CLI wiring — that seam compiles on both sides." — `SendMessage(to: "ba")`
 - **Flag file conflicts between proposals:** "Stories 2 and 4 both edit `pkg/cert/manager.go`. One must depend on the other or they'll conflict when dev agents run in parallel." — tell both `ba` (to re-sequence) and `po`.
 - **Ask the PO about constraints:** "Does this need to work on Windows, or is Linux-only acceptable for the first pass?" — `SendMessage(to: "po")`
 - **Accept BA pushback with evidence:** If the BA defends a decision with codebase evidence (e.g. "these files share internal types"), re-evaluate. Don't block stories to prove a point — block them because a dev agent would fail.

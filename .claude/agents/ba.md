@@ -66,8 +66,9 @@ Every story MUST satisfy ALL of these criteria:
 - **Single concern:** One focused change per story. Not "refactor X and also add Y."
 - **No vague verbs:** Use add, implement, fix, create — never improve, enhance, clean up.
 - **`make test-complete` pass:** Always the final acceptance checkbox.
-- **≤6 acceptance criteria.** Stories with more than 6 ACs are too large — split them. (`make test-complete` does not count toward the ceiling.)
-- **≤2 module touch-points.** A story that edits files across more than 2 packages is too broad — split by package or by capability.
+- **Size triggers, not hard caps.** Two thresholds flag a story for a size check: more than 6 acceptance criteria (`make test-complete` does not count), or files in scope spanning more than 3 packages. Crossing either does NOT automatically mean split. It means the story body MUST carry a **Size Note** — one or two sentences at the top of `## Implementation Notes` stating why this is one coherent concern and why a split would be worse (e.g. "one interface change mirrored across every provider — a split leaves a non-compiling half"). The Tech Lead judges the note, not the number. A story over a threshold with no Size Note is returned for revision.
+- **Known valid over-threshold shape:** adding a field or method to a central-provider interface (e.g. `pkg/storage/interfaces`) legitimately spans the interface + **every** provider implementation + any in-memory mirror structs — 6-7 packages, one unit (verified on #2944). Do not split it by package. The correct split is the plumbing→feature seam: plumbing story first, the consuming feature story depends on it.
+- **The seam test for any split:** each half must compile on its own and have a testable contract at the boundary. If the second story must re-edit the first story's files to work, the split is wrong — keep it one story.
 - **Required tests are marked.** Tests that MUST be present to consider the story done are prefixed `[REQUIRED TEST]` in the AC list — agents have been observed treating unmarked test ACs as optional.
 - **Out of scope is explicit.** Every story has a `## Out of Scope` section calling out adjacent code the agent must NOT touch (e.g., `examples/` directory, README updates, refactors of nearby code). Agents that go out of scope cause acceptance-review kickbacks.
 - **Visual stories carry a design source.** Any story that touches the web UI (`web/src/**`, `.tsx`, component styles) or adds/changes a user-visible screen, view, component, or visual state MUST include a `## Design Source` section (see format below). A visual story with no design source cannot be promoted to Ready — the Tech Lead will Block it as founder-owned design work. Author the design source at decomposition; do not defer it.
@@ -257,7 +258,7 @@ For multi-fix stories, group ACs by fix module with a `### F<n>:` header:
 - [ ] <AC for F12>
 ```
 
-If you cannot fit the story in 6 ACs, split it.
+If the story needs more than 6 ACs, apply the seam test: split only if each half compiles alone and has a testable contract at the boundary. If no such seam exists, keep it one story and add a Size Note (see Story Quality Bar).
 
 ## Documentation & Tests Currency
 
@@ -384,7 +385,7 @@ rm /tmp/ba-summary.md
 
 - Never create stories that overlap in scope
 - Never create a story that requires modifying CLAUDE.md, Makefile root targets, or CI workflows unless the epic explicitly requires it
-- Never create more than 10 stories per epic — if you need more, the epic is too large. Create a `high-priority` tracking issue (set Blocked status) suggesting the epic be split.
+- **10 stories per epic is a target, not a cap.** Completeness beats hitting the number — never merge, thin, or defer needed scope to fit. If the count runs past ~12, note in your epic summary comment what pushed it over (the PO decides whether the epic should be split); then create every story the epic needs.
 - Story titles use the format: `<scope>: <description>` (e.g., `cert: add certificate rotation support`)
 - Every story references its parent epic in `## Parent Epic`
 - Every story lists dependencies on other stories in this decomposition
@@ -426,4 +427,4 @@ When spawned as a teammate (with a `name`, as a background agent), you operate a
 - Story body format
 - Decomposition process (understand epic → survey codebase → identify stories → order by dependency)
 - Codebase survey tools (Read, Grep, Glob) — plus serena semantic navigation (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, `find_implementations`, `find_declaration`) to symbol-verify every code citation before proposing it
-- Max 10 stories per epic rule
+- Story-count target (~10 per epic; completeness wins over the number)
