@@ -236,6 +236,12 @@ func (s *Server) persistPendingCredentialRequest(ctx context.Context, req *pendi
 			meta["self_approved"] = "true"
 		}
 	}
+	if req.CollectedAt != nil {
+		meta["collected_at"] = req.CollectedAt.UTC().Format(time.RFC3339)
+	}
+	if req.CollectedSerial != "" {
+		meta["collected_serial"] = req.CollectedSerial
+	}
 	ttl := time.Until(req.ExpiresAt)
 	if ttl <= 0 {
 		ttl = time.Second
@@ -265,6 +271,7 @@ func pendingCredentialRequestFromMetadata(m *secretsif.SecretMetadata) *pendingC
 		Purpose:              m.Metadata["purpose"],
 		CollectSecretHash:    m.Metadata["collect_secret_hash"],
 		EnrolmentTokenID:     m.Metadata["enrolment_token_id"],
+		CollectedSerial:      m.Metadata["collected_serial"],
 		DeniedBy:             m.Metadata["denied_by"],
 		ApprovedBy:           m.Metadata["approved_by"],
 		BoundAccountID:       m.Metadata["bound_account_id"],
@@ -291,6 +298,11 @@ func pendingCredentialRequestFromMetadata(m *secretsif.SecretMetadata) *pendingC
 	if ts := m.Metadata["approved_at"]; ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
 			req.ApprovedAt = &t
+		}
+	}
+	if ts := m.Metadata["collected_at"]; ts != "" {
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			req.CollectedAt = &t
 		}
 	}
 	return req
@@ -856,6 +868,7 @@ func (s *Server) startCredentialRequestSweep() {
 				return
 			case <-ticker.C:
 				s.sweepExpiredCredentialRequests(context.Background())
+				s.sweepOrphanedCollectedCertificates(context.Background())
 			}
 		}
 	}()
@@ -921,5 +934,71 @@ func (s *Server) sweepExpiredCredentialRequests(ctx context.Context) {
 		s.emitCredentialRequestAudit(ctx, "credential_request.expired", req.TenantID, credentialRequestSweepActor,
 			business.AuditUserTypeSystem, "credential_request", req.ID,
 			business.AuditResultSuccess, business.AuditSeverityLow, nil)
+	}
+}
+
+// sweepOrphanedCollectedCertificates revokes any certificate the collect endpoint
+// (Issue #3719) signed but never finished binding to an account — the crash window
+// between signAndBindCollectedCertificate's SignClientCertificateRequest call and its
+// bindCertOnAccount call. A "collected" request with a recorded CollectedSerial that
+// does not appear in its bound account's CertBindings is exactly that window: the
+// process died (or the account changed underneath the request) after the certificate
+// became durable but before the binding did. Left alone, such a certificate resolves
+// through no account and would fall through extractAdminPrincipal's bootstrap fallback
+// as implicit root (middleware.go, ADR-025 Amendment 3) if it happens to carry the
+// admin marker — this sweep closes that window on the same interval as the expiry sweep.
+func (s *Server) sweepOrphanedCollectedCertificates(ctx context.Context) {
+	if s.secretStore == nil || s.certManager == nil {
+		return
+	}
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Tags: []string{"credential_request"},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: credentialRequestSecretType,
+			"status":                        credentialRequestStatusCollected,
+		},
+		IncludeExpired: true,
+	})
+	if err != nil {
+		s.logger.Error("Credential-request expiry sweep: failed to list collected requests",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	for _, m := range metas {
+		req := pendingCredentialRequestFromMetadata(m)
+		if req.CollectedSerial == "" || req.BoundAccountID == "" {
+			continue
+		}
+		if s.certManager.IsRevoked(req.CollectedSerial) {
+			continue
+		}
+		acct, err := s.getAccountByID(ctx, req.BoundAccountID)
+		if err != nil {
+			s.logger.Error("Credential-request expiry sweep: failed to look up bound account",
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+		bound := false
+		if acct != nil {
+			for _, b := range acct.CertBindings {
+				if b.Serial == req.CollectedSerial {
+					bound = true
+					break
+				}
+			}
+		}
+		if bound {
+			continue
+		}
+		if revokeErr := s.certManager.Revoke(req.CollectedSerial); revokeErr != nil {
+			s.logger.Error("Credential-request expiry sweep: failed to revoke orphaned collected certificate",
+				"error", logging.SanitizeLogValue(revokeErr.Error()))
+			continue
+		}
+		s.logger.Warn("Revoked orphaned collected certificate with no account binding",
+			"request_id", logging.SanitizeLogValue(req.ID))
+		s.emitCredentialRequestAudit(ctx, "credential_request.orphaned_certificate_revoked", req.TenantID, credentialRequestSweepActor,
+			business.AuditUserTypeSystem, "credential_request", req.ID,
+			business.AuditResultSuccess, business.AuditSeverityHigh, nil)
 	}
 }

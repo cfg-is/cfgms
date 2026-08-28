@@ -356,6 +356,9 @@ func TestSetAdminMarker_Architecture(t *testing.T) {
 		"features/controller/initialization/initialization.go": true,
 		// Story D: admin bundle packaging
 		"features/controller/initialization/admin_bundle.go": true,
+		// Issue #3719: credential-request collect signs the marker set recorded at
+		// approval (#3718), which may include the admin marker.
+		"features/controller/api/handlers_credential_requests_collect.go": true,
 	}
 
 	repoRoot := findRepoRoot(t)
@@ -427,6 +430,13 @@ func TestSetRootScopeMarker_Architecture(t *testing.T) {
 	allowList := map[string]bool{
 		// Founder-directed root-scoped issuance opt-in (bootstrap-admin --root-scoped)
 		"features/controller/initialization/admin_bundle.go": true,
+		// Issue #3719: credential-request collect signs the marker set recorded at
+		// approval (#3718) — the root-scope marker is only ever in that set because
+		// principalHasCertifiedRootScope already required the approver to present
+		// their own certified, non-revoked root-scope-marked certificate. Collect
+		// enacts that decision verbatim; it performs no root-scope authority check
+		// of its own.
+		"features/controller/api/handlers_credential_requests_collect.go": true,
 	}
 
 	repoRoot := findRepoRoot(t)
@@ -481,6 +491,9 @@ func TestSetPayloadSigningMarker_Architecture(t *testing.T) {
 		// Issue #3693: CSR-based payload-signing certificate issuance handler —
 		// the sole production caller of cert.SetPayloadSigningMarker.
 		"features/controller/api/handlers_signing_credential.go": true,
+		// Issue #3719: credential-request collect signs the marker set recorded at
+		// approval (#3718), which may include the payload-signing marker.
+		"features/controller/api/handlers_credential_requests_collect.go": true,
 	}
 
 	repoRoot := findRepoRoot(t)
