@@ -819,3 +819,79 @@ Amendment 1 established that human accounts are passkey-only, that adding/removi
 §7 states "the cert path" as the recovery route for a lost sole authenticator. This is accurate for mTLS-authenticated principals (CLI operators, service accounts). It is **not applicable to human web accounts** (Amendment 1): human web accounts are passkey-only and have no associated mTLS client certificate. A human who loses all passkeys cannot recover via cert — they require an admin-mediated account reset (Decision 4 of Amendment 1: "an operator at `AssuranceStrong` re-provisions the account to the zero-authenticator state and issues a fresh single-use magic link"). The server-side anti-lockout guard (Decision 2 above) enforces this: it prevents the browser-self-service path from reaching zero credentials, leaving the emergency reset path as the only way out of a total lockout.
 
 **Implementation reference (Issue #2992):** IDOR fix via `resolveWebAccountForCredentials` helper; anti-lockout guard + CAS under `credentialMu` in `handleWebAuthnRevokeCredential`; self-service passkeys page at `web/src/passkeys/PasskeysView.tsx`; audit helpers `emitPasskeyAddedAudit` / `emitPasskeyRevokedAudit` in `features/controller/api/handlers_webauthn.go`.
+
+## Amendment 4 (2026-08-28): Relying party is configuration, has no default, and wiring it exposed a CLI-relay regression
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** none (closes a wiring gap; documents a consequence)
+
+### Context
+
+`NewWebAuthnFromConfig` and `SetWebAuthn` (`features/controller/api/handlers_webauthn.go`) — the
+constructor and installer for the WebAuthn relying party every handler in this ADR depends on —
+had no caller in the controller binary. Every shipped controller answered
+`/api/v1/web/passkey/login/begin`, `/api/v1/web/passkey/login/finish`, and
+`/api/v1/webauthn/presence/begin|finish` with `503 WEBAUTHN_NOT_CONFIGURED`, unconditionally. All
+of §3 (silent device proof) and §4 (human-presence gesture) of this ADR, and Amendments 1–3 built
+on top of them, were unreachable from a browser. Issue #3713 closes this: `cmd/controller/main.go`
+now builds the relying party from a new `webauthn:` controller-configuration block
+(`features/controller/config.WebAuthnConfig`: `rp_id`, `rp_display_name`, `rp_origins`) and installs
+it via `SetWebAuthn` before the API server starts.
+
+**There is no default.** An absent or empty `rp_id` leaves every passkey endpoint at 503, exactly
+as before this issue — the same behavior a pre-#3713 controller always had. A plausible-looking
+fallback identifier (e.g. `localhost`) would let a phishing-resistant authenticator complete a
+ceremony against an identifier the operator never chose, which is worse than refusing the request.
+`ValidateWebAuthn` (`features/controller/config/config.go`) and `NewWebAuthnFromConfig` both refuse,
+loudly, at startup: `rp_id` set with no `rp_origins`, or any `rp_origins` entry that is not `https://`.
+There is no local-development bypass for either check.
+
+### The regression this wiring causes, and the fix it does not accept
+
+Two existing `cfg` CLI commands run a WebAuthn ceremony from a page served at
+`http://127.0.0.1:<random-port>`: the presence relay in `cmd/cfg/cmd/stepup.go` (used by the
+non-interactive step-up flow) and the registration relay in `cmd/cfg/cmd/webauthn.go` (`cfg webauthn
+register`). A browser enforces that the relying-party identifier is the calling origin's effective
+domain (or a registrable suffix of it) before it will run `navigator.credentials.create()` /
+`.get()` at all — an IP-literal origin like `http://127.0.0.1` can only satisfy an RPID of exactly
+`127.0.0.1`, never a real domain. Before this issue, this was invisible: both relays hit the
+begin endpoint first, which always answered 503 before the browser ever ran the ceremony. **Once a
+production `rp_id` is configured, that masking disappears** — the begin call now succeeds, the
+browser opens the ceremony at the loopback origin, and the browser itself refuses it with a
+same-origin/RPID mismatch. Both commands break for real, for every deployment that configures
+`webauthn:` to make browser login work.
+
+**Adding `http://127.0.0.1` (or `http://localhost`) to `rp_origins` was considered and rejected.**
+`rp_origins` is the relying party's permitted-origin list for every WebAuthn ceremony the controller
+ever runs — login, step-up, and passkey registration — not a per-command allowlist. Admitting a
+loopback origin would make a plaintext, unauthenticated-by-TLS origin a permanently valid target for
+any of them, for every deployment that ever needs the CLI relay to work — the exact class of
+weakening Epic #3711's adversarial review already rejected once for the browser-enrolment surface.
+No loopback or non-HTTPS origin was added as part of #3713, and `ValidateWebAuthn` /
+`NewWebAuthnFromConfig` reject one unconditionally if it ever is.
+
+**Disposition: accepted as a known regression, not fixed by #3713.** The correct fix is for the
+loopback relay to run the ceremony under an origin that actually matches the controller's `rp_id` —
+e.g. the CLI opens a controller-served relay page (`https://<rp_id>/cli-relay/...`) that
+`fetch()`s the result back to the local CLI process, rather than serving the ceremony page from the
+CLI itself. That is CLI-relay redirect work, not a config-wiring fix, and is out of scope for #3713
+(which is explicitly barred from touching any part of Epic #3711's browser-authenticated-CLI-enrolment
+work). It is tracked as a follow-up story under Epic #3711.
+
+### Consequences
+
+- Positive: browser passkey login and passkey step-up (§3, §4, Amendments 1–3) become reachable for
+  the first time in a production deployment that sets `webauthn:` in `controller.cfg`.
+- Positive: an unconfigured or misconfigured relying party still fails safe — 503 when unset, a
+  loud startup error when `rp_id` is set without HTTPS origins.
+- Negative (accepted): `cfg stepup`'s presence relay and `cfg webauthn register` stop completing
+  their browser ceremony as soon as an operator sets a production `rp_id`. Both commands print the
+  relay URL and wait for the browser POST as before; the browser itself refuses the ceremony with a
+  same-origin/RPID mismatch, so the operator sees a stuck "waiting for browser ceremony" prompt that
+  eventually times out. `cfg webauthn list` / `cfg webauthn revoke` (no ceremony, pure REST calls)
+  and the mTLS admin-bundle bootstrap path are unaffected. The admin can still recover via the mTLS
+  cert path (§7) or `cfg registration approve` while the follow-up relay-redirect fix lands.
+
+**Implementation reference (Issue #3713):** `features/controller/config.WebAuthnConfig` +
+`Config.ValidateWebAuthn`; tightened `NewWebAuthnFromConfig` validation in
+`features/controller/api/handlers_webauthn.go`; startup wiring in `cmd/controller/main.go`
+(`buildWebAuthnRelyingParty`, called between `server.New` and `runControllerServer`).
