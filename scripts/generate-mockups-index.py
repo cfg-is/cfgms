@@ -95,10 +95,17 @@ def main():
     new_section = _build_section(entries)
 
     readme_path = os.path.join(root, README_PATH)
-    with open(readme_path, encoding="utf-8") as f:
+    # newline="" disables universal-newline translation on read, so `current`
+    # holds the file's exact bytes-as-text. Without it, Python silently folds
+    # CRLF to LF on read while re-expanding LF to CRLF on write (Windows), so
+    # --check would compare LF text and pass while --write rewrote every line
+    # ending — making --write non-idempotent on an already-current README.
+    # The repo mandates LF for *.md (.gitattributes), so a CRLF working copy is
+    # genuinely stale here: --check reports it and --write normalizes it.
+    with open(readme_path, encoding="utf-8", newline="") as f:
         current = f.read()
 
-    updated = _apply(current, new_section)
+    updated = _apply(current.replace("\r\n", "\n"), new_section)
 
     if "--check" in args:
         if current == updated:
@@ -116,7 +123,9 @@ def main():
                 sys.stderr.write(line)
             sys.exit(1)
     elif "--write" in args:
-        with open(readme_path, "w", encoding="utf-8") as f:
+        # newline="\n" pins the on-disk line endings to LF on every platform,
+        # matching the .gitattributes contract for *.md.
+        with open(readme_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(updated)
         print(f"✅ {README_PATH} updated ({len(entries)} entries)")
     else:

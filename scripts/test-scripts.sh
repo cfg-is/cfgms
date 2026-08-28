@@ -4,6 +4,13 @@
 
 set -euo pipefail
 
+# Python's stdout defaults to the Windows console codepage (cp1252) unless
+# told otherwise, which crashes print() on any emoji/Unicode output --
+# confirmed on generate-mockups-index.py's ✅ and resolve_conflict.test.sh's
+# embedded checker's → (Issue #3686). Set once here rather than patching every
+# script this suite invokes.
+export PYTHONIOENCODING=utf-8
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -2047,7 +2054,7 @@ test_preflight_item_dispatch() {
     log_test "Testing po-cycle-preflight.py: project_queue_list_by_status includes pure draft items via CFGMS_TEST_PROJECT_QUEUE..."
 
     local preflight_script
-    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })/../.claude/scripts/po-cycle-preflight.py"
 
     if [[ ! -f "$preflight_script" ]]; then
         log_fail "po-cycle-preflight.py: not found at $preflight_script"
@@ -2103,7 +2110,7 @@ test_done_on_merge() {
     log_test "Testing po-cycle-preflight.py: auto_close_merged_items marks Done when PR is MERGED..."
 
     local preflight_script
-    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })/../.claude/scripts/po-cycle-preflight.py"
 
     if [[ ! -f "$preflight_script" ]]; then
         log_fail "po-cycle-preflight.py: not found at $preflight_script"
@@ -2289,7 +2296,7 @@ test_preflight_gh_call_budget() {
     log_test "Testing po-cycle-preflight.py: ≤3 direct gh invocations per cycle (Issue #1581)..."
 
     local preflight_script
-    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/po-cycle-preflight.py"
+    preflight_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && { pwd -W 2>/dev/null || pwd; })/../.claude/scripts/po-cycle-preflight.py"
 
     if [[ ! -f "$preflight_script" ]]; then
         log_fail "po-cycle-preflight.py: not found at $preflight_script"

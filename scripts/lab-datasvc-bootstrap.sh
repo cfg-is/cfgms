@@ -80,10 +80,19 @@ generate_tls_certs() {
     umask 077
 
     mkdir -p "$tls_dir"
+    # Normalize to the native path form (no-op on Linux: `pwd -W` fails there,
+    # `|| pwd` keeps the original value). MSYS_NO_PATHCONV below disables
+    # Git-Bash/MSYS's automatic path conversion for the WHOLE openssl
+    # invocation, not just -subj, so the -key/-out arguments must already be
+    # in a form that needs no conversion, or they resolve to a nonexistent
+    # path once conversion is suppressed (Issue #3686).
+    tls_dir="$(cd "$tls_dir" && { pwd -W 2>/dev/null || pwd; })"
 
     if [[ ! -f "${tls_dir}/ca.pem" ]]; then
         openssl genrsa -out "${tls_dir}/ca.key" "$key_bits" 2>/dev/null
-        openssl req -new -x509 -days 3650 \
+        # MSYS_NO_PATHCONV=1: Git-Bash/MSYS auto-converts a leading "/CN=..."
+        # into a bogus Windows path before exec'ing openssl (Issue #3686).
+        MSYS_NO_PATHCONV=1 openssl req -new -x509 -days 3650 \
             -key "${tls_dir}/ca.key" \
             -subj "/CN=cfgms-lab-datasvc-pg-ca/O=cfgms-lab" \
             -out "${tls_dir}/ca.pem" 2>/dev/null
@@ -101,7 +110,8 @@ extendedKeyUsage = serverAuth
 subjectAltName = IP:${server_ip},DNS:${server_fqdn}
 EXTEOF
 
-        openssl req -new \
+        # MSYS_NO_PATHCONV=1: see the ca.pem -subj call above.
+        MSYS_NO_PATHCONV=1 openssl req -new \
             -key "${tls_dir}/server.key" \
             -subj "/CN=${server_fqdn}/O=cfgms-lab" \
             -out "${tls_dir}/server.csr" 2>/dev/null

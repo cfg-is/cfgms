@@ -68,6 +68,69 @@ write_bytes() {
     printf "$fmt" > "$repo/$rel"
 }
 
+# deny_read <path> — remove read access from the current user.
+# POSIX mode bits are advisory on Windows: Git-Bash `chmod 000` leaves the file
+# fully readable (verified — the fixture below still classified as an ELF
+# binary), because read access there is governed by the NTFS ACL. Denying the
+# ACE explicitly is what actually stages the condition under test; without it
+# the "unreadable file" case silently degenerates into "a readable binary is
+# blocked", which other tests already cover.
+deny_read() {
+    case "$OSTYPE" in
+        msys*|cygwin*|win32*)
+            # MSYS2_ARG_CONV_EXCL keeps the msys argument mangler away from
+            # icacls' /deny switch, which it otherwise rewrites into a
+            # filesystem path ("Invalid parameter C:/Program Files/Git/deny").
+            MSYS2_ARG_CONV_EXCL='*' icacls "$(cygpath -w "$1")" \
+                /deny "$(whoami):(R)" >/dev/null 2>&1 || true
+            ;;
+        *) chmod 000 "$1" ;;
+    esac
+}
+
+# restore_read <path> — undo deny_read so the scratch tree can be cleaned up.
+restore_read() {
+    case "$OSTYPE" in
+        msys*|cygwin*|win32*)
+            MSYS2_ARG_CONV_EXCL='*' icacls "$(cygpath -w "$1")" \
+                /remove:d "$(whoami)" >/dev/null 2>&1 || true
+            ;;
+        *) chmod 644 "$1" ;;
+    esac
+}
+
+# is_readable <path> — an actual read attempt, not `[[ -r ]]`: the test bit
+# reports mode bits, which are exactly what does not govern access on Windows.
+is_readable() {
+    head -c 1 -- "$1" >/dev/null 2>&1
+}
+
+# populate_minimal_bin <dest> <tool>... — fill <dest> with just these tools.
+# On POSIX a symlink is enough. On Windows it is not: a copied or linked .exe
+# resolves its runtime DLLs from its OWN directory first, so a bare link to
+# bash.exe placed outside /usr/bin cannot load msys-2.0.dll and dies with exit
+# 127 before the gate under test ever starts. Copy each tool together with the
+# in-tree DLLs ldd reports for it (system DLLs live in System32 and resolve
+# regardless of PATH), which yields a self-contained minimal bin directory.
+populate_minimal_bin() {
+    local dest="$1" tool src dep
+    shift
+    for tool in "$@"; do
+        src="$(command -v "$tool")"
+        case "$OSTYPE" in
+            msys*|cygwin*|win32*)
+                cp -- "$src" "$dest/${tool}.exe"
+                while read -r _ _ dep _; do
+                    case "$dep" in
+                        /usr/*|/mingw*) cp -n -- "$dep" "$dest/" 2>/dev/null || true ;;
+                    esac
+                done < <(ldd "$src" 2>/dev/null)
+                ;;
+            *) ln -sf "$src" "$dest/$tool" ;;
+        esac
+    done
+}
+
 # track <repo> <relative path>...
 track() {
     local repo="$1"
@@ -204,7 +267,12 @@ test_real_host_binary_blocked() {
     local repo od_path
     od_path="$(command -v od)"
     repo="$(new_repo)"
-    cp -- "$od_path" "$repo/vendor-tool"
+    # `cat` redirection, not `cp` (Issue #3686): Windows/Git-Bash `cp` silently
+    # appends `.exe` to an extensionless destination when the source is an
+    # executable, so the subsequent `git add -- vendor-tool` below fails with
+    # "pathspec 'vendor-tool' did not match any files".
+    cat -- "$od_path" > "$repo/vendor-tool"
+    chmod +x "$repo/vendor-tool"
     track "$repo" vendor-tool
 
     run_gate "$repo"
@@ -349,39 +417,41 @@ test_all_offenders_reported() {
 # od's failure used to be swallowed inside the command substitution, so an
 # unreadable tracked binary passed the gate silently.
 test_unreadable_file_fails_closed() {
-    if [[ "$(id -u)" == "0" ]]; then
-        # root bypasses mode bits, so the unreadable condition cannot be staged.
-        _pass "unreadable-file fail-closed check skipped (running as root, mode bits do not apply)"
-        return
-    fi
-
     local repo
     repo="$(new_repo)"
     write_bytes "$repo" "bin/opaque" '\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\2\0\076\0'
     track "$repo" bin/opaque
-    chmod 000 "$repo/bin/opaque"
+    deny_read "$repo/bin/opaque"
+
+    # The fixture is only meaningful if access was actually revoked. root
+    # bypasses mode bits outright, so verify rather than assume — asserting
+    # against a still-readable file would silently re-test the ordinary
+    # ELF-detection path under this test's name.
+    if is_readable "$repo/bin/opaque"; then
+        _pass "unreadable-file fail-closed check not applicable (read access could not be revoked for this user)"
+        restore_read "$repo/bin/opaque"
+        return
+    fi
 
     run_gate "$repo"
     assert_rc 1 "unreadable tracked file fails closed"
     assert_contains "unreadable tracked file: bin/opaque" \
         "unreadable file is named in the finding"
-    chmod 644 "$repo/bin/opaque"
+    restore_read "$repo/bin/opaque"
 }
 
 # The rewrite exists so the gate keeps working where file(1) is absent. Running
 # with a PATH that contains only bash, git and od proves the detector has no
 # hidden dependency on file(1) and cannot be silently disabled by its absence.
 test_runs_without_file_utility() {
-    local repo shim tool
+    local repo shim
     repo="$(new_repo)"
     write_bytes "$repo" "bin/steward" '\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\2\0\076\0'
     track "$repo" bin/steward
 
     shim="$SCRATCH/minimal-bin"
     mkdir -p "$shim"
-    for tool in bash git od; do
-        ln -sf "$(command -v "$tool")" "$shim/$tool"
-    done
+    populate_minimal_bin "$shim" bash git od
 
     if [[ -x "$shim/file" ]]; then
         _fail "minimal PATH unexpectedly provides file(1)"

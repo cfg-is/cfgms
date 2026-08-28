@@ -68,17 +68,29 @@ describe_magic() {
 # *every* call, even with a warm build cache and near-zero actual CPU time.
 # A stable, reused file path lets that overhead amortize to (at most) once
 # per source change instead of once per invocation.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Script directory via parameter expansion + the `cd`/`pwd` builtins, NOT
+# dirname(1): this gate's dependency set is bash, git and od, and it is
+# exercised under a PATH holding only those three. dirname is coreutils, so
+# calling it made the script die at line 1 of its own setup ("dirname: command
+# not found") under that PATH — before any detection logic ran.
+_gate_src="${BASH_SOURCE[0]}"
+_gate_dir="${_gate_src%/*}"
+# No slash in the path (invoked as a bare name found on PATH) leaves the
+# expansion unchanged; that means the current directory.
+[[ "$_gate_dir" == "$_gate_src" ]] && _gate_dir="."
+SCRIPT_DIR="$(cd "$_gate_dir" && pwd)"
 
-# GOEXE is determined from uname, not `go env GOEXE` — deliberately: some
-# callers (test/unit/build's security-gate tests) put a mock `go` stub earlier
-# on PATH to exercise unrelated make-target behavior, and that stub cannot
-# answer `go env` correctly. Keeping the extension decision independent of
-# whatever `go` currently resolves to means a stale-but-valid prior build is
-# still found and reused even when PATH is shadowed like that.
+# The executable suffix is decided from bash's own $OSTYPE, not from `go env
+# GOEXE` and not from uname(1). Not `go env`: some callers (test/unit/build's
+# security-gate tests) put a mock `go` stub earlier on PATH to exercise
+# unrelated make-target behavior, and that stub cannot answer `go env`
+# correctly — keeping the decision independent of whatever `go` resolves to
+# means a stale-but-valid prior build is still found and reused. Not uname(1):
+# it is another external tool absent from the minimal PATH above, and $OSTYPE
+# is set by bash itself at build time.
 BIN_EXT=""
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) BIN_EXT=".exe" ;;
+case "$OSTYPE" in
+    msys*|cygwin*|win32*) BIN_EXT=".exe" ;;
 esac
 BIN_DIR="${SCRIPT_DIR}/../bin"
 BIN_PATH="${BIN_DIR}/check-binary-artifacts${BIN_EXT}"
