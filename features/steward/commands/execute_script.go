@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -475,7 +476,7 @@ func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool) error {
 	if block == nil {
 		return fmt.Errorf("no PEM block found in signature_public_key")
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	parsedCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return fmt.Errorf("parse certificate: %w", err)
 	}
@@ -483,8 +484,11 @@ func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool) error {
 		Roots:     caRoots,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
-	if _, err := cert.Verify(opts); err != nil {
+	if _, err := parsedCert.Verify(opts); err != nil {
 		return fmt.Errorf("certificate chain verification: %w", err)
+	}
+	if !cert.HasAdminMarker(parsedCert) {
+		return fmt.Errorf("operator certificate is not an administrator certificate")
 	}
 	return nil
 }
