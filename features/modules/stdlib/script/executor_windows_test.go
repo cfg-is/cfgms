@@ -189,10 +189,37 @@ func TestApplyExecutionContext_Windows_LoggedInUser_WithUser(t *testing.T) {
 // full sleep) and the grandchild process is gone. Reaching the timeout path at
 // all proves the grandchild held the pipe — otherwise cmd.exe would have exited
 // immediately and Execute would have returned success before the timeout.
+//
+// Issue #3680: the grandchild PID is *observable* only once PowerShell has
+// cold-started, parsed -Command, and reached Set-Content — a separate event
+// from "the grandchild is holding the pipe" (true from the instant `start /b`
+// creates it). A fixed 4s timeout raced that cold start on a loaded runner: if
+// the tree kill landed first, Set-Content never ran, the PID file was never
+// written, and a post-mortem read (taken only after Execute had already
+// returned and killed the tree) could never observe it — not a regression in
+// the tree-kill logic, just the test looking for the PID after the only
+// process that could write it was already dead. Fixed two ways, per the
+// story's guidance to observe the PID while the grandchild is alive AND make
+// the timing generous rather than guessed:
+//  1. measurePowerShellColdStart benchmarks THIS host/run's actual interpreter
+//     startup once, and the timeout is derived from that measurement (with
+//     margin) instead of a constant — a loaded CI runner is slower than a dev
+//     box, and the margin scales with it automatically.
+//  2. The PID file is polled concurrently with Execute, not after it returns
+//     — so the write is observed as soon as it happens, well before the
+//     timeout (and the kill it triggers) can land.
 func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 	if _, err := exec.LookPath("powershell.exe"); err != nil {
 		t.Skip("powershell.exe not available; cannot spawn the grandchild for this test")
 	}
+
+	coldStart := measurePowerShellColdStart(t)
+	// 3x the measured cold-start plus a fixed floor comfortably covers
+	// run-to-run jitter (a loaded runner rarely triples its own baseline)
+	// without inflating the timeout so far that the test takes unreasonably
+	// long on a fast host — coldStart is typically well under a second there.
+	timeout := coldStart*3 + 2*time.Second
+	t.Logf("measured PowerShell cold-start=%s, derived Execute timeout=%s", coldStart, timeout)
 
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
 
@@ -200,13 +227,15 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 	// open by sleeping far past the timeout. `start /b` runs it in the same
 	// console (inheriting the redirected pipe) and backgrounds it, so cmd.exe
 	// returns immediately, leaving only the grandchild holding the pipe.
-	const grandchildSleep = 30 // seconds; must exceed timeout + reap window below
+	// Fixed at a generous 120s rather than derived from timeout: it only needs
+	// to outlast timeout+reapGracePeriod+guard by a wide margin, and the
+	// process tree is killed long before it would ever complete regardless.
+	const grandchildSleep = 120 // seconds
 	script := "@echo off\r\n" +
 		"start /b \"\" powershell.exe -NoProfile -NonInteractive -Command " +
 		"\"Set-Content -LiteralPath '" + pidFile + "' -Value $PID; Start-Sleep -Seconds " +
 		strconv.Itoa(grandchildSleep) + "\"\r\n"
 
-	const timeout = 4 * time.Second
 	cfg := &ScriptConfig{
 		Content:          script,
 		Shell:            ShellCmd,
@@ -214,6 +243,13 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 		ExecutionContext: ExecutionContextSystem,
 	}
 	exe := NewExecutor(cfg)
+
+	// Poll for the grandchild's PID concurrently with Execute (see the
+	// function doc, point 2) rather than reading it only after Execute
+	// returns. The deadline here is generous — it only bounds this
+	// goroutine's own lifetime, not the race being fixed.
+	pidCh := make(chan int, 1)
+	go func() { pidCh <- pollPIDFile(pidFile, timeout+reapGracePeriod+20*time.Second) }()
 
 	// Run Execute under a hard wall-clock guard so a regression (infinite block)
 	// fails the test instead of hanging the whole suite. The guard is shorter than
@@ -239,7 +275,7 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// Best-effort cleanup in case a regression left the grandchild running.
-	pid := readPIDFile(t, pidFile)
+	pid := <-pidCh
 	if pid != 0 {
 		t.Cleanup(func() { _ = exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid)).Run() })
 	}
@@ -254,11 +290,40 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 	assert.Less(t, elapsed, timeout+reapGracePeriod,
 		"Execute must return shortly after the timeout once the process tree is killed")
 
-	// AC3: the grandchild must be terminated along with the tree.
+	// AC3: the grandchild must be terminated along with the tree. This
+	// assertion still has teeth — a regression that lets the tree-kill miss
+	// the grandchild fails it exactly as before; only the false failure from
+	// racing PowerShell's own cold start has been removed.
 	require.NotZero(t, pid, "grandchild must have recorded its PID before the timeout")
 	assert.Eventually(t, func() bool { return !isProcessAlive(pid) },
 		5*time.Second, 100*time.Millisecond,
 		"grandchild process (pid %d) must be terminated with the tree", pid)
+}
+
+// measurePowerShellColdStart times how long this host takes right now to
+// launch powershell.exe, cold-start the interpreter, and execute a trivial
+// Set-Content statement — the same sequence of events the grandchild in
+// TestExecute_Windows_TimeoutKillsProcessTree must complete before its PID
+// is observable. Used to derive that test's timeout from real, current-run
+// latency instead of a guessed constant (Issue #3680): a loaded CI runner's
+// cold-start latency varies run to run and can exceed a small fixed value.
+func measurePowerShellColdStart(t *testing.T) time.Duration {
+	t.Helper()
+	warmupFile := filepath.Join(t.TempDir(), "warmup.pid")
+	start := time.Now()
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+		"Set-Content -LiteralPath '"+warmupFile+"' -Value $PID")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("PowerShell cold-start measurement failed: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 200*time.Millisecond {
+		// A near-zero measurement (warm process cache, fast box) would derive
+		// too tight a timeout for the actual test run, which additionally
+		// pays for `start /b`'s own dispatch. Floor it.
+		elapsed = 200 * time.Millisecond
+	}
+	return elapsed
 }
 
 // TestExecute_Windows_SuccessLeavesDetachedGrandchildRunning guards against the
@@ -268,6 +333,21 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 // collaterally killed when Execute returns. This is why the Job Object is created
 // without JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE — termination happens only on the
 // timeout path, never on the success path.
+//
+// Issue #3680 (AC5): checked for the same PID-write-vs-cold-start race as
+// TestExecute_Windows_TimeoutKillsProcessTree above, and it does not apply
+// here. The PID write is not racing anything — it is one more statement
+// inside the same synchronous PowerShell invocation cmd.exe's cmd.Wait
+// blocks on: Execute cannot return (success or otherwise) until that
+// process has already exited, and it only exits after Set-Content runs. So
+// by the time readPIDFile below is reached, the write has unconditionally
+// already happened; there is no window in which a kill could land first
+// because this path never kills anything. (Contrast the timeout test: there
+// a *different*, cold-starting process races an independent timer that can
+// fire and kill it before it reaches its own Set-Content.) The 20s timeout
+// here is already far more generous than the ~1-2s this script normally
+// takes, which is what actually removes any PowerShell-cold-start risk on a
+// loaded runner — no further change needed.
 func TestExecute_Windows_SuccessLeavesDetachedGrandchildRunning(t *testing.T) {
 	if _, err := exec.LookPath("powershell.exe"); err != nil {
 		t.Skip("powershell.exe not available; cannot spawn the detached grandchild for this test")
@@ -309,20 +389,31 @@ func TestExecute_Windows_SuccessLeavesDetachedGrandchildRunning(t *testing.T) {
 }
 
 // readPIDFile polls briefly for the grandchild's PID file and returns the parsed
-// PID, or 0 if it was never written or is unparseable.
+// PID, or 0 if it was never written or is unparseable. Used where the write is
+// already guaranteed to have happened by the time this is called (see
+// TestExecute_Windows_SuccessLeavesDetachedGrandchildRunning's doc comment) —
+// the 3s deadline is headroom for filesystem visibility, not a race window.
 func readPIDFile(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	return pollPIDFile(path, 3*time.Second)
+}
+
+// pollPIDFile polls path for a parseable PID until it appears or deadline
+// elapses, returning 0 in the latter case. Unlike readPIDFile, this has no
+// *testing.T and is safe to call from a goroutine, for polling concurrently
+// with an in-flight Execute call (Issue #3680) rather than only afterward.
+func pollPIDFile(path string, deadline time.Duration) int {
+	end := time.Now().Add(deadline)
 	for {
 		if data, err := readFileTrim(path); err == nil && data != "" {
 			if pid, perr := strconv.Atoi(data); perr == nil {
 				return pid
 			}
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(end) {
 			return 0
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
