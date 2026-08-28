@@ -5,12 +5,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,12 +21,12 @@ import (
 	"github.com/gorilla/mux"
 
 	configsignature "github.com/cfgis/cfgms/features/config/signature"
-	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	_ "modernc.org/sqlite"
 )
@@ -112,7 +115,74 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 	server.clusterFleetQuery = static
 	server.fleetQuery = static
 
+	// Issue #3694: operator-signature verification for POST /runs/command now runs
+	// unconditionally (no longer gated on SecurityProfilePublicBeta), so every test
+	// that dispatches an inline command needs a working cert manager to verify
+	// against — wire one here rather than per-test.
+	server.certManager = newTLSTestCertManager(t)
+
 	return server, manager, queue
+}
+
+// signedOperatorEnvelopeFields signs content as an operator envelope bound to
+// targets and returns the request-body fields handlePostRunCommand now requires
+// unconditionally (Issue #3694): signature, targets, nonce, expires_at. The operator
+// cert is issued by server's own certManager so it chains to the CA the controller
+// verifies against, and carries the admin marker.
+func signedOperatorEnvelopeFields(t *testing.T, server *Server, content []byte, shell string, targets []string) map[string]interface{} {
+	t.Helper()
+	require.NotNil(t, server.certManager, "test server must have a certManager to sign an operator envelope")
+
+	operator, err := server.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "test-operator",
+		ValidityDays:     1,
+		KeySize:          2048,
+		ClientID:         "test-operator",
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+
+	nonceBytes := make([]byte, 16)
+	_, err = rand.Read(nonceBytes)
+	require.NoError(t, err)
+
+	envelope := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     hex.EncodeToString(nonceBytes),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	canonical, err := operatorpayload.CanonicalBytes(envelope)
+	require.NoError(t, err)
+
+	signer, err := configsignature.NewSigner(&configsignature.SignerConfig{
+		PrivateKeyPEM:  operator.PrivateKeyPEM,
+		CertificatePEM: operator.CertificatePEM,
+	})
+	require.NoError(t, err)
+	signedContent, err := signer.Sign(canonical)
+	require.NoError(t, err)
+
+	return map[string]interface{}{
+		"signature": map[string]interface{}{
+			"algorithm":  string(signedContent.Algorithm),
+			"value":      signedContent.Signature,
+			"public_key": string(operator.CertificatePEM),
+		},
+		"targets":    envelope.Targets,
+		"nonce":      envelope.Nonce,
+		"expires_at": envelope.ExpiresAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// withEnvelopeFields merges signedOperatorEnvelopeFields' output into a request body
+// map, for tests that build their body inline.
+func withEnvelopeFields(body map[string]interface{}, envelopeFields map[string]interface{}) map[string]interface{} {
+	for k, v := range envelopeFields {
+		body[k] = v
+	}
+	return body
 }
 
 // runPrincipal returns a Strong-assurance principal holding exactly the given
@@ -257,11 +327,11 @@ func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
 
-	body := map[string]interface{}{
+	body := withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "pwsh",
-	}
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"}))
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
 		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, body)
 
@@ -270,57 +340,51 @@ func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "admin exec should reach run synthesis; body: %s", rec.Body.String())
 }
 
-func TestPublicBetaRunCommandRequiresAndPreservesOperatorSignature(t *testing.T) {
+// TestRunCommandRequiresAndPreservesOperatorSignature verifies Issue #3694's
+// controller-side AC: operator-signature verification runs unconditionally for
+// POST /api/v1/runs/command — regardless of SecurityProfile, not just public-beta —
+// and the signed envelope's target/nonce/expiry fields are forwarded to the steward
+// unmodified alongside the existing signature metadata.
+func TestRunCommandRequiresAndPreservesOperatorSignature(t *testing.T) {
 	const content = "hostname"
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, queue := setupRunServer(t, stewards)
-	server.cfg.SecurityProfile = config.SecurityProfilePublicBeta
-	server.cfg.Execution.RequireSignedAdhoc = true
-	server.certManager = newTLSTestCertManager(t)
 	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true}
 
+	// Well-formed targets/nonce/expires_at but no signature — isolates the
+	// signature-required check from the expires_at parse check.
 	unsigned := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
-		"target":  "id:steward-1",
-		"content": base64.StdEncoding.EncodeToString([]byte(content)),
-		"shell":   "pwsh",
+		"target":     "id:steward-1",
+		"content":    base64.StdEncoding.EncodeToString([]byte(content)),
+		"shell":      "pwsh",
+		"targets":    []string{"steward-1"},
+		"nonce":      "unsigned-test-nonce",
+		"expires_at": time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339),
 	})
 	require.Equal(t, http.StatusBadRequest, unsigned.Code, "body: %s", unsigned.Body.String())
 	assert.Contains(t, unsigned.Body.String(), "INVALID_SIGNATURE")
 	assert.Empty(t, queue.PeekForDevice("steward-1"), "unsigned command must not reach the execution queue")
 
-	operator, err := server.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName:       "public-beta-operator",
-		ValidityDays:     1,
-		KeySize:          2048,
-		ClientID:         "public-beta-operator",
-		TemplateModifier: cert.SetAdminMarker,
-	})
-	require.NoError(t, err)
-	signer, err := configsignature.NewSigner(&configsignature.SignerConfig{
-		PrivateKeyPEM:  operator.PrivateKeyPEM,
-		CertificatePEM: operator.CertificatePEM,
-	})
-	require.NoError(t, err)
-	signedContent, err := signer.Sign([]byte(content))
-	require.NoError(t, err)
-
-	signed := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+	envelopeFields := signedOperatorEnvelopeFields(t, server, []byte(content), "pwsh", []string{"steward-1"})
+	signed := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte(content)),
 		"shell":   "pwsh",
-		"signature": map[string]interface{}{
-			"algorithm":  string(signedContent.Algorithm),
-			"value":      signedContent.Signature,
-			"public_key": string(operator.CertificatePEM),
-		},
-	})
+	}, envelopeFields))
 	require.Equal(t, http.StatusOK, signed.Code, "body: %s", signed.Body.String())
 
 	queued := queue.PeekForDevice("steward-1")
 	require.Len(t, queued, 1)
-	assert.Equal(t, string(signedContent.Algorithm), queued[0].Metadata["signature_algorithm"])
-	assert.Equal(t, signedContent.Signature, queued[0].Metadata["signature_value"])
-	assert.Equal(t, string(operator.CertificatePEM), queued[0].Metadata["signature_public_key"])
+	sig := envelopeFields["signature"].(map[string]interface{})
+	assert.Equal(t, sig["algorithm"], queued[0].Metadata["signature_algorithm"])
+	assert.Equal(t, sig["value"], queued[0].Metadata["signature_value"])
+	assert.Equal(t, sig["public_key"], queued[0].Metadata["signature_public_key"])
+	assert.Equal(t, envelopeFields["targets"], queued[0].Metadata["targets"],
+		"targets must be forwarded to the steward unmodified")
+	assert.Equal(t, envelopeFields["nonce"], queued[0].Metadata["nonce"],
+		"nonce must be forwarded to the steward unmodified")
+	assert.Equal(t, envelopeFields["expires_at"], queued[0].Metadata["expires_at"],
+		"expires_at must be forwarded to the steward unmodified")
 }
 
 // TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized is the same guard for run-script.
@@ -365,11 +429,11 @@ func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
 	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
 
 	// 1. Dispatch (POST) as admin.
-	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, map[string]interface{}{
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "pwsh",
-	})
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"})))
 	require.Equal(t, http.StatusOK, rec.Code, "dispatch body: %s", rec.Body.String())
 	var resp APIResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -404,11 +468,11 @@ func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
 
 	// Admin dispatches a run owned by the global/empty tenant.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, map[string]interface{}{
+		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, withEnvelopeFields(map[string]interface{}{
 			"target":  "id:steward-1",
 			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 			"shell":   "pwsh",
-		})
+		}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"})))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp APIResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -673,12 +737,13 @@ func TestPostRunCommand_TwoStewardFanout(t *testing.T) {
 	server, manager, queue := setupRunServer(t, stewards)
 	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	content := base64.StdEncoding.EncodeToString([]byte("#!/bin/bash\necho hello"))
-	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
+	rawContent := []byte("#!/bin/bash\necho hello")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
-	})
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"cmd-dev-1", "cmd-dev-2"})))
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp APIResponse
@@ -953,11 +1018,12 @@ func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
+			rawContent := []byte(tc.command)
+			rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
 				"target":  "id:steward-abc",
-				"content": base64.StdEncoding.EncodeToString([]byte(tc.command)),
+				"content": base64.StdEncoding.EncodeToString(rawContent),
 				"shell":   "bash",
-			})
+			}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"steward-abc"})))
 			assert.Equal(t, http.StatusBadRequest, rec.Code,
 				"command with pattern %q must return 400, body: %s", tc.name, rec.Body.String())
 
@@ -985,11 +1051,12 @@ func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
 	// test-tenant principal: cannot access stewards in msp-a.
 	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
 
-	rec := postRunCommand(t, server, execPrincipal, map[string]interface{}{
+	rawContent := []byte("hostname")
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-cross",
-		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"content": base64.StdEncoding.EncodeToString(rawContent),
 		"shell":   "bash",
-	})
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"steward-cross"})))
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"cross-tenant exec must return 403; body: %s", rec.Body.String())
 

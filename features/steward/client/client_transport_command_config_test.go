@@ -128,7 +128,12 @@ func TestSetupCommandHandler_EnforcesRequireSignedAdhoc(t *testing.T) {
 			"unsigned ad-hoc command must be rejected when require_signed_adhoc is wired true")
 	})
 
-	t.Run("require_signed_adhoc false accepts unsigned ad-hoc command", func(t *testing.T) {
+	t.Run("require_signed_adhoc false still rejects unsigned ad-hoc command", func(t *testing.T) {
+		// Issue #3694: inline (ad-hoc) operator-signature verification is now
+		// mandatory and unconditional — require_signed_adhoc no longer gates it.
+		// Before #3694 this configuration let an unsigned ad-hoc command through;
+		// it is now the ONLY gate an inline command passes through, so it can no
+		// longer be configured off.
 		c, err := NewTransportClient(&TransportConfig{
 			ControllerURL: "localhost:4433",
 			ScriptSigning: stewardconfig.ScriptSigningConfig{
@@ -143,9 +148,9 @@ func TestSetupCommandHandler_EnforcesRequireSignedAdhoc(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(handler.Wait)
 
-		err = handler.HandleCommand(context.Background(), unsignedExecuteScript("sig-wired-accept"))
-		assert.NotErrorIs(t, err, commands.ErrUnauthenticatedCommand,
-			"unsigned ad-hoc command must pass signature preflight when require_signed_adhoc is false")
+		err = handler.HandleCommand(context.Background(), unsignedExecuteScript("sig-wired-reject-2"))
+		require.ErrorIs(t, err, commands.ErrUnauthenticatedCommand,
+			"unsigned ad-hoc command must still be rejected even when require_signed_adhoc is false")
 	})
 
 	t.Run("public-beta rejects require_signed_adhoc false", func(t *testing.T) {

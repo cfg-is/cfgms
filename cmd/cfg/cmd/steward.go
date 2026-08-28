@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -22,7 +24,20 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/spf13/cobra"
+)
+
+const (
+	// operatorEnvelopeExpiry bounds the validity window of a client-signed
+	// operator command envelope (Issue #3694). Inline commands execute
+	// immediately, so a short, fixed window is deliberate — it is not a
+	// user-configurable flag.
+	operatorEnvelopeExpiry = 5 * time.Minute
+
+	// operatorNonceBytes is the raw byte length of a generated envelope nonce,
+	// before hex-encoding. Must be at least 16 per Issue #3694's AC.
+	operatorNonceBytes = 16
 )
 
 var (
@@ -1579,11 +1594,6 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	sig, err := signCommandContent(content)
-	if err != nil {
-		return err
-	}
-
 	params, err := parseRunParams(stewardRunParams)
 	if err != nil {
 		return err
@@ -1605,6 +1615,26 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 		}
 	}
 
+	// The operator signature binds an explicit, resolved target-ID list (Issue #3694).
+	// An empty --target means "all stewards" server-side, so resolve "all" here too;
+	// otherwise reuse the resolution already done above for the confirm gate.
+	envelopeMatches := matches
+	if stewardRunTarget == "" {
+		envelopeMatches, err = resolveOrFailFast(context.Background(), client, "all")
+		if err != nil {
+			return err
+		}
+	}
+	targetIDs := make([]string, len(envelopeMatches))
+	for i, m := range envelopeMatches {
+		targetIDs[i] = m.ID
+	}
+
+	sig, envelope, err := buildAndSignEnvelope(content, stewardRunShell, targetIDs)
+	if err != nil {
+		return err
+	}
+
 	reqBody := map[string]interface{}{
 		"target":       stewardRunTarget,
 		"content":      base64.StdEncoding.EncodeToString(content),
@@ -1612,6 +1642,9 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 		"params":       params,
 		"skip_offline": stewardRunSkipOffline,
 		"signature":    sig,
+		"targets":      envelope.Targets,
+		"nonce":        envelope.Nonce,
+		"expires_at":   envelope.ExpiresAt.Format(time.RFC3339),
 	}
 
 	bodyJSON, err := json.Marshal(reqBody)
@@ -1677,11 +1710,6 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	sig, err := signCommandContent(content)
-	if err != nil {
-		return err
-	}
-
 	timeout := stewardExecTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -1703,11 +1731,25 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	// The operator signature binds the explicit, already-resolved target-ID list
+	// (Issue #3694) — reusing `matches` from the confirm-gate resolution above.
+	targetIDs := make([]string, len(matches))
+	for i, m := range matches {
+		targetIDs[i] = m.ID
+	}
+	sig, envelope, err := buildAndSignEnvelope(content, stewardExecShell, targetIDs)
+	if err != nil {
+		return err
+	}
+
 	reqBody := map[string]interface{}{
-		"target":    selector,
-		"content":   base64.StdEncoding.EncodeToString(content),
-		"shell":     stewardExecShell,
-		"signature": sig,
+		"target":     selector,
+		"content":    base64.StdEncoding.EncodeToString(content),
+		"shell":      stewardExecShell,
+		"signature":  sig,
+		"targets":    envelope.Targets,
+		"nonce":      envelope.Nonce,
+		"expires_at": envelope.ExpiresAt.Format(time.RFC3339),
 	}
 
 	bodyJSON, err := json.Marshal(reqBody)
@@ -2037,6 +2079,48 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 		Value:     base64.StdEncoding.EncodeToString(sigBytes),
 		PublicKey: b.CertPEM,
 	}, nil
+}
+
+// generateOperatorNonce returns a fresh operatorpayload.Envelope nonce: at least
+// operatorNonceBytes of crypto/rand, hex-encoded. Never derived from a counter,
+// timestamp, or UUID (Issue #3694 AC) — those are all predictable or reused across
+// process restarts, defeating the replay protection a nonce exists to provide.
+func generateOperatorNonce() (string, error) {
+	buf := make([]byte, operatorNonceBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate nonce: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// buildAndSignEnvelope resolves the fields of an operatorpayload.Envelope binding
+// content, shell, and the caller's already-resolved target steward IDs to a fresh
+// nonce and a bounded expiry, then signs its canonical bytes with the operator's
+// admin-bundle key (Issue #3694). Returns the signature to embed in the request body
+// alongside the returned envelope, whose Targets/Nonce/ExpiresAt the caller forwards
+// as separate request fields so the controller and steward can independently verify
+// against the exact bytes that were signed.
+func buildAndSignEnvelope(content []byte, shell string, targets []string) (*commandSignature, operatorpayload.Envelope, error) {
+	nonce, err := generateOperatorNonce()
+	if err != nil {
+		return nil, operatorpayload.Envelope{}, err
+	}
+	envelope := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: time.Now().Add(operatorEnvelopeExpiry).UTC(),
+	}
+	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
+	if err != nil {
+		return nil, operatorpayload.Envelope{}, fmt.Errorf("build operator envelope: %w", err)
+	}
+	sig, err := signCommandContent(canonicalBytes)
+	if err != nil {
+		return nil, operatorpayload.Envelope{}, err
+	}
+	return sig, envelope, nil
 }
 
 // parsePrivKeyFromPEM decodes a PEM block and parses a private key in any of
