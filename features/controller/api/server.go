@@ -189,6 +189,7 @@ type Server struct {
 	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
 	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
 	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
+	credentialRenewalMu             sync.Mutex                               // Issue #3724: serializes issue-and-rebind so two concurrent renewals of one certificate cannot both succeed
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners

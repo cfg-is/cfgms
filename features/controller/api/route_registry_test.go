@@ -235,6 +235,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/cluster/nodes/{id}/decommission",
 	"POST /api/v1/cluster/nodes/{id}/drain",
 	"POST /api/v1/config/push",
+	"POST /api/v1/credential-renewal",
 	"POST /api/v1/credential-requests/lodge",
 	"POST /api/v1/credential-requests/orphaned/{serial}/revoke",
 	"POST /api/v1/credential-requests/{id}/approve",

@@ -609,8 +609,10 @@ durable pending queue that administrators can list and deny. Story #3718 adds th
 approval decision, and story #3719 adds the single-use collect call that signs the
 certificate and binds it to an account. Story #3720 (below) adds the `cfg` CLI commands
 that drive both halves — minting/revoking from the administrator's workstation, and the
-headless machine's own enrolment. The REST reference for every endpoint these commands
-call follows the CLI sections.
+headless machine's own enrolment. Story #3724 (below) adds a further CLI command,
+`cfg credential renew`, for the step after collection: keeping an already-issued
+credential current without a human present. The REST reference for every endpoint
+these commands call follows the CLI sections.
 
 ### cfg credential enrolment-token mint / revoke (Issue #3720)
 
@@ -1101,6 +1103,118 @@ Every revocation and every cancel emits a durable audit event, and every mutatin
 handler here calls the same lease-backed leadership check the rest of this package
 uses (`503` when not the authoritative node).
 
+### Renewing an issued credential — cfg credential renew (Issue #3724)
+
+Story #3724 closes the epic's last gap: a credential collected via #3719 renews
+itself before it expires, with no human present, and cannot use renewal to gain
+anything it did not already have.
+
+```bash
+cfg credential renew
+cfg credential renew --unattended
+cfg credential renew --bundle /etc/cfgms/admin.bundle.yaml --unattended
+```
+
+Renewal is authorised by presenting the **current, still-valid certificate itself**
+over mutual TLS — there is no separate renewal credential, no bearer secret, and
+nothing in the request body can name, select, or change which account the renewed
+certificate binds to. The command reads the admin bundle (the same file `cfg
+connect --bundle` imports and `cfg credential request-signing-cert` authenticates
+with), generates a fresh keypair locally, and sends only the new public key as a
+certificate signing request:
+
+```
+POST /api/v1/credential-renewal
+{"csr_pem": "-----BEGIN CERTIFICATE REQUEST-----..."}
+```
+
+authenticated by presenting the bundle's own client certificate over mTLS. The
+controller derives everything about the new certificate from that certificate: the
+account it renews into (the one the presented serial is already bound to — a
+presented certificate with no binding at all, the mTLS bootstrap-fallback case, is
+refused rather than renewed into), and the exact marker set the presented
+certificate carries, copied verbatim and never widened. A CSR that reuses the
+current certificate's own public key is refused — a fresh keypair is required on
+every renewal.
+
+A successful renewal returns:
+
+```json
+{
+  "data": {
+    "certificate_pem": "-----BEGIN CERTIFICATE-----...",
+    "ca_certificate_pem": "-----BEGIN CERTIFICATE-----...",
+    "serial_number": "...",
+    "account_id": "<the account the presented certificate is bound to>",
+    "granted_markers": ["admin"],
+    "expires_at": "2027-08-28T10:00:00Z"
+  }
+}
+```
+
+`cfg credential renew` writes the new certificate, its freshly generated private
+key, and the CA certificate back into the same bundle file, preserving
+`controller_url` and `audit_subject` — the file is fully usable for the next `cfg`
+invocation with no further action. The old certificate is revoked and its binding
+removed once the new one is confirmed bound; a failure earlier in that sequence
+(before the new certificate is bound) leaves the old, still-valid certificate as the
+working credential rather than none.
+
+**The renewal window.** The controller refuses renewal outside a 30-day window
+before expiry, for an already-expired certificate, and for a revoked serial — a
+certificate with most of its life left has no reason to renew early. `--unattended`
+is the flag for periodic/cron/systemd-timer invocation: it checks the bundle
+certificate's expiry **locally**, before contacting the controller at all, and exits
+`0` with no network call when renewal is not yet due — so a job scheduled to run
+daily, or even hourly, generates no noise or load until renewal actually matters.
+Without `--unattended`, renewal is attempted unconditionally and the controller's
+own window check is authoritative.
+
+**The off switch is the bound account, not a lifetime cap.** There is no
+total-renewal-count limit and no maximum credential age — a credential may renew
+indefinitely. To stop it, disable the bound account
+(`POST /api/v1/accounts/{username}` with `disabled: true`, or the equivalent web UI
+action): a disabled account's certificate can no longer even authenticate, so the
+very next renewal attempt fails, and the host cannot reach the controller for
+anything else either.
+
+**When renewal fails.** The error message names the reason (`OUTSIDE_RENEWAL_WINDOW`,
+`CERTIFICATE_EXPIRED`, `NO_ACCOUNT_BINDING`, `KEY_REUSE_REJECTED`, or a `401` for a
+revoked or disabled-account certificate that never authenticated in the first
+place):
+
+- Outside the renewal window: not an error to act on — the certificate is not due
+  yet; a scheduled `--unattended` run will pick it up once it is.
+- Certificate already expired, or the bound account was disabled: there is no
+  recovery through this command. An administrator must mint a fresh enrolment
+  token ([above](#minting-and-revoking-an-enrolment-token)) and the host must
+  re-enrol from scratch — renewal only ever extends a credential that is still
+  alive, never resurrects one that is not.
+- Any other failure (network, `503` from a non-leader node, a `5xx`): safe to
+  retry: the old certificate is left intact until a new one is confirmed bound, so
+  a failed or interrupted renewal never leaves the host without a working
+  credential.
+
+Renewal has no RBAC permission gate — the presented certificate is itself the
+authorization, matching the "no separate renewal credential" design. It is
+leadership-gated on the controller (a non-leader node returns `503`, and the old
+credential is left untouched) and records a durable audit event naming the old
+serial, the new serial, and the granted marker set.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--unattended` | false | Only contact the controller if the certificate is within its renewal window; exit `0` without renewing otherwise |
+| `--api-url` | bundle's `controller_url` | Controller REST API URL override |
+| `--tls-insecure` | false | Skip TLS certificate verification (development only) |
+| `--server-name` | — | Override the TLS server name used for certificate verification |
+
+`--bundle`, `--no-bundle`, and `CFGMS_ADMIN_BUNDLE` (the global bundle-discovery
+flags — see [Connection Management](#connection-management)) select which bundle
+file is renewed; renewal always uses the resolved bundle's own certificate, never a
+session token, even if one happens to be active.
+
 ### Permissions
 
 | Permission | Assurance floor | Notes |
@@ -1114,6 +1228,7 @@ uses (`503` when not the authoritative node).
 | `credential-request:cancel` | `AssuranceStrong` | Cancels an approved-but-uncollected request (Issue #3725) |
 | `credential-request:list-orphaned` | none | Read-only; outside the elevated-assurance surface |
 | `credential-request:revoke-orphaned` | `AssuranceStrong` | Revokes a listed orphaned certificate (Issue #3725) |
+| — (none) | — | `POST /api/v1/credential-renewal` (Issue #3724) has no permission gate; the presented certificate is itself the authorization |
 
 ## Workflow Management
 

@@ -31,6 +31,13 @@ type CertBinding struct {
 	Label       string     `json:"label,omitempty"`
 	BoundAt     time.Time  `json:"bound_at"`
 	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+	// HumanApprovedAt is set once, when the credential this binding traces back to
+	// was first approved by a human (the credential-request approve endpoint, Issue
+	// #3718), and copied forward unchanged on every later renewal (Issue #3724). A
+	// credential that renews itself indefinitely still carries the date a person
+	// last vouched for it. Nil for bindings created outside that flow (e.g. the
+	// admin-account cert-bind endpoint) — there is no approval event to record.
+	HumanApprovedAt *time.Time `json:"human_approved_at,omitempty"`
 }
 
 // CertBindingInfo is the public view returned by GET .../certs.
@@ -42,4 +49,6 @@ type CertBindingInfo struct {
 	Label       string     `json:"label,omitempty"`
 	BoundAt     time.Time  `json:"bound_at"`
 	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+	// HumanApprovedAt mirrors CertBinding.HumanApprovedAt — see that field's doc comment.
+	HumanApprovedAt *time.Time `json:"human_approved_at,omitempty"`
 }
