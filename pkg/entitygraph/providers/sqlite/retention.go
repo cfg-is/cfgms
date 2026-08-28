@@ -252,7 +252,7 @@ func (p *SQLiteEntityGraphProvider) pruneHistory(ctx context.Context, now time.T
 		owningTenant := tenantBySubject[subject]
 		histDays, _ := effectivePolicyDays(owningTenant, defaultHistory, defaultTombstone, overrides)
 		cutoff := now.AddDate(0, 0, -histDays)
-		cutoffStr := cutoff.UTC().Format(time.RFC3339Nano)
+		cutoffStr := rfc3339(cutoff)
 
 		// Collect pinned IDs for this subject.
 		var pinList []int64
