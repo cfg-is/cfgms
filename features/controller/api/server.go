@@ -159,6 +159,8 @@ type Server struct {
 	presenceTokens                 sync.Map                              // Issue #2784: short-lived single-use presence tokens; key=tokenHash, value=*presenceTokenRecord
 	webAuthnElevateSessions        sync.Map                              // Issue #2965: pending step-up elevation sessions; key=sessionID, value=*webAuthnElevateSession
 	webAuthnElevateThrottle        sync.Map                              // Issue #2965: per-session/per-IP failed elevation throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
+	operatorPayloadSignSessions    sync.Map                              // Issue #3695: pending operator-payload sign ceremonies; key=sessionID, value=*operatorPayloadSignSession
+	operatorPayloadSignThrottle    sync.Map                              // Issue #3695: per-session/per-IP failed sign-ceremony throttle; key="session:<id>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyLoginSessions           sync.Map                              // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
 	passkeyLoginThrottle           sync.Map                              // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyEnrollSessions          sync.Map                              // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
