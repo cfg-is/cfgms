@@ -227,6 +227,15 @@ func (s *Server) persistPendingCredentialRequest(ctx context.Context, req *pendi
 		meta["denied_at"] = req.DeniedAt.UTC().Format(time.RFC3339)
 		meta["denied_by"] = req.DeniedBy
 	}
+	if req.ApprovedAt != nil {
+		meta["approved_at"] = req.ApprovedAt.UTC().Format(time.RFC3339)
+		meta["approved_by"] = req.ApprovedBy
+		meta["bound_account_id"] = req.BoundAccountID
+		meta["granted_markers"] = strings.Join(req.GrantedMarkers, ",")
+		if req.SelfApproved {
+			meta["self_approved"] = "true"
+		}
+	}
 	ttl := time.Until(req.ExpiresAt)
 	if ttl <= 0 {
 		ttl = time.Second
@@ -257,6 +266,12 @@ func pendingCredentialRequestFromMetadata(m *secretsif.SecretMetadata) *pendingC
 		CollectSecretHash:    m.Metadata["collect_secret_hash"],
 		EnrolmentTokenID:     m.Metadata["enrolment_token_id"],
 		DeniedBy:             m.Metadata["denied_by"],
+		ApprovedBy:           m.Metadata["approved_by"],
+		BoundAccountID:       m.Metadata["bound_account_id"],
+		SelfApproved:         m.Metadata["self_approved"] == "true",
+	}
+	if gm := m.Metadata["granted_markers"]; gm != "" {
+		req.GrantedMarkers = strings.Split(gm, ",")
 	}
 	if ts := m.Metadata["created_at"]; ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
@@ -271,6 +286,11 @@ func pendingCredentialRequestFromMetadata(m *secretsif.SecretMetadata) *pendingC
 	if ts := m.Metadata["denied_at"]; ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
 			req.DeniedAt = &t
+		}
+	}
+	if ts := m.Metadata["approved_at"]; ts != "" {
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			req.ApprovedAt = &t
 		}
 	}
 	return req

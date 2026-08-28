@@ -55,11 +55,16 @@ const (
 	maxPendingCredentialRequestsPerTenant = 100
 
 	// credentialRequestStatusPending and credentialRequestStatusDenied are the status
-	// vocabulary for this story. There is no "approved" or "collected" status here —
-	// those belong to the next two stories in the epic, which this story's queue does
-	// not implement. A denied request can never move to any other status.
+	// vocabulary #3717 introduced. A denied request can never move to any other status.
 	credentialRequestStatusPending = "pending"
 	credentialRequestStatusDenied  = "denied"
+
+	// credentialRequestStatusApproved is set once an administrator approves the request
+	// (Issue #3718). Approval signs nothing: the granted marker set, the bound account
+	// and the approver's identity are recorded at this point so a later collect call has
+	// something fixed to honor, but no certificate exists until collect runs. There is
+	// still no "collected" status here — that belongs to the next story in the epic.
+	credentialRequestStatusApproved = "approved"
 )
 
 // enrolmentToken is the durable record for a single-use, short-lived pre-shared
@@ -137,6 +142,17 @@ type pendingCredentialRequest struct {
 
 	DeniedAt *time.Time
 	DeniedBy string
+
+	// ApprovedAt, ApprovedBy, BoundAccountID, GrantedMarkers and SelfApproved are
+	// written by the approve endpoint (Issue #3718). They record the decision a later
+	// collect call must reproduce exactly, never widen: which markers the eventual
+	// certificate will carry, which account it binds to, who approved it, and whether
+	// the approver approved their own request.
+	ApprovedAt     *time.Time
+	ApprovedBy     string
+	BoundAccountID string
+	GrantedMarkers []string
+	SelfApproved   bool
 }
 
 // hashCredentialSecret returns the SHA-256 hex digest of a raw secret (an enrolment

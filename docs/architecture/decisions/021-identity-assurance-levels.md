@@ -1041,3 +1041,57 @@ still verifies. `emitBootstrapFallbackAudit` writes a structured log line
 under the same controller's custody, not an independent witness, so it is
 bounded the same way. The gap this amendment does not close is therefore
 uncompensated, not weakly compensated.
+
+## Amendment 6 (2026-08-28): Credential marker authority is bounded by the approver's own authority (Epic #3711 Story #3718)
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Extends:** Amendment 5
+
+Approving a pending credential-request enrolment (`POST
+/api/v1/credential-requests/{id}/approve`,
+`features/controller/api/handlers_credential_requests_approve.go`) decides which
+certificate markers (`AdminMarkerOID`, `PayloadSigningMarkerOID`, `RootScopeMarkerOID` —
+Epic #3711 D3) the eventual credential will carry. The rule this amendment records: **an
+approver can only ever mint a credential weaker than or equal to their own.**
+
+- Granting `AdminMarkerOID` requires the approver to already be a platform administrator
+  (`Principal.ImplicitAdmin`) — the same three construction sites named in Amendment 3's
+  `hasPermission` doc comment.
+- Granting `PayloadSigningMarkerOID` requires the approver to hold
+  `signing-credential:request` at `AssuranceStrong` — the same gate
+  `handleRequestSigningCredential` (#3693) enforces on itself when minting one's own.
+- Granting `RootScopeMarkerOID` requires the approver's own request to have been
+  authenticated by a certified, non-revoked root-scope-marked certificate:
+  `Principal.RootScoped && Principal.CertSerial != ""`. This is deliberately narrower than
+  the first two: a root-scope-account session or web-cookie principal can carry
+  `RootScoped: true` (or, for an `ImplicitAdmin` principal, satisfy any permission-string
+  check by construction) without ever presenting the certificate this ADR treats as the
+  root of trust for that scope. `CertSerial` is set in exactly two places, both inside
+  `extractAdminPrincipal`, both after its revocation check — see that function's doc
+  comment and Amendment 5.
+
+**Why this makes self-approval safe.** Because the rule is "weaker than or equal to," an
+administrator approving their own pending request — the ordinary shape of enrolling a
+second device — grants themselves nothing they did not already hold. The approve endpoint
+records `self_approved` on the audit event precisely so this is visible, not something a
+reviewer has to infer.
+
+**Why the gate cannot be a bare permission-string check for `RootScopeMarkerOID`.**
+`hasPermission` returns true for any `ImplicitAdmin` principal by construction (Amendment
+3); an ordinary admin-marked mTLS certificate with no root-scope marker of its own is
+`ImplicitAdmin: true`. A permission check alone would let any platform administrator mint a
+root-scope-marked credential regardless of their own scope — exactly the escalation this
+rule exists to prevent. `Principal.RootScoped` alone is equally insufficient: it is always
+false for every browser-authenticated caller today, so the check would look correct while
+being unexercised, and would silently reopen the day a passkey session is amended to carry
+it. Reading the raw presented certificate (`r.TLS.PeerCertificates[0]`) directly instead of
+the derived principal is a revocation bypass: the server accepts a client certificate the
+TLS handshake did not require (`tls.VerifyClientCertIfGiven`, no `VerifyPeerCertificate`
+callback), and revocation is checked in exactly one place — `extractAdminPrincipal` — which
+a direct read of the raw certificate skips entirely.
+
+**Implementation reference (Issue #3718):** the three gates are named predicates —
+`principalMayAdministerController`, `principalMayGrantPayloadSigningMarker`, and
+`principalHasCertifiedRootScope` — each with a single call site in
+`resolveGrantedMarkers`. A structural test
+(`TestCertSerial_OnlySetByExtractAdminPrincipal`) asserts no other code path in the package
+sets `CertSerial` on a `Principal`, so the root-scope gate's assumption cannot rot silently.

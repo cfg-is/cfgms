@@ -248,6 +248,12 @@ var knownPermissions = map[string]bool{
 	"enrolment-token:revoke":  true,
 	"credential-request:list": true,
 	"credential-request:deny": true,
+
+	// The approve decision (Issue #3718, Epic #3711): a credential-minting-adjacent
+	// surface — it decides the marker set and account binding a later collect call
+	// will sign and write — gated at AssuranceStrong with RequireUserPresence (see
+	// permissionAssurance).
+	"credential-request:approve": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

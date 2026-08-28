@@ -151,6 +151,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// (read and de-escalation actions, mirroring registration:list-pending / :deny).
 	{"POST", "/api/v1/enrolment-tokens", "enrolment-token:mint"},
 	{"POST", "/api/v1/enrolment-tokens/test-token-id/revoke", "enrolment-token:revoke"},
+	// Credential-request approve decision (Issue #3718, Epic #3711) — RequireUserPresence:
+	// true confines the retained bootstrap admin credential (ADR-021 Amendment 5).
+	{"POST", "/api/v1/credential-requests/test-request-id/approve", "credential-request:approve"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

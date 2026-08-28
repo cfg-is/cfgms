@@ -167,6 +167,14 @@ var permissionAssurance = map[string]Requirement{
 	// registration:deny.
 	"enrolment-token:mint":   {Min: session.AssuranceStrong},
 	"enrolment-token:revoke": {Min: session.AssuranceStrong},
+
+	// Approve decision for a pending credential request (Issue #3718, Epic #3711).
+	// RequireUserPresence: true is load-bearing, not merely consistent with the other
+	// credential-minting entries above: ImplicitAdmin satisfies every permission-string
+	// check by construction, so the presence requirement is what actually confines the
+	// retained bootstrap admin credential here (ADR-021 Amendment 5) — it resolves to
+	// no bound account, so no presence token can ever be minted for it.
+	"credential-request:approve": {Min: session.AssuranceStrong, RequireUserPresence: true},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

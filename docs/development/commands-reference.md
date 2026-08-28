@@ -723,6 +723,61 @@ not merely hidden on the next list call, it is deleted. Spent tokens and denied 
 are left in place; the sweep only removes records that are still live but past their
 expiry.
 
+### Approving a pending request (Issue #3718)
+
+Story #3718 adds the approval decision. **Approving signs nothing** — the shipped steward
+registration path already works this way (`handleApproveRegistration`'s own doc comment:
+"no cert is generated here, generate-on-claim") and this endpoint mirrors it: it validates
+the approver's own authority, decides which certificate markers the eventual credential
+will carry, selects or creates the account it will bind to, and records all three together
+on the pending request before moving it to `approved`. No certificate exists at the end of
+this call — signing the lodged public key and writing the account binding atomically is the
+collect story that follows.
+
+```
+POST /api/v1/credential-requests/{id}/approve
+{
+  "fingerprint": "AB12-CD34-EF56-7890",
+  "account_id": "<existing account UUID>",
+  "grant_admin_marker": true,
+  "grant_payload_signing_marker": false,
+  "grant_root_scope_marker": false
+}
+```
+
+`fingerprint` must match the fingerprint recorded at lodge time — full or short form both
+accepted — or the call is rejected with `409`. This closes the window where a second lodge
+re-sorts the queue between rendering the list and clicking approve.
+
+Exactly one of `account_id` (select an existing account within the caller's tenant subtree)
+or `new_account_username` (plus optional `new_account_tenant_id`, defaulting to the
+request's own tenant) must be supplied. A headless host is represented by its own account,
+created through the same durable account-persistence path `POST /api/v1/accounts` uses.
+
+Each of the three certificate markers (Epic #3711 D3) is granted only when explicitly
+requested **and** only when the approver holds the authority for it — the default is
+nothing, and a marker the approver cannot grant refuses the whole call (`403`) rather than
+silently dropping it:
+
+| Marker | Requested field | Requires |
+|---|---|---|
+| `AdminMarkerOID` | `grant_admin_marker` | The approver is themselves a platform administrator (`Principal.ImplicitAdmin`) |
+| `PayloadSigningMarkerOID` | `grant_payload_signing_marker` | The approver holds `signing-credential:request` at `AssuranceStrong` — the same gate `POST /api/v1/signing-credential/request` enforces on itself |
+| `RootScopeMarkerOID` | `grant_root_scope_marker` | The approver's own request was authenticated by a certified, non-revoked root-scope-marked certificate (`Principal.RootScoped && Principal.CertSerial != ""`) — a session or a cookie can never satisfy this, however many permissions it holds |
+
+An approver can therefore never mint a credential stronger than their own — which is also
+what makes **self-approval safe**: approving one's own request (the selected or created
+account is the approver's own) grants nothing the approver did not already have. The
+approve endpoint records `self_approved` on the audit event so this is visible, not
+something a reviewer has to infer.
+
+Requires `credential-request:approve` at `AssuranceStrong` with a fresh user-presence
+proof. The presence requirement is what actually confines the retained bootstrap admin
+credential here ([ADR-021](../architecture/decisions/021-identity-assurance-levels.md)
+Amendment 5): its `ImplicitAdmin` flag satisfies every permission-string check by
+construction, but it resolves to no bound account, so no presence token can ever be minted
+for it.
+
 ### Permissions
 
 | Permission | Assurance floor | Notes |
@@ -731,6 +786,7 @@ expiry.
 | `enrolment-token:revoke` | `AssuranceStrong` | Revokes an unspent token |
 | `credential-request:list` | none | Read-only; outside the elevated-assurance surface |
 | `credential-request:deny` | none | De-escalation action, mirrors `registration:deny` |
+| `credential-request:approve` | `AssuranceStrong` + presence | Decides the marker set and account binding (Issue #3718); signs nothing |
 
 ## Workflow Management
 
