@@ -254,6 +254,16 @@ var knownPermissions = map[string]bool{
 	// will sign and write — gated at AssuranceStrong with RequireUserPresence (see
 	// permissionAssurance).
 	"credential-request:approve": true,
+
+	// Revocation and containment for enrolment-issued credentials (Issue #3725, Epic
+	// #3711): revoke-issued and cancel/revoke-orphaned are credential-destroying
+	// surfaces, gated at AssuranceStrong like cert-binding:revoke. list-orphaned is a
+	// read surface and is intentionally absent from permissionAssurance, mirroring
+	// credential-request:list / cert-binding:list.
+	"enrolment-token:revoke-issued":      true,
+	"credential-request:cancel":          true,
+	"credential-request:list-orphaned":   true,
+	"credential-request:revoke-orphaned": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.
