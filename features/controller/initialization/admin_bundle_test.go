@@ -404,6 +404,53 @@ func TestRegenerate_RecoversFromMissingBundle(t *testing.T) {
 		"initialization marker must remain intact after --regenerate")
 }
 
+// TestIssueAdminBundle_NeverCarriesPayloadSigningMarker locks the issuance-side
+// precondition for the confinement Epic #3711 D4 rests on: "The bootstrap credential
+// is not trusted for execution. The bundle from `controller bootstrap-admin` is
+// controller-custody by construction. It receives AdminMarkerOID and never
+// PayloadSigningMarkerOID." IssueAdminBundle's TemplateModifier composes only
+// cert.SetAdminMarker (and cert.SetRootScopeMarker when rootScoped) — it never calls
+// cert.SetPayloadSigningMarker. This test locks that so a future edit that widens
+// the TemplateModifier to include payload-signing fails loudly, for both the plain
+// and the root-scoped bundle (Issue #3716).
+//
+// Scope limit — this is NOT proof of a shipped control. The marker requirement is
+// not yet enforced at either verification site: verifyOperatorCert
+// (features/steward/commands/execute_script.go) and the operator-signature check in
+// features/controller/api/handlers_runs.go both accept any admin-marked certificate
+// and never call cert.HasPayloadSigningMarker, which has no non-test caller
+// repo-wide. Until Story #3696 adds the positive requirement, a bootstrap bundle
+// can still authorise endpoint code execution; what this test proves is only that
+// the bundle does not acquire the marker, so the enforcement #3696 adds will bite.
+func TestIssueAdminBundle_NeverCarriesPayloadSigningMarker(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	cases := []struct {
+		name       string
+		rootScoped bool
+	}{
+		{"plain", false},
+		{"root-scoped", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outputPath := filepath.Join(t.TempDir(), "no-signing-marker.bundle.yaml")
+			err := IssueAdminBundle(setup.cfg, setup.logger, "confinement-operator", outputPath, tc.rootScoped)
+			require.NoError(t, err)
+
+			x509cert := parseX509FromBundle(t, outputPath)
+			assert.True(t, cert.HasAdminMarker(x509cert),
+				"the bootstrap bundle must be able to administer the controller")
+			assert.False(t, cert.HasPayloadSigningMarker(x509cert),
+				"the bootstrap bundle must never acquire the payload-signing marker "+
+					"(issuance-side precondition only; the marker is not yet required at "+
+					"execute_script.go verifyOperatorCert or handlers_runs.go — Story #3696)")
+		})
+	}
+}
+
 // TestIssueAdminBundle_RootScoped_StampsBothMarkers verifies the bootstrap-admin
 // --root-scoped opt-in (ADR-025 Amendment 1 A1.3, founder decision 2026-08-09, PR #3215)
 // composes both cert.SetAdminMarker and cert.SetRootScopeMarker on the issued cert. Before

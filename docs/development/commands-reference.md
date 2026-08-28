@@ -407,9 +407,24 @@ If neither resolves, the command fails immediately with an error naming the requ
 
 This admin mTLS bundle / session pair authenticates `cfg` itself against the controller (transport auth). It is a distinct credential from the payload-signing certificate issued by `cfg credential request-signing-cert` (below), which exists solely to sign `operatorpayload.Envelope`s — see [Signing Credential Management](#signing-credential-management). With `CFGMS_API_KEY` gone (Issue #3688), `cfg credential request-signing-cert` is the only CLI path to a signing credential; there is no `--api-key` alternative.
 
-### cfg connect (first-time import)
+### cfg connect (first-time import) — bootstrap only
 
-Import an admin bundle and start a controller session.
+Import an admin bundle and start a controller session. This is the bootstrap
+exception: an admin bundle is a credential whose private key the controller
+itself generated and held, confined accordingly (it cannot approve a credential
+enrolment or renew itself, both of which require a passkey presence assertion it
+can never obtain; it is *intended* also to be unable to authorise endpoint
+execution — [GAP: that requirement is not yet enforced, see Epic #3711, Story
+#3696. `verifyOperatorCert` in `features/steward/commands/execute_script.go` and
+the operator-signature check in `features/controller/api/handlers_runs.go` both
+accept any admin-marked certificate and never require the payload-signing
+marker, so a bundle can authorise endpoint execution today] — see
+[ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md)).
+The ordinary way to obtain a session is `cfg login`
+[GAP: not yet shipped — see Epic #3711, Story #3721], a browser passkey
+assertion; this bundle-import route is for the very first credential on a
+controller with no account yet to log in against, or for re-running
+`bootstrap-admin` to issue another one while `cfg login` is unavailable.
 
 ```bash
 cfg connect --bundle /path/to/admin.bundle.yaml --url https://controller:9443

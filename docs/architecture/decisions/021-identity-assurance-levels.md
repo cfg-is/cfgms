@@ -895,3 +895,108 @@ work). It is tracked as a follow-up story under Epic #3711.
 `Config.ValidateWebAuthn`; tightened `NewWebAuthnFromConfig` validation in
 `features/controller/api/handlers_webauthn.go`; startup wiring in `cmd/controller/main.go`
 (`buildWebAuthnRelyingParty`, called between `server.New` and `runControllerServer`).
+
+---
+
+## Amendment 5 (2026-08-28): Bootstrap credential confinement (Epic #3711)
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Extends:** §7 and Decision 4
+
+### Context
+
+Epic #3711 replaces the file-transfer bundle as the ordinary way to obtain a
+`cfg` credential with `cfg login` — a browser passkey assertion that mints a
+session token and never hands the operator a private key the controller ever
+held. `controller bootstrap-admin` remains, because a fresh controller has no
+account yet for anyone to log in against: the chicken-and-egg has to break
+somewhere. This amendment records what confines the credential that step
+produces, so its continued existence is a documented, bounded decision rather
+than an unexamined exception.
+
+### The bootstrap credential is controller-custody by construction
+
+`IssueAdminBundle` (`features/controller/initialization/admin_bundle.go`)
+generates the certificate's keypair itself and writes both halves into the
+bundle file — the controller holds the private key at the moment of issuance.
+Every other credential this epic introduces is CSR-based: the requesting party
+generates its own keypair and the controller only ever sees the public half
+(Epic #3711 D2). The bootstrap bundle is the one credential in the system for
+which that is not true, and it is confined precisely because of it.
+
+### What the confinement covers
+
+The bundle's certificate carries `AdminMarkerOID` (`pkg/cert/admin_marker.go`)
+and — for a `--root-scoped` bundle — also `RootScopeMarkerOID`. It never
+carries `PayloadSigningMarkerOID` (`pkg/cert/payload_signing_marker.go`):
+`IssueAdminBundle`'s `TemplateModifier` composes only the admin marker and,
+conditionally, the root-scope marker, on every path (Epic #3711 D4). Once signer
+verification positively requires the payload-signing marker, a steward will
+refuse to execute a payload whose signer lacks it, and the bootstrap credential
+— however it is obtained, copied, or misused — will not be able to reach code
+execution on a managed endpoint. That is the confinement Epic #3711 D4 names:
+*"a credential whose private key the controller has held cannot reach an
+endpoint."* It is a stated intent, not a shipped control:
+
+> **[GAP: the positive payload-signing-marker requirement is not yet enforced —
+> see Epic #3711, Story #3696. Both signer-verification sites accept any
+> admin-marked certificate and never consult the payload-signing marker:
+> `verifyOperatorCert` (`features/steward/commands/execute_script.go`) for
+> steward-side script execution, and the operator-signature check in
+> `features/controller/api/handlers_runs.go` for controller-side ad-hoc runs.
+> Both test `cert.HasAdminMarker`; `cert.HasPayloadSigningMarker`
+> (`pkg/cert/payload_signing_marker.go`) has no non-test caller repo-wide, and
+> `SetPayloadSigningMarker` has no issuance path yet. `IssueAdminBundle` does
+> stamp `AdminMarkerOID`, `steward:execute-scripts` carries no
+> `RequireUserPresence`, and the bootstrap principal is `ImplicitAdmin` — so
+> until #3696 lands, a bootstrap bundle **can** authorise endpoint code
+> execution. The bundle's absence of the payload-signing marker (locked by
+> `TestIssueAdminBundle_NeverCarriesPayloadSigningMarker`) is a precondition for
+> this confinement, not the confinement itself.]**
+
+The same certificate also cannot approve a credential enrolment or renew
+itself. Both are catastrophic, credential-granting actions and, like
+`module:approve`, require a fresh per-action WebAuthn presence assertion
+(Decision 4) — obtainable only for a principal that resolves to a provisioned
+account holding registered credentials (`handlePresenceBegin`,
+`features/controller/api/handlers_webauthn.go`). `IssueAdminBundle` never
+creates an account binding for the certificate it issues, so every request
+authenticated with a bootstrap bundle resolves through
+`extractAdminPrincipal`'s "no binding found" bootstrap fallback
+(`features/controller/api/middleware.go`): an implicit-admin principal keyed
+by the certificate's `CommonName`, not by any account. `ImplicitAdmin`
+satisfies every *permission* check by construction, but the presence ceremony
+resolves the principal to an account by that same `CommonName` and finds
+none, so no presence token can ever be minted for it. What blocks the
+bootstrap credential here is the presence requirement itself, not an absent
+permission string — the principal holds every permission and is refused
+anyway.
+
+### What the confinement does not cover
+
+The bootstrap credential still administers the controller: every permission
+that does not carry `RequireUserPresence` is available to it, unconditionally,
+for as long as the certificate is valid or until it is revoked. At
+controller-management actions it is exactly as powerful as any other unscoped
+mTLS admin certificate. The confinement is specifically about endpoint
+execution and about the narrow set of actions this ADR gates on human
+presence — not about the controller's own administration surface.
+
+### Interface substitution remains an accepted non-goal
+
+The controller serves the same browser interface used for both `cfg login`
+and enrolment approval, so a compromised controller can present one thing to
+an operator and have them authorise another — Epic #3711 D10, inherited
+unchanged from Epic #3571 D2. This amendment does not close that gap.
+Cryptographic forgery is in scope for the assurance model as a whole; a
+controller that lies about what it is showing a human is not. The
+compensating controls are the ones Epic #3711 names: the server-side
+blast-radius bound described above — which, once Story #3696 lands, will mean
+an admin-marked certificate, however obtained, cannot sign a payload a steward
+will run, and which today does not hold at all (see the [GAP] above) — and the
+audit trail (every bootstrap-fallback authentication is logged —
+`emitBootstrapFallbackAudit`, `features/controller/api/middleware.go`). Epic
+#3711's decomposition notes that the audit trail's strength against a
+host-compromised controller is weaker than that phrase implies, because the
+ADR-004 audit chain's signing key lives in the same controller's secret store
+(tracked separately, #3727) — that weakness is real and is not resolved by
+this amendment.
