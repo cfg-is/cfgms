@@ -600,6 +600,47 @@ func TestCredentialRequests_SecretsHashedAtRestAndNeverLogged(t *testing.T) {
 	assert.NotContains(t, listRec.Body.String(), minted.Token)
 }
 
+// [REQUIRED TEST] Regression for the go/clear-text-logging finding on the lodge
+// endpoint. Lodge is unauthenticated, so the bearer value it is handed is entirely
+// caller-controlled. Nothing derived from that header — not even a six-character
+// prefix — may reach a log line. Only the *resolved store record's* TokenPrefix is
+// loggable, and a bearer value that resolves to no record has no such prefix to log.
+func TestLodgeCredentialRequest_UnresolvedBearerTokenIsNeverLogged(t *testing.T) {
+	capLogger := &captureAllLogger{}
+	server := setupTestServerWithLogger(t, capLogger)
+	csr := generateTestCSR(t, "unresolved-token-device")
+
+	// Case 1: a bearer value the caller chose freely, matching no store record. Its
+	// prefix is deliberately distinctive so a match in the log buffer is unambiguous.
+	attackerToken := "zzcanary-caller-controlled-bearer-value-0123456789abcdef"
+	rec := lodgeCredentialRequest(t, server, attackerToken, LodgeCredentialRequestBody{CSRPEM: csr})
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+
+	// Case 2: a near-miss — a genuine live token with its final character altered. Its
+	// first six characters ARE a real credential's, so logging "the prefix of whatever
+	// was presented" would write part of a live token to disk. Snapshot the log after
+	// minting, because the mint path legitimately logs that record's own prefix.
+	minted := mintTestEnrolmentToken(t, server, "nearmiss-tenant")
+	beforeLodge := len(capLogger.captured())
+
+	mistyped := minted.Token[:len(minted.Token)-1] + "z" // tokens are hex, so "z" always differs
+	require.NotEqual(t, minted.Token, mistyped)
+	rec2 := lodgeCredentialRequest(t, server, mistyped, LodgeCredentialRequestBody{CSRPEM: csr})
+	require.Equal(t, http.StatusUnauthorized, rec2.Code, rec2.Body.String())
+
+	all := capLogger.captured()
+	sinceLodge := all[beforeLodge:]
+
+	assert.NotContains(t, all, attackerToken,
+		"the raw caller-supplied bearer value must never be logged")
+	assert.NotContains(t, all, attackerToken[:enrolmentTokenDisplayPrefixLen],
+		"even a prefix of the caller-supplied bearer value must never be logged")
+	assert.NotContains(t, sinceLodge, mistyped,
+		"the mistyped bearer value must never be logged")
+	assert.NotContains(t, sinceLodge, minted.Token[:enrolmentTokenDisplayPrefixLen],
+		"a near-miss must not disclose the prefix of the live token it nearly matched")
+}
+
 // ---- audit ----------------------------------------------------------------------------
 
 func TestCredentialRequests_AuditEvents(t *testing.T) {

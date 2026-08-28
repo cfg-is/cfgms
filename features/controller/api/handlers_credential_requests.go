@@ -535,8 +535,15 @@ func (s *Server) handleLodgeCredentialRequest(w http.ResponseWriter, r *http.Req
 	}
 	now := time.Now().UTC()
 	if !tok.valid(now) {
-		s.logger.Warn("Lodge attempted with unusable enrolment token",
-			"token_prefix", logging.SanitizeLogValue(enrolmentTokenDisplayPrefix(rawToken)))
+		// Log only the resolved store record's prefix, never a value derived from
+		// the request's bearer token itself — CodeQL go/clear-text-logging flags any
+		// value computed directly from the Authorization header, even a short prefix.
+		if tok != nil {
+			s.logger.Warn("Lodge attempted with unusable enrolment token",
+				"token_prefix", logging.SanitizeLogValue(tok.TokenPrefix))
+		} else {
+			s.logger.Warn("Lodge attempted with unknown enrolment token")
+		}
 		writeUniformLodgeUnauthorized(w)
 		return
 	}
