@@ -788,6 +788,21 @@ decomposes into the elevation assertion handler (this amendment), the browser se
 backend + UI (Amendment 1), the step-up modal + `apiFetch` interceptor, and the held write-action
 wiring (W1–W5) that becomes reachable once elevation works.
 
+### Cross-reference: reused for operator-payload signing (Issue #3695)
+
+The ceremony shape above — single-use server-generated challenge, WebAuthn assertion with
+origin binding, signature-counter clone detection — is reused verbatim by
+`POST /api/v1/operator-payload/sign/begin|finish` (`features/controller/api/handlers_operator_payload_sign.go`),
+with one substitution: the challenge is not an opaque server-generated value but
+`sha256(operatorpayload.CanonicalBytes(envelope))` — the hash of the exact command/target
+envelope the operator is authorizing. The authenticator therefore signs the envelope itself,
+not an unrelated proof-of-presence value, so a successful assertion is simultaneously the
+step-up ceremony's replay/clone protection *and* a binding signature over the payload. This is
+a distinct operation from elevation: it does not raise a session's assurance level, and it is
+only reachable by a caller who already holds `AssuranceStrong` (`operator-payload:sign`,
+`Min: AssuranceStrong`, Issue #3687). See `docs/architecture/operating-model.md` for the
+residual-risk comparison against the mTLS payload-signing path (Issue #3693/#3692).
+
 ---
 
 ## Amendment 3 (2026-08-13): Self-service passkey management UI, IDOR fix, and server-side anti-lockout guard

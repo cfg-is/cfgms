@@ -140,6 +140,11 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// CSR-based payload-signing credential issuance (Issue #3693) — mints a credential
 	// distinguishable from the mTLS admin bundle by cert.PayloadSigningMarkerOID.
 	{"POST", "/api/v1/signing-credential/request", "signing-credential:request"},
+	// WebAuthn operator-payload signing (Issue #3695) — a browser-only operator (no
+	// mTLS bundle) signs an operatorpayload.Envelope via a WebAuthn assertion over
+	// sha256(operatorpayload.CanonicalBytes(envelope)).
+	{"POST", "/api/v1/operator-payload/sign/begin", "operator-payload:sign"},
+	{"POST", "/api/v1/operator-payload/sign/finish", "operator-payload:sign"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
@@ -147,10 +152,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 var knownFuturePermissions = map[string]bool{
 	"publisher-trust:add": true,
 	// Issue #3687: registered in permissionAssurance ahead of the route that will
-	// consume it. operator-payload:sign is consumed by story S6, which has not landed
-	// yet. signing-credential:request's route landed in Issue #3693 and now has a real
-	// entry in strongAssuranceRouteTable above.
-	"operator-payload:sign": true,
+	// consume it. signing-credential:request's route landed in Issue #3693 and
+	// operator-payload:sign's routes landed in Issue #3695 — both now have real
+	// entries in strongAssuranceRouteTable above.
 }
 
 // allStrongAssurancePermissions collects the unique permission IDs from

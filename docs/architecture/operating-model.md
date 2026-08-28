@@ -203,6 +203,25 @@ YAML containing cert + key + CA inline. The `cfg` CLI auto-discovers via: `--bun
 
 **The manifest is fleet-wide, so the endpoint is unscoped-callers-only.** It is gated at the read-only `certificate:list` permission (no elevated assurance — this is a read of state that `certificate:revoke` already produced), and the handler additionally requires an unscoped principal: a caller carrying a tenant scope receives `403`. Revocation status is *not* public — a tenant-scoped operator cannot otherwise enumerate other tenants' serials, and the revocation store holds steward-cert serials as well as operator-cert ones (`certificates/{serial}/revoke` writes into it). Filtering the manifest per tenant is not the alternative: a steward verifying the signature must see every revoked serial, and `Version` is the fleet-wide revoked count, so a subset would be a validly signed manifest that silently omits revocations. Tenant-scoped visibility of certificate data stays on `GET /api/v1/certificates` and `GET /api/v1/certificates/{serial}`, which filter by the caller's tenant subtree.
 
+**Two residual-risk profiles for payload signing.** CFGMS has two independent paths for an
+operator to produce a signature the steward will trust: the CSR-issued mTLS signing credential
+(`POST /api/v1/signing-credential/request`, Issue #3693/#3692) and the WebAuthn operator-payload
+signature (`POST /api/v1/operator-payload/sign/begin|finish`, Issue #3695, ADR-021 Amendment 2
+cross-reference). Both require `AssuranceStrong`, but the credential each rests on has a
+different failure mode if the controller is compromised. The mTLS path issues a certificate over
+a CSR the operator generates — the private key never crosses the wire — but the *resulting
+certificate* is an ordinary bearer credential the controller subsequently sees and could, if
+compromised, mint again for an attacker without the legitimate operator noticing: the deeper risk
+is a controller that silently steals or extends trust in a credential that already exists and is
+expected to keep working unattended for its validity period. The WebAuthn path has no credential
+of that shape at all — a WebAuthn private key is generated and held **only** inside the
+authenticator hardware and never exists server-side, at rest or in transit, so "the controller
+durably retains an extractable private key indefinitely" is not a risk this path can have; a
+compromised controller can at most mint a bogus WebAuthn *registration* for an attacker-controlled
+public key (bounded by `webauthn:register`'s existing `AssuranceStrong` gate, and visible to the
+legitimate operator as an unrecognized credential the next time they list their passkeys), which
+is a shallower failure than silently retaining a credential capable of unattended reuse.
+
 ### Outpost (Future)
 
 Regional infrastructure component deployed at site level. Two roles:
