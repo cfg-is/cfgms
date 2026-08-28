@@ -179,6 +179,11 @@ type Server struct {
 	watchPingInterval              time.Duration                         // Issue #3613: cockpit watch ping cadence; 0 = defaultWatchPingInterval
 	absentCapabilities             []interfaces.AbsentCapability         // Issue #3409: declared-optional capabilities absent in this deployment
 	osqueryDispatcher              stewardOsqueryDispatcher              // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
+	enrolmentTokenMintLimiter      *sourceRateLimiter                    // Issue #3717: per-source rate limit on enrolment-token mint
+	credentialRequestLodgeLimiter  *sourceRateLimiter                    // Issue #3717: per-source rate limit on credential-request lodge
+	credentialRequestMu            sync.Mutex                            // Issue #3717: serializes enrolment-token spend-then-lodge on this node
+	stopCredentialRequestSweep     chan struct{}                         // Issue #3717: signals runCredentialRequestExpirySweep to exit
+	credentialRequestSweepDone     chan struct{}                         // Issue #3717: closed when the sweep goroutine exits
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -317,6 +322,13 @@ func New(
 		sessionCfg:              session.DefaultConfig(), // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
+		// Issue #3717: per-source rate limits on enrolment-token mint and credential-request
+		// lodge. Limits are deliberately generous (mint is an occasional admin action; lodge
+		// is a one-shot per enrolling machine) — they exist to bound abuse, not normal use.
+		enrolmentTokenMintLimiter:     newSourceRateLimiter(10, time.Minute),
+		credentialRequestLodgeLimiter: newSourceRateLimiter(20, time.Minute),
+		stopCredentialRequestSweep:    make(chan struct{}),
+		credentialRequestSweepDone:    make(chan struct{}),
 	}
 
 	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
@@ -490,6 +502,10 @@ func New(
 
 	// Start background cleanup for expired API keys
 	server.startAPIKeyCleanup()
+
+	// Issue #3717: background sweep for expired enrolment tokens and pending
+	// credential requests — reaped on a timer, not only lazily on read.
+	server.startCredentialRequestSweep()
 
 	return server, nil
 }
@@ -1037,6 +1053,22 @@ func (s *Server) Close(ctx context.Context) error {
 		case <-s.cleanupDone:
 		case <-ctx.Done():
 			firstErr = fmt.Errorf("api server close: timed out waiting for cleanup goroutine: %w", ctx.Err())
+		}
+
+		// Issue #3717: signal the credential-request expiry sweep to exit alongside
+		// the API-key cleanup goroutine. Guarded by nil checks (unlike stopCleanup
+		// above) because several tests build a *Server literal directly without
+		// going through New(), and startCredentialRequestSweep — unlike
+		// startAPIKeyCleanup — is never separately special-cased by those helpers.
+		if s.stopCredentialRequestSweep != nil {
+			close(s.stopCredentialRequestSweep)
+			select {
+			case <-s.credentialRequestSweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for credential-request sweep goroutine: %w", ctx.Err())
+				}
+			}
 		}
 
 		// Stop audit manager before closing the HTTP server so that any

@@ -238,6 +238,16 @@ var knownPermissions = map[string]bool{
 	// signing-credential:request by story S10.
 	"operator-payload:sign":      true,
 	"signing-credential:request": true,
+	// Enrolment tokens and the pending credential-request queue (Issue #3717, Epic
+	// #3711): a short-lived single-use token gates an unauthenticated machine's
+	// signing-request lodge. mint/revoke mint or destroy a bearer credential and
+	// carry AssuranceStrong (see permissionAssurance); list/deny are read/de-escalation
+	// actions and are intentionally absent from that map, mirroring
+	// registration:list-pending / registration:deny.
+	"enrolment-token:mint":    true,
+	"enrolment-token:revoke":  true,
+	"credential-request:list": true,
+	"credential-request:deny": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

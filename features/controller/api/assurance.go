@@ -158,6 +158,15 @@ var permissionAssurance = map[string]Requirement{
 	// permissions.go, assurance.go, and knownFuturePermissions for the whole epic.
 	"operator-payload:sign":      {Min: session.AssuranceStrong},
 	"signing-credential:request": {Min: session.AssuranceStrong, RequireUserPresence: true},
+
+	// Enrolment tokens (Issue #3717, Epic #3711): mint and revoke are credential-minting
+	// and credential-destroying surfaces, gated at AssuranceStrong like
+	// registration:create-token / registration:revoke-token. credential-request:list
+	// (read) and credential-request:deny (de-escalation — denying can never grant
+	// trust) are intentionally absent, mirroring registration:list-pending and
+	// registration:deny.
+	"enrolment-token:mint":   {Min: session.AssuranceStrong},
+	"enrolment-token:revoke": {Min: session.AssuranceStrong},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the
