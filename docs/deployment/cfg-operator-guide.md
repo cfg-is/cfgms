@@ -5,7 +5,7 @@ installation through first connect, daily reconnect, checking the active session
 and disconnect — and explains the zero-standing-privilege session model that
 governs every admin interaction with the controller.
 
-**Two ways to obtain a credential.** `cfg login` — a browser passkey assertion —
+**Three ways to obtain a credential.** `cfg login` — a browser passkey assertion —
 is the ordinary way an operator obtains a credential, and is the path described
 by "Reconnecting" and everything after it in this guide. The admin bundle
 described in "First Connect" below exists for exactly one moment: the very
@@ -17,12 +17,17 @@ credential enrolment or renew itself: both require a fresh passkey presence
 assertion, which a bootstrap certificate can never obtain. It is *intended* also
 to be unable to authorise code execution on a managed endpoint (see
 [ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md));
-read the gap note below before relying on that. Every credential after the first
-one should come from `cfg login`, not another bundle.
+read the gap note below before relying on that. The third path, "Headless
+Enrolment" below, is for a machine that cannot open a browser: it still needs
+an administrator who already holds a credential to mint it a token, so it is
+not a second bootstrap route — only `bootstrap-admin` creates the very first
+credential on a controller. Every credential after the first one should come
+from `cfg login` or headless enrolment, not another bundle.
 
 > **[GAP: `cfg login` is not yet shipped — see Epic #3711, Story #3721. Until it
-> lands, the bundle path below is the only way to obtain a credential; issue
-> additional operator bundles with `bootstrap-admin --output`, documented in
+> lands, an already-credentialed administrator can enrol a headless machine
+> (see "Headless Enrolment" below), or issue additional operator bundles with
+> `bootstrap-admin --output`, documented in
 > [Adding Operators](single-controller/walkthrough.md#adding-operators).]**
 
 > **[GAP: the bundle's confinement against endpoint code execution is not yet
@@ -113,7 +118,81 @@ here.
 | macOS    | `~/Library/Application Support/cfgms/connections.json` |
 | Windows  | `%APPDATA%\cfgms\connections.json` |
 
-## 3. Reconnecting in a Fresh Shell
+## 3. Headless Enrolment (No Browser, No Bundle)
+
+For a machine that cannot open a browser (`cfg login`, Story #3721, is not yet
+shipped) and does not hold a copy of the bootstrap bundle, an administrator can
+mint a short-lived, single-use enrolment token from their own already-connected
+workstation and hand it to that machine out of band. See [Enrolment Tokens and
+the Pending Credential-Request Queue](../development/commands-reference.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717)
+for the full command and flag reference; this section walks the happy path
+end to end.
+
+**On the administrator's own workstation** (already connected via `cfg connect`):
+
+```bash
+cfg credential enrolment-token mint --tenant-id root/msp-a/client-1
+```
+
+```
+Enrolment token minted (id: et-..., tenant: root/msp-a/client-1, expires: 2026-06-29T17:00:00Z)
+Token (shown once, cannot be retrieved again): 3f9a...c821
+Hand this value to the enrolling machine out of band, then run there:
+  cfg credential enrol --token <token> --url <controller-url>
+```
+
+Copy the token value out of band — read over a phone call, a chat message you
+trust, or pasted directly into the target machine's terminal. It is a bearer
+credential for the next hour: whoever holds it can lodge exactly one signing
+request against it, so treat it the way you would a one-time password.
+
+**On the headless machine**, with `cfg` installed but no credential yet:
+
+```bash
+cfg credential enrol --token 3f9a...c821 --url https://controller.acme-corp.example:9443
+```
+
+```
+Credential request lodged (id: cr-...)
+Public key fingerprint: AB12-CD34-EF56-7890
+Compare this fingerprint with the administrator before they approve the request.
+Approval endpoint (an administrator lists and approves pending requests here): https://controller.acme-corp.example:9443/api/v1/credential-requests
+Expires: 2026-06-29T17:00:00Z
+Waiting for administrator approval...
+```
+
+**Fingerprint comparison — do this before approving.** Read the printed
+`Public key fingerprint` value back to the administrator (voice, a screenshot,
+whatever channel you already trust for the token itself). The administrator
+lists pending requests — today via `GET /api/v1/credential-requests`; a `cfg`
+list/approve command is a later story in this epic — and confirms the
+`public_key_fingerprint_short` shown there matches what the headless machine
+printed, *before* approving. This comparison is the actual security boundary
+of headless enrolment: the token proves someone holds the out-of-band secret,
+not which machine lodged the request against it. Approving without comparing
+the fingerprint is a bare row click on a credential about to be marked
+admin-capable.
+
+Once approved, the waiting `cfg credential enrol` command collects the signed
+certificate on its next poll, registers the connection, exchanges the
+certificate for a session, and finishes:
+
+```
+Enrolled as "controller.acme-corp.example" (expires 2026-06-29T17:00:00Z)
+```
+
+From here on the headless machine behaves exactly like one that ran
+`cfg connect --bundle` — see "Reconnecting", "Checking the Active Session",
+and the rest of this guide.
+
+**If the administrator denies the request, it expires before a decision
+arrives, or the operator interrupts the waiting command with Ctrl-C**, the
+command exits with a distinct message (see the table in [the command
+reference](../development/commands-reference.md#cfg-credential-enrol-issue-3720))
+and leaves no credential file anywhere on this machine — safe to simply mint a
+fresh token and re-run `cfg credential enrol`.
+
+## 4. Reconnecting in a Fresh Shell
 
 When you open a new terminal, or after your session has expired, reconnect by
 name:
@@ -142,7 +221,7 @@ On reconnect `cfg` decrypts the stored bundle using the machine-bound key
 (no interactive passphrase), authenticates with the controller over mTLS,
 and stores the new session token. The bundle itself is never re-imported.
 
-## 4. Checking the Active Session
+## 5. Checking the Active Session
 
 ```bash
 cfg connections current
@@ -163,7 +242,7 @@ Output when no session is active (or the token has passed its absolute expiry):
 no active session
 ```
 
-## 5. Listing Registered Connections
+## 6. Listing Registered Connections
 
 ```bash
 cfg connections list
@@ -183,7 +262,7 @@ For machine-parseable output:
 cfg connections list --json
 ```
 
-## 6. Disconnecting
+## 7. Disconnecting
 
 ```bash
 cfg disconnect
@@ -211,7 +290,7 @@ No active session.
 After disconnecting, any `cfg` subcommand that requires authentication will
 return an error until you run `cfg connect` again.
 
-## 7. One-Shot Use Without a Session
+## 8. One-Shot Use Without a Session
 
 The session model is the default for interactive operator use. For scripted or
 CI-style automation where storing a session is undesirable, every `cfg`
@@ -232,7 +311,7 @@ bundle or a session from `cfg connect` — never a bare API key (Issue #3688):
 automation that used to export `CFGMS_API_KEY` should export `CFGMS_ADMIN_BUNDLE`
 instead, as shown above.
 
-## 8. The Zero-Standing-Privilege Model
+## 9. The Zero-Standing-Privilege Model
 
 CFGMS admin sessions follow a zero-standing-privilege design: no long-lived
 credential is ever exchanged between operator and controller. Each session is
@@ -312,6 +391,9 @@ Token values are also sanitised from all controller log output.
 | First connect (import bundle) | `cfg connect --bundle <path> --url <url>` |
 | Reconnect by name | `cfg connect <name>` |
 | Reconnect (single connection) | `cfg connect` |
+| Mint an enrolment token (administrator) | `cfg credential enrolment-token mint --tenant-id <id>` |
+| Revoke an unspent enrolment token (administrator) | `cfg credential enrolment-token revoke <id>` |
+| Enrol a headless machine (operator, on that machine) | `cfg credential enrol --token <token> --url <url>` |
 | Check active session | `cfg connections current` |
 | List all connections | `cfg connections list` |
 | Disconnect | `cfg disconnect` |
@@ -322,3 +404,4 @@ Token values are also sanitised from all controller log output.
 - [Single Controller Deployment](single-controller/walkthrough.md) — initial controller setup
 - [Controller Operating Model](../architecture/controller-operating-model.md) — Admin Session Model internals
 - [Steward Refresh Management](steward-refresh-management.md) — managing offline steward re-registration
+- [Commands Reference: Enrolment Tokens and the Pending Credential-Request Queue](../development/commands-reference.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717) — full flag and REST reference for headless enrolment
