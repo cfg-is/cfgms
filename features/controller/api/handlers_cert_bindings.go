@@ -302,9 +302,26 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Issue #3715: merge in last-used timestamps from their own durable record (see
+	// certBindingLastUsedKeyPrefix in middleware.go for why this is looked up separately
+	// rather than living on CertBinding itself). A lookup failure degrades gracefully —
+	// the listing still returns the bindings, just without last-used data — rather than
+	// failing the whole request over an observability-only field.
+	lastUsed, luErr := s.loadCertBindingLastUsed(r.Context(), username, acct.TenantID)
+	if luErr != nil {
+		s.logger.Error("Failed to look up certificate binding last-used timestamps",
+			"error", logging.SanitizeLogValue(luErr.Error()),
+			"username", logging.SanitizeLogValue(username))
+	}
+
 	infos := make([]CertBindingInfo, 0, len(acct.CertBindings))
 	for _, b := range acct.CertBindings {
-		infos = append(infos, CertBindingInfo(b))
+		info := CertBindingInfo(b)
+		if ts, ok := lastUsed[b.Serial]; ok {
+			usedAt := ts
+			info.LastUsedAt = &usedAt
+		}
+		infos = append(infos, info)
 	}
 
 	s.writeSuccessResponse(w, infos)

@@ -575,6 +575,32 @@ func TestAccountCertsHappyPath(t *testing.T) {
 	assert.Contains(t, out.String(), "def456")
 }
 
+// TestAccountCertsShowsLastUsed verifies that a binding with a recorded last-used
+// timestamp displays it, and a binding that has never authenticated (LastUsedAt empty —
+// the server omits last_used_at for it) renders an explicit "never" value rather than a
+// blank line (Issue #3715).
+func TestAccountCertsShowsLastUsed(t *testing.T) {
+	cfg := accountServerConfig{
+		certs: []apiCertBindingInfo{
+			{Serial: "abc123", Label: "primary laptop", BoundAt: "2026-08-01T00:00:00Z", LastUsedAt: "2026-08-20T12:30:00Z"},
+			{Serial: "def456", BoundAt: "2026-08-02T00:00:00Z"},
+		},
+	}
+	_, restore := setupAccountTest(t, cfg)
+	defer restore()
+
+	var out bytes.Buffer
+	accountCertsCmd.SetOut(&out)
+	t.Cleanup(func() { accountCertsCmd.SetOut(nil) })
+
+	err := runAccountCerts(accountCertsCmd, []string{"alice"})
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Last used: 2026-08-20T12:30:00Z",
+		"a binding with a recorded use must display its timestamp")
+	assert.Contains(t, out.String(), "Last used: never",
+		"a binding that has never authenticated must render an explicit never-used value")
+}
+
 func TestAccountCertsEmpty(t *testing.T) {
 	_, restore := setupAccountTest(t, accountServerConfig{certs: []apiCertBindingInfo{}})
 	defer restore()

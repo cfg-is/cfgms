@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -289,6 +290,12 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		// Principal.ID is the account's ID — never the certificate CommonName.
 		// RootScoped derives from cert.HasRootScopeMarker alone (ADR-025 A2.1/A2.2);
 		// account.RootScope is the field that feeds GlobalScope, not the ADR-025 marker.
+		//
+		// Issue #3715: the certificate has now fully passed authentication (revoked and
+		// disabled-account rejections are both behind us) — record the use. Every earlier
+		// return in this function is a rejection and must not reach this line.
+		s.recordCertBindingUse(acct.Username, acct.TenantID, serial)
+
 		var permissions []string
 		implicitAdmin := false
 		if acct.RootScope {
@@ -352,6 +359,234 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 		// (ADR-025 Amendment 3). Permissions is left nil; ImplicitAdmin is the gate.
 		ImplicitAdmin: true,
 	}
+}
+
+// certBindingLastUsedCoalesceWindow bounds how often a busy certificate's last-used
+// timestamp is persisted to durable storage. Every authenticated mTLS admin request
+// reaches recordCertBindingUse, so without coalescing this would turn every request on
+// the authentication hot path into a store write (Issue #3715).
+const certBindingLastUsedCoalesceWindow = 5 * time.Minute
+
+// certBindingLastUsedKeyPrefix namespaces the durable record of certificate-binding
+// last-used timestamps, keyed per account username and stored INDEPENDENTLY of the
+// account record itself (Issue #3715).
+//
+// This separation is deliberate, not incidental. The account record also carries
+// Disabled, Permissions, TenantID, RootScope, and Credentials; a read-modify-write of
+// that whole blob on the authentication hot path — reading it once, then persisting a
+// copy some time later from a background goroutine, with s.mu deliberately not held
+// across the store call — races any concurrent admin action that also mutates the
+// account (disable, permission change, credential reset). If a disable's own persist
+// lands in the store in between this call's read and its write, this call's write can
+// silently overwrite it, un-disabling the account. That is not an acceptable trade-off
+// for an observability timestamp: "Recording use must never affect whether a request is
+// authorised" (Issue #3715 out-of-scope note) is a hard requirement, not a best-effort
+// one. Storing last-used data in its own record, addressed only by username, means a
+// write here can never touch — and therefore can never regress — any security-relevant
+// account field. The only residual race is against another last-used write for a
+// different serial on the same account, which is accepted (see persistCertBindingLastUsed).
+// The trailing "-" (not ":") is deliberate: this key is written as a filename by the
+// flatfile-backed secret store, and ":" is legal in a POSIX filename but illegal on
+// Windows (NTFS reserves it as the alternate-data-stream separator) — a colon here
+// made every write of this key fail on Windows while passing on Linux (Issue #3715
+// merge-queue diagnosis, 2026-08-28). "-" matches the separator every sibling prefix
+// in this package already uses (enrolmentTokenKeyPrefix, credentialRequestKeyPrefix,
+// accountKeyPrefix) and is filename-safe on every supported platform. "/" is
+// deliberately avoided too — see findCertBindingLastUsedRecord for why a slash in a
+// composed key is unsafe for multi-level tenants.
+const certBindingLastUsedKeyPrefix = "cert-binding-last-used-"
+
+const (
+	// certBindingLastUsedTag is the store tag carried by every last-used record; it is
+	// the coarse filter for the metadata lookup that locates one (see
+	// findCertBindingLastUsedRecord).
+	certBindingLastUsedTag = "cert-binding-last-used"
+
+	// certBindingLastUsedSecretType is the secret_type metadata value that, together
+	// with the username metadata field, identifies exactly one record within a tenant.
+	certBindingLastUsedSecretType = "cert_binding_last_used"
+
+	// certBindingLastUsedUsernameKey is the metadata field the record is looked up by.
+	certBindingLastUsedUsernameKey = "username"
+
+	// certBindingLastUsedSerialPrefix namespaces the serial -> RFC3339 timestamp entries
+	// inside the record's metadata map, keeping them disjoint from the identifying
+	// fields above so a serial can never collide with (or be mistaken for) one.
+	certBindingLastUsedSerialPrefix = "serial:"
+)
+
+// certBindingLastUsedStoreKey returns the secret-store write key for username's
+// certificate-binding last-used record. Reads never compose this key with a tenant
+// prefix — see findCertBindingLastUsedRecord.
+func certBindingLastUsedStoreKey(username string) string {
+	return certBindingLastUsedKeyPrefix + username
+}
+
+// certBindingLastUsedSerialKey returns the metadata key holding serial's timestamp.
+func certBindingLastUsedSerialKey(serial string) string {
+	return certBindingLastUsedSerialPrefix + serial
+}
+
+// findCertBindingLastUsedRecord locates username's certificate-binding last-used record
+// within storageTenant, returning (nil, nil) when none exists.
+//
+// The record is resolved by metadata filter, never by composing a "tenant/key" string for
+// GetSecret: GetSecret takes a single key and splits it on the FIRST slash to recover the
+// tenant, so for a multi-level tenant such as root/msp-a/client-1 — the documented CFGMS
+// tenancy shape — "root/msp-a/client-1/cert-binding-last-used-alice" resolves to tenant
+// "root" with name "msp-a/client-1/cert-binding-last-used-alice". That is a different
+// record in a different tenant's namespace than the one StoreSecret wrote (StoreSecret
+// takes TenantID as a separate field, so the write path is unaffected by the split).
+// Reading through that composition would silently return not-found for every multi-level
+// tenant: the listing would report "never used" for a certificate in daily use, and the
+// read-merge-write below would drop every other serial's timestamp on each write.
+// loadAccountFromStore resolves account records the same way for the same reason.
+func (s *Server) findCertBindingLastUsedRecord(ctx context.Context, username, storageTenant string) (*secretsif.SecretMetadata, error) {
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		TenantID: storageTenant,
+		Tags:     []string{certBindingLastUsedTag},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: certBindingLastUsedSecretType,
+			certBindingLastUsedUsernameKey:  username,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list certificate binding last-used records: %w", err)
+	}
+	// Re-check the identifying fields rather than trusting the filter: providers differ in
+	// how much of SecretFilter they honour, and returning another tenant's or another
+	// account's record here would cross exactly the boundary this lookup exists to keep.
+	for _, m := range metas {
+		if m == nil {
+			continue
+		}
+		if m.TenantID == storageTenant && m.Metadata[certBindingLastUsedUsernameKey] == username {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
+// recordCertBindingUse asynchronously records that serial was just used to authenticate
+// on username's account (Issue #3715). It MUST be called only after extractAdminPrincipal
+// has fully resolved a bound, active-account principal — every rejection branch (revoked
+// serial, disabled account) returns before reaching this call, and the bootstrap-fallback
+// (no binding found) branch never calls it either, so a rejected or unbound request
+// produces zero store writes.
+//
+// Coalesced to at most one store write per certBindingLastUsedCoalesceWindow per serial,
+// tracked in s.certBindingLastUsedThrottle independently of s.mu — a busy credential
+// therefore produces occasional writes, not one per request.
+//
+// Runs in its own goroutine so the authentication hot path is never blocked by a store
+// call, and s.mu is never held across the store call inside persistCertBindingLastUsed
+// (which does not touch s.mu or the account cache at all — see certBindingLastUsedKeyPrefix).
+// A failed persist is logged, rate-limited by the same coalescing window, but never fails
+// the request that triggered it — recording use is an observability signal, not part of
+// the authorization decision.
+//
+// Tracked in s.certBindingLastUsedWG so Close() can wait for in-flight goroutines to
+// finish before secretStore is closed underneath them.
+func (s *Server) recordCertBindingUse(username, tenantID, serial string) {
+	now := time.Now().UTC()
+	if last, ok := s.certBindingLastUsedThrottle.Load(serial); ok {
+		if now.Sub(last.(time.Time)) < certBindingLastUsedCoalesceWindow {
+			return
+		}
+	}
+	s.certBindingLastUsedThrottle.Store(serial, now)
+
+	s.certBindingLastUsedWG.Add(1)
+	go func() {
+		defer s.certBindingLastUsedWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := s.persistCertBindingLastUsed(ctx, username, tenantID, serial, now)
+		if err != nil {
+			s.logger.Warn("Failed to persist certificate binding last-used timestamp",
+				"username", logging.SanitizeLogValue(username),
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		if s.onCertBindingLastUsedPersisted != nil {
+			s.onCertBindingLastUsedPersisted(username, serial, err)
+		}
+	}()
+}
+
+// persistCertBindingLastUsed merges serial -> usedAt into username's durable
+// certificate-binding last-used record (see certBindingLastUsedKeyPrefix for why this is
+// a separate record rather than a field updated in place on the account). It never reads
+// or writes s.accounts, so it never touches s.mu and cannot race any account mutation.
+//
+// Known, accepted race: two authenticated certificates on the same account recording use
+// concurrently can race this read-merge-write against each other, and the loser's
+// timestamp for its (different) serial can be dropped. This is confined entirely to this
+// observability record — it can never touch account security fields — and self-heals on
+// the next authenticated request for the dropped serial within the coalescing window.
+func (s *Server) persistCertBindingLastUsed(ctx context.Context, username, tenantID, serial string, usedAt time.Time) error {
+	if s.secretStore == nil {
+		return nil
+	}
+	storageTenant := accountStorageTenant(tenantID)
+
+	// Identifying fields are rewritten on every store so the record stays locatable by
+	// findCertBindingLastUsedRecord regardless of which write created it.
+	uses := map[string]string{
+		secretsif.MetadataKeySecretType: certBindingLastUsedSecretType,
+		certBindingLastUsedUsernameKey:  username,
+	}
+	existing, err := s.findCertBindingLastUsedRecord(ctx, username, storageTenant)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		// Carry forward only the serial entries; the identifying fields are set above.
+		for k, v := range existing.Metadata {
+			if strings.HasPrefix(k, certBindingLastUsedSerialPrefix) {
+				uses[k] = v
+			}
+		}
+	}
+
+	uses[certBindingLastUsedSerialKey(serial)] = usedAt.Format(time.RFC3339)
+
+	return s.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+		Key:         certBindingLastUsedStoreKey(username),
+		TenantID:    storageTenant,
+		Description: "certificate binding last-used timestamps",
+		Tags:        []string{certBindingLastUsedTag},
+		Metadata:    uses,
+	})
+}
+
+// loadCertBindingLastUsed reads username's durable certificate-binding last-used record
+// and returns it as serial -> timestamp. Returns (nil, nil) when no certificate on this
+// account has ever recorded a use (including when secretStore is nil).
+func (s *Server) loadCertBindingLastUsed(ctx context.Context, username, tenantID string) (map[string]time.Time, error) {
+	if s.secretStore == nil {
+		return nil, nil
+	}
+	record, err := s.findCertBindingLastUsedRecord(ctx, username, accountStorageTenant(tenantID))
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		return nil, nil
+	}
+	uses := make(map[string]time.Time, len(record.Metadata))
+	for k, ts := range record.Metadata {
+		serial, isSerialEntry := strings.CutPrefix(k, certBindingLastUsedSerialPrefix)
+		if !isSerialEntry {
+			continue // identifying field (secret_type, username), not a recorded use
+		}
+		parsed, parseErr := time.Parse(time.RFC3339, ts)
+		if parseErr != nil {
+			continue // corrupt/unparseable entry — skip rather than fail the whole lookup
+		}
+		uses[serial] = parsed
+	}
+	return uses, nil
 }
 
 // emitBootstrapFallbackAudit logs the admin.bootstrap_fallback_used audit event.
