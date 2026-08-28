@@ -338,6 +338,25 @@ maximizes the lifetime of the most valuable credential and defeats the purpose.
 - **No blanket re-authentication timer** (see Decision 2).
 - **No new credential storage backend.** WebAuthn credentials are public keys —
   they extend the existing web-account record; they do not need secret storage.
+- **No protection against a host-compromised controller substituting what the
+  operator sees or acts on.** Every mechanism in this ADR — WebAuthn verification,
+  assurance-level computation, the `RequireUserPresence` gesture, session state —
+  executes on the controller. A controller compromised at the host level can serve
+  the operator arbitrary content (e.g. a benign-looking module description while
+  approving a different bundle) and the operator's step-up gesture or presence
+  touch will not detect the substitution; it authenticates *that a human acted*,
+  not *that the human saw the truth*. This is an accepted non-goal of the
+  assurance model, not a gap introduced by it — no browser-side control can verify
+  the honesty of the server rendering its UI. **The audit trail is not a
+  compensating control for this scenario.** `pkg/audit`'s chain (ADR-004) is
+  tamper-evident only against an actor who does not hold its HMAC key; the key is
+  loaded from the controller's own secrets store, so a host-compromised controller
+  holds it and can rewrite its own audit history into a chain that verifies (see
+  ADR-004's [Adversary Bound](004-audit-chain-integrity.md#adversary-bound-issue-3727),
+  Issue #3727). Where this ADR or any other names "the audit trail" as backstopping
+  a compromised-controller scenario, read that claim as bounded by ADR-004: it
+  detects storage-layer tampering by an actor without the key, not tampering by the
+  controller itself.
 
 ---
 
