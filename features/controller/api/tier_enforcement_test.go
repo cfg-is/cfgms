@@ -137,17 +137,20 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"GET", "/api/v1/scripts", "script:admin"},
 	{"GET", "/api/v1/scripts/test-script-id", "script:admin"},
 	{"PUT", "/api/v1/scripts/test-script-id/privilege", "script:admin"},
+	// CSR-based payload-signing credential issuance (Issue #3693) — mints a credential
+	// distinguishable from the mTLS admin bundle by cert.PayloadSigningMarkerOID.
+	{"POST", "/api/v1/signing-credential/request", "signing-credential:request"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
 // that have no REST routes yet — forward-declared for future stories.
 var knownFuturePermissions = map[string]bool{
 	"publisher-trust:add": true,
-	// Issue #3687: registered in permissionAssurance ahead of the routes that will
-	// consume them. operator-payload:sign is consumed by story S6, signing-credential:request
-	// by story S10 — neither route exists yet when this story lands.
-	"operator-payload:sign":      true,
-	"signing-credential:request": true,
+	// Issue #3687: registered in permissionAssurance ahead of the route that will
+	// consume it. operator-payload:sign is consumed by story S6, which has not landed
+	// yet. signing-credential:request's route landed in Issue #3693 and now has a real
+	// entry in strongAssuranceRouteTable above.
+	"operator-payload:sign": true,
 }
 
 // allStrongAssurancePermissions collects the unique permission IDs from
