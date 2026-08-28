@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -62,6 +63,24 @@ func (s *StandaloneStewardTestSuite) SetupTest() {
 	_ = os.RemoveAll(testDir)
 }
 
+// modeLine renders a `mode:` entry for a resource's config block, or nothing on
+// platforms that do not accept unix-style permissions.
+//
+// The file and directory modules reject a unix mode on Windows by design —
+// ErrPermissionsNotSupportedOnPlatform, "NTFS uses ACLs; use the windows_acl
+// field instead" — and a rejected resource is never created at all. Hardcoding
+// `mode:` therefore did not assert a permission outcome on Windows; it stopped
+// the file from existing, and the existence and content assertions below failed
+// on a resource that the module was never going to write. QUICK_START.md's
+// example is POSIX, so emit the mode only where the platform honours it and
+// keep every other assertion identical across platforms.
+func modeLine(mode string) string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return "\n      mode: \"" + mode + "\""
+}
+
 // TestQuickStartOptionA validates the QUICK_START.md Option A workflow - steward creation and startup
 //
 // From QUICK_START.md Step 2: Create Your First Configuration
@@ -91,8 +110,7 @@ resources:
         Hello from CFGMS!
         This file was created by CFGMS standalone mode.
         No controller, no network, no complexity!
-      state: present
-      mode: "0644"
+      state: present` + modeLine("0644") + `
       allowed_base_path: ` + s.tempDir + `
 
   # Create a directory
@@ -101,8 +119,7 @@ resources:
     config:
       allowed_base_path: ` + s.tempDir + `
       path: ` + testDir + `
-      state: present
-      mode: "0755"
+      state: present` + modeLine("0755") + `
 
   # Create a second file in that directory
   - name: info-file
@@ -278,8 +295,7 @@ resources:
     config:
       allowed_base_path: ` + s.tempDir + `
       path: ` + baseDir + `
-      state: present
-      mode: "0755"
+      state: present` + modeLine("0755") + `
 
   # Create data subdirectory
   - name: data-directory
@@ -287,8 +303,7 @@ resources:
     config:
       allowed_base_path: ` + baseDir + `
       path: ` + dataDir + `
-      state: present
-      mode: "0755"
+      state: present` + modeLine("0755") + `
 
   # Create config file
   - name: config-file
@@ -300,8 +315,7 @@ resources:
           "app_name": "CFGMS Test",
           "version": "1.0.0"
         }
-      state: present
-      mode: "0644"
+      state: present` + modeLine("0644") + `
       allowed_base_path: ` + s.tempDir + `
 `
 	err := os.WriteFile(s.configPath, []byte(configContent), 0644)

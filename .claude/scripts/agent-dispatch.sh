@@ -541,6 +541,34 @@ PY
     "$@"
 }
 
+# restrict_to_owner <mode> <path>
+# Makes <path> readable by its owner only.
+#
+# chmod alone does not deliver that on every host this dispatcher runs on.
+# Under Git-Bash/MSYS the POSIX mode bits are synthesized, not stored: `chmod
+# 600` on a credential file leaves stat reporting 644 and, more importantly,
+# leaves the file's real access control — the NTFS DACL — untouched, so the
+# inherited "Users"/"Authenticated Users" read ACEs survive. A minted API key
+# written that way is readable by every local account on the box. Applying the
+# mode AND, on Windows, replacing the DACL with a single owner ACE makes the
+# guarantee the comments claim true on both platforms.
+restrict_to_owner() {
+  local mode="$1" path="$2"
+  chmod "$mode" "$path"
+  case "$OSTYPE" in
+    msys*|cygwin*|win32*)
+      # (OI)(CI) so a directory's restriction is inherited by the credential
+      # files created inside it. MSYS2_ARG_CONV_EXCL stops the msys argument
+      # mangler rewriting icacls' /inheritance and /grant switches into
+      # filesystem paths.
+      local ace="(F)"
+      [[ -d "$path" ]] && ace="(OI)(CI)(F)"
+      MSYS2_ARG_CONV_EXCL='*' icacls "$(cygpath -w "$path")" \
+        /inheritance:r /grant:r "$(whoami):${ace}" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
 # mint_agent_creds <num>
 # Creates agent-test/<num> sub-tenant (idempotent) and issues an agent.dev-scoped
 # API key. Writes key value to ${AGENT_CRED_BASE}/<num>/api.key (0600) and the
@@ -553,7 +581,7 @@ mint_agent_creds() {
 
   # Create and secure the per-agent cred dir.
   mkdir -p "$cred_dir"
-  chmod 700 "$cred_dir"
+  restrict_to_owner 700 "$cred_dir"
 
   # 1. Create agent-test sub-tenant (idempotent — 409 is success).
   local create_resp http_code
@@ -601,9 +629,9 @@ print(d.get('data', {}).get('id', '') or d.get('id', ''))
 
   # 3. Write credential files (600 — no world or group read).
   printf '%s' "$key_value" > "${cred_dir}/api.key"
-  chmod 600 "${cred_dir}/api.key"
+  restrict_to_owner 600 "${cred_dir}/api.key"
   printf '%s' "$key_id" > "${cred_dir}/api.key.id"
-  chmod 600 "${cred_dir}/api.key.id"
+  restrict_to_owner 600 "${cred_dir}/api.key.id"
 
   echo "CRED_MINTED:${num}:${key_id}"
 }
@@ -657,7 +685,7 @@ revoke_agent_creds() {
   # Record any revocation failures for manual follow-up (never block cleanup).
   if [[ ${#errors[@]} -gt 0 ]]; then
     printf '%s\n' "${errors[@]}" >> "$revoke_failed_file"
-    chmod 600 "$revoke_failed_file"
+    restrict_to_owner 600 "$revoke_failed_file"
     for err in "${errors[@]}"; do
       echo "WARN:revoke_failed:${num}:${err}"
     done
