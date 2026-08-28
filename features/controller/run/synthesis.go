@@ -141,6 +141,11 @@ func SynthesizeScriptRun(
 // Runtime params are resolved per-device via ResolveParams. Inline scripts have no
 // declared parameters, so DNA bindings do not apply and runtimeParams are passed
 // through unchanged.
+//
+// targets, nonce, and expiresAt (Issue #3694) are the operator's signed
+// operatorpayload.Envelope coordinates, forwarded into QueuedExecution.Metadata
+// unmodified alongside commandSignature so the dispatcher can pass them on to the
+// steward, which independently verifies target membership, expiry, and nonce replay.
 func SynthesizeCommandRun(
 	ctx context.Context,
 	manager *Manager,
@@ -152,6 +157,9 @@ func SynthesizeCommandRun(
 	shell scriptmodule.ShellType,
 	params map[string]string,
 	commandSignature *CommandSignature,
+	targets []string,
+	nonce string,
+	expiresAt time.Time,
 ) (string, error) {
 	filter.TenantID = tenantID
 
@@ -210,6 +218,9 @@ func SynthesizeCommandRun(
 			metadata["signature_algorithm"] = commandSignature.Algorithm
 			metadata["signature_value"] = commandSignature.Value
 			metadata["signature_public_key"] = commandSignature.PublicKey
+			metadata["targets"] = targets
+			metadata["nonce"] = nonce
+			metadata["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
 		}
 
 		qe := &scriptmodule.QueuedExecution{

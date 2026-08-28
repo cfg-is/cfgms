@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
 
 const (
@@ -343,9 +344,17 @@ func newEventID() string {
 // Library scripts (non-empty script_id): always verified against TrustedKeys; missing
 // or invalid signatures are always rejected regardless of require_signed_adhoc.
 //
-// Inline commands: verified only when require_signed_adhoc is true. When a signature
-// is present, cryptographic verification and (when controllerCARoots is set) operator
-// CA chain verification are performed.
+// Inline (ad-hoc) commands (Issue #3694): operator-signature verification is now
+// mandatory and unconditional — the prior "skip verification when require_signed_adhoc
+// is false" branch is gone. An inline command is the only execution path that reaches
+// a steward with no library-script trust check at all, so making its enforcement
+// configurable made it the weakest link; require_signed_adhoc no longer gates it. The
+// signature must be over operatorpayload.CanonicalBytes of the reconstructed envelope
+// (content, shell, targets, nonce, expiry) — a signature computed over content alone
+// (the pre-#3694 format) does not verify against these bytes and is rejected. The
+// envelope must also name this steward's own ID in Targets, must not be expired, and
+// its nonce must not have been seen before (independent of the outer SignedCommand's
+// own replay window — see envelopeNonceCache).
 func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 	scriptID, _ := cmd.Params["script_id"].(string)
 	sigAlgorithm, _ := cmd.Params["signature_algorithm"].(string)
@@ -356,8 +365,10 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 
 	isLibraryScript := scriptID != ""
 
-	// Decode base64 content. Fail closed when signature enforcement is active; fail open
-	// only for plain inline commands where require_signed_adhoc is false.
+	// Decode base64 content. Fail closed for library scripts and for inline commands
+	// that carry a require_signed_adhoc-independent mandatory check; the legacy
+	// fail-open branch is retained only for the case require_signed_adhoc reports
+	// (a malformed inline payload that would fail identically when actually executed).
 	contentBytes, err := base64.StdEncoding.DecodeString(scriptContentB64)
 	if err != nil {
 		if isLibraryScript || h.requireSignedAdhoc {
@@ -393,33 +404,91 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 		return nil
 	}
 
-	// Inline command: enforce signature only when require_signed_adhoc is set.
-	if !h.requireSignedAdhoc {
-		return nil
-	}
+	// Inline ad-hoc command: operator-envelope verification is mandatory.
 	if !hasSig {
 		return ErrUnauthenticatedCommand
 	}
+
+	targets := extractStringSlice(cmd.Params["targets"])
+	nonce, _ := cmd.Params["nonce"].(string)
+	expiresAtStr, _ := cmd.Params["expires_at"].(string)
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+	if err != nil {
+		return fmt.Errorf("%w: missing or invalid operator envelope expiry", ErrUnauthenticatedCommand)
+	}
+
+	envelope := operatorpayload.Envelope{
+		Content:   contentBytes,
+		Shell:     shellStr,
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: expiresAt,
+	}
+	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
+	if err != nil {
+		return fmt.Errorf("%w: invalid operator envelope: %v", ErrUnauthenticatedCommand, err)
+	}
+
 	sig := &script.ScriptSignature{
 		Algorithm: sigAlgorithm,
 		Signature: sigValue,
 		PublicKey: sigPublicKey,
 	}
-	// Cryptographic verification with any_valid mode; CA chain check is separate below.
+	// Cryptographic verification over the canonical envelope bytes — NOT raw content —
+	// with any_valid mode; CA chain and admin-marker check is separate below. Reusing
+	// VerifyScriptSignature unmodified is deliberate (Issue #3694 Implementation
+	// Notes): only the bytes fed to it change. A signature computed over content alone
+	// (the pre-#3694 wire format) does not verify here, because contentBytes is only
+	// one component of canonicalBytes.
 	inlineCfg := script.ModuleSigningConfig{
 		TrustMode: script.TrustModeAnyValid,
 	}
-	if err := script.VerifyScriptSignature(contentBytes, sig, script.ShellType(shellStr), inlineCfg); err != nil {
+	if err := script.VerifyScriptSignature(canonicalBytes, sig, script.ShellType(shellStr), inlineCfg); err != nil {
 		return fmt.Errorf("%w: inline script verification failed: %v", ErrUnauthenticatedCommand, err)
 	}
-	// Operator cert chain verification: the signing cert must chain to the controller CA
-	// with client-auth EKU and must not be expired. This check is skipped when no CA
-	// roots are configured (e.g. standalone mode or tests without a controller CA).
+
+	// Operator credential verification: the signing credential must be trusted and
+	// carry administrator authority. Skipped when no CA roots are configured (e.g.
+	// standalone mode or tests without a controller CA) — same as before #3694.
+	// Routed through OperatorCredentialVerifier (Issue #3694 Implementation Notes):
+	// x509OperatorCredentialVerifier is the sole implementation today; a later
+	// WebAuthn-verification story adds a second implementation for the WebAuthn
+	// assertion shape without preflightScriptSignature itself changing again.
 	if h.controllerCARoots != nil {
-		if err := verifyOperatorCert(sigPublicKey, h.controllerCARoots); err != nil {
+		credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{caRoots: h.controllerCARoots})
+		if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
 			return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
 		}
 	}
+
+	// Target-set binding (Issue #3694): this steward's own ID must be among the
+	// resolved, signed target list — a legitimately-signed envelope re-addressed to a
+	// different target set in transit does not authorize execution here.
+	targeted := false
+	for _, target := range targets {
+		if target == h.stewardID {
+			targeted = true
+			break
+		}
+	}
+	if !targeted {
+		return fmt.Errorf("%w: steward is not in the signed target list", ErrUnauthenticatedCommand)
+	}
+
+	// Expiry (Issue #3694): reject an envelope past its bound validity window.
+	if time.Now().After(expiresAt) {
+		return fmt.Errorf("%w: operator envelope has expired", ErrUnauthenticatedCommand)
+	}
+
+	// Nonce replay (Issue #3694): single-use, independent of the outer SignedCommand's
+	// own replay window (handler.go's replayCache, keyed by cmd.ID) — a captured
+	// operator-signed envelope re-wrapped in a fresh outer command (new ID, new
+	// timestamp) is still caught here because the nonce is bound into what the
+	// operator actually signed.
+	if !h.envelopeNonceCache.Add(nonce) {
+		return fmt.Errorf("%w: operator envelope nonce already used", ErrUnauthenticatedCommand)
+	}
+
 	return nil
 }
 
@@ -467,6 +536,33 @@ func mergeEnv(base, additional map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// OperatorCredentialVerifier verifies that an operator credential (proof) authorizes
+// envelope. It is the seam Issue #3694's Implementation Notes call for: today's only
+// implementation, x509OperatorCredentialVerifier, wraps the existing controller-issued
+// admin-bundle X.509 certificate check; a later credential-cutover story swaps that
+// implementation's marker check, and a still-later WebAuthn-verification story adds a
+// second implementation for the WebAuthn assertion shape — preflightScriptSignature
+// calls through this interface rather than a single hardcoded verification path so
+// neither change requires touching it again.
+type OperatorCredentialVerifier interface {
+	// Verify reports whether proof authorizes envelope under this credential type.
+	Verify(envelope operatorpayload.Envelope, proof []byte) error
+}
+
+// x509OperatorCredentialVerifier is the current OperatorCredentialVerifier
+// implementation: proof is the PEM-encoded operator certificate (signature_public_key),
+// verified against caRoots with the admin marker check (verifyOperatorCert, still
+// HasAdminMarker per Issue #3689 — unchanged by this story). It does not use envelope:
+// the cryptographic binding of the envelope to the signature is verified separately, by
+// script.VerifyScriptSignature, before this is ever called.
+type x509OperatorCredentialVerifier struct {
+	caRoots *x509.CertPool
+}
+
+func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proof []byte) error {
+	return verifyOperatorCert(string(proof), v.caRoots)
 }
 
 // verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it

@@ -145,12 +145,9 @@ func TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker(t *testing.T) {
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	scriptContent := base64.StdEncoding.EncodeToString([]byte(overCapStdoutScriptBody()))
-	sc := testSignedCommandWithParams("esc-cap-over-001", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content": scriptContent,
-		"shell":          platformShell(),
-		"execution_id":   "esc-cap-over-001",
-	})
+	params := signedInlineEnvelopeParams(t, []byte(overCapStdoutScriptBody()), platformShell(), "steward-test")
+	params["execution_id"] = "esc-cap-over-001"
+	sc := testSignedCommandWithParams("esc-cap-over-001", cpTypes.CommandExecuteScript, params)
 
 	require.NoError(t, h.HandleCommand(context.Background(), sc))
 	h.Wait()
@@ -177,12 +174,9 @@ func TestExecuteScriptHandler_OutputUnderCap_CapturedFully(t *testing.T) {
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	scriptContent := base64.StdEncoding.EncodeToString([]byte(underCapStdoutScriptBody()))
-	sc := testSignedCommandWithParams("esc-cap-under-001", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content": scriptContent,
-		"shell":          platformShell(),
-		"execution_id":   "esc-cap-under-001",
-	})
+	params := signedInlineEnvelopeParams(t, []byte(underCapStdoutScriptBody()), platformShell(), "steward-test")
+	params["execution_id"] = "esc-cap-under-001"
+	sc := testSignedCommandWithParams("esc-cap-under-001", cpTypes.CommandExecuteScript, params)
 
 	require.NoError(t, h.HandleCommand(context.Background(), sc))
 	h.Wait()
