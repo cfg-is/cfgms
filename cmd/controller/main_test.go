@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -17,6 +19,8 @@ import (
 
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/server"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
 	"github.com/stretchr/testify/assert"
@@ -478,4 +482,186 @@ func TestRunBootstrapAdminList_RequiresCertPath(t *testing.T) {
 	err := runBootstrapAdminList(&config.Config{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "certificate path not configured")
+}
+
+// --- Issue #3713: WebAuthn relying-party startup wiring ---
+
+// TestBuildWebAuthnRelyingParty_UnsetConfigReturnsNil is a REQUIRED test (Issue #3713
+// AC): an unset relying-party configuration must produce no relying party and no
+// error — never a local-development fallback identifier.
+func TestBuildWebAuthnRelyingParty_UnsetConfigReturnsNil(t *testing.T) {
+	wa, err := buildWebAuthnRelyingParty(&config.Config{})
+	require.NoError(t, err)
+	assert.Nil(t, wa)
+}
+
+// TestBuildWebAuthnRelyingParty_ProductionConfig is a REQUIRED test (Issue #3713 AC):
+// a representative production configuration (real identifier, HTTPS origin) must
+// build a relying party with no error.
+func TestBuildWebAuthnRelyingParty_ProductionConfig(t *testing.T) {
+	cfg := &config.Config{
+		WebAuthn: &config.WebAuthnConfig{
+			RPID:          "cfgms.example.com",
+			RPDisplayName: "CFGMS Controller",
+			RPOrigins:     []string{"https://cfgms.example.com"},
+		},
+	}
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, wa)
+	assert.Equal(t, "cfgms.example.com", wa.Config.RPID)
+}
+
+// TestBuildWebAuthnRelyingParty_DefaultsDisplayNameToRPID verifies that an empty
+// rp_display_name falls back to rp_id rather than an empty string.
+func TestBuildWebAuthnRelyingParty_DefaultsDisplayNameToRPID(t *testing.T) {
+	cfg := &config.Config{
+		WebAuthn: &config.WebAuthnConfig{
+			RPID:      "cfgms.example.com",
+			RPOrigins: []string{"https://cfgms.example.com"},
+		},
+	}
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, wa)
+	assert.Equal(t, "cfgms.example.com", wa.Config.RPDisplayName)
+}
+
+// TestBuildWebAuthnRelyingParty_InvalidConfigReturnsError verifies the wiring
+// function surfaces the constructor's validation error rather than swallowing it.
+// config.LoadWithPath's ValidateWebAuthn is the primary gate; this is defense in
+// depth for any caller that bypasses it.
+func TestBuildWebAuthnRelyingParty_InvalidConfigReturnsError(t *testing.T) {
+	cfg := &config.Config{
+		WebAuthn: &config.WebAuthnConfig{
+			RPID:      "cfgms.example.com",
+			RPOrigins: []string{"http://cfgms.example.com"},
+		},
+	}
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	require.Error(t, err)
+	assert.Nil(t, wa)
+	assert.Contains(t, err.Error(), "must use https")
+}
+
+// newTestControllerServerConfig returns a representative controller configuration
+// suitable for server.New: certificate management disabled and flatfile storage
+// rooted in a fresh t.TempDir(), matching the pattern used throughout
+// features/controller/server's own server.New tests.
+func newTestControllerServerConfig(t *testing.T, webAuthn *config.WebAuthnConfig) *config.Config {
+	t.Helper()
+	tempDir := t.TempDir()
+
+	keyPath := filepath.Join(tempDir, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, make([]byte, 32), 0600))
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(tempDir, "secrets"))
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "true")
+
+	return &config.Config{
+		ListenAddr:  "127.0.0.1:0",
+		ExternalURL: "https://cfgms.example.com",
+		DataDir:     filepath.Join(tempDir, "data"),
+		Certificate: &config.CertificateConfig{EnableCertManagement: false},
+		Storage: &config.StorageConfig{
+			Provider:     "flatfile",
+			FlatfileRoot: filepath.Join(tempDir, "flatfile"),
+			SQLitePath:   filepath.Join(tempDir, "cfgms.db"),
+		},
+		Transport: &config.TransportConfig{
+			ListenAddr:      "0.0.0.0:4433",
+			ExternalAddress: "cfgms.example.com",
+		},
+		WebAuthn: webAuthn,
+	}
+}
+
+// TestRunController_WebAuthnWiring_AnswersPasskeyLoginBegin is a REQUIRED test
+// (Issue #3713 AC): a controller built from a representative production
+// configuration — using the same buildWebAuthnRelyingParty + SetWebAuthn call shape
+// runController performs at startup — must answer the passkey login begin endpoint
+// with something other than 503 WEBAUTHN_NOT_CONFIGURED.
+func TestRunController_WebAuthnWiring_AnswersPasskeyLoginBegin(t *testing.T) {
+	cfg := newTestControllerServerConfig(t, &config.WebAuthnConfig{
+		RPID:          "cfgms.example.com",
+		RPDisplayName: "CFGMS Controller",
+		RPOrigins:     []string{"https://cfgms.example.com"},
+	})
+
+	srv, err := server.New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, wa)
+	srv.GetAPIServer().SetWebAuthn(wa)
+
+	router := srv.GetAPIServer().GetRouter()
+
+	// Pre-session CSRF (double-submit) is required by the begin handler regardless
+	// of WebAuthn wiring; obtain a real token via GET /csrf.
+	csrfReq := httptest.NewRequest(http.MethodGet, "/api/v1/web/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	router.ServeHTTP(csrfRec, csrfReq)
+	require.Equal(t, http.StatusOK, csrfRec.Code)
+
+	var csrfToken string
+	for _, c := range csrfRec.Result().Cookies() {
+		if c.Name == "cfgms_csrf_pre" {
+			csrfToken = c.Value
+		}
+	}
+	require.NotEmpty(t, csrfToken, "GET /csrf must set the cfgms_csrf_pre cookie")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/begin", nil)
+	req.Header.Set("X-CSRF-Token", csrfToken)
+	req.AddCookie(&http.Cookie{Name: "cfgms_csrf_pre", Value: csrfToken})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code,
+		"a controller wired from a representative production config must not answer "+
+			"the passkey login begin endpoint with 503; body: %s", rec.Body.String())
+}
+
+// TestRunController_WebAuthnWiring_UnsetConfigLeaves503 is a REQUIRED test (Issue
+// #3713 AC): a controller built with no webauthn configuration must leave the
+// passkey login begin endpoint answering 503, exactly as before this wiring existed.
+func TestRunController_WebAuthnWiring_UnsetConfigLeaves503(t *testing.T) {
+	cfg := newTestControllerServerConfig(t, nil)
+
+	srv, err := server.New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	require.NoError(t, err)
+	assert.Nil(t, wa, "unset webauthn config must not produce a relying party")
+	// runController only calls SetWebAuthn when wa != nil — mirror that here rather
+	// than calling SetWebAuthn(nil), which is also the default zero value.
+
+	router := srv.GetAPIServer().GetRouter()
+
+	csrfReq := httptest.NewRequest(http.MethodGet, "/api/v1/web/csrf", nil)
+	csrfRec := httptest.NewRecorder()
+	router.ServeHTTP(csrfRec, csrfReq)
+	require.Equal(t, http.StatusOK, csrfRec.Code)
+
+	var csrfToken string
+	for _, c := range csrfRec.Result().Cookies() {
+		if c.Name == "cfgms_csrf_pre" {
+			csrfToken = c.Value
+		}
+	}
+	require.NotEmpty(t, csrfToken)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/begin", nil)
+	req.Header.Set("X-CSRF-Token", csrfToken)
+	req.AddCookie(&http.Cookie{Name: "cfgms_csrf_pre", Value: csrfToken})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"an unset webauthn config must leave the passkey login begin endpoint at 503; body: %s", rec.Body.String())
 }

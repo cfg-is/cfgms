@@ -129,6 +129,33 @@ The metrics API is not registered on that product listener. Query
 `https://localhost:9090/api/v1/monitoring/metrics` locally with a key carrying
 `monitoring:read-metrics`.
 
+### Browser passkey login (optional)
+
+Browser-based passkey login and passkey step-up (the "My Passkeys" UI, presence-gated
+actions) require a `webauthn:` block in `controller.cfg`. There is no default: without
+it, the passkey endpoints answer `503 WEBAUTHN_NOT_CONFIGURED` and the mTLS admin
+bundle remains the only login path — which is a valid, supported deployment shape.
+
+```yaml
+webauthn:
+  rp_id: ctrl.mylab.local            # the controller's effective domain — no scheme, no port
+  rp_display_name: "CFGMS Controller" # shown by the authenticator/browser prompt
+  rp_origins:
+    - "https://ctrl.mylab.local"      # every fully qualified origin admins log in from
+```
+
+`rp_id` must be the domain in the URL admins use to reach the controller's REST API —
+not an IP address, and not `localhost` unless the controller is genuinely only ever
+reached at `https://localhost`. Every entry in `rp_origins` must be `https://`; startup
+refuses the config otherwise. Setting `rp_id` without `rp_origins` (or the reverse) is
+also a startup error. There is no local-development exception — WebAuthn requires a
+real TLS certificate the browser trusts (a certificate from this controller's own CA,
+imported into the browser's trust store, is sufficient; a self-signed cert the browser
+warns about is not enough because a WebAuthn ceremony refuses to run past a certificate
+error).
+
+
+
 ### Install the systemd service
 
 Copy [cfgms-controller.service](cfgms-controller.service) to `/etc/systemd/system/`:

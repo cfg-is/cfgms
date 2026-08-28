@@ -13,6 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/spf13/cobra"
+
 	"github.com/cfgis/cfgms/cmd/controller/service"
 	controllerapi "github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
@@ -22,7 +25,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
-	"github.com/spf13/cobra"
 
 	// Import logging providers to register them
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
@@ -152,6 +154,18 @@ func runController(configPath string, initMode bool, listenAPIAddr, listenTransp
 		return fmt.Errorf("failed to create controller server: %w", err)
 	}
 
+	// Issue #3713: construct and install the WebAuthn relying party before the API
+	// server starts serving. cfg.WebAuthn was already validated by config.LoadWithPath
+	// (ValidateWebAuthn); wa is nil, nil when the operator has not configured it, which
+	// leaves the passkey endpoints answering 503 exactly as before this wiring existed.
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to configure webauthn relying party: %w", err)
+	}
+	if wa != nil {
+		srv.GetAPIServer().SetWebAuthn(wa)
+	}
+
 	logger.Info("Starting controller server",
 		"operation", "server_start",
 		"log_provider", loggingConfig.Provider,
@@ -230,6 +244,27 @@ func applyListenOverrides(cfg *config.Config, listenAPIAddr, listenTransportAddr
 		}
 		cfg.Transport.ListenAddr = listenTransportAddr
 	}
+}
+
+// buildWebAuthnRelyingParty constructs the WebAuthn relying party from the
+// controller's webauthn configuration block (Issue #3713).
+//
+// Returns (nil, nil) when cfg.WebAuthn is unset or its rp_id is empty — the passkey
+// login and step-up endpoints keep answering 503, exactly as they did before this
+// wiring existed. There is no local-development fallback identifier: an unset
+// configuration must never silently produce a relying party, because that would let a
+// phishing-resistant authenticator verify against an identifier the operator never
+// chose. config.LoadWithPath already runs ValidateWebAuthn before this is reached, so
+// the error path here is defense in depth, not the primary validation gate.
+func buildWebAuthnRelyingParty(cfg *config.Config) (*webauthn.WebAuthn, error) {
+	if cfg.WebAuthn == nil || cfg.WebAuthn.RPID == "" {
+		return nil, nil
+	}
+	displayName := cfg.WebAuthn.RPDisplayName
+	if displayName == "" {
+		displayName = cfg.WebAuthn.RPID
+	}
+	return controllerapi.NewWebAuthnFromConfig(cfg.WebAuthn.RPID, displayName, cfg.WebAuthn.RPOrigins)
 }
 
 // buildInstallCommand builds the `cfgms-controller install` subcommand.

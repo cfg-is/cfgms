@@ -96,6 +96,7 @@ verify these fields:
 | `certificate.server.dns_names` | All hostnames stewards use to reach the controller |
 | `certificate.server.ip_addresses` | All IPs stewards use to reach the controller |
 | `transport.listen_addr` | `"0.0.0.0:4433"` (all interfaces, not just localhost) |
+| `webauthn.rp_id` / `webauthn.rp_origins` | Optional — required only for browser passkey login. `rp_id` must be the public hostname admins use to reach the controller (e.g. `ctrl.mylab.local`); `rp_origins` must list every `https://` origin they log in from. See the [single-controller walkthrough's WebAuthn section](../single-controller/walkthrough.md#browser-passkey-login-optional). |
 
 > **Storage note**: If `controller.cfg` still has `storage.provider: "git"`, replace the
 > `storage:` block before running `--init` — the git provider has been removed. Use:
