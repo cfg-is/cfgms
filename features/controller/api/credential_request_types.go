@@ -164,6 +164,13 @@ type pendingCredentialRequest struct {
 	// approved->collected transition commits — before the certificate is signed. It
 	// is the durable record that the single use has already happened.
 	CollectedAt *time.Time
+
+	// CollectedSerial is the serial number of the certificate collect signed, written
+	// durably immediately after signing and before the account-binding write. A crash
+	// in the window between those two writes leaves this field as the evidence
+	// sweepOrphanedCollectedCertificates needs to find and revoke the certificate
+	// rather than leaving an untracked live credential.
+	CollectedSerial string
 }
 
 // hashCredentialSecret returns the SHA-256 hex digest of a raw secret (an enrolment

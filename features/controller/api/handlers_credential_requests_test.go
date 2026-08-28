@@ -12,7 +12,9 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -780,6 +782,274 @@ func TestSweepDoesNotRemoveSpentTokens(t *testing.T) {
 	stillThere, err := server.getEnrolmentTokenByID(ctx, minted.ID)
 	require.NoError(t, err)
 	assert.NotNil(t, stillThere, "a spent token must not be removed by the sweep even after its expiry")
+}
+
+// ---- orphaned collected-certificate sweep (Issue #3719) ------------------------------
+
+// accountListFailingSecretStore wraps a real SecretStore and fails only the account
+// lookups, leaving every other query (notably the sweep's own credential-request
+// listing) served by the real store. It is a real SecretStore implementation — no mock
+// framework — mirroring errListSecretStore (server_test.go) but narrowed by tag so the
+// sweep reaches its account-lookup branch with everything before it succeeding.
+type accountListFailingSecretStore struct {
+	secretsif.SecretStore
+	failErr error
+}
+
+func (s *accountListFailingSecretStore) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	if filter != nil {
+		for _, tag := range filter.Tags {
+			if tag == "account" {
+				return nil, s.failErr
+			}
+		}
+	}
+	return s.SecretStore.ListSecrets(ctx, filter)
+}
+
+// orphanedCollectFixture describes a request left in exactly the crash window
+// sweepOrphanedCollectedCertificates exists to close.
+type orphanedCollectFixture struct {
+	requestID   string
+	serial      string
+	accountUser string
+	tenantID    string
+}
+
+// collectThenOrphan drives a real lodge -> approve -> collect cycle against a real
+// certificate manager, then removes the account binding collect wrote. The result is
+// precisely the state a crash between signAndBindCollectedCertificate's signing call and
+// its bindCertOnAccount call leaves behind: a live, signed certificate whose serial is
+// durably recorded on a "collected" request, resolving through no account.
+func collectThenOrphan(t *testing.T, server *Server, tenantID, username string, grant ApproveCredentialRequestBody) orphanedCollectFixture {
+	t.Helper()
+	fx := lodgeAndApprove(t, server, tenantID, username, grant)
+
+	rec := collectCredentialRequest(t, server, fx.requestID, fx.collectSecret)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := decodeCollectResponse(t, rec)
+	require.NotEmpty(t, resp.SerialNumber)
+
+	require.NoError(t, server.removeCertBindingFromAccount(context.Background(), fx.accountUser, resp.SerialNumber, "test-setup"))
+	acct, err := server.getAccount(context.Background(), fx.accountUser)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	for _, b := range acct.CertBindings {
+		require.NotEqual(t, resp.SerialNumber, b.Serial, "fixture must leave the collected serial unbound")
+	}
+
+	return orphanedCollectFixture{
+		requestID:   fx.requestID,
+		serial:      resp.SerialNumber,
+		accountUser: fx.accountUser,
+		tenantID:    tenantID,
+	}
+}
+
+// countAuditEntries returns how many entries carry the given action and resource ID.
+// Unlike findAuditEntryByAction it does not fail on absence — the sweep's skip paths are
+// asserted by the absence of an event.
+func countAuditEntries(t *testing.T, server *Server, tenantID, action, resourceID string) int {
+	t.Helper()
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: tenantID})
+	require.NoError(t, err)
+	count := 0
+	for _, e := range entries {
+		if e.Action == action && (resourceID == "" || e.ResourceID == resourceID) {
+			count++
+		}
+	}
+	return count
+}
+
+// TestSweepOrphanedCollectedCertificates_RevokesUnboundCertificate is the primary test
+// for the sweep: a collected request whose recorded serial appears in no account's
+// bindings is the crash window, and the certificate must be revoked so it can never
+// resolve through extractAdminPrincipal's bootstrap fallback as implicit root.
+func TestSweepOrphanedCollectedCertificates_RevokesUnboundCertificate(t *testing.T) {
+	server := setupCollectTestServer(t)
+	ctx := context.Background()
+	fx := collectThenOrphan(t, server, "sweep-orphan-tenant", "sweep-orphan-owner", ApproveCredentialRequestBody{
+		GrantAdminMarker: true,
+	})
+
+	require.False(t, server.certManager.IsRevoked(fx.serial), "sanity: the collected certificate starts out live")
+
+	server.sweepOrphanedCollectedCertificates(ctx)
+
+	assert.True(t, server.certManager.IsRevoked(fx.serial),
+		"a collected certificate with no account binding must be revoked by the sweep")
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: fx.tenantID})
+	require.NoError(t, err)
+	entry := findAuditEntryByAction(t, entries, "credential_request.orphaned_certificate_revoked")
+	assert.Equal(t, fx.requestID, entry.ResourceID)
+	assert.Equal(t, "credential_request", entry.ResourceType)
+
+	// The whole point of the revocation: the admin-marked certificate the crash left
+	// behind must not authenticate. extractAdminPrincipal checks IsRevoked before it
+	// ever reaches the bootstrap-fallback branch, so a synthetic certificate carrying
+	// the revoked serial exercises exactly that lookup (chain verification happens at
+	// the TLS layer — see extractAdminPrincipal's doc comment).
+	serialInt, ok := new(big.Int).SetString(fx.serial, 10)
+	require.True(t, ok, "collected serial must be a base-10 integer")
+	synthetic := makeAdminCertWithAttrs(t, 0, fx.accountUser, false)
+	synthetic.SerialNumber = serialInt
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", synthetic)
+	assert.Nil(t, server.extractAdminPrincipal(req),
+		"a certificate the sweep revoked must never resolve as implicit root")
+}
+
+// TestSweepOrphanedCollectedCertificates_LeavesBoundCertificateAlone covers the "bound"
+// skip path: the ordinary successful collection, where the binding exists. The sweep
+// must never touch it — revoking here would destroy every legitimately issued credential
+// on the next tick.
+func TestSweepOrphanedCollectedCertificates_LeavesBoundCertificateAlone(t *testing.T) {
+	server := setupCollectTestServer(t)
+	ctx := context.Background()
+	fx := lodgeAndApprove(t, server, "sweep-bound-tenant", "sweep-bound-owner", ApproveCredentialRequestBody{
+		GrantAdminMarker: true,
+	})
+
+	rec := collectCredentialRequest(t, server, fx.requestID, fx.collectSecret)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := decodeCollectResponse(t, rec)
+
+	revokedBefore, err := server.certManager.ListRevoked()
+	require.NoError(t, err)
+
+	server.sweepOrphanedCollectedCertificates(ctx)
+
+	assert.False(t, server.certManager.IsRevoked(resp.SerialNumber),
+		"a collected certificate that IS bound to its account must survive the sweep")
+	revokedAfter, err := server.certManager.ListRevoked()
+	require.NoError(t, err)
+	assert.Len(t, revokedAfter, len(revokedBefore), "the sweep must revoke nothing when every collection is bound")
+	assert.Equal(t, 0, countAuditEntries(t, server, "sweep-bound-tenant",
+		"credential_request.orphaned_certificate_revoked", fx.requestID),
+		"no orphan event may be emitted for a properly bound certificate")
+
+	// The binding is intact and the certificate still authenticates.
+	acct, err := server.getAccount(ctx, fx.accountUser)
+	require.NoError(t, err)
+	found := false
+	for _, b := range acct.CertBindings {
+		if b.Serial == resp.SerialNumber {
+			found = true
+		}
+	}
+	assert.True(t, found, "the sweep must not disturb the account binding")
+}
+
+// TestSweepOrphanedCollectedCertificates_AlreadyRevokedIsSkipped covers the
+// already-revoked short-circuit: the collect handler's own post-sign failure path may
+// have revoked the certificate already (or a previous sweep tick did), and a later tick
+// must not re-revoke or emit a second event for the same request.
+func TestSweepOrphanedCollectedCertificates_AlreadyRevokedIsSkipped(t *testing.T) {
+	server := setupCollectTestServer(t)
+	ctx := context.Background()
+	fx := collectThenOrphan(t, server, "sweep-revoked-tenant", "sweep-revoked-owner", ApproveCredentialRequestBody{})
+
+	require.NoError(t, server.certManager.Revoke(fx.serial))
+	revokedBefore, err := server.certManager.ListRevoked()
+	require.NoError(t, err)
+
+	server.sweepOrphanedCollectedCertificates(ctx)
+
+	revokedAfter, err := server.certManager.ListRevoked()
+	require.NoError(t, err)
+	assert.Len(t, revokedAfter, len(revokedBefore), "an already-revoked serial must not be revoked a second time")
+	assert.True(t, server.certManager.IsRevoked(fx.serial))
+	assert.Equal(t, 0, countAuditEntries(t, server, fx.tenantID,
+		"credential_request.orphaned_certificate_revoked", fx.requestID),
+		"the short-circuit must return before the audit event, so a repeating sweep does not repeat the event")
+}
+
+// TestSweepOrphanedCollectedCertificates_AccountLookupErrorDefersToNextSweep covers the
+// account-lookup-error path: a store outage must never be read as "no binding exists".
+// The certificate is left alone, and the next sweep after the store recovers revokes it.
+func TestSweepOrphanedCollectedCertificates_AccountLookupErrorDefersToNextSweep(t *testing.T) {
+	server := setupCollectTestServer(t)
+	ctx := context.Background()
+	fx := collectThenOrphan(t, server, "sweep-lookup-err-tenant", "sweep-lookup-err-owner", ApproveCredentialRequestBody{})
+
+	realStore := server.secretStore
+	server.secretStore = &accountListFailingSecretStore{
+		SecretStore: realStore,
+		failErr:     errors.New("account store temporarily unavailable"),
+	}
+
+	server.sweepOrphanedCollectedCertificates(ctx)
+
+	assert.False(t, server.certManager.IsRevoked(fx.serial),
+		"a failed account lookup must never be treated as an absent binding")
+	assert.Equal(t, 0, countAuditEntries(t, server, fx.tenantID,
+		"credential_request.orphaned_certificate_revoked", fx.requestID))
+
+	server.secretStore = realStore
+	server.sweepOrphanedCollectedCertificates(ctx)
+
+	assert.True(t, server.certManager.IsRevoked(fx.serial),
+		"once the account store recovers, the next sweep must revoke the orphan")
+}
+
+// TestSweepOrphanedCollectedCertificates_SkipsRecordsWithNothingToRevoke covers the two
+// records the sweep must pass over untouched — a collection that crashed before the
+// certificate was signed (no serial) and one carrying no bound account — plus the
+// nil-certManager guard.
+func TestSweepOrphanedCollectedCertificates_SkipsRecordsWithNothingToRevoke(t *testing.T) {
+	server := setupCollectTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	noSerial := &pendingCredentialRequest{
+		ID:                   "cr-collected-no-serial",
+		TenantID:             "sweep-skip-tenant",
+		Status:               credentialRequestStatusCollected,
+		PublicKeyFingerprint: "skip-fp-1",
+		CreatedAt:            now,
+		ExpiresAt:            now.Add(time.Hour),
+		CollectSecretHash:    "skip-hash-1",
+		ApprovedAt:           &now,
+		BoundAccountID:       "account-that-does-not-exist",
+		CollectedAt:          &now,
+	}
+	require.NoError(t, server.persistPendingCredentialRequest(ctx, noSerial))
+
+	noAccount := &pendingCredentialRequest{
+		ID:                   "cr-collected-no-account",
+		TenantID:             "sweep-skip-tenant",
+		Status:               credentialRequestStatusCollected,
+		PublicKeyFingerprint: "skip-fp-2",
+		CreatedAt:            now,
+		ExpiresAt:            now.Add(time.Hour),
+		CollectSecretHash:    "skip-hash-2",
+		CollectedAt:          &now,
+		CollectedSerial:      "serial-with-no-bound-account",
+	}
+	require.NoError(t, server.persistPendingCredentialRequest(ctx, noAccount))
+
+	server.sweepOrphanedCollectedCertificates(ctx)
+
+	assert.Equal(t, 0, countAuditEntries(t, server, "sweep-skip-tenant",
+		"credential_request.orphaned_certificate_revoked", ""),
+		"a record with no serial, or no bound account, has nothing to revoke")
+	assert.False(t, server.certManager.IsRevoked("serial-with-no-bound-account"))
+
+	// Both records survive the sweep — it revokes certificates, it never deletes records.
+	for _, id := range []string{noSerial.ID, noAccount.ID} {
+		stored, err := server.getPendingCredentialRequestByID(ctx, id)
+		require.NoError(t, err)
+		assert.NotNil(t, stored, "the sweep must not delete collected records")
+	}
+
+	// A server with no certificate manager cannot revoke anything: the sweep returns
+	// without touching the store rather than panicking.
+	noCertServer := setupTestServer(t)
+	require.Nil(t, noCertServer.certManager, "sanity: setupTestServer wires no certificate manager")
+	noCertServer.sweepOrphanedCollectedCertificates(ctx)
 }
 
 // ---- approval record fields (Issue #3718) ---------------------------------------------
