@@ -30,7 +30,7 @@ type egWatchProvider interface {
 // watchWriteTimeout bounds a single frame write to a connected browser client.
 const watchWriteTimeout = 10 * time.Second
 
-// watchPongWait bounds how long the server waits for any frame from the
+// defaultWatchPongWait bounds how long the server waits for any frame from the
 // client (a pong, or otherwise) before treating the connection as dead.
 // Mirrors the terminal WebSocket handler's 60s keepalive window
 // (features/terminal/websocket.go). A client that vanishes without a clean
@@ -38,16 +38,47 @@ const watchWriteTimeout = 10 * time.Second
 // read pump unblock and cancel the session context within a bounded time,
 // or the derived ctx (and the provider's watchLoop polling goroutine it
 // keeps alive) leaks until the controller process restarts.
-//
-// Declared as a var, not a const, so tests can shrink the window instead of
-// waiting out the real 60s deadline.
-var watchPongWait = 60 * time.Second
+const defaultWatchPongWait = 60 * time.Second
 
-// watchPingInterval is how often the server sends a ping frame to refresh
-// its own liveness signal to the client. Must stay below watchPongWait so a
+// defaultWatchPingInterval is how often the server sends a ping frame to refresh
+// its own liveness signal to the client. Must stay below the pong wait so a
 // healthy connection's deadline is renewed (via the pong handler) before it
 // expires.
-var watchPingInterval = 54 * time.Second
+const defaultWatchPingInterval = 54 * time.Second
+
+// setWatchKeepalive overrides this server's watch-session keepalive window.
+// The window is per-Server state, not a process global: a WebSocket handler
+// outlives the request that started it (an upgraded connection is hijacked, so
+// http.Server shutdown does not wait for it), and a package-level knob mutated
+// while such a handler is still reading it is an unsynchronized write/read pair
+// on shared memory — a genuine data race, not a detector artefact.
+//
+// A non-positive argument selects the corresponding default. pingInterval must
+// stay below pongWait so a healthy connection's read deadline is refreshed by a
+// pong before it expires.
+func (s *Server) setWatchKeepalive(pongWait, pingInterval time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.watchPongWait = pongWait
+	s.watchPingInterval = pingInterval
+}
+
+// watchKeepalive returns this server's pong-wait and ping-interval, falling back
+// to the package defaults when unset. Read once per session by the handler so
+// the values it uses are immutable locals for the life of the connection.
+func (s *Server) watchKeepalive() (pongWait, pingInterval time.Duration) {
+	s.mu.RLock()
+	pongWait, pingInterval = s.watchPongWait, s.watchPingInterval
+	s.mu.RUnlock()
+
+	if pongWait <= 0 {
+		pongWait = defaultWatchPongWait
+	}
+	if pingInterval <= 0 {
+		pingInterval = defaultWatchPingInterval
+	}
+	return pongWait, pingInterval
+}
 
 // watchConnWriter serializes all writes to a single WebSocket connection.
 // gorilla/websocket supports at most one concurrent writer per connection;
@@ -219,17 +250,23 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 	// The initial deadline plus the pong handler's refresh are what bound a dead
 	// connection: a client that disappears without a close frame — sleep, network
 	// drop, crash — never sends a pong, so ReadMessage unblocks with a timeout
-	// once watchPongWait elapses instead of hanging forever. Both must be set on
+	// once pongWait elapses instead of hanging forever. Both must be set on
 	// conn before this goroutine starts reading, since gorilla/websocket invokes
 	// the pong handler synchronously from inside ReadMessage.
+	//
+	// The keepalive window is snapshotted once here: the pong handler and the
+	// ping ticker below then close over immutable locals, so nothing this
+	// session does reads server state concurrently with a later reconfiguration.
+	pongWait, pingInterval := s.watchKeepalive()
+
 	conn.SetReadLimit(256)
-	if err := conn.SetReadDeadline(time.Now().Add(watchPongWait)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
 		s.logger.Warn("handleCockpitWatch: set initial read deadline failed",
 			"case_id", logging.SanitizeLogValue(id),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(watchPongWait))
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
 	go func() {
@@ -265,7 +302,7 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("handleCockpitWatch: WebSocket session opened",
 		"case_id", logging.SanitizeLogValue(id))
 
-	pingTicker := time.NewTicker(watchPingInterval)
+	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
 
 	for {

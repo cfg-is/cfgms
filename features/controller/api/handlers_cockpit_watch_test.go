@@ -142,8 +142,31 @@ func dialWatchWS(t *testing.T, srv *Server, caseID, callerTenant string) (*webso
 	t.Helper()
 	apiKey := NewEphemeralTestKey(t, srv, []string{"case:read"}, callerTenant, 5*time.Minute)
 
-	ts := httptest.NewServer(srv.router)
-	t.Cleanup(ts.Close)
+	// httptest.Server.Close does not wait for a handler servicing an UPGRADED
+	// connection: hijacking removes the conn from the server's tracked set, so
+	// Close returns while handleCockpitWatch is still running and still reading
+	// this test's stores. Track in-flight requests here and block cleanup until
+	// the handler has actually returned, so one test's watch session cannot
+	// overlap the next test's setup.
+	var inflight sync.WaitGroup
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inflight.Add(1)
+		defer inflight.Done()
+		srv.router.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		ts.Close()
+		drained := make(chan struct{})
+		go func() {
+			inflight.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(10 * time.Second):
+			t.Error("dialWatchWS: watch handler still running 10s after the test server closed")
+		}
+	})
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/cases/" + caseID + "/watch"
 	hdr := http.Header{
@@ -629,25 +652,22 @@ func TestHandleCockpitWatch_SubscriptionScopedToCaseTenant(t *testing.T) {
 // watchLoop polling goroutine it keeps alive (pkg/entitygraph/providers/
 // sqlite/watch.go) — leaks until the controller process restarts.
 //
-// The test shrinks watchPongWait so it doesn't have to wait out the real 60s
-// window, opens a client connection and deliberately never reads from it (so
+// The test shrinks this server's pong wait so it doesn't have to wait out the
+// real 60s window (the knob is per-Server state, so shrinking it cannot disturb
+// a session still running on another test's server), opens a client connection
+// and deliberately never reads from it (so
 // it never processes, let alone responds to, a server ping — the same
 // failure mode as a truly dead peer), then asserts that the channel the real
 // provider's Watch returned is closed within a bounded time. watchLoop closes
 // its channel only when ctx.Done() fires, so an observed close is direct
 // proof the read pump's deadline fired and cancel() ran.
 func TestHandleCockpitWatch_DeadConnectionCancelsContext(t *testing.T) {
-	originalPongWait := watchPongWait
-	originalPingInterval := watchPingInterval
-	watchPongWait = 200 * time.Millisecond
-	watchPingInterval = 50 * time.Millisecond
-	t.Cleanup(func() {
-		watchPongWait = originalPongWait
-		watchPingInterval = originalPingInterval
-	})
-
 	probe := newWatchProbe(t)
 	srv := setupCockpitWatchServer(t, probe)
+	// Set before any connection is dialed: the handler snapshots the window once
+	// per session, so this write happens-before every read of it.
+	srv.setWatchKeepalive(200*time.Millisecond, 50*time.Millisecond)
+
 	c, _ := seedWatchCase(t, srv.CasesStore(), "test-tenant")
 
 	_, teardown := dialWatchWS(t, srv, c.ID, "test-tenant")
@@ -665,6 +685,37 @@ func TestHandleCockpitWatch_DeadConnectionCancelsContext(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("provider's watch channel was not closed — dead connection's read pump never cancelled the session context")
 	}
+}
+
+// ── Keepalive window is per-Server, with package defaults ──────────────────
+
+// TestWatchKeepalive_DefaultsAndOverride pins the keepalive knob's contract: an
+// unconfigured server serves the production window, an override applies only to
+// the server it was set on, and a non-positive value falls back to the default.
+// The per-Server scope is what keeps one test's reconfiguration from racing a
+// watch session still running on another server.
+func TestWatchKeepalive_DefaultsAndOverride(t *testing.T) {
+	srv := setupTestServer(t)
+	pongWait, pingInterval := srv.watchKeepalive()
+	assert.Equal(t, defaultWatchPongWait, pongWait)
+	assert.Equal(t, defaultWatchPingInterval, pingInterval)
+	assert.Less(t, pingInterval, pongWait, "a ping must refresh the deadline before it expires")
+
+	other := setupTestServer(t)
+	srv.setWatchKeepalive(200*time.Millisecond, 50*time.Millisecond)
+
+	pongWait, pingInterval = srv.watchKeepalive()
+	assert.Equal(t, 200*time.Millisecond, pongWait)
+	assert.Equal(t, 50*time.Millisecond, pingInterval)
+
+	otherPong, otherPing := other.watchKeepalive()
+	assert.Equal(t, defaultWatchPongWait, otherPong, "the override must not leak to another server")
+	assert.Equal(t, defaultWatchPingInterval, otherPing, "the override must not leak to another server")
+
+	srv.setWatchKeepalive(0, -time.Second)
+	pongWait, pingInterval = srv.watchKeepalive()
+	assert.Equal(t, defaultWatchPongWait, pongWait, "a non-positive value selects the default")
+	assert.Equal(t, defaultWatchPingInterval, pingInterval, "a non-positive value selects the default")
 }
 
 // ── SetEntityGraphWatchProvider wiring round-trip ──────────────────────────

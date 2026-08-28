@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -100,6 +101,7 @@ func TestPermissionAssurance_CatastrophicForwardDeclarations(t *testing.T) {
 		"registration:approve-by-cidr", // Issue #2969: bulk CIDR approval
 		"tenant:approve-delete",        // Issue #3182: ADR-027 dual-control deletion approval
 		"osquery:execute",              // Issue #3569: catalog queries may reach sensitive host state
+		"signing-credential:request",   // Issue #3687: mints a CSR-signing credential
 	}
 	for _, perm := range catastrophic {
 		req, found := permissionAssurance[perm]
@@ -301,6 +303,60 @@ func TestPermissionAssurance_TenantDeletionPipelineStrong(t *testing.T) {
 		"tenant:approve-delete must be in knownPermissions so it can be granted to a principal")
 }
 
+// TestPermissionAssurance_Issue3687_StrongCredentialFloor is a REQUIRED test (Issue
+// #3687 AC: "permissionAssurance gains all four permission IDs listed above, exact
+// strings, exact Requirement values" and "a request gated by any of the four
+// permissions using an API key at AssuranceMachine is rejected (401/403)").
+//
+// steward:execute-scripts and script:admin have live routes; the assurance gate on
+// them is additionally exercised end-to-end through the real router by
+// TestF2_AssuranceGate_ParityWithPermissionRegistry (tier_enforcement_test.go).
+// operator-payload:sign and signing-credential:request have no route yet (consumed
+// by stories S6 and S10 respectively), so this test drives requirePermission
+// directly, exactly as TestPermissionAssurance_TenantManage_FloorEnforced does for
+// tenant:manage.
+func TestPermissionAssurance_Issue3687_StrongCredentialFloor(t *testing.T) {
+	want := map[string]Requirement{
+		"steward:execute-scripts":    {Min: session.AssuranceStrong},
+		"script:admin":               {Min: session.AssuranceStrong},
+		"operator-payload:sign":      {Min: session.AssuranceStrong},
+		"signing-credential:request": {Min: session.AssuranceStrong, RequireUserPresence: true},
+	}
+
+	server := setupTestServer(t)
+
+	for permID, wantReq := range want {
+		req, found := permissionAssurance[permID]
+		require.True(t, found, "permission %q must be in permissionAssurance", permID)
+		assert.Equal(t, wantReq, req, "permission %q must have Requirement %+v", permID, wantReq)
+		assert.True(t, isKnownPermission(permID), "permission %q must be grantable via knownPermissions", permID)
+
+		parts := strings.SplitN(permID, ":", 2)
+		require.Len(t, parts, 2, "permission %q must be resource:action", permID)
+
+		reached := false
+		probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		})
+		handler := server.requirePermission(parts[0], parts[1])(probe)
+
+		machinePrincipal := &Principal{
+			ID:          "machine-caller",
+			Assurance:   session.AssuranceMachine,
+			Permissions: []string{permID},
+		}
+		httpReq := httptest.NewRequest(http.MethodPost, "/", nil)
+		httpReq = httpReq.WithContext(context.WithValue(httpReq.Context(), principalContextKey, machinePrincipal))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+
+		assert.False(t, reached, "Machine-assurance principal must not reach the handler for %q", permID)
+		assert.True(t, rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden,
+			"Machine-assurance principal must be rejected (401/403) for %q, got %d", permID, rec.Code)
+	}
+}
+
 // TestPermissionAssurance_NonCatastrophicNoUserPresence verifies that non-catastrophic
 // permissions do not accidentally have RequireUserPresence set.
 func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
@@ -311,6 +367,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"registration:approve-by-cidr": true, // Issue #2969
 		"tenant:approve-delete":        true, // Issue #3182: ADR-027 dual-control deletion approval
 		"osquery:execute":              true, // Issue #3569
+		"signing-credential:request":   true, // Issue #3687: mints a CSR-signing credential
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {
