@@ -236,6 +236,9 @@ func (s *Server) persistPendingCredentialRequest(ctx context.Context, req *pendi
 			meta["self_approved"] = "true"
 		}
 	}
+	if req.CollectedAt != nil {
+		meta["collected_at"] = req.CollectedAt.UTC().Format(time.RFC3339)
+	}
 	ttl := time.Until(req.ExpiresAt)
 	if ttl <= 0 {
 		ttl = time.Second
@@ -291,6 +294,11 @@ func pendingCredentialRequestFromMetadata(m *secretsif.SecretMetadata) *pendingC
 	if ts := m.Metadata["approved_at"]; ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
 			req.ApprovedAt = &t
+		}
+	}
+	if ts := m.Metadata["collected_at"]; ts != "" {
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			req.CollectedAt = &t
 		}
 	}
 	return req

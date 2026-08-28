@@ -605,10 +605,10 @@ zero-custody operator enrolment: an administrator mints a short-lived, single-us
 enrolment token and hands it to a machine out of band (e.g. read over a phone call, or
 pasted into a terminal). That machine, holding no certificate yet, spends the token to
 lodge a certificate signing request carrying only a public key. The request lands in a
-durable pending queue that administrators can list and deny. **This story issues no
-certificate, binds no account, and collects no credential** — those are the next two
-stories in the epic. There is no `cfg` CLI command yet; the endpoints below are REST-only
-until that follow-on work lands.
+durable pending queue that administrators can list and deny. Story #3718 adds the
+approval decision, and story #3719 (below) adds the single-use collect call that signs
+the certificate and binds it to an account. There is no `cfg` CLI command yet; the
+endpoints below are REST-only until that follow-on work lands.
 
 ### Minting and revoking an enrolment token
 
@@ -777,6 +777,74 @@ credential here ([ADR-021](../architecture/decisions/021-identity-assurance-leve
 Amendment 5): its `ImplicitAdmin` flag satisfies every permission-string check by
 construction, but it resolves to no bound account, so no presence token can ever be minted
 for it.
+
+### Collecting the signed certificate (Issue #3719)
+
+Story #3719 closes the loop: this is where the certificate is actually signed. The
+machine that lodged the request, and only that machine, collects it — authenticated by
+the `collect_secret` the lodge response returned exactly once, never by the request ID
+or the public-key fingerprint (both are values an observer of the approval screen has
+already seen). There is no API key, mTLS certificate, or web session on this call, and
+no permission gate — the endpoint is not on the elevated-assurance surface at all,
+exactly like lodge.
+
+```
+POST /api/v1/credential-requests/{id}/collect
+Authorization: Bearer <collect secret>
+```
+
+The waiting machine polls this endpoint. Every response is one of:
+
+| Response | Meaning |
+|---|---|
+| `404 REQUEST_NOT_FOUND` | Unknown ID, **or** a valid ID with the wrong (or absent) collect secret — the two are indistinguishable by design; the endpoint never confirms a request ID exists to an unauthenticated caller |
+| `200 {"status": "pending"}` | Correct secret, but no admin decision yet — keep polling |
+| `200 {"status": "denied"}` | The request was denied; it will never become collectible |
+| `200 {"status": "expired"}` | The request (and its collect secret) passed its one-hour lifetime before it was collected |
+| `410 Gone` | Already collected — by this machine's own earlier call, or by the winner of a concurrent race. There is never a second certificate for one request |
+| `503` | Not the authoritative node for minting; the request is untouched — retry |
+| `200` with a certificate body | Success (below) |
+
+A successful collection returns:
+
+```json
+{
+  "data": {
+    "certificate_pem": "-----BEGIN CERTIFICATE-----...",
+    "ca_certificate_pem": "-----BEGIN CERTIFICATE-----...",
+    "serial_number": "...",
+    "account_id": "<the account recorded at approval>",
+    "granted_markers": ["admin"],
+    "expires_at": "2027-08-28T10:00:00Z"
+  }
+}
+```
+
+The certificate is signed from exactly the marker set and account recorded at approval
+— never recomputed, re-derived, or widened at collect, and never read from the bound
+account's own attributes. There is no authenticated principal on this call to derive
+anything else from. An approved request that is never collected leaves no certificate
+in existence: nothing is signed until collect runs.
+
+Collection is single-use, enforced as a conditional durable state transition
+(`approved` → `collected`) that commits **before** the certificate is signed — so a
+restart between the transition and the response can never produce a second
+certificate, and the loser of a concurrent collect race always receives `410` rather
+than a duplicate. The account binding is written **before** the certificate is
+returned to the caller, and any failure after signing revokes the just-issued
+certificate immediately: a signed certificate is never left observable in a state
+where it resolves to no account (that state would otherwise fall through to the mTLS
+middleware's bootstrap-fallback path and be granted implicit root).
+
+Minting is leadership-gated, but only on the branch that actually mints: an approved
+request found on a non-authoritative node returns `503` and stays `approved` untouched,
+while every polling response above (`pending`/`denied`/`expired`/not-found) remains
+available regardless of leadership — a waiting machine's poll loop does not stall
+during a leadership change.
+
+Collect is rate limited per source address, and the collect secret expires with the
+request it belongs to (the same one-hour lifetime and the same background sweep
+described above) — a captured secret has a bounded life.
 
 ### Permissions
 

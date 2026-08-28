@@ -62,9 +62,15 @@ const (
 	// credentialRequestStatusApproved is set once an administrator approves the request
 	// (Issue #3718). Approval signs nothing: the granted marker set, the bound account
 	// and the approver's identity are recorded at this point so a later collect call has
-	// something fixed to honor, but no certificate exists until collect runs. There is
-	// still no "collected" status here — that belongs to the next story in the epic.
+	// something fixed to honor, but no certificate exists until collect runs.
 	credentialRequestStatusApproved = "approved"
+
+	// credentialRequestStatusCollected is set by the collect endpoint (Issue #3719) as
+	// a conditional transition from "approved" — the compare-and-set that makes
+	// collection single-use. It is terminal: once set, no further collect attempt (a
+	// retry, a race loser, or a poll after a restart) can ever mint a second
+	// certificate, because every one of those finds the request already collected.
+	credentialRequestStatusCollected = "collected"
 )
 
 // enrolmentToken is the durable record for a single-use, short-lived pre-shared
@@ -153,6 +159,11 @@ type pendingCredentialRequest struct {
 	BoundAccountID string
 	GrantedMarkers []string
 	SelfApproved   bool
+
+	// CollectedAt is written by the collect endpoint (Issue #3719) the moment the
+	// approved->collected transition commits — before the certificate is signed. It
+	// is the durable record that the single use has already happened.
+	CollectedAt *time.Time
 }
 
 // hashCredentialSecret returns the SHA-256 hex digest of a raw secret (an enrolment
