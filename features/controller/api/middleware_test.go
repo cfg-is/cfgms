@@ -35,6 +35,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -3170,4 +3171,191 @@ func TestExtractAdminPrincipal_AccountResetCannotWidenBoundCert(t *testing.T) {
 		"the binding must be persisted by the reset, not only cached")
 	assert.False(t, afterReload.GlobalScope)
 	assert.False(t, afterReload.ImplicitAdmin)
+}
+
+// --- Issue #3715: cert-binding last-used recording tests ---
+
+// countingStoreSecretStore wraps a real SecretStore and counts StoreSecret (write) calls.
+// Used to assert write-coalescing and zero-writes-on-rejection by counting, not by timing.
+type countingStoreSecretStore struct {
+	secretsif.SecretStore
+	mu     sync.Mutex
+	stores int
+}
+
+func (c *countingStoreSecretStore) StoreSecret(ctx context.Context, req *secretsif.SecretRequest) error {
+	c.mu.Lock()
+	c.stores++
+	c.mu.Unlock()
+	return c.SecretStore.StoreSecret(ctx, req)
+}
+
+func (c *countingStoreSecretStore) storeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stores
+}
+
+// TestRecordCertBindingUse_CoalescesRepeatedAuth is the [REQUIRED TEST] verifying that
+// repeated authenticated requests against the same certificate serial, inside the
+// coalescing window, produce at most one durable store write. Asserted by counting
+// StoreSecret calls, not by timing: recordCertBindingUse updates its in-memory throttle
+// synchronously before ever spawning a goroutine, so the 5 follow-up calls below are
+// guaranteed not to schedule a second write — nothing here depends on goroutine scheduling.
+func TestRecordCertBindingUse_CoalescesRepeatedAuth(t *testing.T) {
+	srv := setupTestServer(t)
+
+	const serialNum = 87001
+	peerCert := makeAdminCertWithAttrs(t, serialNum, "coalesce-admin", false)
+	serial := peerCert.SerialNumber.String()
+
+	srv.cacheAccount(&account{
+		ID:           "acct-coalesce",
+		Username:     "coalesce-operator",
+		TenantID:     "msp-a",
+		Permissions:  []string{"steward:read"},
+		CertBindings: []CertBinding{{Serial: serial}},
+	})
+
+	counting := &countingStoreSecretStore{SecretStore: srv.secretStore}
+	srv.secretStore = counting
+
+	persisted := make(chan error, 1)
+	srv.onCertBindingLastUsedPersisted = func(_, _ string, err error) {
+		persisted <- err
+	}
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+
+	require.NotNil(t, srv.extractAdminPrincipal(req), "first authenticated request")
+
+	// 5 more authenticated requests for the same serial, still inside the coalescing
+	// window. recordCertBindingUse's throttle check-and-set runs synchronously in the
+	// caller's goroutine (this one), so by the time extractAdminPrincipal returns from
+	// each of these calls, no second write has been scheduled.
+	for i := 0; i < 5; i++ {
+		require.NotNil(t, srv.extractAdminPrincipal(req), "repeated request #%d", i)
+	}
+
+	require.NoError(t, <-persisted, "the single async write from the first request")
+
+	assert.Equal(t, 1, counting.storeCount(),
+		"repeated requests inside the coalescing window must produce at most one store write")
+}
+
+// TestRecordCertBindingUse_RejectedOrUnboundAuthProducesZeroWrites is the [REQUIRED TEST]
+// verifying that authentication paths which do not resolve to a bound, active-account
+// principal — a revoked serial, an unbound serial (bootstrap fallback), and a disabled
+// account — never trigger a durable store write. Asserted by counting StoreSecret calls.
+func TestRecordCertBindingUse_RejectedOrUnboundAuthProducesZeroWrites(t *testing.T) {
+	// assertZeroWrites gives any (incorrectly) spawned last-used-recording goroutine a
+	// brief window to run, then asserts — by count, not by the wait itself — that it
+	// produced no write. The wait only guards against a regression that schedules the
+	// write asynchronously after extractAdminPrincipal has already returned.
+	assertZeroWrites := func(t *testing.T, counting *countingStoreSecretStore) {
+		t.Helper()
+		time.Sleep(150 * time.Millisecond)
+		assert.Equal(t, 0, counting.storeCount())
+	}
+
+	t.Run("revoked serial", func(t *testing.T) {
+		tempDir := t.TempDir()
+		certManager, err := cert.NewManager(&cert.ManagerConfig{
+			StoragePath: tempDir,
+			CAConfig: &cert.CAConfig{
+				Organization: "Test",
+				Country:      "US",
+				ValidityDays: 365,
+			},
+		})
+		require.NoError(t, err)
+		srv := setupTestServerWithCertMgr(t, certManager)
+
+		req, serial := issueCertAndBuildRequest(t, http.MethodGet, "/api/v1/test", certManager)
+		require.NoError(t, certManager.Revoke(serial))
+
+		counting := &countingStoreSecretStore{SecretStore: srv.secretStore}
+		srv.secretStore = counting
+
+		p := srv.extractAdminPrincipal(req)
+		assert.Nil(t, p, "revoked cert must be rejected")
+		assertZeroWrites(t, counting)
+	})
+
+	t.Run("unbound serial (bootstrap fallback)", func(t *testing.T) {
+		srv := setupTestServer(t)
+		adminCert := makeSelfSignedAdminCert(t)
+		req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
+
+		counting := &countingStoreSecretStore{SecretStore: srv.secretStore}
+		srv.secretStore = counting
+
+		p := srv.extractAdminPrincipal(req)
+		require.NotNil(t, p, "an unbound cert is accepted via the bootstrap fallback")
+		assertZeroWrites(t, counting)
+	})
+
+	t.Run("disabled account", func(t *testing.T) {
+		srv := setupTestServer(t)
+
+		const serialNum = 87002
+		peerCert := makeAdminCertWithAttrs(t, serialNum, "disabled-coalesce-admin", false)
+		serial := peerCert.SerialNumber.String()
+
+		srv.cacheAccount(&account{
+			ID:           "acct-disabled-coalesce",
+			Username:     "disabled-coalesce-operator",
+			TenantID:     "msp-a",
+			Disabled:     true,
+			CertBindings: []CertBinding{{Serial: serial}},
+		})
+
+		counting := &countingStoreSecretStore{SecretStore: srv.secretStore}
+		srv.secretStore = counting
+
+		req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+		p := srv.extractAdminPrincipal(req)
+		assert.Nil(t, p, "a cert bound to a disabled account must be rejected")
+		assertZeroWrites(t, counting)
+	})
+}
+
+// TestRecordCertBindingUse_StoreFailureDoesNotFailAuth is the [REQUIRED TEST] verifying
+// that a durable-store failure while recording certificate-binding use does not fail the
+// authenticating request, and is logged (not silent) rather than swallowed.
+func TestRecordCertBindingUse_StoreFailureDoesNotFailAuth(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	srv := setupTestServerWithLogger(t, capLog)
+
+	const serialNum = 87003
+	peerCert := makeAdminCertWithAttrs(t, serialNum, "store-fail-admin", false)
+	serial := peerCert.SerialNumber.String()
+
+	srv.cacheAccount(&account{
+		ID:           "acct-store-fail",
+		Username:     "store-fail-operator",
+		TenantID:     "msp-a",
+		Permissions:  []string{"steward:read"},
+		CertBindings: []CertBinding{{Serial: serial}},
+	})
+
+	injected := errors.New("injected store failure")
+	srv.secretStore = &errStoreSecretStore{SecretStore: srv.secretStore, storeErr: injected}
+
+	persisted := make(chan error, 1)
+	srv.onCertBindingLastUsedPersisted = func(_, _ string, err error) {
+		persisted <- err
+	}
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+	p := srv.extractAdminPrincipal(req)
+	require.NotNil(t, p, "a store failure while recording use must not fail authentication")
+	assert.Equal(t, "acct-store-fail", p.ID)
+	assert.Equal(t, session.AssuranceStrong, p.Assurance)
+
+	require.Error(t, <-persisted, "the injected failure must have reached the persist attempt")
+
+	out := capLog.formattedOutput()
+	assert.Contains(t, out, "Failed to persist certificate binding last-used timestamp",
+		"a failed update must be logged, not silent")
 }

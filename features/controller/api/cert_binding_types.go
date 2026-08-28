@@ -13,19 +13,33 @@ import "time"
 // CertBinding is the durable record of an mTLS admin certificate bound to an account.
 // Serial is the binding and lookup key; Fingerprint is stored alongside for defense-in-depth
 // audit correlation (both are computed at no extra cost during extractAdminPrincipal).
+//
+// LastUsedAt is the compensating control for Issue #3715: it records when the binding was
+// last used to authenticate, so an operator listing bindings can spot a credential that no
+// longer needs to renew itself. It is optional (nil) — bindings created before this story,
+// and any binding that has never successfully authenticated, have no recorded use. It is
+// observational only: recording it never affects the authentication decision.
+//
+// This field is never populated by loadAccountFromStore/persistAccount — it is always nil
+// on a CertBinding read from the account record. The durable value lives in its own record
+// (see certBindingLastUsedKeyPrefix in middleware.go) precisely so that recording use never
+// shares a read-modify-write with the account's security-relevant fields (Disabled,
+// Permissions, ...). handleListCertBindings merges it into CertBindingInfo at response time.
 type CertBinding struct {
-	Serial      string    `json:"serial"`
-	Fingerprint string    `json:"fingerprint"`
-	Label       string    `json:"label,omitempty"`
-	BoundAt     time.Time `json:"bound_at"`
+	Serial      string     `json:"serial"`
+	Fingerprint string     `json:"fingerprint"`
+	Label       string     `json:"label,omitempty"`
+	BoundAt     time.Time  `json:"bound_at"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
 }
 
 // CertBindingInfo is the public view returned by GET .../certs.
 // It mirrors CertBinding but carries no additional fields — the full struct
 // is already public-safe (no private key material is ever stored).
 type CertBindingInfo struct {
-	Serial      string    `json:"serial"`
-	Fingerprint string    `json:"fingerprint"`
-	Label       string    `json:"label,omitempty"`
-	BoundAt     time.Time `json:"bound_at"`
+	Serial      string     `json:"serial"`
+	Fingerprint string     `json:"fingerprint"`
+	Label       string     `json:"label,omitempty"`
+	BoundAt     time.Time  `json:"bound_at"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
 }

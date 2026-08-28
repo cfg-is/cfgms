@@ -197,6 +197,61 @@ func TestHandleCertBinding_ListSuccess(t *testing.T) {
 	assert.Equal(t, "alice laptop", resp.Data[0].Label)
 }
 
+// TestHandleCertBinding_ListNeverUsedOmitsLastUsedAt verifies that a binding which has
+// never authenticated renders as an explicit never-used value (LastUsedAt is nil / the
+// last_used_at key is absent from the JSON body), not a zero-value date (Issue #3715).
+func TestHandleCertBinding_ListNeverUsedOmitsLastUsedAt(t *testing.T) {
+	server, certMgr := setupCertBindingServer(t)
+	createTestAccount(t, server, "alice")
+	serial := provisionTestClientCert(t, certMgr, "alice-laptop")
+
+	rec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Serial: serial})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	listRec := listCertsReq(t, server, testAdminPrincipal(), "alice")
+	require.Equal(t, http.StatusOK, listRec.Code, "list: %s", listRec.Body.String())
+
+	// Assert against the raw JSON body, not just the decoded struct: omitempty on a nil
+	// *time.Time drops the key entirely, and decoding first would hide a regression to a
+	// zero-valued (non-pointer) timestamp that serializes as "0001-01-01T00:00:00Z".
+	assert.NotContains(t, listRec.Body.String(), "last_used_at",
+		"a never-used binding must omit last_used_at, not render a zero date")
+
+	var resp struct {
+		Data []CertBindingInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(bytes.NewReader(listRec.Body.Bytes())).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Nil(t, resp.Data[0].LastUsedAt)
+}
+
+// TestHandleCertBinding_ListReflectsRecordedLastUsedAt verifies that once a binding's
+// last-used timestamp has been recorded (the middleware.go recording path, exercised here
+// directly against the internal helper it calls), the listing handler surfaces it.
+func TestHandleCertBinding_ListReflectsRecordedLastUsedAt(t *testing.T) {
+	server, certMgr := setupCertBindingServer(t)
+	createTestAccount(t, server, "alice")
+	serial := provisionTestClientCert(t, certMgr, "alice-laptop")
+
+	rec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Serial: serial})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	usedAt := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, server.persistCertBindingLastUsed(context.Background(), "alice", "default", serial, usedAt))
+
+	listRec := listCertsReq(t, server, testAdminPrincipal(), "alice")
+	require.Equal(t, http.StatusOK, listRec.Code, "list: %s", listRec.Body.String())
+
+	var resp struct {
+		Data []CertBindingInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	require.NotNil(t, resp.Data[0].LastUsedAt)
+	assert.True(t, usedAt.Equal(*resp.Data[0].LastUsedAt),
+		"expected %s, got %s", usedAt, resp.Data[0].LastUsedAt)
+}
+
 // TestHandleCertBinding_ListEmpty verifies that the list endpoint returns an empty slice
 // (not nil/null) when no certificates are bound.
 func TestHandleCertBinding_ListEmpty(t *testing.T) {

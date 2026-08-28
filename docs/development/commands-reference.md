@@ -1176,11 +1176,41 @@ cfg account bind-cert <username> --serial <s> [--label <l>] [--fingerprint <f>]
 
 ### cfg account certs
 
-Lists all mTLS certificate bindings for a web-admin account.
+Lists all mTLS certificate bindings for a web-admin account, including each
+binding's last-used timestamp (Issue #3715) — the compensating control for
+allowing credentials that renew themselves indefinitely: a host that no longer
+needs its credential becomes visible because its binding stops accumulating
+recent `Last used` activity.
 
 ```
 cfg account certs <username> [--json]
 ```
+
+Example:
+
+```
+cfg account certs alice
+
+Certificate bindings for alice (2):
+
+  [1] Serial:   12345
+      Label:    primary laptop
+      Bound at: 2026-08-01T00:00:00Z
+      Last used: 2026-08-20T12:30:00Z
+
+  [2] Serial:   67890
+      Bound at: 2026-08-15T00:00:00Z
+      Last used: never
+```
+
+`Last used` renders `never` when the binding has not yet been used to
+authenticate — including every binding created before this story shipped.
+This is an explicit value, not a blank line or a zero-value date: the
+underlying `last_used_at` field is optional and is omitted from the JSON
+response entirely until the certificate's first successful authentication.
+The timestamp is recorded on a best-effort, coalesced basis (at most once
+every few minutes per certificate) and is observational only — it never
+affects whether a request is authorised.
 
 **Flags:**
 

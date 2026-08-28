@@ -332,11 +332,24 @@ type apiAccountCreateResponse struct {
 }
 
 // apiCertBindingInfo mirrors api.CertBindingInfo.
+// LastUsedAt is empty when the server omits last_used_at — a binding that has never
+// authenticated (Issue #3715). Display code must render that as an explicit "never"
+// value, not a blank line.
 type apiCertBindingInfo struct {
 	Serial      string `json:"serial"`
 	Fingerprint string `json:"fingerprint"`
 	Label       string `json:"label,omitempty"`
 	BoundAt     string `json:"bound_at"`
+	LastUsedAt  string `json:"last_used_at,omitempty"`
+}
+
+// certBindingLastUsedDisplay renders a binding's LastUsedAt for human-readable output,
+// making the never-used state explicit rather than printing a blank value.
+func certBindingLastUsedDisplay(lastUsedAt string) string {
+	if lastUsedAt == "" {
+		return "never"
+	}
+	return lastUsedAt
 }
 
 // apiBindCertRequest mirrors api.BindCertRequest.
@@ -816,6 +829,7 @@ func runAccountCerts(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "      Label:    %s\n", b.Label)
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "      Bound at: %s\n", b.BoundAt)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "      Last used: %s\n", certBindingLastUsedDisplay(b.LastUsedAt))
 		_, _ = fmt.Fprintln(cmd.OutOrStdout())
 	}
 	return nil
