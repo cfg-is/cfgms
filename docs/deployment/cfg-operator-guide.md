@@ -377,7 +377,67 @@ bundle or a session from `cfg connect` — never a bare API key (Issue #3688):
 automation that used to export `CFGMS_API_KEY` should export `CFGMS_ADMIN_BUNDLE`
 instead, as shown above.
 
-## 10. The Zero-Standing-Privilege Model
+## 10. Keeping an Unattended Host's Credential Current
+
+A bundle used the one-shot way (§8) — on a CI runner, a headless automation host,
+or anywhere else nobody is present to run `cfg connect` — still carries a
+certificate with an expiry date. `cfg credential renew` is how that host keeps its
+credential alive without a human: it presents the certificate it already holds
+over mutual TLS to prove who it is, generates a brand-new keypair locally, and asks
+the controller for a new certificate bound to the exact same account. Nothing
+about the account is chosen by the request — the controller derives it entirely
+from the certificate presented.
+
+```bash
+# Run periodically (cron, a systemd timer, or equivalent) against the bundle
+# a headless host authenticates with:
+cfg credential renew --unattended --bundle /etc/cfgms/admin.bundle.yaml
+```
+
+`--unattended` is what makes this safe to schedule frequently: it checks the
+bundle certificate's expiry itself before contacting the controller, and exits `0`
+having done nothing when renewal is not yet due. Point a timer at it daily, or even
+hourly, and it stays quiet until the certificate is actually within its renewal
+window (30 days before expiry) — then it renews, and the bundle file is updated
+in place with the new certificate, the new private key, and the CA, ready for the
+very next `cfg` invocation.
+
+**The off switch is the bound account — there is no expiry-count ceiling.** A
+renewed credential can renew again indefinitely; nothing here ever forces
+re-enrolment on its own. To take an unattended host's access away, disable the
+account it authenticates as (the same account `cfg credential renew` has been
+quietly renewing into all along):
+
+```bash
+cfg account update <username> --disabled=true
+```
+
+A disabled account's certificate stops authenticating immediately — not just to
+renewal, to everything — so the very next scheduled renewal attempt fails, and the
+host cannot reach the controller again until an administrator re-enables the
+account or issues it a fresh credential through a new enrolment token.
+
+**If a scheduled renewal starts failing**, the certificate's own expiry is the
+first thing to check:
+
+- Still has time left, but outside the 30-day window: not a problem — a later
+  scheduled run will pick it up once it is due.
+- Already expired, or the account was disabled: `cfg credential renew` cannot
+  recover this credential — renewal only extends one that is still alive. An
+  administrator must mint a fresh enrolment token and the host must re-enrol from
+  the beginning (see the enrolment-token flow in
+  [Adding Operators](single-controller/walkthrough.md#adding-operators), or the
+  `POST /api/v1/enrolment-tokens` reference in
+  [Commands Reference](../development/commands-reference.md#renewing-an-issued-credential--cfg-credential-renew-issue-3724)).
+- Anything else (a network blip, the controller mid-failover): safe to leave
+  alone — the old certificate is never touched until a new one is confirmed
+  bound, so a failed or interrupted renewal never costs the host its existing,
+  still-working credential.
+
+See [Commands Reference — cfg credential renew](../development/commands-reference.md#renewing-an-issued-credential--cfg-credential-renew-issue-3724)
+for the full flag reference and the exact controller-side contract.
+
+## 11. The Zero-Standing-Privilege Model
 
 CFGMS admin sessions follow a zero-standing-privilege design: no long-lived
 credential is ever exchanged between operator and controller. Each session is

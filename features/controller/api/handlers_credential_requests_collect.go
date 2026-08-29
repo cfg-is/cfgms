@@ -186,6 +186,11 @@ func (s *Server) signAndBindCollectedCertificate(ctx context.Context, claimed *p
 		Fingerprint: claimed.PublicKeyFingerprint,
 		Label:       claimed.Label,
 		BoundAt:     time.Now().UTC(),
+		// HumanApprovedAt records the moment a human approved this credential
+		// (Issue #3718's ApprovedAt) — the fixed point later renewals (Issue #3724)
+		// carry forward unchanged, so an indefinitely-renewing credential never loses
+		// the date a person last vouched for it.
+		HumanApprovedAt: claimed.ApprovedAt,
 	}
 	if err := s.bindCertOnAccount(ctx, acct.Username, newBinding, credentialRequestCollectActor); err != nil {
 		if revokeErr := s.certManager.Revoke(issued.SerialNumber); revokeErr != nil {
