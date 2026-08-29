@@ -519,6 +519,174 @@ export async function approveCliLoginRequest(
   return { ok: true, status: response.status, requestStatus }
 }
 
+// ── Credential requests (Issue #3723 / Epic #3711) ──────────────────────────────
+
+/**
+ * A pending credential request as read from GET /api/v1/credential-requests
+ * (PendingCredentialRequestInfo, Issue #3717). Every field besides id/status/
+ * fingerprints is caller-supplied at lodge time and is display-only untrusted
+ * text — never used for any authorization decision here or on the server.
+ */
+export interface CredentialRequestEntry {
+  id: string
+  tenantId: string
+  status: string
+  publicKeyFingerprint: string
+  publicKeyFingerprintShort: string
+  sourceIp: string
+  hostname: string
+  label: string
+  platform: string
+  purpose: string
+  createdAt: string
+  expiresAt: string
+}
+
+function strField(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+/** Exported for unit coverage of the shape guard; callers should use listCredentialRequests. */
+export function parseCredentialRequestEntry(value: unknown): CredentialRequestEntry | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const id = strField(r.id)
+  if (!id) return null
+  return {
+    id,
+    tenantId: strField(r.tenant_id),
+    status: strField(r.status),
+    publicKeyFingerprint: strField(r.public_key_fingerprint),
+    publicKeyFingerprintShort: strField(r.public_key_fingerprint_short),
+    sourceIp: strField(r.source_ip),
+    hostname: strField(r.hostname),
+    label: strField(r.label),
+    platform: strField(r.platform),
+    purpose: strField(r.purpose),
+    createdAt: strField(r.created_at),
+    expiresAt: strField(r.expires_at),
+  }
+}
+
+export interface ListCredentialRequestsResult {
+  ok: boolean
+  status: number
+  requests: CredentialRequestEntry[]
+}
+
+/**
+ * Lists pending credential requests (GET /api/v1/credential-requests,
+ * Issue #3717). Unlike the older steward registration queue, the response is
+ * the standard {data: [...]} envelope (writeSuccessResponse), not a bare array.
+ */
+export async function listCredentialRequests(): Promise<ListCredentialRequestsResult> {
+  const response = await apiFetch('/api/v1/credential-requests')
+  if (!response.ok) {
+    return { ok: false, status: response.status, requests: [] }
+  }
+  let requests: CredentialRequestEntry[] = []
+  try {
+    const body = (await response.json()) as Record<string, unknown>
+    if (Array.isArray(body.data)) {
+      requests = body.data
+        .map(parseCredentialRequestEntry)
+        .filter((e): e is CredentialRequestEntry => e !== null)
+    }
+  } catch {
+    // Body parse is best-effort; an unparseable body yields an empty list rather
+    // than a thrown error, matching the ok:true/empty-list shape callers expect.
+  }
+  return { ok: true, status: response.status, requests }
+}
+
+/**
+ * Approve request parameters (POST .../credential-requests/{id}/approve,
+ * Issue #3718). fingerprint must always be the value the panel rendered for
+ * this row, never operator-retyped — the server rejects a mismatch (or a
+ * request that is no longer pending) with 409 rather than approving by
+ * accident (Issue #3723 [REQUIRED TEST]).
+ *
+ * Deliberately has NO field for the root-scope marker. The epic's amendment to
+ * Issue #3723 requires this screen never offer that grant, and the server's own
+ * gate (principalHasCertifiedRootScope, handlers_credential_requests_approve.go)
+ * can never pass for a cookie-authenticated caller — there is no parameter here
+ * for any panel code path to smuggle one through even by mistake.
+ */
+export interface ApproveCredentialRequestParams {
+  id: string
+  fingerprint: string
+  newAccountUsername: string
+  grantAdminMarker: boolean
+  grantPayloadSigningMarker: boolean
+}
+
+export interface ApproveCredentialRequestResult {
+  ok: boolean
+  status: number
+  /** True on a 409 — the request changed after the row was rendered. */
+  conflict: boolean
+  errorCode?: string
+  accountId?: string
+  grantedMarkers?: string[]
+}
+
+export async function approveCredentialRequest(
+  params: ApproveCredentialRequestParams,
+): Promise<ApproveCredentialRequestResult> {
+  const response = await apiFetch(
+    `/api/v1/credential-requests/${encodeURIComponent(params.id)}/approve`,
+    {
+      method: 'POST',
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        fingerprint: params.fingerprint,
+        new_account_username: params.newAccountUsername,
+        grant_admin_marker: params.grantAdminMarker,
+        grant_payload_signing_marker: params.grantPayloadSigningMarker,
+      }),
+    },
+  )
+  if (!response.ok) {
+    let errorCode: string | undefined
+    try {
+      const body = (await response.json()) as Record<string, unknown>
+      const error = body.error as Record<string, unknown> | undefined
+      if (error !== undefined && typeof error.code === 'string') errorCode = error.code
+    } catch {
+      // Body parse is best-effort.
+    }
+    return { ok: false, status: response.status, conflict: response.status === 409, errorCode }
+  }
+  let accountId: string | undefined
+  let grantedMarkers: string[] | undefined
+  try {
+    const body = (await response.json()) as Record<string, unknown>
+    const data = body.data as Record<string, unknown> | undefined
+    if (data !== undefined && data !== null) {
+      if (typeof data.account_id === 'string') accountId = data.account_id
+      if (Array.isArray(data.granted_markers)) {
+        grantedMarkers = data.granted_markers.filter((m): m is string => typeof m === 'string')
+      }
+    }
+  } catch {
+    // Body parse is best-effort.
+  }
+  return { ok: true, status: response.status, conflict: false, accountId, grantedMarkers }
+}
+
+export interface DenyCredentialRequestResult {
+  ok: boolean
+  status: number
+}
+
+/** POST .../credential-requests/{id}/deny (Issue #3717). No body — deny carries no reason field here. */
+export async function denyCredentialRequest(id: string): Promise<DenyCredentialRequestResult> {
+  const response = await apiFetch(`/api/v1/credential-requests/${encodeURIComponent(id)}/deny`, {
+    method: 'POST',
+  })
+  return { ok: response.ok, status: response.status }
+}
+
 /**
  * Server-side logout (CSRF-checked). A 401 means the session was already
  * gone — the caller returns to the signin state either way, so it is not
