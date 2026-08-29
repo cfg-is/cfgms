@@ -195,4 +195,19 @@ describe('App', () => {
     )
     expect(dataCall).toBeDefined()
   })
+
+  it('reaches the CLI login confirmation screen at /login/confirm as a top-level unauthenticated route', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    render(
+      <MemoryRouter initialEntries={['/login/confirm?request_id=cli-login-abc']}>
+        <App />
+      </MemoryRouter>,
+    )
+    // No session: the screen falls back to the shared passkey login ceremony, not the
+    // authenticated shell and not a 404 — confirming the route is registered.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /sign in with a passkey/i })).toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+  })
 })

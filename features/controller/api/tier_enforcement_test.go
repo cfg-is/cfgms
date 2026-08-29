@@ -165,6 +165,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// cfg-CLI Bearer session for the approving principal; AssuranceStrong mirrors
 	// session:create's own bar.
 	{"POST", "/api/v1/cli-login/test-request-id/approve", "cli-login:approve"},
+	// CLI login confirmation screen's read (Issue #3722, Epic #3711) — shares
+	// cli-login:approve with the route above, mirroring script:admin's GET+PUT sharing.
+	{"GET", "/api/v1/cli-login/test-request-id", "cli-login:approve"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
