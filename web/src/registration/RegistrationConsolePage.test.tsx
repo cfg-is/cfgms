@@ -47,13 +47,14 @@ function tab(name: RegExp) {
 // ── Tab strip composition ─────────────────────────────────────────────────────
 
 describe('RegistrationConsolePage — tab strip', () => {
-  it('renders a tablist with Pending, Tokens, and IP Trust', () => {
+  it('renders a tablist with Pending, Tokens, IP Trust, and Credential Requests', () => {
     renderPage()
 
     expect(screen.getByRole('tablist', { name: /registration sections/i })).toBeInTheDocument()
     expect(tab(/^Pending/i)).toBeInTheDocument()
     expect(tab(/^Tokens/i)).toBeInTheDocument()
     expect(tab(/^IP Trust/i)).toBeInTheDocument()
+    expect(tab(/^Credential Requests/i)).toBeInTheDocument()
     expect(screen.getAllByRole('tab')).toHaveLength(TABS.length)
   })
 
@@ -63,6 +64,7 @@ describe('RegistrationConsolePage — tab strip', () => {
     expect(tab(/^Pending/i)).toHaveAttribute('aria-selected', 'true')
     expect(tab(/^Tokens/i)).toHaveAttribute('aria-selected', 'false')
     expect(tab(/^IP Trust/i)).toHaveAttribute('aria-selected', 'false')
+    expect(tab(/^Credential Requests/i)).toHaveAttribute('aria-selected', 'false')
   })
 
   it('gives the active tab a roving tabindex of 0 and the rest -1', () => {
@@ -135,6 +137,16 @@ describe('RegistrationConsolePage — panel rendering', () => {
     expect(screen.queryByText(/IP Trust is not yet available/i)).toBeNull()
   })
 
+  it('mounts the real CredentialRequestsTab on the Credential Requests tab, not a soon placeholder', async () => {
+    renderPage()
+
+    fireEvent.click(tab(/^Credential Requests/i))
+
+    expect(tab(/^Credential Requests/i)).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('credential-requests-loading')).toBeInTheDocument()
+    expect(screen.queryByText(/Credential Requests is not yet available/i)).toBeNull()
+  })
+
   it('restores the Pending panel after visiting the Tokens tab', () => {
     renderPage()
 
@@ -165,27 +177,30 @@ describe('RegistrationConsolePage — keyboard navigation', () => {
 
     fireEvent.keyDown(tablist, { key: 'ArrowRight' })
     expect(tab(/^IP Trust/i)).toHaveAttribute('aria-selected', 'true')
+
+    fireEvent.keyDown(tablist, { key: 'ArrowRight' })
+    expect(tab(/^Credential Requests/i)).toHaveAttribute('aria-selected', 'true')
   })
 
   it('ArrowRight wraps from the last tab back to Pending', () => {
     renderPage()
     const tablist = screen.getByRole('tablist')
 
-    fireEvent.click(tab(/^IP Trust/i))
+    fireEvent.click(tab(/^Credential Requests/i))
     fireEvent.keyDown(tablist, { key: 'ArrowRight' })
 
     expect(tab(/^Pending/i)).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByTestId('pending-loading')).toBeInTheDocument()
   })
 
-  it('ArrowLeft wraps from Pending to IP Trust', async () => {
+  it('ArrowLeft wraps from Pending to the last tab (Credential Requests)', async () => {
     renderPage()
     const tablist = screen.getByRole('tablist')
 
     fireEvent.keyDown(tablist, { key: 'ArrowLeft' })
 
-    expect(tab(/^IP Trust/i)).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByTestId('iptrust-loading')).toBeInTheDocument()
+    expect(tab(/^Credential Requests/i)).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('credential-requests-loading')).toBeInTheDocument()
   })
 
   it('ArrowLeft steps backwards one tab at a time', () => {
@@ -248,13 +263,11 @@ describe('RegistrationConsolePage — keyboard navigation', () => {
 // ── Tab specification ─────────────────────────────────────────────────────────
 
 describe('TABS', () => {
-  it('declares Pending, Tokens, and IP Trust with real panels', () => {
-    expect(TABS.map((t) => t.key)).toEqual(['pending', 'tokens', 'ip-trust'])
-    expect(TABS[0]?.soon).toBe(false)
-    expect(TABS[0]?.Panel).toBeDefined()
-    expect(TABS[1]?.soon).toBe(false)
-    expect(TABS[1]?.Panel).toBeDefined()
-    expect(TABS[2]?.soon).toBe(false)
-    expect(TABS[2]?.Panel).toBeDefined()
+  it('declares Pending, Tokens, IP Trust, and Credential Requests with real panels', () => {
+    expect(TABS.map((t) => t.key)).toEqual(['pending', 'tokens', 'ip-trust', 'credential-requests'])
+    for (const spec of TABS) {
+      expect(spec.soon).toBe(false)
+      expect(spec.Panel).toBeDefined()
+    }
   })
 })

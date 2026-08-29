@@ -13,6 +13,10 @@ import {
   onSessionConfirmed,
   onSessionExpired,
   onStepUpRequired,
+  listCredentialRequests,
+  approveCredentialRequest,
+  denyCredentialRequest,
+  parseCredentialRequestEntry,
   type AssertionJSON,
   type AttestationJSON,
 } from './client.ts'
@@ -970,5 +974,271 @@ describe('approveCliLoginRequest', () => {
     )
     const result = await approveCliLoginRequest('cli-login-abc', 'ABCD-1234', false)
     expect(JSON.stringify(result)).not.toContain('super-secret-session-token')
+  })
+})
+
+// ── Credential requests (Issue #3723) ────────────────────────────────────────────
+
+function makeCredentialRequestPayload(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'creq-abc123',
+    tenant_id: 'msp-a',
+    status: 'pending',
+    public_key_fingerprint: 'a'.repeat(64),
+    public_key_fingerprint_short: 'AAAA-AAAA-AAAA-AAAA',
+    source_ip: '10.0.0.1',
+    hostname: 'host-1',
+    label: 'label-1',
+    platform: 'linux',
+    purpose: 'steward',
+    created_at: '2026-08-29T00:00:00Z',
+    expires_at: '2026-08-29T01:00:00Z',
+    ...overrides,
+  }
+}
+
+describe('parseCredentialRequestEntry', () => {
+  it('returns null for non-objects', () => {
+    expect(parseCredentialRequestEntry(null)).toBeNull()
+    expect(parseCredentialRequestEntry('x')).toBeNull()
+  })
+
+  it('returns null when id is missing or empty', () => {
+    expect(parseCredentialRequestEntry({})).toBeNull()
+    expect(parseCredentialRequestEntry({ id: '' })).toBeNull()
+  })
+
+  it('parses a valid entry', () => {
+    const entry = parseCredentialRequestEntry(makeCredentialRequestPayload())
+    expect(entry).toEqual({
+      id: 'creq-abc123',
+      tenantId: 'msp-a',
+      status: 'pending',
+      publicKeyFingerprint: 'a'.repeat(64),
+      publicKeyFingerprintShort: 'AAAA-AAAA-AAAA-AAAA',
+      sourceIp: '10.0.0.1',
+      hostname: 'host-1',
+      label: 'label-1',
+      platform: 'linux',
+      purpose: 'steward',
+      createdAt: '2026-08-29T00:00:00Z',
+      expiresAt: '2026-08-29T01:00:00Z',
+    })
+  })
+
+  it('coerces non-string fields to empty string', () => {
+    const entry = parseCredentialRequestEntry({ id: 'creq-1', hostname: 42, purpose: null })
+    expect(entry?.hostname).toBe('')
+    expect(entry?.purpose).toBe('')
+  })
+})
+
+describe('listCredentialRequests', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionConfirmed(null)
+    onSessionExpired(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('GETs the list endpoint and parses the {data:[...]} envelope', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: [makeCredentialRequestPayload()] }))
+    const result = await listCredentialRequests()
+    expect(result.ok).toBe(true)
+    expect(result.requests).toHaveLength(1)
+    expect(result.requests[0]?.id).toBe('creq-abc123')
+    const call = fetchMock.mock.calls.at(0)
+    expect(String(call?.[0])).toBe('/api/v1/credential-requests')
+    expect(call?.[1]?.method ?? 'GET').toBe('GET')
+  })
+
+  it('drops entries without an id', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { data: [{}, makeCredentialRequestPayload()] }),
+    )
+    const result = await listCredentialRequests()
+    expect(result.requests).toHaveLength(1)
+  })
+
+  it('returns ok:false and an empty list on a non-2xx response', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(500, { error: { code: 'STORE_ERROR', message: 'x' } }))
+    const result = await listCredentialRequests()
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(500)
+    expect(result.requests).toEqual([])
+  })
+
+  it('fires the session-expired listener on a plain 401, via apiFetch', async () => {
+    const expired = vi.fn()
+    onSessionExpired(expired)
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    await listCredentialRequests()
+    expect(expired).toHaveBeenCalled()
+  })
+})
+
+describe('approveCredentialRequest', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionConfirmed(null)
+    onSessionExpired(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs the fingerprint the caller supplied, the new account username, and the requested markers', async () => {
+    document.cookie = 'cfgms_csrf=sess-tok; path=/'
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        data: { id: 'creq-abc123', status: 'approved', account_id: 'acct-1', granted_markers: ['admin'] },
+      }),
+    )
+
+    const result = await approveCredentialRequest({
+      id: 'creq-abc123',
+      fingerprint: 'AAAA-AAAA-AAAA-AAAA',
+      newAccountUsername: 'host-1',
+      grantAdminMarker: true,
+      grantPayloadSigningMarker: false,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.accountId).toBe('acct-1')
+    expect(result.grantedMarkers).toEqual(['admin'])
+    const call = fetchMock.mock.calls.at(0)
+    if (!call) throw new Error('approve POST was never made')
+    expect(String(call[0])).toBe('/api/v1/credential-requests/creq-abc123/approve')
+    expect(call[1]?.method).toBe('POST')
+    const headers = new Headers(call[1]?.headers)
+    expect(headers.get('X-CSRF-Token')).toBe('sess-tok')
+    const body = JSON.parse(String(call[1]?.body)) as Record<string, unknown>
+    expect(body).toEqual({
+      fingerprint: 'AAAA-AAAA-AAAA-AAAA',
+      new_account_username: 'host-1',
+      grant_admin_marker: true,
+      grant_payload_signing_marker: false,
+    })
+  })
+
+  it('URL-encodes the id', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404))
+    await approveCredentialRequest({
+      id: 'has space/slash',
+      fingerprint: 'x',
+      newAccountUsername: 'host-1',
+      grantAdminMarker: false,
+      grantPayloadSigningMarker: false,
+    })
+    const call = fetchMock.mock.calls.at(0)
+    expect(String(call?.[0])).toBe('/api/v1/credential-requests/has%20space%2Fslash/approve')
+  })
+
+  it('surfaces a 409 conflict distinctly, with the error code', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(409, { error: { code: 'FINGERPRINT_MISMATCH', message: 'nope' } }),
+    )
+    const result = await approveCredentialRequest({
+      id: 'creq-abc123',
+      fingerprint: 'stale',
+      newAccountUsername: 'host-1',
+      grantAdminMarker: false,
+      grantPayloadSigningMarker: false,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(409)
+    expect(result.conflict).toBe(true)
+    expect(result.errorCode).toBe('FINGERPRINT_MISMATCH')
+  })
+
+  it('a 403 (marker not grantable) is surfaced as a non-conflict failure', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(403, { error: { code: 'MARKER_NOT_GRANTABLE', message: 'nope' } }),
+    )
+    const result = await approveCredentialRequest({
+      id: 'creq-abc123',
+      fingerprint: 'x',
+      newAccountUsername: 'host-1',
+      grantAdminMarker: true,
+      grantPayloadSigningMarker: false,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.conflict).toBe(false)
+    expect(result.errorCode).toBe('MARKER_NOT_GRANTABLE')
+  })
+
+  it('never sends a root-scope marker field, for every reachable combination of the admin/payload-signing markers', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { id: 'creq-abc123', status: 'approved' } }))
+    const combinations = [
+      [false, false],
+      [true, false],
+      [false, true],
+      [true, true],
+    ] as const
+    for (const [admin, signing] of combinations) {
+      fetchMock.mockClear()
+      await approveCredentialRequest({
+        id: 'creq-abc123',
+        fingerprint: 'x',
+        newAccountUsername: 'host-1',
+        grantAdminMarker: admin,
+        grantPayloadSigningMarker: signing,
+      })
+      const call = fetchMock.mock.calls.at(0)
+      const rawBody = String(call?.[1]?.body)
+      expect(rawBody).not.toContain('root_scope')
+      expect(rawBody).not.toContain('rootScope')
+      const body = JSON.parse(rawBody) as Record<string, unknown>
+      expect(Object.keys(body).sort()).toEqual([
+        'fingerprint',
+        'grant_admin_marker',
+        'grant_payload_signing_marker',
+        'new_account_username',
+      ])
+    }
+  })
+})
+
+describe('denyCredentialRequest', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionConfirmed(null)
+    onSessionExpired(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs to the deny endpoint', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { id: 'creq-abc123', status: 'denied' } }))
+    const result = await denyCredentialRequest('creq-abc123')
+    expect(result.ok).toBe(true)
+    const call = fetchMock.mock.calls.at(0)
+    expect(String(call?.[0])).toBe('/api/v1/credential-requests/creq-abc123/deny')
+    expect(call?.[1]?.method).toBe('POST')
+  })
+
+  it('surfaces a failure status without throwing', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(409, { error: { code: 'REQUEST_NOT_PENDING', message: 'x' } }))
+    const result = await denyCredentialRequest('creq-abc123')
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(409)
   })
 })
