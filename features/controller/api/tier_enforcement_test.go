@@ -161,6 +161,10 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/enrolment-tokens/test-token-id/revoke-issued-credentials", "enrolment-token:revoke-issued"},
 	{"POST", "/api/v1/credential-requests/test-request-id/cancel", "credential-request:cancel"},
 	{"POST", "/api/v1/credential-requests/orphaned/testserial/revoke", "credential-request:revoke-orphaned"},
+	// Browser-authenticated CLI login approval (Issue #3721, Epic #3711) — mints a
+	// cfg-CLI Bearer session for the approving principal; AssuranceStrong mirrors
+	// session:create's own bar.
+	{"POST", "/api/v1/cli-login/test-request-id/approve", "cli-login:approve"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

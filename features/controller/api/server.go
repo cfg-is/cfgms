@@ -190,6 +190,11 @@ type Server struct {
 	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
 	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
 	credentialRenewalMu             sync.Mutex                               // Issue #3724: serializes issue-and-rebind so two concurrent renewals of one certificate cannot both succeed
+	cliLoginLodgeLimiter            *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login lodge
+	cliLoginCollectLimiter          *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login collect
+	cliLoginCollectMu               sync.Mutex                               // Issue #3721: serializes the approved->collected compare-and-set
+	stopCliLoginSweep               chan struct{}                            // Issue #3721: signals the cli-login expiry sweep to exit
+	cliLoginSweepDone               chan struct{}                            // Issue #3721: closed when the cli-login sweep goroutine exits
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -338,6 +343,12 @@ func New(
 		// Issue #3719: collect is polled by a waiting machine, so its budget is more
 		// generous than lodge's one-shot allowance.
 		credentialRequestCollectLimiter: newSourceRateLimiter(30, time.Minute),
+		// Issue #3721: per-source rate limits on cli-login lodge and collect, mirroring
+		// the credential-request lodge/collect budgets.
+		cliLoginLodgeLimiter:   newSourceRateLimiter(20, time.Minute),
+		cliLoginCollectLimiter: newSourceRateLimiter(30, time.Minute),
+		stopCliLoginSweep:      make(chan struct{}),
+		cliLoginSweepDone:      make(chan struct{}),
 	}
 
 	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
@@ -515,6 +526,11 @@ func New(
 	// Issue #3717: background sweep for expired enrolment tokens and pending
 	// credential requests — reaped on a timer, not only lazily on read.
 	server.startCredentialRequestSweep()
+
+	// Issue #3721: background sweep for expired cli-login requests — reaped on a
+	// timer, not only lazily on read, so an "expiry" audit event fires even when
+	// nobody is actively polling collect.
+	server.startCliLoginRequestSweep()
 
 	return server, nil
 }
@@ -1076,6 +1092,20 @@ func (s *Server) Close(ctx context.Context) error {
 			case <-ctx.Done():
 				if firstErr == nil {
 					firstErr = fmt.Errorf("api server close: timed out waiting for credential-request sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
+		// Issue #3721: signal the cli-login expiry sweep to exit alongside the
+		// credential-request sweep. Guarded by a nil check for the same reason —
+		// several tests build a *Server literal directly without going through New().
+		if s.stopCliLoginSweep != nil {
+			close(s.stopCliLoginSweep)
+			select {
+			case <-s.cliLoginSweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for cli-login sweep goroutine: %w", ctx.Err())
 				}
 			}
 		}
