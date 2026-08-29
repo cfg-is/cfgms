@@ -21,6 +21,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -268,6 +269,102 @@ func TestApproveCliLoginRequest_Deny(t *testing.T) {
 	assert.Empty(t, stored.SessionID, "a denial must never mint a session")
 }
 
+// TestApproveCliLoginRequest_UnknownID_NotFound covers the unknown-request branch:
+// approving an ID that was never lodged is a plain 404, and mints nothing. Mirrors
+// TestApproveCredentialRequest_UnknownID_NotFound for the handler this one mirrors.
+func TestApproveCliLoginRequest_UnknownID_NotFound(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-12", false)
+
+	rec := approveCliLogin(t, server, principal, "cli-login-does-not-exist",
+		ApproveCliLoginRequestBody{UserCode: "AAAA-BBBB"})
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Equal(t, "REQUEST_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+}
+
+// TestApproveCliLoginRequest_NotPending_Conflict covers the terminal-state branch: a
+// request that has already left "pending" cannot be resolved again, in either
+// direction. Mirrors TestApproveCredentialRequest_NotPending_Conflict. The
+// double-approve case is the security-relevant one — a second approval must not mint a
+// second session against the same request.
+func TestApproveCliLoginRequest_NotPending_Conflict(t *testing.T) {
+	t.Run("double approve", func(t *testing.T) {
+		server, mgr := setupCliLoginTestServer(t)
+		principal := browserPrincipalAfterPasskeyLogin("browser-op-13", false)
+
+		_, hash := newTestVerifier(t)
+		lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+
+		first := approveCliLogin(t, server, principal, lodged.RequestID,
+			ApproveCliLoginRequestBody{UserCode: lodged.UserCode})
+		require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+		approved, err := server.getCliLoginRequestWithToken(context.Background(), lodged.RequestID)
+		require.NoError(t, err)
+		require.NotEmpty(t, approved.SessionID)
+
+		second := approveCliLogin(t, server, principal, lodged.RequestID,
+			ApproveCliLoginRequestBody{UserCode: lodged.UserCode})
+		assert.Equal(t, http.StatusConflict, second.Code, second.Body.String())
+		assert.Equal(t, "REQUEST_NOT_PENDING", errCode(t, second.Body.Bytes()))
+
+		stored, err := server.getCliLoginRequestWithToken(context.Background(), lodged.RequestID)
+		require.NoError(t, err)
+		assert.Equal(t, cliLoginRequestStatusApproved, stored.Status)
+		assert.Equal(t, approved.SessionID, stored.SessionID,
+			"a re-approval must not mint a second session against the same request")
+		assert.Equal(t, approved.SessionToken, stored.SessionToken,
+			"a re-approval must not replace the token the CLI is waiting to collect")
+
+		sess, err := mgr.Validate(context.Background(), approved.SessionToken)
+		require.NoError(t, err)
+		assert.Equal(t, principal.ID, sess.PrincipalID)
+	})
+
+	t.Run("approve after deny", func(t *testing.T) {
+		server, _ := setupCliLoginTestServer(t)
+		principal := browserPrincipalAfterPasskeyLogin("browser-op-14", false)
+
+		_, hash := newTestVerifier(t)
+		lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+
+		denyRec := approveCliLogin(t, server, principal, lodged.RequestID,
+			ApproveCliLoginRequestBody{UserCode: lodged.UserCode, Deny: true})
+		require.Equal(t, http.StatusOK, denyRec.Code, denyRec.Body.String())
+
+		rec := approveCliLogin(t, server, principal, lodged.RequestID,
+			ApproveCliLoginRequestBody{UserCode: lodged.UserCode})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, "REQUEST_NOT_PENDING", errCode(t, rec.Body.Bytes()))
+
+		stored, err := server.getCliLoginRequestWithToken(context.Background(), lodged.RequestID)
+		require.NoError(t, err)
+		assert.Equal(t, cliLoginRequestStatusDenied, stored.Status, "a denial is terminal")
+		assert.Empty(t, stored.SessionID, "approving a denied request must never mint a session")
+		assert.Empty(t, stored.SessionToken)
+	})
+
+	t.Run("deny after approve", func(t *testing.T) {
+		server, _ := setupCliLoginTestServer(t)
+		principal := browserPrincipalAfterPasskeyLogin("browser-op-15", false)
+
+		_, hash := newTestVerifier(t)
+		lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+
+		approveRec := approveCliLogin(t, server, principal, lodged.RequestID,
+			ApproveCliLoginRequestBody{UserCode: lodged.UserCode})
+		require.Equal(t, http.StatusOK, approveRec.Code, approveRec.Body.String())
+
+		rec := approveCliLogin(t, server, principal, lodged.RequestID,
+			ApproveCliLoginRequestBody{UserCode: lodged.UserCode, Deny: true})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, "REQUEST_NOT_PENDING", errCode(t, rec.Body.Bytes()))
+
+		stored, err := server.getCliLoginRequestByID(context.Background(), lodged.RequestID)
+		require.NoError(t, err)
+		assert.Equal(t, cliLoginRequestStatusApproved, stored.Status)
+	})
+}
+
 // TestApproveCliLoginRequest_RequiresStrongAssurance is a [REQUIRED TEST]: the approve
 // route requires strong assurance, and a session that has not completed a passkey login
 // (stuck at Basic) cannot approve a login request — it receives the step-up challenge,
@@ -320,6 +417,54 @@ func TestCollectCliLoginRequest_Success(t *testing.T) {
 	stored, err := server.getCliLoginRequestByID(context.Background(), requestID)
 	require.NoError(t, err)
 	assert.Equal(t, cliLoginRequestStatusCollected, stored.Status)
+}
+
+// TestCollectCliLoginRequest_ClearsStoredTokenOnCollection asserts the token stops
+// existing at rest the moment it is handed over. A collected request is terminal —
+// sweepExpiredCliLoginRequests never touches it and the secret store's TTL only filters
+// reads — so a session_token left in its metadata would sit in git-backed durable
+// storage, and in that store's history, outliving the session it names. The session
+// itself must stay live: this clears the record, not the credential.
+func TestCollectCliLoginRequest_ClearsStoredTokenOnCollection(t *testing.T) {
+	server, mgr := setupCliLoginTestServer(t)
+	ctx := context.Background()
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-16", false)
+	requestID, verifier := lodgeAndApproveCliLogin(t, server, principal)
+
+	rec := collectCliLogin(t, server, requestID, verifier)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	token := decodeCollectCliLoginResponse(t, rec).Token
+	require.NotEmpty(t, token, "the collect response body is where the token is handed over")
+
+	stored, err := server.getCliLoginRequestWithToken(ctx, requestID)
+	require.NoError(t, err)
+	require.NotNil(t, stored, "the collected record itself is retained; only the token is dropped")
+	require.Equal(t, cliLoginRequestStatusCollected, stored.Status)
+	assert.Empty(t, stored.SessionToken,
+		"a collected request must not leave the session token in durable storage")
+	assert.NotEmpty(t, stored.SessionID, "the session identifier is not a credential and is retained")
+
+	// Directly inspect the persisted metadata: no field of the stored record may carry
+	// the token under any key.
+	metas, err := server.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Tags: []string{cliLoginRequestSecretType},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: cliLoginRequestSecretType,
+			"id":                            requestID,
+		},
+		IncludeExpired: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	_, hasTokenKey := metas[0].Metadata["session_token"]
+	assert.False(t, hasTokenKey, "the persisted record must carry no session_token key at all")
+	for k, v := range metas[0].Metadata {
+		assert.NotEqual(t, token, v, "metadata key %q must not carry the session token", k)
+	}
+
+	sess, err := mgr.Validate(ctx, token)
+	require.NoError(t, err, "clearing the stored copy must not revoke the collected session")
+	assert.Equal(t, principal.ID, sess.PrincipalID)
 }
 
 // TestCollectCliLoginRequest_RequiresVerifier_WrongIDOnlyGets404 is part of the
@@ -607,6 +752,81 @@ func TestCliLoginSession_CannotObtainRootScopeCertificate(t *testing.T) {
 // ---- refusal fires before ceremony / distinguishes revoked vs expired -----------------
 // (Client-side behaviors — a timeout/denial/interrupt distinction and the revoked-vs-
 // expired distinction — are covered in cmd/cfg/cmd/login_test.go.)
+
+// ---- leadership gate ---------------------------------------------------------------------
+
+// TestCliLogin_LeadershipGate is the authority-gating test for all three mutating
+// cli-login handlers (CLAUDE.md Authority Gating Rule, Story #3547 / Epic #3411):
+// lodge, approve and the collect handler's claim branch each call HasLeadership() in
+// their own body — routes_cli_login.go relies on exactly that, since the scanner cannot
+// see a gate through the rate-limiter middleware wrapper — and each returns 503 on a
+// non-authoritative node. Mirrors TestCredentialRequests_LeadershipGate and
+// TestCollectCredentialRequest_LeadershipGate.
+func TestCliLogin_LeadershipGate(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+	ctx := context.Background()
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-17", false)
+
+	// Every fixture must be built while the node is still leader — lodge and approve
+	// are themselves gated, so the follower branches below have nothing to act on
+	// otherwise.
+	approvedID, approvedVerifier := lodgeAndApproveCliLogin(t, server, principal)
+	pendingVerifier, pendingHash := newTestVerifier(t)
+	pendingLodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, pendingHash))
+	toApproveVerifier, toApproveHash := newTestVerifier(t)
+	toApprove := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, toApproveHash))
+
+	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	t.Run("lodge", func(t *testing.T) {
+		_, hash := newTestVerifier(t)
+		rec := lodgeCliLogin(t, server, hash)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	})
+
+	t.Run("approve", func(t *testing.T) {
+		rec := approveCliLogin(t, server, principal, toApprove.RequestID,
+			ApproveCliLoginRequestBody{UserCode: toApprove.UserCode})
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+		stored, err := server.getCliLoginRequestWithToken(ctx, toApprove.RequestID)
+		require.NoError(t, err)
+		assert.Equal(t, cliLoginRequestStatusPending, stored.Status,
+			"a 503 from a non-leader must leave the request pending")
+		assert.Empty(t, stored.SessionToken, "a non-leader must never mint a session")
+	})
+
+	t.Run("collect claim branch", func(t *testing.T) {
+		rec := collectCliLogin(t, server, approvedID, approvedVerifier)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+		stored, err := server.getCliLoginRequestByID(ctx, approvedID)
+		require.NoError(t, err)
+		assert.Equal(t, cliLoginRequestStatusApproved, stored.Status,
+			"a 503 from a non-leader must leave the request unconsumed")
+	})
+
+	t.Run("polling stays available on a non-leader", func(t *testing.T) {
+		rec := collectCliLogin(t, server, pendingLodged.RequestID, pendingVerifier)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, "pending", decodeCollectCliLoginResponse(t, rec).Status)
+	})
+
+	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
+
+	t.Run("leader completes what the follower refused", func(t *testing.T) {
+		approveRec := approveCliLogin(t, server, principal, toApprove.RequestID,
+			ApproveCliLoginRequestBody{UserCode: toApprove.UserCode})
+		require.Equal(t, http.StatusOK, approveRec.Code, approveRec.Body.String())
+		collectRec := collectCliLogin(t, server, toApprove.RequestID, toApproveVerifier)
+		require.Equal(t, http.StatusOK, collectRec.Code, collectRec.Body.String())
+		assert.NotEmpty(t, decodeCollectCliLoginResponse(t, collectRec).Token)
+
+		retryRec := collectCliLogin(t, server, approvedID, approvedVerifier)
+		require.Equal(t, http.StatusOK, retryRec.Code, retryRec.Body.String())
+		assert.NotEmpty(t, decodeCollectCliLoginResponse(t, retryRec).Token)
+	})
+}
 
 // ---- expiry sweep -----------------------------------------------------------------------
 

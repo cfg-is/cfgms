@@ -123,13 +123,12 @@ from that same machine:
 cfg login --url https://controller.acme-corp.example:9443
 ```
 
-The command prints a short confirmation code and an approval URL, and opens
-that URL in your default browser:
+The command prints a short code and an approval URL, and opens that URL in
+your default browser (pass `--no-browser` to only print it):
 
 ```
-Confirmation code: AB3D-7FQK
-Compare this code with the one shown in your browser before confirming.
-Approval URL: https://controller.acme-corp.example:9443/login/confirm?id=cli-login-...
+Code: AB3D-7FQK
+Approve this login by visiting: https://controller.acme-corp.example:9443/login/confirm?request_id=cli-login-...
 Expires: 2026-06-29T16:05:00Z
 ```
 

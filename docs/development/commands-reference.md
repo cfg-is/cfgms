@@ -420,11 +420,10 @@ the operator-signature check in `features/controller/api/handlers_runs.go` both
 accept any admin-marked certificate and never require the payload-signing
 marker, so a bundle can authorise endpoint execution today] — see
 [ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md)).
-The ordinary way to obtain a session is `cfg login`
-[GAP: not yet shipped — see Epic #3711, Story #3721], a browser passkey
-assertion; this bundle-import route is for the very first credential on a
-controller with no account yet to log in against, or for re-running
-`bootstrap-admin` to issue another one while `cfg login` is unavailable.
+The ordinary way to obtain a session is `cfg login` (Issue #3721), a browser
+passkey assertion — see below; this bundle-import route is for the very first
+credential on a controller with no account yet to log in against, or for
+re-running `bootstrap-admin` to issue another operator bundle.
 
 ```bash
 cfg connect --bundle /path/to/admin.bundle.yaml --url https://controller:9443
@@ -737,45 +736,46 @@ cfg login --url https://controller:9443 --name prod
 ```
 
 The command generates a random verifier locally (never written to disk, never placed in
-a URL), lodges a login request over its own already-pinned TLS connection, and prints,
-together and prominently:
+a URL, sent to the controller only once — as a bearer credential at collect time), lodges
+a login request over its own connection, and prints:
 
 ```
-Confirmation code: AB3D-7FQK
-Compare this code with the one shown in your browser before confirming.
-Approval URL: https://controller:9443/login/confirm?id=cli-login-...
+Code: AB3D-7FQK
+Approve this login by visiting: https://controller:9443/login/confirm?request_id=cli-login-...
 Expires: 2026-08-28T11:05:00Z
 ```
 
-It then opens the approval URL in the default browser — best-effort; if that fails (a
-headless SSH session, an unsupported platform) the command prints a notice and the
-operator copies the URL to any browser, on any machine. Complete a passkey login there
-and confirm the same code this command printed — **the code comparison is the actual
-security check**, and applies uniformly regardless of the account's scope: `cfg login`
-succeeds the same way for a root-scoped account as for a tenant-scoped one, and the
-resulting session carries whatever scope the approving account has.
+It then opens the approval URL in the default browser (skip this and only print the URL
+with `--no-browser`) — best-effort; if opening fails (a headless SSH session, an
+unsupported platform) the command prints a notice and the operator copies the URL to any
+browser, on any machine. Complete a passkey login there and confirm the same code this
+command printed — **the code comparison is the actual security check**, and applies
+uniformly regardless of the account's scope: `cfg login` succeeds the same way for a
+root-scoped account as for a tenant-scoped one, and the resulting session carries
+whatever scope the approving account has.
 
 **No bundle, no relay, no listener.** `cfg login` never opens a local listening socket.
-The token that the browser mints is handed to this command only once, over the
+The session token is handed to this command exactly once, in the response body of the
 collect call this command itself makes to the controller — the browser never talks to
 this machine, and the token never appears in any URL, query string, fragment, redirect
 target, log line, or output stream.
 
 **A tenant-scoped account needs the `session:create` permission** (granted like any
 other RBAC permission) before it can log in this way — `cfg login` reuses the existing
-session-creation path (`POST /api/v1/sessions`) via the approving account, it does not
-mint through a separate route.
+session-creation path (`POST /api/v1/sessions`, via the `cli-login:approve` route) for
+the approving account; it does not mint through a separate route.
 
-The command then polls the collect endpoint (`--poll-interval`, default 3s) until the
-browser confirms, printing `Waiting for browser confirmation...` between polls, and
-exits with one of four distinct outcomes — the first three leave no session on disk:
+The command then polls the collect endpoint (`--poll-interval`, default 3s, bounded by
+`--wait-timeout`, default 5m) until the browser confirms, printing `Waiting for browser
+approval...` between polls, and exits with one of four distinct outcomes — none of which
+leave a session on disk:
 
 | Outcome | What happened | Message |
 |---|---|---|
-| Denied | The browser session declined the confirmation | `login denied by the browser session — no session was stored` |
-| Timed out | No confirmation arrived within the login request's short lifetime | `login timed out waiting for browser confirmation — try again, or use 'cfg credential enrol' for headless enrolment` |
+| Denied | The browser session declined the confirmation | `login request was denied by an administrator` |
+| Timed out | The wait-timeout elapsed, or the login request's own short lifetime expired first | `timed out waiting for browser approval; run 'cfg credential enrol' for headless enrolment instead` |
 | Interrupted | The operator pressed Ctrl-C while waiting | `login interrupted; no session was stored` |
-| Already collected | This command already collected it (should not normally occur) | `login request was already collected — no session was stored` |
+| Already collected | This request was already collected (should not normally occur) | `login request was already collected` |
 | **Success** | Confirmed in the browser and collected | `Logged in as "<name>" (expires ...)` |
 
 On success the command registers the connection in the local registry (`unlock_method:
@@ -789,8 +789,8 @@ reasons applies — both surface as the same `401` from the controller, so the c
 never collapses them into one generic message:
 
 ```
-Your previous session was revoked — if your account was disabled, this login will fail for the same reason; contact an administrator if so.
-Your previous session expired — logging in again.
+Note: your previous session was revoked — this usually means the account was disabled. If a fresh login also fails, contact an administrator.
+Note: your previous session expired. Logging in again...
 ```
 
 This is informational only; the fresh browser login proceeds either way.
@@ -800,10 +800,12 @@ This is informational only; the fresh browser login proceeds either way.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--url` | — | Controller HTTPS URL; required, and must be HTTPS for any non-loopback address (same rule as `cfg connect`) |
-| `--name` | derived from URL host | Connection name to register |
+| `--name` | derived from URL host | Connection label to register |
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
 | `--poll-interval` | 3s | Interval between collect polls |
+| `--wait-timeout` | 5m | Maximum time to wait for browser approval |
+| `--no-browser` | false | Never attempt to open a browser automatically; only print the URL |
 
 ### cfg credential revoke-by-token / cancel-request / list-orphaned / revoke-orphaned (Issue #3725)
 
