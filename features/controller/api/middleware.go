@@ -104,7 +104,10 @@ type Principal struct {
 	// RootScoped principal is subject to ADR-025 Decision 1's root<->MSP boundary
 	// (isCallerAuthorizedForTenant in handlers_tenants.go). Set from an explicit signal
 	// only: cert.HasRootScopeMarker for mTLS admin certs, Session.RootScoped for cfg-CLI
-	// Bearer sessions. Always false for API-key, web-session, and relay principals.
+	// Bearer sessions, or — for both the Bearer and web-cookie session paths — a
+	// phishing-resistant assertion (Assurance >= AssuranceStrong) for an account whose
+	// RootScope flag is set (ADR-025 Amendment 4 A4.1), re-derived on every request by
+	// rootScopeFromAssertion. Always false for API-key and relay principals.
 	RootScoped bool
 	// ImplicitAdmin marks a principal as having unrestricted permission breadth (ADR-025
 	// Amendment 3). Exactly three construction sites set this: mTLS admin certs
@@ -117,6 +120,20 @@ type Principal struct {
 	// permission by construction. Previously, Permissions==nil served as the implicit-admin
 	// marker; that sentinel made a zero-valued principal unintentionally privileged.
 	ImplicitAdmin bool
+}
+
+// rootScopeFromAssertion derives the ADR-025 Amendment 4 A4.1 explicit root-scope
+// marker for a session-authenticated principal from two facts alone: the bound
+// account's RootScope flag and the session's current assurance being phishing-resistant
+// (AssuranceStrong — a passkey login or a WebAuthn step-up elevation). It is never
+// inferred from TenantID being empty, from GlobalScope, or from ImplicitAdmin.
+//
+// Deliberately recomputed by the caller on every request rather than cached on the
+// session record: an assurance downgrade (ADR-021 Decision 5, source-IP change) or an
+// administrative clearing of the account's RootScope flag must stop conferring the
+// marker on the very next request, not at session expiry (ADR-025 Amendment 4 A4.3).
+func rootScopeFromAssertion(acct *account, assurance session.AssuranceLevel) bool {
+	return acct != nil && acct.RootScope && assurance >= session.AssuranceStrong
 }
 
 // loggingMiddleware logs HTTP requests
@@ -781,10 +798,13 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						Permissions:   permissions,
 						TenantID:      tenantID,
 						ImplicitAdmin: implicitAdmin,
-						// RootScoped mirrors the session's own explicit marker (ADR-025
-						// Amendment 1 A1.3, set only by session.Manager.IssueRootScoped) —
-						// never derived from TenantID or GlobalScope.
-						RootScoped: sess.RootScoped,
+						// RootScoped is true when either the session's own explicit marker
+						// (ADR-025 Amendment 1 A1.3, set only by session.Manager.IssueRootScoped
+						// and immutable thereafter) is set, or this request's phishing-resistant
+						// assertion against the bound account qualifies (ADR-025 Amendment 4
+						// A4.1, re-derived every request). Never derived from TenantID or
+						// GlobalScope.
+						RootScoped: sess.RootScoped || rootScopeFromAssertion(acct, sess.Assurance),
 					}
 					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
 					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
@@ -848,7 +868,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				// (ADR-025 Amendment 3). permissions is always non-nil; the nil-sentinel is gone.
 				implicitAdminWeb := false
 				permissions := []string{}
-				if acct, err := s.getAccountByID(r.Context(), webSess.PrincipalID); err == nil && acct != nil {
+				webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
+				if webAcctErr == nil && webAcct != nil {
+					acct := webAcct
 					// Issue #3126: an administratively disabled account loses access
 					// immediately, not at session expiry. The login gate in
 					// handlePasskeyLoginFinish only blocks new sessions; without this
@@ -902,6 +924,14 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					TenantID:           webSess.TenantID,
 					AuthenticatorCount: authCount,
 					ImplicitAdmin:      implicitAdminWeb,
+					// RootScoped is derived per request from the bound account's RootScope
+					// flag and this session's current assurance being phishing-resistant
+					// (ADR-025 Amendment 4 A4.1) — never stored on the session record, never
+					// inferred from TenantID or GlobalScope. This is the browser-path half of
+					// the asymmetry Amendment 4 closes: before this, a root-scope web session
+					// never carried the marker at all and was therefore unconfined by the
+					// Decision 1 root<->MSP boundary (A4.2).
+					RootScoped: rootScopeFromAssertion(webAcct, webSess.Assurance),
 				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))

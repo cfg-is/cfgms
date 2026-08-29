@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -3427,4 +3428,393 @@ func TestCertBindingLastUsedStoreKey_WindowsFilenameSafe(t *testing.T) {
 				"store key %q must not contain Windows-reserved filename character %q", key, c)
 		}
 	}
+}
+
+// ---- ADR-025 Amendment 4: session-derived root-scope marker ------------------------
+
+// TestWebSessionCookie_PhishingResistantRootScopeAccount_CarriesMarker is the positive
+// half of the [REQUIRED TEST] set for ADR-025 Amendment 4 A4.1: a web-cookie session
+// established by a phishing-resistant assertion (AssuranceStrong, mirroring a passkey
+// login which is issued at Strong directly per handlePasskeyLoginFinish) for an account
+// whose RootScope flag is set must carry the explicit RootScoped marker. Before this
+// story the web-session principal construction set no such marker at all.
+func TestWebSessionCookie_PhishingResistantRootScopeAccount_CarriesMarker(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	srv.cacheAccount(&account{
+		ID:        "web-root-op",
+		Username:  "web-root-op",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	sess, _, err := mgr.Issue(context.Background(), "web-root-op", "web-login", "")
+	require.NoError(t, err)
+	// Elevate with an empty sourceIP: BoundIP stays "" so no source-IP-change downgrade
+	// can fire against httptest's default RemoteAddr on the request below.
+	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
+	require.NoError(t, err)
+
+	var captured *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.Equal(t, session.AssuranceStrong, captured.Assurance, "precondition: session must be phishing-resistant")
+	assert.True(t, captured.RootScoped,
+		"a phishing-resistant web session for a root-scope account must carry the ADR-025 Amendment 4 A4.1 marker")
+}
+
+// TestBearerSession_PhishingResistantRootScopeAccount_CarriesMarker is the CLI-Bearer
+// counterpart, pinning AC1's "on both the browser cookie path and the CLI bearer path."
+func TestBearerSession_PhishingResistantRootScopeAccount_CarriesMarker(t *testing.T) {
+	srv := setupTestServer(t)
+	cliCfg := session.DefaultConfig()
+	store := session.NewMemStore(cliCfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cliCfg, store, time.Now)
+	srv.SetSessionManager(mgr)
+
+	srv.cacheAccount(&account{
+		ID:        "cli-root-op",
+		Username:  "cli-root-op",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	sess, _, err := mgr.Issue(context.Background(), "cli-root-op", "cfg-cli", "")
+	require.NoError(t, err)
+	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
+	require.NoError(t, err)
+
+	var captured *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+elevatedTok)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.Equal(t, session.AssuranceStrong, captured.Assurance, "precondition: session must be phishing-resistant")
+	assert.True(t, captured.RootScoped,
+		"a phishing-resistant cfg-CLI Bearer session for a root-scope account must carry the ADR-025 Amendment 4 A4.1 marker")
+}
+
+// TestWebSessionCookie_RootScopeAccount_BasicAssurance_NoMarker is the [REQUIRED TEST]
+// for the acceptance criterion "a session whose assurance is below phishing-resistant
+// does not carry the marker, even when the bound account's flag is set."
+func TestWebSessionCookie_RootScopeAccount_BasicAssurance_NoMarker(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	srv.cacheAccount(&account{
+		ID:        "web-root-op-basic",
+		Username:  "web-root-op-basic",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	// Issue only — never elevated, so Assurance stays Basic.
+	cookie := issueWebSession(t, mgr, "web-root-op-basic", "")
+
+	var captured *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.Equal(t, session.AssuranceBasic, captured.Assurance, "precondition: session must not be phishing-resistant")
+	assert.False(t, captured.RootScoped,
+		"a root-scope account's session must not carry the marker until its assurance is phishing-resistant")
+	assert.True(t, captured.ImplicitAdmin,
+		"permission breadth is unaffected: it is still granted from the account's RootScope flag alone")
+}
+
+// TestBearerSession_RootScopeAccount_BasicAssurance_NoMarker is the CLI-Bearer
+// counterpart of the assurance-floor test above.
+func TestBearerSession_RootScopeAccount_BasicAssurance_NoMarker(t *testing.T) {
+	srv := setupTestServer(t)
+	cliCfg := session.DefaultConfig()
+	store := session.NewMemStore(cliCfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(cliCfg, store, time.Now)
+	srv.SetSessionManager(mgr)
+
+	srv.cacheAccount(&account{
+		ID:        "cli-root-op-basic",
+		Username:  "cli-root-op-basic",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	_, tok, err := mgr.Issue(context.Background(), "cli-root-op-basic", "cfg-cli", "")
+	require.NoError(t, err)
+
+	var captured *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.Equal(t, session.AssuranceBasic, captured.Assurance, "precondition: session must not be phishing-resistant")
+	assert.False(t, captured.RootScoped,
+		"a root-scope account's cfg-CLI Bearer session must not carry the marker until its assurance is phishing-resistant")
+}
+
+// TestWebSessionCookie_RootScopeMarker_RemovedOnAssuranceDowngrade pins A4.3: an
+// assurance downgrade (ADR-021 Decision 5, source-IP change) removes the marker on the
+// very next request rather than at session expiry.
+func TestWebSessionCookie_RootScopeMarker_RemovedOnAssuranceDowngrade(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	srv.cacheAccount(&account{
+		ID:        "web-root-op-downgrade",
+		Username:  "web-root-op-downgrade",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	sess, _, err := mgr.Issue(context.Background(), "web-root-op-downgrade", "web-login", "")
+	require.NoError(t, err)
+	// Bind the elevation to an IP different from httptest's default RemoteAddr
+	// (192.0.2.1) so the very next request is a source-IP-change downgrade.
+	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "10.0.0.9")
+	require.NoError(t, err)
+
+	var captured *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.Equal(t, session.AssuranceBasic, captured.Assurance,
+		"precondition: the source-IP change must have downgraded this very request")
+	assert.False(t, captured.RootScoped,
+		"an assurance downgrade must remove the marker on the next request, not wait for session expiry")
+}
+
+// TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared pins A4.3's other
+// half: an administrative clearing of the account's RootScope flag removes the marker
+// on the next request without waiting for session expiry.
+func TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	srv.cacheAccount(&account{
+		ID:        "web-root-op-cleared",
+		Username:  "web-root-op-cleared",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	sess, _, err := mgr.Issue(context.Background(), "web-root-op-cleared", "web-login", "")
+	require.NoError(t, err)
+	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
+	require.NoError(t, err)
+	cookie := &http.Cookie{Name: "cfgms_session", Value: elevatedTok}
+
+	var captured *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req1 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req1.AddCookie(cookie)
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusOK, rec1.Code, rec1.Body.String())
+	require.NotNil(t, captured)
+	require.True(t, captured.RootScoped, "precondition: the first request must carry the marker")
+
+	// Administratively clear the account's RootScope flag — no session mutation at all.
+	srv.cacheAccount(&account{
+		ID:        "web-root-op-cleared",
+		Username:  "web-root-op-cleared",
+		TenantID:  "",
+		RootScope: false,
+	})
+
+	captured = nil
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req2.AddCookie(cookie)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+	require.NotNil(t, captured)
+	assert.False(t, captured.RootScoped,
+		"clearing the account's RootScope flag must remove the marker on the very next request")
+}
+
+// TestWebSessionPhishingResistantRootScope_CannotGrantCertificateExtension is the
+// [REQUIRED TEST]: a session-derived root scope (this story's new marker source) must
+// never satisfy principalHasCertifiedRootScope, the sole gate on granting
+// RootScopeMarkerOID to a new credential (ADR-025 Amendment 4 A4.4). Only a principal
+// whose certificate authenticated the request — evidenced by a non-empty CertSerial —
+// may do that; a session, however strongly asserted, never has CertSerial set.
+func TestWebSessionPhishingResistantRootScope_CannotGrantCertificateExtension(t *testing.T) {
+	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+
+	srv.cacheAccount(&account{
+		ID:        "web-root-op-cert-bound",
+		Username:  "web-root-op-cert-bound",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	sess, _, err := mgr.Issue(context.Background(), "web-root-op-cert-bound", "web-login", "")
+	require.NoError(t, err)
+	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
+	require.NoError(t, err)
+
+	var captured *Principal
+	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = r.Context().Value(principalContextKey).(*Principal)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-requests/x/approve", nil)
+	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.True(t, captured.RootScoped, "sanity: this session must be genuinely root-scoped by Amendment 4")
+	assert.Empty(t, captured.CertSerial)
+	assert.False(t, principalHasCertifiedRootScope(captured),
+		"a session-derived root scope, however phishing-resistant, must never satisfy the certified-root-scope gate")
+}
+
+// TestCertificateAuthPath_UnchangedByAmendment4 is the [REQUIRED TEST] pinning that
+// this story's session-derived marker leaves the certificate authentication path
+// byte-identical: a root-scope-marked certificate, an unmarked admin certificate, and a
+// revoked certificate all behave exactly as before.
+func TestCertificateAuthPath_UnchangedByAmendment4(t *testing.T) {
+	t.Run("root-scope-marked certificate", func(t *testing.T) {
+		server := setupTestServer(t)
+		peerCert := makeRootScopedAdminTestCert(t)
+		req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+		p := server.extractAdminPrincipal(req)
+		require.NotNil(t, p)
+		assert.True(t, p.RootScoped, "a root-scope-marked certificate must still derive RootScoped from the extension")
+		assert.Equal(t, "", p.TenantID)
+		assert.NotEmpty(t, p.CertSerial)
+	})
+
+	t.Run("unmarked admin certificate", func(t *testing.T) {
+		server := setupTestServer(t)
+		peerCert := makeSelfSignedAdminCert(t)
+		req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
+		p := server.extractAdminPrincipal(req)
+		require.NotNil(t, p)
+		assert.False(t, p.RootScoped, "an unmarked admin certificate must still derive RootScoped=false")
+		assert.Equal(t, "", p.TenantID)
+		assert.True(t, p.ImplicitAdmin, "the unbound bootstrap-fallback admin grant must be unaffected")
+	})
+
+	t.Run("revoked certificate is rejected outright", func(t *testing.T) {
+		server := setupTestServer(t)
+		tempDir := t.TempDir()
+		certManager, err := cert.NewManager(&cert.ManagerConfig{
+			StoragePath: tempDir,
+			CAConfig:    &cert.CAConfig{Organization: "Test", Country: "US", ValidityDays: 365},
+		})
+		require.NoError(t, err)
+		server.certManager = certManager
+
+		issuedCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName:   "revoked-op",
+			Organization: "CFGMS",
+			ValidityDays: 1,
+			TemplateModifier: func(template *x509.Certificate) {
+				cert.SetAdminMarker(template)
+				cert.SetRootScopeMarker(template)
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, certManager.Revoke(issuedCert.SerialNumber))
+
+		certBlock, _ := pem.Decode(issuedCert.CertificatePEM)
+		require.NotNil(t, certBlock)
+		x509Cert, err := x509.ParseCertificate(certBlock.Bytes)
+		require.NoError(t, err)
+
+		req := requestWithTLSCert(http.MethodGet, "/api/v1/test", x509Cert)
+		p := server.extractAdminPrincipal(req)
+		assert.Nil(t, p, "a revoked certificate must still be rejected outright, never granted any scope")
+	})
+}
+
+// TestWebSessionCookie_RootScopedAccount_ConfinedByCatchAllBoundaryGate is the
+// [REQUIRED TEST]: a root-scope browser session (ADR-025 Amendment 4 A4.1) attempting a
+// tenant-targeting action against a strict descendant of "root" with no active crossing
+// is confined by requirePermission's catch-all ADR-025 Decision 1 boundary gate — not
+// only by a single handler's own authorizeTenantAccess call. Before this story a
+// root-scope web session carried no RootScoped marker at all and sailed through this
+// exact gate unconfined (Amendment 4 A4.2).
+func TestWebSessionCookie_RootScopedAccount_ConfinedByCatchAllBoundaryGate(t *testing.T) {
+	server := boundaryTestServer(t)
+	webCfg := session.DefaultConfig()
+	store := session.NewMemStore(webCfg, time.Now)
+	t.Cleanup(store.Close)
+	mgr := session.NewManager(webCfg, store, time.Now)
+	server.SetWebSessionManager(mgr)
+
+	server.cacheAccount(&account{
+		ID:        "web-root-operator-1",
+		Username:  "web-root-operator-1",
+		TenantID:  "",
+		RootScope: true,
+	})
+
+	sess, _, err := mgr.Issue(context.Background(), "web-root-operator-1", "web-login", "")
+	require.NoError(t, err)
+	_, elevatedTok, err := mgr.Elevate(context.Background(), sess.ID, []byte("cred-1"), "")
+	require.NoError(t, err)
+
+	reached := false
+	probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := server.authenticationMiddleware(server.requirePermission("tenant", "read")(probe))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/msp-a", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "msp-a"})
+	req.AddCookie(&http.Cookie{Name: "cfgms_session", Value: elevatedTok})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.False(t, reached,
+		"a root-scope web session without an active crossing must not reach the handler")
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`,
+		"the catch-all boundary gate, not a bare 403/404, must respond")
 }
