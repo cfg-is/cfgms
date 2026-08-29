@@ -126,6 +126,14 @@ var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
 // credentials directory is neither (ADR-030).
 const EnvFileSuffix = "_FILE"
 
+// ResolveEnvValue is the exported entry point for resolveEnvValue, for callers
+// outside this package that need the same <VAR>/<VAR>_FILE resolution — e.g.
+// pkg/fleet/storage's DNA database connection secret, which is not itself
+// part of the ${VAR} config-file templating this package otherwise owns.
+func ResolveEnvValue(name string) (string, bool, error) {
+	return resolveEnvValue(name)
+}
+
 // resolveEnvValue returns the value of the named environment variable,
 // falling back to the contents of the file named by <name>_FILE.
 //

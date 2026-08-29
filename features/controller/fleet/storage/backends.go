@@ -19,6 +19,7 @@ import (
 	_ "github.com/lib/pq"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -364,10 +365,15 @@ type DatabaseBackend struct {
 
 // NewDatabaseBackend creates a new PostgreSQL-based DNA storage backend
 func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend, error) {
-	// Get connection string: config field > environment variable > individual env vars
+	// Get connection string: config field > environment variable (or its
+	// _FILE-delivered companion, ADR-030) > individual env vars.
 	connString := config.DatabaseURL
 	if connString == "" {
-		connString = os.Getenv("CFGMS_DNA_DATABASE_URL")
+		var err error
+		connString, _, err = controllerconfig.ResolveEnvValue("CFGMS_DNA_DATABASE_URL")
+		if err != nil {
+			return nil, err
+		}
 	}
 	if connString == "" {
 		var err error
@@ -882,12 +888,18 @@ func (b *DatabaseBackend) calculateStats() error {
 }
 
 // buildDNAConnString constructs a PostgreSQL connection string from individual env vars.
-// CFGMS_DNA_DB_PASSWORD is required — no hardcoded defaults for credentials.
+// CFGMS_DNA_DB_PASSWORD is required — no hardcoded defaults for credentials. Like
+// CFGMS_DNA_DATABASE_URL above, it may be delivered directly or via its
+// CFGMS_DNA_DB_PASSWORD_FILE companion (ADR-030) — the same sealed-credential
+// delivery already used for CFGMS_STORAGE_DB_PASSWORD.
 func buildDNAConnString() (string, error) {
-	password := os.Getenv("CFGMS_DNA_DB_PASSWORD")
+	password, _, err := controllerconfig.ResolveEnvValue("CFGMS_DNA_DB_PASSWORD")
+	if err != nil {
+		return "", err
+	}
 	if password == "" {
 		return "", fmt.Errorf("CFGMS_DNA_DB_PASSWORD environment variable is required for DNA database backend. " +
-			"Set this variable or use CFGMS_DNA_DATABASE_URL for a full connection string. " +
+			"Set this variable (or CFGMS_DNA_DB_PASSWORD_FILE) or use CFGMS_DNA_DATABASE_URL for a full connection string. " +
 			"See docs/deployment/ for configuration examples")
 	}
 
