@@ -406,6 +406,119 @@ export async function passkeyEnrollFinishRequest(
   return { ok: response.ok, status: response.status }
 }
 
+// ── Browser-authenticated CLI login (Issue #3722 / Epic #3711) ──────────────────
+
+/**
+ * Status vocabulary for a lodged CLI login request, mirroring the controller's
+ * pendingCliLoginRequest. "expired" is computed by the server from the request's
+ * timestamp, never a value it persists.
+ */
+export type CliLoginRequestStatus = 'pending' | 'approved' | 'denied' | 'collected' | 'expired'
+
+/**
+ * A lodged CLI login request as read from GET /api/v1/cli-login/{id}. UserCode is a
+ * confused-deputy guard, not a secret — safe to display, never the session token.
+ */
+export interface CliLoginRequestState {
+  requestId: string
+  status: CliLoginRequestStatus
+  userCode: string
+  expiresAt: string
+}
+
+export interface CliLoginReadResult {
+  ok: boolean
+  status: number
+  request?: CliLoginRequestState
+}
+
+/**
+ * Reads a lodged login request's status and user code (Issue #3722). This is the
+ * confirmation screen's only way to learn the true code — the CLI never puts it in the
+ * confirmation URL, only the request ID — so the operator has something to compare
+ * against their terminal before confirming. Requires the same AssuranceStrong session
+ * as approveCliLoginRequest; a 401 here is a genuine session absence/expiry, routed
+ * through apiFetch's central handling like any other authenticated read.
+ */
+export async function getCliLoginRequest(id: string): Promise<CliLoginReadResult> {
+  const response = await apiFetch(`/api/v1/cli-login/${encodeURIComponent(id)}`)
+  if (!response.ok) {
+    return { ok: false, status: response.status }
+  }
+  let request: CliLoginRequestState | undefined
+  try {
+    const body = (await response.json()) as Record<string, unknown>
+    const data = body.data as Record<string, unknown> | undefined
+    if (data !== undefined && data !== null) {
+      request = {
+        requestId: typeof data.request_id === 'string' ? data.request_id : '',
+        status: (typeof data.status === 'string' ? data.status : 'pending') as CliLoginRequestStatus,
+        userCode: typeof data.user_code === 'string' ? data.user_code : '',
+        expiresAt: typeof data.expires_at === 'string' ? data.expires_at : '',
+      }
+    }
+  } catch {
+    // Body parse is best-effort; the caller treats a missing request as an error.
+  }
+  return { ok: true, status: response.status, request }
+}
+
+/**
+ * Response shape from POST /api/v1/cli-login/{id}/approve. Deliberately has no field
+ * for a session token or a certificate of any kind — the server's own response never
+ * carries either (Issue #3721/#3722 [REQUIRED TEST]): the minted session token is
+ * collected by the waiting CLI command over its own connection, never by this screen,
+ * and no root-scope certificate grant is reachable from a cookie-authenticated caller
+ * at all (that capability requires a certificate-authenticated caller — see the
+ * approval story). This type's shape enforces that: there is nothing here to render,
+ * store, or forward even by mistake.
+ */
+export interface ApproveCliLoginResult {
+  ok: boolean
+  status: number
+  requestStatus?: string
+  errorCode?: string
+}
+
+/**
+ * Approves or denies a lodged login request (Issue #3722). userCode is always the
+ * value read back from getCliLoginRequest, never operator-typed — sending back exactly
+ * what this same-origin session was able to read is what makes the code check an
+ * effective forged-request guard (a cross-site POST could not have read it first).
+ * Never sends, requests, or renders a certificate of any kind.
+ */
+export async function approveCliLoginRequest(
+  id: string,
+  userCode: string,
+  deny: boolean,
+): Promise<ApproveCliLoginResult> {
+  const response = await apiFetch(`/api/v1/cli-login/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+    headers: new Headers({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ user_code: userCode, deny }),
+  })
+  if (!response.ok) {
+    let errorCode: string | undefined
+    try {
+      const body = (await response.json()) as Record<string, unknown>
+      const error = body.error as Record<string, unknown> | undefined
+      if (error !== undefined && typeof error.code === 'string') errorCode = error.code
+    } catch {
+      // Body parse is best-effort.
+    }
+    return { ok: false, status: response.status, errorCode }
+  }
+  let requestStatus: string | undefined
+  try {
+    const body = (await response.json()) as Record<string, unknown>
+    const data = body.data as Record<string, unknown> | undefined
+    if (data !== undefined && typeof data.status === 'string') requestStatus = data.status
+  } catch {
+    // Body parse is best-effort.
+  }
+  return { ok: true, status: response.status, requestStatus }
+}
+
 /**
  * Server-side logout (CSRF-checked). A 401 means the session was already
  * gone — the caller returns to the signin state either way, so it is not

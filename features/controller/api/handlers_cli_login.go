@@ -424,6 +424,65 @@ func (s *Server) handleLodgeCliLoginRequest(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// GetCliLoginResponse is returned by GET /api/v1/cli-login/{id}. UserCode is the same
+// non-secret pairing code recorded on pendingCliLoginRequest — safe to return here for
+// the same reason it is safe to store and compare in cleartext (see the field comment).
+// Deliberately absent: VerifierHash and SessionToken, which never leave this file except
+// through the collect response body.
+type GetCliLoginResponse struct {
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
+	UserCode  string `json:"user_code"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// handleGetCliLoginRequest handles GET /api/v1/cli-login/{id}. This is the confirmation
+// screen's (Issue #3722) only way to learn the true user code: the CLI never puts it in
+// the confirmation URL (only the request ID), so the operator has nothing to compare
+// against without this call. Requiring the code to be read same-origin, under the same
+// AssuranceStrong gate as approve (requirePermission("cli-login", "approve")), rather
+// than accepting it as a URL parameter, is deliberate: a cross-site forged approve/deny
+// POST cannot supply a code its origin was never able to read. A session that has not
+// completed a passkey login never reaches this body, matching the confirmation screen's
+// own requirement that login happens before anything is displayed.
+//
+// Status mirrors handleCollectCliLoginRequest's own precedence: an expired request
+// reports "expired" regardless of its stored status, computed here rather than
+// persisted — the stored value is left untouched for the sweep to find and reap.
+func (s *Server) handleGetCliLoginRequest(w http.ResponseWriter, r *http.Request) {
+	if s.secretStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Cli login service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "id is required", "MISSING_ID")
+		return
+	}
+
+	reqRecord, err := s.getCliLoginRequestByID(r.Context(), id)
+	if err != nil {
+		s.logger.Error("Failed to look up cli-login request", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up login request", "STORE_ERROR")
+		return
+	}
+	if reqRecord == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Login request not found", "REQUEST_NOT_FOUND")
+		return
+	}
+
+	status := reqRecord.Status
+	if time.Now().UTC().After(reqRecord.ExpiresAt) {
+		status = "expired"
+	}
+	s.writeResponse(w, http.StatusOK, GetCliLoginResponse{
+		RequestID: reqRecord.ID,
+		Status:    status,
+		UserCode:  reqRecord.UserCode,
+		ExpiresAt: reqRecord.ExpiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
 // ApproveCliLoginRequestBody is the POST /api/v1/cli-login/{id}/approve body. UserCode
 // is the pairing code the operator sees on both screens — required on every call,
 // including a denial, so only the browser session actually showing the matching code

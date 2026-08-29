@@ -7,6 +7,8 @@ import {
   passkeyLoginFinishRequest,
   passkeyEnrollBeginRequest,
   passkeyEnrollFinishRequest,
+  getCliLoginRequest,
+  approveCliLoginRequest,
   logoutRequest,
   onSessionConfirmed,
   onSessionExpired,
@@ -798,5 +800,175 @@ describe('logoutRequest', () => {
     fetchMock.mockResolvedValue(jsonResponse(401))
     await logoutRequest()
     expect(expired).not.toHaveBeenCalled()
+  })
+})
+
+// ── CLI login (Issue #3722) ─────────────────────────────────────────────────────
+
+describe('getCliLoginRequest', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionConfirmed(null)
+    onSessionExpired(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('GETs the login request by id and parses status/user_code/expires_at', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        data: {
+          request_id: 'cli-login-abc',
+          status: 'pending',
+          user_code: 'ABCD-1234',
+          expires_at: '2026-08-29T00:00:00Z',
+        },
+      }),
+    )
+
+    const result = await getCliLoginRequest('cli-login-abc')
+
+    expect(result.ok).toBe(true)
+    expect(result.request).toEqual({
+      requestId: 'cli-login-abc',
+      status: 'pending',
+      userCode: 'ABCD-1234',
+      expiresAt: '2026-08-29T00:00:00Z',
+    })
+    const call = fetchMock.mock.calls.at(0)
+    if (!call) throw new Error('GET was never made')
+    expect(String(call[0])).toBe('/api/v1/cli-login/cli-login-abc')
+    expect(call[1]?.method ?? 'GET').toBe('GET')
+  })
+
+  it('URL-encodes the id', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404))
+    await getCliLoginRequest('has space/slash')
+    const call = fetchMock.mock.calls.at(0)
+    expect(String(call?.[0])).toBe('/api/v1/cli-login/has%20space%2Fslash')
+  })
+
+  it('returns ok:false with the status code on 404 (unknown or expired-and-swept)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404))
+    const result = await getCliLoginRequest('cli-login-gone')
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(404)
+    expect(result.request).toBeUndefined()
+  })
+
+  it('returns ok:false on a plain 401 (no session)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    const result = await getCliLoginRequest('cli-login-x')
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(401)
+  })
+
+  it('fires the session-expired listener on a plain 401, via apiFetch', async () => {
+    const expired = vi.fn()
+    onSessionExpired(expired)
+    fetchMock.mockResolvedValue(jsonResponse(401))
+    await getCliLoginRequest('cli-login-x')
+    expect(expired).toHaveBeenCalled()
+  })
+
+  it('never returns a token or verifier field even if the server sent one', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        data: {
+          request_id: 'cli-login-abc',
+          status: 'pending',
+          user_code: 'ABCD-1234',
+          expires_at: '2026-08-29T00:00:00Z',
+          // A misbehaving/hostile server sending these must not leak them onward —
+          // CliLoginRequestState has no field to carry either.
+          token: 'super-secret-session-token',
+          verifier_hash: 'deadbeef',
+        },
+      }),
+    )
+    const result = await getCliLoginRequest('cli-login-abc')
+    expect(result.request).toEqual({
+      requestId: 'cli-login-abc',
+      status: 'pending',
+      userCode: 'ABCD-1234',
+      expiresAt: '2026-08-29T00:00:00Z',
+    })
+    expect(JSON.stringify(result.request)).not.toContain('super-secret-session-token')
+  })
+})
+
+describe('approveCliLoginRequest', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    clearCookies()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    onSessionConfirmed(null)
+    onSessionExpired(null)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs user_code and deny:false for a confirm, with the session CSRF header', async () => {
+    document.cookie = 'cfgms_csrf=sess-tok; path=/'
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { request_id: 'cli-login-abc', status: 'approved' } }))
+
+    const result = await approveCliLoginRequest('cli-login-abc', 'ABCD-1234', false)
+
+    expect(result.ok).toBe(true)
+    expect(result.requestStatus).toBe('approved')
+    const call = fetchMock.mock.calls.at(0)
+    if (!call) throw new Error('approve POST was never made')
+    expect(String(call[0])).toBe('/api/v1/cli-login/cli-login-abc/approve')
+    expect(call[1]?.method).toBe('POST')
+    const headers = new Headers(call[1]?.headers)
+    expect(headers.get('X-CSRF-Token')).toBe('sess-tok')
+    const body = JSON.parse(String(call[1]?.body)) as Record<string, unknown>
+    expect(body).toEqual({ user_code: 'ABCD-1234', deny: false })
+  })
+
+  it('POSTs deny:true for a deny', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { request_id: 'cli-login-abc', status: 'denied' } }))
+    await approveCliLoginRequest('cli-login-abc', 'ABCD-1234', true)
+    const call = fetchMock.mock.calls.at(0)
+    const body = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>
+    expect(body).toEqual({ user_code: 'ABCD-1234', deny: true })
+  })
+
+  it('surfaces the error code from a non-2xx response', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(409, { error: { code: 'REQUEST_NOT_PENDING', message: 'not pending' } }),
+    )
+    const result = await approveCliLoginRequest('cli-login-abc', 'ABCD-1234', false)
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(409)
+    expect(result.errorCode).toBe('REQUEST_NOT_PENDING')
+  })
+
+  it('never sends any field beyond user_code and deny — no host/scheme/port/callback, no certificate or scope field', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: { request_id: 'cli-login-abc', status: 'approved' } }))
+    await approveCliLoginRequest('cli-login-abc', 'ABCD-1234', false)
+    const call = fetchMock.mock.calls.at(0)
+    const body = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>
+    expect(Object.keys(body).sort()).toEqual(['deny', 'user_code'])
+  })
+
+  it('never returns a token field even if the server sent one', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        data: { request_id: 'cli-login-abc', status: 'approved', token: 'super-secret-session-token' },
+      }),
+    )
+    const result = await approveCliLoginRequest('cli-login-abc', 'ABCD-1234', false)
+    expect(JSON.stringify(result)).not.toContain('super-secret-session-token')
   })
 })

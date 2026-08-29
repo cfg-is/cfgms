@@ -179,6 +179,173 @@ func TestLodgeCliLoginRequest_RejectsMalformedVerifierHash(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 
+// ---- get (Issue #3722: the confirmation screen's read) ---------------------------------
+
+func getCliLoginRequestHTTP(t *testing.T, server *Server, principal *Principal, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli-login/"+id, nil)
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"id": id})
+	rec := httptest.NewRecorder()
+	server.handleGetCliLoginRequest(rec, req)
+	return rec
+}
+
+func decodeGetCliLoginResponse(t *testing.T, rec *httptest.ResponseRecorder) GetCliLoginResponse {
+	t.Helper()
+	var resp struct {
+		Data GetCliLoginResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp.Data
+}
+
+func TestGetCliLoginRequest_Success(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-1", false)
+
+	_, hash := newTestVerifier(t)
+	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+
+	rec := getCliLoginRequestHTTP(t, server, principal, lodged.RequestID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	resp := decodeGetCliLoginResponse(t, rec)
+	assert.Equal(t, lodged.RequestID, resp.RequestID)
+	assert.Equal(t, cliLoginRequestStatusPending, resp.Status)
+	assert.Equal(t, lodged.UserCode, resp.UserCode)
+	assert.NotEmpty(t, resp.ExpiresAt)
+}
+
+// TestGetCliLoginRequest_NeverCarriesVerifierHashOrToken asserts the read response can
+// never disclose either secret this flow protects — the raw JSON is inspected directly
+// rather than through the typed decoder, which would silently hide an unexpected field.
+func TestGetCliLoginRequest_NeverCarriesVerifierHashOrToken(t *testing.T) {
+	server, mgr := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-2", false)
+
+	requestID, _ := lodgeAndApproveCliLogin(t, server, principal)
+	t.Cleanup(func() {
+		withToken, err := server.getCliLoginRequestWithToken(context.Background(), requestID)
+		require.NoError(t, err)
+		if withToken.SessionID != "" {
+			_ = mgr.Revoke(context.Background(), withToken.SessionID)
+		}
+	})
+
+	rec := getCliLoginRequestHTTP(t, server, principal, requestID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	body, _ := raw["data"].(map[string]interface{})
+	_, hasToken := body["token"]
+	_, hasVerifierHash := body["verifier_hash"]
+	assert.False(t, hasToken, "get response must never include a token field")
+	assert.False(t, hasVerifierHash, "get response must never include the verifier hash")
+}
+
+func TestGetCliLoginRequest_UnknownID_NotFound(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-3", false)
+
+	rec := getCliLoginRequestHTTP(t, server, principal, "cli-login-does-not-exist")
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+// TestGetCliLoginRequest_ExpiredComputedFromTimestamp mirrors handleCollectCliLoginRequest's
+// own precedence: an expired request reports "expired" from its timestamp, without the
+// stored status ever being rewritten — that stays pending for the sweep to find.
+func TestGetCliLoginRequest_ExpiredComputedFromTimestamp(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-4", false)
+
+	_, hash := newTestVerifier(t)
+	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+
+	stored, err := server.getCliLoginRequestByID(context.Background(), lodged.RequestID)
+	require.NoError(t, err)
+	stored.ExpiresAt = time.Now().UTC().Add(-time.Minute)
+	require.NoError(t, server.persistCliLoginRequest(context.Background(), stored))
+
+	rec := getCliLoginRequestHTTP(t, server, principal, lodged.RequestID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "expired", decodeGetCliLoginResponse(t, rec).Status)
+
+	freshlyStored, err := server.getCliLoginRequestByID(context.Background(), lodged.RequestID)
+	require.NoError(t, err)
+	assert.Equal(t, cliLoginRequestStatusPending, freshlyStored.Status,
+		"the read must never rewrite the stored status — only the sweep reaps expired requests")
+}
+
+func TestGetCliLoginRequest_DeniedStatus(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-5", false)
+
+	_, hash := newTestVerifier(t)
+	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+	denyRec := approveCliLogin(t, server, principal, lodged.RequestID,
+		ApproveCliLoginRequestBody{UserCode: lodged.UserCode, Deny: true})
+	require.Equal(t, http.StatusOK, denyRec.Code, denyRec.Body.String())
+
+	rec := getCliLoginRequestHTTP(t, server, principal, lodged.RequestID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, cliLoginRequestStatusDenied, decodeGetCliLoginResponse(t, rec).Status)
+}
+
+func TestGetCliLoginRequest_ApprovedStatus(t *testing.T) {
+	server, mgr := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-6", false)
+
+	requestID, _ := lodgeAndApproveCliLogin(t, server, principal)
+	t.Cleanup(func() {
+		withToken, err := server.getCliLoginRequestWithToken(context.Background(), requestID)
+		require.NoError(t, err)
+		if withToken.SessionID != "" {
+			_ = mgr.Revoke(context.Background(), withToken.SessionID)
+		}
+	})
+
+	rec := getCliLoginRequestHTTP(t, server, principal, requestID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, cliLoginRequestStatusApproved, decodeGetCliLoginResponse(t, rec).Status)
+}
+
+func TestGetCliLoginRequest_RequiresStrongAssurance(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+
+	_, hash := newTestVerifier(t)
+	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+
+	basicPrincipal := &Principal{ID: "basic-op-get", Assurance: session.AssuranceBasic, ImplicitAdmin: true}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli-login/"+lodged.RequestID, nil)
+	req = withVars(req, map[string]string{"id": lodged.RequestID})
+	rec := httptest.NewRecorder()
+
+	handler := server.requirePermission("cli-login", "approve")(http.HandlerFunc(server.handleGetCliLoginRequest))
+	req = withPrincipal(req, basicPrincipal)
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+}
+
+// TestGetCliLoginRequest_AvailableOnNonLeader asserts the read is exempt from the
+// leadership gate that guards approve/collect's mutating branches — mirroring collect's
+// own polling, which "remains available on a non-authoritative node" (handlers_cli_login.go).
+func TestGetCliLoginRequest_AvailableOnNonLeader(t *testing.T) {
+	server, _ := setupCliLoginTestServer(t)
+	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-7", false)
+
+	_, hash := newTestVerifier(t)
+	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
+
+	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+
+	rec := getCliLoginRequestHTTP(t, server, principal, lodged.RequestID)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
 // ---- approve ----------------------------------------------------------------------------
 
 func TestApproveCliLoginRequest_MintsSessionForBrowserPrincipal(t *testing.T) {

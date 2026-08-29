@@ -5,8 +5,10 @@
  * App root: router + auth provider + route guard around the authenticated
  * app shell (Story #2496).
  *
- * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733, #2941, #2968, #2992, #2937, #3608, #3614):
+ * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733, #2941, #2968, #2992, #2937, #3608, #3614, #3722):
  *   /enroll/:token   → Enroll (unauthenticated — magic-link redemption)
+ *   /login/confirm   → CliLogin (unauthenticated top-level route — the passkey
+ *                      ceremony renders inline for a session-less visitor; Issue #3722)
  *   /                → AppShell layout → FleetOverview
  *   /stewards/:id    → AppShell layout → StewardAssetPage
  *   /audit           → AppShell layout → AuditView
@@ -37,6 +39,13 @@
  * required before enrollment, and RequireAuth is not in its render path.
  * After a successful enrollment, apiFetch fires onSessionConfirmed and the
  * navigate('/') call transitions into the authenticated shell.
+ *
+ * /login/confirm is likewise a top-level sibling outside RequireAuth (Issue
+ * #3722): the CLI login confirmation screen requires a passkey login before it
+ * will display or approve anything, but it enforces that itself (mirroring
+ * RequireAuth's own guard condition) rather than being wrapped by the shared
+ * guard, since the guard's fallback is the plain login screen with no
+ * confirmation-specific content either side of it.
  */
 import { Routes, Route } from 'react-router'
 import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
@@ -54,6 +63,7 @@ import RegistrationConsolePage from './registration/RegistrationConsolePage.tsx'
 import RefreshQueuePage from './refresh/RefreshQueuePage.tsx'
 import PasskeysView from './passkeys/PasskeysView.tsx'
 import Enroll from './pages/Enroll.tsx'
+import CliLogin from './pages/CliLogin.tsx'
 import ReportsDashboardView from './reports/ReportsDashboardView.tsx'
 import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
 import MonitoringView from './monitoring/MonitoringView.tsx'
@@ -68,6 +78,9 @@ function App() {
       <Routes>
         {/* Unauthenticated: magic-link first-passkey enrollment (Story #2968) */}
         <Route path="/enroll/:token" element={<Enroll />} />
+
+        {/* Unauthenticated top-level route: CLI login confirmation (Issue #3722) */}
+        <Route path="/login/confirm" element={<CliLogin />} />
 
         {/* All other routes require an authenticated session */}
         <Route
