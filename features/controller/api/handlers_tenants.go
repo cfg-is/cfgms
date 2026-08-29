@@ -37,11 +37,18 @@ const (
 
 // authorizeTenantAccess decides whether principal may act on resourceTenant.
 //
-//   - An unscoped principal (TenantID == "") that is NOT RootScoped has unrestricted
-//     access — today's exact behavior, unchanged for every admin/session principal
-//     issued before the ADR-025 Amendment 1 A1.3 root-scope marker existed, and for
-//     the 31 pre-existing callerTenant=="" branches elsewhere in this package (none of
-//     which call this function).
+//   - An unscoped, certificate-authenticated principal (TenantID == "", CertSerial != "")
+//     that is NOT RootScoped has unrestricted access — today's exact behavior, unchanged
+//     for every admin cert issued before the ADR-025 Amendment 1 A1.3 root-scope marker
+//     existed, and for the 31 pre-existing callerTenant=="" branches elsewhere in this
+//     package (none of which call this function). The certificate authentication path is
+//     out of scope for ADR-025 Amendment 4 and must be provably unchanged by it.
+//   - An unscoped, NON-certificate-authenticated principal (session, API key, or any
+//     future auth path) that is NOT RootScoped is denied (ADR-025 Amendment 4 A4.2): the
+//     absence of the explicit marker must not be read as unrestricted access for a caller
+//     that never went through certificate authentication, or a phishing-resistant
+//     assertion downgrading mid-session would silently fall back to unrestricted instead
+//     of confined.
 //   - A tenant-scoped principal must have resourceTenant equal to or a genuine
 //     ParentID-chain descendant of its own TenantID (ADR-025 Amendment 1 A1.2) — never
 //     a string-prefix match against tenant IDs. Real tenant IDs are flat, validated
@@ -53,16 +60,28 @@ const (
 //     Decision 1, Decision 2), else tenantAuthNeedsCrossing.
 func (s *Server) authorizeTenantAccess(ctx context.Context, principal *Principal, resourceTenant string) tenantAuthDecision {
 	var callerTenant, principalID string
-	var rootScoped bool
+	var rootScoped, certAuthenticated bool
 	if principal != nil {
 		callerTenant = principal.TenantID
 		rootScoped = principal.RootScoped
 		principalID = principal.ID
+		// CertSerial is set in exactly two places, both inside extractAdminPrincipal
+		// (middleware.go), both after its revocation check and only when the
+		// certificate itself authenticated the request — see
+		// TestCertSerial_OnlySetByExtractAdminPrincipal. A session, API-key, or relay
+		// principal never has it set.
+		certAuthenticated = principal.CertSerial != ""
 	}
 
 	if callerTenant == "" {
 		if !rootScoped {
-			return tenantAuthAllowed
+			if certAuthenticated {
+				return tenantAuthAllowed
+			}
+			// ADR-025 Amendment 4 A4.2: an unscoped, unmarked, non-certificate caller
+			// must fail closed rather than resolve to unrestricted access purely by
+			// omission of the marker.
+			return tenantAuthDenied
 		}
 		return s.authorizeRootScopedTenantAccess(ctx, principalID, resourceTenant)
 	}

@@ -209,10 +209,13 @@ func TestAuthorizeRootScopedCaller_ListSilentlyFilters(t *testing.T) {
 }
 
 // TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess is the regression
-// counterpart: an ordinary unscoped principal (TenantID == "", RootScoped == false —
-// today's only shape, and every admin cert issued before this marker existed) must see
-// every tenant exactly as before, including a genuine descendant, with no crossing
-// required at all.
+// counterpart: an ordinary unscoped CERTIFICATE-authenticated principal (TenantID == "",
+// RootScoped == false, CertSerial != "" — every admin cert issued before the root-scope
+// marker existed) must see every tenant exactly as before, including a genuine
+// descendant, with no crossing required at all. The certificate authentication path is
+// explicitly out of scope for ADR-025 Amendment 4 and must be provably unchanged by it —
+// CertSerial is what distinguishes this caller from the non-certificate case
+// TestUnscopedAndUnmarked_NonCertificateCaller_NoLongerUnrestricted denies.
 func TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
@@ -221,13 +224,16 @@ func TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess(t *testing.T)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
 
-	unscopedAdmin := &Principal{ID: "admin-1", TenantID: "", RootScoped: false, GlobalScope: true, Assurance: session.AssuranceStrong}
+	unscopedAdmin := &Principal{
+		ID: "admin-1", TenantID: "", RootScoped: false, GlobalScope: true,
+		Assurance: session.AssuranceStrong, CertSerial: "unscoped-admin-cert-serial",
+	}
 	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", unscopedAdmin, nil)
 	rec := httptest.NewRecorder()
 	server.handleGetTenant(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code,
-		"an unscoped principal without the explicit root-scope marker must retain today's unrestricted access")
+		"an unscoped certificate-authenticated principal without the explicit root-scope marker must retain today's unrestricted access")
 }
 
 // TestExtractAdminPrincipal_RootScopeMarker verifies extractAdminPrincipal reads

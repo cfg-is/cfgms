@@ -1085,6 +1085,36 @@ func TestHandleGetTenant_UnscopedAdmin_CanReadAnyTenant(t *testing.T) {
 	assert.Equal(t, "any-tenant", data["id"])
 }
 
+// TestUnscopedAndUnmarked_NonCertificateCaller_NoLongerUnrestricted is the [REQUIRED
+// TEST] for ADR-025 Amendment 4 A4.2: an unscoped (TenantID == ""), non-RootScoped
+// caller with no certificate authentication (CertSerial == "") must no longer resolve
+// to unrestricted tenant access purely because the marker is absent. This is what keeps
+// a root-scope web/bearer session confined once its phishing-resistant assurance
+// downgrades: TenantID stays "" and RootScoped drops to false on the very next request
+// (middleware.go's rootScopeFromAssertion), and before this story that combination fell
+// through authorizeTenantAccess to unrestricted for ANY caller shape, not only the
+// certificate one A4.2 deliberately keeps unchanged
+// (TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess).
+func TestUnscopedAndUnmarked_NonCertificateCaller_NoLongerUnrestricted(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	unscopedUnmarked := &Principal{
+		ID: "session-op", TenantID: "", RootScoped: false, GlobalScope: true,
+		Assurance: session.AssuranceBasic, // e.g. a root-scope session downgraded below phishing-resistant
+	}
+	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", unscopedUnmarked, nil)
+	rec := httptest.NewRecorder()
+	server.handleGetTenant(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"an unscoped, non-certificate-authenticated caller with no explicit root-scope marker must no longer receive unrestricted access")
+}
+
 // TestHandleGetTenant_SiblingPrefix_Returns404 verifies that "client-1" cannot read
 // "client-10" — a bare HasPrefix check without the "/" separator would allow this
 // incorrectly (Issue #3147).
@@ -1390,7 +1420,16 @@ func TestHandleListTenants_StorageFailure_Returns500(t *testing.T) {
 
 	listAsUnscopedAdmin := func(ctx context.Context) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
-		req = req.WithContext(context.WithValue(ctx, ctxkeys.TenantID, ""))
+		reqCtx := context.WithValue(ctx, ctxkeys.TenantID, "")
+		// ADR-025 Amendment 4: an unscoped principal is only unrestricted when
+		// certificate-authenticated (CertSerial != ""). This test is about the
+		// storage-failure branch, not the tenant-access boundary, so the caller
+		// only needs to represent a legitimate unscoped admin.
+		reqCtx = context.WithValue(reqCtx, principalContextKey, &Principal{
+			ID: "list-failure-admin", TenantID: "", GlobalScope: true,
+			CertSerial: "list-failure-admin-cert-serial",
+		})
+		req = req.WithContext(reqCtx)
 		rec := httptest.NewRecorder()
 		server.handleListTenants(rec, req)
 		return rec

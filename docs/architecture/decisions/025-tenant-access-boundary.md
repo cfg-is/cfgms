@@ -728,3 +728,82 @@ certificate; what changes is that classification alone no longer grants anything
 Epic #3178's principal-resolution story implements the unbound-certificate rule and cites this
 amendment. The bootstrap account-and-binding requirement is a separate deliverable. Stories cite
 ADRs; they do not edit them.
+
+## Amendment 4 (2026-08-28) — A phishing-resistant assertion by a root-scope account is an A1.3 marker
+
+Founder decision, 2026-08-28, taken during the decomposition of epic #3711. This amendment
+extends A2.1's explicit-marker rule to the session authentication paths. It does not weaken it.
+
+### A4.1 — Decision
+
+A session established by a **phishing-resistant assertion** — passkey login, or WebAuthn
+step-up — for an account whose `RootScope` flag is explicitly set constitutes an A1.3 explicit
+root-scope marker for that session, on both the browser cookie path and the CLI bearer path.
+
+This remains an explicit marker and not an inference. It rests on two facts that are each set
+deliberately: the account's `RootScope` flag, set explicitly at account creation and
+mutually exclusive with a tenant assignment (Issue #2919), and a completed phishing-resistant
+assertion. It is never derived from `TenantID` being empty, from `GlobalScope`, or from
+`ImplicitAdmin`. Approach (b) stays rejected exactly as A2.1 rejected it.
+
+### A4.2 — This amendment CONFINES; it does not widen
+
+`RootScoped` is named for what grants it and acts as a confinement. Setting it subjects a caller
+to the Decision 1 boundary; its absence exempts them.
+
+Before this amendment the browser path never set the marker, so a root-scope administrator in the
+browser presented an empty `TenantID` **and** no marker. `authorizeTenantAccess` returns
+unrestricted for that combination, and the catch-all boundary gate inside `requirePermission`
+fires only when the marker is present. A root-scope web session was therefore **unconfined** —
+exempt from the very gate whose own comment records that it exists because handler-by-handler
+enforcement had already failed once.
+
+That was a live gap, not a consequence of this amendment. Closing it is this amendment's primary
+effect: a root-scope browser session becomes subject to Decision 1 and requires an active grant
+or a break-glass crossing to reach a strict descendant tenant, exactly as the same operator's
+certificate credential already does.
+
+### A4.3 — Derive per request; do not store it on the session record
+
+The marker must be re-derived on each request from the bound account's `RootScope` flag and the
+session's current assurance. It must not be stored on the session record as the source of truth.
+
+Two reasons, both operational. Assurance can be downgraded mid-session — ADR-021 Decision 5
+downgrades on a source-address change — and a session that is no longer phishing-resistant must
+no longer carry the marker. And the account flag can be cleared administratively, which must take
+effect on the next request rather than at session expiry. This matches the account-authoritative
+re-derivation the bearer path already performs (Issue #3576), and inherits its off switch: a
+disabled account is rejected outright on the next request.
+
+### A4.4 — The bound: a session-derived marker never mints a certificate-borne one
+
+**A root scope derived from a session must never be sufficient to issue a certificate carrying
+`RootScopeMarkerOID`.** Granting that certificate extension remains gated on a
+certificate-derived principal — one whose certificate authenticated the request, evidenced by a
+non-empty `CertSerial`, which is set only after the revocation check and only on the certificate
+paths.
+
+This bound is what keeps the amendment safe, and it is not optional. Without it, a root-scope
+session could lodge a signing request, approve it, and collect a certificate with a 45-day floor
+and unattended renewal — converting a revocable eight-hour session into a durable credential that
+survives remediation.
+
+With it, the strongest durable credential in the system still requires an existing certificate to
+create, and the accepted interface-substitution non-goal stays bounded: an adversary who
+substitutes the browser interface obtains at most a root-scope **session** — idle-timed,
+absolutely capped, revocable, and killed on the next request if the account is disabled — and
+never a durable certificate. That is a strictly smaller prize than the one an adversary who has
+reached the controller host already holds, since the controller is itself the certificate
+authority.
+
+### A4.5 — Consequences
+
+- The Decision 1 boundary applies to root-scope operators on every authentication path, closing
+  the browser-path gap described in A4.2.
+- Browser-authenticated CLI login becomes available to root-scope operators, and the session it
+  mints is root-scoped and therefore confined. Those operators no longer require a permanently
+  held certificate bundle for ordinary work.
+- The certificate bundle path remains necessary for issuing a new root-scope-marked certificate,
+  per A4.4, and for first-boot bootstrap.
+- Self-approval, permitted by epic #3711's D9, stays bounded by A4.4: a session-derived root scope
+  cannot approve itself into a stronger credential class.
