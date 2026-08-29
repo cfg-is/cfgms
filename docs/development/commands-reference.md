@@ -760,10 +760,11 @@ collect call this command itself makes to the controller — the browser never t
 this machine, and the token never appears in any URL, query string, fragment, redirect
 target, log line, or output stream.
 
-**A tenant-scoped account needs the `session:create` permission** (granted like any
+**A tenant-scoped account needs the `cli-login:approve` permission** (granted like any
 other RBAC permission) before it can log in this way — `cfg login` reuses the existing
-session-creation path (`POST /api/v1/sessions`, via the `cli-login:approve` route) for
-the approving account; it does not mint through a separate route.
+session-creation path (`POST /api/v1/sessions`) for the approving account, gated by its
+own `cli-login:approve` permission rather than the `session:create` permission that path
+normally requires; it does not mint through a separate route.
 
 The command then polls the collect endpoint (`--poll-interval`, default 3s, bounded by
 `--wait-timeout`, default 5m) until the browser confirms, printing `Waiting for browser

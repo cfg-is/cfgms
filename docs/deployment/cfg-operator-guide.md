@@ -152,11 +152,14 @@ browser cannot be opened automatically here — an SSH session, a headless
 workstation — the command prints a notice and you copy the URL to a browser
 anywhere else you can complete the passkey ceremony.
 
-**A tenant-scoped account needs the `session:create` permission** (granted
+**A tenant-scoped account needs the `cli-login:approve` permission** (granted
 like any other RBAC permission — see [cfg account](../development/commands-reference.md#cfg-account--account-lifecycle-and-certificate-credentials-issue-3582))
-before it can log in this way. A root-scoped account needs nothing extra: the
-session `cfg login` mints carries whatever scope the approving account
-already has, the same way `POST /api/v1/sessions` always has.
+before it can log in this way. This is a separate permission from
+`session:create` — `cfg login` reuses the session-creation *path*, not its
+permission, so granting `session:create` alone does not satisfy the approve
+route. A root-scoped account needs nothing extra: the session `cfg login`
+mints carries whatever scope the approving account already has, the same way
+`POST /api/v1/sessions` always has.
 
 From here on this connection behaves exactly like one that ran
 `cfg connect --bundle` — see "Reconnecting", "Checking the Active Session",

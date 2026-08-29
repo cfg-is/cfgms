@@ -3,11 +3,14 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -263,6 +266,87 @@ func TestLogin_HappyPath(t *testing.T) {
 	require.NotNil(t, entry, "a successful login must register the connection")
 	assert.Equal(t, srv.URL, entry.ControllerURL)
 	assert.Equal(t, "browser", entry.UnlockMethod)
+}
+
+// ── no loopback listener (planning-review amendment, Issue #3721 [REQUIRED TEST]) ──
+
+// ownListeningTCPPorts returns a set identifying every TCP socket, in this process, that
+// is currently in the LISTEN state — cross-referencing /proc/self/net/tcp{,6} (every
+// listening socket visible in this process's network namespace) against
+// /proc/self/fd (the sockets this process actually holds open), so sockets owned by
+// unrelated processes sharing the namespace are not misattributed to it. Linux-only:
+// TestLogin_OpensNoListeningSocket skips elsewhere.
+func ownListeningTCPPorts(t *testing.T) map[string]bool {
+	t.Helper()
+
+	inodes := map[string]bool{}
+	fds, err := os.ReadDir("/proc/self/fd")
+	require.NoError(t, err)
+	for _, fd := range fds {
+		link, err := os.Readlink("/proc/self/fd/" + fd.Name())
+		if err != nil {
+			continue // the fd can vanish between ReadDir and Readlink; not a listener either way
+		}
+		if inode, ok := strings.CutPrefix(link, "socket:["); ok {
+			inodes[strings.TrimSuffix(inode, "]")] = true
+		}
+	}
+
+	ports := map[string]bool{}
+	for _, procFile := range []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"} {
+		f, err := os.Open(procFile)
+		if err != nil {
+			continue // tcp6 is absent when IPv6 is disabled
+		}
+		scanner := bufio.NewScanner(f)
+		scanner.Scan() // header line
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) < 10 {
+				continue
+			}
+			const tcpStateListen = "0A"
+			localAddr, state, inode := fields[1], fields[3], fields[9]
+			if state == tcpStateListen && inodes[inode] {
+				ports[procFile+" "+localAddr] = true
+			}
+		}
+		_ = f.Close()
+	}
+	return ports
+}
+
+// TestLogin_OpensNoListeningSocket is the runtime counterpart to the planning-review
+// amendment carried into this story: "do not add a loopback listener to the CLI"
+// (rejected because no nonce or origin check closes the case where a crafted link names
+// a port an attacker controls). login.go's absence of a net.Listen call is a static
+// property that a later edit could silently reintroduce — this test catches that at
+// runtime by comparing this process's own listening TCP sockets immediately before and
+// immediately after a full login flow (lodge, poll, collect, store).
+func TestLogin_OpensNoListeningSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("listening-socket introspection reads /proc and only runs on Linux; CI's unit-tests job runs on ubuntu-latest, where this test executes for real")
+	}
+
+	setLoginFlags(t)
+	overrideSessionStore(t, newTestSessionStore())
+	overrideLoginBrowserOpener(t)
+
+	const requestID = "cli-login-listener-probe"
+	capt := &loginFlowCapture{}
+	srv := newLoginFlowServer(t, requestID, "LSTN-0001", capt, []func(w http.ResponseWriter){
+		collectLoginPending, collectLoginSuccess("sess-listener-probe", "listener-probe-token-0123456789abcdef"),
+	})
+	loginURL = srv.URL
+
+	// Captured after srv (and its own listening socket) already exist, so this baseline
+	// isolates whatever runLogin itself opens.
+	before := ownListeningTCPPorts(t)
+
+	require.NoError(t, runLogin(loginCmd, nil))
+
+	after := ownListeningTCPPorts(t)
+	assert.Equal(t, before, after, "runLogin must not open any new listening TCP socket")
 }
 
 // ── distinct terminal outcomes ────────────────────────────────────────────────────
