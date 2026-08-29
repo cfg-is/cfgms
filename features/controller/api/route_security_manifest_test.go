@@ -57,6 +57,16 @@ var publicRouteSecurityPolicies = map[string]routeSecurityPolicy{
 	// in constant time against its stored hash before anything is disclosed or minted
 	// (handleCollectCredentialRequest).
 	"POST /api/v1/credential-requests/{id}/collect": publicWritePolicy("single-use collect secret (bearer)", "credential_request.collected"),
+	// Lodge (Issue #3721): the operator holds no API key or mTLS credential yet — this is
+	// the bootstrap path. No pre-shared secret gates lodge itself (unlike credential-
+	// request lodge); the CLI-generated verifier is established here and never disclosed
+	// again until collect (handleLodgeCliLoginRequest).
+	"POST /api/v1/cli-login/lodge": publicWritePolicy("none — bootstrap path; CLI-generated verifier established here", "cli_login.lodged"),
+	// Collect (Issue #3721): the CLI holds no API key or mTLS credential — only the
+	// verifier it generated locally and never transmitted until now, compared in
+	// constant time against its stored hash before the minted session token is disclosed
+	// (handleCollectCliLoginRequest).
+	"POST /api/v1/cli-login/{id}/collect": publicWritePolicy("single-use CLI-generated verifier (bearer)", "cli_login.collected"),
 }
 
 func publicReadPolicy(authentication, event string) routeSecurityPolicy {

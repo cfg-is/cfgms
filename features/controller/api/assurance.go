@@ -186,6 +186,12 @@ var permissionAssurance = map[string]Requirement{
 	"enrolment-token:revoke-issued":      {Min: session.AssuranceStrong},
 	"credential-request:cancel":          {Min: session.AssuranceStrong},
 	"credential-request:revoke-orphaned": {Min: session.AssuranceStrong},
+
+	// Browser-authenticated CLI login approval (Issue #3721, Epic #3711): mints a
+	// cfg-CLI Bearer session for the approving principal through the same branch
+	// session:create uses. AssuranceStrong, no RequireUserPresence — mirrors
+	// session:create's own bar exactly, since approval performs exactly that mint.
+	"cli-login:approve": {Min: session.AssuranceStrong},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

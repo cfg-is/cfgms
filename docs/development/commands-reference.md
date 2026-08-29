@@ -609,10 +609,13 @@ durable pending queue that administrators can list and deny. Story #3718 adds th
 approval decision, and story #3719 adds the single-use collect call that signs the
 certificate and binds it to an account. Story #3720 (below) adds the `cfg` CLI commands
 that drive both halves — minting/revoking from the administrator's workstation, and the
-headless machine's own enrolment. Story #3724 (below) adds a further CLI command,
-`cfg credential renew`, for the step after collection: keeping an already-issued
-credential current without a human present. The REST reference for every endpoint
-these commands call follows the CLI sections.
+headless machine's own enrolment. Story #3721 (below) adds the interactive
+counterpart, `cfg login`: no token to hand out of band, no certificate to mint — an
+operator with a browser completes a passkey login and the CLI ends with a session.
+Story #3724 (below) adds a further CLI command, `cfg credential renew`, for the step
+after collection: keeping an already-issued credential current without a human
+present. The REST reference for every endpoint these commands call follows the CLI
+sections.
 
 ### cfg credential enrolment-token mint / revoke (Issue #3720)
 
@@ -720,6 +723,87 @@ at any verbosity.
 None of these flags select the certificate's markers (admin, payload-signing, root
 scope) — that set is decided entirely by the administrator at approval time, never by
 the requesting machine.
+
+### cfg login — browser-authenticated CLI login (Issue #3721)
+
+Run by an **operator who already has a browser** but no `cfg` credential yet — the
+default, everyday way to obtain a session. Where `cfg credential enrol` (above) is the
+headless path, `cfg login` is the interactive one: no bundle file, no private key
+transfer, no shell on the controller.
+
+```bash
+cfg login --url https://controller:9443
+cfg login --url https://controller:9443 --name prod
+```
+
+The command generates a random verifier locally (never written to disk, never placed in
+a URL), lodges a login request over its own already-pinned TLS connection, and prints,
+together and prominently:
+
+```
+Confirmation code: AB3D-7FQK
+Compare this code with the one shown in your browser before confirming.
+Approval URL: https://controller:9443/login/confirm?id=cli-login-...
+Expires: 2026-08-28T11:05:00Z
+```
+
+It then opens the approval URL in the default browser — best-effort; if that fails (a
+headless SSH session, an unsupported platform) the command prints a notice and the
+operator copies the URL to any browser, on any machine. Complete a passkey login there
+and confirm the same code this command printed — **the code comparison is the actual
+security check**, and applies uniformly regardless of the account's scope: `cfg login`
+succeeds the same way for a root-scoped account as for a tenant-scoped one, and the
+resulting session carries whatever scope the approving account has.
+
+**No bundle, no relay, no listener.** `cfg login` never opens a local listening socket.
+The token that the browser mints is handed to this command only once, over the
+collect call this command itself makes to the controller — the browser never talks to
+this machine, and the token never appears in any URL, query string, fragment, redirect
+target, log line, or output stream.
+
+**A tenant-scoped account needs the `session:create` permission** (granted like any
+other RBAC permission) before it can log in this way — `cfg login` reuses the existing
+session-creation path (`POST /api/v1/sessions`) via the approving account, it does not
+mint through a separate route.
+
+The command then polls the collect endpoint (`--poll-interval`, default 3s) until the
+browser confirms, printing `Waiting for browser confirmation...` between polls, and
+exits with one of four distinct outcomes — the first three leave no session on disk:
+
+| Outcome | What happened | Message |
+|---|---|---|
+| Denied | The browser session declined the confirmation | `login denied by the browser session — no session was stored` |
+| Timed out | No confirmation arrived within the login request's short lifetime | `login timed out waiting for browser confirmation — try again, or use 'cfg credential enrol' for headless enrolment` |
+| Interrupted | The operator pressed Ctrl-C while waiting | `login interrupted; no session was stored` |
+| Already collected | This command already collected it (should not normally occur) | `login request was already collected — no session was stored` |
+| **Success** | Confirmed in the browser and collected | `Logged in as "<name>" (expires ...)` |
+
+On success the command registers the connection in the local registry (`unlock_method:
+browser` — there is no bundle to later reconnect from; run `cfg login` again for a fresh
+session) and stores the session token in the OS keychain, exactly as `cfg connect` does.
+The next ordinary `cfg` command against this controller works without any further step.
+
+If a previous session for this controller is already stored, `cfg login` checks it before
+starting the browser flow and, if it is no longer usable, prints which of two distinct
+reasons applies — both surface as the same `401` from the controller, so the command
+never collapses them into one generic message:
+
+```
+Your previous session was revoked — if your account was disabled, this login will fail for the same reason; contact an administrator if so.
+Your previous session expired — logging in again.
+```
+
+This is informational only; the fresh browser login proceeds either way.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--url` | — | Controller HTTPS URL; required, and must be HTTPS for any non-loopback address (same rule as `cfg connect`) |
+| `--name` | derived from URL host | Connection name to register |
+| `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
+| `--server-name` | — | Override the TLS server name used for certificate verification |
+| `--poll-interval` | 3s | Interval between collect polls |
 
 ### cfg credential revoke-by-token / cancel-request / list-orphaned / revoke-orphaned (Issue #3725)
 

@@ -264,6 +264,11 @@ var knownPermissions = map[string]bool{
 	"credential-request:cancel":          true,
 	"credential-request:list-orphaned":   true,
 	"credential-request:revoke-orphaned": true,
+
+	// Browser-authenticated CLI login approval (Issue #3721, Epic #3711): mints a
+	// cfg-CLI Bearer session for the approving principal, gated at AssuranceStrong (see
+	// permissionAssurance).
+	"cli-login:approve": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

@@ -1452,6 +1452,114 @@ func (c *APIClient) CollectCredentialRequest(ctx context.Context, requestID stri
 	}
 }
 
+// --- browser-authenticated CLI login (Issue #3721) ---
+
+// LodgeCliLoginRequestBody is the POST /api/v1/cli-login/lodge body. VerifierHash is the
+// SHA-256 hex digest of a verifier generated and retained locally — the raw value is
+// never sent here.
+type LodgeCliLoginRequestBody struct {
+	VerifierHash string `json:"verifier_hash"`
+}
+
+// LodgeCliLoginResponse mirrors api.LodgeCliLoginResponse.
+type LodgeCliLoginResponse struct {
+	RequestID string `json:"request_id"`
+	UserCode  string `json:"user_code"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// LodgeCliLogin calls POST /api/v1/cli-login/lodge. Unauthenticated — this is the
+// bootstrap path for an operator holding no prior credential.
+func (c *APIClient) LodgeCliLogin(ctx context.Context, verifierHash string) (*LodgeCliLoginResponse, error) {
+	reqBody, err := json.Marshal(LodgeCliLoginRequestBody{VerifierHash: verifierHash})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/cli-login/lodge", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data LodgeCliLoginResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+// CollectCliLoginResult is the outcome of one poll against the cli-login collect
+// endpoint. Exactly one of Token (on success), AlreadyGone, or a non-empty Status is
+// meaningful: Status is one of "pending", "denied", "expired" (echoed from the
+// controller).
+type CollectCliLoginResult struct {
+	Status         string
+	Token          string
+	SessionID      string
+	AbsoluteExpiry time.Time
+	AlreadyGone    bool
+}
+
+// CollectCliLogin calls POST /api/v1/cli-login/{id}/collect, authenticated by this
+// client's bearer token — the verifier generated at lodge time. It performs exactly one
+// poll; the caller decides whether and how often to call it again. An unknown request ID
+// and a wrong verifier are indistinguishable on the wire (both 404) and are surfaced here
+// as an error, since that condition can never resolve itself by polling again.
+func (c *APIClient) CollectCliLogin(ctx context.Context, requestID string) (*CollectCliLoginResult, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/cli-login/"+url.PathEscape(requestID)+"/collect", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusGone:
+		return &CollectCliLoginResult{AlreadyGone: true}, nil
+	case http.StatusOK:
+		var envelope struct {
+			Data struct {
+				Status         string    `json:"status"`
+				Token          string    `json:"token,omitempty"`
+				SessionID      string    `json:"session_id,omitempty"`
+				AbsoluteExpiry time.Time `json:"absolute_expiry,omitempty"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+		return &CollectCliLoginResult{
+			Status:         envelope.Data.Status,
+			Token:          envelope.Data.Token,
+			SessionID:      envelope.Data.SessionID,
+			AbsoluteExpiry: envelope.Data.AbsoluteExpiry,
+		}, nil
+	default:
+		return nil, c.parseError(resp)
+	}
+}
+
+// apiErrorCode extracts the structured error code from a JSON error response body
+// shaped {"error":{"code":"...","message":"..."}}, consuming resp.Body. Returns "" when
+// the body does not carry that shape.
+func apiErrorCode(resp *http.Response) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return ""
+	}
+	return envelope.Error.Code
+}
+
 // WebAuthnRevokeCredential calls POST /api/v1/accounts/{username}/webauthn/revoke/{credential_id}
 // to remove the specified credential from the account. credential_id must be the base64url-encoded
 // credential ID (as returned by WebAuthnListCredentials).

@@ -24,12 +24,6 @@ not a second bootstrap route — only `bootstrap-admin` creates the very first
 credential on a controller. Every credential after the first one should come
 from `cfg login` or headless enrolment, not another bundle.
 
-> **[GAP: `cfg login` is not yet shipped — see Epic #3711, Story #3721. Until it
-> lands, an already-credentialed administrator can enrol a headless machine
-> (see "Headless Enrolment" below), or issue additional operator bundles with
-> `bootstrap-admin --output`, documented in
-> [Adding Operators](single-controller/walkthrough.md#adding-operators).]**
-
 > **[GAP: the bundle's confinement against endpoint code execution is not yet
 > enforced — see Epic #3711, Story #3696. Signer verification on both the steward
 > (`features/steward/commands/execute_script.go`) and the controller
@@ -118,11 +112,72 @@ here.
 | macOS    | `~/Library/Application Support/cfgms/connections.json` |
 | Windows  | `%APPDATA%\cfgms\connections.json` |
 
-## 3. Headless Enrolment (No Browser, No Bundle)
+## 3. Browser Login (`cfg login`) — the Ordinary Way
 
-For a machine that cannot open a browser (`cfg login`, Story #3721, is not yet
-shipped) and does not hold a copy of the bootstrap bundle, an administrator can
-mint a short-lived, single-use enrolment token from their own already-connected
+This is how every operator after the very first one obtains a credential — no
+bundle file, no private key transfer, no shell on the controller. Run it from
+any workstation with a browser, whether or not the controller is reachable
+from that same machine:
+
+```bash
+cfg login --url https://controller.acme-corp.example:9443
+```
+
+The command prints a short confirmation code and an approval URL, and opens
+that URL in your default browser:
+
+```
+Confirmation code: AB3D-7FQK
+Compare this code with the one shown in your browser before confirming.
+Approval URL: https://controller.acme-corp.example:9443/login/confirm?id=cli-login-...
+Expires: 2026-06-29T16:05:00Z
+```
+
+Complete a passkey login in the browser, confirm the same code shown there
+against what this command printed, and the command ends holding a session:
+
+```
+Logged in as "controller.acme-corp.example" (expires 2026-06-30T00:05:00Z)
+```
+
+**The code comparison is the actual security check** — the same principle as
+the fingerprint comparison in "Headless Enrolment" below. The token that
+approval mints never travels through the browser to this command: it is
+collected only over this command's own already-pinned TLS connection to the
+controller, using a verifier this command generated locally and never
+disclosed until that collection call. `cfg login` never opens a local
+listening socket.
+
+**The browser and the command do not need to be the same machine.** If a
+browser cannot be opened automatically here — an SSH session, a headless
+workstation — the command prints a notice and you copy the URL to a browser
+anywhere else you can complete the passkey ceremony.
+
+**A tenant-scoped account needs the `session:create` permission** (granted
+like any other RBAC permission — see [cfg account](../development/commands-reference.md#cfg-account--account-lifecycle-and-certificate-credentials-issue-3582))
+before it can log in this way. A root-scoped account needs nothing extra: the
+session `cfg login` mints carries whatever scope the approving account
+already has, the same way `POST /api/v1/sessions` always has.
+
+From here on this connection behaves exactly like one that ran
+`cfg connect --bundle` — see "Reconnecting", "Checking the Active Session",
+and the rest of this guide — except that there is no bundle to later
+reconnect from with `cfg connect <name>`; run `cfg login` again for a fresh
+session against the same controller.
+
+If a login is denied in the browser, times out before a decision arrives, or
+you interrupt the waiting command with Ctrl-C, the command exits with a
+distinct message (see the table in [the command
+reference](../development/commands-reference.md#cfg-login--browser-authenticated-cli-login-issue-3721))
+and leaves no session behind. A timeout names `cfg credential enrol` (below)
+as the headless alternative.
+
+## 4. Headless Enrolment (No Browser, No Bundle)
+
+For a machine that cannot open a browser at all — headless, no display, `cfg
+login` (above) is not an option — and does not hold a copy of the bootstrap
+bundle, an administrator can mint a short-lived, single-use enrolment token
+from their own already-connected
 workstation and hand it to that machine out of band. See [Enrolment Tokens and
 the Pending Credential-Request Queue](../development/commands-reference.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717)
 for the full command and flag reference; this section walks the happy path
@@ -192,7 +247,7 @@ reference](../development/commands-reference.md#cfg-credential-enrol-issue-3720)
 and leaves no credential file anywhere on this machine — safe to simply mint a
 fresh token and re-run `cfg credential enrol`.
 
-## 4. Containing a Compromised Enrolment
+## 5. Containing a Compromised Enrolment
 
 If an enrolment token or a headless-enrolled host is believed compromised —
 the token leaked before the intended machine used it, or a device enrolled via
@@ -258,7 +313,7 @@ cfg credential revoke-orphaned <serial>
 All of the mutating commands above are destructive and prompt for
 confirmation — pass `--force` to skip the prompt in a script.
 
-## 5. Reconnecting in a Fresh Shell
+## 6. Reconnecting in a Fresh Shell
 
 When you open a new terminal, or after your session has expired, reconnect by
 name:
@@ -287,7 +342,7 @@ On reconnect `cfg` decrypts the stored bundle using the machine-bound key
 (no interactive passphrase), authenticates with the controller over mTLS,
 and stores the new session token. The bundle itself is never re-imported.
 
-## 6. Checking the Active Session
+## 7. Checking the Active Session
 
 ```bash
 cfg connections current
@@ -308,7 +363,7 @@ Output when no session is active (or the token has passed its absolute expiry):
 no active session
 ```
 
-## 7. Listing Registered Connections
+## 8. Listing Registered Connections
 
 ```bash
 cfg connections list
@@ -328,7 +383,7 @@ For machine-parseable output:
 cfg connections list --json
 ```
 
-## 8. Disconnecting
+## 9. Disconnecting
 
 ```bash
 cfg disconnect
@@ -356,7 +411,7 @@ No active session.
 After disconnecting, any `cfg` subcommand that requires authentication will
 return an error until you run `cfg connect` again.
 
-## 9. One-Shot Use Without a Session
+## 10. One-Shot Use Without a Session
 
 The session model is the default for interactive operator use. For scripted or
 CI-style automation where storing a session is undesirable, every `cfg`
@@ -377,9 +432,9 @@ bundle or a session from `cfg connect` — never a bare API key (Issue #3688):
 automation that used to export `CFGMS_API_KEY` should export `CFGMS_ADMIN_BUNDLE`
 instead, as shown above.
 
-## 10. Keeping an Unattended Host's Credential Current
+## 11. Keeping an Unattended Host's Credential Current
 
-A bundle used the one-shot way (§8) — on a CI runner, a headless automation host,
+A bundle used the one-shot way (§10) — on a CI runner, a headless automation host,
 or anywhere else nobody is present to run `cfg connect` — still carries a
 certificate with an expiry date. `cfg credential renew` is how that host keeps its
 credential alive without a human: it presents the certificate it already holds
@@ -437,7 +492,7 @@ first thing to check:
 See [Commands Reference — cfg credential renew](../development/commands-reference.md#renewing-an-issued-credential--cfg-credential-renew-issue-3724)
 for the full flag reference and the exact controller-side contract.
 
-## 11. The Zero-Standing-Privilege Model
+## 12. The Zero-Standing-Privilege Model
 
 CFGMS admin sessions follow a zero-standing-privilege design: no long-lived
 credential is ever exchanged between operator and controller. Each session is
@@ -514,7 +569,8 @@ Token values are also sanitised from all controller log output.
 
 | Task | Command |
 |------|---------|
-| First connect (import bundle) | `cfg connect --bundle <path> --url <url>` |
+| Log in via browser passkey (operator, the ordinary way) | `cfg login --url <url>` |
+| First connect (import bootstrap bundle — one time only, before any account exists) | `cfg connect --bundle <path> --url <url>` |
 | Reconnect by name | `cfg connect <name>` |
 | Reconnect (single connection) | `cfg connect` |
 | Mint an enrolment token (administrator) | `cfg credential enrolment-token mint --tenant-id <id>` |
