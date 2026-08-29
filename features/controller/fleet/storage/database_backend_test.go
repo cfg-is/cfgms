@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -371,4 +372,103 @@ func TestDatabaseBackend_DeviceTenant(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "tenant-shared", all["dt-shared"])
 	})
+}
+
+// clearDNAEnv unsets every env var buildDNAConnString and NewDatabaseBackend's
+// CFGMS_DNA_DATABASE_URL lookup consult, plus their _FILE companions, and
+// restores the original values via t.Cleanup — so these tests can't leak
+// state into (or pick up state from) the surrounding environment.
+func clearDNAEnv(t *testing.T) {
+	t.Helper()
+	names := []string{
+		"CFGMS_DNA_DATABASE_URL", "CFGMS_DNA_DATABASE_URL_FILE",
+		"CFGMS_DNA_DB_PASSWORD", "CFGMS_DNA_DB_PASSWORD_FILE",
+		"CFGMS_DNA_DB_HOST", "CFGMS_DNA_DB_PORT", "CFGMS_DNA_DB_NAME", "CFGMS_DNA_DB_USER",
+	}
+	for _, name := range names {
+		orig, existed := os.LookupEnv(name)
+		require.NoError(t, os.Unsetenv(name))
+		t.Cleanup(func() {
+			if existed {
+				_ = os.Setenv(name, orig)
+			} else {
+				_ = os.Unsetenv(name)
+			}
+		})
+	}
+}
+
+// TestBuildDNAConnString_PasswordFromFile is a required test (DNA URL/password
+// _FILE indirection): CFGMS_DNA_DB_PASSWORD_FILE delivers the password when
+// CFGMS_DNA_DB_PASSWORD itself is unset — the same sealed-credential delivery
+// (ADR-030) already used for CFGMS_STORAGE_DB_PASSWORD, extended here so the
+// DNA backend's password never has to enter a systemd unit's plaintext
+// Environment= directive.
+func TestBuildDNAConnString_PasswordFromFile(t *testing.T) {
+	clearDNAEnv(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dna-db-password")
+	require.NoError(t, os.WriteFile(path, []byte("s3cr3t-from-file\n"), 0o600))
+
+	require.NoError(t, os.Setenv("CFGMS_DNA_DB_PASSWORD_FILE", path))
+
+	dsn, err := buildDNAConnString()
+	require.NoError(t, err)
+	assert.Contains(t, dsn, "s3cr3t-from-file", "password must be read from the file, with the trailing newline stripped")
+	assert.NotContains(t, dsn, "\n", "a trailing newline in the file must not leak into the DSN")
+}
+
+// TestBuildDNAConnString_DirectValueWinsOverFile is a required test: an
+// operator override via the direct env var takes precedence over a
+// file-delivered value, matching resolveEnvValue's documented precedence.
+func TestBuildDNAConnString_DirectValueWinsOverFile(t *testing.T) {
+	clearDNAEnv(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dna-db-password")
+	require.NoError(t, os.WriteFile(path, []byte("from-file"), 0o600))
+
+	require.NoError(t, os.Setenv("CFGMS_DNA_DB_PASSWORD_FILE", path))
+	require.NoError(t, os.Setenv("CFGMS_DNA_DB_PASSWORD", "from-direct-var"))
+
+	dsn, err := buildDNAConnString()
+	require.NoError(t, err)
+	assert.Contains(t, dsn, "from-direct-var")
+	assert.NotContains(t, dsn, "from-file")
+}
+
+// TestBuildDNAConnString_MissingPasswordAndFile_Errors is a required test:
+// absent both CFGMS_DNA_DB_PASSWORD and CFGMS_DNA_DB_PASSWORD_FILE, the
+// backend still fails closed with a clear error — the _FILE addition must not
+// weaken the existing "credential required" guarantee.
+func TestBuildDNAConnString_MissingPasswordAndFile_Errors(t *testing.T) {
+	clearDNAEnv(t)
+
+	_, err := buildDNAConnString()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CFGMS_DNA_DB_PASSWORD")
+}
+
+// TestNewDatabaseBackend_DatabaseURLFromFile is a required test: when
+// CFGMS_DNA_DATABASE_URL itself is unset, NewDatabaseBackend resolves it from
+// CFGMS_DNA_DATABASE_URL_FILE — the full-connection-string equivalent of the
+// individual-var _FILE support above. Uses a real DB connection (skipped when
+// unavailable) so the resolved value is proven to actually work end to end,
+// not just string-matched.
+func TestNewDatabaseBackend_DatabaseURLFromFile(t *testing.T) {
+	skipIfDatabaseUnavailable(t)
+	clearDNAEnv(t)
+
+	dsn := buildDNATestDSN()
+	dropDNATables(t, dsn)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dna-database-url")
+	require.NoError(t, os.WriteFile(path, []byte(dsn), 0o600))
+	require.NoError(t, os.Setenv("CFGMS_DNA_DATABASE_URL_FILE", path))
+
+	backend, err := NewDatabaseBackend(DefaultConfig(), logging.NewNoopLogger())
+	require.NoError(t, err, "NewDatabaseBackend must resolve the DSN from CFGMS_DNA_DATABASE_URL_FILE")
+	defer backend.Close() //nolint:errcheck
 }
