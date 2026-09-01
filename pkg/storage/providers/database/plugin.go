@@ -346,6 +346,21 @@ func (p *DatabaseProvider) CreateNonceStore(config map[string]interface{}) (busi
 	return store, nil
 }
 
+// CreateLeaseStore creates a PostgreSQL-backed LeaseStore — the fenced,
+// quorum-equivalent singleton-claim primitive (ADR-031 Decision 5, Issue #3756).
+// Implements interfaces.LeaseStoreCreator.
+func (p *DatabaseProvider) CreateLeaseStore(config map[string]interface{}) (business.LeaseStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseLeaseStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database lease store: %w", err)
+	}
+	return store, nil
+}
+
 // CreatePendingRefreshStore creates a PostgreSQL-backed PendingRefreshStore (Issue #2329).
 func (p *DatabaseProvider) CreatePendingRefreshStore(config map[string]interface{}) (business.PendingRefreshStore, error) {
 	db, err := p.sharedPool(config)

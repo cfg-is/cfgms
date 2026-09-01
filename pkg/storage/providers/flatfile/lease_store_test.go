@@ -157,3 +157,13 @@ func TestFlatFileLeaseStore_AcquireOrRenew_RejectsEmptyNameOrHolder(t *testing.T
 	_, err = store.AcquireOrRenew(ctx, "singleton-x", "", time.Second)
 	require.Error(t, err)
 }
+
+// TestFlatFileLeaseStore_SharedAcrossNodes_False pins the substrate declaration the
+// controller's cluster-mode startup gate reads (ADR-031 Decision 5). Exclusion here
+// is an in-process mutex over a file on one node's disk, which excludes no peer
+// node.
+func TestFlatFileLeaseStore_SharedAcrossNodes_False(t *testing.T) {
+	var store business.LeaseStore = newTestLeaseStore(t)
+	assert.False(t, business.LeaseStoreIsNodeShared(store),
+		"a per-node JSON file is not a substrate shared across controller nodes")
+}

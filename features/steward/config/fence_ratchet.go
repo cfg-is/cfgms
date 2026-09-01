@@ -13,9 +13,18 @@ import (
 
 const fenceRatchetFileName = "fence_ratchet.json"
 
-// FenceRatchet persists the Raft-term fence ratchet state across steward
-// process restarts (Story #3437, ADR-029 Decision 6). Two fields survive:
-// the ratchet-set flag and the highest Raft term observed from the controller.
+// FenceRatchet persists the fence ratchet state across steward process restarts
+// (Story #3437, ADR-029 Decision 6). Two fields survive: the ratchet-set flag and
+// the highest fencing value observed from the controller.
+//
+// The ratchet is source-agnostic: it only ever compares magnitudes
+// (highestTermSeen against an incoming value) and never re-derives, recomputes,
+// or otherwise knows where that value came from. It was originally the Raft term
+// (ADR-029 Decision 5); Issue #3760 (ADR-031 Decision 5) moved the source to the
+// S3 database lease's fencing token without touching this file — same field name,
+// same wire type (uint64), same three-state comparison. This matters because S9
+// deletes the Raft code entirely: nothing here assumes Raft exists, so nothing
+// here needs to change when it goes.
 //
 // The zero value (dir = "") is valid: Load returns zero values and Save/ClearRatchet
 // are no-ops — the ratchet operates in-memory only, matching pre-#3437 behaviour.
@@ -200,7 +209,7 @@ func (r *FenceRatchet) Save(ratchetSet bool, highestTermSeen uint64) error {
 //
 // Safety contingency: the reset's effectiveness against a network-positioned
 // adversary depends on a forthcoming story that closes the registration-gating
-// gap — see docs/architecture/steward-operating-model.md §Raft-Term Command
+// gap — see docs/architecture/steward-operating-model.md §Fencing-Token Command
 // Fence for the contingency statement. The reset is safe against the failure
 // modes this story exists for: a routine steward restart and a legitimate
 // controller-cluster rebuild.

@@ -14,8 +14,11 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// Compile-time assertion.
-var _ business.LeaseStore = (*FlatFileLeaseStore)(nil)
+// Compile-time assertions.
+var (
+	_ business.LeaseStore           = (*FlatFileLeaseStore)(nil)
+	_ business.NodeSharedLeaseStore = (*FlatFileLeaseStore)(nil)
+)
 
 // FlatFileLeaseStore implements business.LeaseStore backed by a single JSON
 // file — the fenced, quorum-equivalent singleton-claim primitive (ADR-031
@@ -51,6 +54,12 @@ func NewFlatFileLeaseStore(root string) (*FlatFileLeaseStore, error) {
 	}
 	return &FlatFileLeaseStore{root: root}, nil
 }
+
+// SharedAcrossNodes implements business.NodeSharedLeaseStore: false. The backing
+// JSON file lives on the node's own disk and exclusion is an in-process mutex, so
+// a second controller node contends with nothing here. Usable as a single-node
+// claim, never as cluster-wide leadership authority (ADR-031 Decision 5).
+func (s *FlatFileLeaseStore) SharedAcrossNodes() bool { return false }
 
 // Close is a no-op; the store holds no persistent handles.
 func (s *FlatFileLeaseStore) Close() error { return nil }

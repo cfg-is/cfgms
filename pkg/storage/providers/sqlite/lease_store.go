@@ -14,8 +14,11 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// Compile-time assertion.
-var _ business.LeaseStore = (*SQLiteLeaseStore)(nil)
+// Compile-time assertions.
+var (
+	_ business.LeaseStore           = (*SQLiteLeaseStore)(nil)
+	_ business.NodeSharedLeaseStore = (*SQLiteLeaseStore)(nil)
+)
 
 // SQLiteLeaseStore implements business.LeaseStore using SQLite. In
 // SingleServerMode this store is never on a contended path — only one process
@@ -25,6 +28,15 @@ var _ business.LeaseStore = (*SQLiteLeaseStore)(nil)
 type SQLiteLeaseStore struct {
 	db *sql.DB
 }
+
+// SharedAcrossNodes implements business.NodeSharedLeaseStore: false. The
+// database is a file on the node's own disk, so a second controller node runs
+// against a different file and contends with nothing. Leases held here are
+// single-node claims (background-job singletons within one process); they must
+// never be read as cluster-wide leadership authority, which is why the
+// controller refuses to start a cluster deployment on this substrate
+// (ADR-031 Decision 5).
+func (s *SQLiteLeaseStore) SharedAcrossNodes() bool { return false }
 
 // Close closes the underlying database connection.
 func (s *SQLiteLeaseStore) Close() error {

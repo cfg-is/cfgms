@@ -136,6 +136,30 @@ the fencing token (Decision 5) does not depend on the lease being correct.
 | `HasLeadership()` | Lease-backed authority. | **The admission primitive.** Every side-effecting path. |
 | `GetTerm()` | Current Raft term. | The fencing token source (Decision 5). |
 
+> **Amended by ADR-031 Decision 5 (Issue #3760):** `Manager.HasLeadership()` and
+> `Manager.GetTerm()` are now backed by the S3 database lease (`pkg/lease`) instead of
+> `RaftConsensus`. `IsRaftLeader()` is untouched — it still reads the raw Raft protocol state —
+> and `RaftConsensus`'s own `HasLeadership()`/`GetTerm()` methods are unchanged and still exist,
+> simply no longer consulted by `Manager`. This table's third column ("Use") still holds; only
+> which concrete type backs the first two rows changed. The lease store is wired by
+> `ha.NewManager` from the `StorageManager` it is handed (providers supply it via
+> `interfaces.LeaseStoreCreator`) and is a **startup precondition in `ClusterMode`**:
+> `Manager.Start()` refuses to run without one, because starting without it is not a degraded
+> mode but a disabled control — `HasLeadership()` would be false forever and `GetTerm()` would
+> stamp 0 on every command. Decision 4's `SingleServerMode` short-circuit is untouched: it
+> needs no lease and none is required of it.
+>
+> **The substrate must be shared, not merely present.** A lease excludes only the nodes that
+> contend on the same rows, so the controller's startup path additionally requires the wired
+> store to report `business.LeaseStoreIsNodeShared` — true only for the cluster (Postgres)
+> tier every node connects to. The node-local tiers (per-node SQLite, per-node flat file)
+> also supply a `LeaseStore`, usable for single-node claims; accepting one as cluster
+> authority would let every node hold its own copy of the leadership lease and mint its own
+> fencing sequence from 1, which is fail-open. `ha.mode: blue-green` runs the node-local tier
+> and therefore has **no** lease-backed authority: `HasLeadership()` is false on both nodes
+> and leader-gated mutating endpoints stay closed, which is where that mode sat before this
+> amendment.
+
 **The ergonomic name belongs to the safe one.** The ambiguity of a single `IsLeader()` is what
 allowed the category error, so `IsLeader()` is **removed outright**, not retained as a
 deprecated alias. CFGMS is pre-production and the house rule is a hard break over a migration
@@ -207,6 +231,15 @@ Pairing the term with a cluster identity makes the reset automatic rather than p
 partitioned node carries the *same* `clusterID` as the majority, so it cannot use this to clear
 anything; minting a new one requires write access to the vault, which is already the trust
 root.
+
+> **Amended by ADR-031 Decision 5 (Issue [#3760](https://github.com/cfg-is/cfgms/issues/3760)):**
+> the fencing token's source moves from `RaftConsensus.GetTerm()` to the S3 database lease's
+> monotonic token (`pkg/lease`), read via the same `Manager.GetTerm()` call site. The `term`
+> half of this Decision's `(clusterID, term)` pair is what moves; `clusterID` was never wired
+> into the command envelope or the steward-side ratchet (`Command` carries no `ClusterID`
+> field) and #3760 does not add it — that gap predates and is unaffected by this amendment. The
+> steward-side three-state comparison (Decision 6) is unchanged: it compares magnitudes only
+> and does not know or care which substrate produced them.
 
 ---
 

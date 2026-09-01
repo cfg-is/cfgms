@@ -321,3 +321,15 @@ func TestDatabaseLeaseStore_ConcurrentAcquire_AfterExpiryTokensStrictlyIncrease(
 			"tokens issued across successive expiry cycles must be strictly increasing")
 	}
 }
+
+// TestDatabaseLeaseStore_SharedAcrossNodes_True pins the substrate declaration the
+// controller's cluster-mode startup gate reads (ADR-031 Decision 5): every cluster
+// node connects to the same PostgreSQL instance, so contention for a lease name is
+// resolved across nodes by that one server. Asserted on a bare value because the
+// declaration is a property of the backend, not of a particular connection — no
+// database is required to state it.
+func TestDatabaseLeaseStore_SharedAcrossNodes_True(t *testing.T) {
+	var store business.LeaseStore = &DatabaseLeaseStore{}
+	assert.True(t, business.LeaseStoreIsNodeShared(store),
+		"the shared PostgreSQL backend is the only substrate that can carry cluster leadership")
+}

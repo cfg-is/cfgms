@@ -20,11 +20,39 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	cptypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"github.com/cfgis/cfgms/pkg/version"
 )
+
+// clusterLeadershipLeaseName is the pkg/lease lease name used for the cluster
+// singleton-leadership claim (ADR-031 Decision 5). One HA cluster shares exactly
+// one lease under this name; every ClusterMode Manager that has had a lease store
+// wired contends for it under its own node ID as holderID.
+const clusterLeadershipLeaseName = "controller-cluster-leadership"
+
+// usesLeaseAuthority reports whether this deployment mode derives HasLeadership()
+// and GetTerm() from the cluster leadership lease (ADR-031 Decision 5).
+//
+// Only ClusterMode does. The lease is a mutual-exclusion primitive, and exclusion
+// comes from the substrate, not from the algorithm: it is authority only when
+// every node contends for the same rows in a shared database, which is the
+// storage tier ClusterMode — and only ClusterMode — deploys. SingleServerMode
+// needs no lease at all (ADR-029 Decision 4's unconditional-true short-circuit).
+// BlueGreenMode runs the node-local storage tier, so a lease acquired there would
+// be acquired independently and successfully by *both* the blue and the green
+// node against their own database files, each minting its own token sequence from
+// 1 — two simultaneous "singleton" holders and two fencing sequences, which is
+// precisely the condition the lease exists to make impossible. Blue-green
+// therefore has no lease-backed authority: HasLeadership() stays false and
+// leader-gated mutating endpoints stay closed, which is where that mode was
+// before ADR-031 and is the safe direction to be wrong in.
+func (m *Manager) usesLeaseAuthority() bool {
+	return m.cfg != nil && m.cfg.Mode == ClusterMode
+}
 
 // Manager implements the ClusterManager interface and coordinates all HA operations
 type Manager struct {
@@ -69,6 +97,17 @@ type Manager struct {
 	// Health checks
 	healthChecks map[string]HealthCheckFunc
 	healthStatus *HealthStatus
+
+	// leaseManager, when non-nil, backs HasLeadership()/GetTerm() with the S3
+	// database lease (pkg/lease, ADR-031 Decision 5) instead of RaftConsensus.
+	// nil until SetLeaseStore is called; always nil in SingleServerMode, which
+	// never consults it (Decision 4's unconditional-true short-circuit).
+	leaseManager *lease.Manager
+	// leaseRenewalInterval is the interval Start()'s background acquisition loop
+	// ticks at. Set alongside leaseManager by SetLeaseStore so the loop renews
+	// often enough relative to the lease TTL to keep leaseManager's derived
+	// SafetyMargin() meaningful.
+	leaseRenewalInterval time.Duration
 }
 
 // NewManager creates a new HA manager.
@@ -150,6 +189,25 @@ func NewManager(cfg *Config, logger logging.Logger, storageManager *interfaces.S
 		return nil, fmt.Errorf("failed to initialize HA components: %w", err)
 	}
 
+	// Wire the leadership lease from the storage manager this Manager was handed
+	// (ADR-031 Decision 5). Deriving the substrate here rather than leaving it to
+	// an opt-in SetLeaseStore call is deliberate: in ClusterMode the lease *is* the
+	// authority source, so a construction path that forgets to wire it does not
+	// produce a manager with a missing option, it produces a manager whose
+	// HasLeadership() is permanently false and whose GetTerm() stamps 0.
+	// SetLeaseStore remains available to override this (tests, alternate stores).
+	// A provider that supplies no lease store leaves this nil and Start() refuses.
+	//
+	// Only ClusterMode wires it — see usesLeaseAuthority for why a node-local
+	// substrate must never become leadership authority in the other modes.
+	if manager.usesLeaseAuthority() && storageManager != nil {
+		if leaseStore := storageManager.GetLeaseStore(); leaseStore != nil {
+			if err := manager.setLeaseStoreLocked(leaseStore); err != nil {
+				return nil, fmt.Errorf("failed to wire leadership lease store: %w", err)
+			}
+		}
+	}
+
 	manager.logger.Info("HA Manager initialized",
 		"mode", cfg.GetModeString(),
 		"node_id", nodeInfo.ID)
@@ -164,6 +222,19 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	if m.isStarted {
 		return fmt.Errorf("HA manager is already started")
+	}
+
+	// ADR-031 Decision 5: in ClusterMode, HasLeadership() and GetTerm() are backed
+	// exclusively by the database lease. Starting without one is not a degraded
+	// mode, it is a disabled security control: HasLeadership() would be false
+	// forever (every leader-gated mutating endpoint 503s) and GetTerm() would stamp
+	// 0 on every outbound command, which the steward fence ratchet reads as
+	// "unstamped" — accepted unconditionally by a fresh steward and rejected
+	// unconditionally by a ratcheted one. Refuse to start instead.
+	if m.usesLeaseAuthority() && m.leaseManager == nil {
+		return fmt.Errorf(
+			"HA mode %q requires a lease store for leadership authority: call SetLeaseStore before Start (ADR-031 Decision 5)",
+			m.cfg.GetModeString())
 	}
 
 	// m.ctx bounds every long-lived background component started below (health
@@ -239,6 +310,16 @@ func (m *Manager) Start(ctx context.Context) error {
 		rc.onBecomeLeader = func(ctx context.Context, departedNodeID string) {
 			go m.handleBecomeLeader(ctx, departedNodeID)
 		}
+	}
+
+	// Start the S3 database-lease acquisition loop (ADR-031 Decision 5) when a
+	// lease store has been wired via SetLeaseStore. SingleServerMode never has a
+	// leaseManager (SetLeaseStore no-ops there), so this never runs for it.
+	if m.leaseManager != nil {
+		lm := m.leaseManager
+		nodeID := m.nodeInfo.ID
+		renewalInterval := m.leaseRenewalInterval
+		go m.runLeaseAcquisition(m.ctx, lm, nodeID, renewalInterval)
 	}
 
 	m.isStarted = true
@@ -404,8 +485,20 @@ func (m *Manager) IsRaftLeader() bool {
 // HasLeadership returns true when this node is authorised to perform side-effecting
 // operations. In SingleServerMode it is unconditionally true (Decision 4, ADR-029):
 // there is no quorum to lose and no peer to overlap with, so no lease is needed.
-// In ClusterMode it delegates to RaftConsensus.HasLeadership() which enforces the
-// 0.8 × ElectionTimeout lease bound.
+// In ClusterMode it is backed by the S3 database lease (pkg/lease, ADR-031
+// Decision 5) rather than RaftConsensus: true iff this node's node ID currently
+// holds cached local authority for clusterLeadershipLeaseName, per
+// leaseManager.HasLocalAuthority's monotonic-clock SafetyMargin bound. Returns
+// false when no lease store is wired — this fails closed rather than falling back
+// to Raft. That state is not reachable on a running ClusterMode node: Start()
+// refuses to run without a lease store, precisely so an unwired substrate is a
+// loud startup failure rather than a node that silently 503s every mutating
+// endpoint and stamps fencing token 0 on every command it publishes.
+//
+// BlueGreenMode returns false: it deploys a node-local storage tier, and a lease
+// on a node-local substrate excludes nothing (see usesLeaseAuthority). False is
+// the fail-closed answer — leader-gated mutating endpoints refuse on both the
+// blue and the green node rather than both nodes claiming to be the singleton.
 func (m *Manager) HasLeadership() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -414,23 +507,131 @@ func (m *Manager) HasLeadership() bool {
 		return true
 	}
 
-	if m.raftConsensus != nil {
-		return m.raftConsensus.HasLeadership()
+	if m.leaseManager != nil {
+		_, ok := m.leaseManager.HasLocalAuthority(clusterLeadershipLeaseName, m.nodeInfo.ID)
+		return ok
 	}
 
 	return false
 }
 
-// GetTerm returns the current Raft term, sourced from the underlying RaftConsensus.
-// Returns 0 in SingleServerMode (no Raft cluster) and when no consensus engine is
-// available. The term is the fencing-token source for ADR-029 Decision 5.
+// GetTerm returns the current fencing token, sourced from the S3 database lease
+// (pkg/lease, ADR-031 Decision 5) rather than RaftConsensus.GetTerm(). It returns
+// the token cached by this node's most recent successful acquire/renew — the same
+// cache HasLeadership() reads — so a caller that calls GetTerm() only after
+// observing HasLeadership() == true is guaranteed a non-zero token. Returns 0 in
+// SingleServerMode and BlueGreenMode (neither has lease-backed authority — see
+// usesLeaseAuthority), when no lease store has been wired, and whenever this node
+// does not currently hold cached local authority.
 func (m *Manager) GetTerm() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.raftConsensus != nil {
-		return m.raftConsensus.GetTerm()
+
+	if m.leaseManager != nil {
+		if token, ok := m.leaseManager.HasLocalAuthority(clusterLeadershipLeaseName, m.nodeInfo.ID); ok {
+			return token
+		}
 	}
+
 	return 0
+}
+
+// SetLeaseStore replaces the S3 database-lease store (pkg/lease, ADR-031 Decision 5)
+// that backs HasLeadership()/GetTerm() in ClusterMode. It is an override, not the
+// primary wiring: NewManager already wires the store supplied by the StorageManager
+// it is handed, so the substrate cannot be silently skipped by a construction path
+// that forgets to call this. Call it (before Start) only to supply a store the
+// StorageManager does not have. In ClusterMode a nil store is an error, not a
+// silent unwiring.
+//
+// A no-op in every mode that does not derive authority from the lease
+// (usesLeaseAuthority): SingleServerMode never consults one (Decision 4's
+// unconditional-true short-circuit) and BlueGreenMode must not, because its
+// node-local substrate would hand both the blue and the green node simultaneous
+// leadership. A no-op rather than an error keeps that guarantee independent of
+// what any caller passes: no store handed to a non-cluster Manager can ever
+// become its authority.
+//
+// Whether a given store's substrate is genuinely shared by all nodes is not
+// decidable here — a store is an object, and "every node contends on it" is a
+// property of the deployment that composed it. The composition layer owns that
+// check: the controller startup path refuses to build a ClusterMode manager unless
+// the wired store reports business.LeaseStoreIsNodeShared (see
+// features/controller/server.initializeHAManager). In-process tests legitimately
+// share one node-local store between two Managers, which is real exclusion within
+// that process and no basis for rejecting the store here.
+//
+// The constructed pkg/lease.Manager's leaseTTL/renewalInterval/
+// maxAllowedRenewalLatency are derived from cfg.Cluster.ElectionTimeout using the
+// same 0.8 ratio Raft's own leader lease used (ADR-029 Decision 1:
+// leaseDuration = 0.8 × ElectionTimeout — see ClusterConfig.LeaseDuration): TTL
+// equals ElectionTimeout, and renewalInterval/maxAllowedRenewalLatency each take
+// half of the remaining 0.2, so the derived SafetyMargin lands on the identical
+// bound already validated for this deployment's ElectionTimeout. This method only
+// chooses those three inputs — the margin itself is pkg/lease.SafetyMargin's
+// derivation, not re-derived here.
+func (m *Manager) SetLeaseStore(store business.LeaseStore) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.setLeaseStoreLocked(store)
+}
+
+// setLeaseStoreLocked is SetLeaseStore's body without the lock, so NewManager can
+// reuse it while the Manager is still unpublished. Callers must hold m.mu (or own
+// the Manager exclusively, as NewManager does).
+func (m *Manager) setLeaseStoreLocked(store business.LeaseStore) error {
+	if !m.usesLeaseAuthority() {
+		return nil
+	}
+
+	// lease.NewManager also rejects a nil store, but naming the caller's mistake
+	// here keeps the startup error actionable: a nil here means the running
+	// storage provider supplies no LeaseStore, not that pkg/lease misconfigured.
+	if store == nil {
+		return fmt.Errorf(
+			"HA mode %q requires a shared-database lease store but none was supplied; the configured storage provider does not implement interfaces.LeaseStoreCreator (ADR-031 Decision 5)",
+			m.cfg.GetModeString())
+	}
+
+	electionTimeout := m.cfg.Cluster.ElectionTimeout
+	ttl := electionTimeout
+	renewalInterval := electionTimeout / 10
+	maxAllowedRenewalLatency := electionTimeout / 10
+
+	lm, err := lease.NewManager(store, ttl, renewalInterval, maxAllowedRenewalLatency)
+	if err != nil {
+		return fmt.Errorf("failed to construct lease manager: %w", err)
+	}
+
+	m.leaseManager = lm
+	m.leaseRenewalInterval = renewalInterval
+	return nil
+}
+
+// runLeaseAcquisition periodically calls TryAcquire so this node keeps contending
+// for (or renewing) the S3 database lease that backs HasLeadership()/GetTerm()
+// (ADR-031 Decision 5). It runs independently of Raft — every ClusterMode node
+// with a lease store wired contends for the same lease name, regardless of
+// whichever node RaftConsensus currently believes is its own leader. This is the
+// point of the substrate swap: the database lease, not Raft, decides authority.
+// Bounded by ctx (m.ctx, cancelled by Stop()) so the goroutine always exits.
+func (m *Manager) runLeaseAcquisition(ctx context.Context, lm *lease.Manager, holderID string, renewalInterval time.Duration) {
+	ttl := lm.LeaseTTL()
+	ticker := time.NewTicker(renewalInterval)
+	defer ticker.Stop()
+
+	for {
+		if _, _, err := lm.TryAcquire(ctx, clusterLeadershipLeaseName, holderID, ttl); err != nil {
+			m.logger.Warn("Failed to acquire/renew cluster leadership lease",
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // GetLeader returns the current cluster leader node
@@ -752,6 +953,11 @@ func (m *Manager) initializeRaftConsensus() error {
 
 	// Create and attach transport
 	transport := newRaftTransport(nodeID, m.nodeInfo.Address, m.raftConsensus, caCertPEM, peerCert.CertificatePEM, peerCert.PrivateKeyPEM, allowedCNs, m.logger)
+	// GET /api/v1/raft/status must report is_leader from the same lease-backed
+	// HasLeadership() that GET /api/v1/ha/status reports (ADR-029 Decision 7,
+	// retained by ADR-031). m.HasLeadership evaluates lazily at call time, so this
+	// is safe to wire before SetLeaseStore is ever called.
+	transport.setHasLeadershipFn(m.HasLeadership)
 	m.raftConsensus.SetTransport(transport)
 
 	// Add peer addresses to transport
