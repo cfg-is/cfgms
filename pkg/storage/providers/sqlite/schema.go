@@ -758,6 +758,17 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			max_dormancy_days INTEGER
 		)`,
 
+		// Fenced, quorum-equivalent singleton-claim leases (ADR-031 Decision 5,
+		// Issue #3756). Release force-expires rather than deletes a row, so
+		// token remains a monotonic per-name high-water mark.
+		`CREATE TABLE IF NOT EXISTS cfgms_leases (
+			name       TEXT PRIMARY KEY,
+			holder_id  TEXT NOT NULL,
+			token      INTEGER NOT NULL,
+			expires_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_leases_expires_at ON cfgms_leases(expires_at)`,
+
 		// Per-tenant assurance-policy overrides (ADR-021, Issue #2845).
 		// Each row holds one per-permission override. Absent rows mean global defaults apply.
 		`CREATE TABLE IF NOT EXISTS assurance_policy_overrides (
