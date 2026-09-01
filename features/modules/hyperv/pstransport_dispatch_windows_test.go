@@ -869,4 +869,3 @@ func TestPreamble_CopyToSeedVHDFailsLoudlyOnMissingVolume(t *testing.T) {
 	assert.Contains(t, body, "throw",
 		"a missing labelled seed volume must throw a named error, not fail obscurely on a null path")
 }
-
