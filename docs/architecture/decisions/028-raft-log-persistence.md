@@ -1,6 +1,6 @@
 # ADR-028: Raft Log Persistence for Controller Cluster Restarts
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-031](031-controller-cluster-service-model.md)
 
 **Date:** 2026-08-13
 
