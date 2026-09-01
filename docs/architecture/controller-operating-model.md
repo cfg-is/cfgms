@@ -1212,22 +1212,16 @@ One root tenant, unlimited depth.
 #### Example: SaaS Platform
 
 ```
-cfg-is (platform root)
- ├── msp-alpha (root)
- │   ├── client-1
- │   │   └── ...
- │   └── client-2
- │       └── ...
- ├── msp-beta (root)
- │   ├── client-1
- │   │   └── ...
- │   └── client-2
- │       └── ...
- └── msp-gamma (root)
-     └── ...
+Cell 1                    Cell 2                    Cell 3
+─────────────             ─────────────             ─────────────
+msp-alpha (root)          msp-beta (root)           msp-gamma (root)
+ ├── client-1              ├── client-1              └── ...
+ │   └── ...                │   └── ...
+ └── client-2               └── client-2
+     └── ...                    └── ...
 ```
 
-Multiple independent root tenants under a platform tenant. MSPs cannot see each other's trees. This topology enables cfg.is to host hundreds of MSPs on shared infrastructure with per-MSP isolation, resource scheduling, and billing.
+Each cell is a complete, independent CFGMS deployment (its own controller cluster, database, blob store, and vault, per ADR-032) with exactly one root tenant; MSPs are children of that root. Cells share no runtime state — there is no shared parent tenant, no cross-cell inheritance, and no cross-cell visibility. This topology enables cfg.is to host hundreds of MSPs across cells with per-MSP isolation, resource scheduling, and billing. Cross-cell concerns (a tenant→cell directory, admin routing, a cross-cell operations view) are deferred until a second cell is justified.
 
 ### Cfg Inheritance
 
@@ -1247,7 +1241,7 @@ Every value in the effective cfg carries its **source path** and **version** for
 - **Certificate isolation** — each steward gets its own client certificate
 - **RBAC isolation** — permissions are scoped to tenant path; a client admin cannot manage another client's devices
 - **Cfg inheritance** — flows down the hierarchy only; children inherit from parents, never sideways
-- **Multi-root isolation** — independent root tenants are fully isolated; no inheritance, no visibility, no shared state between roots
+- **Cell isolation** — cells share no runtime state; each cell has exactly one root tenant
 
 ## Monitoring and Reporting
 
