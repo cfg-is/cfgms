@@ -383,18 +383,6 @@ function Cfgms-AttachSeedDisk {
     Add-VMHardDiskDrive -VMName $Name -Path $SeedPath
 }
 
-# Cfgms-SeedDiskAttached reports whether $SeedPath is attached to the VM as a
-# hard disk drive, emitting a bare 'true'/'false'. Read-only. Backs the
-# seedless-guest gate (#3168), which decides power-on from the VM's actual
-# hardware rather than from a ProvisionRecord that does not survive a steward
-# restart for a non-CSV VM. Both values travel via ArgumentList.
-function Cfgms-SeedDiskAttached {
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SeedPath)
-    $d = @(Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $SeedPath })
-    if ($d.Count -gt 0) { Write-Output 'true' } else { Write-Output 'false' }
-}
-
 # Cfgms-AttachDVD attaches the install ISO (host path) to the VM as a DVD
 # drive. The ISO is never repacked or re-signed (ADR-009 §5). $ISOPath
 # travels via ArgumentList.

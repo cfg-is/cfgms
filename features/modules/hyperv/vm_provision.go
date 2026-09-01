@@ -76,13 +76,6 @@ const (
 	// VM's secondary disk.
 	psAttachSeedDisk = `Add-VMHardDiskDrive -VMName $Name -Path $SeedPath`
 
-	// psSeedDiskAttached reports whether $SeedPath is currently attached to the
-	// named VM as a hard disk drive, emitting a bare "true"/"false". Used by the
-	// seedless-guest gate (#3168) to decide power-on from the VM's real hardware
-	// rather than from a ProvisionRecord that is not durable for non-CSV VMs.
-	// Both values travel via ArgumentList — never interpolated into script text.
-	psSeedDiskAttached = `$d = @(Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $SeedPath }); if ($d.Count -gt 0) { Write-Output 'true' } else { Write-Output 'false' }`
-
 	// psAttachDVD wraps Add-VMDvdDrive: attach the install ISO as the VM's DVD
 	// drive. The ISO is never repacked or re-signed.
 	psAttachDVD = `Add-VMDvdDrive -VMName $Name -Path $ISOPath`
@@ -626,36 +619,6 @@ func cloudInitMetaData(vmName, correlationID string) string {
 		host = vmName
 	}
 	return "instance-id: " + vmName + "\nlocal-hostname: " + host + "\n"
-}
-
-// seedDiskAttached reports whether the seed VHDX at seedPath is currently
-// attached to the named VM as a hard disk drive. It is the state-free half of
-// the seedless-guest gate (#3168): unlike a ProvisionRecord (in-memory, and so
-// lost across a steward restart for any non-CSV VM), the VM's own hardware is
-// authoritative and survives anything.
-//
-// A transport or parse failure returns an error rather than a false negative —
-// the caller treats "cannot tell" as "do not block convergence", so reporting
-// false here would wrongly wedge a healthy VM powered off.
-func (m *hypervModule) seedDiskAttached(ctx context.Context, hostName, seedPath string) (bool, error) {
-	if m.transport == nil {
-		return false, ErrVMNotFound
-	}
-	out, err := m.transport.ExecutePS(ctx, psSeedDiskAttached, map[string]string{
-		"Name":     hostName,
-		"SeedPath": seedPath,
-	})
-	if err != nil {
-		return false, fmt.Errorf("hyperv: probe seed disk attachment for VM %q: %w", hostName, err)
-	}
-	switch strings.ToLower(strings.TrimSpace(out)) {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	default:
-		return false, fmt.Errorf("hyperv: unexpected seed-attachment probe output for VM %q: %q", hostName, strings.TrimSpace(out))
-	}
 }
 
 // provisionCloudInit performs the cloud-init media setup for a Linux

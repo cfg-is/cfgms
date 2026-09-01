@@ -112,9 +112,6 @@ func dispatchForTest(ctx context.Context, psCommand string, psArgs map[string]st
 	case psAttachSeedDisk:
 		return emit("Cfgms-AttachSeedDisk -Name " + quoteArg(psArgs, "Name") +
 			" -SeedPath " + quoteArg(psArgs, "SeedPath"))
-	case psSeedDiskAttached:
-		return emit("Cfgms-SeedDiskAttached -Name " + quoteArg(psArgs, "Name") +
-			" -SeedPath " + quoteArg(psArgs, "SeedPath"))
 	case psAttachDVD:
 		return emit("Cfgms-AttachDVD -Name " + quoteArg(psArgs, "Name") +
 			" -ISOPath " + quoteArg(psArgs, "ISOPath"))
@@ -573,7 +570,6 @@ func TestDispatch_AllKnownCommands(t *testing.T) {
 		{"psDetachSeedVHD", psDetachSeedVHD, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psDeleteSeedMedia", psDeleteSeedMedia, map[string]string{"Path": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachSeedDisk", psAttachSeedDisk, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
-		{"psSeedDiskAttached", psSeedDiskAttached, map[string]string{"Name": "cfgms-t__web-01", "SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx"}},
 		{"psAttachDVD", psAttachDVD, map[string]string{"Name": "cfgms-t__web-01", "ISOPath": "C:\\ISO\\server.iso"}},
 		{"psSetVMFirmware", psSetVMFirmware, map[string]string{"Name": "cfgms-t__web-01", "Template": "MicrosoftWindows"}},
 		{"psDisableVMFirmwareSecureBoot", psDisableVMFirmwareSecureBoot, map[string]string{"Name": "cfgms-t__web-01"}},
@@ -874,56 +870,3 @@ func TestPreamble_CopyToSeedVHDFailsLoudlyOnMissingVolume(t *testing.T) {
 		"a missing labelled seed volume must throw a named error, not fail obscurely on a null path")
 }
 
-// TestPreamble_SeedDiskAttachedIsReadOnly guards the #3168 gate's probe. It must
-// stay read-only: the gate runs on EVERY convergence for every cloud-init VM, and
-// it is dispatched through the PERSISTENT host (like psGetVM, which also calls
-// Get-VMHardDiskDrive). Anything that opens a VHD here — Mount-VHD, Get-VHD,
-// Add/Remove-VMHardDiskDrive — would hit the async-VHD deadlock that forced every
-// other seed op onto runFresh.
-func TestPreamble_SeedDiskAttachedIsReadOnly(t *testing.T) {
-	body := preambleFunctionBody(t, "Cfgms-SeedDiskAttached")
-
-	assert.Contains(t, body, "Get-VMHardDiskDrive",
-		"the probe must read the VM's attached disks")
-	for _, forbidden := range []string{"Mount-VHD", "Dismount-VHD", "Get-VHD", "Add-VMHardDiskDrive", "Remove-VMHardDiskDrive", "Set-", "New-"} {
-		assert.NotContains(t, body, forbidden,
-			"Cfgms-SeedDiskAttached must stay read-only and must not open a VHD (found %q) — "+
-				"it runs on the persistent host on every convergence", forbidden)
-	}
-	assert.Contains(t, body, "'true'", "probe must emit a bare 'true'")
-	assert.Contains(t, body, "'false'", "probe must emit a bare 'false'")
-}
-
-// TestDispatch_SeedDiskAttachedQuotesValuesSafely: the #3168 probe carries a VM
-// name and a host path, both caller-influenced. This transport inlines values as
-// single-quoted PS literals (quoteForPS) rather than using ArgumentList, so the
-// invariant to hold is that every value is quote-escaped — an embedded single
-// quote must be doubled and must not be able to close the literal and append
-// arbitrary PowerShell.
-func TestDispatch_SeedDiskAttachedQuotesValuesSafely(t *testing.T) {
-	var captured string
-	emit := func(expr string) (string, error) { captured = expr; return "false", nil }
-
-	_, err := dispatchForTest(context.Background(), psSeedDiskAttached,
-		map[string]string{"Name": "web-01", "SeedPath": `C:\VMs\seed.vhdx`}, emit)
-	require.NoError(t, err)
-	assert.Contains(t, captured, "Cfgms-SeedDiskAttached",
-		"the probe must dispatch to its preamble function")
-	assert.Contains(t, captured, `-Name 'web-01'`, "the VM name must be a quoted PS literal")
-	assert.Contains(t, captured, `-SeedPath 'C:\VMs\seed.vhdx'`, "the seed path must be a quoted PS literal")
-
-	// Injection attempt: a name that tries to close the literal and chain a command.
-	_, err = dispatchForTest(context.Background(), psSeedDiskAttached,
-		map[string]string{"Name": `x'; Remove-VM -Name 'prod`, "SeedPath": `C:\s.vhdx`}, emit)
-	require.NoError(t, err)
-	// The escaped form is 'x''; Remove-VM -Name ''prod' — the quote is DOUBLED, so
-	// the literal never closes. Asserting the absence of "'; Remove-VM" would be a
-	// false alarm: the correctly-escaped output legitimately contains that
-	// substring as part of the doubled pair. The real invariants are that the
-	// quote was doubled, and that quoting stays balanced (an even count) so no
-	// value can leave a literal open and have its tail parsed as PowerShell.
-	assert.Contains(t, captured, "x''; Remove-VM -Name ''prod",
-		"an embedded single quote must be doubled per PS literal escaping")
-	assert.Equal(t, 0, strings.Count(captured, "'")%2,
-		"single quotes must stay balanced — an odd count means a value escaped its literal")
-}

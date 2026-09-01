@@ -1756,56 +1756,6 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		return m.degradeProvision(ctx, cfg, vmName, record, currentVM.State)
 	}
 
-	// Seedless-guest gate (#3168). The failedDuringSeedPhase check above is the
-	// FIRST line of defence, but it reads a ProvisionRecord that is NOT durable
-	// for a non-CSV VM: storeFor() falls back to an in-memory memProvisionStore,
-	// so a steward restart (or any fresh module instance) loses the record and
-	// loadOrInitProvision returns a fresh one at `absent` — failedDuringSeedPhase
-	// then returns false and the gate silently does not fire. The VM falls
-	// through here and gets powered on by the plain lifecycle below.
-	//
-	// The consequence is a silently, permanently broken VM: a cloud-init guest
-	// booted with no CIDATA device finds no datasource, never installs the
-	// steward, and never enrols — while convergence reports drift forever and
-	// never repairs it. Observed on cfg-lab: a VM ran for over an hour with a
-	// single (boot) disk attached and no seed; attaching the seed and rebooting
-	// enrolled it in ~90 seconds.
-	//
-	// So gate on the VM's ACTUAL hardware rather than on remembered state: ask
-	// the host whether the seed disk is attached. This is state-free and
-	// survives a restart. Best-effort — a probe error must not block
-	// convergence for VMs this does not apply to, so it degrades to "assume
-	// attached" and logs.
-	if cfg.Source.isCloudInit() {
-		seedPath := seedVHDPath(vmName, cfg.VHDPath, m.seedDir)
-		attached, probeErr := m.seedDiskAttached(ctx, hostName, seedPath)
-		switch {
-		case probeErr != nil:
-			if logger, ok := m.GetLogger(); ok {
-				logger.Warn("hyperv: could not verify CIDATA seed attachment; continuing",
-					"vm_name", logging.SanitizeLogValue(vmName),
-					"error", logging.SanitizeLogValue(probeErr.Error()))
-			}
-		case !attached:
-			if logger, ok := m.GetLogger(); ok {
-				logger.Warn("hyperv: VM exists but its CIDATA seed disk is NOT attached; surface-and-wait (no power-on — a seedless cloud-init guest can never enrol)",
-					"vm_name", logging.SanitizeLogValue(vmName),
-					"seed_path", logging.SanitizeLogValue(seedPath),
-					"observed_state", logging.SanitizeLogValue(currentVM.State))
-			}
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-				"vm-provision-skip-seed-not-attached", "vm:"+vmName, nil,
-				map[string]interface{}{"reason": "CIDATA seed disk not attached; VM left powered off"}, nil)
-			return m.failProvision(ctx, cfg, vmName, record,
-				fmt.Errorf("hyperv: VM %q exists without its CIDATA seed disk (%s); refusing to power on a guest that cannot enrol", vmName, seedPath))
-		}
-	}
-
-	// Existing healthy VM → source is inert. Log the inert decision, then drive
-	// the create-from-source convergence (installing → finalizing detach, a
-	// no-op unless an own record is at installing and settle conditions hold)
-	// and the plain lifecycle (power/resize/NIC) so an already-provisioned VM
-	// still converges to its declared running/stopped state without provisioning.
 	if logger, ok := m.GetLogger(); ok {
 		logger.Warn("hyperv: VM exists; source is inert (on_existing: never)",
 			"vm_name", logging.SanitizeLogValue(vmName),

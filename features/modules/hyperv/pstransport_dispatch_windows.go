@@ -115,12 +115,6 @@ func (t *psHostTransport) ExecutePS(ctx context.Context, psCommand string, psArg
 		return t.runFresh(ctx,
 			"Cfgms-AttachSeedDisk -Name "+quoteArg(psArgs, "Name")+
 				" -SeedPath "+quoteArg(psArgs, "SeedPath"))
-	case psSeedDiskAttached:
-		// Read-only Get-VMHardDiskDrive — no VHD is opened, so the persistent
-		// host is safe here (unlike the attach above).
-		return t.run(ctx,
-			"Cfgms-SeedDiskAttached -Name "+quoteArg(psArgs, "Name")+
-				" -SeedPath "+quoteArg(psArgs, "SeedPath"))
 	case psAttachDVD:
 		// runFresh: Add-VMDvdDrive opens the install ISO (same reason).
 		return t.runFresh(ctx,
