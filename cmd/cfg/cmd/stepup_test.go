@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -192,6 +193,38 @@ func TestStepUp_Interactive_PresenceRequired_RetrigesWithToken(t *testing.T) {
 	_, err = client.ListTokens(context.Background(), "")
 	require.NoError(t, err)
 	assert.Equal(t, 2, requestCount, "must retry original request once with presence token")
+}
+
+// --- Required test: runPresenceBrowserFlow fails fast, without a controller round-trip ---
+//
+// AC: "cfg stepup's presence path fails fast: the real runPresenceBrowserFlow (rename
+// acceptable) returns the actionable error naming the web UI path, without starting a
+// listener or opening a browser. The test in cmd/cfg/cmd/stepup_test.go must call the
+// real function — not override presenceBrowserFlowFn to skip it."
+
+func TestRunPresenceBrowserFlow_FailsFastWithoutContactingController(t *testing.T) {
+	presenceBeginCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/presence/begin") {
+			presenceBeginCalled = true
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, err := NewAPIClient(&APIClientConfig{
+		BaseURL:     server.URL,
+		TLSInsecure: true,
+	})
+	require.NoError(t, err)
+
+	token, err := runPresenceBrowserFlow(client)
+	require.Error(t, err, "CLI-driven presence assertion must fail fast")
+	assert.Empty(t, token)
+	assert.False(t, presenceBeginCalled, "must not contact the presence-begin endpoint")
+	assert.Contains(t, err.Error(), "web UI", "error must name the web UI as the alternative")
+	assert.NotContains(t, strings.ToLower(err.Error()), "unsupported configuration",
+		"error must name the alternative explicitly, not say \"unsupported configuration\"")
 }
 
 // --- Interactive + no presence: assurance-level step-up fails with actionable error ---

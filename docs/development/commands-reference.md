@@ -567,9 +567,11 @@ used for mTLS session authentication.
 The endpoint is gated by the `signing-credential:request` permission at
 `AssuranceStrong` plus a fresh user-presence proof, so this command requires an
 authenticated admin mTLS bundle or session (see [Connection
-Management](#connection-management)) and completes a WebAuthn presence ceremony —
-the CLI opens a browser automatically when one is needed, the same flow used by
-other presence-gated commands.
+Management](#connection-management)). CLI-driven presence assertion is not
+currently supported (see [Step-Up Authentication](#step-up-authentication-adr-021-decision-6)),
+so this command fails fast with an actionable error when the controller demands a
+presence gesture — complete the presence-gated action from the controller web UI
+instead.
 
 **Where the private key is kept:** the generated key is stored encrypted at rest in
 the machine-bound credential store — `<user config dir>/cfgms/credentials/signing-key.enc`,
@@ -1743,9 +1745,15 @@ Run `cfg connect` to generate and install an admin bundle.
 
 ### cfg webauthn register
 
-Registers a new WebAuthn passkey for a web account. Opens the system browser to
-complete the authenticator ceremony; the browser must be able to reach the controller's
-configured RPID origin.
+Fails fast: a WebAuthn ceremony served from a CLI-local loopback listener
+(`http://127.0.0.1:<random-port>`) can never satisfy a configured relying party, in any
+controller configuration — the browser itself refuses `navigator.credentials.create()`
+because a `127.0.0.1` origin can never match a real `rp_id` (see [ADR-021 Amendment
+4](../architecture/decisions/021-identity-assurance-levels.md#amendment-4-2026-08-28-relying-party-is-configuration-has-no-default-and-wiring-it-exposed-a-cli-relay-regression)).
+The command returns immediately with an error, without contacting the controller's begin
+endpoint, starting a local listener, or opening a browser. Register a passkey from the
+controller web UI instead, at the `/passkeys` page (ADR-021 Amendment 1 self-enrollment,
+Amendment 3 self-service passkey management).
 
 ```
 cfg webauthn register --username <user> [--label <name>] [--bundle <path>]
@@ -1755,13 +1763,11 @@ Example:
 
 ```
 cfg webauthn register --username alice --label "YubiKey 5C"
-# Requesting WebAuthn registration challenge from controller...
-# Opening browser at http://127.0.0.1:52341/register
-# ...
-# Passkey registered successfully!
-#   Username:      alice
-#   Label:         YubiKey 5C
-#   Registered at: 2026-07-19T22:00:00Z
+# Error: cfg webauthn register cannot run the WebAuthn ceremony from the CLI: a browser
+# refuses navigator.credentials.create() from a page served at http://127.0.0.1, which
+# can never match a configured relying party (ADR-021 Amendment 4). Register a passkey
+# from the controller web UI instead, at the /passkeys page (ADR-021 Amendment 1
+# self-enrollment, Amendment 3 self-service passkey management)
 ```
 
 **Flags:**
@@ -1772,7 +1778,6 @@ cfg webauthn register --username alice --label "YubiKey 5C"
 | `--label` | — | Human-readable label for the credential |
 | `--bundle` | auto | Path to admin bundle file (env: CFGMS_ADMIN_BUNDLE) |
 | `--api-url` | bundle URL | Override controller URL |
-| `--timeout` | 5m | Browser ceremony timeout |
 
 ### cfg webauthn list
 
@@ -2070,10 +2075,13 @@ response, it distinguishes two cases:
 
 When running interactively (stdin is a TTY):
 
-- **Presence required** (`presence="required"` in the header): `cfg` opens the
-  system browser to a local relay page and prompts for a security key touch. After
-  the WebAuthn assertion completes, the original request is automatically retried
-  with `X-Presence-Token`. No flags or re-invocation are needed.
+- **Presence required** (`presence="required"` in the header): CLI-driven presence
+  assertion is not currently supported — a ceremony served from a CLI-local loopback
+  listener can never satisfy a configured relying party, in any controller
+  configuration (see [ADR-021 Amendment
+  4](../architecture/decisions/021-identity-assurance-levels.md#amendment-4-2026-08-28-relying-party-is-configuration-has-no-default-and-wiring-it-exposed-a-cli-relay-regression)).
+  `cfg` fails fast with an actionable error directing the operator to complete the
+  action from the controller web UI.
 
 - **Assurance too low** (no `presence="required"`): `cfg` fails with an actionable
   message directing the operator to use an mTLS-authenticated session or log in via

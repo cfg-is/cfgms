@@ -924,6 +924,9 @@ work). It is tracked as a follow-up story under Epic #3711.
   eventually times out. `cfg webauthn list` / `cfg webauthn revoke` (no ceremony, pure REST calls)
   and the mTLS admin-bundle bootstrap path are unaffected. The admin can still recover via the mTLS
   cert path (§7) or `cfg registration approve` while the follow-up relay-redirect fix lands.
+  Issue #3728 replaced the stuck "waiting for browser ceremony" prompt and its eventual timeout
+  with an immediate, actionable fail-fast error, and deleted the dead relay implementation the
+  paragraph above describes.
 
 **Implementation reference (Issue #3713):** `features/controller/config.WebAuthnConfig` +
 `Config.ValidateWebAuthn`; tightened `NewWebAuthnFromConfig` validation in

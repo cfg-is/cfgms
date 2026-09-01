@@ -830,9 +830,14 @@ The table below collects all `[GAP: ...]` markers from this walkthrough for easy
 
 ## Next Steps
 
-- **Register a browser passkey**: Run `cfg webauthn register --username <admin-username>` to
-  register a WebAuthn passkey for browser-based controller login. The admin mTLS certificate
-  (from `bootstrap-admin`) remains your CLI credential; this step enables the web UI login path.
+- **Register a browser passkey**: `cfg webauthn register` cannot complete a browser
+  ceremony from the CLI (a loopback-served ceremony can never satisfy a configured
+  relying party — see [ADR-021 Amendment
+  4](../../architecture/decisions/021-identity-assurance-levels.md#amendment-4-2026-08-28-relying-party-is-configuration-has-no-default-and-wiring-it-exposed-a-cli-relay-regression)).
+  Instead, run `cfg account create --username <admin-username>` to mint a single-use
+  enrollment magic link, then open that link in a browser to register the first passkey
+  for browser-based controller login (ADR-021 Amendment 1 self-enrollment). The admin
+  mTLS certificate (from `bootstrap-admin`) remains your CLI credential either way.
 - **Role configs**: See [Role Config Recipes](../../examples/role-configs/README.md) for
   ready-to-use fleet configs for web servers, database servers, domain controllers, and more.
 - **Docker fleet test**: Epic #1501 will validate this walkthrough against a docker-based
