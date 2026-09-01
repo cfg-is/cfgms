@@ -4,7 +4,9 @@ package sqlite_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -241,4 +243,128 @@ func TestAuditStore_GetLastAuditEntry_TenantIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, lastB)
 	assert.Equal(t, uint64(1), lastB.SequenceNumber)
+}
+
+// TestAuditStore_AppendChainedEntry_FileBacked_ConcurrentAppenders is the
+// regression test for the deferred-transaction defect in AppendChainedEntry.
+//
+// It must be file-backed: in-memory databases are pinned to a single connection
+// (openDB), which hides the defect entirely. A file-backed database keeps the
+// default multi-connection pool in WAL mode and every store opens its own pool
+// over the file, so several store handles here reproduce what several stores in
+// one controller — or several controller processes sharing the file — do.
+//
+// With a deferred transaction each appender takes its read snapshot at the head
+// SELECT; any other connection committing before its INSERT invalidates that
+// snapshot, the read-to-write upgrade fails with SQLITE_BUSY, and busy_timeout
+// does not retry a snapshot-invalidation busy. Measured on this workload against
+// the deferred implementation: 10 of 200 appends succeeded. Because
+// audit.Manager only logs a failed append and moves on, the other 190 would be
+// silently destroyed audit evidence — and undetectable afterwards, since the
+// surviving chain remains gap-free and correctly linked.
+//
+// Every append must therefore succeed, and the persisted chain must be 1..N with
+// no gaps and no sequence number issued twice.
+func TestAuditStore_AppendChainedEntry_FileBacked_ConcurrentAppenders(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "audit-concurrent.db")
+	p := sqlite.NewSQLiteProvider(dir)
+
+	newStore := func() business.AuditStore {
+		store, err := p.CreateAuditStore(map[string]interface{}{"path": dbPath})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		return store
+	}
+
+	ctx := context.Background()
+	checksum := func(e *business.AuditEntry) string {
+		return fmt.Sprintf("chk-%d-%s", e.SequenceNumber, e.PreviousChecksum)
+	}
+
+	// An unrelated writer on its own pool: ordinary concurrent controller
+	// activity against the same database, which is all the deferred
+	// implementation needed to start losing appends.
+	unrelated := newStore()
+	stopUnrelated := make(chan struct{})
+	unrelatedErr := make(chan error, 1)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stopUnrelated:
+				unrelatedErr <- nil
+				return
+			default:
+			}
+			e := sampleAuditEntry(fmt.Sprintf("unrelated-%d", i))
+			e.TenantID = "tenant-unrelated"
+			if err := unrelated.StoreAuditEntry(ctx, e); err != nil {
+				unrelatedErr <- fmt.Errorf("unrelated writer failed on entry %d: %w", i, err)
+				return
+			}
+		}
+	}()
+
+	const appenders = 4
+	const perAppender = 25
+	const totalAppends = appenders * perAppender
+	const chainTenant = "tenant-chain"
+
+	var wg sync.WaitGroup
+	appendErrs := make(chan error, totalAppends)
+	for a := 0; a < appenders; a++ {
+		store := newStore()
+		wg.Add(1)
+		go func(a int, store business.AuditStore) {
+			defer wg.Done()
+			for i := 0; i < perAppender; i++ {
+				entry := sampleAuditEntry(fmt.Sprintf("chained-%d-%d", a, i))
+				entry.TenantID = ""
+				entry.Checksum = ""
+				if err := store.AppendChainedEntry(ctx, chainTenant, entry, checksum); err != nil {
+					appendErrs <- fmt.Errorf("appender %d entry %d: %w", a, i, err)
+				}
+			}
+		}(a, store)
+	}
+	wg.Wait()
+	close(appendErrs)
+	close(stopUnrelated)
+
+	for err := range appendErrs {
+		require.NoError(t, err, "no chain append may be lost to concurrent writers")
+	}
+	require.NoError(t, <-unrelatedErr, "the unrelated writer must also complete without lock failures")
+
+	// The durable chain must be complete: 1..N, gap-free, each sequence issued once.
+	entries, err := chainStoreEntries(ctx, t, newStore(), chainTenant, totalAppends)
+	require.NoError(t, err)
+	require.Len(t, entries, totalAppends, "every appended entry must be durably persisted")
+
+	bySequence := make(map[uint64]*business.AuditEntry, totalAppends)
+	for _, e := range entries {
+		require.Nil(t, bySequence[e.SequenceNumber], "sequence %d assigned twice", e.SequenceNumber)
+		bySequence[e.SequenceNumber] = e
+	}
+	for i := uint64(1); i <= totalAppends; i++ {
+		e := bySequence[i]
+		require.NotNil(t, e, "sequence %d missing from the persisted chain", i)
+		if i == 1 {
+			assert.Empty(t, e.PreviousChecksum, "the first entry must have an empty PreviousChecksum")
+			continue
+		}
+		assert.Equal(t, bySequence[i-1].Checksum, e.PreviousChecksum,
+			"entry %d must link to entry %d's checksum", i, i-1)
+	}
+}
+
+// chainStoreEntries reads back every entry stored for tenantID.
+func chainStoreEntries(ctx context.Context, t *testing.T, store business.AuditStore, tenantID string, limit int) ([]*business.AuditEntry, error) {
+	t.Helper()
+	return store.ListAuditEntries(ctx, &business.AuditFilter{
+		TenantID: tenantID,
+		SortBy:   "timestamp",
+		Order:    "asc",
+		Limit:    limit + 1,
+	})
 }

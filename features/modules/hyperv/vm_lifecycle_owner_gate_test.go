@@ -37,7 +37,7 @@ func TestApplyVMState_NonOwner_GoesQuiet(t *testing.T) {
 	}}
 	m := vmModuleWithTransport(transport, "t-2422")
 	m.nodeHostname = "NODE1"
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	m.auditMgr = mgr
 	m.stewardID = "steward-2422"
 

@@ -189,11 +189,11 @@ func assertReceiptTimestamps(t *testing.T, entries []*business.AuditEntry, start
 // persistent PS-host transport, the cluster scope cap (cluster_name +
 // cluster_role_names), a non-CSV seed dir, a fast DNA poll cadence, and a fake
 // audit manager whose entries the S8 receipt-time checks inspect.
-func newClusterHAModule(t *testing.T, p clusterHAParams, roleNames []string) (*hypervModule, *fakeAuditStore) {
+func newClusterHAModule(t *testing.T, p clusterHAParams, roleNames []string) (*hypervModule, *recordingAuditStore) {
 	t.Helper()
 	store := newInlineStore() // ps-host transport needs no credentials
 	m := newModuleWithDetector(store, &fakeDetector{result: true})
-	auditMgr, auditStore := newFakeAuditManager(t)
+	auditMgr, auditStore := newRecordingAuditManager(t)
 	require.NoError(t, m.Configure(mapConfigState{
 		"transport":             "ps-host",
 		"tenant_id":             "lab",

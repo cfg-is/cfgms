@@ -20,9 +20,9 @@ import (
 // the cluster tests exercise the real getCluster / clusterOwnershipHelper paths
 // without any mocks of CFGMS components (the recording transport + fakeDetector
 // are the established test seams).
-func clusterTestModule(t *testing.T, transport *testWinRMTransport) (*hypervModule, *fakeAuditStore) {
+func clusterTestModule(t *testing.T, transport *testWinRMTransport) (*hypervModule, *recordingAuditStore) {
 	t.Helper()
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	m := newModuleWithDetector(nil, &fakeDetector{result: true})
 	m.transport = transport
 	m.auditMgr = mgr

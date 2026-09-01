@@ -274,7 +274,7 @@ func TestSetVM_HARoleAlreadyClusterWide_SkipsCreate(t *testing.T) {
 		m := vmModuleWithTransport(transport, "t-2420")
 		m.clusterName = cluster
 		m.nodeHostname = "NODE1"
-		mgr, store := newFakeAuditManager(t)
+		mgr, store := newRecordingAuditManager(t)
 		m.auditMgr = mgr
 		m.stewardID = "steward-2420"
 
@@ -399,7 +399,7 @@ func TestSetVM_ClusterWideAbsentRole_NonOwnerSurfacesAndWaits(t *testing.T) {
 		m := vmModuleWithTransport(transport, "t-2421")
 		m.clusterName = cluster
 		m.nodeHostname = "NODE1"
-		mgr, store := newFakeAuditManager(t)
+		mgr, store := newRecordingAuditManager(t)
 		m.auditMgr = mgr
 		m.stewardID = "steward-2421"
 

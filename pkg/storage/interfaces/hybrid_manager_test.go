@@ -609,6 +609,14 @@ func (s *mockAuditStore) GetLastAuditEntry(_ context.Context, _ string) (*busine
 	return nil, nil
 }
 
+// AppendChainedEntry returns nil to satisfy the AuditStore interface, for the
+// same circular-dependency reason documented on GetLastAuditEntry above. Chain
+// assignment is tested end-to-end in pkg/audit/manager_test.go and against real
+// providers in pkg/storage/interfaces/business's contract tests.
+func (s *mockAuditStore) AppendChainedEntry(_ context.Context, _ string, _ *business.AuditEntry, _ func(entry *business.AuditEntry) string) error {
+	return nil
+}
+
 func (s *mockAuditStore) Close() error {
 	return nil
 }
