@@ -790,6 +790,31 @@ func (s DatabaseSchemas) BackfillRegistrationTokenIDs(ctx context.Context, db *s
 	return nil
 }
 
+// CreateLeaseTable creates the cfgms_leases table backing pkg/lease — the
+// fenced, quorum-equivalent singleton-claim primitive (ADR-031 Decision 5,
+// Issue #3756). A row is never deleted by Release; it is force-expired so the
+// token column remains the lease's monotonic high-water mark across releases.
+func (s DatabaseSchemas) CreateLeaseTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_leases (
+			name       TEXT PRIMARY KEY,
+			holder_id  TEXT NOT NULL,
+			token      BIGINT NOT NULL,
+			expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+		);
+	`
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_leases table: %w", err)
+	}
+
+	indexQuery := "CREATE INDEX IF NOT EXISTS idx_leases_expires_at ON cfgms_leases(expires_at);"
+	if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_leases index: %w", err)
+	}
+
+	return nil
+}
+
 // CreateIPTrustRangesTable creates the cfgms_ip_trust_ranges table for tenant-scoped IP trust.
 func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
@@ -916,6 +941,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 	}
 
 	if err := s.CreateIPTrustRangesTable(ctx, db); err != nil {
+		return err
+	}
+
+	if err := s.CreateLeaseTable(ctx, db); err != nil {
 		return err
 	}
 
@@ -1359,6 +1388,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_registration_tokens;",
 		"DROP TABLE IF EXISTS cfgms_registration_token_claims;",
 		"DROP TABLE IF EXISTS cfgms_ip_trust_ranges;",
+		"DROP TABLE IF EXISTS cfgms_leases;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key
