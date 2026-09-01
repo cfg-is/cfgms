@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,7 +184,6 @@ func initSignedModuleRepo(t *testing.T, gitBin, repoDir, publisher, name, versio
 // error response names the unapproved module.
 func TestHandleUpdateStewardConfig_RequiredModules_PendingInCache_Returns422(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "acme-corp", 5*time.Minute)
 
 	c, err := cache.New(t.TempDir() + "/module-cache")
 	require.NoError(t, err)
@@ -203,8 +201,7 @@ func TestHandleUpdateStewardConfig_RequiredModules_PendingInCache_Returns422(t *
 		{"name": "cfgms/firewall", "version": "1.0.0"},
 	})
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-required-pending/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-pending/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -225,7 +222,6 @@ func TestHandleUpdateStewardConfig_RequiredModules_PendingInCache_Returns422(t *
 // and asserts that the cfg push proceeds normally.
 func TestHandleUpdateStewardConfig_RequiredModules_ApprovedInCache_Returns200(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "acme-corp", 5*time.Minute)
 
 	c, err := cache.New(t.TempDir() + "/module-cache")
 	require.NoError(t, err)
@@ -246,8 +242,7 @@ func TestHandleUpdateStewardConfig_RequiredModules_ApprovedInCache_Returns200(t 
 		{"name": "cfgms/firewall", "version": "1.0.0"},
 	})
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-required-approved/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-approved/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -263,7 +258,6 @@ func TestHandleUpdateStewardConfig_RequiredModules_ApprovedInCache_Returns200(t 
 func TestHandleUpdateStewardConfig_RequiredModules_UncachedQueuedByResolver_Returns422(t *testing.T) {
 	gitBin := skipIfNoGitForRequiredModules(t)
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "acme-corp", 5*time.Minute)
 
 	modulesDir := t.TempDir()
 	firewallDir := filepath.Join(modulesDir, "firewall")
@@ -286,8 +280,7 @@ func TestHandleUpdateStewardConfig_RequiredModules_UncachedQueuedByResolver_Retu
 		{"name": "cfgms/firewall", "version": "1.0.0"},
 	})
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-required-uncached/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-uncached/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -307,7 +300,6 @@ func TestHandleUpdateStewardConfig_RequiredModules_UncachedQueuedByResolver_Retu
 func TestHandleUpdateStewardConfig_RequiredModules_UncachedAutoApprovedByResolver_Returns200(t *testing.T) {
 	gitBin := skipIfNoGitForRequiredModules(t)
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "acme-corp", 5*time.Minute)
 
 	modulesDir := t.TempDir()
 	firewallDir := filepath.Join(modulesDir, "firewall")
@@ -335,8 +327,7 @@ func TestHandleUpdateStewardConfig_RequiredModules_UncachedAutoApprovedByResolve
 		{"name": "cfgms/firewall", "version": "1.0.0"},
 	})
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-required-autoapprove/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-autoapprove/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -352,15 +343,13 @@ func TestHandleUpdateStewardConfig_RequiredModules_UncachedAutoApprovedByResolve
 // the module cache.
 func TestHandleUpdateStewardConfig_RequiredModules_DependenciesNotWired_Returns200(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "acme-corp", 5*time.Minute)
 
 	// Intentionally do NOT call server.SetModuleResolution.
 	body := requiredModulesValidCfgBody(t, "test-steward-required-unwired", []map[string]string{
 		{"name": "cfgms/firewall", "version": "1.0.0"},
 	})
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-required-unwired/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-required-unwired/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)

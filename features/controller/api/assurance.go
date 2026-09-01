@@ -150,6 +150,17 @@ var permissionAssurance = map[string]Requirement{
 	"steward:execute-scripts": {Min: session.AssuranceStrong}, // POST /runs/script, /runs/command; DELETE /runs/{run_id}
 	"script:admin":            {Min: session.AssuranceStrong}, // GET/PUT /scripts, /scripts/{id}, /scripts/{id}/privilege
 
+	// Steward config push (Issue #3792): PUT /stewards/{id}/config applies the
+	// submitted resources as declared state on the target host — root-equivalent,
+	// same blast radius as steward:execute-scripts. Before this entry an
+	// AssuranceMachine (API-key) principal could push config cross-tenant with no
+	// assurance floor at all. Gated at AssuranceStrong only, no RequireUserPresence:
+	// config push is a routine, often-automated operation (CI/CD, scheduled
+	// deploys), unlike the one-off admin actions that carry RequireUserPresence
+	// (module:approve, osquery:execute) — mirrors steward:execute-scripts and
+	// steward:move rather than those.
+	"steward:write-config": {Min: session.AssuranceStrong}, // PUT /stewards/{id}/config
+
 	// Forward-declared for stories consuming this registry entry — no live route yet.
 	// operator-payload:sign is consumed by story S6; signing-credential:request (with
 	// RequireUserPresence: true, mirroring module:approve/osquery:execute — the operation

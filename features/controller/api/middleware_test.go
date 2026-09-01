@@ -2363,35 +2363,40 @@ func TestBearerSession_BoundAccountPermissionChangeLiveWithoutRelogin(t *testing
 	// Issue one session token that both requests will use.
 	token := setupBearerSession(t, mgr, acct.ID, acct.TenantID)
 
+	// steward:validate-config is used here (not steward:write-config) because it
+	// carries no permissionAssurance entry — this test exercises live permission-
+	// grant propagation, not assurance gating, and Bearer sessions are AssuranceBasic
+	// so an AssuranceStrong-gated permission (Issue #3792) would 401 step-up rather
+	// than the 403/200 pair this test asserts.
 	handler := srv.authenticationMiddleware(
-		srv.requirePermission("steward", "write-config")(
+		srv.requirePermission("steward", "validate-config")(
 			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}),
 		),
 	)
 
-	// Request 1: steward:write-config is not in the account's grants → 403.
+	// Request 1: steward:validate-config is not in the account's grants → 403.
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test/config", nil)
 	req1.Header.Set("Authorization", "Bearer "+token)
 	rec1 := httptest.NewRecorder()
 	handler.ServeHTTP(rec1, req1)
 	assert.Equal(t, http.StatusForbidden, rec1.Code,
-		"steward:write-config must be denied before the permission is granted")
+		"steward:validate-config must be denied before the permission is granted")
 
-	// Simulate an admin granting steward:write-config — update the cache without re-login.
+	// Simulate an admin granting steward:validate-config — update the cache without re-login.
 	updated := *acct
 	updated.Permissions = append([]string{}, acct.Permissions...)
-	updated.Permissions = append(updated.Permissions, "steward:write-config")
+	updated.Permissions = append(updated.Permissions, "steward:validate-config")
 	srv.cacheAccount(&updated)
 
-	// Request 2: same token, now steward:write-config is in the account's grants → 200.
+	// Request 2: same token, now steward:validate-config is in the account's grants → 200.
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/test/config", nil)
 	req2.Header.Set("Authorization", "Bearer "+token)
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req2)
 	assert.Equal(t, http.StatusOK, rec2.Code,
-		"steward:write-config must be allowed after the account permission is updated — no re-login required")
+		"steward:validate-config must be allowed after the account permission is updated — no re-login required")
 }
 
 // TestBearerSession_BoundDisabledAccount_Returns401Revoked verifies that a session
