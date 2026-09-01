@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -741,4 +742,170 @@ func TestLoadCAFromSecretStore_MissingKeyReturnsError(t *testing.T) {
 	err = loaded.LoadCAFromSecretStore(ctx, store, "root", "cluster-ca")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "CA private key")
+}
+
+// TestCA_Initialize_UnsetPathLengthPreservesLeafOnlyBehavior verifies that a
+// CAConfig with no PathLength override produces byte-identical
+// MaxPathLen/MaxPathLenZero behavior to today's hardcoded leaf-only CA.
+// [REQUIRED TEST]
+func TestCA_Initialize_UnsetPathLengthPreservesLeafOnlyBehavior(t *testing.T) {
+	caConfig := &CAConfig{
+		Organization: "Test CA",
+		Country:      "US",
+		ValidityDays: 365,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	require.NoError(t, err)
+
+	caCertPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+	caCert, err := ParseCertificateFromPEM(caCertPEM)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, caCert.MaxPathLen)
+	assert.True(t, caCert.MaxPathLenZero)
+}
+
+// TestCA_Initialize_CustomPathLength verifies that a CAConfig with
+// PathLength: 1 (PathLengthSet: true) produces a certificate capable of
+// signing a subordinate CA. [REQUIRED TEST]
+func TestCA_Initialize_CustomPathLength(t *testing.T) {
+	caConfig := &CAConfig{
+		Organization:  "Test Intermediate-Capable CA",
+		Country:       "US",
+		ValidityDays:  365,
+		PathLength:    1,
+		PathLengthSet: true,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	require.NoError(t, err)
+
+	caCertPEM, err := ca.GetCACertificate()
+	require.NoError(t, err)
+	caCert, err := ParseCertificateFromPEM(caCertPEM)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, caCert.MaxPathLen)
+	assert.False(t, caCert.MaxPathLenZero)
+
+	// Prove the chain-capable CA can actually sign a subordinate.
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := ca.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Test Intermediate CA",
+		Organization: "Test Org",
+		ValidityDays: 365,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, subCert)
+
+	subX509Cert, err := ParseCertificateFromPEM(subCert.CertificatePEM)
+	require.NoError(t, err)
+
+	assert.True(t, subX509Cert.IsCA)
+	assert.Equal(t, 0, subX509Cert.MaxPathLen)
+	assert.True(t, subX509Cert.MaxPathLenZero)
+	assert.Empty(t, subCert.PrivateKeyPEM, "CA must never generate or return a private key for a caller-supplied public key")
+
+	err = subX509Cert.CheckSignatureFrom(caCert)
+	assert.NoError(t, err)
+}
+
+// TestCA_Initialize_InvalidPathLengthRejected verifies out-of-range
+// PathLength values are rejected rather than silently clamped.
+func TestCA_Initialize_InvalidPathLengthRejected(t *testing.T) {
+	caConfig := &CAConfig{
+		Organization:  "Test CA",
+		Country:       "US",
+		ValidityDays:  365,
+		PathLength:    7,
+		PathLengthSet: true,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	assert.Error(t, err)
+}
+
+// TestCA_SignSubordinateCA_RejectsPathLengthZeroSigner verifies that
+// SignSubordinateCA against a path-length-zero CA (today's default) returns
+// an error and signs nothing. [REQUIRED TEST]
+func TestCA_SignSubordinateCA_RejectsPathLengthZeroSigner(t *testing.T) {
+	caConfig := &CAConfig{
+		Organization: "Test CA",
+		Country:      "US",
+		ValidityDays: 365,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := ca.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Test Intermediate CA",
+		Organization: "Test Org",
+		ValidityDays: 365,
+		PathLength:   0,
+	})
+	require.Error(t, err)
+	assert.Nil(t, subCert)
+}
+
+// TestCA_SignSubordinateCA_RejectsPathLengthNotLessThanSigner verifies a
+// subordinate's requested path length must leave room within the signer's
+// own path-length constraint (RFC 5280 4.2.1.9).
+func TestCA_SignSubordinateCA_RejectsPathLengthNotLessThanSigner(t *testing.T) {
+	caConfig := &CAConfig{
+		Organization:  "Test CA",
+		Country:       "US",
+		ValidityDays:  365,
+		PathLength:    1,
+		PathLengthSet: true,
+	}
+
+	ca, err := NewCA(caConfig)
+	require.NoError(t, err)
+	err = ca.Initialize(caConfig)
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	// PathLength 1 does not leave room under a signer whose own path
+	// length is also 1 — must be strictly less.
+	subCert, err := ca.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Test Intermediate CA",
+		Organization: "Test Org",
+		ValidityDays: 365,
+		PathLength:   1,
+	})
+	require.Error(t, err)
+	assert.Nil(t, subCert)
+}
+
+// TestCA_SignSubordinateCA_UninitializedReturnsError ensures SignSubordinateCA
+// rejects an uninitialized CA rather than signing against a nil certificate.
+func TestCA_SignSubordinateCA_UninitializedReturnsError(t *testing.T) {
+	ca := &CA{}
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := ca.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName: "Test Intermediate CA",
+	})
+	assert.Error(t, err)
+	assert.Nil(t, subCert)
 }

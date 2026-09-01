@@ -160,6 +160,18 @@ type CAConfig struct {
 
 	// Storage path for CA files
 	StoragePath string
+
+	// PathLength overrides the CA certificate's path-length constraint
+	// (RFC 5280 pathLenConstraint), valid range 0-6. Only honored when
+	// PathLengthSet is true. Leaving both fields at their zero value
+	// preserves today's leaf-only behavior (MaxPathLen: 0, MaxPathLenZero:
+	// true) — a CA that can never sign a subordinate CA.
+	PathLength int
+
+	// PathLengthSet indicates PathLength was explicitly provided by the
+	// caller. Required because PathLength's zero value is itself a valid,
+	// meaningful setting (leaf-only CA) distinct from "not set".
+	PathLengthSet bool
 }
 
 // ServerCertConfig contains configuration for server certificate generation
@@ -206,6 +218,29 @@ type ClientCertConfig struct {
 	// TemplateModifier is an optional function applied to the certificate template
 	// before signing. Pass SetAdminMarker (from the cert package) to issue admin certificates.
 	TemplateModifier func(*x509.Certificate)
+}
+
+// SubordinateCAConfig contains configuration for signing a caller-supplied
+// public key into a subordinate (intermediate) CA certificate. Mirrors
+// ClientCertConfig's caller-supplies-pubkey-only shape: the CA never
+// generates or sees a private key for the subordinate.
+type SubordinateCAConfig struct {
+	// Common name for the subordinate CA
+	CommonName string
+
+	// Organization name
+	Organization string
+
+	// Organizational unit
+	OrganizationalUnit string
+
+	// Certificate validity period in days
+	ValidityDays int
+
+	// PathLength is the subordinate CA's own path-length constraint
+	// (RFC 5280 pathLenConstraint), valid range 0-6. Must be strictly less
+	// than the signing CA's own path length.
+	PathLength int
 }
 
 // Certificate represents a generated certificate with its metadata
