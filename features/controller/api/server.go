@@ -108,6 +108,7 @@ type Server struct {
 	registrationLeaderStatus        registrationLeaderStatus                 // Issue #3471: leader check for registration/token endpoints (nil = always leader)
 	commandPublisher                *commands.Publisher                      // Issue #1319: fan-out config push to active stewards
 	pushStore                       business.PushStore                       // Issue #1320: durable push-state persistence for HA failover
+	commandStore                    business.CommandStore                    // Issue #3757: durable delivery-lifecycle outbox for steward-directed writes (ADR-031 Decision 2)
 	registry                        registry.Registry                        // Issue #1323: active steward connection registry
 	mountPointValidator             MountPointValidator                      // Issue #1396: config source connection test
 	configSourceSecretStore         secretsif.SecretStore                    // Issue #1396: secrets for config source validator
@@ -1567,6 +1568,17 @@ func (s *Server) SetAssurancePolicyStore(store business.AssurancePolicyStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.assurancePolicyStore = store
+}
+
+// SetCommandStore wires the durable command/delivery outbox store (Issue #3757,
+// ADR-031 Decision 2). When nil (default), handleConfigPush skips creating
+// durable delivery rows entirely and falls back to synchronous best-effort
+// fan-out only — the same degraded posture other optional stores use (e.g.
+// pushStore, egConfigstoreWriter) when their backing provider is unavailable.
+func (s *Server) SetCommandStore(store business.CommandStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandStore = store
 }
 
 // SetAuditStore wires a direct AuditStore reference for the test-mode count endpoint

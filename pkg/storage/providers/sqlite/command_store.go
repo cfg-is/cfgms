@@ -52,7 +52,120 @@ func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *bu
 	}
 	// Always start in pending state.
 	record.Status = business.CommandStatusPending
+	if record.DeliveryStatus == "" {
+		record.DeliveryStatus = business.DeliveryStatusPending
+	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := sqliteInsertCommandRecord(ctx, tx, record, now); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// CreateCommandRecords atomically creates a batch of command records in a single
+// transaction: every record commits, or none do (Issue #3757, ADR-031 Decision 2).
+func (s *SQLiteCommandStore) CreateCommandRecords(ctx context.Context, records []*business.CommandRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	for _, r := range records {
+		if r == nil {
+			return fmt.Errorf("sqlite: command record cannot be nil")
+		}
+		if r.ID == "" {
+			return business.ErrCommandIDRequired
+		}
+		if r.StewardID == "" {
+			return business.ErrCommandStewardIDRequired
+		}
+	}
+
+	now := nowUTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to begin batch transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, record := range records {
+		if record.IssuedAt.IsZero() {
+			record.IssuedAt = now
+		}
+		record.Status = business.CommandStatusPending
+		if record.DeliveryStatus == "" {
+			record.DeliveryStatus = business.DeliveryStatusPending
+		}
+		if err := sqliteInsertCommandRecord(ctx, tx, record, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// CreatePushAndCommandRecords atomically creates push (the "config write") and
+// records (the per-steward delivery rows it requires) in a single transaction:
+// both commit together, or neither does (Issue #3757, ADR-031 Decision 2). push
+// may be nil (only the delivery rows are written); records may be empty (only
+// the push row is written).
+func (s *SQLiteCommandStore) CreatePushAndCommandRecords(ctx context.Context, push *business.PushRecord, records []*business.CommandRecord) error {
+	if push == nil && len(records) == 0 {
+		return nil
+	}
+	for _, r := range records {
+		if r == nil {
+			return fmt.Errorf("sqlite: command record cannot be nil")
+		}
+		if r.ID == "" {
+			return business.ErrCommandIDRequired
+		}
+		if r.StewardID == "" {
+			return business.ErrCommandStewardIDRequired
+		}
+	}
+
+	now := nowUTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to begin push+command tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if push != nil {
+		if err := sqliteInsertPushRecord(ctx, tx, push); err != nil {
+			return err
+		}
+	}
+
+	for _, record := range records {
+		if record.IssuedAt.IsZero() {
+			record.IssuedAt = now
+		}
+		record.Status = business.CommandStatusPending
+		if record.DeliveryStatus == "" {
+			record.DeliveryStatus = business.DeliveryStatusPending
+		}
+		if err := sqliteInsertCommandRecord(ctx, tx, record, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// sqliteInsertCommandRecord inserts a single commands row plus its initial
+// pending transition within tx. Shared by CreateCommandRecord and
+// CreateCommandRecords so both paths persist identically.
+func sqliteInsertCommandRecord(ctx context.Context, tx *sql.Tx, record *business.CommandRecord, transitionTime time.Time) error {
 	payload, err := marshalJSON(record.Payload)
 	if err != nil {
 		return fmt.Errorf("sqlite: failed to marshal command payload: %w", err)
@@ -62,17 +175,12 @@ func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *bu
 		return fmt.Errorf("sqlite: failed to marshal command result: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite: failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO commands
 			(id, type, steward_id, tenant_id, payload, status,
-			 issued_at, started_at, completed_at, result, error_message, issued_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+			 issued_at, started_at, completed_at, result, error_message, issued_by,
+			 delivery_status, delivery_detail)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.Type,
 		record.StewardID,
@@ -83,17 +191,15 @@ func (s *SQLiteCommandStore) CreateCommandRecord(ctx context.Context, record *bu
 		result,
 		record.ErrorMessage,
 		record.IssuedBy,
+		string(record.DeliveryStatus),
+		record.DeliveryDetail,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: failed to create command record %s: %w", record.ID, err)
 	}
 
 	// Record initial transition (creation counts as first audit entry).
-	if err := insertTransition(ctx, tx, record.ID, business.CommandStatusPending, now, ""); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return insertTransition(ctx, tx, record.ID, business.CommandStatusPending, transitionTime, "")
 }
 
 // UpdateCommandStatus transitions a command to the given status and appends a
@@ -156,6 +262,84 @@ func (s *SQLiteCommandStore) UpdateCommandStatus(
 	return tx.Commit()
 }
 
+// UpdateDeliveryStatus transitions a command record's outbox DeliveryStatus
+// (Issue #3757, ADR-031 Decision 2). Independent of UpdateCommandStatus: this
+// updates delivery_status/delivery_detail only and does not touch the
+// command_transitions audit trail (that trail records CommandStatus, not
+// DeliveryStatus).
+func (s *SQLiteCommandStore) UpdateDeliveryStatus(
+	ctx context.Context,
+	id string,
+	status business.DeliveryStatus,
+	detail string,
+) error {
+	if id == "" {
+		return business.ErrCommandIDRequired
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE commands SET delivery_status = ?, delivery_detail = ?
+		WHERE id = ?`,
+		string(status), detail, id)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to update delivery status for %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to read rows affected for %s: %w", id, err)
+	}
+	if n == 0 {
+		return business.ErrCommandNotFound
+	}
+	return nil
+}
+
+// ListPendingDeliveries returns every command record targeting stewardID whose
+// DeliveryStatus is still pending (Issue #3757) — the set a steward drains on
+// reconnect.
+//
+// The query is scoped to stewardTenant and its ancestor tenants as well as to
+// steward_id. steward_id on its own is not a tenant boundary: a steward can be
+// moved between tenants (Issue #2341) while its older rows keep the tenant_id
+// they were written under, and SQLite has no row-level security to compensate.
+func (s *SQLiteCommandStore) ListPendingDeliveries(ctx context.Context, stewardID, stewardTenant string) ([]*business.CommandRecord, error) {
+	if stewardID == "" {
+		return nil, business.ErrCommandStewardIDRequired
+	}
+	if stewardTenant == "" {
+		return nil, business.ErrCommandTenantIDRequired
+	}
+
+	// The tenant predicate is a fixed statement with bound parameters — no
+	// generated fragment, so nothing about the tenant path reaches the SQL text.
+	// It matches business.TenantPathChain exactly: the record's own tenant, or an
+	// ancestor of it, tested by prefix equality against the separator rather than
+	// LIKE (a tenant path containing % or _ would otherwise widen the match).
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, type, steward_id, tenant_id, payload, status,
+		       issued_at, started_at, completed_at, result, error_message, issued_by,
+		       delivery_status, delivery_detail
+		FROM commands
+		WHERE steward_id = ? AND delivery_status = ?
+		  AND (tenant_id = ? OR substr(?, 1, length(tenant_id) + 1) = tenant_id || '/')
+		ORDER BY issued_at ASC`,
+		stewardID, string(business.DeliveryStatusPending), stewardTenant, stewardTenant)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to list pending deliveries for %s: %w", stewardID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []*business.CommandRecord
+	for rows.Next() {
+		rec, err := scanCommandRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
+}
+
 // GetCommandRecord retrieves the current state of a command by ID.
 func (s *SQLiteCommandStore) GetCommandRecord(ctx context.Context, id string) (*business.CommandRecord, error) {
 	if id == "" {
@@ -164,7 +348,8 @@ func (s *SQLiteCommandStore) GetCommandRecord(ctx context.Context, id string) (*
 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, type, steward_id, tenant_id, payload, status,
-		       issued_at, started_at, completed_at, result, error_message, issued_by
+		       issued_at, started_at, completed_at, result, error_message, issued_by,
+		       delivery_status, delivery_detail
 		FROM commands WHERE id = ?`, id)
 
 	return scanCommandRecord(row)
@@ -174,7 +359,8 @@ func (s *SQLiteCommandStore) GetCommandRecord(ctx context.Context, id string) (*
 func (s *SQLiteCommandStore) ListCommandRecords(ctx context.Context, filter *business.CommandFilter) ([]*business.CommandRecord, error) {
 	query := `
 		SELECT id, type, steward_id, tenant_id, payload, status,
-		       issued_at, started_at, completed_at, result, error_message, issued_by
+		       issued_at, started_at, completed_at, result, error_message, issued_by,
+		       delivery_status, delivery_detail
 		FROM commands WHERE 1=1`
 	var args []interface{}
 
@@ -347,7 +533,7 @@ func insertTransition(ctx context.Context, tx *sql.Tx, commandID string, status 
 // scanCommandRecord scans a *sql.Row (single QueryRow result) into a CommandRecord.
 func scanCommandRecord(row *sql.Row) (*business.CommandRecord, error) {
 	var rec business.CommandRecord
-	var payloadStr, statusStr, issuedAtStr, resultStr string
+	var payloadStr, statusStr, issuedAtStr, resultStr, deliveryStatusStr string
 	var startedAt, completedAt sql.NullString
 
 	err := row.Scan(
@@ -355,6 +541,7 @@ func scanCommandRecord(row *sql.Row) (*business.CommandRecord, error) {
 		&payloadStr, &statusStr,
 		&issuedAtStr, &startedAt, &completedAt,
 		&resultStr, &rec.ErrorMessage, &rec.IssuedBy,
+		&deliveryStatusStr, &rec.DeliveryDetail,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrCommandNotFound
@@ -362,13 +549,13 @@ func scanCommandRecord(row *sql.Row) (*business.CommandRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to scan command record: %w", err)
 	}
-	return populateCommandRecord(&rec, payloadStr, statusStr, issuedAtStr, startedAt, completedAt, resultStr)
+	return populateCommandRecord(&rec, payloadStr, statusStr, deliveryStatusStr, issuedAtStr, startedAt, completedAt, resultStr)
 }
 
 // scanCommandRow scans a *sql.Rows (multi-row Query result) into a CommandRecord.
 func scanCommandRow(rows *sql.Rows) (*business.CommandRecord, error) {
 	var rec business.CommandRecord
-	var payloadStr, statusStr, issuedAtStr, resultStr string
+	var payloadStr, statusStr, issuedAtStr, resultStr, deliveryStatusStr string
 	var startedAt, completedAt sql.NullString
 
 	if err := rows.Scan(
@@ -376,20 +563,22 @@ func scanCommandRow(rows *sql.Rows) (*business.CommandRecord, error) {
 		&payloadStr, &statusStr,
 		&issuedAtStr, &startedAt, &completedAt,
 		&resultStr, &rec.ErrorMessage, &rec.IssuedBy,
+		&deliveryStatusStr, &rec.DeliveryDetail,
 	); err != nil {
 		return nil, fmt.Errorf("sqlite: failed to scan command row: %w", err)
 	}
-	return populateCommandRecord(&rec, payloadStr, statusStr, issuedAtStr, startedAt, completedAt, resultStr)
+	return populateCommandRecord(&rec, payloadStr, statusStr, deliveryStatusStr, issuedAtStr, startedAt, completedAt, resultStr)
 }
 
 // populateCommandRecord deserialises JSON columns and nullable timestamps.
 func populateCommandRecord(
 	rec *business.CommandRecord,
-	payloadStr, statusStr, issuedAtStr string,
+	payloadStr, statusStr, deliveryStatusStr, issuedAtStr string,
 	startedAt, completedAt sql.NullString,
 	resultStr string,
 ) (*business.CommandRecord, error) {
 	rec.Status = business.CommandStatus(statusStr)
+	rec.DeliveryStatus = business.DeliveryStatus(deliveryStatusStr)
 	rec.IssuedAt = parseTime(issuedAtStr)
 	rec.StartedAt = parseNullTime(startedAt)
 	rec.CompletedAt = parseNullTime(completedAt)

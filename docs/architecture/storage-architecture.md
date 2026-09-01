@@ -437,22 +437,109 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 
 `SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` interface returns `ErrNotSupported` from the SQLite provider — config storage targets the flat-file provider (OSS) and PostgreSQL (commercial).
 
-### CommandStore (Issue #665)
+### CommandStore (Issue #665; delivery lifecycle: Issue #3757, ADR-031 Decision 2)
 
-`CommandStore` is the durable command dispatch state backend. It persists the full lifecycle of commands dispatched to stewards so that dispatch state (executing, completed, failed) survives a process restart and forms a crash-survivable audit trail.
+`CommandStore` is the durable command dispatch state backend. It persists two
+independent lifecycles on the same `CommandRecord`:
+
+- **Execution status** (`Status`, Issue #665) — whether the *receiving steward*
+  has executed the command: `pending` → `executing` → `completed` / `failed` /
+  `cancelled`. Owned and transitioned by `features/steward/commands.Handler` on
+  the steward side.
+- **Delivery status** (`DeliveryStatus`, Issue #3757) — whether the *dispatching
+  controller* has gotten the command onto the wire to that steward at all:
+  `pending` → `delivered` → `acknowledged`, with terminal failures recorded
+  distinctly as `failed`. Owned and transitioned by the controller (e.g.
+  `handleConfigPush` in `features/controller/api`).
+
+The two are orthogonal: a record can be execution-`pending` and
+delivery-`delivered` (the steward has it but hasn't started on it yet), or
+execution-`completed` with delivery history irrelevant on the steward's own
+copy of the record (a steward only ever writes its own execution status).
 
 **Key design decisions**:
-- Two tables: `commands` (current state) and `command_transitions` (immutable audit log of every status change, including initial creation as `pending`).
-- `GetCommandAuditTrail(commandID)` returns all transitions in chronological order — this record is immutable; only `PurgeExpiredRecords` can delete it (by age).
-- `PurgeExpiredRecords(ctx, olderThan)` removes `completed`, `failed`, and `cancelled` records older than the threshold. `executing` and `pending` records are never purged.
-- **Startup sweep**: when `features/steward/commands.Handler` is initialised with a `CommandStore`, it queries all `executing` records and flips them to `failed` with error `"controller_restart"`. This converts crash-time in-progress state into a queryable audit entry.
-- The in-memory `executing` map in `Handler` retains only `context.CancelFunc` for in-flight cancellation — durable state is entirely in the store.
+- Two tables: `commands`/`command_records` (current state) and
+  `command_transitions` (immutable audit log of every *execution* status
+  change, including initial creation as `pending`). `DeliveryStatus` changes are
+  **not** written to `command_transitions` — that trail is scoped to
+  `CommandStatus` only; `UpdateDeliveryStatus` updates `delivery_status` /
+  `delivery_detail` in place.
+- `GetCommandAuditTrail(commandID)` returns all execution-status transitions in
+  chronological order — this record is immutable; only `PurgeExpiredRecords`
+  can delete it (by age).
+- `PurgeExpiredRecords(ctx, olderThan)` removes `completed`, `failed`, and
+  `cancelled` records older than the threshold. `executing` and `pending`
+  records are never purged.
+- `CreateCommandRecords(ctx, records)` creates a batch of records in a single
+  database transaction — every record commits, or none do. `handleConfigPush`
+  uses this so a fan-out to N stewards produces one durable fact (all N
+  delivery rows), never a partial set silently missing some stewards.
+- `CreatePushAndCommandRecords(ctx, push, records)` extends that batch
+  transaction to also write `push` (the `PushRecord` — the "config write") in
+  the same commit: ADR-031 Decision 2's "a command/notification row commits in
+  the same transaction as the state change that requires it." This is possible
+  because `PushRecord` and `CommandRecord` are both persisted by the same SQL
+  storage tier (the `database`/`sqlite` providers each open their own
+  connection pool, but both point at the same physical database, so a
+  transaction opened by either can write either table). Writes that live in a
+  genuinely different pluggable provider — e.g. the entity-graph desired-state
+  observation `handleConfigPush` also records — remain outside this seam and
+  stay best-effort by design; central-provider pluggability means a SQL
+  transaction cannot in general span an arbitrary second backend (the entity
+  graph, or a git-backed `ConfigStore`), so the outbox's joint-commit guarantee
+  is scoped to writes that share its own SQL tier. `handleConfigPush` passes
+  `push` (nil when no `PushStore` is configured) and the per-steward delivery
+  `records` (empty when no steward matched) to this single call instead of two
+  independently-committing writes.
+- `ListPendingDeliveries(ctx, stewardID, stewardTenant)` returns every record
+  targeting a steward whose `DeliveryStatus` is still `pending` — the set a
+  steward drains on reconnect. Delivery to an offline endpoint is deferred,
+  never lost. `stewardTenant` is mandatory and implementations must apply it in
+  the query: results are limited to records stamped with the steward's current
+  tenant or one of its ancestors (`business.TenantPathChain`), the only tenants
+  a subtree push targeting that steward can have been issued under. `steward_id`
+  alone is not a tenant boundary — the binding is mutable (steward move), so
+  rows written under a previous tenant stay attached to the same `steward_id`,
+  and neither backend compensates (the Postgres read path does not set
+  `app.current_tenant`, whose absence makes the `command_records` SELECT policy
+  permissive; SQLite has no RLS). An empty `stewardTenant` is refused with
+  `ErrCommandTenantIDRequired` rather than widening the query.
+- **Startup sweep — inverted under ADR-031 Decision 2.** Previously, restarting
+  `features/steward/commands.Handler` with a configured `CommandStore` flipped
+  *every* `executing` record to `failed` with error `"controller_restart"`,
+  unconditionally. This inverted the "a restart never fails a queued delivery"
+  requirement in spirit even though it operated on execution status, not
+  delivery status, so the behavior is now bounded: only `executing` records
+  whose `StartedAt` is older than `ExecutingRestartTimeout` (default 5 minutes)
+  are failed; a record that started executing more recently than the timeout is
+  left alone, since a fast restart may not have genuinely interrupted it.
+  `pending` records are **never** queried or touched by the sweep at all — they
+  were never mid-attempt, so a restart cannot have interrupted anything to fail.
+  This is the steward-side half of "a controller restart never fails a queued
+  delivery"; the controller-side half is structural: neither the `database` nor
+  `sqlite` `CommandStore` implementation runs any sweep on its own — a `pending`
+  `DeliveryStatus` row survives a controller restart unmodified because nothing
+  ever touches it until a real delivery attempt or an explicit
+  `UpdateDeliveryStatus` call changes it.
+- The in-memory `executing` map in `Handler` retains only `context.CancelFunc`
+  for in-flight cancellation — durable state is entirely in the store.
 
-**Status values**: `pending` → `executing` → `completed` / `failed` / `cancelled`.
+**Status values**: execution `pending` → `executing` → `completed` / `failed` /
+`cancelled`. Delivery `pending` → `delivered` → `acknowledged`, or `pending` →
+`failed` (terminal).
 
 **Implementations**:
-- `pkg/storage/providers/sqlite`: `commands` and `command_transitions` tables added to the shared SQLite schema. This is the OSS default.
-- `pkg/storage/providers/flatfile`, `database`, `git`: return `ErrNotSupported` — command state is business data, not config data.
+- `pkg/storage/providers/sqlite`: `commands` and `command_transitions` tables in
+  the shared SQLite schema, including `delivery_status`/`delivery_detail`
+  columns. Used both by the OSS controller composite and by each steward's own
+  local command-execution store.
+- `pkg/storage/providers/database`: `command_records` and `command_transitions`
+  tables with tenant-scoped RLS, including `delivery_status`/`delivery_detail`
+  columns. The controller-side outbox for deployments on the PostgreSQL
+  business-data tier.
+- `pkg/storage/providers/flatfile`, `git`: return `ErrNotSupported` — command
+  dispatch/delivery state is business data, not config data, and flatfile is
+  git-backed config storage only (`pkg/README.md` decision tree).
 
 ## Cluster Mode Provider Compatibility
 

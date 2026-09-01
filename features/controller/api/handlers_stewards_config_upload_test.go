@@ -303,3 +303,111 @@ resources:
 	assert.Equal(t, "STORAGE_ERROR", resp.Error.Code,
 		"storage failure must report STORAGE_ERROR, not VALIDATION_ERROR")
 }
+
+// TestHandleUpdateStewardConfig_WithCommandStore_ReferencesDeliveryRecord
+// verifies Issue #3757 (ADR-031 Decision 2): "status: stored responses that
+// imply more than storage are replaced by responses that reference the
+// trackable delivery record." When a commandStore is configured, a successful
+// config update must return a command_id (and delivery_status) instead of a
+// bare "status": "stored", and the referenced record must actually exist and
+// be readable back through the store.
+func TestHandleUpdateStewardConfig_WithCommandStore_ReferencesDeliveryRecord(t *testing.T) {
+	server := setupTestServer(t)
+	storageManager := pkgtesting.SetupTestStorage(t)
+	commandStore := storageManager.GetCommandStore()
+	require.NotNil(t, commandStore)
+	server.SetCommandStore(commandStore)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
+
+	body := []byte(`
+steward:
+  id: test-steward-delivery-record
+  mode: controller
+  logging:
+    level: info
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+modules:
+  file: file
+resources:
+  - name: my-managed-file
+    module: file
+    config:
+      path: /tmp/managed
+      content: hello
+`)
+
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-delivery-record/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/yaml")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var envelope APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
+	resp, ok := envelope.Data.(map[string]any)
+	require.True(t, ok, "response data must be a JSON object")
+	_, hasBareStatus := resp["status"]
+	assert.False(t, hasBareStatus,
+		"response must not fall back to a bare status: stored when a commandStore is configured")
+	commandID, _ := resp["command_id"].(string)
+	require.NotEmpty(t, commandID, "response must reference a trackable delivery record")
+	assert.NotEmpty(t, resp["delivery_status"])
+
+	got, err := commandStore.GetCommandRecord(context.Background(), commandID)
+	require.NoError(t, err, "the referenced command_id must be a real, readable record")
+	assert.Equal(t, "test-steward-delivery-record", got.StewardID)
+	assert.Equal(t, "test-tenant", got.TenantID)
+}
+
+// TestHandleUpdateStewardConfig_NoCommandStore_FallsBackToBareStatus is the
+// backward-compatibility regression guard: deployments without a commandStore
+// configured keep the original bare "status": "stored" response shape rather
+// than claiming a trackable record that does not exist.
+func TestHandleUpdateStewardConfig_NoCommandStore_FallsBackToBareStatus(t *testing.T) {
+	server := setupTestServer(t) // commandStore is nil here
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
+
+	body := []byte(`
+steward:
+  id: test-steward-no-command-store
+  mode: controller
+  logging:
+    level: info
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+modules:
+  file: file
+resources:
+  - name: my-managed-file
+    module: file
+    config:
+      path: /tmp/managed
+      content: hello
+`)
+
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-no-command-store/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/yaml")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var envelope APIResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
+	resp, ok := envelope.Data.(map[string]any)
+	require.True(t, ok, "response data must be a JSON object")
+	assert.Equal(t, "stored", resp["status"])
+	_, hasCommandID := resp["command_id"]
+	assert.False(t, hasCommandID, "no commandStore means no delivery record to reference")
+}

@@ -857,6 +857,258 @@ func TestBackfillCfgmsPendingRegistrationColumns_AlterFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "back-fill failed", "error must identify the back-fill stage")
 }
 
+// legacyCommandsSchema is the commands DDL as shipped by Issue #665, before
+// Issue #3757 added the outbox delivery-lifecycle columns. Used to simulate a
+// pre-#3757 controller or steward database upgrading in place.
+const legacyCommandsSchema = `CREATE TABLE IF NOT EXISTS commands (
+	id            TEXT PRIMARY KEY,
+	type          TEXT NOT NULL,
+	steward_id    TEXT NOT NULL,
+	tenant_id     TEXT NOT NULL DEFAULT '',
+	payload       TEXT NOT NULL DEFAULT '{}',
+	status        TEXT NOT NULL DEFAULT 'pending',
+	issued_at     TEXT NOT NULL,
+	started_at    TEXT,
+	completed_at  TEXT,
+	result        TEXT NOT NULL DEFAULT '{}',
+	error_message TEXT NOT NULL DEFAULT '',
+	issued_by     TEXT NOT NULL DEFAULT ''
+)`
+
+// commandDeliveryColumns are the two columns added by Issue #3757.
+var commandDeliveryColumns = []string{"delivery_status", "delivery_detail"}
+
+// seedLegacyCommandRow inserts a pre-#3757-shaped row into a legacy commands
+// table (no delivery columns), so tests can prove what the migration does to
+// records that already exist on an upgrading deployment.
+func seedLegacyCommandRow(t *testing.T, db *sql.DB, id, stewardID string) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO commands
+			(id, type, steward_id, tenant_id, payload, status, issued_at, result, error_message, issued_by)
+		VALUES (?, 'sync_config', ?, 'tenant-legacy', '{}', 'pending', '2026-01-01T00:00:00Z', '{}', '', 'admin@example.com')`,
+		id, stewardID)
+	require.NoError(t, err, "seed legacy command row %s", id)
+}
+
+// TestBackfillCommandDeliveryColumns_LegacyTable verifies that initializeSchema
+// adds the two delivery-lifecycle columns and the reconnect-drain index to a
+// pre-existing commands table created before Issue #3757. CREATE TABLE IF NOT
+// EXISTS cannot add columns, so without the back-fill every upgrading
+// deployment would fail its next command dispatch with "no such column:
+// delivery_status".
+func TestBackfillCommandDeliveryColumns_LegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCommandsSchema)
+	require.NoError(t, err, "seed legacy commands schema")
+	seedLegacyCommandRow(t, db, "cmd-legacy", "steward-legacy")
+
+	for _, col := range commandDeliveryColumns {
+		require.False(t, hasColumn(t, db, "commands", col),
+			"pre-condition: %s absent before back-fill", col)
+	}
+
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	for _, col := range commandDeliveryColumns {
+		assert.True(t, hasColumn(t, db, "commands", col), "%s present after back-fill", col)
+	}
+	assert.True(t, hasIndex(t, db, "commands", "idx_commands_steward_delivery"),
+		"reconnect-drain index present after back-fill")
+
+	// A row written under the retired fire-and-forget goroutine has an unknown
+	// delivery outcome, so it must land on 'pending' — a drain re-attempts it
+	// rather than silently treating it as delivered.
+	store := &SQLiteCommandStore{db: db}
+	got, err := store.GetCommandRecord(ctx, "cmd-legacy")
+	require.NoError(t, err, "back-filled table must be readable by the store")
+	assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus,
+		"pre-existing rows must default to pending, not delivered")
+	assert.Equal(t, "", got.DeliveryDetail, "pre-existing rows must default to empty detail")
+
+	// The migrated table must actually be usable by the live outbox paths — a
+	// column that exists but carries the wrong name or affinity would still
+	// break dispatch after a successful startup.
+	pending, err := store.ListPendingDeliveries(ctx, "steward-legacy", "tenant-legacy")
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "the legacy row must be drainable on reconnect")
+	assert.Equal(t, "cmd-legacy", pending[0].ID)
+
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "cmd-legacy", business.DeliveryStatusDelivered, ""),
+		"back-filled table must accept a delivery transition")
+	drained, err := store.ListPendingDeliveries(ctx, "steward-legacy", "tenant-legacy")
+	require.NoError(t, err)
+	assert.Empty(t, drained, "a delivered row must leave the pending set")
+
+	// New records must also insert cleanly against the migrated table.
+	require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("cmd-after-migration")),
+		"back-filled table must accept a newly created record")
+}
+
+// TestBackfillCommandDeliveryColumns_Idempotent verifies that a second
+// initializeSchema pass over an already-migrated commands table succeeds (the
+// PRAGMA column probe suppresses the duplicate ALTER) and that rows written
+// between the two passes survive with their delivery state intact.
+func TestBackfillCommandDeliveryColumns_Idempotent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCommandsSchema)
+	require.NoError(t, err, "seed legacy commands schema")
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	store := &SQLiteCommandStore{db: db}
+	require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("cmd-survive")))
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "cmd-survive", business.DeliveryStatusFailed, "steward unreachable"))
+
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+
+	for _, col := range commandDeliveryColumns {
+		assert.True(t, hasColumn(t, db, "commands", col), "%s still present after second pass", col)
+	}
+	assert.True(t, hasIndex(t, db, "commands", "idx_commands_steward_delivery"),
+		"reconnect-drain index still present after second pass")
+
+	got, err := store.GetCommandRecord(ctx, "cmd-survive")
+	require.NoError(t, err, "row must survive second initializeSchema")
+	assert.Equal(t, business.DeliveryStatusFailed, got.DeliveryStatus,
+		"delivery state must survive second initializeSchema")
+	assert.Equal(t, "steward unreachable", got.DeliveryDetail,
+		"delivery detail must survive second initializeSchema")
+}
+
+// TestBackfillCommandDeliveryColumns_PartialLegacyTable covers the
+// interrupted-upgrade case: a deployment whose ALTER sequence died between the
+// two columns. The per-column PRAGMA probe must add only the missing one rather
+// than failing on a duplicate column.
+func TestBackfillCommandDeliveryColumns_PartialLegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCommandsSchema)
+	require.NoError(t, err, "seed legacy commands schema")
+	_, err = db.ExecContext(ctx,
+		`ALTER TABLE commands ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'pending'`)
+	require.NoError(t, err, "seed a partially migrated table")
+
+	require.NoError(t, backfillCommandDeliveryColumns(ctx, db),
+		"a half-migrated table must not fail the back-fill")
+
+	for _, col := range commandDeliveryColumns {
+		assert.True(t, hasColumn(t, db, "commands", col),
+			"%s present after back-fill over a partially migrated table", col)
+	}
+	assert.True(t, hasIndex(t, db, "commands", "idx_commands_steward_delivery"),
+		"reconnect-drain index created over a partially migrated table")
+}
+
+// TestBackfillCommandDeliveryColumns_FreshDB verifies that a fresh database
+// carries both delivery columns and the drain index from CREATE TABLE, so the
+// back-fill is a no-op on new deployments.
+func TestBackfillCommandDeliveryColumns_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+
+	for _, col := range commandDeliveryColumns {
+		assert.True(t, hasColumn(t, db, "commands", col), "%s present on fresh DB", col)
+	}
+	assert.True(t, hasIndex(t, db, "commands", "idx_commands_steward_delivery"),
+		"reconnect-drain index present on fresh DB")
+	require.NoError(t, backfillCommandDeliveryColumns(ctx, db), "back-fill is a no-op on a fresh DB")
+}
+
+// TestBackfillCommandDeliveryColumns_TableAbsent verifies the table-absent
+// short-circuit: a database that has never carried the commands table must be
+// left untouched rather than erroring on the PRAGMA/ALTER or creating the table
+// (or its index) as a side effect.
+func TestBackfillCommandDeliveryColumns_TableAbsent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, backfillCommandDeliveryColumns(ctx, db),
+		"absent table must be a no-op, not an error")
+
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='commands'`).Scan(&count))
+	assert.Equal(t, 0, count, "back-fill must not create the table itself")
+	assert.False(t, hasIndex(t, db, "commands", "idx_commands_steward_delivery"),
+		"back-fill must not create the index without the table")
+}
+
+// TestBackfillCommandDeliveryColumns_ProbeFailure verifies that a tableExists
+// failure propagates instead of silently reporting success — the back-fill runs
+// on every database open, so a swallowed probe error would let the controller
+// start against an un-migrated commands table and lose every queued delivery.
+func TestBackfillCommandDeliveryColumns_ProbeFailure(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := openDB(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	err = backfillCommandDeliveryColumns(ctx, db)
+	require.Error(t, err, "closed DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill probe failed", "error must identify the probe stage")
+}
+
+// TestBackfillCommandDeliveryColumns_AlterFailure verifies that an ALTER TABLE
+// failure propagates rather than leaving a half-migrated table behind a
+// successful startup.
+func TestBackfillCommandDeliveryColumns_AlterFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "readonly-commands.db")
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(context.Background(), legacyCommandsSchema)
+	require.NoError(t, err)
+	require.NoError(t, setup.Close())
+
+	roDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = roDB.Close() })
+	require.NoError(t, roDB.Ping())
+
+	err = backfillCommandDeliveryColumns(context.Background(), roDB)
+	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill failed", "error must identify the back-fill stage")
+}
+
+// TestBackfillCommandDeliveryColumns_IndexFailure covers the branch past the
+// ALTERs: a table that already has both columns but not the drain index. A
+// failure to create it must propagate, because ListPendingDeliveries would
+// otherwise fall back to a full scan of every command ever issued.
+func TestBackfillCommandDeliveryColumns_IndexFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "readonly-commands-index.db")
+	ctx := context.Background()
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx, legacyCommandsSchema)
+	require.NoError(t, err)
+	for _, ddl := range []string{
+		`ALTER TABLE commands ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE commands ADD COLUMN delivery_detail TEXT NOT NULL DEFAULT ''`,
+	} {
+		_, err = setup.ExecContext(ctx, ddl)
+		require.NoError(t, err)
+	}
+	require.NoError(t, setup.Close())
+
+	roDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = roDB.Close() })
+	require.NoError(t, roDB.Ping())
+
+	err = backfillCommandDeliveryColumns(ctx, roDB)
+	require.Error(t, err, "CREATE INDEX on read-only DB must return an error")
+	assert.Contains(t, err.Error(), "delivery index back-fill failed", "error must identify the index stage")
+}
+
 // legacySingleDeviceClaimSchema is the registration_token_claims DDL as first
 // shipped: one claim row per token, for the token's whole lifetime.
 const legacySingleDeviceClaimSchema = `CREATE TABLE IF NOT EXISTS registration_token_claims (

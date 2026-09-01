@@ -67,7 +67,38 @@ func (s *DatabasePushStore) Close() error {
 
 // CreatePush inserts a new push record with status PushStatusPending.
 // Returns an error (not ErrPushNotFound) if a record with the same ID exists.
+// Validates record before touching s.db, so the nil/empty-ID guards are
+// reachable without a live database connection (see newUnconnectedPushStore
+// in push_store_test.go).
 func (s *DatabasePushStore) CreatePush(ctx context.Context, record *business.PushRecord) error {
+	if record == nil {
+		return fmt.Errorf("database: push record cannot be nil")
+	}
+	if record.ID == "" {
+		return fmt.Errorf("database: push record ID cannot be empty")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin create push tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := dbInsertPushRecord(ctx, tx, record); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// dbInsertPushRecord inserts a single cfgms_push_records row within tx. Shared
+// by DatabasePushStore.CreatePush and DatabaseCommandStore.CreatePushAndCommandRecords
+// (Issue #3757, ADR-031 Decision 2) so both paths persist identically and so the
+// push row and its delivery records can share one transaction. Callers that
+// need the nil/empty-ID guards reachable without a live connection (CreatePush)
+// validate before opening a transaction; this function re-validates so any
+// other caller gets the same guarantee.
+func dbInsertPushRecord(ctx context.Context, tx *sql.Tx, record *business.PushRecord) error {
 	if record == nil {
 		return fmt.Errorf("database: push record cannot be nil")
 	}
@@ -85,7 +116,7 @@ func (s *DatabasePushStore) CreatePush(ctx context.Context, record *business.Pus
 		createdAt = now
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO cfgms_push_records
 			(id, config_id, tenant_id, version, status, initiated_by, data, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,

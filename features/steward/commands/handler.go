@@ -68,6 +68,14 @@ type Handler struct {
 	// rejected as a potential replay.
 	replayWindow time.Duration
 
+	// executingRestartTimeout bounds how long a command may sit in "executing"
+	// before a startup sweep treats it as abandoned (Issue #3757, ADR-031
+	// Decision 2). Only executing records started at least this long ago are
+	// failed with "controller_restart"; pending records are never touched by
+	// the sweep at all — they were never mid-attempt, so a restart cannot have
+	// interrupted anything for them to fail.
+	executingRestartTimeout time.Duration
+
 	// replayCache detects duplicate command IDs within the replay window.
 	replayCache *ttlReplayCache
 
@@ -140,6 +148,12 @@ type Config struct {
 	// Defaults to 5 minutes when zero.
 	ReplayWindow time.Duration
 
+	// ExecutingRestartTimeout bounds how long a command may sit in "executing"
+	// before the startup sweep treats it as abandoned and fails it with
+	// "controller_restart" (Issue #3757). Defaults to 5 minutes when zero.
+	// Pending records are never touched by the sweep regardless of this value.
+	ExecutingRestartTimeout time.Duration
+
 	// MaxParamsBytes is the maximum JSON-serialized size of Command.Params.
 	// Defaults to 65536 (64 KiB) when zero.
 	MaxParamsBytes int
@@ -168,6 +182,15 @@ const (
 	defaultReplayWindow  = 5 * time.Minute
 	defaultMaxParamBytes = 64 * 1024
 
+	// defaultExecutingRestartTimeout bounds how long a command may sit in
+	// "executing" before the startup sweep treats it as abandoned (Issue #3757).
+	// 5 minutes covers the vast majority of steward command executions (see the
+	// 30s default per-command timeout in executeCommand) with headroom for
+	// slower ones; a still-executing record that young is more likely mid-attempt
+	// across a fast crash/restart than truly stuck, so the sweep leaves it alone
+	// and lets it either complete or reach its own execution timeout.
+	defaultExecutingRestartTimeout = 5 * time.Minute
+
 	// envelopeNonceCacheTTL bounds how long an operator-payload envelope nonce is
 	// remembered for replay detection (Issue #3694). It is independent of — and
 	// deliberately longer-lived than — replayWindow: an envelope's own ExpiresAt
@@ -178,8 +201,11 @@ const (
 )
 
 // New creates a new command handler and, when a CommandStore is configured,
-// sweeps any commands left in "executing" state from a previous run and marks
-// them as failed with reason "controller_restart".
+// sweeps commands left in "executing" state from a previous run that have been
+// executing longer than ExecutingRestartTimeout, marking them as failed with
+// reason "controller_restart" (Issue #3757). Commands in "pending" state are
+// never touched by this sweep — a restart never fails a queued delivery
+// (ADR-031 Decision 2).
 func New(cfg *Config) (*Handler, error) {
 	if cfg.StewardID == "" {
 		return nil, fmt.Errorf("steward ID is required")
@@ -195,27 +221,32 @@ func New(cfg *Config) (*Handler, error) {
 	if replayWindow == 0 {
 		replayWindow = defaultReplayWindow
 	}
+	executingRestartTimeout := cfg.ExecutingRestartTimeout
+	if executingRestartTimeout == 0 {
+		executingRestartTimeout = defaultExecutingRestartTimeout
+	}
 	maxParamsBytes := cfg.MaxParamsBytes
 	if maxParamsBytes == 0 {
 		maxParamsBytes = defaultMaxParamBytes
 	}
 
 	h := &Handler{
-		stewardID:          cfg.StewardID,
-		handlers:           make(map[cpTypes.CommandType]CommandFunc),
-		onStatus:           cfg.OnStatus,
-		logger:             cfg.Logger,
-		store:              cfg.Store,
-		executing:          make(map[string]*executionContext),
-		verifier:           cfg.Verifier,
-		replayWindow:       replayWindow,
-		replayCache:        newReplayCache(replayWindow),
-		envelopeNonceCache: newReplayCache(envelopeNonceCacheTTL),
-		maxParamsBytes:     maxParamsBytes,
-		signingConfig:      cfg.SigningConfig,
-		requireSignedAdhoc: cfg.RequireSignedAdhoc,
-		controllerCARoots:  cfg.ControllerCARoots,
-		eventEmitter:       cfg.EventEmitter,
+		stewardID:               cfg.StewardID,
+		handlers:                make(map[cpTypes.CommandType]CommandFunc),
+		onStatus:                cfg.OnStatus,
+		logger:                  cfg.Logger,
+		store:                   cfg.Store,
+		executing:               make(map[string]*executionContext),
+		verifier:                cfg.Verifier,
+		replayWindow:            replayWindow,
+		executingRestartTimeout: executingRestartTimeout,
+		replayCache:             newReplayCache(replayWindow),
+		envelopeNonceCache:      newReplayCache(envelopeNonceCacheTTL),
+		maxParamsBytes:          maxParamsBytes,
+		signingConfig:           cfg.SigningConfig,
+		requireSignedAdhoc:      cfg.RequireSignedAdhoc,
+		controllerCARoots:       cfg.ControllerCARoots,
+		eventEmitter:            cfg.EventEmitter,
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -246,23 +277,37 @@ func (h *Handler) UpdateVerifier(v signature.Verifier) {
 	h.mu.Unlock()
 }
 
-// sweepStaleExecutingCommands marks commands that were left in "executing" state
-// (from a crashed or restarted process) as "failed" with error "controller_restart".
+// sweepStaleExecutingCommands marks commands left in "executing" state (from a
+// crashed or restarted process) as "failed" with error "controller_restart" —
+// but only once they have been executing longer than executingRestartTimeout
+// (Issue #3757, ADR-031 Decision 2). "executing" implies a delivery attempt was
+// genuinely in flight when the process stopped; a record that started executing
+// more recently than the timeout may simply have survived a fast restart mid-step
+// and is left alone to either complete or age past the timeout on a later sweep.
+// "pending" records are never listed or touched here at all — pending means no
+// attempt was ever made, so a restart cannot have interrupted anything to fail;
+// they stay pending and are drained via ListPendingDeliveries.
 func (h *Handler) sweepStaleExecutingCommands(ctx context.Context) error {
-	stale, err := h.store.ListCommandsByStatus(ctx, business.CommandStatusExecuting)
+	executing, err := h.store.ListCommandsByStatus(ctx, business.CommandStatusExecuting)
 	if err != nil {
-		return fmt.Errorf("listing stale executing commands: %w", err)
+		return fmt.Errorf("listing executing commands: %w", err)
 	}
 
-	for _, cmd := range stale {
+	now := time.Now()
+	for _, cmd := range executing {
+		if cmd.StartedAt != nil && now.Sub(*cmd.StartedAt) < h.executingRestartTimeout {
+			// Started recently enough that this may be a fast restart mid-attempt
+			// rather than a genuinely abandoned command; a later sweep re-evaluates it.
+			continue
+		}
 		if err := h.store.UpdateCommandStatus(ctx, cmd.ID,
 			business.CommandStatusFailed, nil, "controller_restart"); err != nil {
 			h.logger.Error("Failed to mark stale command as failed",
-				"command_id", cmd.ID,
-				"error", err)
+				"command_id", logging.SanitizeLogValue(cmd.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
 		} else {
 			h.logger.Info("Marked stale executing command as failed (controller_restart)",
-				"command_id", cmd.ID)
+				"command_id", logging.SanitizeLogValue(cmd.ID))
 		}
 	}
 	return nil

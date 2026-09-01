@@ -25,6 +25,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -827,12 +828,63 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"steward_id", stewardIDForLog,
 		"tenant_id", tenantIDForLog)
 
-	s.writeSuccessResponse(w, map[string]any{
+	// Issue #3757 (ADR-031 Decision 2): "status: stored responses that imply
+	// more than storage are replaced by responses that reference the trackable
+	// delivery record." Record a durable outbox row for this steward-directed
+	// write and attempt immediate delivery via the same node-local fan-out path
+	// handleConfigPush uses, so the response can point the caller at something
+	// they can watch land instead of a bare "stored".
+	resp := map[string]any{
 		"steward_id": stewardID,
 		"tenant_id":  tenantID,
-		"status":     "stored",
 		"message":    "Configuration stored successfully",
-	})
+	}
+	if s.commandStore != nil {
+		var issuedBy string
+		if principal, ok := r.Context().Value(principalContextKey).(*Principal); ok && principal != nil {
+			issuedBy = principal.ID
+		}
+		rec := &business.CommandRecord{
+			ID:             fmt.Sprintf("cfg-update-%s-%d", stewardID, time.Now().UnixNano()),
+			Type:           string(controlplaneTypes.CommandSyncConfig),
+			StewardID:      stewardID,
+			TenantID:       tenantID,
+			IssuedAt:       time.Now().UTC(),
+			IssuedBy:       issuedBy,
+			DeliveryStatus: business.DeliveryStatusPending,
+		}
+		if err := s.commandStore.CreateCommandRecord(r.Context(), rec); err != nil {
+			s.logger.Warn("Failed to durably record config update delivery",
+				"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			deliveryStatus := rec.DeliveryStatus
+			if s.commandPublisher != nil {
+				if _, pubErr := s.commandPublisher.TriggerConfigSync(r.Context(), stewardID); pubErr != nil {
+					s.logger.Warn("Failed to trigger config sync after config update",
+						"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(pubErr.Error()))
+					if updErr := s.commandStore.UpdateDeliveryStatus(r.Context(), rec.ID, business.DeliveryStatusPending, logging.SanitizeLogValue(pubErr.Error())); updErr != nil {
+						s.logger.Warn("Failed to record delivery attempt failure",
+							"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(updErr.Error()))
+					}
+				} else if updErr := s.commandStore.UpdateDeliveryStatus(r.Context(), rec.ID, business.DeliveryStatusDelivered, ""); updErr != nil {
+					s.logger.Warn("Failed to record delivered status",
+						"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(updErr.Error()))
+				} else {
+					deliveryStatus = business.DeliveryStatusDelivered
+				}
+			}
+			resp["command_id"] = rec.ID
+			resp["delivery_status"] = string(deliveryStatus)
+		}
+	}
+	if _, ok := resp["command_id"]; !ok {
+		// No commandStore configured, or the delivery row failed to persist —
+		// fall back to a plain storage acknowledgement rather than claiming a
+		// trackable record that does not exist.
+		resp["status"] = "stored"
+	}
+
+	s.writeSuccessResponse(w, resp)
 }
 
 // handleValidateConfig handles POST /api/v1/stewards/{id}/config/validate

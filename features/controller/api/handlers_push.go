@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
@@ -187,12 +188,20 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 
 	s.emitConfigPushAudit(r, cfg.TenantID, cfg.ConfigID, pushID)
 
-	// Durably record the push intent before fan-out begins so that an HA leader
-	// failover can replay any push that was interrupted mid-delivery.
+	// Build the push record (the "config write") up front. It is persisted
+	// below in the same transaction as the per-steward delivery rows it
+	// requires (Issue #3757, ADR-031 Decision 2: "config write + notify
+	// steward X are atomic") whenever a commandStore is configured — a
+	// controller crash between the two can no longer leave a push recorded
+	// with no trace that stewards were ever owed it, or delivery rows with no
+	// corresponding push.
+	var pushRecord *business.PushRecord
 	if s.pushStore != nil {
 		pushData, marshalErr := json.Marshal(&cfg)
-		if marshalErr == nil {
-			record := &business.PushRecord{
+		if marshalErr != nil {
+			s.logger.Warn("Failed to marshal push payload for persistence", "error", logging.SanitizeLogValue(marshalErr.Error()), "push_id", pushID)
+		} else {
+			pushRecord = &business.PushRecord{
 				ID:        pushID,
 				ConfigID:  cfg.ConfigID,
 				TenantID:  cfg.TenantID,
@@ -202,49 +211,137 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 				CreatedAt: queuedAt,
 				UpdatedAt: queuedAt,
 			}
-			if err := s.pushStore.CreatePush(r.Context(), record); err != nil {
-				s.logger.Warn("Failed to persist push record", "error", logging.SanitizeLogValue(err.Error()), "push_id", pushID)
-			}
-		} else {
-			s.logger.Warn("Failed to marshal push payload for persistence", "error", marshalErr, "push_id", pushID)
 		}
 	}
 
-	// Fan-out CommandSyncConfig to matched stewards only. Fire-and-forget: the
-	// goroutine uses context.Background so it is not cancelled when the HTTP
-	// response is written. 202 is returned to the caller immediately.
+	// Issue #3757 (ADR-031 Decision 2): one durable delivery/outbox row per
+	// targeted steward, all in a single transaction — either every steward this
+	// push targets gets a trackable pending row, or none do. This replaces the old
+	// detached fire-and-forget goroutine, whose only durable trace was the
+	// aggregate PushRecord above; a controller crash between that goroutine
+	// starting and finishing silently dropped delivery to whichever stewards had
+	// not yet been reached, with no record that they were ever owed a push.
+	recordsByStewardID := make(map[string]*business.CommandRecord, len(targeted))
+	var records []*business.CommandRecord
+	if s.commandStore != nil && len(targeted) > 0 {
+		records = make([]*business.CommandRecord, 0, len(targeted))
+		for _, st := range targeted {
+			rec := &business.CommandRecord{
+				ID:        fmt.Sprintf("%s-%s", pushID, st.ID),
+				Type:      string(controlplaneTypes.CommandSyncConfig),
+				StewardID: st.ID,
+				TenantID:  cfg.TenantID,
+				Payload: map[string]interface{}{
+					"push_id":   pushID,
+					"config_id": cfg.ConfigID,
+					"version":   cfg.Version,
+				},
+				IssuedAt:       queuedAt,
+				IssuedBy:       principal.ID,
+				DeliveryStatus: business.DeliveryStatusPending,
+			}
+			records = append(records, rec)
+			recordsByStewardID[st.ID] = rec
+		}
+	}
+
+	switch {
+	case s.commandStore != nil:
+		// The transactional-CommandStore seam: pushRecord (nil when no
+		// pushStore is configured) and records (empty when no steward matched)
+		// commit together, or neither commits.
+		if err := s.commandStore.CreatePushAndCommandRecords(r.Context(), pushRecord, records); err != nil {
+			s.logger.Error("Failed to durably record config push and its deliveries",
+				"push_id", pushID, "error", logging.SanitizeLogValue(err.Error()))
+			recordsByStewardID = nil
+		}
+	case s.pushStore != nil && pushRecord != nil:
+		// No commandStore configured in this deployment, so there are no
+		// delivery rows to co-commit the push record with.
+		if err := s.pushStore.CreatePush(r.Context(), pushRecord); err != nil {
+			s.logger.Warn("Failed to persist push record", "error", logging.SanitizeLogValue(err.Error()), "push_id", pushID)
+		}
+	}
+
+	// Drain immediately via the existing node-local fan-out path (still the only
+	// delivery mechanism in this story; cross-node delivery via a shared routing
+	// table arrives in S10). Synchronous, not detached: even when a durable
+	// delivery row exists, nothing is gained by detaching this attempt — the row
+	// already guarantees the obligation survives a failed attempt or a process
+	// stop, and detaching it is exactly what left per-steward outcomes
+	// unobserved before. Runs whenever commandPublisher is configured,
+	// independent of commandStore — deployments without a durable command store
+	// still get best-effort fan-out, same as before this story.
 	if s.commandPublisher != nil {
-		cfgSnapshot := cfg
-		// #nosec G118 -- this authenticated, target-bounded fan-out intentionally
-		// survives the HTTP response and persists completion in pushStore.
-		go func() {
-			result := push.Fanout(context.Background(), &cfgSnapshot, targeted, s.commandPublisher, s.logger)
-			s.logger.Info("Config push fan-out complete",
+		result := push.Fanout(r.Context(), &cfg, targeted, s.commandPublisher, s.logger)
+		s.logger.Info("Config push fan-out complete",
+			"push_id", pushID,
+			"succeeded", len(result.Succeeded),
+			"failed", len(result.Failed))
+
+		for _, stewardID := range result.Succeeded {
+			rec := recordsByStewardID[stewardID]
+			if rec == nil {
+				continue
+			}
+			if err := s.commandStore.UpdateDeliveryStatus(r.Context(), rec.ID, business.DeliveryStatusDelivered, ""); err != nil {
+				s.logger.Warn("Failed to record delivered status", "push_id", pushID,
+					"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+				continue
+			}
+			rec.DeliveryStatus = business.DeliveryStatusDelivered
+		}
+		for stewardID, deliveryErr := range result.Failed {
+			s.logger.Error("Config push fan-out delivery failed",
 				"push_id", pushID,
-				"succeeded", len(result.Succeeded),
-				"failed", len(result.Failed))
-			for stewardID, err := range result.Failed {
-				s.logger.Error("Config push fan-out delivery failed",
-					"push_id", pushID,
-					"steward_id", logging.SanitizeLogValue(stewardID),
-					"error", logging.SanitizeLogValue(err.Error()))
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(deliveryErr.Error()))
+			rec := recordsByStewardID[stewardID]
+			if rec == nil {
+				continue
 			}
-			if s.pushStore != nil {
-				finalStatus := business.PushStatusCompleted
-				if len(result.Failed) > 0 && len(result.Succeeded) == 0 {
-					finalStatus = business.PushStatusFailed
-				}
-				if updateErr := s.pushStore.UpdatePushStatus(context.Background(), pushID, finalStatus); updateErr != nil {
-					s.logger.Warn("Failed to update push record status", "error", updateErr, "push_id", pushID)
-				}
+			// Transport attempt failed but the row itself stays pending, not
+			// terminally failed: the outbox row is the guarantee under the fast
+			// path (ADR-031 Decision 2/3) — it drains on the steward's next
+			// reconnect rather than being abandoned after one failed attempt.
+			detail := logging.SanitizeLogValue(deliveryErr.Error())
+			if err := s.commandStore.UpdateDeliveryStatus(r.Context(), rec.ID, business.DeliveryStatusPending, detail); err != nil {
+				s.logger.Warn("Failed to record delivery attempt failure", "push_id", pushID,
+					"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+				continue
 			}
-		}()
+			rec.DeliveryDetail = detail
+		}
+
+		if s.pushStore != nil {
+			finalStatus := business.PushStatusCompleted
+			if len(result.Failed) > 0 && len(result.Succeeded) == 0 {
+				finalStatus = business.PushStatusFailed
+			}
+			if updateErr := s.pushStore.UpdatePushStatus(r.Context(), pushID, finalStatus); updateErr != nil {
+				s.logger.Warn("Failed to update push record status", "error", logging.SanitizeLogValue(updateErr.Error()), "push_id", pushID)
+			}
+		}
+	}
+
+	deliveries := make([]*ConfigPushDelivery, 0, len(recordsByStewardID))
+	for _, st := range targeted {
+		rec := recordsByStewardID[st.ID]
+		if rec == nil {
+			continue
+		}
+		deliveries = append(deliveries, &ConfigPushDelivery{
+			StewardID: st.ID,
+			CommandID: rec.ID,
+			Status:    string(rec.DeliveryStatus),
+		})
 	}
 
 	s.respondJSON(w, http.StatusAccepted, ConfigPushResponse{
-		PushID:   pushID,
-		Status:   "accepted",
-		QueuedAt: queuedAt,
+		PushID:     pushID,
+		Status:     "accepted",
+		QueuedAt:   queuedAt,
+		Deliveries: deliveries,
 	})
 }
 

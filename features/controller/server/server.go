@@ -1385,6 +1385,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if as := storageManager.GetAuditStore(); as != nil {
 		httpServer.SetAuditStore(as)
 	}
+	// Issue #3757: wire the durable command/delivery outbox store so config push
+	// creates a trackable delivery record for each targeted steward, atomically,
+	// instead of the retired fire-and-forget goroutine (ADR-031 Decision 2). Nil
+	// when the deployment has no business-tier command store configured; that
+	// degrades handleConfigPush to best-effort fan-out only, same as before.
+	if cmdStore := storageManager.GetCommandStore(); cmdStore != nil {
+		httpServer.SetCommandStore(cmdStore)
+	}
 
 	// Issue #2464: Wire durable SQLite-backed upgrade store; falls back to in-memory
 	// when SQLite is not configured so controller startup is never blocked on storage.

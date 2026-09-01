@@ -334,6 +334,48 @@ func backfillTenantLifecycle(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillCommandDeliveryColumns adds the outbox delivery-lifecycle columns to a
+// pre-existing commands table (Issue #3757, ADR-031 Decision 2). Fresh databases
+// (table absent) are skipped. Column-existence is checked via PRAGMA before each
+// ALTER TABLE so the pass is fully idempotent. Pre-existing rows default to
+// 'pending': their actual delivery outcome under the retired fire-and-forget
+// goroutine is unknown, so pending is the conservative choice — a drain will
+// re-attempt rather than silently treat them as delivered.
+func backfillCommandDeliveryColumns(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "commands")
+	if err != nil {
+		return fmt.Errorf("sqlite: command back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	type col struct {
+		name string
+		ddl  string
+	}
+	for _, c := range []col{
+		{"delivery_status", `ALTER TABLE commands ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'pending'`},
+		{"delivery_detail", `ALTER TABLE commands ADD COLUMN delivery_detail TEXT NOT NULL DEFAULT ''`},
+	} {
+		present, err := columnExists(ctx, db, "commands", c.name)
+		if err != nil {
+			return fmt.Errorf("sqlite: command back-fill column probe failed (%s): %w", c.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("sqlite: commands back-fill failed: %w\nSQL: %s", err, c.ddl)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_commands_steward_delivery ON commands(steward_id, delivery_status)`,
+	); err != nil {
+		return fmt.Errorf("sqlite: commands delivery index back-fill failed: %w", err)
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 // All DDL statements are executed inside a single transaction to reduce WAL
@@ -359,6 +401,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillCfgmsPendingRegistrationColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillCommandDeliveryColumns(ctx, db); err != nil {
 		return err
 	}
 
@@ -626,12 +671,18 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			completed_at  TEXT,
 			result        TEXT NOT NULL DEFAULT '{}',
 			error_message TEXT NOT NULL DEFAULT '',
-			issued_by     TEXT NOT NULL DEFAULT ''
+			issued_by     TEXT NOT NULL DEFAULT '',
+			delivery_status TEXT NOT NULL DEFAULT 'pending',
+			delivery_detail TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_commands_steward_id  ON commands(steward_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_commands_status      ON commands(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_commands_issued_at   ON commands(issued_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_commands_tenant_id   ON commands(tenant_id)`,
+		// Issue #3757: reconnect-drain lookup (ListPendingDeliveries) filters by
+		// steward_id + delivery_status together, then narrows the result to the
+		// steward's tenant chain (idx_commands_tenant_id above covers that column).
+		`CREATE INDEX IF NOT EXISTS idx_commands_steward_delivery ON commands(steward_id, delivery_status)`,
 
 		// Command audit trail — immutable log of each state transition
 		`CREATE TABLE IF NOT EXISTS command_transitions (
