@@ -111,17 +111,21 @@ func credentialMarkerModifier(markers []string) func(*x509.Certificate) {
 	}
 }
 
-// claimCredentialRequestForCollection performs the approved->collected compare-and-set
-// under credentialRequestCollectMu: re-fetch the record inside the lock, verify it is
-// still "approved", and persist the transition before releasing it — mirroring the
-// enrolment-token spend section of handleLodgeCredentialRequest. The transition is
-// durable and committed before any certificate is signed, so a process restart, or a
-// second caller, between this commit and the eventual response always observes
-// "collected" and never causes a second certificate to be minted.
+// claimCredentialRequestForCollection performs the approved->collected compare-and-set:
+// re-fetch the record, verify it is still "approved", and persist the transition via
+// CompareAndSwapSecret keyed on the version just read — mirroring the enrolment-token
+// spend section of handleLodgeCredentialRequest. The transition is durable and
+// committed before any certificate is signed, so a process restart, or a second
+// caller anywhere in the cluster, between this commit and the eventual response
+// always observes "collected" and never causes a second certificate to be minted
+// (Issue #3775).
+//
+// The "anywhere in the cluster" half of that rests on the secret store's swap being
+// atomic across nodes, which is not true of every backend and is therefore not
+// assumed: NewSecretStore refuses to start a cluster-mode controller on a store that
+// does not provide it (secretsif.CompareAndSwapIsClusterAtomic). Read this comment as
+// a consequence of that gate, not as an independent promise.
 func (s *Server) claimCredentialRequestForCollection(ctx context.Context, id string) (*pendingCredentialRequest, error) {
-	s.credentialRequestCollectMu.Lock()
-	defer s.credentialRequestCollectMu.Unlock()
-
 	fresh, err := s.getPendingCredentialRequestByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -132,9 +136,16 @@ func (s *Server) claimCredentialRequestForCollection(ctx context.Context, id str
 	now := time.Now().UTC()
 	fresh.Status = credentialRequestStatusCollected
 	fresh.CollectedAt = &now
-	if err := s.persistPendingCredentialRequest(ctx, fresh); err != nil {
+	newVersion, ok, err := s.persistPendingCredentialRequestCAS(ctx, fresh)
+	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		// Lost the race: a concurrent collect (or containment action) already
+		// transitioned this request away from "approved".
+		return nil, errCredentialRequestAlreadyCollected
+	}
+	fresh.Version = newVersion
 	return fresh, nil
 }
 

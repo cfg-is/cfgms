@@ -53,6 +53,13 @@ func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsInte
 	return &secretsInterfaces.Secret{Key: key, Value: v}, nil
 }
 
+func (s *testSecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsInterfaces.SecretRequest) (int, bool, error) {
+	if s.storeErr != nil {
+		return 0, false, s.storeErr
+	}
+	s.secrets[req.TenantID+"/"+req.Key] = req.Value
+	return 1, true, nil
+}
 func (s *testSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
 func (s *testSecretStore) ListSecrets(_ context.Context, _ *secretsInterfaces.SecretFilter) ([]*secretsInterfaces.SecretMetadata, error) {
 	return nil, nil

@@ -66,7 +66,10 @@ func (s *e2eSecretStore) GetSecret(_ context.Context, key string) (*secretsif.Se
 	return &secretsif.Secret{Key: key, Value: v}, nil
 }
 func (s *e2eSecretStore) StoreSecret(_ context.Context, _ *secretsif.SecretRequest) error { return nil }
-func (s *e2eSecretStore) DeleteSecret(_ context.Context, _ string) error                  { return nil }
+func (s *e2eSecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, _ *secretsif.SecretRequest) (int, bool, error) {
+	return 1, true, nil
+}
+func (s *e2eSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
 func (s *e2eSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
 	return nil, nil
 }

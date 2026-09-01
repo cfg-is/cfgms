@@ -14,8 +14,9 @@ import (
 // inMemSecretStore is a minimal thread-safe in-memory SecretStore for unit tests.
 // It exercises the real SecretStore interface without requiring a running OpenBao instance.
 type inMemSecretStore struct {
-	mu      sync.RWMutex
-	secrets map[string]string
+	mu       sync.RWMutex
+	secrets  map[string]string
+	versions map[string]int
 }
 
 func newInMemSecretStore() *inMemSecretStore {
@@ -30,6 +31,23 @@ func (s *inMemSecretStore) StoreSecret(_ context.Context, req *secretsinterfaces
 	defer s.mu.Unlock()
 	s.secrets[req.TenantID+"/"+req.Key] = req.Value
 	return nil
+}
+
+func (s *inMemSecretStore) CompareAndSwapSecret(_ context.Context, key string, expectedVersion int, req *secretsinterfaces.SecretRequest) (int, bool, error) {
+	if req.TenantID == "" {
+		return 0, false, fmt.Errorf("TenantID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.versions == nil {
+		s.versions = make(map[string]int)
+	}
+	if s.versions[key] != expectedVersion {
+		return 0, false, nil
+	}
+	s.secrets[req.TenantID+"/"+req.Key] = req.Value
+	s.versions[key]++
+	return s.versions[key], true, nil
 }
 
 func (s *inMemSecretStore) GetSecret(_ context.Context, key string) (*secretsinterfaces.Secret, error) {

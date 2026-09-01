@@ -56,6 +56,19 @@ func (s *memorySecretStore) StoreSecret(_ context.Context, req *secretsiface.Sec
 	return nil
 }
 
+func (s *memorySecretStore) CompareAndSwapSecret(_ context.Context, key string, expectedVersion int, req *secretsiface.SecretRequest) (int, bool, error) {
+	current := 0
+	if existing, ok := s.secrets[key]; ok {
+		current = existing.Version
+	}
+	if current != expectedVersion {
+		return 0, false, nil
+	}
+	newVersion := current + 1
+	s.secrets[req.Key] = &secretsiface.Secret{Key: req.Key, Value: req.Value, Version: newVersion}
+	return newVersion, true, nil
+}
+
 func (s *memorySecretStore) DeleteSecret(_ context.Context, key string) error {
 	if _, ok := s.secrets[key]; !ok {
 		return secretsiface.ErrSecretNotFound

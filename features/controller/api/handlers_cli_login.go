@@ -148,6 +148,12 @@ type pendingCliLoginRequest struct {
 	SessionToken          string
 	SessionAbsoluteExpiry time.Time
 	CollectedAt           *time.Time
+
+	// Version is the secret store's version for this record at the time it was
+	// read (SecretMetadata.Version) — 0 for a record that does not yet exist.
+	// Callers pass it as CompareAndSwapSecret's expectedVersion so a concurrent
+	// writer cannot silently clobber this record (Issue #3775).
+	Version int
 }
 
 // cliLoginRequestStoreKey namespaces id in the secret store.
@@ -197,6 +203,20 @@ func verifierMatches(raw, storedHash string) bool {
 // metadata rather than read back from the store's own CreatedAt/ExpiresAt because
 // StoreSecret always stamps CreatedAt fresh on every call, including updates.
 func (s *Server) persistCliLoginRequest(ctx context.Context, req *pendingCliLoginRequest) error {
+	return s.secretStore.StoreSecret(ctx, buildCliLoginRequestSecretRequest(req))
+}
+
+// persistCliLoginRequestCAS writes req through CompareAndSwapSecret, keyed on
+// req.Version — the version read alongside the record being transitioned. A lost
+// race (ok=false) means a concurrent writer already transitioned this request; the
+// caller must treat that as a conflict, never retry with the stale in-memory value
+// (Issue #3775).
+func (s *Server) persistCliLoginRequestCAS(ctx context.Context, req *pendingCliLoginRequest) (newVersion int, ok bool, err error) {
+	secretReq := buildCliLoginRequestSecretRequest(req)
+	return s.secretStore.CompareAndSwapSecret(ctx, cliLoginRequestTenantID+"/"+secretReq.Key, req.Version, secretReq)
+}
+
+func buildCliLoginRequestSecretRequest(req *pendingCliLoginRequest) *secretsif.SecretRequest {
 	meta := map[string]string{
 		secretsif.MetadataKeySecretType: cliLoginRequestSecretType,
 		"id":                            req.ID,
@@ -230,7 +250,7 @@ func (s *Server) persistCliLoginRequest(ctx context.Context, req *pendingCliLogi
 	if ttl <= 0 {
 		ttl = time.Second // already past expiry; persist briefly so the sweep can find and remove it
 	}
-	return s.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+	return &secretsif.SecretRequest{
 		Key:         cliLoginRequestStoreKey(req.ID),
 		Value:       "",
 		TenantID:    cliLoginRequestTenantID,
@@ -238,7 +258,7 @@ func (s *Server) persistCliLoginRequest(ctx context.Context, req *pendingCliLogi
 		Tags:        []string{cliLoginRequestSecretType},
 		TTL:         ttl,
 		Metadata:    meta,
-	})
+	}
 }
 
 // cliLoginRequestFromMetadata reconstructs a pendingCliLoginRequest from a stored record.
@@ -252,6 +272,7 @@ func cliLoginRequestFromMetadata(m *secretsif.SecretMetadata) *pendingCliLoginRe
 		DeniedBy:     m.Metadata["denied_by"],
 		SessionID:    m.Metadata["session_id"],
 		SessionToken: m.Metadata["session_token"],
+		Version:      m.Version,
 	}
 	if ts := m.Metadata["created_at"]; ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
@@ -634,12 +655,13 @@ type CollectCliLoginResponse struct {
 	AbsoluteExpiry time.Time `json:"absolute_expiry,omitempty"`
 }
 
-// claimCliLoginRequestForCollection performs the approved->collected compare-and-set
-// under cliLoginCollectMu: re-fetch the record inside the lock, verify it is still
-// "approved", and persist the transition before releasing it — mirroring
+// claimCliLoginRequestForCollection performs the approved->collected compare-and-set:
+// re-fetch the record, verify it is still "approved", and persist the transition via
+// CompareAndSwapSecret keyed on the version just read — mirroring
 // claimCredentialRequestForCollection. This commits before the token is ever written
-// to the response, so a process restart or a second caller between this commit and
-// the eventual response always observes "collected" and never hands out the token twice.
+// to the response, so a process restart or a second caller anywhere in the cluster,
+// between this commit and the eventual response, always observes "collected" and
+// never hands out the token twice (Issue #3775).
 //
 // The committed record deliberately carries no session_token: the token is lifted into
 // a local, cleared on the struct before persisting, and restored only on the in-memory
@@ -648,9 +670,6 @@ type CollectCliLoginResponse struct {
 // and in that store's history — for longer than the session it names. Collection is the
 // single point at which the token stops being needed at rest, so it is dropped there.
 func (s *Server) claimCliLoginRequestForCollection(ctx context.Context, id string) (*pendingCliLoginRequest, error) {
-	s.cliLoginCollectMu.Lock()
-	defer s.cliLoginCollectMu.Unlock()
-
 	fresh, err := s.getCliLoginRequestByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -663,8 +682,14 @@ func (s *Server) claimCliLoginRequestForCollection(ctx context.Context, id strin
 	fresh.Status = cliLoginRequestStatusCollected
 	fresh.CollectedAt = &now
 	fresh.SessionToken = ""
-	if err := s.persistCliLoginRequest(ctx, fresh); err != nil {
+	_, ok, err := s.persistCliLoginRequestCAS(ctx, fresh)
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		// Lost the race: a concurrent collect already transitioned this request
+		// away from "approved".
+		return nil, errCliLoginRequestAlreadyCollected
 	}
 	fresh.SessionToken = token
 	return fresh, nil

@@ -51,6 +51,13 @@ type secretIndexEntry struct {
 // indexFileName is the name of the encrypted index file.
 const indexFileName = "index.json.enc"
 
+// entryExpired reports whether entry has passed its expiry. Single definition so
+// the read paths and CompareAndSwapSecret cannot drift apart on what "expired"
+// means (Issue #3775).
+func entryExpired(entry *secretIndexEntry) bool {
+	return entry != nil && entry.ExpiresAt != nil && time.Now().After(*entry.ExpiresAt)
+}
+
 // StoreSecret stores a secret with OS-native encryption.
 func (s *StewardSecretStore) StoreSecret(_ context.Context, req *interfaces.SecretRequest) error {
 	if req.Key == "" {
@@ -132,7 +139,7 @@ func (s *StewardSecretStore) GetSecret(_ context.Context, key string) (*interfac
 	}
 
 	// Check expiration
-	if entry.ExpiresAt != nil && time.Now().After(*entry.ExpiresAt) {
+	if entryExpired(entry) {
 		return nil, fmt.Errorf("secret expired: %s", key)
 	}
 
@@ -266,6 +273,103 @@ func (s *StewardSecretStore) StoreSecrets(ctx context.Context, secrets map[strin
 		}
 	}
 	return nil
+}
+
+// CompareAndSwapSecret implements interfaces.SecretStore.CompareAndSwapSecret.
+// s.mu already serializes every read-modify-write against the in-memory index
+// within this process, and exactly one StewardSecretStore ever exists per host —
+// this provider is explicitly not cluster-capable (ClusterCapable returns false):
+// the steward's secrets are endpoint-local and never shared with another
+// controller node or another steward. The in-process lock is therefore sufficient
+// by the same reasoning flatfile.FlatFileNonceStore documents for its own
+// single-node-only backing store.
+func (s *StewardSecretStore) CompareAndSwapSecret(_ context.Context, key string, expectedVersion int, req *interfaces.SecretRequest) (int, bool, error) {
+	if req == nil {
+		return 0, false, fmt.Errorf("secret request cannot be nil")
+	}
+	if req.Key == "" {
+		return 0, false, fmt.Errorf("secret key cannot be empty")
+	}
+	if key == "" {
+		return 0, false, fmt.Errorf("secret key cannot be empty")
+	}
+	if len(req.Key) > 256 {
+		return 0, false, fmt.Errorf("secret key exceeds maximum length of 256 characters")
+	}
+	if len(req.Value) > 1*1024*1024 {
+		return 0, false, fmt.Errorf("secret value exceeds maximum size of 1MB")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// An expired entry does not exist for comparison purposes: GetSecret already
+	// refuses it and ListSecrets already skips it, so treating it as a holder here
+	// would make it invisible to every reader yet permanently able to block a
+	// create-if-absent claim (Issue #3775). Its stored version is still what the
+	// write below increments, so versions stay monotonic per key.
+	currentVersion := 0
+	if entry, exists := s.index.Entries[req.Key]; exists && !entryExpired(entry) {
+		currentVersion = entry.Version
+	}
+	if currentVersion != expectedVersion {
+		return 0, false, nil
+	}
+
+	encrypted, err := s.encryptor.Encrypt([]byte(req.Value))
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to encrypt secret: %w", err)
+	}
+
+	blobFile := keyToBlobFile(req.Key)
+	blobPath := filepath.Join(s.secretsDir, "blobs", blobFile)
+	if err := os.WriteFile(blobPath, encrypted, 0600); err != nil {
+		return 0, false, fmt.Errorf("failed to write encrypted blob: %w", err)
+	}
+
+	now := time.Now()
+	entry, exists := s.index.Entries[req.Key]
+	if exists {
+		entry.Version++
+		entry.UpdatedAt = now
+		entry.UpdatedBy = req.CreatedBy
+		entry.Metadata = req.Metadata
+		entry.Tags = req.Tags
+		entry.Description = req.Description
+	} else {
+		entry = &secretIndexEntry{
+			Key:         req.Key,
+			BlobFile:    blobFile,
+			Metadata:    req.Metadata,
+			Tags:        req.Tags,
+			Version:     1,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			CreatedBy:   req.CreatedBy,
+			UpdatedBy:   req.CreatedBy,
+			TenantID:    req.TenantID,
+			Description: req.Description,
+		}
+	}
+	// The expiry is set from this request, not inherited. The update branch above
+	// reuses the existing entry, so carrying a previous ExpiresAt forward would make
+	// a takeover of an expired record land already-expired — the new holder's claim
+	// would be invisible the instant it was written, and every subsequent caller
+	// would win the same claim (Issue #3775). A request with no TTL means no expiry.
+	if req.TTL > 0 {
+		expiresAt := now.Add(req.TTL)
+		entry.ExpiresAt = &expiresAt
+	} else {
+		entry.ExpiresAt = nil
+	}
+
+	s.index.Entries[req.Key] = entry
+
+	if err := s.saveIndex(); err != nil {
+		return 0, false, fmt.Errorf("failed to save index: %w", err)
+	}
+
+	return entry.Version, true, nil
 }
 
 // GetSecretVersion returns ErrVersioningNotSupported as steward provider does not support versioning.

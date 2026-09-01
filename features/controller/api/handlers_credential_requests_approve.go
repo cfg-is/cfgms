@@ -316,9 +316,20 @@ func (s *Server) handleApproveCredentialRequest(w http.ResponseWriter, r *http.R
 	reqRecord.GrantedMarkers = granted
 	reqRecord.SelfApproved = selfApproved
 
-	if err := s.persistPendingCredentialRequest(r.Context(), reqRecord); err != nil {
+	// The pending->approved transition is a durable compare-and-set keyed on the
+	// version read alongside reqRecord at the top of this handler (Issue #3775): this
+	// call site previously had no protection of any kind, on any node count, so two
+	// concurrent approvals of the same pending request could both pass the pending
+	// check above and both write, binding two different accounts or granting two
+	// different marker sets to one CSR with the second write silently winning. A lost
+	// race now surfaces as 409 Conflict rather than a silent second write.
+	if _, ok, err := s.persistPendingCredentialRequestCAS(r.Context(), reqRecord); err != nil {
 		s.logger.Error("Failed to persist credential request approval", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to approve credential request", "STORE_ERROR")
+		return
+	} else if !ok {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Credential request was concurrently modified; it is no longer pending", "REQUEST_NOT_PENDING")
 		return
 	}
 

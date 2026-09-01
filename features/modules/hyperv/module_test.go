@@ -150,6 +150,13 @@ func (s *inlineSecretStore) StoreSecret(_ context.Context, req *secretsif.Secret
 	return nil
 }
 
+func (s *inlineSecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsif.SecretRequest) (int, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[req.Key] = req.Value
+	return 1, true, nil
+}
+
 // Stub implementations for the rest of the SecretStore interface.
 func (s *inlineSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
 func (s *inlineSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {

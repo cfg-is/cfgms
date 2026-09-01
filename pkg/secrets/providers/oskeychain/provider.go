@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -42,6 +44,12 @@ const (
 
 	// maxKeyLength bounds the namespaced key (e.g. cfgms/session/<connection>).
 	maxKeyLength = 256
+
+	// casVersionKeySuffix names the companion OS-keychain entry
+	// CompareAndSwapSecret uses to track a key's version, since the underlying
+	// backend has no notion of versioning of its own (GetCapabilities reports
+	// SupportsVersioning: false; GetSecret always reports Version 1).
+	casVersionKeySuffix = "\x00cas-version"
 )
 
 // errSecretNotFound is the sentinel a backend returns when a key is absent.
@@ -135,6 +143,11 @@ func (p *Provider) CreateSecretStore(_ map[string]interface{}) (interfaces.Secre
 // listable secret database).
 type Store struct {
 	backend backend
+	// casMu serializes CompareAndSwapSecret's read-check-write sequence against
+	// the version companion entry. This is in-process only — oskeychain is not
+	// cluster-capable (ClusterCapable returns false): it holds one local CLI
+	// session token, not state shared across controller nodes.
+	casMu sync.Mutex
 }
 
 // newStore wraps a backend in a Store.
@@ -189,6 +202,63 @@ func (s *Store) DeleteSecret(_ context.Context, key string) error {
 		return fmt.Errorf("oskeychain: delete %q: %w", key, err)
 	}
 	return nil
+}
+
+// CompareAndSwapSecret implements interfaces.SecretStore.CompareAndSwapSecret. The
+// backend has no atomic check-and-set primitive of its own, so this tracks a
+// version number in a companion OS-keychain entry (key+casVersionKeySuffix) and
+// serializes the read-check-write sequence with casMu.
+//
+// The interface's "an expired secret does not exist" rule needs no code here:
+// this provider has no notion of expiry at all — StoreSecret ignores
+// SecretRequest.TTL, GetSecret never refuses a record as expired, and nothing
+// records an ExpiresAt — so no stored record can ever be in the expired state the
+// rule is about. It holds one local CLI session token, not TTL-bounded claims.
+func (s *Store) CompareAndSwapSecret(_ context.Context, key string, expectedVersion int, req *interfaces.SecretRequest) (int, bool, error) {
+	if req == nil {
+		return 0, false, errors.New("oskeychain: secret request is nil")
+	}
+	if req.Key == "" {
+		return 0, false, errors.New("oskeychain: secret key cannot be empty")
+	}
+	if key == "" {
+		return 0, false, errors.New("oskeychain: secret key cannot be empty")
+	}
+	if len(req.Key) > maxKeyLength {
+		return 0, false, fmt.Errorf("oskeychain: secret key exceeds maximum length of %d characters", maxKeyLength)
+	}
+	if req.Value == "" {
+		return 0, false, errors.New("oskeychain: secret value cannot be empty")
+	}
+	if len(req.Value) > maxSecretSize {
+		return 0, false, fmt.Errorf("oskeychain: secret value exceeds maximum size of %d bytes", maxSecretSize)
+	}
+
+	s.casMu.Lock()
+	defer s.casMu.Unlock()
+
+	versionKey := req.Key + casVersionKeySuffix
+	currentVersion := 0
+	if raw, err := s.backend.get(versionKey); err == nil {
+		if v, convErr := strconv.Atoi(string(raw)); convErr == nil {
+			currentVersion = v
+		}
+	} else if !errors.Is(err, errSecretNotFound) {
+		return 0, false, fmt.Errorf("oskeychain: read version for %q: %w", req.Key, err)
+	}
+
+	if currentVersion != expectedVersion {
+		return 0, false, nil
+	}
+
+	if err := s.backend.set(req.Key, []byte(req.Value)); err != nil {
+		return 0, false, fmt.Errorf("oskeychain: compare-and-swap %q: %w", req.Key, err)
+	}
+	newVersion := currentVersion + 1
+	if err := s.backend.set(versionKey, []byte(strconv.Itoa(newVersion))); err != nil {
+		return 0, false, fmt.Errorf("oskeychain: persist version for %q: %w", req.Key, err)
+	}
+	return newVersion, true, nil
 }
 
 // unsupported wraps errors.ErrUnsupported with the operation name. The OS

@@ -91,6 +91,12 @@ type account struct {
 	EnrollmentLinkHash      string
 	EnrollmentLinkExpiresAt time.Time
 	EnrollmentLinkRevoked   bool
+
+	// Version is the secret store's version for this record at the time it was
+	// read (SecretMetadata.Version) — 0 for a record that does not yet exist.
+	// Callers pass it as CompareAndSwapSecret's expectedVersion so a concurrent
+	// writer cannot silently clobber this record (Issue #3775).
+	Version int
 }
 
 // AccountRequest is the POST /api/v1/accounts body. The same endpoint
@@ -395,6 +401,7 @@ func (s *Server) loadAccountFromStore(ctx context.Context, username, tenantHint 
 			acct.EnrollmentLinkExpiresAt = t
 		}
 	}
+	acct.Version = m.Version
 	s.cacheAccount(acct)
 	return acct, nil
 }
@@ -403,6 +410,20 @@ func (s *Server) loadAccountFromStore(ctx context.Context, username, tenantHint 
 // (same seam as API keys — handlers_apikeys.go). WebAuthn credentials (public keys)
 // are serialized to JSON in the metadata.
 func (s *Server) persistAccount(ctx context.Context, acct *account, createdBy string) error {
+	return s.secretStore.StoreSecret(ctx, buildAccountSecretRequest(acct, createdBy))
+}
+
+// persistAccountCAS writes acct through CompareAndSwapSecret, keyed on
+// acct.Version — the version read alongside the record being transitioned. A lost
+// race (ok=false) means a concurrent writer already modified this account; the
+// caller must treat that as a conflict, never retry with the stale in-memory value
+// (Issue #3775).
+func (s *Server) persistAccountCAS(ctx context.Context, acct *account, createdBy string) (newVersion int, ok bool, err error) {
+	req := buildAccountSecretRequest(acct, createdBy)
+	return s.secretStore.CompareAndSwapSecret(ctx, accountStorageTenant(acct.TenantID)+"/"+req.Key, acct.Version, req)
+}
+
+func buildAccountSecretRequest(acct *account, createdBy string) *secretsif.SecretRequest {
 	meta := map[string]string{
 		secretsif.MetadataKeySecretType: accountSecretType,
 		"id":                            acct.ID,
@@ -442,7 +463,7 @@ func (s *Server) persistAccount(ctx context.Context, acct *account, createdBy st
 			meta["enrollment_link_revoked"] = "true"
 		}
 	}
-	secretReq := &secretsif.SecretRequest{
+	return &secretsif.SecretRequest{
 		Key:         accountStoreKey(acct.Username),
 		Value:       "",                                  // no secret value — accounts are passkey-only (Issue #2993)
 		TenantID:    accountStorageTenant(acct.TenantID), // Issue #2919: sentinel for root-scope
@@ -451,7 +472,6 @@ func (s *Server) persistAccount(ctx context.Context, acct *account, createdBy st
 		Tags:        []string{"account"},
 		Metadata:    meta,
 	}
-	return s.secretStore.StoreSecret(ctx, secretReq)
 }
 
 // --- audit (founder condition 2) ---

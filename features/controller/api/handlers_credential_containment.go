@@ -13,9 +13,9 @@
 // (#3718) signs nothing, and collect (#3719) is what mints the certificate, so an
 // "approved" request has no certificate to revoke yet. Cancel and revoke-by-token both
 // reuse credentialRequestStatusDenied for that transition (no new status value) and
-// both take s.credentialRequestCollectMu — the same lock claimCredentialRequestForCollection
-// takes — so an in-flight collect can never race a containment action for the same
-// request.
+// both persist via CompareAndSwapSecret (Issue #3775) — the same primitive
+// claimCredentialRequestForCollection uses — so an in-flight collect can never race a
+// containment action for the same request.
 package api
 
 import (
@@ -73,18 +73,16 @@ type OrphanedCredentialInfo struct {
 // ---- state-machine helpers ------------------------------------------------------------
 
 // cancelApprovedCredentialRequest performs the approved->denied compare-and-set for the
-// standalone cancel action, under s.credentialRequestCollectMu — the same lock
-// claimCredentialRequestForCollection takes for the approved->collected transition, so a
-// cancel and an in-flight collect for the same request can never both observe "approved".
+// standalone cancel action via CompareAndSwapSecret, keyed on the version just read —
+// the same primitive claimCredentialRequestForCollection uses for the approved->collected
+// transition, so a cancel and an in-flight collect for the same request can never both
+// win against "approved" (Issue #3775).
 //
 // Returns a distinct sentinel per non-approved current status so the handler can refuse
 // with a distinguishable error (Issue #3725 AC): pending isn't approved yet (use deny),
 // collected already has a live certificate (use revoke-by-token or revoke-orphaned, not
 // cancel), denied is already terminal.
 func (s *Server) cancelApprovedCredentialRequest(ctx context.Context, id, actingPrincipalID string) (*pendingCredentialRequest, error) {
-	s.credentialRequestCollectMu.Lock()
-	defer s.credentialRequestCollectMu.Unlock()
-
 	fresh, err := s.getPendingCredentialRequestByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -108,25 +106,46 @@ func (s *Server) cancelApprovedCredentialRequest(ctx context.Context, id, acting
 	fresh.Status = credentialRequestStatusDenied
 	fresh.DeniedAt = &now
 	fresh.DeniedBy = actingPrincipalID
-	if err := s.persistPendingCredentialRequest(ctx, fresh); err != nil {
+	newVersion, ok, err := s.persistPendingCredentialRequestCAS(ctx, fresh)
+	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		// Lost the race: a concurrent collect or containment action already
+		// transitioned this request away from "approved" between the read above
+		// and this compare-and-set. Re-read to report the accurate sentinel
+		// rather than a generic conflict.
+		latest, latestErr := s.getPendingCredentialRequestByID(ctx, id)
+		if latestErr != nil {
+			return nil, latestErr
+		}
+		if latest == nil {
+			return nil, errCredentialRequestNotFound
+		}
+		switch latest.Status {
+		case credentialRequestStatusCollected:
+			return nil, errCredentialRequestAlreadyCollected
+		case credentialRequestStatusDenied:
+			return nil, errCredentialRequestAlreadyDeniedCancel
+		default:
+			return nil, errCredentialRequestPendingNotApproved
+		}
+	}
+	fresh.Version = newVersion
 	return fresh, nil
 }
 
 // blockCredentialRequestFromEverCollecting transitions req from "pending" or "approved"
-// to "denied" under s.credentialRequestCollectMu, so an in-flight collect claim on the
-// same request can never race this containment action. Unlike cancelApprovedCredentialRequest
-// it accepts "pending" as well — revoke-by-token must block every request that could still
+// to "denied" via CompareAndSwapSecret keyed on the version just read, so an in-flight
+// collect claim (or any other concurrent transition) on the same request can never race
+// this containment action (Issue #3775). Unlike cancelApprovedCredentialRequest it
+// accepts "pending" as well — revoke-by-token must block every request that could still
 // someday produce a certificate, not only ones an administrator already approved.
 //
 // blocked is false (with a nil error) when the request has already left the
 // pending/approved window (denied, collected, or gone) — that is itself containment,
 // not a failure, and the caller reports it as such.
 func (s *Server) blockCredentialRequestFromEverCollecting(ctx context.Context, id, actingPrincipalID string) (blocked bool, err error) {
-	s.credentialRequestCollectMu.Lock()
-	defer s.credentialRequestCollectMu.Unlock()
-
 	fresh, err := s.getPendingCredentialRequestByID(ctx, id)
 	if err != nil {
 		return false, err
@@ -142,8 +161,14 @@ func (s *Server) blockCredentialRequestFromEverCollecting(ctx context.Context, i
 	fresh.Status = credentialRequestStatusDenied
 	fresh.DeniedAt = &now
 	fresh.DeniedBy = actingPrincipalID
-	if err := s.persistPendingCredentialRequest(ctx, fresh); err != nil {
+	_, ok, err := s.persistPendingCredentialRequestCAS(ctx, fresh)
+	if err != nil {
 		return false, err
+	}
+	if !ok {
+		// Lost the race: a concurrent transition already moved this request out of
+		// pending/approved between the read above and this compare-and-set.
+		return false, nil
 	}
 
 	s.emitCredentialRequestAudit(ctx, "credential_request.denied", fresh.TenantID, actingPrincipalID,

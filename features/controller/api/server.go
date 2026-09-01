@@ -164,7 +164,6 @@ type Server struct {
 	passkeyLoginSessions            sync.Map                                 // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
 	passkeyLoginThrottle            sync.Map                                 // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyEnrollSessions           sync.Map                                 // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
-	credentialMu                    sync.Mutex                               // Issue #2992: guards the credential CAS section in handleWebAuthnRevokeCredential
 	telemetryHandler                http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter             egConfigstoreIngestor                    // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                      egReadProvider                           // Issue #2880: entity graph read API
@@ -181,18 +180,14 @@ type Server struct {
 	osqueryDispatcher               stewardOsqueryDispatcher                 // Issue #3569: controller-side dispatch to steward OsqueryQuery streams
 	enrolmentTokenMintLimiter       *sourceRateLimiter                       // Issue #3717: per-source rate limit on enrolment-token mint
 	credentialRequestLodgeLimiter   *sourceRateLimiter                       // Issue #3717: per-source rate limit on credential-request lodge
-	credentialRequestMu             sync.Mutex                               // Issue #3717: serializes enrolment-token spend-then-lodge on this node
 	stopCredentialRequestSweep      chan struct{}                            // Issue #3717: signals runCredentialRequestExpirySweep to exit
 	credentialRequestSweepDone      chan struct{}                            // Issue #3717: closed when the sweep goroutine exits
 	credentialRequestCollectLimiter *sourceRateLimiter                       // Issue #3719: per-source rate limit on credential-request collect
-	credentialRequestCollectMu      sync.Mutex                               // Issue #3719: serializes the approved->collected compare-and-set
 	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
 	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
 	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
-	credentialRenewalMu             sync.Mutex                               // Issue #3724: serializes issue-and-rebind so two concurrent renewals of one certificate cannot both succeed
 	cliLoginLodgeLimiter            *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login lodge
 	cliLoginCollectLimiter          *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login collect
-	cliLoginCollectMu               sync.Mutex                               // Issue #3721: serializes the approved->collected compare-and-set
 	stopCliLoginSweep               chan struct{}                            // Issue #3721: signals the cli-login expiry sweep to exit
 	cliLoginSweepDone               chan struct{}                            // Issue #3721: closed when the cli-login sweep goroutine exits
 
@@ -2458,6 +2453,27 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	store, err := secretsif.CreateSecretStoreFromConfig("sops", secretsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create secret store: %w", err)
+	}
+
+	// Fail-closed guard: in cluster mode the secret store must have a
+	// compare-and-swap that is atomic across controller nodes (Issue #3775).
+	//
+	// Every credential-issuing transition in this package — enrolment-token spend,
+	// approved->collected, CLI-login collect, account revoke, the renewal claim —
+	// is guarded by CompareAndSwapSecret and mints a certificate on the strength of
+	// winning it. A store whose swap is only node-local lets two nodes both win one
+	// approval and both mint a certificate, so it must be refused here rather than
+	// documented as a limitation: assertClusterBackendsReady gates the storage
+	// provider, and nothing else gates this. The condition is a property of the
+	// backend the store was actually built on, asked of the constructed store, not
+	// inferred from the provider name.
+	if cfg.HA.IsClusterMode() && !secretsif.CompareAndSwapIsClusterAtomic(store) {
+		_ = store.Close()
+		return nil, fmt.Errorf(
+			"cluster mode requires a secret store whose compare-and-swap is atomic across nodes; "+
+				"backend %q does not provide one. Configure storage.provider: database (PostgreSQL "+
+				"conditional writes) for the secret store, or use a cluster-capable secrets provider",
+			cfg.Storage.Provider)
 	}
 
 	// Verify store is healthy. Fail closed unconditionally: a broken store at
