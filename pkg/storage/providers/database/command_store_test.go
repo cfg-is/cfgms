@@ -269,11 +269,13 @@ func TestDatabaseCommandStore_PendingSurvivesRestart(t *testing.T) {
 	cmd := makeSampleCommand("restart-pending-db", "sw-restart-db", "tenant-restart-db")
 	require.NoError(t, store1.CreateCommandRecord(ctx, cmd))
 
-	// Simulate a controller restart: open a brand new DatabaseCommandStore
-	// instance against the same DSN. NewDatabaseCommandStore re-runs
-	// initializeSchema exactly as a fresh process boot would.
-	dsn := buildTestDSN()
-	store2, err := NewDatabaseCommandStore(dsn, getTestConfig())
+	// Simulate a controller restart: open a brand new *sql.DB against the same
+	// test database (not setupTestDatabase, which would drop store1's tables)
+	// and construct a fresh DatabaseCommandStore on it. NewDatabaseCommandStore
+	// re-runs initializeSchema exactly as a fresh process boot would.
+	db2 := getTestDB(t)
+	t.Cleanup(func() { _ = db2.Close() })
+	store2, err := NewDatabaseCommandStore(db2, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store2.Close() })
 

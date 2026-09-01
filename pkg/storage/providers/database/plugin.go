@@ -335,11 +335,11 @@ func (p *DatabaseProvider) CreateCaseStore(config map[string]interface{}) (busin
 // without this method the cluster (multi-node Postgres) deployment runs with a
 // nil nonce store and every registration-refresh endpoint answers 503.
 func (p *DatabaseProvider) CreateNonceStore(config map[string]interface{}) (business.NonceStore, error) {
-	dsn, err := p.getDSN(config)
+	db, err := p.sharedPool(config)
 	if err != nil {
 		return nil, fmt.Errorf("invalid database configuration: %w", err)
 	}
-	store, err := NewDatabaseNonceStore(dsn, config)
+	store, err := NewDatabaseNonceStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database nonce store: %w", err)
 	}

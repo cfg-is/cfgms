@@ -507,6 +507,8 @@ func TestDatabaseProvider_SharedPool_Identity(t *testing.T) {
 	require.NoError(t, err)
 	caseStore, err := provider.CreateCaseStore(config)
 	require.NoError(t, err)
+	nonceStore, err := provider.CreateNonceStore(config)
+	require.NoError(t, err)
 
 	pool, err := provider.sharedPool(config)
 	require.NoError(t, err)
@@ -519,6 +521,7 @@ func TestDatabaseProvider_SharedPool_Identity(t *testing.T) {
 	assert.Same(t, pool, tenantStore.(*DatabaseTenantStore).db, "TenantStore must share the provider's pool")
 	assert.Same(t, pool, sessionStore.(*DatabaseSessionStore).db, "SessionStore must share the provider's pool")
 	assert.Same(t, pool, caseStore.(*DatabaseCaseStore).db, "CaseStore must share the provider's pool")
+	assert.Same(t, pool, nonceStore.(*DatabaseNonceStore).db, "NonceStore must share the provider's pool")
 }
 
 // TestDatabaseProvider_SharedPool_DivergentDSNDoesNotReusePool covers the
