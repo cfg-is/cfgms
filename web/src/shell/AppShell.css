@@ -138,6 +138,22 @@ nav a.soon .tag {
   text-transform: uppercase;
   color: var(--text-faint);
 }
+/* Asset-tab count badge — same pill shape and color as .badge, but inline
+   (not absolute) since it sits beside the tab label rather than overlaying
+   an icon corner. */
+.asset-tab .count-badge {
+  margin-left: 5px;
+  padding: 0 6px;
+  min-width: 16px;
+  border-radius: var(--radius-pill);
+  background: var(--state-crit);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  display: inline-block;
+}
 
 .main {
   display: flex;

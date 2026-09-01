@@ -1453,6 +1453,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 
 	if len(apiResp.Data) == 0 {
 		fmt.Println("No stewards registered.")
+		printPendingRegistrationCount(client)
 		return nil
 	}
 
@@ -1476,7 +1477,26 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	printPendingRegistrationCount(client)
+	return nil
+}
+
+// printPendingRegistrationCount appends a trailing pending-count line to the
+// default `cfg steward list` output so a queued steward is distinguishable from
+// one that never contacted the controller (Issue #3786). Best-effort: a caller
+// without the registration:list-pending permission gets a 403 here, which is
+// silently omitted rather than failing the whole command. A zero count is also
+// omitted — the line exists to surface a backlog, not to announce its absence.
+func printPendingRegistrationCount(client *APIClient) {
+	pending, status, err := client.ListPendingRegistrationsWithHTTPStatus(context.Background())
+	if err != nil || status != http.StatusOK || len(pending) == 0 {
+		return
+	}
+	fmt.Printf("\n%d pending registration(s) — cfg registration pending\n", len(pending))
 }
 
 // ---------------------------------------------------------------------------
