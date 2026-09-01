@@ -2,7 +2,7 @@
 
 ## Summary
 
-The planned Arm A / Arm B measurement batch (18-36 VMs across `cfg-lab`'s 3
+The planned Arm A / Arm B measurement batch (18-36 VMs across the lab fleet's 3
 Hyper-V hosts, comparing serial vs. same-host-concurrent provisioning) could
 not run as designed. Before any VM reached the point where CIDATA visibility
 could even be observed, two **pre-existing, unrelated infrastructure defects**
@@ -43,7 +43,7 @@ never had network to register in the first place," described below.
 
 ## What was proven working
 
-- A single VM (`poc-cidata-70-02-01` on `CFG-70-02`) was created, its boot
+- A single VM (`poc-cidata-70-02-01` on `hv-host-a`) was created, its boot
   disk converted, its CIDATA seed formatted and attached, and the VM started
   — confirmed via `Get-VM`: `State: Running`, `Uptime: 01:18:41`,
   `Status: Operating normally`.
@@ -68,7 +68,7 @@ the 10-minute window (some ran over an hour with no registration). A 100%
 failure rate contradicts the story's own premise ("frequently, not always"),
 so before recording it as a real measurement it was investigated:
 
-1. **Console check (`diag-cidata-01` on `CFG-70-02`):** the login prompt
+1. **Console check (`diag-cidata-01` on `hv-host-a`):** the login prompt
    showed hostname `diag-cidata-01`, not `localhost`. This means cloud-init
    **did** successfully detect and read the NoCloud/CIDATA datasource on
    this boot — directly contradicting the story's primary hypothesis for
@@ -79,25 +79,25 @@ so before recording it as a real measurement it was investigated:
    Arm A VMs or the diagnostic VMs. Not "rejected" — **absent**.
 
 3. **DHCP lease table (`cfg-dc2-02`, the lab's DHCP server):** every guest
-   VM hosted on `CFG-AB-02` and `CFG-C3-02` — all 6 Arm A VMs from those two
+   VM hosted on `hv-host-c` and `hv-host-d` — all 6 Arm A VMs from those two
    hosts, plus `diag-cidata-ab02` — **did** get an active DHCP lease with
    correct hostname and successful dynamic DNS registration
-   (`*.lab.cfg.is`). This means those guests' cloud-init `runcmd` stage ran
+   (`the lab-internal DNS zone`). This means those guests' cloud-init `runcmd` stage ran
    far enough to bring up networking and complete a full DHCP round-trip.
-   **None** of `CFG-70-02`'s own 3 Arm A VMs, nor its 2 diagnostic VMs, ever
-   appear in the lease table at all — `CFG-70-02`-hosted guests never
+   **None** of `hv-host-a`'s own 3 Arm A VMs, nor its 2 diagnostic VMs, ever
+   appear in the lease table at all — `hv-host-a`-hosted guests never
    obtain a lease.
 
-4. **Direct reachability, `CFG-70-02` → `cidata-a-cfgab02-02`
-   (192.168.234.109, a leased AB-02 guest):** `ping` fails with
-   `Destination host unreachable` reported by `CFG-70-02`'s own stack (ARP
-   resolution never completes) — despite `CFG-70-02` successfully pinging
-   `CFG-AB-02` and `CFG-C3-02`'s **host** IPs (192.168.234.100/.101)
-   directly, and successfully pinging `cfgms-lab-datasvc`
-   (192.168.234.105).
+4. **Direct reachability, `hv-host-a` → `cidata-a-cfgab02-02`
+   (guest-ip-1, a leased AB-02 guest):** `ping` fails with
+   `Destination host unreachable` reported by `hv-host-a`'s own stack (ARP
+   resolution never completes) — despite `hv-host-a` successfully pinging
+   `hv-host-c` and `hv-host-d`'s **host** IPs (host-ip-c and host-ip-d)
+   directly, and successfully pinging the lab data-services host
+   (datasvc-ip).
 
-5. **Local reachability, `CFG-AB-02` → its own guest
-   `diag-cidata-ab02` (192.168.234.114):** also fails — **the host hosting
+5. **Local reachability, `hv-host-c` → its own guest
+   `diag-cidata-ab02` (guest-ip-2):** also fails — **the host hosting
    the VM cannot reach its own guest**, over the same `HVSwitch_1G` external
    switch the VM's DHCP lease came through moments earlier. This rules out a
    physical-switch/VLAN explanation (confirmed `Untagged`, `AccessVlanId: 0`
@@ -121,7 +121,7 @@ console output beyond the login-prompt screenshot was not captured.
 
 The evidence is inconsistent with a purely physical-network cause (VLAN,
 switch port security, or a router in the path): DHCP round-trips
-successfully in both directions, and `CFG-70-02` reaches every physical
+successfully in both directions, and `hv-host-a` reaches every physical
 host directly. It is also inconsistent with the CIDATA-visibility
 hypothesis this story exists to test: at least one guest (`diag-cidata-01`)
 proved cloud-init read the seed correctly (hostname set), and guests that
@@ -137,7 +137,7 @@ driver warning in the console log is circumstantial support for a
 driver/vmbus-level issue on this kernel/image combination, but was not
 confirmed as the cause — only observed alongside it.
 
-**`CFG-70-02` never getting a DHCP lease at all (vs. `AB-02`/`C3-02`
+**`hv-host-a` never getting a DHCP lease at all (vs. `AB-02`/`C3-02`
 getting a lease but losing reachability shortly after) is a second,
 possibly separate anomaly** specific to that host, not explained by
 anything above. It was not investigated further given time constraints.
@@ -155,11 +155,11 @@ this story's decision rule anticipates, but a hard precondition failure.
 ## Recommended next steps
 
 1. **Fix cross-host / guest-network reachability first.** This blocks not
-   only this story but any future live Hyper-V VM work on `cfg-lab`.
+   only this story but any future live Hyper-V VM work on the lab fleet.
    Suggested starting points for whoever picks this up:
    - Check `hv_netvsc` driver/kernel version on the `debian-13-generic-amd64.raw`
      image against a known-good combination; the GRO warning is a live lead.
-   - Check whether `CFG-70-02`'s failure to get a lease at all (distinct
+   - Check whether `hv-host-a`'s failure to get a lease at all (distinct
      from `AB-02`/`C3-02`'s lease-then-unreachable pattern) shares a root
      cause or is a second, independent problem specific to that host's
      switch/NIC binding.
