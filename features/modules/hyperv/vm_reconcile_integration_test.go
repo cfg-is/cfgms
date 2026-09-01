@@ -4,7 +4,9 @@ package hyperv
 
 import (
 	"context"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -659,4 +661,113 @@ func TestApplySourceGated_FailedAfterInstallingStillConverges(t *testing.T) {
 		"a post-installing failure must keep converging: the off VM is started to its desired running state")
 	assert.Empty(t, callsContaining(calls, "Remove-VM"),
 		"convergence must still never destroy the existing VM")
+}
+
+// scriptRoutingTransport returns a different canned output per PS script body,
+// falling back to defaultOutput. Unlike testWinRMTransport's perCallOutputs it
+// is not indexed by call ORDER, so a test asserting on one specific probe does
+// not break when an unrelated change adds or reorders a transport call.
+type scriptRoutingTransport struct {
+	mu            sync.Mutex
+	calls         []winRMCall
+	byScript      map[string]string
+	defaultOutput string
+}
+
+func (t *scriptRoutingTransport) ExecutePS(_ context.Context, psCommand string, psArgs map[string]string) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	keys := make([]string, 0, len(psArgs))
+	for k := range psArgs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	args := make([]interface{}, len(keys))
+	for i, k := range keys {
+		args[i] = psArgs[k]
+	}
+	t.calls = append(t.calls, winRMCall{scriptBlock: psCommand, args: args})
+
+	if out, ok := t.byScript[psCommand]; ok {
+		return out, nil
+	}
+	return t.defaultOutput, nil
+}
+
+func (t *scriptRoutingTransport) recordedCalls() []winRMCall {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]winRMCall(nil), t.calls...)
+}
+
+// TestApplySourceGated_SeedNotAttached_DoesNotStartVM is the [REQUIRED TEST] for
+// the #3168 seedless-guest gate. It covers the case the #2467 record-based gate
+// CANNOT: the ProvisionRecord is absent (storeFor falls back to an in-memory
+// store for a non-CSV VM, so a steward restart loses it), yet the VM exists,
+// is healthy-but-off, and has NO CIDATA seed disk attached.
+//
+// Powering such a guest on produces a silently, permanently broken VM: no
+// datasource, no steward, no enrolment — while convergence reports drift
+// forever and never repairs it. The gate must refuse the power-on and surface
+// the reason instead.
+func TestApplySourceGated_SeedNotAttached_DoesNotStartVM(t *testing.T) {
+	transport := &scriptRoutingTransport{
+		defaultOutput: existingSourceVMJSON("stw-01", "Off"),
+		byScript:      map[string]string{psSeedDiskAttached: "false"},
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	// Deliberately NO provision record — this is the restart-lost-record case
+	// that makes failedDuringSeedPhase return false.
+	_, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.ErrorIs(t, err, ErrProvisionNotFound, "test premise: no record exists")
+
+	cfg := rawConfigState{m: cloudInitVMConfigMap(2)} // state: running, on_existing: never
+	setErr := m.Set(context.Background(), "vm:stw-01", cfg)
+	require.Error(t, setErr, "a seedless cloud-init VM must surface an error, not silently power on")
+	assert.Contains(t, setErr.Error(), "without its CIDATA seed disk")
+
+	calls := transport.recordedCalls()
+	assert.Empty(t, callsContaining(calls, "Start-VM"),
+		"a VM with no CIDATA seed attached must NOT be powered on — it could never enrol")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"the gate must never destroy the existing VM")
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"the gate must not recreate the VM")
+}
+
+// TestApplySourceGated_SeedAttached_StillConverges is the no-regression
+// companion: when the seed disk IS attached, an existing healthy-but-off VM
+// converges to its declared running state exactly as before.
+func TestApplySourceGated_SeedAttached_StillConverges(t *testing.T) {
+	transport := &scriptRoutingTransport{
+		defaultOutput: existingSourceVMJSON("stw-01", "Off"),
+		byScript:      map[string]string{psSeedDiskAttached: "true"},
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	// vhd_path must match the path existingSourceVMJSON reports, or the apply
+	// diverts into a storage move (Cfgms-MoveVMStorage) and never reaches the
+	// power-on this test is asserting on.
+	cfgMap := cloudInitVMConfigMap(2)
+	cfgMap["vhd_path"] = `C:\ClusterStorage\CSV01\stw-01.vhdx`
+	cfg := rawConfigState{m: cfgMap}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	assert.NotEmpty(t, callsContaining(transport.recordedCalls(), "Start-VM"),
+		"a VM whose seed IS attached must still converge to its declared running state")
+}
+
+// TestSeedDiskAttached_UnparseableOutputIsAnError proves the probe reports a
+// transport/parse failure as an ERROR rather than a false negative. The caller
+// treats "cannot tell" as "do not block convergence", so returning false here
+// would wrongly wedge a healthy VM powered off.
+func TestSeedDiskAttached_UnparseableOutputIsAnError(t *testing.T) {
+	transport := &scriptRoutingTransport{defaultOutput: `{"found":true}`}
+	m := provisionModuleWithTransport(t, transport)
+
+	attached, err := m.seedDiskAttached(context.Background(), "stw-01", `C:\seeds\s.vhdx`)
+	require.Error(t, err, "unparseable probe output must be an error, never a silent false")
+	assert.False(t, attached)
 }

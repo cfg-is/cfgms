@@ -261,11 +261,22 @@ function Cfgms-NewSeedVHD {
 # 0x80070020 sharing violation on the next Mount-VHD).
 function Cfgms-MountSeedVHD {
     param([Parameter(Mandatory)][string]$Path, [string]$Label = 'CFGMS_SEED')
-    Mount-VHD -Path $Path -Passthru |
-        Initialize-Disk -PartitionStyle MBR -PassThru |
-        New-Partition -UseMaximumSize -AssignDriveLetter |
-        Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Label -Confirm:$false | Out-Null
-    Cfgms-DismountAndVerify -Path $Path
+    # try/finally is REQUIRED, not stylistic: without it any failure between the
+    # Mount-VHD and the dismount (a Format-Volume error, a partition/letter
+    # failure) leaks a host-attached VHD PERMANENTLY. The leak is not confined to
+    # this VM — the next VM's Add-VMHardDiskDrive then fails with a 0x80070020
+    # sharing violation, so one transient error silently breaks seed provisioning
+    # for every subsequent VM on the host until an operator dismounts by hand.
+    # Observed on cfg-lab: a seed VHD left Attached=True for two days after its
+    # VM had been deleted.
+    try {
+        Mount-VHD -Path $Path -Passthru |
+            Initialize-Disk -PartitionStyle MBR -PassThru |
+            New-Partition -UseMaximumSize -AssignDriveLetter |
+            Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Label -Confirm:$false | Out-Null
+    } finally {
+        Cfgms-DismountAndVerify -Path $Path
+    }
 }
 
 # Cfgms-DismountAndVerify dismounts a seed VHD and confirms it is fully detached
@@ -307,16 +318,24 @@ function Cfgms-CopyToSeedVHD {
         [string]$LauncherDest = 'cfgms-steward-launcher',
         [string]$CASrc = ''
     )
-    $disk = Mount-VHD -Path $SeedPath -Passthru
-    $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
-        Where-Object { $_.FileSystemLabel -eq $Label } |
-        Select-Object -First 1).DriveLetter
-    Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
-    if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
-    if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
-    if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
-    if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
-    Cfgms-DismountAndVerify -Path $SeedPath
+    # try/finally is REQUIRED — see the note on Cfgms-MountSeedVHD. A failure in
+    # any Set-Content/Copy-Item below (or a null $letter when the labelled volume
+    # is not found) would otherwise skip the dismount and leak a host-attached
+    # VHD permanently, breaking seed attach for every later VM on this host.
+    try {
+        $disk = Mount-VHD -Path $SeedPath -Passthru
+        $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
+            Where-Object { $_.FileSystemLabel -eq $Label } |
+            Select-Object -First 1).DriveLetter
+        if (-not $letter) { throw ('seed volume with label ' + $Label + ' not found after mount: ' + $SeedPath) }
+        Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
+        if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
+        if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
+        if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
+        if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
+    } finally {
+        Cfgms-DismountAndVerify -Path $SeedPath
+    }
 }
 
 # Cfgms-DetachSeedVHD dismounts the seed VHDX from the host (called at
@@ -340,6 +359,18 @@ function Cfgms-DeleteSeedMedia {
 function Cfgms-AttachSeedDisk {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SeedPath)
     Add-VMHardDiskDrive -VMName $Name -Path $SeedPath
+}
+
+# Cfgms-SeedDiskAttached reports whether $SeedPath is attached to the VM as a
+# hard disk drive, emitting a bare 'true'/'false'. Read-only. Backs the
+# seedless-guest gate (#3168), which decides power-on from the VM's actual
+# hardware rather than from a ProvisionRecord that does not survive a steward
+# restart for a non-CSV VM. Both values travel via ArgumentList.
+function Cfgms-SeedDiskAttached {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SeedPath)
+    $d = @(Get-VMHardDiskDrive -VMName $Name -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $SeedPath })
+    if ($d.Count -gt 0) { Write-Output 'true' } else { Write-Output 'false' }
 }
 
 # Cfgms-AttachDVD attaches the install ISO (host path) to the VM as a DVD
