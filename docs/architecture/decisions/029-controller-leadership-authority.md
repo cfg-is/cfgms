@@ -1,6 +1,6 @@
 # ADR-029: Controller Leadership Authority — Lease-Backed Authority and Fenced Side Effects
 
-**Status:** Accepted
+**Status:** Amended by [ADR-031](031-controller-cluster-service-model.md) — request-path authority gating and Raft substrate superseded; lease authority model retained (see ADR-031 §Supersedes)
 
 **Date:** 2026-08-18
 
