@@ -77,6 +77,9 @@ func (m *memCommandStore) CreateCommandRecord(_ context.Context, rec *business.C
 	if cp.IssuedAt.IsZero() {
 		cp.IssuedAt = time.Now()
 	}
+	if cp.DeliveryStatus == "" {
+		cp.DeliveryStatus = business.DeliveryStatusPending
+	}
 	m.records[rec.ID] = &cp
 	m.transitions[rec.ID] = append(m.transitions[rec.ID], &business.CommandTransition{
 		CommandID: rec.ID,
@@ -84,6 +87,64 @@ func (m *memCommandStore) CreateCommandRecord(_ context.Context, rec *business.C
 		Timestamp: cp.IssuedAt,
 	})
 	return nil
+}
+
+func (m *memCommandStore) CreateCommandRecords(ctx context.Context, records []*business.CommandRecord) error {
+	// Real (non-mocked) atomic-batch semantics: validate every record before
+	// writing any of them, so a mid-batch failure leaves nothing committed —
+	// matching the SQL providers' single-transaction behavior.
+	m.mu.Lock()
+	for _, rec := range records {
+		if rec == nil {
+			m.mu.Unlock()
+			return fmt.Errorf("record is nil")
+		}
+		if rec.ID == "" {
+			m.mu.Unlock()
+			return business.ErrCommandIDRequired
+		}
+		if rec.StewardID == "" {
+			m.mu.Unlock()
+			return business.ErrCommandStewardIDRequired
+		}
+		if _, exists := m.records[rec.ID]; exists {
+			m.mu.Unlock()
+			return fmt.Errorf("duplicate command ID: %s", rec.ID)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, rec := range records {
+		if err := m.CreateCommandRecord(ctx, rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *memCommandStore) UpdateDeliveryStatus(_ context.Context, id string, status business.DeliveryStatus, detail string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.records[id]
+	if !ok {
+		return business.ErrCommandNotFound
+	}
+	rec.DeliveryStatus = status
+	rec.DeliveryDetail = detail
+	return nil
+}
+
+func (m *memCommandStore) ListPendingDeliveries(_ context.Context, stewardID string) ([]*business.CommandRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*business.CommandRecord
+	for _, rec := range m.records {
+		if rec.StewardID == stewardID && rec.DeliveryStatus == business.DeliveryStatusPending {
+			cp := *rec
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
 }
 
 func (m *memCommandStore) UpdateCommandStatus(_ context.Context, id string, status business.CommandStatus, result map[string]interface{}, errMsg string) error {
@@ -327,12 +388,16 @@ func TestNew_SweepsStaleExecutingCommands(t *testing.T) {
 	require.NoError(t, store.UpdateCommandStatus(ctx, "stale-cmd",
 		business.CommandStatusExecuting, nil, ""))
 
-	// Creating the handler should trigger the startup sweep.
+	// Creating the handler should trigger the startup sweep. A negative timeout
+	// guarantees the record (StartedAt = "now", set by UpdateCommandStatus above)
+	// is immediately treated as past the in-flight boundary, regardless of clock
+	// resolution — proving the sweep still fires for genuinely stale records.
 	_, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  noopStatus,
-		Logger:    newTestLogger(t),
-		Store:     store,
+		StewardID:               "steward-test",
+		OnStatus:                noopStatus,
+		Logger:                  newTestLogger(t),
+		Store:                   store,
+		ExecutingRestartTimeout: -1 * time.Second,
 	})
 	require.NoError(t, err)
 
@@ -340,6 +405,71 @@ func TestNew_SweepsStaleExecutingCommands(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.CommandStatusFailed, got.Status)
 	assert.Equal(t, "controller_restart", got.ErrorMessage)
+}
+
+// TestNew_SweepLeavesRecentExecutingCommandAlone proves the timeout boundary:
+// an executing record that started well within ExecutingRestartTimeout is left
+// executing by the startup sweep rather than immediately failed, because a
+// process restart that fast may not have genuinely interrupted it (Issue #3757).
+func TestNew_SweepLeavesRecentExecutingCommandAlone(t *testing.T) {
+	store := newMemCommandStore()
+	ctx := context.Background()
+
+	rec := &business.CommandRecord{
+		ID:        "recent-executing",
+		Type:      "sync_config",
+		StewardID: "steward-test",
+	}
+	require.NoError(t, store.CreateCommandRecord(ctx, rec))
+	require.NoError(t, store.UpdateCommandStatus(ctx, "recent-executing",
+		business.CommandStatusExecuting, nil, ""))
+
+	_, err := New(&Config{
+		StewardID:               "steward-test",
+		OnStatus:                noopStatus,
+		Logger:                  newTestLogger(t),
+		Store:                   store,
+		ExecutingRestartTimeout: time.Hour,
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetCommandRecord(ctx, "recent-executing")
+	require.NoError(t, err)
+	assert.Equal(t, business.CommandStatusExecuting, got.Status,
+		"a record started well within the timeout must not be failed by the sweep")
+}
+
+// TestNew_SweepNeverTouchesPendingCommands proves a pending delivery/command
+// record survives the startup sweep untouched (Issue #3757 required test:
+// restart-survival). Pending means no attempt was ever made, so a restart
+// cannot have interrupted anything for the sweep to fail.
+func TestNew_SweepNeverTouchesPendingCommands(t *testing.T) {
+	store := newMemCommandStore()
+	ctx := context.Background()
+
+	rec := &business.CommandRecord{
+		ID:        "pending-cmd",
+		Type:      "sync_config",
+		StewardID: "steward-test",
+	}
+	require.NoError(t, store.CreateCommandRecord(ctx, rec))
+
+	// Even a zero/negative timeout must not touch a pending record — the sweep
+	// only ever lists CommandStatusExecuting.
+	_, err := New(&Config{
+		StewardID:               "steward-test",
+		OnStatus:                noopStatus,
+		Logger:                  newTestLogger(t),
+		Store:                   store,
+		ExecutingRestartTimeout: -1 * time.Second,
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetCommandRecord(ctx, "pending-cmd")
+	require.NoError(t, err)
+	assert.Equal(t, business.CommandStatusPending, got.Status,
+		"a pending command must survive the startup sweep unmodified")
+	assert.Empty(t, got.ErrorMessage)
 }
 
 // ---------------------------------------------------------------------------

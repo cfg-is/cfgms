@@ -62,6 +62,9 @@ func (s *DatabaseCommandStore) initializeSchema() error {
 	if err := schemas.CreateCommandRecordsTable(ctx, s.db); err != nil {
 		return err
 	}
+	if err := schemas.BackfillCommandRecordsDeliveryStatus(ctx, s.db); err != nil {
+		return err
+	}
 	return schemas.CreateCommandTransitionsTable(ctx, s.db)
 }
 
@@ -91,14 +94,8 @@ func (s *DatabaseCommandStore) CreateCommandRecord(ctx context.Context, record *
 		record.IssuedAt = now
 	}
 	record.Status = business.CommandStatusPending
-
-	payloadJSON, err := json.Marshal(record.Payload)
-	if err != nil {
-		return fmt.Errorf("database: failed to marshal command payload: %w", err)
-	}
-	resultJSON, err := json.Marshal(record.Result)
-	if err != nil {
-		return fmt.Errorf("database: failed to marshal command result: %w", err)
+	if record.DeliveryStatus == "" {
+		record.DeliveryStatus = business.DeliveryStatusPending
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -111,11 +108,82 @@ func (s *DatabaseCommandStore) CreateCommandRecord(ctx context.Context, record *
 		return fmt.Errorf("database: failed to set tenant context: %w", err)
 	}
 
+	if err := dbInsertCommandRecord(ctx, tx, record, now); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// CreateCommandRecords atomically creates a batch of command records in a single
+// transaction: every record commits, or none do (Issue #3757, ADR-031 Decision 2).
+// All records must share the same tenant — callers fanning a single desired-state
+// write out to multiple stewards in one tenant call this once with the full batch
+// so the durable outbox rows for that fan-out are one commit, not N independent ones.
+func (s *DatabaseCommandStore) CreateCommandRecords(ctx context.Context, records []*business.CommandRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	tenantID := records[0].TenantID
+	for _, r := range records {
+		if r == nil {
+			return fmt.Errorf("database: command record cannot be nil")
+		}
+		if r.ID == "" {
+			return business.ErrCommandIDRequired
+		}
+		if r.StewardID == "" {
+			return business.ErrCommandStewardIDRequired
+		}
+	}
+
+	now := time.Now().UTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin batch create command tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	for _, record := range records {
+		if record.IssuedAt.IsZero() {
+			record.IssuedAt = now
+		}
+		record.Status = business.CommandStatusPending
+		if record.DeliveryStatus == "" {
+			record.DeliveryStatus = business.DeliveryStatusPending
+		}
+		if err := dbInsertCommandRecord(ctx, tx, record, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// dbInsertCommandRecord inserts a single command_records row plus its initial
+// pending transition within tx. Shared by CreateCommandRecord and
+// CreateCommandRecords so both paths persist identically.
+func dbInsertCommandRecord(ctx context.Context, tx *sql.Tx, record *business.CommandRecord, transitionTime time.Time) error {
+	payloadJSON, err := json.Marshal(record.Payload)
+	if err != nil {
+		return fmt.Errorf("database: failed to marshal command payload: %w", err)
+	}
+	resultJSON, err := json.Marshal(record.Result)
+	if err != nil {
+		return fmt.Errorf("database: failed to marshal command result: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO command_records
 			(id, type, steward_id, tenant_id, payload, status,
-			 issued_at, started_at, completed_at, result, error_message, issued_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,NULL,$8,$9,$10)`,
+			 issued_at, started_at, completed_at, result, error_message, issued_by,
+			 delivery_status, delivery_detail)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,NULL,$8,$9,$10,$11,$12)`,
 		record.ID,
 		record.Type,
 		record.StewardID,
@@ -126,16 +194,14 @@ func (s *DatabaseCommandStore) CreateCommandRecord(ctx context.Context, record *
 		resultJSON,
 		record.ErrorMessage,
 		record.IssuedBy,
+		string(record.DeliveryStatus),
+		record.DeliveryDetail,
 	)
 	if err != nil {
 		return fmt.Errorf("database: failed to insert command record %s: %w", record.ID, err)
 	}
 
-	if err := dbInsertTransition(ctx, tx, record.ID, business.CommandStatusPending, now, ""); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return dbInsertTransition(ctx, tx, record.ID, business.CommandStatusPending, transitionTime, "")
 }
 
 // UpdateCommandStatus transitions a command to the given status and appends a transition.
@@ -210,6 +276,59 @@ func (s *DatabaseCommandStore) UpdateCommandStatus(
 	return tx.Commit()
 }
 
+// UpdateDeliveryStatus transitions a command record's outbox DeliveryStatus
+// (Issue #3757, ADR-031 Decision 2). Independent of UpdateCommandStatus: this
+// updates delivery_status/delivery_detail only and does not touch status,
+// started_at, completed_at, result, or the command_transitions audit trail
+// (that trail records CommandStatus, not DeliveryStatus).
+func (s *DatabaseCommandStore) UpdateDeliveryStatus(
+	ctx context.Context,
+	id string,
+	status business.DeliveryStatus,
+	detail string,
+) error {
+	if id == "" {
+		return business.ErrCommandIDRequired
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE command_records SET delivery_status = $2, delivery_detail = $3
+		WHERE id = $1`,
+		id, string(status), detail)
+	if err != nil {
+		return fmt.Errorf("database: failed to update delivery status for %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("database: failed to read rows affected for %s: %w", id, err)
+	}
+	if n == 0 {
+		return business.ErrCommandNotFound
+	}
+	return nil
+}
+
+// ListPendingDeliveries returns every command record targeting stewardID whose
+// DeliveryStatus is still pending (Issue #3757) — the set a steward drains on
+// reconnect.
+func (s *DatabaseCommandStore) ListPendingDeliveries(ctx context.Context, stewardID string) ([]*business.CommandRecord, error) {
+	if stewardID == "" {
+		return nil, business.ErrCommandStewardIDRequired
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, type, steward_id, tenant_id, payload, status,
+		       issued_at, started_at, completed_at, result, error_message, issued_by,
+		       delivery_status, delivery_detail
+		FROM command_records
+		WHERE steward_id = $1 AND delivery_status = $2
+		ORDER BY issued_at ASC`, stewardID, string(business.DeliveryStatusPending))
+	if err != nil {
+		return nil, fmt.Errorf("database: failed to list pending deliveries for %s: %w", stewardID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanDBCommandRows(rows)
+}
+
 // GetCommandRecord retrieves the current state of a command by ID.
 func (s *DatabaseCommandStore) GetCommandRecord(ctx context.Context, id string) (*business.CommandRecord, error) {
 	if id == "" {
@@ -217,7 +336,8 @@ func (s *DatabaseCommandStore) GetCommandRecord(ctx context.Context, id string) 
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, type, steward_id, tenant_id, payload, status,
-		       issued_at, started_at, completed_at, result, error_message, issued_by
+		       issued_at, started_at, completed_at, result, error_message, issued_by,
+		       delivery_status, delivery_detail
 		FROM command_records WHERE id = $1`, id)
 	return scanDBCommandRecord(row)
 }
@@ -226,7 +346,8 @@ func (s *DatabaseCommandStore) GetCommandRecord(ctx context.Context, id string) 
 func (s *DatabaseCommandStore) ListCommandRecords(ctx context.Context, filter *business.CommandFilter) ([]*business.CommandRecord, error) {
 	query := `
 		SELECT id, type, steward_id, tenant_id, payload, status,
-		       issued_at, started_at, completed_at, result, error_message, issued_by
+		       issued_at, started_at, completed_at, result, error_message, issued_by,
+		       delivery_status, delivery_detail
 		FROM command_records WHERE 1=1`
 	var args []interface{}
 	argN := 0
@@ -421,7 +542,7 @@ func dbInsertTransition(ctx context.Context, tx *sql.Tx, commandID string, statu
 func scanDBCommandRecord(row *sql.Row) (*business.CommandRecord, error) {
 	var rec business.CommandRecord
 	var payloadJSON, resultJSON []byte
-	var statusStr string
+	var statusStr, deliveryStatusStr string
 	var startedAt, completedAt sql.NullTime
 
 	err := row.Scan(
@@ -429,6 +550,7 @@ func scanDBCommandRecord(row *sql.Row) (*business.CommandRecord, error) {
 		&payloadJSON, &statusStr,
 		&rec.IssuedAt, &startedAt, &completedAt,
 		&resultJSON, &rec.ErrorMessage, &rec.IssuedBy,
+		&deliveryStatusStr, &rec.DeliveryDetail,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrCommandNotFound
@@ -436,7 +558,7 @@ func scanDBCommandRecord(row *sql.Row) (*business.CommandRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to scan command record: %w", err)
 	}
-	return populateDBCommandRecord(&rec, statusStr, startedAt, completedAt, payloadJSON, resultJSON)
+	return populateDBCommandRecord(&rec, statusStr, deliveryStatusStr, startedAt, completedAt, payloadJSON, resultJSON)
 }
 
 func scanDBCommandRows(rows *sql.Rows) ([]*business.CommandRecord, error) {
@@ -444,7 +566,7 @@ func scanDBCommandRows(rows *sql.Rows) ([]*business.CommandRecord, error) {
 	for rows.Next() {
 		var rec business.CommandRecord
 		var payloadJSON, resultJSON []byte
-		var statusStr string
+		var statusStr, deliveryStatusStr string
 		var startedAt, completedAt sql.NullTime
 
 		if err := rows.Scan(
@@ -452,10 +574,11 @@ func scanDBCommandRows(rows *sql.Rows) ([]*business.CommandRecord, error) {
 			&payloadJSON, &statusStr,
 			&rec.IssuedAt, &startedAt, &completedAt,
 			&resultJSON, &rec.ErrorMessage, &rec.IssuedBy,
+			&deliveryStatusStr, &rec.DeliveryDetail,
 		); err != nil {
 			return nil, fmt.Errorf("database: failed to scan command row: %w", err)
 		}
-		populated, err := populateDBCommandRecord(&rec, statusStr, startedAt, completedAt, payloadJSON, resultJSON)
+		populated, err := populateDBCommandRecord(&rec, statusStr, deliveryStatusStr, startedAt, completedAt, payloadJSON, resultJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -466,11 +589,12 @@ func scanDBCommandRows(rows *sql.Rows) ([]*business.CommandRecord, error) {
 
 func populateDBCommandRecord(
 	rec *business.CommandRecord,
-	statusStr string,
+	statusStr, deliveryStatusStr string,
 	startedAt, completedAt sql.NullTime,
 	payloadJSON, resultJSON []byte,
 ) (*business.CommandRecord, error) {
 	rec.Status = business.CommandStatus(statusStr)
+	rec.DeliveryStatus = business.DeliveryStatus(deliveryStatusStr)
 	if startedAt.Valid {
 		t := startedAt.Time
 		rec.StartedAt = &t

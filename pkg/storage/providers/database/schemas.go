@@ -1194,7 +1194,9 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 			completed_at  TIMESTAMP WITH TIME ZONE,
 			result        JSONB NOT NULL DEFAULT '{}',
 			error_message TEXT NOT NULL DEFAULT '',
-			issued_by     TEXT NOT NULL DEFAULT ''
+			issued_by     TEXT NOT NULL DEFAULT '',
+			delivery_status TEXT NOT NULL DEFAULT 'pending',
+			delivery_detail TEXT NOT NULL DEFAULT ''
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create command_records table: %w", err)
@@ -1204,6 +1206,9 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 		"CREATE INDEX IF NOT EXISTS idx_command_records_steward_id ON command_records(steward_id);",
 		"CREATE INDEX IF NOT EXISTS idx_command_records_status     ON command_records(status);",
 		"CREATE INDEX IF NOT EXISTS idx_command_records_issued_at  ON command_records(issued_at);",
+		// Issue #3757: reconnect-drain lookup (ListPendingDeliveries) filters by
+		// steward_id + delivery_status together.
+		"CREATE INDEX IF NOT EXISTS idx_command_records_steward_delivery ON command_records(steward_id, delivery_status);",
 	}
 	for _, idx := range indexes {
 		if _, err := db.ExecContext(ctx, idx); err != nil {
@@ -1235,6 +1240,32 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to configure command_records RLS: %w", err)
 		}
+	}
+	return nil
+}
+
+// BackfillCommandRecordsDeliveryStatus adds the outbox delivery-lifecycle columns
+// to a pre-existing command_records table (Issue #3757, ADR-031 Decision 2,
+// migration 011). Safe to call on a table that already has these columns —
+// ADD COLUMN IF NOT EXISTS is idempotent on Postgres. Pre-existing rows default
+// to 'pending': they predate the outbox and were dispatched by the old
+// fire-and-forget goroutine, so their actual delivery outcome is unknown: pending
+// is the conservative choice (a drain will re-attempt rather than silently
+// drop them).
+func (s DatabaseSchemas) BackfillCommandRecordsDeliveryStatus(ctx context.Context, db *sql.DB) error {
+	alters := []string{
+		`ALTER TABLE command_records ADD COLUMN IF NOT EXISTS delivery_status TEXT NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE command_records ADD COLUMN IF NOT EXISTS delivery_detail TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range alters {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to back-fill command_records delivery columns: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		"CREATE INDEX IF NOT EXISTS idx_command_records_steward_delivery ON command_records(steward_id, delivery_status);",
+	); err != nil {
+		return fmt.Errorf("failed to create command_records delivery index: %w", err)
 	}
 	return nil
 }

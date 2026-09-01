@@ -64,4 +64,7 @@ func registerStewardRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("reboot_window", "read")(http.HandlerFunc(s.handleGetStewardRebootWindow))).Methods("GET")
 	stewards.Handle("/{id}/reboot-window",
 		s.requirePermission("reboot_window", "override")(http.HandlerFunc(s.handlePutStewardRebootWindow))).Methods("PUT")
+
+	// Durable delivery-outbox read endpoint (Issue #3757, ADR-031 Decision 2).
+	stewards.Handle("/{id}/pending-deliveries", s.requirePermission("steward", "read")(http.HandlerFunc(s.handleListPendingDeliveries))).Methods("GET")
 }

@@ -822,6 +822,211 @@ func TestHandleConfigPush_PersistenceStatusFailed(t *testing.T) {
 		"push record must be marked failed when all targeted stewards fail delivery")
 }
 
+// ---------------------------------------------------------------------------
+// Delivery-outbox tests (Issue #3757, ADR-031 Decision 2)
+// ---------------------------------------------------------------------------
+
+// makePushServerWithCommandStore creates a test server wired with a real command
+// publisher and a real (SQLite-backed, non-mocked) CommandStore, so the durable
+// per-steward delivery rows created by handleConfigPush can be read back and
+// asserted on directly.
+func makePushServerWithCommandStore(t *testing.T, cp controlplaneInterfaces.ControlPlaneProvider) (*Server, business.CommandStore) {
+	t.Helper()
+	setTestSecretsEnv(t)
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+	logger := logging.NewNoopLogger()
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	commandStore := storageManager.GetCommandStore()
+	require.NotNil(t, commandStore)
+
+	pub, err := commands.New(&commands.Config{ControlPlane: cp, Signer: nil, Logger: logger})
+	require.NoError(t, err)
+
+	server, err := New(
+		cfg, logger, controllerService, configService, nil, rbacService,
+		nil, tenantManager, rbacManager,
+		nil, nil, nil, "", nil,
+		auditMgr,
+		pub,                           // real command publisher
+		storageManager.GetPushStore(), // real push store
+		nil,                           // No blob store needed
+	)
+	require.NoError(t, err)
+	server.SetCommandStore(commandStore)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Close(closeCtx)
+	})
+	return server, commandStore
+}
+
+// TestHandleConfigPush_DeliveryRecordsCreated verifies that handleConfigPush
+// creates a durable, trackable delivery record for each targeted steward and
+// that the response references it (Issue #3757 AC: "API responses for
+// steward-directed writes reference the trackable delivery record instead of a
+// bare status: stored").
+func TestHandleConfigPush_DeliveryRecordsCreated(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, commandStore := makePushServerWithCommandStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	payload := validPushPayload()
+	stewardID := registerActiveSteward(t, server.controllerService, "delivery-dna-1", payload.TenantID)
+	cp.wg.Add(1)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Deliveries, 1, "response must reference one delivery record for the one targeted steward")
+	assert.Equal(t, stewardID, resp.Deliveries[0].StewardID)
+	assert.NotEmpty(t, resp.Deliveries[0].CommandID)
+
+	// The referenced delivery record must be durably readable, independent of
+	// the HTTP response — this is the "trackable" part of the acceptance criterion.
+	got, err := commandStore.GetCommandRecord(context.Background(), resp.Deliveries[0].CommandID)
+	require.NoError(t, err)
+	assert.Equal(t, stewardID, got.StewardID)
+	assert.Equal(t, payload.TenantID, got.TenantID)
+}
+
+// TestHandleConfigPush_DeliveryRecordMarkedDeliveredSynchronously proves the
+// detached fire-and-forget goroutine is gone (Issue #3757 required test): by
+// the time handleConfigPush returns — with no cp.wg.Wait() or any other
+// synchronization — the delivery record for a steward whose SendCommand
+// succeeded already reflects DeliveryStatusDelivered. Under the old detached
+// goroutine, this same assertion made immediately after the handler returns
+// would be racy at best (the goroutine has not necessarily run yet); the new
+// synchronous fan-out makes it deterministic.
+func TestHandleConfigPush_DeliveryRecordMarkedDeliveredSynchronously(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, commandStore := makePushServerWithCommandStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	payload := validPushPayload()
+	stewardID := registerActiveSteward(t, server.controllerService, "delivery-sync-dna-1", payload.TenantID)
+	cp.wg.Add(1)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Deliveries, 1)
+
+	// No wait, no synchronization — the handler must have already driven this
+	// to completion synchronously before writing the response.
+	got, err := commandStore.GetCommandRecord(context.Background(), resp.Deliveries[0].CommandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusDelivered, got.DeliveryStatus)
+	assert.ElementsMatch(t, []string{stewardID}, cp.ReceivedIDs())
+}
+
+// TestHandleConfigPush_DeliveryRecordFailedAttemptStaysPending verifies that a
+// failed transport attempt records the failure detail but leaves the row
+// pending (not terminally failed) so it drains on the steward's next
+// reconnect — ADR-031 Decision 2/3: "the outbox row is the guarantee under the
+// fast path."
+func TestHandleConfigPush_DeliveryRecordFailedAttemptStaysPending(t *testing.T) {
+	cp := &failingControlPlane{
+		syncedControlPlane: syncedControlPlane{},
+		sendErr:            fmt.Errorf("simulated delivery failure"),
+	}
+	server, commandStore := makePushServerWithCommandStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	payload := validPushPayload()
+	registerActiveSteward(t, server.controllerService, "delivery-fail-dna-1", payload.TenantID)
+	cp.wg.Add(1)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Deliveries, 1)
+
+	got, err := commandStore.GetCommandRecord(context.Background(), resp.Deliveries[0].CommandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus,
+		"a failed transport attempt must leave the row pending for a later drain, not mark it terminally failed")
+	assert.Contains(t, got.DeliveryDetail, "simulated delivery failure")
+}
+
+// TestHandleConfigPush_DeliveryRecordsAtomicAcrossFanout verifies that when
+// multiple stewards are targeted, every one of them gets a durable delivery
+// row from the single CreateCommandRecords call — proving the batch commits
+// as one fact rather than a partial set (Issue #3757 required test:
+// transactional atomicity at the handler's call site; the storage-layer
+// all-or-nothing guarantee itself is proven directly in
+// pkg/storage/providers/database and sqlite command_store_test.go).
+func TestHandleConfigPush_DeliveryRecordsAtomicAcrossFanout(t *testing.T) {
+	cp := &syncedControlPlane{}
+	server, commandStore := makePushServerWithCommandStore(t, cp)
+	server.pushLeaderStatus = nil // leader
+
+	payload := validPushPayload()
+	stewardA := registerActiveSteward(t, server.controllerService, "delivery-multi-a", payload.TenantID)
+	stewardB := registerActiveSteward(t, server.controllerService, "delivery-multi-b", payload.TenantID)
+	cp.wg.Add(2)
+
+	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Deliveries, 2, "both targeted stewards must have a delivery record")
+
+	gotStewardIDs := make([]string, 0, 2)
+	for _, d := range resp.Deliveries {
+		_, err := commandStore.GetCommandRecord(context.Background(), d.CommandID)
+		require.NoError(t, err, "every referenced delivery record must actually exist")
+		gotStewardIDs = append(gotStewardIDs, d.StewardID)
+	}
+	assert.ElementsMatch(t, []string{stewardA, stewardB}, gotStewardIDs)
+}
+
 // --- Selector targeting + tenant isolation tests (Issue #2366 ACs) ---
 
 // TestHandleConfigPush_EmptySelector verifies that a request with an empty

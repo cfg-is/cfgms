@@ -319,3 +319,187 @@ func TestSQLiteCommandStore_CreateRecord_DuplicateID(t *testing.T) {
 	err := store.CreateCommandRecord(ctx, rec)
 	require.Error(t, err, "duplicate command ID must be rejected")
 }
+
+// ---------------------------------------------------------------------------
+// Delivery lifecycle (Issue #3757, ADR-031 Decision 2)
+// ---------------------------------------------------------------------------
+
+func TestSQLiteCommandStore_CreateRecord_DeliveryStatusDefaultsPending(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	rec := testCommandRecord("delivery-default")
+	require.NoError(t, store.CreateCommandRecord(ctx, rec))
+
+	got, err := store.GetCommandRecord(ctx, "delivery-default")
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus)
+	assert.Empty(t, got.DeliveryDetail)
+}
+
+func TestSQLiteCommandStore_UpdateDeliveryStatus(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	rec := testCommandRecord("delivery-lifecycle")
+	require.NoError(t, store.CreateCommandRecord(ctx, rec))
+
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "delivery-lifecycle", business.DeliveryStatusDelivered, ""))
+	got, err := store.GetCommandRecord(ctx, "delivery-lifecycle")
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusDelivered, got.DeliveryStatus)
+	// Execution status is untouched by a delivery-status transition.
+	assert.Equal(t, business.CommandStatusPending, got.Status)
+
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "delivery-lifecycle", business.DeliveryStatusAcknowledged, ""))
+	got, err = store.GetCommandRecord(ctx, "delivery-lifecycle")
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusAcknowledged, got.DeliveryStatus)
+
+	// UpdateDeliveryStatus does not append to the CommandStatus audit trail.
+	trail, err := store.GetCommandAuditTrail(ctx, "delivery-lifecycle")
+	require.NoError(t, err)
+	assert.Len(t, trail, 1, "only the initial pending transition should exist")
+}
+
+func TestSQLiteCommandStore_UpdateDeliveryStatus_Failed_RecordsDetail(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	rec := testCommandRecord("delivery-failed")
+	require.NoError(t, store.CreateCommandRecord(ctx, rec))
+
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "delivery-failed",
+		business.DeliveryStatusFailed, "steward deregistered"))
+
+	got, err := store.GetCommandRecord(ctx, "delivery-failed")
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusFailed, got.DeliveryStatus)
+	assert.Equal(t, "steward deregistered", got.DeliveryDetail)
+}
+
+func TestSQLiteCommandStore_UpdateDeliveryStatus_NotFound(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+	err := store.UpdateDeliveryStatus(ctx, "nonexistent", business.DeliveryStatusDelivered, "")
+	require.ErrorIs(t, err, business.ErrCommandNotFound)
+}
+
+func TestSQLiteCommandStore_UpdateDeliveryStatus_EmptyID(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+	err := store.UpdateDeliveryStatus(ctx, "", business.DeliveryStatusDelivered, "")
+	require.Error(t, err)
+}
+
+func TestSQLiteCommandStore_ListPendingDeliveries(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	r1 := testCommandRecord("pd-1")
+	r2 := testCommandRecord("pd-2")
+	r3 := testCommandRecord("pd-3")
+	r3.StewardID = "steward-002"
+	require.NoError(t, store.CreateCommandRecord(ctx, r1))
+	require.NoError(t, store.CreateCommandRecord(ctx, r2))
+	require.NoError(t, store.CreateCommandRecord(ctx, r3))
+
+	// Mark one of steward-001's records delivered — it must drop out of the pending list.
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, "pd-1", business.DeliveryStatusDelivered, ""))
+
+	pending, err := store.ListPendingDeliveries(ctx, "steward-001")
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "pd-2", pending[0].ID)
+
+	otherPending, err := store.ListPendingDeliveries(ctx, "steward-002")
+	require.NoError(t, err)
+	require.Len(t, otherPending, 1)
+	assert.Equal(t, "pd-3", otherPending[0].ID)
+}
+
+func TestSQLiteCommandStore_ListPendingDeliveries_EmptyStewardID(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+	_, err := store.ListPendingDeliveries(ctx, "")
+	require.Error(t, err)
+}
+
+// TestSQLiteCommandStore_CreateCommandRecords_Atomic proves the batch create is
+// truly transactional: a duplicate ID partway through the batch rolls back every
+// record in the call, not just the one that failed (Issue #3757 required test).
+func TestSQLiteCommandStore_CreateCommandRecords_Atomic(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	// Pre-seed one record so the batch below collides with it.
+	require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("batch-2")))
+
+	batch := []*business.CommandRecord{
+		testCommandRecord("batch-1"),
+		testCommandRecord("batch-2"), // duplicate of the pre-seeded record — must fail
+		testCommandRecord("batch-3"),
+	}
+
+	err := store.CreateCommandRecords(ctx, batch)
+	require.Error(t, err, "a duplicate ID anywhere in the batch must fail the whole call")
+
+	// batch-1 and batch-3 must NOT have been committed despite being inserted
+	// before the failing row — proves the batch is one transaction.
+	_, err = store.GetCommandRecord(ctx, "batch-1")
+	assert.ErrorIs(t, err, business.ErrCommandNotFound, "batch-1 must not survive a rolled-back batch")
+	_, err = store.GetCommandRecord(ctx, "batch-3")
+	assert.ErrorIs(t, err, business.ErrCommandNotFound, "batch-3 must not survive a rolled-back batch")
+}
+
+func TestSQLiteCommandStore_CreateCommandRecords_Success(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	batch := []*business.CommandRecord{
+		testCommandRecord("ok-1"),
+		testCommandRecord("ok-2"),
+		testCommandRecord("ok-3"),
+	}
+	require.NoError(t, store.CreateCommandRecords(ctx, batch))
+
+	for _, id := range []string{"ok-1", "ok-2", "ok-3"} {
+		got, err := store.GetCommandRecord(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus)
+	}
+}
+
+func TestSQLiteCommandStore_CreateCommandRecords_Empty(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.CreateCommandRecords(ctx, nil))
+}
+
+// TestSQLiteCommandStore_PendingSurvivesRestart proves a pending delivery row is
+// never touched by anything at the storage layer across a simulated controller
+// restart (Issue #3757 required test): reopening a store instance against the
+// same on-disk database must not alter DeliveryStatus.
+func TestSQLiteCommandStore_PendingSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/restart.db"
+
+	db, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	store1 := &SQLiteCommandStore{db: db}
+
+	rec := testCommandRecord("restart-pending")
+	require.NoError(t, store1.CreateCommandRecord(context.Background(), rec))
+	require.NoError(t, db.Close())
+
+	// Simulate a controller restart: reopen the same on-disk database fresh.
+	db2, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db2.Close() })
+	store2 := &SQLiteCommandStore{db: db2}
+
+	got, err := store2.GetCommandRecord(context.Background(), "restart-pending")
+	require.NoError(t, err)
+	assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus,
+		"a pending delivery row must survive a controller restart unmodified")
+}

@@ -212,10 +212,24 @@ type ReadinessStatus struct {
 }
 
 // ConfigPushResponse is returned by POST /api/v1/config/push on acceptance.
+// Deliveries references the trackable per-steward delivery record created for
+// this push (Issue #3757, ADR-031 Decision 2) — callers watch a write until it
+// lands via GET /api/v1/commands/{id} rather than trusting a bare "accepted".
+// Empty when the durable command store is not configured for this deployment.
 type ConfigPushResponse struct {
-	PushID   string    `json:"push_id"`
-	Status   string    `json:"status"`
-	QueuedAt time.Time `json:"queued_at"`
+	PushID     string                `json:"push_id"`
+	Status     string                `json:"status"`
+	QueuedAt   time.Time             `json:"queued_at"`
+	Deliveries []*ConfigPushDelivery `json:"deliveries,omitempty"`
+}
+
+// ConfigPushDelivery references one steward's durable delivery record for a
+// config push (Issue #3757). CommandID is the ID to pass to
+// GET /api/v1/commands/{id} to watch this specific delivery's lifecycle.
+type ConfigPushDelivery struct {
+	StewardID string `json:"steward_id"`
+	CommandID string `json:"command_id"`
+	Status    string `json:"status"`
 }
 
 // DeploymentSummary holds aggregate counts for a config deployment query.
