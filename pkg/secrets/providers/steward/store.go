@@ -303,13 +303,18 @@ func (s *StewardSecretStore) CompareAndSwapSecret(_ context.Context, key string,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The index is keyed on the caller's lookup key, not req.Key. Every caller of
+	// this interface passes a tenant-qualified key (tenantID + "/" + req.Key) and
+	// reads it back through GetSecret with that same string, so keying the write on
+	// the bare req.Key would file the record where no reader looks and let two
+	// tenants sharing a key name overwrite each other (Issue #3775).
 	// An expired entry does not exist for comparison purposes: GetSecret already
 	// refuses it and ListSecrets already skips it, so treating it as a holder here
 	// would make it invisible to every reader yet permanently able to block a
 	// create-if-absent claim (Issue #3775). Its stored version is still what the
 	// write below increments, so versions stay monotonic per key.
 	currentVersion := 0
-	if entry, exists := s.index.Entries[req.Key]; exists && !entryExpired(entry) {
+	if entry, exists := s.index.Entries[key]; exists && !entryExpired(entry) {
 		currentVersion = entry.Version
 	}
 	if currentVersion != expectedVersion {
@@ -321,14 +326,14 @@ func (s *StewardSecretStore) CompareAndSwapSecret(_ context.Context, key string,
 		return 0, false, fmt.Errorf("failed to encrypt secret: %w", err)
 	}
 
-	blobFile := keyToBlobFile(req.Key)
+	blobFile := keyToBlobFile(key)
 	blobPath := filepath.Join(s.secretsDir, "blobs", blobFile)
 	if err := os.WriteFile(blobPath, encrypted, 0600); err != nil {
 		return 0, false, fmt.Errorf("failed to write encrypted blob: %w", err)
 	}
 
 	now := time.Now()
-	entry, exists := s.index.Entries[req.Key]
+	entry, exists := s.index.Entries[key]
 	if exists {
 		entry.Version++
 		entry.UpdatedAt = now
@@ -338,7 +343,7 @@ func (s *StewardSecretStore) CompareAndSwapSecret(_ context.Context, key string,
 		entry.Description = req.Description
 	} else {
 		entry = &secretIndexEntry{
-			Key:         req.Key,
+			Key:         key,
 			BlobFile:    blobFile,
 			Metadata:    req.Metadata,
 			Tags:        req.Tags,
@@ -363,7 +368,7 @@ func (s *StewardSecretStore) CompareAndSwapSecret(_ context.Context, key string,
 		entry.ExpiresAt = nil
 	}
 
-	s.index.Entries[req.Key] = entry
+	s.index.Entries[key] = entry
 
 	if err := s.saveIndex(); err != nil {
 		return 0, false, fmt.Errorf("failed to save index: %w", err)

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,7 +50,17 @@ const (
 	// CompareAndSwapSecret uses to track a key's version, since the underlying
 	// backend has no notion of versioning of its own (GetCapabilities reports
 	// SupportsVersioning: false; GetSecret always reports Version 1).
-	casVersionKeySuffix = "\x00cas-version"
+	//
+	// It must stay printable ASCII. Every backend passes the key to the OS as a
+	// process argument or a kernel keyring description — secret-tool takes it in
+	// argv and add_key takes it as the key description — and none of those accept
+	// a NUL byte, so a NUL separator here fails every write with a bare "invalid
+	// argument" from exec or the keyring rather than a storage error (Issue #3775).
+	//
+	// "#" cannot occur in the cfgms/<namespace>/<name> key shape this provider is
+	// given, and CompareAndSwapSecret rejects any key that already contains the
+	// suffix, so a caller cannot address a version entry as if it were a secret.
+	casVersionKeySuffix = "#cfgms-cas-version"
 )
 
 // errSecretNotFound is the sentinel a backend returns when a key is absent.
@@ -227,6 +238,12 @@ func (s *Store) CompareAndSwapSecret(_ context.Context, key string, expectedVers
 	if len(req.Key) > maxKeyLength {
 		return 0, false, fmt.Errorf("oskeychain: secret key exceeds maximum length of %d characters", maxKeyLength)
 	}
+	if len(key) > maxKeyLength {
+		return 0, false, fmt.Errorf("oskeychain: secret key exceeds maximum length of %d characters", maxKeyLength)
+	}
+	if strings.Contains(key, casVersionKeySuffix) {
+		return 0, false, fmt.Errorf("oskeychain: secret key must not contain %q", casVersionKeySuffix)
+	}
 	if req.Value == "" {
 		return 0, false, errors.New("oskeychain: secret value cannot be empty")
 	}
@@ -237,26 +254,30 @@ func (s *Store) CompareAndSwapSecret(_ context.Context, key string, expectedVers
 	s.casMu.Lock()
 	defer s.casMu.Unlock()
 
-	versionKey := req.Key + casVersionKeySuffix
+	// The swap is keyed on the caller's lookup key, not req.Key: the interface
+	// stores req "at key", and GetSecret reads that same string back, so writing
+	// under req.Key would file the record where no reader looks whenever a caller
+	// passes a qualified key (every controller caller passes tenantID+"/"+req.Key).
+	versionKey := key + casVersionKeySuffix
 	currentVersion := 0
 	if raw, err := s.backend.get(versionKey); err == nil {
 		if v, convErr := strconv.Atoi(string(raw)); convErr == nil {
 			currentVersion = v
 		}
 	} else if !errors.Is(err, errSecretNotFound) {
-		return 0, false, fmt.Errorf("oskeychain: read version for %q: %w", req.Key, err)
+		return 0, false, fmt.Errorf("oskeychain: read version for %q: %w", key, err)
 	}
 
 	if currentVersion != expectedVersion {
 		return 0, false, nil
 	}
 
-	if err := s.backend.set(req.Key, []byte(req.Value)); err != nil {
-		return 0, false, fmt.Errorf("oskeychain: compare-and-swap %q: %w", req.Key, err)
+	if err := s.backend.set(key, []byte(req.Value)); err != nil {
+		return 0, false, fmt.Errorf("oskeychain: compare-and-swap %q: %w", key, err)
 	}
 	newVersion := currentVersion + 1
 	if err := s.backend.set(versionKey, []byte(strconv.Itoa(newVersion))); err != nil {
-		return 0, false, fmt.Errorf("oskeychain: persist version for %q: %w", req.Key, err)
+		return 0, false, fmt.Errorf("oskeychain: persist version for %q: %w", key, err)
 	}
 	return newVersion, true, nil
 }
