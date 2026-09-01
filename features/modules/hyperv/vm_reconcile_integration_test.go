@@ -660,3 +660,35 @@ func TestApplySourceGated_FailedAfterInstallingStillConverges(t *testing.T) {
 	assert.Empty(t, callsContaining(calls, "Remove-VM"),
 		"convergence must still never destroy the existing VM")
 }
+
+// TestReconcile_DeleteRemovesSeedMedia guards the seed-media half of the #3168
+// cleanup story. Hyper-V's Remove-VM deletes the VM object but NEVER its backing
+// disks, so the module must delete the seed VHDX itself on state: absent —
+// otherwise every provisioned-then-deleted VM leaves a seed file behind.
+//
+// This matters beyond disk usage: the live incident left seed VHDXs on all three
+// lab hosts, and one of them was still ATTACHED to the host days after its VM was
+// gone — which is what then failed the next VM's Add-VMHardDiskDrive. The
+// try/finally fix removes the cause of the stuck mount; this test pins the
+// deletion that stops the files accumulating in the first place.
+func TestReconcile_DeleteRemovesSeedMedia(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{existingSourceVMJSON("stw-01", "Off")},
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	cfgMap := cloudInitVMConfigMap(2)
+	cfgMap["vhd_path"] = `C:\ClusterStorage\CSV01\stw-01.vhdx`
+	cfgMap["state"] = "absent"
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", rawConfigState{m: cfgMap}))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	require.NotEmpty(t, callsContaining(calls, "Remove-VM"),
+		"state: absent must remove the VM object")
+	assert.NotEmpty(t, callsContaining(calls, psDeleteSeedMedia),
+		"deleting a VM must also delete its seed media — Remove-VM never deletes "+
+			"backing disks, so the seed VHDX would otherwise be orphaned on the host")
+}

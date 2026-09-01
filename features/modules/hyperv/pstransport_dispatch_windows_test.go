@@ -778,3 +778,94 @@ func TestQuoteForPS_SingleQuoteEscapes(t *testing.T) {
 		assert.Equal(t, tc.want, quoteForPS(tc.in))
 	}
 }
+
+// ── #3168 seed-mount leak guards ───────────────────────────────────────────
+//
+// These assert the PREAMBLE FUNCTION BODIES, for the same reason
+// TestPreamble_RemoveVMStopsRunningVMFirst does: the dispatch tests only check
+// the synthesised call string and stay green while the function body regresses.
+// The live bug was exactly that class — a mount/dismount pair that looked
+// correct at the call site and leaked on every error path.
+
+// TestPreamble_SeedMountsDismountInFinally is the [REQUIRED TEST] for the mount
+// leak. Both functions that Mount-VHD must dismount in a `finally`, or any error
+// between mount and dismount leaks a host-attached VHD PERMANENTLY — which then
+// fails the NEXT VM's Add-VMHardDiskDrive with a 0x80070020 sharing violation.
+// One transient error silently breaks seed provisioning for every later VM on
+// the host. Observed live: a seed left Attached=True for two days after its VM
+// had been deleted.
+func TestPreamble_SeedMountsDismountInFinally(t *testing.T) {
+	for _, fn := range []string{"Cfgms-MountSeedVHD", "Cfgms-CopyToSeedVHD"} {
+		t.Run(fn, func(t *testing.T) {
+			body := preambleFunctionBody(t, fn)
+
+			require.Contains(t, body, "Mount-VHD",
+				"%s is expected to mount the seed VHD", fn)
+			// Match the TOKEN, not the bare word: "finally" also appears in the
+			// explanatory comments above the code.
+			require.Contains(t, body, "} finally {",
+				"%s must dismount in a finally block — without it any error between "+
+					"Mount-VHD and the dismount leaks a host-attached VHD permanently", fn)
+
+			mountIdx := strings.Index(body, "Mount-VHD -Path")
+			finallyIdx := strings.Index(body, "} finally {")
+			tryIdx := strings.Index(body, "try {")
+			assert.Less(t, tryIdx, mountIdx,
+				"%s must open its try BEFORE Mount-VHD, or a mount failure escapes the cleanup", fn)
+			assert.Less(t, mountIdx, finallyIdx,
+				"%s must mount inside the try, before the finally", fn)
+			assert.Contains(t, body[finallyIdx:], "Cfgms-DismountAndVerify",
+				"%s must call Cfgms-DismountAndVerify from its finally", fn)
+		})
+	}
+}
+
+// TestPreamble_SeedMountCleanupDoesNotMaskOriginalError guards the subtler half.
+// A finally that throws REPLACES the in-flight exception, so a naive
+// `finally { Cfgms-DismountAndVerify }` would discard the real cause of a seed
+// failure and report a dismount error instead — the same diagnostic blindness
+// that made this bug expensive to find. But cleanup must NOT be silently
+// swallowed either: on the success path a failed dismount IS the leak.
+//
+// The contract: guard on a success flag, let the dismount throw when the body
+// succeeded, and catch-and-warn only when an exception is already in flight.
+func TestPreamble_SeedMountCleanupDoesNotMaskOriginalError(t *testing.T) {
+	for _, fn := range []string{"Cfgms-MountSeedVHD", "Cfgms-CopyToSeedVHD"} {
+		t.Run(fn, func(t *testing.T) {
+			body := preambleFunctionBody(t, fn)
+			finallyIdx := strings.Index(body, "} finally {")
+			require.NotEqual(t, -1, finallyIdx, "%s must have a finally block", fn)
+			cleanup := body[finallyIdx:]
+
+			assert.Contains(t, body, "$ok = $false",
+				"%s must initialise a success flag before the try", fn)
+			assert.Contains(t, body, "$ok = $true",
+				"%s must set the success flag as the LAST statement inside the try", fn)
+			assert.Contains(t, cleanup, "if ($ok)",
+				"%s cleanup must branch on the success flag", fn)
+			assert.Contains(t, cleanup, "catch",
+				"%s must catch a dismount failure on the FAILURE path so it cannot "+
+					"replace the in-flight exception and hide the real cause", fn)
+
+			// On the success path the dismount must be un-caught, so a leak throws.
+			okBranch := cleanup[strings.Index(cleanup, "if ($ok)"):]
+			elseIdx := strings.Index(okBranch, "} else {")
+			require.NotEqual(t, -1, elseIdx, "%s cleanup must have an else branch", fn)
+			assert.NotContains(t, okBranch[:elseIdx], "catch",
+				"%s must NOT swallow a dismount failure on the success path — that "+
+					"failure is the leak this function exists to prevent", fn)
+		})
+	}
+}
+
+// TestPreamble_CopyToSeedVHDFailsLoudlyOnMissingVolume: without an explicit
+// check, a missing labelled volume yields a null $letter and the writes fail
+// obscurely on a path like ":\user-data" — a confusing error for what is really
+// "the format step did not produce the volume we expected".
+func TestPreamble_CopyToSeedVHDFailsLoudlyOnMissingVolume(t *testing.T) {
+	body := preambleFunctionBody(t, "Cfgms-CopyToSeedVHD")
+	assert.Contains(t, body, "if (-not $letter)",
+		"Cfgms-CopyToSeedVHD must check the drive letter was resolved")
+	assert.Contains(t, body, "throw",
+		"a missing labelled seed volume must throw a named error, not fail obscurely on a null path")
+}

@@ -272,10 +272,46 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 			return string(out), fmt.Errorf(
 				"hyperv-ps-host: seed op killed by deadline after %s (ctx: %w)", elapsed, ctxErr)
 		}
-		return string(out), fmt.Errorf("hyperv-ps-host: fresh seed op failed: %w: %s",
-			runErr, strings.TrimSpace(string(out)))
+		return string(out), freshSeedOpError(runErr, string(out), expression, elapsed)
 	}
 	return string(out), nil
+}
+
+// freshSeedOpError formats the failure of a runFresh seed op.
+//
+// It exists as a separate function because the message it produces is the ONLY
+// diagnostic a caller gets, and the previous form —
+// `fresh seed op failed: exit status 1: ` with an empty tail — was actively
+// misleading in production: it looks like a truncated message rather than
+// "PowerShell exited non-zero and printed nothing at all". That ambiguity cost
+// days of misdirected investigation on a real incident, so the empty case now
+// says so explicitly and names the verb that failed.
+//
+// combined is the merged stdout+stderr (exec.CombinedOutput), so an empty value
+// genuinely means the process produced NO output on either stream.
+func freshSeedOpError(runErr error, combined, expression string, elapsed time.Duration) error {
+	trimmed := strings.TrimSpace(combined)
+	if trimmed != "" {
+		return fmt.Errorf("hyperv-ps-host: fresh seed op failed: %w: %s", runErr, trimmed)
+	}
+	return fmt.Errorf(
+		"hyperv-ps-host: fresh seed op failed: %w: powershell exited non-zero after %s and produced NO output on stdout or stderr (verb: %s)",
+		runErr, elapsed, psVerbOf(expression))
+}
+
+// psVerbOf returns the leading Cfgms-* verb of a dispatched expression, for use
+// in an error message. Only the verb is taken: the argument tail can carry host
+// paths and other caller-supplied values that should not be pasted into an
+// error string. Returns "unknown" for an empty or unrecognised expression.
+func psVerbOf(expression string) string {
+	fields := strings.Fields(strings.TrimSpace(expression))
+	if len(fields) == 0 {
+		return "unknown"
+	}
+	if !strings.HasPrefix(fields[0], "Cfgms-") {
+		return "unknown"
+	}
+	return fields[0]
 }
 
 // runDetached launches a single Cfgms-* expression in a DETACHED fresh

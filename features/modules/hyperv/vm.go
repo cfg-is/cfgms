@@ -1756,11 +1756,6 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		return m.degradeProvision(ctx, cfg, vmName, record, currentVM.State)
 	}
 
-	// Existing healthy VM → source is inert. Log the inert decision, then drive
-	// the create-from-source convergence (installing → finalizing detach, a
-	// no-op unless an own record is at installing and settle conditions hold)
-	// and the plain lifecycle (power/resize/NIC) so an already-provisioned VM
-	// still converges to its declared running/stopped state without provisioning.
 	if logger, ok := m.GetLogger(); ok {
 		logger.Warn("hyperv: VM exists; source is inert (on_existing: never)",
 			"vm_name", logging.SanitizeLogValue(vmName),

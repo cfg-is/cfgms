@@ -261,11 +261,34 @@ function Cfgms-NewSeedVHD {
 # 0x80070020 sharing violation on the next Mount-VHD).
 function Cfgms-MountSeedVHD {
     param([Parameter(Mandatory)][string]$Path, [string]$Label = 'CFGMS_SEED')
-    Mount-VHD -Path $Path -Passthru |
-        Initialize-Disk -PartitionStyle MBR -PassThru |
-        New-Partition -UseMaximumSize -AssignDriveLetter |
-        Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Label -Confirm:$false | Out-Null
-    Cfgms-DismountAndVerify -Path $Path
+    # try/finally is REQUIRED, not stylistic: without it any failure between the
+    # Mount-VHD and the dismount (a Format-Volume error, a partition/letter
+    # failure) leaks a host-attached VHD PERMANENTLY. The leak is not confined to
+    # this VM — the next VM's Add-VMHardDiskDrive then fails with a 0x80070020
+    # sharing violation, so one transient error silently breaks seed provisioning
+    # for every subsequent VM on the host until an operator dismounts by hand.
+    # Observed on cfg-lab: a seed VHD left Attached=True for two days after its
+    # VM had been deleted.
+    # $ok distinguishes the two cleanup cases. On the SUCCESS path a dismount
+    # failure IS the leak this function exists to prevent, so it must throw. On
+    # the FAILURE path it must not: a throwing finally replaces the in-flight
+    # exception, losing the real cause — the exact diagnostic blindness that made
+    # this class of bug expensive to find.
+    $ok = $false
+    try {
+        Mount-VHD -Path $Path -Passthru |
+            Initialize-Disk -PartitionStyle MBR -PassThru |
+            New-Partition -UseMaximumSize -AssignDriveLetter |
+            Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Label -Confirm:$false | Out-Null
+        $ok = $true
+    } finally {
+        if ($ok) {
+            Cfgms-DismountAndVerify -Path $Path
+        } else {
+            try { Cfgms-DismountAndVerify -Path $Path }
+            catch { Write-Warning ('cleanup dismount failed for ' + $Path + ': ' + $_.Exception.Message) }
+        }
+    }
 }
 
 # Cfgms-DismountAndVerify dismounts a seed VHD and confirms it is fully detached
@@ -307,16 +330,34 @@ function Cfgms-CopyToSeedVHD {
         [string]$LauncherDest = 'cfgms-steward-launcher',
         [string]$CASrc = ''
     )
-    $disk = Mount-VHD -Path $SeedPath -Passthru
-    $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
-        Where-Object { $_.FileSystemLabel -eq $Label } |
-        Select-Object -First 1).DriveLetter
-    Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
-    if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
-    if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
-    if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
-    if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
-    Cfgms-DismountAndVerify -Path $SeedPath
+    # try/finally is REQUIRED — see the note on Cfgms-MountSeedVHD. A failure in
+    # any Set-Content/Copy-Item below (or a null $letter when the labelled volume
+    # is not found) would otherwise skip the dismount and leak a host-attached
+    # VHD permanently, breaking seed attach for every later VM on this host.
+    # See the $ok note on Cfgms-MountSeedVHD: a dismount failure must throw on
+    # the success path (it is the leak) but must never replace an in-flight
+    # exception on the failure path.
+    $ok = $false
+    try {
+        $disk = Mount-VHD -Path $SeedPath -Passthru
+        $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
+            Where-Object { $_.FileSystemLabel -eq $Label } |
+            Select-Object -First 1).DriveLetter
+        if (-not $letter) { throw ('seed volume with label ' + $Label + ' not found after mount: ' + $SeedPath) }
+        Set-Content -Path ($letter + ':\' + $FileName) -Value $Content -NoNewline
+        if ($FileName2) { Set-Content -Path ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
+        if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
+        if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
+        if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
+        $ok = $true
+    } finally {
+        if ($ok) {
+            Cfgms-DismountAndVerify -Path $SeedPath
+        } else {
+            try { Cfgms-DismountAndVerify -Path $SeedPath }
+            catch { Write-Warning ('cleanup dismount failed for ' + $SeedPath + ': ' + $_.Exception.Message) }
+        }
+    }
 }
 
 # Cfgms-DetachSeedVHD dismounts the seed VHDX from the host (called at
