@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/audit"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
@@ -35,6 +37,12 @@ type Manager struct {
 	validator    cfgpkg.MountPointValidator // optional; validates git mount points on create/update
 	secretStore  secretsiface.SecretStore   // optional; provides credentials to validator
 	auditManager *audit.Manager             // optional; records config source lifecycle events
+
+	// RealmID is the deployment-wide realm qualifier naming this cell (ADR-032
+	// Decision 3). Empty by default (self-hosted: no realm concept). It is never
+	// stored per-tenant — every tenant's qualified identity is computed on demand
+	// by QualifiedTenantID from whatever RealmID is currently configured.
+	RealmID string
 }
 
 // NewManager creates a new tenant manager
@@ -878,6 +886,129 @@ func validateExplicitTenantID(id string) error {
 	}
 	if !k8sNameRegex.MatchString(id) {
 		return fmt.Errorf("tenant ID %q is not Kubernetes-compatible: must contain only lowercase alphanumeric characters and hyphens, must not start or end with a hyphen", id)
+	}
+	return nil
+}
+
+// validateRealmQualifiedTenantID validates a realm-qualified tenant ID of the
+// form "<realm>/<unqualified-id>", where each half independently satisfies the
+// same Kubernetes RFC 1123 DNS label rules as validateExplicitTenantID. This
+// keeps the qualified form syntactically distinct from an intra-cell
+// hierarchical path — tenant IDs never contain "/" today (ADR-025 Amendment 1,
+// A1.1: hierarchy is carried by ParentID, not string concatenation) — while
+// giving the qualified form its own unambiguous, parseable shape. Valid only
+// on cross-cell surfaces; intra-cell resolution (IsTenantAncestor,
+// isWithinTenantScope) is unaffected and never sees this form.
+func validateRealmQualifiedTenantID(id string) error {
+	parts := strings.Split(id, "/")
+	if len(parts) != 2 {
+		return fmt.Errorf("realm-qualified tenant ID %q must have exactly one \"/\" separator (\"<realm>/<id>\"), got %d segment(s)", id, len(parts))
+	}
+	realm, unqualifiedID := parts[0], parts[1]
+	if err := validateExplicitTenantID(realm); err != nil {
+		return fmt.Errorf("realm segment invalid: %w", err)
+	}
+	if err := validateExplicitTenantID(unqualifiedID); err != nil {
+		return fmt.Errorf("tenant ID segment invalid: %w", err)
+	}
+	return nil
+}
+
+// validateRealmID validates a deployment's realm qualifier against the same
+// Kubernetes RFC 1123 DNS label rules a tenant ID must satisfy. The realm is
+// one half of the "<realm>/<unqualified-id>" grammar, so anything that is not
+// a single DNS label — "root/msp-a", "Cell1", "../.." — would produce a
+// qualified identity validateRealmQualifiedTenantID rejects, reintroducing the
+// multi-segment parsing ambiguity ADR-025 Amendment 1 (A1.1) eliminated.
+func validateRealmID(realm string) error {
+	if err := validateExplicitTenantID(realm); err != nil {
+		return fmt.Errorf("realm ID is not a valid single DNS label: %w", err)
+	}
+	return nil
+}
+
+// QualifiedTenantID returns the realm-qualified form "<RealmID>/<unqualifiedID>"
+// for cross-cell surfaces. The realm is deployment-wide config, never stored
+// per-tenant, so the qualified identity is always computed on demand from
+// whatever RealmID is currently configured — there is no per-tenant record to
+// migrate if the realm is assigned or corrected later. Returns unqualifiedID
+// unchanged when RealmID is empty (self-hosted default: no realm concept).
+//
+// Both halves are validated at construction, and the result is checked against
+// validateRealmQualifiedTenantID, so a returned value always satisfies the
+// documented grammar (ADR-025 Amendment 1, A1.4). A realm or tenant ID that
+// cannot produce a conforming identity is an error, never a silently malformed
+// string handed to a cross-cell surface.
+func (m *Manager) QualifiedTenantID(unqualifiedID string) (string, error) {
+	if err := validateExplicitTenantID(unqualifiedID); err != nil {
+		return "", fmt.Errorf("cannot build realm-qualified tenant ID: %w", err)
+	}
+	if m.RealmID == "" {
+		return unqualifiedID, nil
+	}
+	if err := validateRealmID(m.RealmID); err != nil {
+		return "", fmt.Errorf("cannot build realm-qualified tenant ID: %w", err)
+	}
+	qualified := m.RealmID + "/" + unqualifiedID
+	if err := validateRealmQualifiedTenantID(qualified); err != nil {
+		return "", fmt.Errorf("cannot build realm-qualified tenant ID: %w", err)
+	}
+	return qualified, nil
+}
+
+// EnforceRealmGuard fails closed when a configured realm is malformed (any
+// deployment shape) or when a SaaS cluster deployment reaches production with
+// no realm configured at all. Mirrors
+// openbao.enforceProductionGuard's "fail closed in production, no-op
+// otherwise" pattern: the same CFGMS_TELEMETRY_ENVIRONMENT=production signal,
+// gated additionally on ha.mode: cluster (the existing SaaS-deployment
+// signal) so self-hosted deployments are never gated regardless of RealmID.
+// This is what makes ADR-032 Decision 3's "assigned before the first
+// production tenant is created" an enforced fact rather than an optional
+// field nobody sets.
+func EnforceRealmGuard(cfg *controllerconfig.Config) error {
+	// A configured realm is validated on every deployment shape, not just SaaS
+	// production: RealmID is concatenated into a tenant identity by
+	// QualifiedTenantID, so a malformed value must fail closed at startup
+	// rather than surface later as an unparseable cross-cell identity. The
+	// emptiness gate below stays scoped to SaaS production, where a realm is
+	// mandatory; a malformed one is wrong everywhere.
+	if cfg.RealmID != "" {
+		if err := validateRealmID(cfg.RealmID); err != nil {
+			return fmt.Errorf(
+				"controller refused to start:\n"+
+					"  Reason: configured realm is not a valid realm identifier.\n"+
+					"  A realm names a single cell and must be one Kubernetes DNS label\n"+
+					"  (lowercase alphanumeric and hyphens, no leading/trailing hyphen,\n"+
+					"  63 characters or less) — it is not a slash-delimited path, and\n"+
+					"  tenant hierarchy is carried by ParentID, not by string\n"+
+					"  concatenation (ADR-025 Amendment 1).\n"+
+					"  Detail: %w\n"+
+					"  Fix: set realm_id in controller.cfg to this cell's stable identifier.\n"+
+					"  See: docs/operations/cluster-ca.md",
+				err,
+			)
+		}
+	}
+
+	isProduction := os.Getenv("CFGMS_TELEMETRY_ENVIRONMENT") == "production"
+	if !isProduction {
+		return nil
+	}
+	if !cfg.HA.IsClusterMode() {
+		return nil
+	}
+	if cfg.RealmID == "" {
+		return fmt.Errorf(
+			"tenant manager refused to start:\n" +
+				"  Reason: no realm configured for a SaaS cluster deployment in production.\n" +
+				"  ADR-032 Decision 3 requires every tenant identity to carry a realm\n" +
+				"  qualifier naming its home cell, assigned before the first production\n" +
+				"  tenant is created. ha.mode is \"cluster\" and\n" +
+				"  CFGMS_TELEMETRY_ENVIRONMENT=production, but RealmID is empty.\n" +
+				"  Fix: set RealmID in controller.cfg to this cell's stable identifier.\n" +
+				"  See: docs/operations/cluster-ca.md",
+		)
 	}
 	return nil
 }

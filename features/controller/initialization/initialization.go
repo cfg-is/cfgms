@@ -22,6 +22,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -47,6 +48,14 @@ type Result struct {
 func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("configuration is required for initialization")
+	}
+
+	// Fail closed before any CA material or markers are written: a SaaS
+	// cluster deployment must not reach production without a realm assigned
+	// (ADR-032 Decision 3). Self-hosted (ha.mode unset or not "cluster") is
+	// never gated.
+	if err := tenant.EnforceRealmGuard(cfg); err != nil {
+		return nil, err
 	}
 
 	if cfg.Certificate == nil || !cfg.Certificate.EnableCertManagement {
