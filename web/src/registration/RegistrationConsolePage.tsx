@@ -13,10 +13,11 @@
  * tabindex, ArrowLeft/Right keyboard navigation, implicit aria-labelledby
  * association so inactive panels can be lazily rendered.
  */
-import { type ComponentType, useRef, useState } from 'react'
+import { type ComponentType, useEffect, useRef, useState } from 'react'
+import { apiFetch } from '../api/client.ts'
 import CredentialRequestsTab from './CredentialRequestsTab.tsx'
 import IPTrustTab from './IPTrustTab.tsx'
-import PendingQueueTab from './PendingQueueTab.tsx'
+import PendingQueueTab, { parsePendingRegistrations } from './PendingQueueTab.tsx'
 import TokensTab from './TokensTab.tsx'
 
 type TabKey = 'pending' | 'tokens' | 'ip-trust' | 'credential-requests'
@@ -51,7 +52,29 @@ export const TABS: readonly TabSpec[] = [
 
 export default function RegistrationConsolePage() {
   const [activeTab, setActiveTab] = useState<TabKey>('pending')
+  const [pendingCount, setPendingCount] = useState<number | null>(null)
   const tabRefs = useRef<Map<TabKey, HTMLButtonElement>>(new Map())
+
+  // Independent of tab selection so the badge is visible without navigating
+  // into the Pending tab (Issue #3786). Uses the same registration:list-pending
+  // -gated endpoint as PendingQueueTab: a principal who cannot see the tab
+  // (403) does not see the badge either — failures are silently ignored.
+  useEffect(() => {
+    let cancelled = false
+    apiFetch('/api/v1/registration/pending')
+      .then(async (response) => {
+        if (!response.ok) return
+        const body: unknown = await response.json()
+        const entries = parsePendingRegistrations(body)
+        if (!cancelled) setPendingCount(entries.length)
+      })
+      .catch(() => {
+        // Best-effort: no badge on failure, no error surfaced.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const activeSpec = (TABS.find((t) => t.key === activeTab) ?? TABS[0])!
 
@@ -102,6 +125,11 @@ export default function RegistrationConsolePage() {
           >
             {tab.label}
             {tab.soon && <span className="tag asset-tab-soon">soon</span>}
+            {tab.key === 'pending' && pendingCount !== null && pendingCount > 0 && (
+              <span className="count-badge" data-testid="pending-count-badge">
+                {pendingCount}
+              </span>
+            )}
           </button>
         ))}
       </div>

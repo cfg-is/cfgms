@@ -11,7 +11,7 @@
  * tabs in their loading state during structural assertions.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import RegistrationConsolePage, { TABS } from './RegistrationConsolePage.tsx'
@@ -257,6 +257,69 @@ describe('RegistrationConsolePage — keyboard navigation', () => {
 
     fireEvent.keyDown(tablist, { key: 'Enter' })
     expect(tab(/^Pending/i)).toHaveAttribute('aria-selected', 'true')
+  })
+})
+
+// ── Pending-count badge (Issue #3786) ───────────────────────────────────────────
+
+// Two independent consumers hit this endpoint (PendingQueueTab's own fetch and
+// the parent's badge fetch), each reading the response body once — a shared
+// Response instance would throw "body stream already read" on the second
+// consumer, so a fresh Response is built per call.
+function mockPendingEndpoint(body: object, status = 200) {
+  fetchMock.mockImplementation((input) => {
+    const url = typeof input === 'string' ? input : (input as Request).url
+    if (url.includes('/api/v1/registration/pending')) {
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }
+    // Every other endpoint (tokens, resolve, ...) never settles — irrelevant
+    // to badge assertions and keeps those panels in a stable loading state.
+    return new Promise(() => {})
+  })
+}
+
+describe('RegistrationConsolePage — pending count badge', () => {
+  it('shows a non-zero pending count on the Pending tab without opening it', async () => {
+    mockPendingEndpoint([
+      { pending_id: 'p1', steward_id: 's1', source_ip: '10.0.0.1', registered_at: '2026-07-25T10:00:00Z' },
+      { pending_id: 'p2', steward_id: 's2', source_ip: '10.0.0.2', registered_at: '2026-07-25T10:05:00Z' },
+    ])
+
+    renderPage()
+    fireEvent.click(tab(/^Tokens/i))
+
+    const badge = await within(tab(/^Pending/i)).findByTestId('pending-count-badge')
+    expect(badge).toHaveTextContent('2')
+    // Visible while a different tab is active — no navigation into Pending needed.
+    expect(tab(/^Tokens/i)).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('shows no badge when there are zero pending registrations', async () => {
+    mockPendingEndpoint([])
+
+    renderPage()
+
+    // Default active tab is Pending, so its own panel settles against the
+    // same mocked endpoint — waiting for its empty state proves the parent's
+    // independent fetch has also had a chance to settle.
+    await screen.findByTestId('pending-empty')
+    expect(screen.queryByTestId('pending-count-badge')).toBeNull()
+  })
+
+  it('shows no badge when the caller lacks registration:list-pending (403)', async () => {
+    mockPendingEndpoint({ error: 'forbidden' }, 403)
+
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('pending-count-badge')).toBeNull()
   })
 })
 

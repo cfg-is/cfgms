@@ -44,9 +44,13 @@ func TestStewardList_CallsGetStewardsEndpoint(t *testing.T) {
 
 	var requestPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		if r.URL.Path == "/api/v1/registration/pending" {
+			_ = json.NewEncoder(w).Encode([]interface{}{})
+			return
+		}
+		requestPath = r.URL.Path
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"data":      stewards,
 			"timestamp": now,

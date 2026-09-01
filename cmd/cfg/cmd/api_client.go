@@ -360,22 +360,31 @@ type APIPendingRegistration struct {
 
 // ListPendingRegistrations lists quarantined stewards awaiting admin approval.
 func (c *APIClient) ListPendingRegistrations(ctx context.Context) ([]APIPendingRegistration, error) {
+	pending, _, err := c.ListPendingRegistrationsWithHTTPStatus(ctx)
+	return pending, err
+}
+
+// ListPendingRegistrationsWithHTTPStatus lists quarantined stewards awaiting admin
+// approval, returning the HTTP status code alongside the result. Callers that need
+// to distinguish a permission denial (403, caller lacks registration:list-pending)
+// from other failures without parsing the error string should use this variant.
+func (c *APIClient) ListPendingRegistrationsWithHTTPStatus(ctx context.Context) ([]APIPendingRegistration, int, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v1/registration/pending", nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp)
+		return nil, resp.StatusCode, c.parseError(resp)
 	}
 
 	var pending []APIPendingRegistration
 	if err := json.NewDecoder(resp.Body).Decode(&pending); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return pending, nil
+	return pending, resp.StatusCode, nil
 }
 
 // ApproveRegistration approves a quarantined steward registration by pending_id.
