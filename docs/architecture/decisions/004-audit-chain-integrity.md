@@ -14,6 +14,32 @@
 > as a compensating control for a compromised-controller scenario is describing a
 > control that does not apply there — see ADR-021's qualification.
 
+> **Amended 2026-09-01 (Issue #3754, per ADR-031 Decision 1) — Sequence Assignment.**
+> The Decision section below originally read "Sequence numbers are assigned inside
+> the single drain goroutine in `pkg/audit/Manager` — no concurrent writer can
+> interleave, so ordering is guaranteed without a database-side sequence." ADR-031
+> named this claim a casualty of removing the leadership gate from the request path:
+> once any controller node can run the drain goroutine against the shared database,
+> "no concurrent writer can interleave" is false. Sequence and `previous_checksum`
+> assignment now happens inside `AuditStore.AppendChainedEntry`
+> (`pkg/storage/interfaces/business/audit_store.go`), which every provider
+> implements as a single serializing operation — the database provider takes a
+> `SELECT ... FOR UPDATE` row lock on the tenant's chain-head row
+> (`audit_chain_heads`) so two nodes appending to the same tenant's chain
+> concurrently cannot be assigned the same `SequenceNumber`. `pkg/audit/Manager`'s
+> drain goroutine no longer computes `head.sequence + 1` itself; it calls
+> `AppendChainedEntry` and lets the store assign the fields, passing only the
+> HMAC-checksum computation (the store never holds the signing key — see the
+> Adversary Bound amendment above). The SQLite provider runs the same read-then-write
+> inside a `BEGIN IMMEDIATE` transaction on one checked-out connection: file-backed
+> SQLite databases keep a multi-connection WAL pool and are shared across stores and
+> processes, and a deferred transaction's read snapshot is invalidated by any other
+> writer's commit — the resulting `SQLITE_BUSY` on the write is not retried by
+> `busy_timeout` and would silently drop the entry. Taking the write lock before the
+> head read is what makes the operation serializing there. The flatfile provider holds
+> its append mutex across the head read and the write, which is sufficient because
+> that store is single-process by contract.
+
 ---
 
 ## Context
@@ -38,7 +64,7 @@ Use a **per-tenant HMAC-keyed hash chain** with the following design:
 
 - Each `AuditEntry` carries `SequenceNumber uint64` (monotonically increasing per tenant) and `PreviousChecksum string` (the HMAC-SHA256 checksum of the immediately preceding entry for the same tenant).
 - The `Checksum` field on each entry is computed as `HMAC-SHA256(key, ID|TenantID|Timestamp|EventType|Action|UserID|ResourceType|ResourceID|Result|SequenceNumber|PreviousChecksum)`.
-- Sequence numbers are assigned inside the single drain goroutine in `pkg/audit/Manager` — no concurrent writer can interleave, so ordering is guaranteed without a database-side sequence.
+- ~~Sequence numbers are assigned inside the single drain goroutine in `pkg/audit/Manager` — no concurrent writer can interleave, so ordering is guaranteed without a database-side sequence.~~ **Amended by ADR-031 (Issue #3754):** see [Sequence Assignment](#amended-2026-09-01-issue-3754-per-adr-031-decision-1--sequence-assignment) above. Sequence numbers and `previous_checksum` are now assigned by `AuditStore.AppendChainedEntry`, a database-side serializing operation — the drain goroutine no longer computes them.
 - The HMAC key is loaded from `pkg/secrets` (key name `"audit/hmac-key"`) via the optional `WithSecretsStore` functional option on `NewManager`. If no secrets store is wired, a random 32-byte in-process key is used and a warning is logged.
 - `VerifyChain(entries []*AuditEntry) []ChainBreak` is a pure in-memory function that walks a caller-provided, sorted slice and reports gaps, hash mismatches, and `PreviousChecksum` mismatches.
 
@@ -142,5 +168,5 @@ compensating control against storage tampering, not against controller compromis
 ### Negative
 
 - The HMAC key is ephemeral if no secrets store is wired (logs a `Warn`). Operators who do not configure a secrets store lose cross-restart chain continuity.
-- `GetLastAuditEntry` is called once per drain-loop iteration, adding one read per write. For flatfile (OSS), this is O(N) over the tenant's audit files; acceptable for the OSS use case, not suitable for high-throughput production deployments without an indexed store.
+- ~~`GetLastAuditEntry` is called once per drain-loop iteration, adding one read per write.~~ **Amended by ADR-031 (Issue #3754):** the drain goroutine no longer batches a chain-head read across entries — `AppendChainedEntry` reads and locks the chain head once per entry, inside its own transaction, which is the cost of making that read-then-write atomic across nodes. For flatfile (OSS), the head read is still O(N) over the tenant's audit files; acceptable for the OSS use case, not suitable for high-throughput production deployments without an indexed store.
 - The `Checksum` field now stores an HMAC-SHA256 value rather than a plain SHA256 value. Existing tooling that verifies checksums independently (outside the `VerifyIntegrity` or `VerifyChain` methods) will need updating.

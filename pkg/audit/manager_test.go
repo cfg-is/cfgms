@@ -3,10 +3,12 @@
 package audit_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -166,7 +168,285 @@ func (s *slowAuditStore) PurgeAuditEntries(ctx context.Context, before time.Time
 func (s *slowAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
 	return s.inner.GetLastAuditEntry(ctx, tenantID)
 }
+func (s *slowAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	err := s.inner.AppendChainedEntry(ctx, tenantID, entry, computeChecksum)
+	if err == nil {
+		s.writes.Add(1)
+	}
+	return err
+}
 func (s *slowAuditStore) Close() error { return s.inner.Close() }
+
+// assignmentSpyAuditStore wraps a real business.AuditStore (embedded, so every
+// method except AppendChainedEntry passes straight through) and records, for
+// each AppendChainedEntry call, whether the manager handed it an entry with
+// SequenceNumber/PreviousChecksum/Checksum already populated. Not a mock — a
+// real backing store with one method intercepted for observation.
+type assignmentSpyAuditStore struct {
+	business.AuditStore
+	mu            sync.Mutex
+	sawUnassigned []bool
+}
+
+func (s *assignmentSpyAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	s.mu.Lock()
+	s.sawUnassigned = append(s.sawUnassigned,
+		entry.SequenceNumber == 0 && entry.PreviousChecksum == "" && entry.Checksum == "")
+	s.mu.Unlock()
+	return s.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum)
+}
+
+func (s *assignmentSpyAuditStore) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sawUnassigned)
+}
+
+func (s *assignmentSpyAuditStore) allUnassigned() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range s.sawUnassigned {
+		if !v {
+			return false
+		}
+	}
+	return true
+}
+
+// TestManager_DelegatesSequenceAssignmentToStore proves the drain loop hands
+// AppendChainedEntry an entry with SequenceNumber, PreviousChecksum, and
+// Checksum still unset — it does not compute head.sequence+1 itself (the
+// pre-#3754 approach that assumed no concurrent writer could interleave, false
+// the moment more than one controller node runs against one database; ADR-031
+// Decision 1). All three fields end up correctly populated afterward because
+// the store (backed here by a real flat-file AuditStore) assigns them.
+func TestManager_DelegatesSequenceAssignmentToStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	spy := &assignmentSpyAuditStore{AuditStore: storageManager.GetAuditStore()}
+
+	manager, err := audit.NewManager(spy, "delegation-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("delegation-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("delegation_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+	flushOrFail(t, manager)
+
+	require.Equal(t, 3, spy.callCount(), "drain loop must call AppendChainedEntry once per entry")
+	assert.True(t, spy.allUnassigned(),
+		"manager must not pre-assign SequenceNumber/PreviousChecksum/Checksum before calling AppendChainedEntry")
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "delegation-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+	for i, e := range entries {
+		assert.Equal(t, uint64(i+1), e.SequenceNumber, "store must assign sequence numbers 1..3")
+		assert.NotEmpty(t, e.Checksum, "store's computeChecksum callback must populate Checksum")
+	}
+}
+
+// syncBuffer is a mutex-guarded io.Writer so the drain goroutine's slog output
+// can be captured and read from the test goroutine without a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// failingAppendAuditStore wraps a real business.AuditStore (embedded, so every
+// other method passes straight through to durable storage) and fails
+// AppendChainedEntry for entries whose ResourceID is in failFor. Not a mock —
+// the surviving entries are appended to a real store, so the chain that remains
+// after an injected failure is the chain the store actually persisted.
+//
+// gate, when non-nil, blocks the first AppendChainedEntry call until it is
+// closed and signals gateEntered when the call arrives. That parks the drain
+// goroutine inside a write so a test can enqueue a known set of entries and
+// have collectBatch pick all of them up as one batch — which is what makes
+// "the rest of the batch is still attempted" an assertion about batch
+// semantics rather than about goroutine timing.
+type failingAppendAuditStore struct {
+	business.AuditStore
+
+	failFor     map[string]error
+	gate        chan struct{}
+	gateEntered chan struct{}
+	gateOnce    sync.Once
+
+	mu        sync.Mutex
+	attempted []string
+}
+
+func (s *failingAppendAuditStore) holdFirstCall() {
+	if s.gate == nil {
+		return
+	}
+	s.gateOnce.Do(func() {
+		close(s.gateEntered)
+		<-s.gate
+	})
+}
+
+func (s *failingAppendAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	s.holdFirstCall()
+
+	s.mu.Lock()
+	s.attempted = append(s.attempted, entry.ResourceID)
+	s.mu.Unlock()
+
+	if err, ok := s.failFor[entry.ResourceID]; ok {
+		return err
+	}
+	return s.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum)
+}
+
+func (s *failingAppendAuditStore) attemptedResourceIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.attempted...)
+}
+
+// TestManager_WriteBatch_ContinuesAfterAppendFailure covers writeBatch's failure
+// branch (Issue #3754): entries are appended one at a time via
+// AppendChainedEntry, and a store error on one entry is logged and skipped
+// rather than aborting the batch. It asserts all three consequences of that
+// choice:
+//
+//  1. every remaining entry in the same batch is still attempted after the
+//     failing one — the loop does not stop at the first error;
+//  2. the durable chain that survives is gap-free and internally consistent
+//     (sequence 1..N with correct PreviousChecksum linkage, VerifyChain clean),
+//     because the store — not the manager — assigns sequence numbers, so a
+//     dropped entry consumes no sequence number;
+//  3. the drop is reported: a warning naming the tenant and the store error is
+//     logged, since RecordEvent enqueues asynchronously and the error can no
+//     longer be returned to the caller.
+func TestManager_WriteBatch_ContinuesAfterAppendFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	logs := &syncBuffer{}
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	const (
+		chainTenant  = "append-failure-tenant"
+		warmupTenant = "append-failure-warmup-tenant"
+		failedRes    = "res-2"
+	)
+	injectedErr := errors.New("injected append failure")
+
+	store := &failingAppendAuditStore{
+		AuditStore:  storageManager.GetAuditStore(),
+		failFor:     map[string]error{failedRes: injectedErr},
+		gate:        make(chan struct{}),
+		gateEntered: make(chan struct{}),
+	}
+
+	manager, err := audit.NewManager(store, "append-failure-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	ctx := context.Background()
+	record := func(tenant, resourceID string) {
+		t.Helper()
+		require.NoError(t, manager.RecordEvent(ctx, audit.NewEventBuilder().
+			Tenant(tenant).
+			Type(business.AuditEventConfiguration).
+			Action("append_failure_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", resourceID, "").
+			Severity(business.AuditSeverityMedium)))
+	}
+
+	// Park the drain goroutine inside the warm-up entry's write (separate tenant,
+	// so it has its own chain and does not perturb the chain under assertion).
+	record(warmupTenant, "warmup")
+	select {
+	case <-store.gateEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain goroutine never entered AppendChainedEntry for the warm-up entry")
+	}
+
+	// With the drain goroutine blocked, these five queue up and are collected as
+	// a single batch; res-2 (the middle one) fails.
+	want := []string{"res-0", "res-1", "res-2", "res-3", "res-4"}
+	for _, resourceID := range want {
+		record(chainTenant, resourceID)
+	}
+	close(store.gate)
+	flushOrFail(t, manager)
+
+	// (a) The failure did not abort the batch: every later entry was attempted.
+	assert.Equal(t, append([]string{"warmup"}, want...), store.attemptedResourceIDs(),
+		"a failed append must not stop writeBatch from attempting the rest of the batch")
+
+	// (b) The surviving chain is gap-free and consistent; the failed entry is
+	// absent from durable storage with no sequence number burned for it.
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: chainTenant, Order: "asc"})
+	require.NoError(t, err)
+	require.Len(t, entries, len(want)-1, "the failed entry must not be persisted")
+
+	gotResources := make([]string, 0, len(entries))
+	for i, e := range entries {
+		gotResources = append(gotResources, e.ResourceID)
+		assert.Equal(t, uint64(i+1), e.SequenceNumber, "surviving chain must be gap-free")
+		assert.Equal(t, chainTenant, e.TenantID)
+	}
+	assert.Equal(t, []string{"res-0", "res-1", "res-3", "res-4"}, gotResources)
+	assert.Empty(t, manager.VerifyChain(entries),
+		"chain must remain verifiable after an entry is dropped by a store failure")
+
+	// (c) The drop is visible in the logs — it cannot be returned to the caller.
+	logged := logs.String()
+	assert.Contains(t, logged, "audit entry append failed",
+		"a dropped audit entry must be logged")
+	assert.Contains(t, logged, injectedErr.Error(),
+		"the store error must be included in the warning")
+	assert.Contains(t, logged, chainTenant,
+		"the warning must name the tenant whose chain lost an entry")
+}
 
 // flushOrFail drains the async queue and fails the test if Flush returns an error.
 // Tests that query the store after RecordEvent MUST call flushOrFail first

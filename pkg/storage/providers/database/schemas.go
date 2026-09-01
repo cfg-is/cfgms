@@ -274,6 +274,13 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_source ON audit_entries(source);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_event_timestamp ON audit_entries(tenant_id, event_type, timestamp);",
 
+		// Chain integrity defense-in-depth (Issue #3754): guarantees at the
+		// database level that no tenant ever has two entries sharing a
+		// SequenceNumber, even if a bug in AppendChainedEntry's locking were to
+		// slip past it. Partial so pre-chain legacy rows (sequence_number = 0,
+		// see VerifyChain) remain unconstrained — many such rows share tenant_id.
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_entries_tenant_sequence_unique ON audit_entries(tenant_id, sequence_number) WHERE sequence_number > 0;",
+
 		// Time-based partitioning support (for future sharding) - temporarily disabled
 		// Complex date functions in indexes require careful IMMUTABLE handling
 		// "CREATE INDEX IF NOT EXISTS idx_audit_entries_daily_partition ON audit_entries(tenant_id, date_trunc('day', timestamp));",
@@ -285,6 +292,25 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 		}
 	}
 
+	return nil
+}
+
+// CreateAuditChainHeadsTable creates audit_chain_heads, the row-lock target
+// AppendChainedEntry uses to serialize concurrent chain writers for the same
+// tenant — including across separate controller nodes sharing this database
+// (ADR-004 amendment, ADR-031 Decision 1, Issue #3754). One row per tenant;
+// SELECT ... FOR UPDATE on that row is what makes sequence assignment atomic.
+func (s DatabaseSchemas) CreateAuditChainHeadsTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS audit_chain_heads (
+			tenant_id       VARCHAR(255) PRIMARY KEY,
+			sequence_number BIGINT NOT NULL DEFAULT 0,
+			checksum        VARCHAR(64) NOT NULL DEFAULT ''
+		);
+	`
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create audit_chain_heads table: %w", err)
+	}
 	return nil
 }
 
@@ -928,6 +954,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateAuditChainHeadsTable(ctx, db); err != nil {
+		return err
+	}
+
 	if err := s.CreateAuditStatsView(ctx, db); err != nil {
 		return err
 	}
@@ -1380,6 +1410,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 	dropQueries := []string{
 		"DROP MATERIALIZED VIEW IF EXISTS audit_stats;",
 		"DROP TABLE IF EXISTS storage_health;",
+		"DROP TABLE IF EXISTS audit_chain_heads;",
 		"DROP TABLE IF EXISTS audit_entries;",
 		"DROP TABLE IF EXISTS config_history;",
 		"DROP TABLE IF EXISTS configs;",

@@ -8,103 +8,68 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// fakeAuditStore is an in-memory business.AuditStore for testing.
-// Only StoreAuditEntry and GetLastAuditEntry have real logic;
-// all other methods are no-ops so the drain loop can operate.
-type fakeAuditStore struct {
+// recordingAuditStore is a REAL business.AuditStore — a flat-file store rooted in
+// t.TempDir(), obtained through pkg/storage/interfaces — with one method
+// intercepted for observation. Every interface method is the real store's (the
+// embedded interface forwards them); AppendChainedEntry delegates the chain
+// sequencing and the durable write to the real store and then keeps a pointer to
+// the entry it wrote so tests can assert on what the module emitted, including
+// Details/Changes values in their original Go types.
+//
+// No CFGMS behaviour is reimplemented here: the chain-head read, the
+// SequenceNumber/PreviousChecksum assignment and the checksum callback all run in
+// the real provider under test (Issue #3754).
+type recordingAuditStore struct {
+	business.AuditStore
 	mu      sync.Mutex
 	entries []*business.AuditEntry
 }
 
-func (f *fakeAuditStore) StoreAuditEntry(_ context.Context, entry *business.AuditEntry) error {
-	f.mu.Lock()
-	f.entries = append(f.entries, entry)
-	f.mu.Unlock()
-	return nil
-}
-
-func (f *fakeAuditStore) GetAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
-	return nil, nil
-}
-
-func (f *fakeAuditStore) ListAuditEntries(_ context.Context, _ *business.AuditFilter) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-
-func (f *fakeAuditStore) StoreAuditBatch(_ context.Context, entries []*business.AuditEntry) error {
-	f.mu.Lock()
-	f.entries = append(f.entries, entries...)
-	f.mu.Unlock()
-	return nil
-}
-
-func (f *fakeAuditStore) GetAuditsByUser(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-
-func (f *fakeAuditStore) GetAuditsByResource(_ context.Context, _, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-
-func (f *fakeAuditStore) GetAuditsByAction(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-
-func (f *fakeAuditStore) GetFailedActions(_ context.Context, _ *business.TimeRange, _ int) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-
-func (f *fakeAuditStore) GetSuspiciousActivity(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-
-func (f *fakeAuditStore) GetAuditStats(_ context.Context) (*business.AuditStats, error) {
-	return &business.AuditStats{LastUpdated: time.Now()}, nil
-}
-
-func (f *fakeAuditStore) GetLastAuditEntry(_ context.Context, tenantID string) (*business.AuditEntry, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for i := len(f.entries) - 1; i >= 0; i-- {
-		if f.entries[i].TenantID == tenantID {
-			return f.entries[i], nil
-		}
+func (r *recordingAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if err := r.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum); err != nil {
+		return err
 	}
-	return nil, nil
+	r.mu.Lock()
+	r.entries = append(r.entries, entry)
+	r.mu.Unlock()
+	return nil
 }
 
-func (f *fakeAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-
-func (f *fakeAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-
-func (f *fakeAuditStore) Close() error { return nil }
-
-// captured returns a snapshot copy of all stored entries.
-func (f *fakeAuditStore) captured() []*business.AuditEntry {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]*business.AuditEntry, len(f.entries))
-	copy(out, f.entries)
+// captured returns a snapshot copy of all entries the real store accepted.
+func (r *recordingAuditStore) captured() []*business.AuditEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*business.AuditEntry, len(r.entries))
+	copy(out, r.entries)
 	return out
 }
 
-// newFakeAuditManager returns an audit.Manager backed by an in-memory store.
-func newFakeAuditManager(t *testing.T) (*audit.Manager, *fakeAuditStore) {
+// newRecordingAuditStore builds the real flat-file audit store the tests write
+// through. The provider is resolved through pkg/storage/interfaces (central
+// provider rule); providers_test.go performs the registration import.
+func newRecordingAuditStore(t *testing.T) *recordingAuditStore {
 	t.Helper()
-	store := &fakeAuditStore{}
+	provider, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err, "flatfile storage provider must be registered")
+	store, err := provider.CreateAuditStore(map[string]interface{}{"root": t.TempDir()})
+	require.NoError(t, err, "creating the real audit store must not fail in test setup")
+	t.Cleanup(func() { _ = store.Close() })
+	return &recordingAuditStore{AuditStore: store}
+}
+
+// newRecordingAuditManager returns an audit.Manager backed by that real store.
+func newRecordingAuditManager(t *testing.T) (*audit.Manager, *recordingAuditStore) {
+	t.Helper()
+	store := newRecordingAuditStore(t)
 	mgr, err := audit.NewManager(store, "hyperv-test")
 	require.NoError(t, err)
 	return mgr, store
@@ -121,7 +86,7 @@ func TestAuditRecordHypervOp_NilSafe(t *testing.T) {
 // TestAuditRecordHypervOp_NoRawPS verifies that Details contains no raw PowerShell
 // script text or argument values such as VM names, VHD paths, or switch names.
 func TestAuditRecordHypervOp_NoRawPS(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	recordHypervOp(context.Background(), mgr, "tenant-1", "steward-1", "host-1", "New-VM", "vm:vm1", nil, nil, nil)
@@ -151,7 +116,7 @@ func TestAuditRecordHypervOp_NoRawPS(t *testing.T) {
 // non-success result with an error message, and that recordHypervOp does not
 // change what error the caller sees (separation of concerns).
 func TestAuditRecordHypervOp_ErrorPath(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	opErr := errors.New("VM creation failed: disk quota exceeded")
@@ -173,7 +138,7 @@ func TestAuditRecordHypervOp_ErrorPath(t *testing.T) {
 // TestAuditLog_VMOperation verifies that a New-VM operation produces an audit
 // entry with all required fields correctly populated and result Success.
 func TestAuditLog_VMOperation(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	tenantID := "tenant-a"
@@ -209,7 +174,7 @@ func TestAuditLog_VMOperation(t *testing.T) {
 // TestAuditResourceID_UsesCfgID verifies that the audit Resource id is the
 // cfg-declared id (e.g. "vm:web-01") and not a raw bare name.
 func TestAuditResourceID_UsesCfgID(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	cfgID := "vm:web-01"
@@ -233,7 +198,7 @@ func TestAuditResourceID_UsesCfgID(t *testing.T) {
 // an audit entry with correctly populated Changes.Before, Changes.After, and
 // Changes.Fields for both cpu and memory_mb.
 func TestAuditChanges_ResizeBeforeAfter(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	before := map[string]interface{}{"cpu": 1, "memory_mb": int64(512)}
@@ -259,7 +224,7 @@ func TestAuditChanges_ResizeBeforeAfter(t *testing.T) {
 // TestAuditChanges_CreateEmptyBefore verifies that a create operation records
 // an empty Changes.Before (new resource, no prior state).
 func TestAuditChanges_CreateEmptyBefore(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	after := map[string]interface{}{"cpu": 2, "memory_mb": int64(1024), "state": "stopped"}
@@ -277,7 +242,7 @@ func TestAuditChanges_CreateEmptyBefore(t *testing.T) {
 // TestAuditChanges_DeleteEmptyAfter verifies that a delete operation records
 // an empty Changes.After (resource removed, no desired state).
 func TestAuditChanges_DeleteEmptyAfter(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	before := map[string]interface{}{"cpu": 4, "memory_mb": int64(2048), "state": "stopped"}
@@ -295,7 +260,7 @@ func TestAuditChanges_DeleteEmptyAfter(t *testing.T) {
 // TestAuditChanges_NilBeforeAfter verifies that when both before and after are
 // nil (e.g. provisioning intermediate ops), Changes is not populated.
 func TestAuditChanges_NilBeforeAfter(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	recordHypervOp(context.Background(), mgr, "t", "s", "h", "Set-VMFirmware", "vm:prov-vm", nil, nil, nil)
@@ -311,7 +276,7 @@ func TestAuditChanges_NilBeforeAfter(t *testing.T) {
 // the live VM name, VHD path, and any switch names from the host state do NOT
 // appear in the emitted audit entry (Resource id, Details, or Changes).
 func TestAuditSecurity_NoLiveNamesInResizeEntry(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	const liveVMName = "prod-vm-7f3a"
@@ -351,7 +316,7 @@ func TestAuditSecurity_NoLiveNamesInResizeEntry(t *testing.T) {
 // the live VM name, VHD path, and live switch names do NOT appear in
 // the emitted audit entry.
 func TestAuditSecurity_NoLiveNamesInDeleteEntry(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	const liveVMName = "db-server-9a2b"
@@ -462,10 +427,11 @@ func TestChangedFields_NoChange(t *testing.T) {
 // ─── vm.go call-site audit tests ─────────────────────────────────────────────
 
 // vmModuleWithAudit returns a hypervModule wired with both the given transport
-// and a fake audit manager, for tests that need to inspect audit entries.
-func vmModuleWithAudit(t *testing.T, transport winrmTransport, tenantID string) (*hypervModule, *fakeAuditStore) {
+// and an audit manager over a real audit store, for tests that need to inspect
+// audit entries.
+func vmModuleWithAudit(t *testing.T, transport winrmTransport, tenantID string) (*hypervModule, *recordingAuditStore) {
 	t.Helper()
-	store := &fakeAuditStore{}
+	store := newRecordingAuditStore(t)
 	mgr, err := audit.NewManager(store, "hyperv-test-vm")
 	require.NoError(t, err, "audit.NewManager must not fail in test setup")
 	return &hypervModule{
@@ -720,7 +686,7 @@ func TestAuditVM_PowerStateBeforeAfter(t *testing.T) {
 // TestAuditVSwitch_CreateUsescfgID verifies that New-VMSwitch audit entries use
 // the vswitch: prefixed cfg resource id.
 func TestAuditVSwitch_CreateUsesCfgID(t *testing.T) {
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	defer func() { _ = mgr.Stop(context.Background()) }()
 
 	const switchName = "my-internal"

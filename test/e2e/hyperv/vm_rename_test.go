@@ -37,7 +37,7 @@ const envRenameE2E = "CFGMS_E2E_HYPERV_RENAME"
 // (non-clustered) VM case. Reuses the package's in-memory audit + secret stores.
 func rnBuildModule(t *testing.T) modules.Module {
 	t.Helper()
-	store := &ccAuditStore{}
+	store := newCCAuditStore(t)
 	mgr, err := audit.NewManager(store, "hyperv-rename-e2e")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })

@@ -159,18 +159,29 @@ func (r *syncTestRouter) DeleteConfigBatch(_ context.Context, _ []*cfgconfig.Con
 var _ configroutingiface.ConfigSourceRouter = (*syncTestRouter)(nil)
 var _ tenantRemoteSyncer = (*syncTestRouter)(nil)
 
-// ---- test-double AuditStore ----
+// ---- real AuditStore with capture ----
 
-// captureAuditStore is a real in-memory AuditStore that records stored entries.
+// captureAuditStore is a REAL business.AuditStore — the flat-file audit store
+// from the composite storage manager pkg/testing builds — with a single method
+// intercepted for observation. The embedded interface forwards every other
+// method to the real store, and AppendChainedEntry delegates the chain-head
+// read, the SequenceNumber/PreviousChecksum assignment and the durable write to
+// that store before recording a copy of what was written. None of the store's
+// behaviour is reimplemented here, so these tests exercise the real chain
+// locking rather than a parallel hand-written copy of it (Issue #3754).
 type captureAuditStore struct {
+	business.AuditStore
 	mu      sync.Mutex
 	entries []*business.AuditEntry
 }
 
-func (s *captureAuditStore) StoreAuditEntry(_ context.Context, e *business.AuditEntry) error {
+func (s *captureAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if err := s.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cp := *e
+	cp := *entry
 	s.entries = append(s.entries, &cp)
 	return nil
 }
@@ -193,58 +204,17 @@ func (s *captureAuditStore) count() int {
 	return len(s.entries)
 }
 
-func (s *captureAuditStore) GetAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) ListAuditEntries(_ context.Context, _ *business.AuditFilter) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) StoreAuditBatch(_ context.Context, entries []*business.AuditEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, e := range entries {
-		cp := *e
-		s.entries = append(s.entries, &cp)
-	}
-	return nil
-}
-func (s *captureAuditStore) GetAuditsByUser(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) GetAuditsByResource(_ context.Context, _, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) GetAuditsByAction(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) GetFailedActions(_ context.Context, _ *business.TimeRange, _ int) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) GetSuspiciousActivity(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) GetAuditStats(_ context.Context) (*business.AuditStats, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) GetLastAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *captureAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-func (s *captureAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-func (s *captureAuditStore) Close() error { return nil }
-
 var _ business.AuditStore = (*captureAuditStore)(nil)
 
 // ---- helpers ----
 
-// newTestAuditManager creates a real audit.Manager backed by a captureAuditStore.
+// newTestAuditManager creates a real audit.Manager writing through the real
+// flat-file AuditStore that pkg/testing's storage manager provides.
 func newTestAuditManager(t *testing.T) (*audit.Manager, *captureAuditStore) {
 	t.Helper()
-	store := &captureAuditStore{}
+	realStore := pkgtesting.SetupTestStorage(t).GetAuditStore()
+	require.NotNil(t, realStore, "test storage manager must provide an AuditStore")
+	store := &captureAuditStore{AuditStore: realStore}
 	m, err := audit.NewManager(store, "sync-service-test")
 	require.NoError(t, err)
 	t.Cleanup(func() {

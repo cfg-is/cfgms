@@ -136,6 +136,106 @@ func (s *SQLiteAuditStore) GetLastAuditEntry(ctx context.Context, tenantID strin
 	return entry, nil
 }
 
+// AppendChainedEntry implements business.AuditStore.AppendChainedEntry. The
+// head-read, the sequence assignment and the INSERT run inside one BEGIN
+// IMMEDIATE transaction on a single checked-out connection.
+//
+// A deferred transaction (plain BeginTx) is NOT sufficient here. File-backed
+// databases keep the default multi-connection pool and run in WAL mode (openDB /
+// openAndInit in plugin.go — only in-memory databases are pinned to one
+// connection), each store opens its own pool over the same file, and several
+// processes writing one file is a supported shape (concurrent_writers_test.go,
+// concurrent_processes_test.go). In WAL a deferred transaction takes its read
+// snapshot at the head SELECT; if any other connection commits any write before
+// the INSERT, the read-to-write upgrade fails with SQLITE_BUSY, and busy_timeout
+// does not retry a snapshot-invalidation busy. Because the audit manager logs and
+// continues when an append fails (pkg/audit/manager.go writeBatch), that would
+// silently drop audit records while leaving the surviving chain gap-free — a loss
+// VerifyChain cannot detect.
+//
+// BEGIN IMMEDIATE acquires the database write lock before the head is read, so no
+// other writer can commit between the read and the INSERT, and the busy_timeout
+// budget (plus retryOnBusy) applies to acquiring that lock — where waiting is
+// correct — instead of to an upgrade that can never succeed. The transaction is
+// issued on a dedicated *sql.Conn because database/sql exposes no per-transaction
+// locking mode: BEGIN IMMEDIATE is otherwise a DSN-wide (_txlock) setting that
+// would force every transaction of every store sharing the pool, including
+// read-only ones, to take the write lock (ADR-004 amendment, ADR-031 Decision 1,
+// Issue #3754).
+func (s *SQLiteAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, chainChecksum func(entry *business.AuditEntry) string) error {
+	if entry == nil {
+		return fmt.Errorf("audit entry cannot be nil")
+	}
+	if chainChecksum == nil {
+		return fmt.Errorf("computeChecksum function is required")
+	}
+	entry.TenantID = tenantID
+	if entry.ID == "" {
+		return fmt.Errorf("audit entry ID cannot be empty")
+	}
+
+	// A failed attempt rolls back before returning, so re-running it is safe: the
+	// sequence fields are recomputed from the head the next attempt reads.
+	return retryOnBusy(ctx, func() error {
+		return s.appendChainedEntryOnce(ctx, tenantID, entry, chainChecksum)
+	})
+}
+
+// appendChainedEntryOnce performs one BEGIN IMMEDIATE attempt of AppendChainedEntry.
+func (s *SQLiteAuditStore) appendChainedEntryOnce(ctx context.Context, tenantID string, entry *business.AuditEntry, chainChecksum func(entry *business.AuditEntry) string) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("failed to begin immediate transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		// Roll back on a context detached from the caller's: if ctx is already
+		// cancelled the ROLLBACK would be refused, and the connection would go
+		// back to the pool still holding an open write transaction.
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(rollbackCtx, `ROLLBACK`)
+	}()
+
+	var headSeq uint64
+	var headChecksum string
+	row := conn.QueryRowContext(ctx, `
+		SELECT sequence_number, checksum FROM audit_entries
+		WHERE tenant_id = ?
+		ORDER BY sequence_number DESC
+		LIMIT 1`, tenantID)
+	switch err := row.Scan(&headSeq, &headChecksum); err {
+	case nil:
+		// head found
+	case sql.ErrNoRows:
+		headSeq, headChecksum = 0, ""
+	default:
+		return fmt.Errorf("failed to read chain head: %w", err)
+	}
+
+	entry.SequenceNumber = headSeq + 1
+	entry.PreviousChecksum = headChecksum
+	entry.Checksum = chainChecksum(entry)
+
+	if err := s.storeAuditEntryExec(ctx, conn, entry); err != nil {
+		return err
+	}
+
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("failed to commit chained audit entry: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // ListAuditEntries returns audit entries matching the filter.
 func (s *SQLiteAuditStore) ListAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
 	query, args := buildAuditQuery(filter)
@@ -165,7 +265,7 @@ func (s *SQLiteAuditStore) StoreAuditBatch(ctx context.Context, entries []*busin
 	defer func() { _ = tx.Rollback() }()
 
 	for _, e := range entries {
-		if err := s.storeAuditEntryTx(ctx, tx, e); err != nil {
+		if err := s.storeAuditEntryExec(ctx, tx, e); err != nil {
 			return err
 		}
 	}
@@ -289,7 +389,14 @@ func (s *SQLiteAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (in
 
 // ---- helpers ----------------------------------------------------------------
 
-func (s *SQLiteAuditStore) storeAuditEntryTx(ctx context.Context, tx *sql.Tx, entry *business.AuditEntry) error {
+// auditRowExecer is the subset of *sql.Tx and *sql.Conn that storeAuditEntryExec
+// needs, so the same INSERT serves both the batch transaction and the
+// BEGIN IMMEDIATE chain append (which drives its transaction on a *sql.Conn).
+type auditRowExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func (s *SQLiteAuditStore) storeAuditEntryExec(ctx context.Context, tx auditRowExecer, entry *business.AuditEntry) error {
 	if entry.Checksum == "" {
 		entry.Checksum = computeChecksum(entry)
 	}
@@ -331,7 +438,7 @@ func (s *SQLiteAuditStore) storeAuditEntryTx(ctx context.Context, tx *sql.Tx, en
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return business.ErrImmutable
 		}
-		return fmt.Errorf("failed to store audit entry %s in batch: %w", entry.ID, err)
+		return fmt.Errorf("failed to store audit entry %s: %w", entry.ID, err)
 	}
 	return nil
 }

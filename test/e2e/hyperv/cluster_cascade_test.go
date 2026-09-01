@@ -41,6 +41,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // Required environment variable (the suite skips when unset):
@@ -68,64 +69,39 @@ const (
 	ccCNOGroup = "Cluster Group"
 )
 
-// ─── in-memory audit store (external-package twin of the internal fakeAuditStore) ──
+// ─── audit store (real flat-file store + capture) ─────────────────────────────
 //
-// A real business.AuditStore backing a real audit.Manager, so the module's
-// recordHypervOp emissions (the owner-gate skips this suite asserts on) are
-// captured and replayable. Not a mock — an in-memory store.
+// ccAuditStore is a REAL business.AuditStore — the flat-file audit store from the
+// composite storage manager pkg/testing builds under t.TempDir() — with a single
+// method intercepted for observation. The embedded interface forwards every other
+// method to the real store, and AppendChainedEntry delegates the chain-head read,
+// the SequenceNumber/PreviousChecksum assignment and the durable write to it
+// before recording what was written, so the suite's owner-gate assertions read
+// entries that a real store accepted. Nothing about the store is reimplemented
+// here (Issue #3754).
 type ccAuditStore struct {
+	business.AuditStore
 	mu      sync.Mutex
 	entries []*business.AuditEntry
 }
 
-func (s *ccAuditStore) StoreAuditEntry(_ context.Context, e *business.AuditEntry) error {
+// newCCAuditStore builds the real audit store the e2e audit manager writes through.
+func newCCAuditStore(t *testing.T) *ccAuditStore {
+	t.Helper()
+	store := pkgtesting.SetupTestStorage(t).GetAuditStore()
+	require.NotNil(t, store, "test storage manager must provide an AuditStore")
+	return &ccAuditStore{AuditStore: store}
+}
+
+func (s *ccAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if err := s.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum); err != nil {
+		return err
+	}
 	s.mu.Lock()
-	s.entries = append(s.entries, e)
+	s.entries = append(s.entries, entry)
 	s.mu.Unlock()
 	return nil
 }
-
-func (s *ccAuditStore) StoreAuditBatch(_ context.Context, es []*business.AuditEntry) error {
-	s.mu.Lock()
-	s.entries = append(s.entries, es...)
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *ccAuditStore) GetAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) ListAuditEntries(_ context.Context, _ *business.AuditFilter) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) GetAuditsByUser(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) GetAuditsByResource(_ context.Context, _, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) GetAuditsByAction(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) GetFailedActions(_ context.Context, _ *business.TimeRange, _ int) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) GetSuspiciousActivity(_ context.Context, _ string, _ *business.TimeRange) ([]*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) GetAuditStats(_ context.Context) (*business.AuditStats, error) {
-	return &business.AuditStats{LastUpdated: time.Now()}, nil
-}
-func (s *ccAuditStore) GetLastAuditEntry(_ context.Context, _ string) (*business.AuditEntry, error) {
-	return nil, nil
-}
-func (s *ccAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-func (s *ccAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int64, error) {
-	return 0, nil
-}
-func (s *ccAuditStore) Close() error { return nil }
 
 // actionsSince returns the captured entries with the given Action recorded at or
 // after `since` — used to assert a skip was produced by THIS cycle (e.g. the
@@ -377,7 +353,7 @@ func ccOtherNode(env ccEnv, not string) string {
 // reads back. Returns the module, its audit manager, and the backing store.
 func ccBuildModule(t *testing.T, env ccEnv) (modules.Module, *audit.Manager, *ccAuditStore) {
 	t.Helper()
-	store := &ccAuditStore{}
+	store := newCCAuditStore(t)
 	mgr, err := audit.NewManager(store, "hyperv-cluster-e2e")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })

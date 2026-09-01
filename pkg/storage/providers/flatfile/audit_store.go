@@ -67,9 +67,9 @@ func (s *FlatFileAuditStore) dailyFilePath(tenantID string, t time.Time) (string
 	return filepath.Join(dir, filename), nil
 }
 
-// StoreAuditEntry appends an immutable audit entry to the daily JSONL file.
-// Returns ErrImmutable if the entry's timestamp predates the retention period.
-func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
+// validateFlatFileAuditEntry checks the required fields shared by every write path
+// (StoreAuditEntry, AppendChainedEntry).
+func validateFlatFileAuditEntry(entry *business.AuditEntry) error {
 	if entry.TenantID == "" {
 		return business.ErrTenantIDRequired
 	}
@@ -84,6 +84,15 @@ func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 	}
 	if entry.ResourceID == "" {
 		return business.ErrResourceIDRequired
+	}
+	return nil
+}
+
+// StoreAuditEntry appends an immutable audit entry to the daily JSONL file.
+// Returns ErrImmutable if the entry's timestamp predates the retention period.
+func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
+	if err := validateFlatFileAuditEntry(entry); err != nil {
+		return err
 	}
 
 	if entry.Timestamp.IsZero() {
@@ -132,6 +141,76 @@ func (s *FlatFileAuditStore) StoreAuditBatch(ctx context.Context, entries []*bus
 		if err := s.StoreAuditEntry(ctx, entry); err != nil {
 			return fmt.Errorf("batch store failed for entry %q: %w", entry.ID, err)
 		}
+	}
+	return nil
+}
+
+// AppendChainedEntry implements business.AuditStore.AppendChainedEntry. It holds
+// s.mutex for the read-then-append critical section — the same mutex StoreAuditEntry
+// uses to serialize appends — so the chain-head read and the write land atomically
+// with respect to every other writer in this process. FlatFileAuditStore is a
+// single-process, single-writer store (documented on the type); there is no
+// cross-process deployment of the flatfile provider to defend against
+// (ADR-004 amendment, ADR-031 Decision 1, Issue #3754).
+func (s *FlatFileAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if entry == nil {
+		return fmt.Errorf("audit entry cannot be nil")
+	}
+	if computeChecksum == nil {
+		return fmt.Errorf("computeChecksum function is required")
+	}
+	entry.TenantID = tenantID
+	if err := validateFlatFileAuditEntry(entry); err != nil {
+		return err
+	}
+
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	if entry.Timestamp.Before(s.retentionCutoff()) {
+		return ErrImmutable
+	}
+
+	path, err := s.dailyFilePath(entry.TenantID, entry.Timestamp)
+	if err != nil {
+		return fmt.Errorf("invalid tenant ID: %w", err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	last, err := s.GetLastAuditEntry(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to read chain head: %w", err)
+	}
+	if last != nil {
+		entry.SequenceNumber = last.SequenceNumber + 1
+		entry.PreviousChecksum = last.Checksum
+	} else {
+		entry.SequenceNumber = 1
+		entry.PreviousChecksum = ""
+	}
+	entry.Checksum = computeChecksum(entry)
+
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal audit entry: %w", err)
+	}
+	raw = append(raw, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return fmt.Errorf("failed to create audit dir: %w", err)
+	}
+
+	// #nosec G304 -- path validated by safeJoin inside dailyFilePath
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open audit file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := f.Write(raw); err != nil {
+		return fmt.Errorf("failed to append audit entry: %w", err)
 	}
 	return nil
 }

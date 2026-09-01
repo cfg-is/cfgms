@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -126,10 +127,6 @@ type Manager struct {
 	// are never silently dropped.
 	queue chan *business.AuditEntry
 
-	// chainHeads is owned exclusively by drainLoop. It avoids a durable
-	// GetLastAuditEntry query for every event while preserving per-tenant order.
-	chainHeads map[string]auditChainHead
-
 	// flushReq / flushAck implement a channel-based rendezvous with drainLoop.
 	// A caller sends an ack-channel on flushReq, drainLoop empties the queue
 	// and closes the ack-channel to signal completion.
@@ -147,11 +144,6 @@ type Manager struct {
 
 	// logger is used for internal storage and drain diagnostics.
 	logger *slog.Logger
-}
-
-type auditChainHead struct {
-	sequence uint64
-	checksum string
 }
 
 // managerOption is a functional option for NewManager.
@@ -223,14 +215,13 @@ func NewManager(store business.AuditStore, source string, opts ...managerOption)
 	}
 
 	m := &Manager{
-		store:      store,
-		source:     source,
-		queue:      make(chan *business.AuditEntry, defaultQueueCapacity),
-		chainHeads: make(map[string]auditChainHead),
-		flushReq:   make(chan chan struct{}),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
-		logger:     slog.Default().With("component", "audit", "source", source),
+		store:    store,
+		source:   source,
+		queue:    make(chan *business.AuditEntry, defaultQueueCapacity),
+		flushReq: make(chan chan struct{}),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		logger:   slog.Default().With("component", "audit", "source", source),
 	}
 
 	ctx := context.Background()
@@ -311,51 +302,25 @@ func (m *Manager) collectBatch(first *business.AuditEntry) []*business.AuditEntr
 	return batch
 }
 
-// writeBatch assigns chain fields and persists a group in one store call.
-// Called exclusively from drainLoop, so the in-memory chain heads require no
-// additional locking and cannot be interleaved by another Manager writer.
+// writeBatch persists a group of entries, delegating sequence-number assignment
+// and PreviousChecksum linkage to the store's AppendChainedEntry so that
+// multiple controller nodes writing this tenant's chain against a shared
+// database cannot interleave (ADR-004 amendment, ADR-031 Decision 1, Issue
+// #3754). Entries are appended one at a time: each entry's PreviousChecksum
+// must link to whatever the store durably holds as the chain head at the
+// moment it is appended — which may include an entry another node wrote
+// concurrently — so entries cannot be pre-linked client-side across a batch.
+// A failed append is logged and skipped; it does not abort the rest of the
+// batch, matching the previous StoreAuditBatch failure handling.
 func (m *Manager) writeBatch(entries []*business.AuditEntry) {
 	ctx := context.Background()
-	pendingHeads := make(map[string]auditChainHead)
-
 	for _, entry := range entries {
-		head, ok := pendingHeads[entry.TenantID]
-		if !ok {
-			head, ok = m.chainHeads[entry.TenantID]
+		if err := m.store.AppendChainedEntry(ctx, entry.TenantID, entry, m.generateChecksum); err != nil {
+			m.logger.Warn("audit entry append failed",
+				"error", logging.SanitizeLogValue(err.Error()),
+				"tenant_id", logging.SanitizeLogValue(entry.TenantID),
+			)
 		}
-		if !ok {
-			last, err := m.store.GetLastAuditEntry(ctx, entry.TenantID)
-			if err != nil {
-				m.logger.Warn("audit batch deferred because chain head could not be read",
-					"error", err,
-					"tenant_id", entry.TenantID,
-					"batch_size", len(entries),
-				)
-				return
-			}
-			if last != nil {
-				head = auditChainHead{sequence: last.SequenceNumber, checksum: last.Checksum}
-			}
-		}
-
-		entry.SequenceNumber = head.sequence + 1
-		entry.PreviousChecksum = head.checksum
-		entry.Checksum = m.generateChecksum(entry)
-		pendingHeads[entry.TenantID] = auditChainHead{
-			sequence: entry.SequenceNumber,
-			checksum: entry.Checksum,
-		}
-	}
-
-	if err := m.store.StoreAuditBatch(ctx, entries); err != nil {
-		m.logger.Warn("audit batch write failed",
-			"error", err,
-			"batch_size", len(entries),
-		)
-		return
-	}
-	for tenantID, head := range pendingHeads {
-		m.chainHeads[tenantID] = head
 	}
 }
 

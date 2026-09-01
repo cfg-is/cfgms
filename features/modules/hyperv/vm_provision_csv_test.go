@@ -59,7 +59,7 @@ func TestStoreFor_RoutesHARoleCSVToInjectedStore(t *testing.T) {
 // injected. The transport answers the 4 reads on the create path up to (but not
 // including) any New-VM: getVM(absent) + membership probe(empty) + CNO owner +
 // role owners. Any New-VM beyond that is a gate violation.
-func haCSVSourceModule(t *testing.T, csvStore ProvisionStore) (*hypervModule, *testWinRMTransport, *fakeAuditStore) {
+func haCSVSourceModule(t *testing.T, csvStore ProvisionStore) (*hypervModule, *testWinRMTransport, *recordingAuditStore) {
 	t.Helper()
 	transport := &testWinRMTransport{perCallOutputs: []string{
 		`{"found":false}`,   // getVM: locally absent
@@ -72,7 +72,7 @@ func haCSVSourceModule(t *testing.T, csvStore ProvisionStore) (*hypervModule, *t
 	m.nodeHostname = "NODE1"
 	m.seedDir = `C:\cfgms\seed` // host-local (satisfies the ha_role CSV seed rule)
 	m.csvProvisionStore = csvStore
-	mgr, store := newFakeAuditManager(t)
+	mgr, store := newRecordingAuditManager(t)
 	m.auditMgr = mgr
 	m.stewardID = "steward-2447"
 	return m, transport, store

@@ -34,6 +34,27 @@ type AuditStore interface {
 	// Chain integrity
 	GetLastAuditEntry(ctx context.Context, tenantID string) (*AuditEntry, error)
 
+	// AppendChainedEntry atomically assigns entry.SequenceNumber and
+	// entry.PreviousChecksum by reading the current chain head for tenantID and
+	// persists entry, all as a single serializing operation (e.g. SELECT ... FOR
+	// UPDATE on the tenant's chain-head row within one database transaction, or an
+	// equivalent construct). This is the sole authority for sequence assignment —
+	// implementations MUST NOT accept a pre-assigned SequenceNumber from the
+	// caller and merely validate it; the head-read, the assignment, and the
+	// durable write must happen inside the same atomic operation so that two
+	// callers appending to the same tenant's chain concurrently — including from
+	// separate controller processes/nodes sharing one database — cannot be
+	// assigned the same SequenceNumber and cannot produce a broken
+	// PreviousChecksum link (ADR-004 amendment, ADR-031 Decision 1, Issue #3754).
+	//
+	// entry.TenantID is set to tenantID. entry.SequenceNumber and
+	// entry.PreviousChecksum are computed by this method, overwriting any value
+	// already present. computeChecksum is invoked with entry after its sequence
+	// fields are assigned but before the write commits, and its result is stored
+	// as entry.Checksum — the audit.Manager holds the HMAC key used for integrity
+	// checksums, not the store, so the store cannot compute Checksum itself.
+	AppendChainedEntry(ctx context.Context, tenantID string, entry *AuditEntry, computeChecksum func(entry *AuditEntry) string) error
+
 	// Retention and archival (implementation dependent)
 	ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error)
 	PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error)
