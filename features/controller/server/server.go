@@ -163,6 +163,7 @@ type Server struct {
 	haManager               *ha.Manager
 	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
 	connRegistry            registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
+	admissionQueues         *ingestAdmissionQueues                      // Issue #3759: per-tenant ingest admission gates, split by bucket-key trust level
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
 	registrationTokenStore  pkgRegistration.Store
@@ -779,6 +780,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// GET /api/v1/stewards/{id}). Without this wiring the API server has no
 	// registry and always reports stewards as disconnected (Issue #1572).
 	var connRegistry registry.Registry
+	// admissionQueues holds the per-tenant ingest admission gates (Issue #3759).
+	// Created once here so the CP provider (Register/ControlChannel) takes the
+	// server-verified-key queue now and Start() takes the wire-keyed queue for
+	// the DNA and bulk-transfer handlers. See ingest_admission.go for why those
+	// are two instances and not one.
+	admissionQueues := newIngestAdmissionQueues()
 	var heartbeatService *heartbeat.Service
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
@@ -810,6 +817,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("steward approval store is required when transport is enabled")
 		}
 		approvalChecker := grpcCP.NewStewardStoreApprovalChecker(stewardStore)
+		// Issue #3759: the admission gate keys its buckets on the tenant this
+		// store reports for the mTLS-verified steward CN, never on the tenant
+		// field the steward puts on the wire — otherwise any steward with a
+		// valid certificate could saturate another tenant's shared slots.
+		tenantResolver := grpcCP.NewStewardStoreTenantResolver(stewardStore)
 		// Issue #2008: compose the admin-registry upsert hook alongside the
 		// signing-rotation hook so every authenticated (re)connect repopulates
 		// ControllerService.s.stewards (which backs cfg steward list/status/exec).
@@ -829,6 +841,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
 				grpcCP.WithApprovalChecker(approvalChecker),
+				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
+				// the DNA and bulk handlers use, whose bucket key comes off the wire
+				// (see ingest_admission.go).
+				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
+				grpcCP.WithStewardTenantResolver(tenantResolver),
 			)
 		} else {
 			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler)
@@ -836,6 +853,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
 				grpcCP.WithApprovalChecker(approvalChecker),
+				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
+				// the DNA and bulk handlers use, whose bucket key comes off the wire
+				// (see ingest_admission.go).
+				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
+				grpcCP.WithStewardTenantResolver(tenantResolver),
 			)
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
@@ -1455,8 +1477,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
 		haManager:               haManager,
-		controlPlane:            controlPlane, // Story #363 / #514
-		connRegistry:            connRegistry, // Issue #1572: shared with CP provider re-init in Start()
+		controlPlane:            controlPlane,    // Story #363 / #514
+		connRegistry:            connRegistry,    // Issue #1572: shared with CP provider re-init in Start()
+		admissionQueues:         admissionQueues, // Issue #3759: connect/heartbeat gate wired above; DNA/bulk gate taken in Start()
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
 		registrationTokenStore:  regStore,
@@ -1967,7 +1990,13 @@ func (s *Server) Start() error {
 			return fmt.Errorf("CP provider ServerHandler() returned nil")
 		}
 
-		tenantQueue := controllerTransport.NewTenantQueue()
+		// Issue #3759: the DNA and bulk handlers take the wire-keyed admission
+		// queue, which is a different instance from the one gating
+		// Register/ControlChannel. The DNA bucket key is the first chunk's
+		// tenant_id — caller-controlled — so sharing one instance would let a
+		// compromised steward name a victim tenant's bucket and starve that
+		// tenant's connects and heartbeats. See ingest_admission.go.
+		tenantQueue := s.admissionQueues.dnaBulkQueue()
 		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
 
 		// Wire fragment-root partial-sync detection (Issue #3329). The DNA handler

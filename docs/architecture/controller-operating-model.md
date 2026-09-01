@@ -502,6 +502,89 @@ The controller monitors steward heartbeats to detect connectivity loss:
 
 These fields must remain distinct. `HeartbeatTimeout` is intentionally short for fast HA-failover detection and must not be used for steward-liveness decisions.
 
+### Per-Tenant Ingest Admission Control (Issue #3759, ADR-031 Decision 6)
+
+Steward ingest is admission-controlled per tenant by
+`features/controller/transport.TenantQueue` — a per-tenant concurrency
+semaphore, `MaxConcurrentPerTenant` (32) in-flight slots per tenant, non-blocking
+`Acquire`/`Release`. Four entry points are gated on a cell: **connect**
+(`Register`), **heartbeat** (`ControlChannel`'s Heartbeat message), **DNA sync**
+(`SyncDNA`), and **bulk transfer** (`BulkTransfer`).
+
+Two `TenantQueue` instances are constructed in
+`features/controller/server.New` (`features/controller/server/ingest_admission.go`),
+split by how much the controller trusts the bucket key each path uses:
+
+| Instance | Paths | Bucket key |
+|----------|-------|------------|
+| `connectHeartbeat` | connect, heartbeat | server-verified (see below) |
+| `dnaBulk` | DNA sync, bulk transfer | DNA: first chunk's `tenant_id` (wire data). Bulk: mTLS peer CN |
+
+- **Connect** (`pkg/controlplane/providers/grpc.transportServer.Register`):
+  `Acquire`/`Release` bracket the RPC from just after the registration-token
+  tenant-binding check to the return. A saturated tenant gets
+  `codes.ResourceExhausted`; other tenants are unaffected.
+- **Heartbeat** (`transportServer.ControlChannel`, the `Heartbeat` case):
+  `Acquire`/`Release` bracket only that one heartbeat's dispatch — never
+  deferred to stream teardown. A saturated tenant has that heartbeat silently
+  dropped (logged, stream stays open); the slot is free again before the next
+  message on the loop.
+- **DNA sync / bulk transfer** (`features/controller/transport.DNAHandler` /
+  `BulkHandler`): unchanged by #3759 — `Acquire` on the first chunk, `Release`
+  deferred for the RPC's duration. This is the pre-existing mechanism the connect
+  and heartbeat paths above compose with, by reusing the same type, the same
+  limit and the same acquire/release discipline.
+
+Because `pkg/controlplane` is a central provider and must never import a
+`features/` package (Central Provider System, CLAUDE.md), the gRPC provider
+declares its own narrow `TenantAdmission` interface (`Acquire`/`Release`) rather
+than importing `TenantQueue` directly; `*TenantQueue` satisfies it structurally
+with no changes. `grpc.WithTenantAdmission(queue)` injects the gate — nil (the
+default) disables admission control entirely, matching pre-#3759 behavior.
+
+**Why two instances and not one.** A shared queue makes the bucket key an
+authorization-relevant input: whoever can name a bucket can pin all 32 of that
+bucket's slots. The DNA handler takes its key from the first chunk's
+`tenant_id`, which is unverified wire data, and holds the slot for the life of
+the RPC. Were connect and heartbeat to share that instance, a steward with a
+valid certificate — CLAUDE.md's threat model assumes stewards run on hosts that
+may be compromised — could open 32 concurrent `SyncDNA` streams naming a
+**victim** tenant, trickle chunks to hold the slots, and thereby have the
+victim's `Register` calls rejected and its heartbeats dropped fleet-wide, making
+the victim's whole fleet look stale. The same sharing would also let unbounded,
+unvalidated tenant strings into a `sync.Map` whose entries are never evicted.
+Keeping the wire-keyed paths on their own instance bounds that flood to the DNA
+and bulk paths, exactly as it was before connect and heartbeat were gated. The
+split is by key trust level, not by path count: a further path may join
+`connectHeartbeat` only once its key is derived server-side the same way.
+
+**The connect/heartbeat bucket key is always server-verified, never the wire's
+`tenant_id`.** `creds.tenant_id` and `heartbeat.tenant_id` are never inputs to
+it. `Provider.admissionBucket` resolves the key in this order:
+
+1. the tenant the caller has proven server-side — the tenant the registration
+   token is bound to, from the `RegistrationTokenStore` lookup (connect only,
+   which is why the binding check runs *before* `Acquire`);
+2. the tenant the controller's own fleet record reports for the mTLS-verified
+   certificate CN, via `StewardTenantResolver`
+   (`grpc.NewStewardStoreTenantResolver` over `business.StewardStore`, wired in
+   `server.New`). The ControlChannel resolves this **once at connect** and
+   reuses it for every heartbeat on the stream, so the per-heartbeat path does no
+   store lookups;
+3. otherwise the mTLS-verified CN itself, in the reserved `steward-cn:`
+   namespace — a still-bounded key (one per certificate this controller's CA
+   issued) used when the steward has no fleet record yet or the resolver is
+   unavailable. Admission is a fairness control, not an authorization decision,
+   so a resolver outage degrades to per-steward buckets rather than refusing
+   traffic.
+
+A candidate key is additionally rejected by `validAdmissionTenantID` unless it is
+1–128 bytes of `[A-Za-z0-9._/-]`; a rejected value falls back to the `steward-cn:`
+bucket. `TenantQueue` entries are created lazily and never evicted, so its
+documented bound ("number of active tenants") holds only while the key space is
+server-controlled and bounded — that is what this validation, the server-verified
+sourcing, and the instance split preserve for the connect/heartbeat gate.
+
 ### IP-Trust Establishment
 
 The controller promotes a steward's source IP to **trusted status** only after it has been continuously healthy for at least the configured threshold (default: **30 minutes**). This is implemented by `IPTrustEvaluator` (`features/controller/registration/ip_trust_evaluator.go`, Issue #1694).
