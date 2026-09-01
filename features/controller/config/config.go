@@ -429,6 +429,12 @@ type Config struct {
 	// default — browser passkey login and passkey step-up answer 503 until an operator
 	// explicitly sets rp_id and rp_origins.
 	WebAuthn *WebAuthnConfig `yaml:"webauthn,omitempty"`
+
+	// RealmID is the deployment-wide realm qualifier naming this cell (ADR-032
+	// Decision 3, Issue #3782). Empty by default (self-hosted: no realm concept).
+	// A SaaS cluster deployment (ha.mode: cluster) refuses to start in production
+	// with this unset — see tenant.EnforceRealmGuard.
+	RealmID string `yaml:"realm_id,omitempty"`
 }
 
 // EffectiveRings returns the deployment ring configuration with defaults applied.

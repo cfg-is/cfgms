@@ -329,6 +329,51 @@ scoped to specific admin-session types. **Left open for #3125 (or a follow-on de
 resolve before Decision 1 can be considered actually enforced** — added as Remaining Tunable
 5 below.
 
+### A1.4 — Realm-qualified form for cross-cell surfaces (ADR-032 Decision 3, Issue #3782)
+
+ADR-032 ("SaaS deployment topology and trust hierarchy foundations") introduces the *realm* —
+a deployment-wide identifier naming a cell — and requires every tenant identity to carry a
+realm qualifier before the first production tenant exists (ADR-032 Decision 3). Issue #3782
+adds the grammar for that qualified form: `<realm>/<unqualified-id>`, where both `<realm>` and
+`<unqualified-id>` independently satisfy the same k8s-DNS-label rule A1.1 established
+(`k8sNameRegex`, `features/tenant/manager.go`) via `validateRealmQualifiedTenantID`.
+
+This is deliberately **not** a relaxation of A1.1's finding. A1.1 established that a plain
+tenant ID (the form `isWithinTenantScope` and `IsTenantAncestor` operate on) is a single DNS
+label and never contains `/`. The realm-qualified form is a distinct, syntactically
+unambiguous shape — exactly one `/`, both halves independently validated — reserved for
+**cross-cell surfaces only** (a future tenant→cell directory, cross-cell admin routing,
+cross-cell audit aggregation — none of which exist yet; ADR-032 explicitly defers building
+them). It is never passed to `isWithinTenantScope` or `IsTenantAncestor`, and intra-cell
+ancestry resolution is completely unaffected by its existence.
+
+The realm itself is a single deployment-wide config value (`RealmID` in `controller.cfg`,
+Issue #3782), never stored per-tenant. `Manager.QualifiedTenantID` computes a tenant's
+qualified identity on demand from whatever `RealmID` is currently configured, returning the
+bare unqualified ID unchanged when `RealmID` is empty (the self-hosted default: no realm
+concept). Because nothing is persisted per-tenant, there is no migration to run if a
+deployment's realm is assigned — or corrected — at any point before a real cross-cell surface
+starts persisting the qualified form.
+
+The grammar is enforced at the point of construction, not merely documented: `QualifiedTenantID`
+validates both halves and the assembled result, and returns an error rather than a malformed
+identity. A realm that is not a single DNS label — `root/msp-a`, `Cell1`, `../..` — can
+therefore never produce a qualified ID, closing the path by which `realm_id: "root/msp-a"`
+would otherwise yield the ambiguous `root/msp-a/client-1` shape A1.1 eliminated.
+
+To make "assigned before the first production tenant is created" an enforced fact rather than
+an optional field nobody sets, `tenant.EnforceRealmGuard` fails closed at controller startup:
+a `CFGMS_TELEMETRY_ENVIRONMENT=production` controller with `ha.mode: cluster` (the existing
+SaaS-deployment signal, `HAConfig.Mode`) and an empty `RealmID` refuses to boot. Self-hosted
+deployments (`ha.mode` unset or not `cluster`) are never gated on *emptiness*, regardless of
+`RealmID` — but a `RealmID` that is set and malformed refuses to boot on every deployment
+shape and in every environment, because a bad realm is wrong everywhere.
+
+The guard runs where `RealmID` is consumed — `server.New`, on the path every controller start
+takes — and again on the one-time `--init` path before any CA material is written. It is
+deliberately not placed behind an optional config block (certificate management, `cluster_ca`),
+since a deployment that omits that block would otherwise skip the check entirely.
+
 ### Consequences of the amendment
 
 - #3125 cannot deliver a working ADR-025 boundary check by simply calling the existing

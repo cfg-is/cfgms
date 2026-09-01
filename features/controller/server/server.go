@@ -486,6 +486,21 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize tenant management with durable storage
 	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager).
 		WithAuditManager(auditManager)
+	// Fail closed at the point RealmID is actually consumed. Every controller
+	// start reaches here regardless of certificate or HA config shape — unlike
+	// the certificate-manager and --init paths, which are conditional (a
+	// cluster deployment with no certificate.cluster_ca block never builds a
+	// cluster cert manager, and --init runs once at provisioning time). This is
+	// what makes the unconditional "refuses to start when unset" in
+	// docs/reference/config-schema.md and docs/operations/cluster-ca.md true,
+	// and it rejects a malformed realm before any tenant identity is built
+	// from it.
+	if err := tenant.EnforceRealmGuard(cfg); err != nil {
+		return nil, err
+	}
+	// RealmID is deployment-wide config (ADR-032 Decision 3), never stored per-tenant;
+	// QualifiedTenantID computes the qualified form on demand from whatever is configured.
+	tenantManager.RealmID = cfg.RealmID
 
 	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
 	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode

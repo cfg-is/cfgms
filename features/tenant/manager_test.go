@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/rbac"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -1576,4 +1577,254 @@ func TestManager_SuspendTenant_NoAuditManager_NoPanic(t *testing.T) {
 		_, _ = manager.SuspendTenant(ctx, td.ID)
 		_, _ = manager.RestoreTenant(ctx, td.ID)
 	})
+}
+
+// TestValidateRealmQualifiedTenantID exercises the "<realm>/<id>" grammar
+// (Issue #3782): each half must independently satisfy the same k8s DNS-label
+// rules as validateExplicitTenantID, and there must be exactly one separator.
+func TestValidateRealmQualifiedTenantID(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{"valid realm and id", "cell1/msp-a", false},
+		{"valid single-char halves", "a/b", false},
+		{"valid with hyphens and numbers", "cell-us-east-1/agent-test-123", false},
+		{"empty string", "", true},
+		{"no separator", "msp-a", true},
+		{"empty realm segment", "/msp-a", true},
+		{"empty id segment", "cell1/", true},
+		{"realm segment invalid k8s label (uppercase)", "Cell1/msp-a", true},
+		{"id segment invalid k8s label (underscore)", "cell1/msp_a", true},
+		{"realm segment leading hyphen", "-cell1/msp-a", true},
+		{"id segment trailing hyphen", "cell1/msp-a-", true},
+		{"two separators", "cell1/msp-a/extra", true},
+		{"trailing separator only", "cell1/msp-a/", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRealmQualifiedTenantID(tt.id)
+			if tt.wantErr {
+				assert.Error(t, err, "expected error for id=%q", tt.id)
+			} else {
+				assert.NoError(t, err, "expected no error for id=%q", tt.id)
+			}
+		})
+	}
+}
+
+// TestValidateRealmQualifiedTenantID_RejectsMultiSegmentHierarchicalPath guards
+// against resurrecting the ambiguity ADR-025 Amendment 1 (A1.1) found in the
+// dead strings.HasPrefix(id, tenant+"/") pattern, which implied slash-delimited
+// hierarchical paths like "root/msp-a/client-1". The realm-qualified grammar
+// must reject that shape outright rather than accepting the first two segments
+// and ignoring the rest.
+func TestValidateRealmQualifiedTenantID_RejectsMultiSegmentHierarchicalPath(t *testing.T) {
+	err := validateRealmQualifiedTenantID("root/msp-a/client-1")
+	require.Error(t, err, "realm-qualified grammar must reject multi-segment hierarchical paths")
+}
+
+// TestValidateExplicitTenantID_UnaffectedByRealmQualifiedGrammar is a
+// regression guard (Issue #3782): the existing unqualified single-DNS-label
+// validator must keep rejecting slash-containing values exactly as before —
+// only validateRealmQualifiedTenantID accepts the new "<realm>/<id>" shape.
+func TestValidateExplicitTenantID_UnaffectedByRealmQualifiedGrammar(t *testing.T) {
+	err := validateExplicitTenantID("cell1/msp-a")
+	require.Error(t, err, "unqualified validator must still reject a slash-containing ID")
+
+	// Spot-check the pre-existing table's core acceptances/rejections are unchanged.
+	assert.NoError(t, validateExplicitTenantID("team-root"))
+	assert.NoError(t, validateExplicitTenantID("agent-test-123"))
+	assert.Error(t, validateExplicitTenantID(""))
+	assert.Error(t, validateExplicitTenantID("Team-Root"))
+}
+
+// TestManager_QualifiedTenantID_EmptyRealm_ReturnsUnqualified verifies the
+// self-hosted default: no RealmID configured means QualifiedTenantID is a
+// passthrough.
+func TestManager_QualifiedTenantID_EmptyRealm_ReturnsUnqualified(t *testing.T) {
+	manager := newTestTenantManager(t)
+	require.Equal(t, "", manager.RealmID)
+	qualified, err := manager.QualifiedTenantID("msp-a")
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a", qualified)
+}
+
+// TestManager_QualifiedTenantID_WithRealm_ReturnsQualified verifies that once
+// RealmID is configured, QualifiedTenantID formats "<realm>/<id>" on demand.
+func TestManager_QualifiedTenantID_WithRealm_ReturnsQualified(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.RealmID = "cell1"
+	qualified, err := manager.QualifiedTenantID("msp-a")
+	require.NoError(t, err)
+	assert.Equal(t, "cell1/msp-a", qualified)
+}
+
+// TestManager_QualifiedTenantID_RejectsMalformedInputs verifies the
+// construction-time invariant: QualifiedTenantID never returns a value that
+// validateRealmQualifiedTenantID would reject. A multi-segment realm such as
+// "root/msp-a" would otherwise yield "root/msp-a/client-1" — exactly the
+// ambiguous shape ADR-025 Amendment 1 (A1.1) eliminated.
+func TestManager_QualifiedTenantID_RejectsMalformedInputs(t *testing.T) {
+	tests := []struct {
+		name          string
+		realm         string
+		unqualifiedID string
+	}{
+		{"multi-segment realm", "root/msp-a", "client-1"},
+		{"uppercase realm", "Cell1", "msp-a"},
+		{"path traversal realm", "../..", "msp-a"},
+		{"over-length realm", strings.Repeat("a", 64), "msp-a"},
+		{"leading hyphen realm", "-cell1", "msp-a"},
+		{"empty unqualified id", "cell1", ""},
+		{"slash in unqualified id", "cell1", "msp-a/client-1"},
+		{"uppercase unqualified id", "cell1", "MSP-A"},
+		{"empty unqualified id with no realm", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := newTestTenantManager(t)
+			manager.RealmID = tt.realm
+
+			qualified, err := manager.QualifiedTenantID(tt.unqualifiedID)
+			require.Error(t, err, "expected error for realm=%q id=%q", tt.realm, tt.unqualifiedID)
+			assert.Empty(t, qualified, "no identity may be returned alongside an error")
+		})
+	}
+}
+
+// TestManager_QualifiedTenantID_OutputAlwaysSatisfiesGrammar closes the loop
+// between the constructor and the validator: whatever QualifiedTenantID
+// returns for a configured realm must pass validateRealmQualifiedTenantID.
+func TestManager_QualifiedTenantID_OutputAlwaysSatisfiesGrammar(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.RealmID = "cell-us-east-1"
+
+	for _, id := range []string{"a", "msp-a", "agent-test-123", strings.Repeat("b", 63)} {
+		qualified, err := manager.QualifiedTenantID(id)
+		require.NoError(t, err, "id=%q", id)
+		require.NoError(t, validateRealmQualifiedTenantID(qualified), "qualified=%q", qualified)
+	}
+}
+
+// TestEnforceRealmGuard_ProductionClusterEmptyRealm_Refuses mirrors
+// enforceProductionGuard's TestProductionGuard_Reject coverage in
+// pkg/secrets/providers/openbao/provider_test.go: a SaaS production cluster
+// with no realm assigned must refuse to start.
+func TestEnforceRealmGuard_ProductionClusterEmptyRealm_Refuses(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+		RealmID: "",
+	}
+	err := EnforceRealmGuard(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "realm")
+}
+
+// TestEnforceRealmGuard_ProductionClusterWithRealm_Starts verifies a SaaS
+// production cluster with a configured RealmID is never gated.
+func TestEnforceRealmGuard_ProductionClusterWithRealm_Starts(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+		RealmID: "cell1",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
+}
+
+// TestEnforceRealmGuard_SelfHostedNeverGated verifies that a self-hosted
+// deployment (ha.mode unset) is never gated in production, regardless of
+// RealmID — the guard only closes the SaaS-production (ha.mode: cluster) path.
+func TestEnforceRealmGuard_SelfHostedNeverGated(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	cfg := &controllerconfig.Config{
+		HA:      nil,
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
+
+	cfgSingle := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "single"},
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfgSingle))
+}
+
+// TestEnforceRealmGuard_NonProduction_NeverGated verifies the emptiness gate is
+// a no-op outside CFGMS_TELEMETRY_ENVIRONMENT=production, even for a cluster
+// deployment with no realm configured.
+func TestEnforceRealmGuard_NonProduction_NeverGated(t *testing.T) {
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
+}
+
+// TestEnforceRealmGuard_MalformedRealm_RefusesOnEveryDeploymentShape verifies
+// that a configured-but-malformed realm fails closed regardless of ha.mode or
+// CFGMS_TELEMETRY_ENVIRONMENT. RealmID is concatenated into a tenant identity
+// by QualifiedTenantID, so a value like "root/msp-a" must be rejected at
+// startup rather than silently producing an unparseable cross-cell identity.
+func TestEnforceRealmGuard_MalformedRealm_RefusesOnEveryDeploymentShape(t *testing.T) {
+	malformed := []struct {
+		name  string
+		realm string
+	}{
+		{"multi-segment hierarchical path", "root/msp-a"},
+		{"uppercase", "Cell1"},
+		{"path traversal", "../.."},
+		{"underscore", "cell_1"},
+		{"trailing hyphen", "cell1-"},
+		{"over 63 characters", strings.Repeat("a", 64)},
+		{"whitespace", "cell 1"},
+	}
+
+	shapes := []struct {
+		name string
+		ha   *controllerconfig.HAConfig
+	}{
+		{"self-hosted (no ha)", nil},
+		{"single node", &controllerconfig.HAConfig{Mode: "single"}},
+		{"cluster", &controllerconfig.HAConfig{Mode: "cluster"}},
+	}
+
+	for _, env := range []string{"", "production"} {
+		for _, shape := range shapes {
+			for _, m := range malformed {
+				t.Run(fmt.Sprintf("env=%s/%s/%s", env, shape.name, m.name), func(t *testing.T) {
+					t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", env)
+
+					cfg := &controllerconfig.Config{
+						HA:      shape.ha,
+						RealmID: m.realm,
+					}
+					err := EnforceRealmGuard(cfg)
+					require.Error(t, err, "malformed realm %q must fail closed", m.realm)
+					assert.Contains(t, err.Error(), "realm")
+				})
+			}
+		}
+	}
+}
+
+// TestEnforceRealmGuard_ValidRealm_AcceptedOnEveryDeploymentShape is the
+// counterpart: a well-formed single-DNS-label realm is never rejected.
+func TestEnforceRealmGuard_ValidRealm_AcceptedOnEveryDeploymentShape(t *testing.T) {
+	for _, realm := range []string{"a", "cell1", "cell-us-east-1", strings.Repeat("c", 63)} {
+		for _, mode := range []string{"", "single", "cluster"} {
+			cfg := &controllerconfig.Config{
+				HA:      &controllerconfig.HAConfig{Mode: mode},
+				RealmID: realm,
+			}
+			require.NoError(t, EnforceRealmGuard(cfg), "realm=%q mode=%q", realm, mode)
+		}
+	}
 }

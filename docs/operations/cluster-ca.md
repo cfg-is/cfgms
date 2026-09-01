@@ -33,6 +33,12 @@ Add the `certificate.cluster_ca` block to `controller.cfg`:
 ha:
   mode: cluster
 
+# Deployment-wide realm qualifier naming this cell (ADR-032 Decision 3). Required
+# once CFGMS_TELEMETRY_ENVIRONMENT=production — the controller refuses to start
+# a production cluster deployment without it. See the "Realm Assignment" section
+# below.
+realm_id: cell1
+
 certificate:
   enable_cert_management: true
   ca_path: /var/lib/cfgms/ca
@@ -86,6 +92,27 @@ path "secret/data/root/cluster-ca-key" {
   capabilities = ["read", "create", "update"]
 }
 ```
+
+## Realm Assignment
+
+`realm_id` names this cluster's home cell (ADR-032 Decision 3). It is a single
+deployment-wide config value — never stored per-tenant — so every tenant's realm-qualified
+identity (`Manager.QualifiedTenantID`) is computed on demand from whatever `realm_id` is
+currently configured. There is no per-tenant record to migrate if it is assigned, or
+corrected, at any point before a cross-cell surface starts persisting the qualified form.
+
+`realm_id` must be a single Kubernetes DNS label: lowercase alphanumeric characters and
+hyphens, no leading or trailing hyphen, 63 characters or less (`cell1`, `cell-us-east-1`).
+It is **not** a slash-delimited path — tenant hierarchy is carried by a tenant's parent, never
+by string concatenation — so values like `root/msp-a`, `Cell1` or `../..` are rejected. A
+malformed `realm_id` refuses to start on every deployment shape and in every environment, not
+just production clusters.
+
+**Production cluster deployments must set `realm_id`.** When `CFGMS_TELEMETRY_ENVIRONMENT=production`
+and `ha.mode: cluster`, the controller refuses to start with `realm_id` empty — this is what
+makes "a realm is assigned before the first production tenant exists" an enforced fact rather
+than an optional field nobody sets. Self-hosted deployments (`ha.mode` unset or not `cluster`)
+are not gated on emptiness and can leave `realm_id` unset.
 
 ## Single-Node Deployments
 

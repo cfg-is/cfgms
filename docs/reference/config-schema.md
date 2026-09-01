@@ -39,6 +39,7 @@ If no file is found, built-in defaults are used and environment variable overrid
 | `logging` | object | see [`logging`](#logging-controller) | optional | Logging provider config | config.go:93 |
 | `transport` | object | see [`transport`](#transport) | optional | gRPC-over-QUIC transport config | config.go:96 |
 | `admin_bundle_path` | string | `""` | optional | Path where `--init` writes the admin credential bundle (mode 0600) | config.go:101 |
+| `realm_id` | string | `""` | required for `ha.mode: cluster` in production | Deployment-wide realm qualifier naming this cell (ADR-032 Decision 3). Must be a single DNS label (lowercase alphanumeric and hyphens, no leading/trailing hyphen, ≤63 chars); a malformed value refuses to start on any deployment shape, and a `CFGMS_TELEMETRY_ENVIRONMENT=production` controller with `ha.mode: cluster` also refuses to start when unset (`tenant.EnforceRealmGuard`) | config.go |
 
 **Environment overrides for top-level fields:**
 
