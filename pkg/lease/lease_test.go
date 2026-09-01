@@ -326,13 +326,21 @@ func TestManager_CurrentHolder_UsesStoreValidityNotLocalWallClock(t *testing.T) 
 // property the dual-authority-window bound test below depends on.
 func TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL(t *testing.T) {
 	store := newTestStore(t)
-	ttl := 1 * time.Second
-	renewalInterval := 100 * time.Millisecond
-	maxRenewalLatency := 100 * time.Millisecond
+	// The parameters are chosen so the margin is a small fraction of the TTL
+	// (400ms of 2s), not a near-miss (800ms of 1s). The test samples a single
+	// instant that must fall after the margin and before the row's expiry; with a
+	// near-miss the whole budget for the two store round-trips plus scheduling is
+	// ttl-sleepFor, which on a loaded machine (the full suite runs packages in
+	// parallel and the flatfile store does real file IO) is not a bound the
+	// property under test depends on — it is the test racing itself. Widening the
+	// gap makes the sampled instant unambiguous and shortens the sleep.
+	ttl := 2 * time.Second
+	renewalInterval := 800 * time.Millisecond
+	maxRenewalLatency := 800 * time.Millisecond
 	m, err := NewManager(store, ttl, renewalInterval, maxRenewalLatency)
 	require.NoError(t, err)
 	margin := m.SafetyMargin()
-	require.Less(t, margin, ttl, "safety margin must be strictly less than the lease TTL for this test to be meaningful")
+	require.Less(t, margin, ttl/2, "safety margin must be well under the lease TTL so the sampled instant is unambiguous")
 
 	ctx := context.Background()
 	_, acquired, err := m.TryAcquire(ctx, "singleton-x", "holder-1", ttl)
@@ -342,10 +350,11 @@ func TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL(t *testing.T) {
 	_, has := m.HasLocalAuthority("singleton-x", "holder-1")
 	require.True(t, has, "immediately after acquiring, local authority must be valid")
 
-	// Sleep past the safety margin but still within the lease's real TTL.
-	// The 100ms buffer on each side absorbs scheduling jitter under -race.
+	// Sleep past the safety margin but still well within the lease's real TTL:
+	// margin+100ms = 500ms, leaving ~1.5s of the 2s TTL for the store round-trip
+	// below plus any scheduling delay under -race.
 	sleepFor := margin + 100*time.Millisecond
-	require.Less(t, sleepFor, ttl, "test sleep must still land before the real TTL expires")
+	require.Less(t, sleepFor, ttl/2, "test sleep must land well before the real TTL expires")
 	time.Sleep(sleepFor)
 
 	_, has = m.HasLocalAuthority("singleton-x", "holder-1")

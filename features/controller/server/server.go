@@ -2696,6 +2696,28 @@ func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) err
 // certManager is passed through to ha.NewManager and is required in ClusterMode for mTLS
 // peer transport; it may be nil when cluster mode is not in use.
 // raftLogDir is the directory for the per-node Raft WAL; pass empty in tests.
+//
+// In ClusterMode the manager's leadership authority and command fencing token come
+// from the database lease (ADR-031 Decision 5), so this function verifies the
+// storage tier supplies a lease store *whose substrate every node shares* before
+// ha.NewManager wires it. Both halves are startup preconditions:
+//
+//   - No lease store at all is a disabled control, not a degraded one:
+//     HasLeadership() would be false forever and every outbound command would carry
+//     fencing token 0.
+//   - A node-local lease store (per-node SQLite file, per-node flat file) is worse
+//     than none, because it fails open. Each node would acquire the cluster
+//     leadership lease against its own database, all of them reporting
+//     HasLeadership() == true with independent token sequences starting at 1 — the
+//     singleton claim and the command fence both silently off. Only the shared
+//     cluster (Postgres) tier can carry the lease, which is why the check is
+//     business.LeaseStoreIsNodeShared rather than a non-nil test.
+//
+// Other non-single modes (blue-green) run the node-local storage tier and therefore
+// have no shared substrate to arbitrate on. ha.Manager gives them no lease-backed
+// authority at all (HasLeadership() stays false, leader-gated mutating endpoints
+// stay closed); this function logs that consequence at startup so it is visible to
+// the operator rather than discovered as unexplained 503s.
 func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager, raftLogDir string) (*ha.Manager, error) {
 	haConfig := ha.DefaultConfig()
 
@@ -2709,6 +2731,36 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 
 	if err := haConfig.LoadFromEnvironment(); err != nil {
 		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
+	}
+
+	switch haConfig.Mode {
+	case ha.ClusterMode:
+		// The lease is wired by ha.NewManager from storageManager. Check the
+		// precondition here so the failure names the storage tier the operator has
+		// to change, rather than surfacing later as Start() refusing to run.
+		var leaseStore business.LeaseStore
+		providerName := "<none>"
+		if storageManager != nil {
+			leaseStore = storageManager.GetLeaseStore()
+			providerName = storageManager.GetProviderName()
+		}
+		if leaseStore == nil {
+			return nil, fmt.Errorf(
+				"ha.mode %q requires a leadership lease store for command fencing, but storage provider %q supplies none; use the cluster (Postgres) storage tier (ADR-031 Decision 5)",
+				haConfig.GetModeString(), providerName)
+		}
+		if !business.LeaseStoreIsNodeShared(leaseStore) {
+			return nil, fmt.Errorf(
+				"ha.mode %q requires a leadership lease held in the database every node shares, but storage provider %q supplies a node-local lease store; each node would hold its own copy of the cluster leadership lease and mint its own fencing tokens. Configure storage.cluster.postgres_dsn so the cluster (Postgres) storage tier is used (ADR-031 Decision 5)",
+				haConfig.GetModeString(), providerName)
+		}
+	case ha.SingleServerMode:
+		// No lease: one node, no peer to exclude (ADR-029 Decision 4).
+	default:
+		logger.Warn("HA mode has no shared lease substrate: leadership authority is unavailable",
+			"ha_mode", haConfig.GetModeString(),
+			"consequence", "HasLeadership() is false on every node, so leader-gated mutating endpoints refuse requests and outbound commands carry no fencing token",
+			"remedy", "use ha.mode cluster with storage.cluster.postgres_dsn for a deployment that must serve mutating traffic from more than one node")
 	}
 
 	haManager, err := ha.NewManager(haConfig, logger, storageManager, certManager, raftLogDir)

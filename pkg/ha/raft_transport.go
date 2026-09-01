@@ -44,6 +44,14 @@ type raftTransport struct {
 	// messages. Includes the local node's CN so single-node loopback works.
 	allowedCNs []string
 
+	// hasLeadershipFn, when set, overrides HandleStatus's is_leader field with the
+	// lease-backed HasLeadership() check (pkg/ha.Manager, ADR-031 Decision 5)
+	// instead of the raw consensus.HasLeadership() (Raft's own leader lease). nil
+	// when a raftTransport is constructed without an owning Manager, as this
+	// package's own unit tests do — HandleStatus then falls back to
+	// consensus.HasLeadership(), preserving prior behavior for those callers.
+	hasLeadershipFn func() bool
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -286,11 +294,32 @@ type raftStatusResponse struct {
 	Nodes        int    `json:"nodes"`
 }
 
+// setHasLeadershipFn wires the lease-backed leadership check (pkg/ha.Manager's
+// HasLeadership(), ADR-031 Decision 5) that HandleStatus's is_leader field reports.
+// Called by Manager.initializeRaftConsensus before the transport is ever served.
+func (t *raftTransport) setHasLeadershipFn(fn func() bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.hasLeadershipFn = fn
+}
+
 // HandleStatus returns Raft status (HTTP handler)
 func (t *raftTransport) HandleStatus(w http.ResponseWriter, r *http.Request) {
+	t.mu.RLock()
+	hasLeadershipFn := t.hasLeadershipFn
+	t.mu.RUnlock()
+
+	// IsLeader: the admission primitive (ADR-029 Decision 3), lease-backed since
+	// ADR-031 Decision 5. Falls back to the raw Raft-lease check only when no
+	// owning Manager wired an override (see hasLeadershipFn's doc comment).
+	isLeader := t.consensus.HasLeadership()
+	if hasLeadershipFn != nil {
+		isLeader = hasLeadershipFn()
+	}
+
 	status := raftStatusResponse{
 		NodeID:   t.nodeID,
-		IsLeader: t.consensus.HasLeadership(),
+		IsLeader: isLeader,
 		// IsRaftLeader: raw Raft replication-protocol state — observational only, not an admission primitive.
 		RaftIsLeader: t.consensus.IsRaftLeader(),
 		Leader:       t.consensus.GetLeader(),

@@ -173,3 +173,14 @@ func TestSQLiteLeaseStore_ConcurrentAcquire_ExactlyOneWinner(t *testing.T) {
 	}
 	assert.Equal(t, 1, winners, "exactly one goroutine must win contention for a fresh lease")
 }
+
+// TestSQLiteLeaseStore_SharedAcrossNodes_False pins the substrate declaration the
+// controller's cluster-mode startup gate reads (ADR-031 Decision 5). The database
+// is a file on one node's disk: a second controller node opens a different file
+// and contends with nothing, so this store must never present itself as a
+// cluster-wide authority.
+func TestSQLiteLeaseStore_SharedAcrossNodes_False(t *testing.T) {
+	var store business.LeaseStore = newTestLeaseStore(t)
+	assert.False(t, business.LeaseStoreIsNodeShared(store),
+		"a per-node SQLite file is not a substrate shared across controller nodes")
+}
