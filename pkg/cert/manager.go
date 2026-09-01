@@ -247,6 +247,24 @@ func (m *Manager) SignClientCertificateRequest(pubKey crypto.PublicKey, config *
 	return cert, nil
 }
 
+// SignSubordinateCA signs a caller-supplied public key into a subordinate
+// (intermediate) CA certificate and stores it. The CA never generates or sees
+// a private key for this credential, so the stored Certificate.PrivateKeyPEM
+// is empty and FileStore never writes a key.pem for it.
+func (m *Manager) SignSubordinateCA(pubKey crypto.PublicKey, config *SubordinateCAConfig) (*Certificate, error) {
+	cert, err := m.ca.SignSubordinateCA(pubKey, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store the certificate
+	if err := m.store.StoreCertificate(cert); err != nil {
+		return nil, fmt.Errorf("failed to store subordinate CA certificate: %w", err)
+	}
+
+	return cert, nil
+}
+
 // GenerateSigningCertificate creates a config signing certificate and stores it
 func (m *Manager) GenerateSigningCertificate(config *SigningCertConfig) (*Certificate, error) {
 	cert, err := m.ca.GenerateSigningCertificate(config)

@@ -185,6 +185,97 @@ func TestManager_SignClientCertificateRequest(t *testing.T) {
 	assert.NoError(t, statErr)
 }
 
+// TestManager_SignSubordinateCA verifies Manager.SignSubordinateCA delegates
+// to CA.SignSubordinateCA with the same error and result shape as
+// Manager.SignClientCertificateRequest.
+func TestManager_SignSubordinateCA(t *testing.T) {
+	tempDir := t.TempDir()
+	manager, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &CAConfig{
+			Organization:  "Test",
+			Country:       "US",
+			ValidityDays:  365,
+			PathLength:    1,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+
+	// Caller generates its own keypair locally; the manager never sees the private key.
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subConfig := &SubordinateCAConfig{
+		CommonName:   "Test Intermediate CA",
+		Organization: "Test Org",
+		ValidityDays: 365,
+		PathLength:   0,
+	}
+
+	cert, err := manager.SignSubordinateCA(&subKey.PublicKey, subConfig)
+	require.NoError(t, err)
+	require.NotNil(t, cert)
+
+	// Verify certificate properties
+	assert.Equal(t, CertificateTypeCA, cert.Type)
+	assert.Equal(t, "Test Intermediate CA", cert.CommonName)
+	assert.NotEmpty(t, cert.SerialNumber)
+	assert.NotEmpty(t, cert.CertificatePEM)
+
+	// No private key is returned or persisted for a subordinate CA signed
+	// from a caller-supplied public key.
+	assert.Empty(t, cert.PrivateKeyPEM)
+
+	x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
+	require.NoError(t, err)
+	assert.True(t, x509Cert.IsCA)
+	assert.Equal(t, 0, x509Cert.MaxPathLen)
+	assert.True(t, x509Cert.MaxPathLenZero)
+
+	// Verify certificate is stored (metadata + cert.pem)
+	storedCert, err := manager.GetCertificate(cert.SerialNumber)
+	require.NoError(t, err)
+	assert.Equal(t, cert.CommonName, storedCert.CommonName)
+
+	// key.pem must not be written — there is no private key to persist.
+	keyPath := filepath.Join(tempDir, cert.SerialNumber, "key.pem")
+	_, statErr := os.Stat(keyPath)
+	assert.True(t, os.IsNotExist(statErr), "key.pem must not be written for a subordinate CA signed from a caller-supplied public key")
+
+	// cert.pem must still be written.
+	certPath := filepath.Join(tempDir, cert.SerialNumber, "cert.pem")
+	_, statErr = os.Stat(certPath)
+	assert.NoError(t, statErr)
+}
+
+// TestManager_SignSubordinateCA_RejectsPathLengthZeroSigner verifies the
+// manager wrapper surfaces the same rejection as CA.SignSubordinateCA when
+// the signing CA is path-length-zero (today's default), and stores nothing.
+func TestManager_SignSubordinateCA_RejectsPathLengthZeroSigner(t *testing.T) {
+	tempDir := t.TempDir()
+	manager, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &CAConfig{
+			Organization: "Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	cert, err := manager.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Test Intermediate CA",
+		Organization: "Test Org",
+		ValidityDays: 365,
+	})
+	require.Error(t, err)
+	assert.Nil(t, cert)
+}
+
 func TestManager_GenerateClientCertificate(t *testing.T) {
 	tempDir := t.TempDir()
 	manager, err := NewManager(&ManagerConfig{

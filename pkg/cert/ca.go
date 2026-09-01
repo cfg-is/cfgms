@@ -65,6 +65,21 @@ func (ca *CA) Initialize(config *CAConfig) error {
 		return fmt.Errorf("CA configuration is required")
 	}
 
+	// Path-length constraint: an explicit PathLengthSet honors the caller's
+	// PathLength (validated 0-6); otherwise preserve today's leaf-only
+	// default (MaxPathLen: 0, MaxPathLenZero: true) exactly, since
+	// PathLength's zero value is itself a valid "leaf-only" setting distinct
+	// from "not set".
+	maxPathLen := 0
+	maxPathLenZero := true
+	if ca.config.PathLengthSet {
+		if ca.config.PathLength < 0 || ca.config.PathLength > 6 {
+			return fmt.Errorf("CA path length must be between 0 and 6, got %d", ca.config.PathLength)
+		}
+		maxPathLen = ca.config.PathLength
+		maxPathLenZero = ca.config.PathLength == 0
+	}
+
 	// Generate CA private key
 	privateKey, err := rsa.GenerateKey(rand.Reader, ca.config.KeySize)
 	if err != nil {
@@ -87,8 +102,8 @@ func (ca *CA) Initialize(config *CAConfig) error {
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
-		MaxPathLen:            0,
-		MaxPathLenZero:        true,
+		MaxPathLen:            maxPathLen,
+		MaxPathLenZero:        maxPathLenZero,
 	}
 
 	// Create the CA certificate
@@ -487,6 +502,111 @@ func (ca *CA) SignClientCertificateRequest(pubKey crypto.PublicKey, config *Clie
 		Fingerprint:    fingerprint,
 		Issuer:         ca.certificate.Subject.CommonName,
 		ClientID:       config.ClientID,
+	}, nil
+}
+
+// SignSubordinateCA signs a caller-supplied public key into a subordinate
+// (intermediate) CA certificate. Like SignClientCertificateRequest, the CA
+// never generates or sees a private key for the subordinate: the caller
+// generates the keypair locally and submits only pubKey. The returned
+// Certificate.PrivateKeyPEM is empty.
+//
+// A signer whose own path-length constraint is zero (today's default) can
+// never sign a subordinate CA, and a subordinate's requested path length
+// must always be strictly less than the signer's own — otherwise the chain
+// could exceed the signer's RFC 5280 §4.2.1.9 pathLenConstraint. Both are
+// rejected with an explicit error rather than left to x509.CreateCertificate,
+// which does not enforce this relationship on its own.
+func (ca *CA) SignSubordinateCA(pubKey crypto.PublicKey, config *SubordinateCAConfig) (*Certificate, error) {
+	if !ca.initialized {
+		return nil, fmt.Errorf("CA is not initialized")
+	}
+
+	if config == nil {
+		return nil, fmt.Errorf("subordinate CA config is required")
+	}
+
+	if pubKey == nil {
+		return nil, fmt.Errorf("public key is required")
+	}
+
+	if config.PathLength < 0 || config.PathLength > 6 {
+		return nil, fmt.Errorf("subordinate CA path length must be between 0 and 6, got %d", config.PathLength)
+	}
+
+	// A path-length-zero signer may not be followed by any intermediate CA
+	// certificate in a valid path, so it can never sign a subordinate CA.
+	if ca.certificate.MaxPathLenZero {
+		return nil, fmt.Errorf("signer CA has path length 0 and cannot sign a subordinate CA")
+	}
+
+	// A signer with no pathLenConstraint present (MaxPathLen == -1) is
+	// unconstrained; otherwise the subordinate must leave room within the
+	// signer's own constraint.
+	if ca.certificate.MaxPathLen >= 0 && config.PathLength >= ca.certificate.MaxPathLen {
+		return nil, fmt.Errorf("subordinate CA path length %d must be strictly less than signer path length %d", config.PathLength, ca.certificate.MaxPathLen)
+	}
+
+	// Set defaults
+	if config.ValidityDays == 0 {
+		config.ValidityDays = 3650
+	}
+	if config.Organization == "" {
+		config.Organization = ca.config.Organization
+	}
+
+	// Generate serial number
+	serialNumber, err := ca.generateSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	// Create subordinate CA certificate template
+	subject := pkix.Name{
+		Organization: []string{config.Organization},
+		CommonName:   config.CommonName,
+	}
+	if config.OrganizationalUnit != "" {
+		subject.OrganizationalUnit = []string{config.OrganizationalUnit}
+	}
+
+	template := &x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               subject,
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		MaxPathLen:            config.PathLength,
+		MaxPathLenZero:        config.PathLength == 0,
+	}
+
+	// Sign the caller-supplied public key directly — the CA never generates
+	// or holds a private key for this subordinate.
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, pubKey, ca.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create subordinate CA certificate: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certDER,
+	})
+
+	fingerprint := ca.calculateFingerprint(certDER)
+
+	return &Certificate{
+		Type:           CertificateTypeCA,
+		CommonName:     config.CommonName,
+		SerialNumber:   serialNumber.String(),
+		CreatedAt:      template.NotBefore,
+		ExpiresAt:      template.NotAfter,
+		IsValid:        true,
+		CertificatePEM: certPEM,
+		PrivateKeyPEM:  nil,
+		Fingerprint:    fingerprint,
+		Issuer:         ca.certificate.Subject.CommonName,
 	}, nil
 }
 
