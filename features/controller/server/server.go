@@ -899,7 +899,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
 			if scErr == nil {
 				hoistedSignerCertSerial = signerCert.SerialNumber
-				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true)
+				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true, false)
 				if exportErr == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
 					var signerErr error
 					hoistedSigner, signerErr = signature.NewSigner(&signature.SignerConfig{
@@ -949,7 +949,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				}
 				serial := current.SerialNumber
 				return serial, func() (signature.SigningKeyExport, error) {
-					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true)
+					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true, false)
 					if exportErr != nil {
 						return signature.SigningKeyExport{}, exportErr
 					}
@@ -1201,7 +1201,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				}
 				serial := current.SerialNumber
 				return serial, func() (signature.SigningKeyExport, error) {
-					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true)
+					certPEM, keyPEM, exportErr := cm.ExportCertificate(serial, true, false)
 					if exportErr != nil {
 						return signature.SigningKeyExport{}, exportErr
 					}

@@ -7,8 +7,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -163,6 +166,50 @@ func newTestCertManager(t *testing.T) *cert.Manager {
 	})
 	require.NoError(t, err)
 	return mgr
+}
+
+// newTestIntermediateCertManager creates a real cert manager whose active CA
+// identity is a subordinate (regional intermediate) signed from a freshly
+// generated test root — the Issue #3778 shape a controller cell backed by an
+// imported regional intermediate has once S3's ImportSubordinateCA lands.
+func newTestIntermediateCertManager(t *testing.T) *cert.Manager {
+	t.Helper()
+	rootMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization:  "Test CFGMS Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    1,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+
+	rootCertPEM, err := rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &cert.SubordinateCAConfig{
+		CommonName:   "Test CFGMS Regional Intermediate",
+		Organization: "Test CFGMS",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+
+	subKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(subKey),
+	})
+
+	intermediateMgr, err := cert.NewManagerFromCAMaterial(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, subCert.CertificatePEM, subKeyPEM, rootCertPEM)
+	require.NoError(t, err)
+	return intermediateMgr
 }
 
 // postRegister sends a POST /api/v1/register request with valid device identity fields
@@ -859,6 +906,35 @@ func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {
 	assert.NotEmpty(t, resp.CACert, "ca_cert must be present and non-empty on approve")
 	assert.NotEmpty(t, resp.StewardID, "steward_id must be present on approve")
 	assert.Equal(t, "test-tenant", resp.TenantID)
+	assert.Empty(t, resp.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
+}
+
+// TestHandleRegister_ApproveReturns200WithCert_IntermediateCA_IncludesIssuerChain
+// verifies issuer_chain is present and non-empty on the direct-approval registration
+// response when the controller's cert manager is backed by an intermediate CA
+// (Issue #3778). [REQUIRED TEST]
+func TestHandleRegister_ApproveReturns200WithCert_IntermediateCA_IncludesIssuerChain(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestIntermediateCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_approve_intermediate_test",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegister(server, "cfgms_reg_approve_intermediate_test")
+
+	assert.Equal(t, http.StatusOK, rec.Code, "approve decision must return HTTP 200")
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.ClientCert, "client_cert must be present and non-empty on approve")
+	assert.NotEmpty(t, resp.CACert, "ca_cert must be present and non-empty on approve")
+	assert.NotEmpty(t, resp.IssuerChain, "issuer_chain must be present and non-empty when the cert manager is backed by an intermediate CA")
 }
 
 func TestHandleRegister_RejectReturns403(t *testing.T) {
@@ -1129,6 +1205,7 @@ func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
 		assert.NotEmpty(t, body.ClientCert, "client_cert must be present after approval")
 		assert.NotEmpty(t, body.ClientKey, "client_key must be present after approval")
 		assert.NotEmpty(t, body.CACert, "ca_cert must be present after approval")
+		assert.Empty(t, body.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
 
 		// Entry must be persisted as claimed.
 		got, err := pendingStore.GetPendingByID(context.Background(), "pending-lifecycle-1")
@@ -1143,6 +1220,61 @@ func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
 		assert.Equal(t, http.StatusGone, resp.StatusCode,
 			"second poll after claim must return 410 Gone — cert must not be re-issued")
 	})
+}
+
+// TestHandleRegistrationStatus_ClaimIntermediateCA_IncludesIssuerChain verifies
+// issuer_chain is present and non-empty on the claim-poll response (buildClaimResponse)
+// when the controller's cert manager is backed by an intermediate CA (Issue #3778).
+// [REQUIRED TEST]
+func TestHandleRegistrationStatus_ClaimIntermediateCA_IncludesIssuerChain(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestIntermediateCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_intermediate_claim_tok"
+	const tenantID = "test-tenant"
+	require.NoError(t, tokenStore.SaveToken(context.Background(), &registration.Token{
+		Token:         regToken,
+		TenantID:      tenantID,
+		ControllerURL: "grpc://controller:7443",
+		Group:         "prod",
+	}))
+
+	now := time.Now().UTC()
+	require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:    "pending-intermediate-claim-1",
+		StewardID:    "steward-intermediate-claim-1",
+		TenantID:     tenantID,
+		TokenStr:     regToken,
+		SourceIP:     "10.0.0.1",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}))
+	require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+		"pending-intermediate-claim-1", business.PendingRegistrationStatusApproved))
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET",
+		ts.URL+"/api/v1/registration/status/pending-intermediate-claim-1", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+regToken)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var body RegistrationStatusResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, "claimed", body.Status)
+	assert.NotEmpty(t, body.ClientCert)
+	assert.NotEmpty(t, body.IssuerChain, "issuer_chain must be present and non-empty when the cert manager is backed by an intermediate CA")
 }
 
 // TestHandleRegistrationStatus_TenantIsolation verifies that a token from a different tenant

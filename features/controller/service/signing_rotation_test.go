@@ -472,7 +472,7 @@ func TestEnsureStewardCurrent_SignsWithRotatingCertAfterOverlapExpiry(t *testing
 	// once we write a cursor that simulates a completed rotation.
 	initialCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
 	require.NoError(t, err)
-	initialCertPEM, _, err := certMgr.ExportCertificate(initialCert.SerialNumber, false)
+	initialCertPEM, _, err := certMgr.ExportCertificate(initialCert.SerialNumber, false, false)
 	require.NoError(t, err)
 
 	// Build a verifier backed by the initial (rotating) cert to assert the

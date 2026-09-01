@@ -266,6 +266,14 @@ type Certificate struct {
 	// Certificate data in PEM format
 	CertificatePEM []byte
 
+	// IssuerChainPEM is the PEM-concatenated chain from this certificate's direct
+	// issuer up to (but not including) the trusted root, ordered nearest-issuer-first
+	// / root-last (the same leaf-first/root-last convention validator.go's
+	// checkCertificateWarnings position parameter uses). Empty when the issuing CA
+	// is itself the trusted root — true for every certificate issued today, since
+	// nothing populates a CA's own issuerChainPEM before ImportSubordinateCA (S3).
+	IssuerChainPEM []byte
+
 	// Private key data in PEM format (only available for newly generated certificates)
 	PrivateKeyPEM []byte
 

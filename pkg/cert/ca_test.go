@@ -909,3 +909,212 @@ func TestCA_SignSubordinateCA_UninitializedReturnsError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, subCert)
 }
+
+// newRootCAForChainTests builds a self-signed root CA with a path length that
+// permits signing subordinate CAs, for use by the Issue #3778 chain-identity
+// tests below.
+func newRootCAForChainTests(t *testing.T, pathLength int) (*CA, []byte) {
+	t.Helper()
+	caConfig := &CAConfig{
+		Organization:  "Test Root CA",
+		Country:       "US",
+		ValidityDays:  3650,
+		PathLength:    pathLength,
+		PathLengthSet: true,
+	}
+	root, err := NewCA(caConfig)
+	require.NoError(t, err)
+	require.NoError(t, root.Initialize(caConfig))
+
+	rootCertPEM, err := root.GetCACertificate()
+	require.NoError(t, err)
+	return root, rootCertPEM
+}
+
+// signIntermediateForChainTests signs a caller-generated key into a subordinate
+// CA certificate under root, and returns a fully-populated *CA wrapping it —
+// exactly the shape ImportSubordinateCA (S3) will eventually produce by re-loading
+// a previously-signed subordinate's working cert+key, minus the vault plumbing.
+func signIntermediateForChainTests(t *testing.T, root *CA, rootCertPEM []byte, commonName string, pathLength int) *CA {
+	t.Helper()
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := root.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   commonName,
+		Organization: "Test Org",
+		ValidityDays: 3650,
+		PathLength:   pathLength,
+	})
+	require.NoError(t, err)
+
+	subX509Cert, err := ParseCertificateFromPEM(subCert.CertificatePEM)
+	require.NoError(t, err)
+
+	return &CA{
+		certificate: subX509Cert,
+		privateKey:  subKey,
+		config:      &CAConfig{Organization: "Test Org"},
+		initialized: true,
+		// The intermediate's direct issuer chain, up to and including the root:
+		// a single hop away, so it is exactly the root's own certificate.
+		issuerChainPEM: rootCertPEM,
+	}
+}
+
+// TestCA_GetCACertificate_WithIssuerChain_ReturnsTerminalRoot is the direct
+// regression test for the trust-anchor identity bug the security review found:
+// GetCACertificate() must return the ultimate trust root, not ca.certificate's
+// own PEM, once ca.issuerChainPEM is non-empty. [REQUIRED TEST]
+func TestCA_GetCACertificate_WithIssuerChain_ReturnsTerminalRoot(t *testing.T) {
+	root, rootCertPEM := newRootCAForChainTests(t, 1)
+	intermediate := signIntermediateForChainTests(t, root, rootCertPEM, "Test Intermediate CA", 0)
+
+	intermediateOwnCertPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: intermediate.certificate.Raw,
+	})
+
+	got, err := intermediate.GetCACertificate()
+	require.NoError(t, err)
+
+	assert.Equal(t, rootCertPEM, got, "GetCACertificate() on a subordinate CA must return the root, not its own active cert")
+	assert.NotEqual(t, intermediateOwnCertPEM, got, "GetCACertificate() must never return the intermediate's own certificate as the trust anchor")
+}
+
+// TestCA_SignSubordinateCA_IssuedLeafCarriesIntermediateInIssuerChain proves a CA
+// initialized as a subordinate (re-loaded working cert+key, mirroring how S3's
+// ImportSubordinateCA will populate a *CA) signs a leaf whose IssuerChainPEM
+// contains exactly the intermediate's own PEM — not the root, not empty.
+// [REQUIRED TEST]
+func TestCA_SignSubordinateCA_IssuedLeafCarriesIntermediateInIssuerChain(t *testing.T) {
+	root, rootCertPEM := newRootCAForChainTests(t, 1)
+	intermediate := signIntermediateForChainTests(t, root, rootCertPEM, "Test Intermediate CA", 0)
+
+	intermediateOwnCertPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: intermediate.certificate.Raw,
+	})
+
+	leaf, err := intermediate.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, intermediateOwnCertPEM, leaf.IssuerChainPEM,
+		"leaf issued by a subordinate CA must carry exactly the intermediate's own PEM as its issuer chain")
+
+	leafX509, err := ParseCertificateFromPEM(leaf.CertificatePEM)
+	require.NoError(t, err)
+	require.NoError(t, leafX509.CheckSignatureFrom(intermediate.certificate))
+}
+
+// TestCA_IntermediateRotationSurvival is the property ADR-032 actually promises:
+// rotating a region's active intermediate never requires wiping and re-enrolling
+// its already-registered stewards. Two independent sibling intermediates, A and
+// B, are signed from the same root. A leaf is issued from A (the steward's
+// original enrollment) and the steward's trust pool is built from the root
+// alone — exactly what GetCACertificate() now returns — and never touched again.
+// A second, independent leaf is then issued from B (the region rotating its
+// active intermediate for a different device) and must still verify against
+// that untouched root-only pool, using only its own freshly-delivered
+// IssuerChainPEM to bridge to the root. [REQUIRED TEST]
+func TestCA_IntermediateRotationSurvival(t *testing.T) {
+	root, rootCertPEM := newRootCAForChainTests(t, 1)
+	intermediateA := signIntermediateForChainTests(t, root, rootCertPEM, "Region Intermediate A", 0)
+	intermediateB := signIntermediateForChainTests(t, root, rootCertPEM, "Region Intermediate B", 0)
+
+	// Simulate the steward's original enrollment: pin the root-only trust pool
+	// exactly as this story's GetCACertificate() fix delivers it, and never touch
+	// it again for the rest of the test.
+	stewardPool := x509.NewCertPool()
+	require.True(t, stewardPool.AppendCertsFromPEM(rootCertPEM))
+
+	// Original enrollment leaf, issued from intermediate A.
+	leafA, err := intermediateA.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-original",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-original",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Region rotates its active intermediate: a second, independent device
+	// enrolls and is issued a leaf from intermediate B instead.
+	leafB, err := intermediateB.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-post-rotation",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-post-rotation",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// leafA still verifies against the untouched root-only pool using its own
+	// delivered chain (intermediate A) — rotation of B does not disturb A.
+	leafAX509, err := ParseCertificateFromPEM(leafA.CertificatePEM)
+	require.NoError(t, err)
+	intermediatesA := x509.NewCertPool()
+	require.True(t, intermediatesA.AppendCertsFromPEM(leafA.IssuerChainPEM))
+	_, err = leafAX509.Verify(x509.VerifyOptions{
+		Roots:         stewardPool,
+		Intermediates: intermediatesA,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	require.NoError(t, err)
+
+	// leafB — presented with its own IssuerChainPEM (intermediate B) — verifies
+	// against the SAME untouched root-only pool. No reference to A or B's
+	// identity was ever added to stewardPool, and no re-enrollment occurred.
+	leafBX509, err := ParseCertificateFromPEM(leafB.CertificatePEM)
+	require.NoError(t, err)
+	intermediatesB := x509.NewCertPool()
+	require.True(t, intermediatesB.AppendCertsFromPEM(leafB.IssuerChainPEM))
+	_, err = leafBX509.Verify(x509.VerifyOptions{
+		Roots:         stewardPool,
+		Intermediates: intermediatesB,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	require.NoError(t, err, "rotating the region's active intermediate must not require wiping and re-enrolling already-registered stewards")
+}
+
+// TestCA_GetCACertificate_ReversedChainFailsClosed proves the trust-anchor
+// selection itself fails closed, independent of the constructor-level validation
+// in NewManagerFromCAMaterial: a *CA assembled inside the package with a
+// root-FIRST (reversed) issuer chain must return an error rather than publish its
+// terminal entry — an intermediate — as the fleet's permanently-pinned anchor.
+func TestCA_GetCACertificate_ReversedChainFailsClosed(t *testing.T) {
+	root, rootCertPEM := newRootCAForChainTests(t, 1)
+	intermediate := signIntermediateForChainTests(t, root, rootCertPEM, "Test Intermediate CA", 0)
+
+	intermediateOwnCertPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: intermediate.certificate.Raw,
+	})
+
+	// Root-first ordering: the terminal entry is the intermediate, not the root.
+	reversed := &CA{
+		certificate:    intermediate.certificate,
+		privateKey:     intermediate.privateKey,
+		config:         intermediate.config,
+		initialized:    true,
+		issuerChainPEM: append(append([]byte{}, rootCertPEM...), intermediateOwnCertPEM...),
+	}
+
+	got, err := reversed.GetCACertificate()
+	require.Error(t, err, "a reversed issuer chain must not yield a trust anchor")
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "not a self-signed root")
+}
+
+// TestValidateIssuerChain_RejectsGarbagePEM proves non-certificate material
+// supplied as an issuer chain is rejected outright rather than partially parsed.
+func TestValidateIssuerChain_RejectsGarbagePEM(t *testing.T) {
+	root, _ := newRootCAForChainTests(t, 1)
+
+	err := validateIssuerChain(root.certificate, []byte("not a pem block at all"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse issuer chain")
+}

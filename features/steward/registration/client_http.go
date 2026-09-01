@@ -51,6 +51,12 @@ type RegistrationResponse struct {
 	ClientKey  string `json:"client_key,omitempty"`
 	CACert     string `json:"ca_cert,omitempty"`
 
+	// IssuerChain is the PEM-concatenated chain from ClientCert's direct issuer up
+	// to (but not including) CACert (Issue #3778). Empty for a self-hosted,
+	// root-only controller; populated when the controller's cert manager is backed
+	// by an imported regional intermediate.
+	IssuerChain string `json:"issuer_chain,omitempty"`
+
 	// Controller's server certificate for configuration signature verification (Story #315)
 	// Used by steward to verify configurations signed by this controller
 	// In HA clusters, stewards collect and trust certs from all controllers
@@ -74,6 +80,7 @@ type RegistrationStatusResponse struct {
 	ClientCert       string `json:"client_cert,omitempty"`
 	ClientKey        string `json:"client_key,omitempty"`
 	CACert           string `json:"ca_cert,omitempty"`
+	IssuerChain      string `json:"issuer_chain,omitempty"`
 	ServerCert       string `json:"server_cert,omitempty"`
 	SigningCert      string `json:"signing_cert,omitempty"`
 }
@@ -435,15 +442,18 @@ func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, no
 // returns. It is the evidence the fence-ratchet reset verifies before it touches
 // the steward's persisted fence state.
 type enrollmentCertSet struct {
-	stewardID  string
-	clientCert string
-	clientKey  string
-	caCert     string
+	stewardID   string
+	clientCert  string
+	clientKey   string
+	caCert      string
+	issuerChain string
 }
 
 // complete reports whether the response carried a full certificate set. Responses
 // that carry none (a 202 pending registration, a 410 already-claimed poll) are not
-// enrollment completions and never trigger the reset.
+// enrollment completions and never trigger the reset. issuerChain is additive
+// (Issue #3778) and never required: a self-hosted, root-only controller carries
+// none, and that is not a partial set.
 func (s enrollmentCertSet) complete() bool {
 	return s.clientCert != "" && s.clientKey != "" && s.caCert != ""
 }
@@ -451,20 +461,22 @@ func (s enrollmentCertSet) complete() bool {
 // enrollmentCertSet extracts the certificate material from an approved registration.
 func (r *RegistrationResponse) enrollmentCertSet() enrollmentCertSet {
 	return enrollmentCertSet{
-		stewardID:  r.StewardID,
-		clientCert: r.ClientCert,
-		clientKey:  r.ClientKey,
-		caCert:     r.CACert,
+		stewardID:   r.StewardID,
+		clientCert:  r.ClientCert,
+		clientKey:   r.ClientKey,
+		caCert:      r.CACert,
+		issuerChain: r.IssuerChain,
 	}
 }
 
 // enrollmentCertSet extracts the certificate material from a claimed status poll.
 func (r *RegistrationStatusResponse) enrollmentCertSet() enrollmentCertSet {
 	return enrollmentCertSet{
-		stewardID:  r.StewardID,
-		clientCert: r.ClientCert,
-		clientKey:  r.ClientKey,
-		caCert:     r.CACert,
+		stewardID:   r.StewardID,
+		clientCert:  r.ClientCert,
+		clientKey:   r.ClientKey,
+		caCert:      r.CACert,
+		issuerChain: r.IssuerChain,
 	}
 }
 
@@ -474,8 +486,9 @@ func (r *RegistrationStatusResponse) enrollmentCertSet() enrollmentCertSet {
 //
 //  1. The client certificate and private key are a usable pair (the steward can
 //     actually authenticate with what it was handed).
-//  2. The leaf chains to the CA certificate delivered alongside it, is currently
-//     within its validity window, and carries the client-auth EKU.
+//  2. The leaf chains to the CA certificate delivered alongside it — by way of any
+//     delivered issuerChain, when the issuing CA is an intermediate (Issue #3778)
+//     — is currently within its validity window, and carries the client-auth EKU.
 //  3. Nothing is missing — a partial set fails rather than half-verifying.
 //
 // It deliberately does not attempt to prove the CA is a *different* cluster's CA:
@@ -500,10 +513,19 @@ func verifyEnrollmentCertSet(set enrollmentCertSet) error {
 		return fmt.Errorf("build verification pool from enrollment CA certificate: %w", err)
 	}
 
-	if _, err := leaf.Verify(x509.VerifyOptions{
+	verifyOpts := x509.VerifyOptions{
 		Roots:     roots,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}); err != nil {
+	}
+	if set.issuerChain != "" {
+		intermediates, err := cert.CertPoolFromPEM([]byte(set.issuerChain))
+		if err != nil {
+			return fmt.Errorf("build intermediate pool from enrollment issuer chain: %w", err)
+		}
+		verifyOpts.Intermediates = intermediates
+	}
+
+	if _, err := leaf.Verify(verifyOpts); err != nil {
 		return fmt.Errorf("enrollment client certificate does not chain to the enrollment CA: %w", err)
 	}
 

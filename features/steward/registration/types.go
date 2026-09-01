@@ -28,6 +28,7 @@ type RefreshCompleteResponse struct {
 	ClientCert       string `json:"client_cert"`
 	ClientKey        string `json:"client_key"`
 	CACert           string `json:"ca_cert"`
+	IssuerChain      string `json:"issuer_chain,omitempty"`
 	ServerCert       string `json:"server_cert,omitempty"`
 	TransportAddress string `json:"transport_address"`
 }

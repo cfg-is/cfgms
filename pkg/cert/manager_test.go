@@ -491,7 +491,7 @@ func TestManager_ImportExportCertificate(t *testing.T) {
 	require.NoError(t, err)
 
 	// Export the certificate
-	certPEM, keyPEM, err := manager.ExportCertificate(originalCert.SerialNumber, true)
+	certPEM, keyPEM, err := manager.ExportCertificate(originalCert.SerialNumber, true, false)
 	require.NoError(t, err)
 	assert.NotEmpty(t, certPEM)
 	assert.NotEmpty(t, keyPEM)
@@ -822,4 +822,336 @@ func TestNewManagerFromSecretStore_NoCAConfigFails(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CA config required")
+}
+
+// buildIntermediateManagerForTest builds a root manager, signs a one-level-deep
+// subordinate CA from it, and returns a Manager whose active CA identity is that
+// subordinate — the Issue #3778 shape a controller cell backed by an imported
+// regional intermediate has once S3's ImportSubordinateCA lands. Also returns the
+// root CA certificate PEM (what the steward pins as its trust anchor).
+func buildIntermediateManagerForTest(t *testing.T) (intermediate *Manager, rootCertPEM []byte) {
+	t.Helper()
+
+	rootMgr, err := NewManager(&ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization:  "Test Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    1,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+
+	rootCertPEM, err = rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Test Regional Intermediate",
+		Organization: "Test Org",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+
+	subKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(subKey),
+	})
+
+	intermediate, err = NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, subCert.CertificatePEM, subKeyPEM, rootCertPEM)
+	require.NoError(t, err)
+
+	return intermediate, rootCertPEM
+}
+
+// TestManager_GenerateClientCertificate_IntermediateCA_PopulatesIssuerChain
+// proves the chain population plumbs all the way through the Manager, not just
+// the underlying CA (ca_test.go covers the CA-level behavior directly).
+// [REQUIRED TEST]
+func TestManager_GenerateClientCertificate_IntermediateCA_PopulatesIssuerChain(t *testing.T) {
+	intermediate, rootCertPEM := buildIntermediateManagerForTest(t)
+
+	leaf, err := intermediate.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, leaf.IssuerChainPEM, "leaf issued by an intermediate-backed Manager must carry a non-empty issuer chain")
+
+	// The trust anchor returned to callers must be the root, never the
+	// intermediate's own currently-active certificate.
+	anchorPEM, err := intermediate.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, anchorPEM)
+}
+
+// TestManager_GenerateClientCertificate_RootCA_EmptyIssuerChain proves the
+// self-hosted, root-only default is unaffected: a Manager backed by a plain root
+// CA issues certificates with an empty IssuerChainPEM. [REQUIRED TEST]
+func TestManager_GenerateClientCertificate_RootCA_EmptyIssuerChain(t *testing.T) {
+	mgr, err := NewManager(&ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Test CFGMS",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	leaf, err := mgr.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, leaf.IssuerChainPEM, "leaf issued by a root-only Manager must carry no issuer chain")
+}
+
+// TestManager_ExportCertificate_IncludeChain verifies the includeChain parameter
+// appends IssuerChainPEM to the exported PEM only when requested.
+func TestManager_ExportCertificate_IncludeChain(t *testing.T) {
+	intermediate, _ := buildIntermediateManagerForTest(t)
+
+	leaf, err := intermediate.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, leaf.IssuerChainPEM)
+
+	withoutChain, _, err := intermediate.ExportCertificate(leaf.SerialNumber, false, false)
+	require.NoError(t, err)
+	assert.Equal(t, leaf.CertificatePEM, withoutChain)
+
+	withChain, _, err := intermediate.ExportCertificate(leaf.SerialNumber, false, true)
+	require.NoError(t, err)
+	assert.Equal(t, append(append([]byte{}, leaf.CertificatePEM...), leaf.IssuerChainPEM...), withChain)
+}
+
+// twoLevelChainMaterial is a root -> intermediate A -> intermediate B hierarchy,
+// deep enough that chain ORDER is observable: a one-entry chain reads the same
+// forwards and backwards, a two-entry chain does not.
+type twoLevelChainMaterial struct {
+	rootCertPEM []byte // self-signed root, path length 2
+	interACert  []byte // signed by root, path length 1
+	interBCert  []byte // signed by intermediate A, path length 0
+	interBKey   []byte // intermediate B's private key
+}
+
+// buildTwoLevelChainMaterial signs a two-deep subordinate hierarchy off a fresh
+// root and returns the raw PEM material for it, so issuer-chain validation can be
+// exercised with correctly-ordered, reversed, and non-linking chains for the same
+// certificate.
+func buildTwoLevelChainMaterial(t *testing.T) twoLevelChainMaterial {
+	t.Helper()
+
+	rootMgr, err := NewManager(&ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization:  "Test Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    2,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+
+	rootCertPEM, err := rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	keyA, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	certA, err := rootMgr.SignSubordinateCA(&keyA.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Test Intermediate A",
+		Organization: "Test Org",
+		ValidityDays: 3650,
+		PathLength:   1,
+	})
+	require.NoError(t, err)
+	keyAPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(keyA),
+	})
+
+	mgrA, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, certA.CertificatePEM, keyAPEM, rootCertPEM)
+	require.NoError(t, err)
+
+	keyB, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	certB, err := mgrA.SignSubordinateCA(&keyB.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Test Intermediate B",
+		Organization: "Test Org",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+	keyBPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(keyB),
+	})
+
+	return twoLevelChainMaterial{
+		rootCertPEM: rootCertPEM,
+		interACert:  certA.CertificatePEM,
+		interBCert:  certB.CertificatePEM,
+		interBKey:   keyBPEM,
+	}
+}
+
+// TestNewManagerFromCAMaterial_AcceptsCorrectlyOrderedChain is the positive
+// control for the chain validation below: a genuine nearest-issuer-first /
+// root-last chain two levels deep is accepted, and the trust anchor it publishes
+// is the root.
+func TestNewManagerFromCAMaterial_AcceptsCorrectlyOrderedChain(t *testing.T) {
+	m := buildTwoLevelChainMaterial(t)
+
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, m.interBCert, m.interBKey, append(append([]byte{}, m.interACert...), m.rootCertPEM...))
+	require.NoError(t, err)
+
+	anchor, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, m.rootCertPEM, anchor)
+}
+
+// TestNewManagerFromCAMaterial_RejectsReversedChain covers the fail-open case the
+// security review found: the chain convention is root-LAST, the reverse of the
+// conventional PEM bundle order an operator reaches for. Supplied root-first, the
+// terminal entry is the INTERMEDIATE, which every steward would then TOFU-pin
+// permanently as its root. Construction must fail closed instead.
+func TestNewManagerFromCAMaterial_RejectsReversedChain(t *testing.T) {
+	m := buildTwoLevelChainMaterial(t)
+
+	reversed := append(append([]byte{}, m.rootCertPEM...), m.interACert...)
+
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, m.interBCert, m.interBKey, reversed)
+
+	require.Error(t, err, "a root-first (reversed) issuer chain must be rejected, not pinned as the fleet trust anchor")
+	assert.Nil(t, mgr)
+	assert.Contains(t, err.Error(), "issuer chain")
+}
+
+// TestNewManagerFromCAMaterial_RejectsNonLinkingChain proves a chain with a gap
+// is rejected: intermediate B's chain jumps straight to the root, skipping the
+// intermediate A that actually issued it, so the chain does not link even though
+// its terminal entry is a genuine self-signed root.
+func TestNewManagerFromCAMaterial_RejectsNonLinkingChain(t *testing.T) {
+	m := buildTwoLevelChainMaterial(t)
+
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, m.interBCert, m.interBKey, m.rootCertPEM)
+
+	require.Error(t, err, "an issuer chain whose first entry did not issue the CA certificate must be rejected")
+	assert.Nil(t, mgr)
+	assert.Contains(t, err.Error(), "did not issue the CA certificate")
+}
+
+// TestNewManagerFromCAMaterial_RejectsChainTerminatingInIntermediate proves a
+// chain that links correctly but stops short of the root is rejected: its
+// terminal entry is intermediate A, which is not self-signed and must never
+// become the pinned anchor.
+func TestNewManagerFromCAMaterial_RejectsChainTerminatingInIntermediate(t *testing.T) {
+	m := buildTwoLevelChainMaterial(t)
+
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, m.interBCert, m.interBKey, m.interACert)
+
+	require.Error(t, err, "an issuer chain terminating in an intermediate must be rejected")
+	assert.Nil(t, mgr)
+	assert.Contains(t, err.Error(), "not a self-signed root")
+}
+
+// TestNewManagerFromCAMaterial_RejectsUnrelatedChain proves a chain from an
+// entirely different hierarchy — a well-formed, self-signed root that simply did
+// not issue this CA — cannot be substituted in as the trust anchor.
+func TestNewManagerFromCAMaterial_RejectsUnrelatedChain(t *testing.T) {
+	m := buildTwoLevelChainMaterial(t)
+
+	foreignMgr, err := NewManager(&ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Foreign Root",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.NoError(t, err)
+	foreignRootPEM, err := foreignMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, m.interBCert, m.interBKey, foreignRootPEM)
+
+	require.Error(t, err, "an issuer chain from an unrelated hierarchy must be rejected")
+	assert.Nil(t, mgr)
+	assert.Contains(t, err.Error(), "did not issue the CA certificate")
+}
+
+// TestNewManagerFromCAMaterial_RejectsSubordinateWithEmptyChain proves the
+// omitted-chain case fails closed too: an empty chain declares the supplied
+// certificate to be the trust anchor itself, which is only true of a self-signed
+// root. A subordinate passed with no chain would otherwise publish itself as the
+// fleet anchor.
+func TestNewManagerFromCAMaterial_RejectsSubordinateWithEmptyChain(t *testing.T) {
+	m := buildTwoLevelChainMaterial(t)
+
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, m.interBCert, m.interBKey, nil)
+
+	require.Error(t, err, "a subordinate CA supplied without an issuer chain must be rejected")
+	assert.Nil(t, mgr)
+	assert.Contains(t, err.Error(), "not self-signed")
+}
+
+// TestNewManagerFromCAMaterial_AcceptsSelfSignedRootWithEmptyChain is the
+// positive control for the empty-chain rule: the root-only, self-hosted default
+// still constructs and publishes its own certificate as the anchor.
+func TestNewManagerFromCAMaterial_AcceptsSelfSignedRootWithEmptyChain(t *testing.T) {
+	rootDir := t.TempDir()
+	rootMgr, err := NewManager(&ManagerConfig{
+		StoragePath: rootDir,
+		CAConfig: &CAConfig{
+			Organization: "Test Root",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.NoError(t, err)
+	rootCertPEM, err := rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	rootKeyPEM, err := os.ReadFile(filepath.Join(rootDir, "ca", "ca.key"))
+	require.NoError(t, err)
+
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, rootCertPEM, rootKeyPEM, nil)
+	require.NoError(t, err)
+
+	anchor, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, anchor)
 }

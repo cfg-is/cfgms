@@ -83,6 +83,7 @@ type RefreshCompleteResponse struct {
 	ClientCert  string `json:"client_cert,omitempty"`
 	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
+	IssuerChain string `json:"issuer_chain,omitempty"` // Issue #3778: chain from ClientCert's direct issuer up to (not including) CACert
 	SigningCert string `json:"signing_cert,omitempty"`
 	ServerCert  string `json:"server_cert,omitempty"` // same value as signing_cert; matches initial registration response field name
 }
@@ -540,10 +541,11 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 	}
 
 	resp := &RefreshCompleteResponse{
-		Status:     "approved",
-		ClientCert: string(clientCert.CertificatePEM),
-		ClientKey:  string(clientCert.PrivateKeyPEM),
-		CACert:     string(caCert),
+		Status:      "approved",
+		ClientCert:  string(clientCert.CertificatePEM),
+		ClientKey:   string(clientCert.PrivateKeyPEM),
+		CACert:      string(caCert),
+		IssuerChain: string(clientCert.IssuerChainPEM),
 	}
 
 	if signingCertPEM, sigErr := s.certManager.GetSigningCertificate(); sigErr == nil && len(signingCertPEM) > 0 {
@@ -592,6 +594,7 @@ type AdminRefreshApproveResponse struct {
 	ClientCert  string `json:"client_cert,omitempty"`
 	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
+	IssuerChain string `json:"issuer_chain,omitempty"`
 	SigningCert string `json:"signing_cert,omitempty"`
 }
 
@@ -825,6 +828,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		ClientCert:  certResp.ClientCert,
 		ClientKey:   certResp.ClientKey,
 		CACert:      certResp.CACert,
+		IssuerChain: certResp.IssuerChain,
 		SigningCert: certResp.SigningCert,
 	}); err != nil {
 		s.logger.Error("Failed to encode approve response", "error", logging.SanitizeLogValue(err.Error()))
