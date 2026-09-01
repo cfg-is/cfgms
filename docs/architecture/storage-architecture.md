@@ -474,9 +474,36 @@ copy of the record (a steward only ever writes its own execution status).
   database transaction — every record commits, or none do. `handleConfigPush`
   uses this so a fan-out to N stewards produces one durable fact (all N
   delivery rows), never a partial set silently missing some stewards.
-- `ListPendingDeliveries(ctx, stewardID)` returns every record targeting a
-  steward whose `DeliveryStatus` is still `pending` — the set a steward drains
-  on reconnect. Delivery to an offline endpoint is deferred, never lost.
+- `CreatePushAndCommandRecords(ctx, push, records)` extends that batch
+  transaction to also write `push` (the `PushRecord` — the "config write") in
+  the same commit: ADR-031 Decision 2's "a command/notification row commits in
+  the same transaction as the state change that requires it." This is possible
+  because `PushRecord` and `CommandRecord` are both persisted by the same SQL
+  storage tier (the `database`/`sqlite` providers each open their own
+  connection pool, but both point at the same physical database, so a
+  transaction opened by either can write either table). Writes that live in a
+  genuinely different pluggable provider — e.g. the entity-graph desired-state
+  observation `handleConfigPush` also records — remain outside this seam and
+  stay best-effort by design; central-provider pluggability means a SQL
+  transaction cannot in general span an arbitrary second backend (the entity
+  graph, or a git-backed `ConfigStore`), so the outbox's joint-commit guarantee
+  is scoped to writes that share its own SQL tier. `handleConfigPush` passes
+  `push` (nil when no `PushStore` is configured) and the per-steward delivery
+  `records` (empty when no steward matched) to this single call instead of two
+  independently-committing writes.
+- `ListPendingDeliveries(ctx, stewardID, stewardTenant)` returns every record
+  targeting a steward whose `DeliveryStatus` is still `pending` — the set a
+  steward drains on reconnect. Delivery to an offline endpoint is deferred,
+  never lost. `stewardTenant` is mandatory and implementations must apply it in
+  the query: results are limited to records stamped with the steward's current
+  tenant or one of its ancestors (`business.TenantPathChain`), the only tenants
+  a subtree push targeting that steward can have been issued under. `steward_id`
+  alone is not a tenant boundary — the binding is mutable (steward move), so
+  rows written under a previous tenant stay attached to the same `steward_id`,
+  and neither backend compensates (the Postgres read path does not set
+  `app.current_tenant`, whose absence makes the `command_records` SELECT policy
+  permissive; SQLite has no RLS). An empty `stewardTenant` is refused with
+  `ErrCommandTenantIDRequired` rather than widening the query.
 - **Startup sweep — inverted under ADR-031 Decision 2.** Previously, restarting
   `features/steward/commands.Handler` with a configured `CommandStore` flipped
   *every* `executing` record to `failed` with error `"controller_restart"`,

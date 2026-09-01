@@ -105,6 +105,15 @@ func (s *Server) handleGetCommandRecord(w http.ResponseWriter, r *http.Request) 
 // outside the steward's tenant subtree gets 404, not the pending-deliveries
 // list, so this read surface cannot be used to probe cross-tenant delivery
 // state by steward ID.
+//
+// Authorizing on the steward is not sufficient on its own, because a steward's
+// tenant binding is mutable (POST /api/v1/stewards/{id}/move, Issue #2341):
+// records written while the steward lived in a previous tenant keep that
+// tenant_id but stay attached to the same steward_id, and CommandRecordResponse
+// exposes tenant_id and issued_by. So the read is also scoped by tenant —
+// stewardTenant plus its ancestors, the only tenants that can legitimately have
+// targeted the steward where it lives now — in the store query, and each returned
+// record is re-checked against that same chain below.
 func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Request) {
 	if s.commandStore == nil {
 		s.respondError(w, http.StatusServiceUnavailable, "command store not available")
@@ -123,8 +132,12 @@ func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// A steward whose tenant is unresolvable cannot be tenant-scoped, and the
+	// controller service never records one (it skips devices with no resolvable
+	// tenant rather than fabricating an empty one, Issue #2008). Refuse rather
+	// than fall back to an unscoped read.
 	stewardTenant, found := s.resolveStewardTenant(stewardID)
-	if !found {
+	if !found || stewardTenant == "" {
 		s.respondError(w, http.StatusNotFound, "steward not found")
 		return
 	}
@@ -135,7 +148,7 @@ func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	records, err := s.commandStore.ListPendingDeliveries(r.Context(), stewardID)
+	records, err := s.commandStore.ListPendingDeliveries(r.Context(), stewardID, stewardTenant)
 	if err != nil {
 		s.logger.Error("Failed to list pending deliveries",
 			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
@@ -143,8 +156,24 @@ func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Re-check every record against the steward's tenant chain. CommandStore is a
+	// pluggable seam, so the query-level filter is the first line of defence, not
+	// the only one: a record stamped with any other tenant (e.g. one written
+	// before the steward was moved) never reaches the response body.
+	allowedTenants := make(map[string]struct{}, 4)
+	for _, tenant := range business.TenantPathChain(stewardTenant) {
+		allowedTenants[tenant] = struct{}{}
+	}
+
 	out := make([]*CommandRecordResponse, 0, len(records))
 	for _, rec := range records {
+		if _, ok := allowedTenants[rec.TenantID]; !ok {
+			s.logger.Warn("Dropping pending delivery outside the steward's tenant chain",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"steward_tenant", logging.SanitizeLogValue(stewardTenant),
+				"record_tenant", logging.SanitizeLogValue(rec.TenantID))
+			continue
+		}
 		out = append(out, commandRecordToResponse(rec))
 	}
 

@@ -297,7 +297,7 @@ func (h *Handler) sweepStaleExecutingCommands(ctx context.Context) error {
 	for _, cmd := range executing {
 		if cmd.StartedAt != nil && now.Sub(*cmd.StartedAt) < h.executingRestartTimeout {
 			// Started recently enough that this may be a fast restart mid-attempt
-			// rather than a genuinely abandoned command; leave it for now.
+			// rather than a genuinely abandoned command; a later sweep re-evaluates it.
 			continue
 		}
 		if err := h.store.UpdateCommandStatus(ctx, cmd.ID,

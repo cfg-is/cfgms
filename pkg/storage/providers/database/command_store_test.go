@@ -71,7 +71,7 @@ func TestDatabaseCommandStore_ListPendingDeliveries(t *testing.T) {
 	require.NoError(t, store.CreateCommandRecord(ctx, r2))
 	require.NoError(t, store.UpdateDeliveryStatus(ctx, "pd-db-1", business.DeliveryStatusDelivered, ""))
 
-	pending, err := store.ListPendingDeliveries(ctx, "sw-pd-db")
+	pending, err := store.ListPendingDeliveries(ctx, "sw-pd-db", "tenant-pd-db")
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, "pd-db-2", pending[0].ID)
@@ -80,8 +80,46 @@ func TestDatabaseCommandStore_ListPendingDeliveries(t *testing.T) {
 func TestDatabaseCommandStore_ListPendingDeliveries_EmptyStewardID(t *testing.T) {
 	store := newTestCommandStore(t)
 	ctx := context.Background()
-	_, err := store.ListPendingDeliveries(ctx, "")
+	_, err := store.ListPendingDeliveries(ctx, "", "tenant-pd-db")
 	require.Error(t, err)
+}
+
+// TestDatabaseCommandStore_ListPendingDeliveries_EmptyTenantFailsClosed proves
+// the tenant argument is mandatory rather than an optional narrowing.
+func TestDatabaseCommandStore_ListPendingDeliveries_EmptyTenantFailsClosed(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+	_, err := store.ListPendingDeliveries(ctx, "sw-pd-db", "")
+	require.ErrorIs(t, err, business.ErrCommandTenantIDRequired)
+}
+
+// TestDatabaseCommandStore_ListPendingDeliveries_TenantScoped proves the query
+// filters on tenant_id as well as steward_id. RLS does not cover this read — it
+// runs without setTenantLocal and the SELECT policy is permissive when
+// app.current_tenant is unset — so a row left behind by a previous tenant
+// binding (Issue #2341) would otherwise be returned to the steward's new tenant.
+// Records stamped with an ancestor of the steward's tenant (subtree pushes) must
+// still drain.
+func TestDatabaseCommandStore_ListPendingDeliveries_TenantScoped(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	own := makeSampleCommand("pd-scope-own", "sw-pd-scope", "root/msp-a/client-1")
+	ancestor := makeSampleCommand("pd-scope-ancestor", "sw-pd-scope", "root/msp-a")
+	foreign := makeSampleCommand("pd-scope-foreign", "sw-pd-scope", "root/msp-b/client-9")
+	for _, rec := range []*business.CommandRecord{own, ancestor, foreign} {
+		require.NoError(t, store.CreateCommandRecord(ctx, rec))
+	}
+
+	pending, err := store.ListPendingDeliveries(ctx, "sw-pd-scope", "root/msp-a/client-1")
+	require.NoError(t, err)
+
+	ids := make([]string, 0, len(pending))
+	for _, rec := range pending {
+		ids = append(ids, rec.ID)
+	}
+	assert.ElementsMatch(t, []string{"pd-scope-own", "pd-scope-ancestor"}, ids,
+		"a record stamped with another tenant is never returned for this steward")
 }
 
 // TestDatabaseCommandStore_CreateCommandRecords_Atomic proves the batch create
@@ -129,6 +167,90 @@ func TestDatabaseCommandStore_CreateCommandRecords_Success(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus)
 	}
+}
+
+// testPushRecordForCommandStore returns a minimal PushRecord for
+// CreatePushAndCommandRecords tests.
+func testPushRecordForCommandStore(id string) *business.PushRecord {
+	return &business.PushRecord{
+		ID:       id,
+		ConfigID: "cfg-atomic",
+		TenantID: "tenant-atomic",
+		Version:  "v1",
+		Status:   business.PushStatusInProgress,
+	}
+}
+
+// TestDatabaseCommandStore_CreatePushAndCommandRecords_Atomic proves the seam
+// handleConfigPush uses (Issue #3757, ADR-031 Decision 2 required test): the
+// push record (the "config write") and its per-steward delivery rows commit or
+// roll back together as one transaction, not as two independently-committing
+// writes. Both failure directions are exercised: a delivery-row failure must
+// roll back the push, and a push-row failure must roll back the deliveries.
+func TestDatabaseCommandStore_CreatePushAndCommandRecords_Atomic(t *testing.T) {
+	t.Run("delivery row failure rolls back the push record", func(t *testing.T) {
+		store := newTestCommandStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.CreateCommandRecord(ctx, makeSampleCommand("push-fail-cmd-1", "sw-atomic", "tenant-atomic")))
+
+		push := testPushRecordForCommandStore("push-rollback-1")
+		records := []*business.CommandRecord{
+			makeSampleCommand("push-fail-cmd-1", "sw-atomic", "tenant-atomic"), // duplicate — must fail the whole tx
+		}
+
+		err := store.CreatePushAndCommandRecords(ctx, push, records)
+		require.Error(t, err, "a failing delivery row must fail the whole call")
+
+		pushStore := &DatabasePushStore{db: store.db}
+		_, getErr := pushStore.GetPush(ctx, "push-rollback-1")
+		assert.ErrorIs(t, getErr, business.ErrPushNotFound,
+			"the push record must not survive a batch whose delivery rows rolled back")
+	})
+
+	t.Run("push row failure rolls back the delivery records", func(t *testing.T) {
+		store := newTestCommandStore(t)
+		ctx := context.Background()
+
+		pushStore := &DatabasePushStore{db: store.db}
+		require.NoError(t, pushStore.CreatePush(ctx, testPushRecordForCommandStore("push-collide-1")))
+
+		push := testPushRecordForCommandStore("push-collide-1") // duplicate ID — must fail
+		records := []*business.CommandRecord{
+			makeSampleCommand("push-fail-cmd-2", "sw-atomic", "tenant-atomic"),
+		}
+
+		err := store.CreatePushAndCommandRecords(ctx, push, records)
+		require.Error(t, err, "a failing push row must fail the whole call")
+
+		_, getErr := store.GetCommandRecord(ctx, "push-fail-cmd-2")
+		assert.ErrorIs(t, getErr, business.ErrCommandNotFound,
+			"delivery rows must not survive a batch whose push row rolled back")
+	})
+
+	t.Run("push record and delivery rows commit together", func(t *testing.T) {
+		store := newTestCommandStore(t)
+		ctx := context.Background()
+
+		push := testPushRecordForCommandStore("push-success-1")
+		records := []*business.CommandRecord{
+			makeSampleCommand("push-success-cmd-1", "sw-atomic", "tenant-atomic"),
+			makeSampleCommand("push-success-cmd-2", "sw-atomic", "tenant-atomic"),
+		}
+
+		require.NoError(t, store.CreatePushAndCommandRecords(ctx, push, records))
+
+		pushStore := &DatabasePushStore{db: store.db}
+		gotPush, err := pushStore.GetPush(ctx, "push-success-1")
+		require.NoError(t, err)
+		assert.Equal(t, business.PushStatusInProgress, gotPush.Status)
+
+		for _, id := range []string{"push-success-cmd-1", "push-success-cmd-2"} {
+			got, err := store.GetCommandRecord(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus)
+		}
+	})
 }
 
 // TestDatabaseCommandStore_PendingSurvivesRestart proves a pending delivery row

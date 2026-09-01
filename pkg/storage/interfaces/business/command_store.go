@@ -5,6 +5,7 @@ package business
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -105,6 +106,22 @@ type CommandStore interface {
 	// record follows the same defaulting rules as CreateCommandRecord.
 	CreateCommandRecords(ctx context.Context, records []*CommandRecord) error
 
+	// CreatePushAndCommandRecords atomically creates a PushRecord (the "config
+	// write") together with its batch of per-steward delivery records in a
+	// single transaction: the push and every delivery row commit together, or
+	// none do (Issue #3757, ADR-031 Decision 2 — "a command/notification row
+	// commits in the same transaction as the state change that requires it").
+	// push may be nil when the caller has no PushRecord to persist for this
+	// batch (only the delivery rows commit, per CreateCommandRecords' rules);
+	// records may be empty when push should be persisted with no targeted
+	// stewards. This is the transactional-CommandStore seam handlers_push.go
+	// uses instead of the separate, independently-committing PushStore.CreatePush
+	// + CreateCommandRecords calls it replaces — both writes share the same
+	// SQL storage tier (PushRecord and CommandRecord are both backed by the
+	// database/sqlite providers), which is what makes one shared transaction
+	// possible without crossing a pluggable-provider boundary.
+	CreatePushAndCommandRecords(ctx context.Context, push *PushRecord, records []*CommandRecord) error
+
 	// UpdateCommandStatus transitions a command to a new status.
 	// result is serialised to JSON and stored in the result column.
 	// A corresponding transition entry is appended to the audit trail.
@@ -123,7 +140,24 @@ type CommandStore interface {
 	// this on reconnect to drain any delivery that was queued while it was
 	// unreachable — the row survived any controller restart in the interim, so
 	// nothing queued for it is ever silently lost.
-	ListPendingDeliveries(ctx context.Context, stewardID string) ([]*CommandRecord, error)
+	//
+	// stewardTenant is the steward's CURRENT tenant path and is mandatory:
+	// implementations must restrict the result to records whose TenantID is that
+	// tenant or one of its ancestors (TenantPathChain) — the only tenants that can
+	// legitimately have targeted a steward living there, since a push fans out over
+	// a tenant subtree. steward_id alone is not a tenant boundary: the binding is
+	// mutable (POST /api/v1/stewards/{id}/move, Issue #2341), so rows written under
+	// a previous tenant keep that tenant_id while staying attached to the same
+	// steward_id, and an unfiltered read hands the previous tenant's path and the
+	// issuing operator's principal ID to a caller in the new tenant.
+	//
+	// The filter belongs in the query itself — neither SQL backend has a
+	// compensating control (the Postgres read path does not set app.current_tenant,
+	// and its command_records SELECT policy is permissive when that setting is
+	// unset; SQLite has no row-level security at all). Returns
+	// ErrCommandTenantIDRequired when stewardTenant is empty: an unscoped read of
+	// this set is never correct.
+	ListPendingDeliveries(ctx context.Context, stewardID, stewardTenant string) ([]*CommandRecord, error)
 
 	// GetCommandRecord retrieves the current state of a command by ID.
 	GetCommandRecord(ctx context.Context, id string) (*CommandRecord, error)
@@ -171,7 +205,44 @@ var (
 		Message: "steward ID is required",
 		Code:    "COMMAND_STEWARD_ID_REQUIRED",
 	}
+	// ErrCommandTenantIDRequired is returned by tenant-scoped reads (currently
+	// ListPendingDeliveries) when the caller supplies no tenant. Those reads fail
+	// closed rather than degrading to an unscoped query across every tenant's
+	// records.
+	ErrCommandTenantIDRequired = &CommandValidationError{
+		Field:   "tenant_id",
+		Message: "tenant ID is required",
+		Code:    "COMMAND_TENANT_ID_REQUIRED",
+	}
 )
+
+// TenantPathChain returns tenantID followed by each of its ancestor tenant paths,
+// leaf first: "root/msp-a/client-1" yields
+// ["root/msp-a/client-1", "root/msp-a", "root"].
+//
+// It is the exact set of tenants a command record may carry while legitimately
+// targeting a steward that lives in tenantID. Pushes fan out over a tenant
+// subtree (handleConfigPush scopes to the config's tenant and all descendants)
+// and stamp the record with the issuing config's tenant, so a record aimed at
+// this steward is stamped with the steward's own tenant or one of its ancestors —
+// never a sibling tenant, and never a tenant the steward has since been moved out
+// of. An empty tenantID yields an empty chain, so a caller that passes one
+// matches nothing rather than everything.
+func TenantPathChain(tenantID string) []string {
+	if tenantID == "" {
+		return nil
+	}
+	chain := []string{tenantID}
+	for parent := tenantID; ; {
+		idx := strings.LastIndex(parent, "/")
+		if idx <= 0 {
+			break
+		}
+		parent = parent[:idx]
+		chain = append(chain, parent)
+	}
+	return chain
+}
 
 // CommandValidationError represents a validation failure for CommandStore operations.
 type CommandValidationError struct {

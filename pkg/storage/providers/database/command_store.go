@@ -65,7 +65,14 @@ func (s *DatabaseCommandStore) initializeSchema() error {
 	if err := schemas.BackfillCommandRecordsDeliveryStatus(ctx, s.db); err != nil {
 		return err
 	}
-	return schemas.CreateCommandTransitionsTable(ctx, s.db)
+	if err := schemas.CreateCommandTransitionsTable(ctx, s.db); err != nil {
+		return err
+	}
+	// CreatePushAndCommandRecords (Issue #3757) writes cfgms_push_records rows
+	// through this store's own transaction, so that table must exist regardless
+	// of whether a DatabasePushStore has been constructed on this connection
+	// yet. CREATE TABLE IF NOT EXISTS makes this safe to run from both stores.
+	return schemas.CreatePushRecordsTable(ctx, s.db)
 }
 
 // Close releases the database connection.
@@ -159,6 +166,69 @@ func (s *DatabaseCommandStore) CreateCommandRecords(ctx context.Context, records
 		}
 		if err := dbInsertCommandRecord(ctx, tx, record, now); err != nil {
 			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// CreatePushAndCommandRecords atomically creates push (the "config write") and
+// records (the per-steward delivery rows it requires) in a single transaction:
+// both commit together, or neither does (Issue #3757, ADR-031 Decision 2). push
+// may be nil (only the delivery rows are written); records may be empty (only
+// the push row is written). This is the seam handleConfigPush uses so the
+// desired-state push record and its outbox rows are one commit instead of two
+// independently-committing writes.
+func (s *DatabaseCommandStore) CreatePushAndCommandRecords(ctx context.Context, push *business.PushRecord, records []*business.CommandRecord) error {
+	if push == nil && len(records) == 0 {
+		return nil
+	}
+	var tenantID string
+	for _, r := range records {
+		if r == nil {
+			return fmt.Errorf("database: command record cannot be nil")
+		}
+		if r.ID == "" {
+			return business.ErrCommandIDRequired
+		}
+		if r.StewardID == "" {
+			return business.ErrCommandStewardIDRequired
+		}
+		tenantID = r.TenantID
+	}
+	if tenantID == "" && push != nil {
+		tenantID = push.TenantID
+	}
+
+	now := time.Now().UTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin push+command tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if push != nil {
+		if err := dbInsertPushRecord(ctx, tx, push); err != nil {
+			return err
+		}
+	}
+
+	if len(records) > 0 {
+		if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+			return fmt.Errorf("database: failed to set tenant context: %w", err)
+		}
+		for _, record := range records {
+			if record.IssuedAt.IsZero() {
+				record.IssuedAt = now
+			}
+			record.Status = business.CommandStatusPending
+			if record.DeliveryStatus == "" {
+				record.DeliveryStatus = business.DeliveryStatusPending
+			}
+			if err := dbInsertCommandRecord(ctx, tx, record, now); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -311,17 +381,35 @@ func (s *DatabaseCommandStore) UpdateDeliveryStatus(
 // ListPendingDeliveries returns every command record targeting stewardID whose
 // DeliveryStatus is still pending (Issue #3757) — the set a steward drains on
 // reconnect.
-func (s *DatabaseCommandStore) ListPendingDeliveries(ctx context.Context, stewardID string) ([]*business.CommandRecord, error) {
+//
+// The query is scoped to stewardTenant and its ancestor tenants as well as to
+// steward_id. steward_id on its own is not a tenant boundary: a steward can be
+// moved between tenants (Issue #2341) while its older rows keep the tenant_id
+// they were written under. RLS does not compensate here — this read path runs
+// without setTenantLocal, and the command_records SELECT policy is permissive
+// when app.current_tenant is unset.
+func (s *DatabaseCommandStore) ListPendingDeliveries(ctx context.Context, stewardID, stewardTenant string) ([]*business.CommandRecord, error) {
 	if stewardID == "" {
 		return nil, business.ErrCommandStewardIDRequired
 	}
+	if stewardTenant == "" {
+		return nil, business.ErrCommandTenantIDRequired
+	}
+
+	// The tenant predicate is a fixed statement with bound parameters — no
+	// generated fragment, so nothing about the tenant path reaches the SQL text.
+	// It matches business.TenantPathChain exactly: the record's own tenant, or an
+	// ancestor of it, tested by prefix equality against the separator rather than
+	// LIKE (a tenant path containing % or _ would otherwise widen the match).
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, type, steward_id, tenant_id, payload, status,
 		       issued_at, started_at, completed_at, result, error_message, issued_by,
 		       delivery_status, delivery_detail
 		FROM command_records
 		WHERE steward_id = $1 AND delivery_status = $2
-		ORDER BY issued_at ASC`, stewardID, string(business.DeliveryStatusPending))
+		  AND (tenant_id = $3 OR substr($3::text, 1, length(tenant_id) + 1) = tenant_id || '/')
+		ORDER BY issued_at ASC`,
+		stewardID, string(business.DeliveryStatusPending), stewardTenant)
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to list pending deliveries for %s: %w", stewardID, err)
 	}

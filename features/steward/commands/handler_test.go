@@ -122,6 +122,14 @@ func (m *memCommandStore) CreateCommandRecords(ctx context.Context, records []*b
 	return nil
 }
 
+// CreatePushAndCommandRecords ignores push — this test double backs the
+// steward-side command handler tests, which never read PushRecord state — and
+// otherwise delegates to CreateCommandRecords for identical atomic-batch
+// semantics.
+func (m *memCommandStore) CreatePushAndCommandRecords(ctx context.Context, _ *business.PushRecord, records []*business.CommandRecord) error {
+	return m.CreateCommandRecords(ctx, records)
+}
+
 func (m *memCommandStore) UpdateDeliveryStatus(_ context.Context, id string, status business.DeliveryStatus, detail string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -134,11 +142,28 @@ func (m *memCommandStore) UpdateDeliveryStatus(_ context.Context, id string, sta
 	return nil
 }
 
-func (m *memCommandStore) ListPendingDeliveries(_ context.Context, stewardID string) ([]*business.CommandRecord, error) {
+// ListPendingDeliveries mirrors the contract's tenant scoping: results are
+// limited to records stamped with stewardTenant or one of its ancestors, so a
+// record left behind by a previous tenant binding is not returned.
+func (m *memCommandStore) ListPendingDeliveries(_ context.Context, stewardID, stewardTenant string) ([]*business.CommandRecord, error) {
+	if stewardID == "" {
+		return nil, business.ErrCommandStewardIDRequired
+	}
+	if stewardTenant == "" {
+		return nil, business.ErrCommandTenantIDRequired
+	}
+	allowed := make(map[string]struct{})
+	for _, tenant := range business.TenantPathChain(stewardTenant) {
+		allowed[tenant] = struct{}{}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []*business.CommandRecord
 	for _, rec := range m.records {
+		if _, ok := allowed[rec.TenantID]; !ok {
+			continue
+		}
 		if rec.StewardID == stewardID && rec.DeliveryStatus == business.DeliveryStatusPending {
 			cp := *rec
 			out = append(out, &cp)

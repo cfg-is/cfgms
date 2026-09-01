@@ -931,14 +931,14 @@ func TestBackfillCommandDeliveryColumns_LegacyTable(t *testing.T) {
 	// The migrated table must actually be usable by the live outbox paths — a
 	// column that exists but carries the wrong name or affinity would still
 	// break dispatch after a successful startup.
-	pending, err := store.ListPendingDeliveries(ctx, "steward-legacy")
+	pending, err := store.ListPendingDeliveries(ctx, "steward-legacy", "tenant-legacy")
 	require.NoError(t, err)
 	require.Len(t, pending, 1, "the legacy row must be drainable on reconnect")
 	assert.Equal(t, "cmd-legacy", pending[0].ID)
 
 	require.NoError(t, store.UpdateDeliveryStatus(ctx, "cmd-legacy", business.DeliveryStatusDelivered, ""),
 		"back-filled table must accept a delivery transition")
-	drained, err := store.ListPendingDeliveries(ctx, "steward-legacy")
+	drained, err := store.ListPendingDeliveries(ctx, "steward-legacy", "tenant-legacy")
 	require.NoError(t, err)
 	assert.Empty(t, drained, "a delivered row must leave the pending set")
 

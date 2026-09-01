@@ -111,6 +111,57 @@ func (s *SQLiteCommandStore) CreateCommandRecords(ctx context.Context, records [
 	return tx.Commit()
 }
 
+// CreatePushAndCommandRecords atomically creates push (the "config write") and
+// records (the per-steward delivery rows it requires) in a single transaction:
+// both commit together, or neither does (Issue #3757, ADR-031 Decision 2). push
+// may be nil (only the delivery rows are written); records may be empty (only
+// the push row is written).
+func (s *SQLiteCommandStore) CreatePushAndCommandRecords(ctx context.Context, push *business.PushRecord, records []*business.CommandRecord) error {
+	if push == nil && len(records) == 0 {
+		return nil
+	}
+	for _, r := range records {
+		if r == nil {
+			return fmt.Errorf("sqlite: command record cannot be nil")
+		}
+		if r.ID == "" {
+			return business.ErrCommandIDRequired
+		}
+		if r.StewardID == "" {
+			return business.ErrCommandStewardIDRequired
+		}
+	}
+
+	now := nowUTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to begin push+command tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if push != nil {
+		if err := sqliteInsertPushRecord(ctx, tx, push); err != nil {
+			return err
+		}
+	}
+
+	for _, record := range records {
+		if record.IssuedAt.IsZero() {
+			record.IssuedAt = now
+		}
+		record.Status = business.CommandStatusPending
+		if record.DeliveryStatus == "" {
+			record.DeliveryStatus = business.DeliveryStatusPending
+		}
+		if err := sqliteInsertCommandRecord(ctx, tx, record, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // sqliteInsertCommandRecord inserts a single commands row plus its initial
 // pending transition within tx. Shared by CreateCommandRecord and
 // CreateCommandRecords so both paths persist identically.
@@ -246,18 +297,33 @@ func (s *SQLiteCommandStore) UpdateDeliveryStatus(
 // ListPendingDeliveries returns every command record targeting stewardID whose
 // DeliveryStatus is still pending (Issue #3757) — the set a steward drains on
 // reconnect.
-func (s *SQLiteCommandStore) ListPendingDeliveries(ctx context.Context, stewardID string) ([]*business.CommandRecord, error) {
+//
+// The query is scoped to stewardTenant and its ancestor tenants as well as to
+// steward_id. steward_id on its own is not a tenant boundary: a steward can be
+// moved between tenants (Issue #2341) while its older rows keep the tenant_id
+// they were written under, and SQLite has no row-level security to compensate.
+func (s *SQLiteCommandStore) ListPendingDeliveries(ctx context.Context, stewardID, stewardTenant string) ([]*business.CommandRecord, error) {
 	if stewardID == "" {
 		return nil, business.ErrCommandStewardIDRequired
 	}
+	if stewardTenant == "" {
+		return nil, business.ErrCommandTenantIDRequired
+	}
 
+	// The tenant predicate is a fixed statement with bound parameters — no
+	// generated fragment, so nothing about the tenant path reaches the SQL text.
+	// It matches business.TenantPathChain exactly: the record's own tenant, or an
+	// ancestor of it, tested by prefix equality against the separator rather than
+	// LIKE (a tenant path containing % or _ would otherwise widen the match).
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, type, steward_id, tenant_id, payload, status,
 		       issued_at, started_at, completed_at, result, error_message, issued_by,
 		       delivery_status, delivery_detail
 		FROM commands
 		WHERE steward_id = ? AND delivery_status = ?
-		ORDER BY issued_at ASC`, stewardID, string(business.DeliveryStatusPending))
+		  AND (tenant_id = ? OR substr(?, 1, length(tenant_id) + 1) = tenant_id || '/')
+		ORDER BY issued_at ASC`,
+		stewardID, string(business.DeliveryStatusPending), stewardTenant, stewardTenant)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to list pending deliveries for %s: %w", stewardID, err)
 	}

@@ -188,12 +188,20 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 
 	s.emitConfigPushAudit(r, cfg.TenantID, cfg.ConfigID, pushID)
 
-	// Durably record the push intent before fan-out begins so that an HA leader
-	// failover can replay any push that was interrupted mid-delivery.
+	// Build the push record (the "config write") up front. It is persisted
+	// below in the same transaction as the per-steward delivery rows it
+	// requires (Issue #3757, ADR-031 Decision 2: "config write + notify
+	// steward X are atomic") whenever a commandStore is configured — a
+	// controller crash between the two can no longer leave a push recorded
+	// with no trace that stewards were ever owed it, or delivery rows with no
+	// corresponding push.
+	var pushRecord *business.PushRecord
 	if s.pushStore != nil {
 		pushData, marshalErr := json.Marshal(&cfg)
-		if marshalErr == nil {
-			record := &business.PushRecord{
+		if marshalErr != nil {
+			s.logger.Warn("Failed to marshal push payload for persistence", "error", logging.SanitizeLogValue(marshalErr.Error()), "push_id", pushID)
+		} else {
+			pushRecord = &business.PushRecord{
 				ID:        pushID,
 				ConfigID:  cfg.ConfigID,
 				TenantID:  cfg.TenantID,
@@ -203,15 +211,10 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 				CreatedAt: queuedAt,
 				UpdatedAt: queuedAt,
 			}
-			if err := s.pushStore.CreatePush(r.Context(), record); err != nil {
-				s.logger.Warn("Failed to persist push record", "error", logging.SanitizeLogValue(err.Error()), "push_id", pushID)
-			}
-		} else {
-			s.logger.Warn("Failed to marshal push payload for persistence", "error", logging.SanitizeLogValue(marshalErr.Error()), "push_id", pushID)
 		}
 	}
 
-	// Issue #3757 (ADR-031 Decision 2): create one durable delivery/outbox row per
+	// Issue #3757 (ADR-031 Decision 2): one durable delivery/outbox row per
 	// targeted steward, all in a single transaction — either every steward this
 	// push targets gets a trackable pending row, or none do. This replaces the old
 	// detached fire-and-forget goroutine, whose only durable trace was the
@@ -219,8 +222,9 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// starting and finishing silently dropped delivery to whichever stewards had
 	// not yet been reached, with no record that they were ever owed a push.
 	recordsByStewardID := make(map[string]*business.CommandRecord, len(targeted))
+	var records []*business.CommandRecord
 	if s.commandStore != nil && len(targeted) > 0 {
-		records := make([]*business.CommandRecord, 0, len(targeted))
+		records = make([]*business.CommandRecord, 0, len(targeted))
 		for _, st := range targeted {
 			rec := &business.CommandRecord{
 				ID:        fmt.Sprintf("%s-%s", pushID, st.ID),
@@ -239,10 +243,23 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 			records = append(records, rec)
 			recordsByStewardID[st.ID] = rec
 		}
-		if err := s.commandStore.CreateCommandRecords(r.Context(), records); err != nil {
-			s.logger.Error("Failed to durably record config push deliveries",
+	}
+
+	switch {
+	case s.commandStore != nil:
+		// The transactional-CommandStore seam: pushRecord (nil when no
+		// pushStore is configured) and records (empty when no steward matched)
+		// commit together, or neither commits.
+		if err := s.commandStore.CreatePushAndCommandRecords(r.Context(), pushRecord, records); err != nil {
+			s.logger.Error("Failed to durably record config push and its deliveries",
 				"push_id", pushID, "error", logging.SanitizeLogValue(err.Error()))
 			recordsByStewardID = nil
+		}
+	case s.pushStore != nil && pushRecord != nil:
+		// No commandStore configured in this deployment, so there are no
+		// delivery rows to co-commit the push record with.
+		if err := s.pushStore.CreatePush(r.Context(), pushRecord); err != nil {
+			s.logger.Warn("Failed to persist push record", "error", logging.SanitizeLogValue(err.Error()), "push_id", pushID)
 		}
 	}
 

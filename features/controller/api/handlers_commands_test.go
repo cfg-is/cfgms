@@ -209,6 +209,86 @@ func TestHandleListPendingDeliveries_CrossTenantReturn404(t *testing.T) {
 		"tenant-a caller must not be able to list tenant-b steward's pending deliveries")
 }
 
+// TestHandleListPendingDeliveries_ExcludesRecordsFromPreviousTenant covers the
+// gap the steward-move path opens (POST /api/v1/stewards/{id}/move, Issue
+// #2341). Authorizing on the steward's CURRENT tenant is not enough: rows
+// written while the steward lived in tenant-b keep tenant_id "tenant-b" but stay
+// attached to the same steward_id, and CommandRecordResponse carries tenant_id
+// and issued_by — so returning them would disclose the previous tenant's path
+// and its operator across an MSP boundary.
+func TestHandleListPendingDeliveries_ExcludesRecordsFromPreviousTenant(t *testing.T) {
+	server, store := setupCommandTestServer(t)
+	stewardID := registerActiveSteward(t, server.controllerService, "pending-dna-moved", "tenant-a")
+	// Written before the move, under the steward's previous tenant.
+	createCommandRecord(t, store, "cmd-pd-previous", stewardID, "tenant-b")
+	// Written after the move, under the steward's current tenant.
+	createCommandRecord(t, store, "cmd-pd-current", stewardID, "tenant-a")
+
+	req := withScopedPrincipal(newPendingDeliveriesRequest(t, stewardID), "tenant-a")
+	w := httptest.NewRecorder()
+
+	server.handleListPendingDeliveries(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp PendingDeliveriesResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Deliveries, 1,
+		"a record stamped with the steward's previous tenant must not be returned")
+	assert.Equal(t, "cmd-pd-current", resp.Deliveries[0].ID)
+	assert.Equal(t, "tenant-a", resp.Deliveries[0].TenantID)
+}
+
+// TestHandleListPendingDeliveries_AdminSeesOnlyStewardTenantChain proves the
+// tenant filter is anchored to the steward, not to the caller: an unscoped mTLS
+// admin (callerTenant "") still does not get another tenant's record back just
+// because it happens to share a steward_id.
+func TestHandleListPendingDeliveries_AdminSeesOnlyStewardTenantChain(t *testing.T) {
+	server, store := setupCommandTestServer(t)
+	stewardID := registerActiveSteward(t, server.controllerService, "pending-dna-admin-scope", "tenant-a")
+	createCommandRecord(t, store, "cmd-pd-admin-current", stewardID, "tenant-a")
+	createCommandRecord(t, store, "cmd-pd-admin-foreign", stewardID, "tenant-b")
+
+	req := withAdminPrincipal(newPendingDeliveriesRequest(t, stewardID))
+	w := httptest.NewRecorder()
+
+	server.handleListPendingDeliveries(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp PendingDeliveriesResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Deliveries, 1)
+	assert.Equal(t, "cmd-pd-admin-current", resp.Deliveries[0].ID)
+}
+
+// TestHandleListPendingDeliveries_IncludesAncestorTenantRecords proves the
+// tenant filter does not break subtree fan-out: handleConfigPush stamps each
+// delivery row with the config's tenant, which for a push aimed at a tenant
+// subtree is an ancestor of the targeted steward's own tenant. Those rows are
+// legitimately owed to the steward and must still drain.
+func TestHandleListPendingDeliveries_IncludesAncestorTenantRecords(t *testing.T) {
+	server, store := setupCommandTestServer(t)
+	stewardID := registerActiveSteward(t, server.controllerService, "pending-dna-subtree", "root/msp-a/client-1")
+	createCommandRecord(t, store, "cmd-pd-subtree-own", stewardID, "root/msp-a/client-1")
+	createCommandRecord(t, store, "cmd-pd-subtree-parent", stewardID, "root/msp-a")
+	createCommandRecord(t, store, "cmd-pd-subtree-sibling", stewardID, "root/msp-a/client-2")
+
+	req := withScopedPrincipal(newPendingDeliveriesRequest(t, stewardID), "root/msp-a")
+	w := httptest.NewRecorder()
+
+	server.handleListPendingDeliveries(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp PendingDeliveriesResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	ids := make([]string, 0, len(resp.Deliveries))
+	for _, d := range resp.Deliveries {
+		ids = append(ids, d.ID)
+	}
+	assert.ElementsMatch(t, []string{"cmd-pd-subtree-own", "cmd-pd-subtree-parent"}, ids,
+		"own and ancestor tenants drain; a sibling tenant's row never does")
+}
+
 func TestHandleListPendingDeliveries_AdminCanReadAnyTenant(t *testing.T) {
 	server, store := setupCommandTestServer(t)
 	stewardID := registerActiveSteward(t, server.controllerService, "pending-dna-admin", "tenant-c")

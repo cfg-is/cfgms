@@ -680,7 +680,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_commands_issued_at   ON commands(issued_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_commands_tenant_id   ON commands(tenant_id)`,
 		// Issue #3757: reconnect-drain lookup (ListPendingDeliveries) filters by
-		// steward_id + delivery_status together.
+		// steward_id + delivery_status together, then narrows the result to the
+		// steward's tenant chain (idx_commands_tenant_id above covers that column).
 		`CREATE INDEX IF NOT EXISTS idx_commands_steward_delivery ON commands(steward_id, delivery_status)`,
 
 		// Command audit trail — immutable log of each state transition

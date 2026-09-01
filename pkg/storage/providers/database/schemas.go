@@ -1207,7 +1207,10 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 		"CREATE INDEX IF NOT EXISTS idx_command_records_status     ON command_records(status);",
 		"CREATE INDEX IF NOT EXISTS idx_command_records_issued_at  ON command_records(issued_at);",
 		// Issue #3757: reconnect-drain lookup (ListPendingDeliveries) filters by
-		// steward_id + delivery_status together.
+		// steward_id + delivery_status together, then narrows the result to the
+		// steward's tenant chain (idx_command_records_tenant_id covers that column) —
+		// that query cannot rely on rls_read below, which is permissive when
+		// app.current_tenant is unset, as it is on this read path.
 		"CREATE INDEX IF NOT EXISTS idx_command_records_steward_delivery ON command_records(steward_id, delivery_status);",
 	}
 	for _, idx := range indexes {

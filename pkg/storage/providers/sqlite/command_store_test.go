@@ -407,12 +407,12 @@ func TestSQLiteCommandStore_ListPendingDeliveries(t *testing.T) {
 	// Mark one of steward-001's records delivered — it must drop out of the pending list.
 	require.NoError(t, store.UpdateDeliveryStatus(ctx, "pd-1", business.DeliveryStatusDelivered, ""))
 
-	pending, err := store.ListPendingDeliveries(ctx, "steward-001")
+	pending, err := store.ListPendingDeliveries(ctx, "steward-001", "tenant-001")
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, "pd-2", pending[0].ID)
 
-	otherPending, err := store.ListPendingDeliveries(ctx, "steward-002")
+	otherPending, err := store.ListPendingDeliveries(ctx, "steward-002", "tenant-001")
 	require.NoError(t, err)
 	require.Len(t, otherPending, 1)
 	assert.Equal(t, "pd-3", otherPending[0].ID)
@@ -421,8 +421,71 @@ func TestSQLiteCommandStore_ListPendingDeliveries(t *testing.T) {
 func TestSQLiteCommandStore_ListPendingDeliveries_EmptyStewardID(t *testing.T) {
 	store := newTestCommandStore(t)
 	ctx := context.Background()
-	_, err := store.ListPendingDeliveries(ctx, "")
+	_, err := store.ListPendingDeliveries(ctx, "", "tenant-001")
 	require.Error(t, err)
+}
+
+// TestSQLiteCommandStore_ListPendingDeliveries_EmptyTenantFailsClosed proves the
+// tenant argument is mandatory: an empty tenant is refused rather than silently
+// widening the query to every tenant's rows for that steward ID.
+func TestSQLiteCommandStore_ListPendingDeliveries_EmptyTenantFailsClosed(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("pd-no-tenant")))
+
+	_, err := store.ListPendingDeliveries(ctx, "steward-001", "")
+	require.ErrorIs(t, err, business.ErrCommandTenantIDRequired)
+}
+
+// TestSQLiteCommandStore_ListPendingDeliveries_ExcludesForeignTenant is the
+// storage-layer half of the cross-tenant isolation guarantee. A steward's tenant
+// binding is mutable (Issue #2341), so rows written under a previous tenant stay
+// attached to the same steward_id; filtering on steward_id alone would hand them
+// to the steward's new tenant, and SQLite has no RLS to compensate.
+func TestSQLiteCommandStore_ListPendingDeliveries_ExcludesForeignTenant(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	current := testCommandRecord("pd-current-tenant")
+	current.TenantID = "tenant-new"
+	previous := testCommandRecord("pd-previous-tenant") // same steward, old tenant
+	previous.TenantID = "tenant-old"
+	require.NoError(t, store.CreateCommandRecord(ctx, current))
+	require.NoError(t, store.CreateCommandRecord(ctx, previous))
+
+	pending, err := store.ListPendingDeliveries(ctx, "steward-001", "tenant-new")
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "only the record stamped with the steward's current tenant is returned")
+	assert.Equal(t, "pd-current-tenant", pending[0].ID)
+}
+
+// TestSQLiteCommandStore_ListPendingDeliveries_IncludesAncestorTenant proves the
+// filter does not break subtree pushes: handleConfigPush stamps a record with the
+// config's tenant, which for a fan-out is an ancestor of the targeted steward's
+// own tenant. Those rows must still drain.
+func TestSQLiteCommandStore_ListPendingDeliveries_IncludesAncestorTenant(t *testing.T) {
+	store := newTestCommandStore(t)
+	ctx := context.Background()
+
+	own := testCommandRecord("pd-own")
+	own.TenantID = "root/msp-a/client-1"
+	ancestor := testCommandRecord("pd-ancestor")
+	ancestor.TenantID = "root/msp-a"
+	sibling := testCommandRecord("pd-sibling")
+	sibling.TenantID = "root/msp-a/client-2"
+	require.NoError(t, store.CreateCommandRecord(ctx, own))
+	require.NoError(t, store.CreateCommandRecord(ctx, ancestor))
+	require.NoError(t, store.CreateCommandRecord(ctx, sibling))
+
+	pending, err := store.ListPendingDeliveries(ctx, "steward-001", "root/msp-a/client-1")
+	require.NoError(t, err)
+
+	ids := make([]string, 0, len(pending))
+	for _, rec := range pending {
+		ids = append(ids, rec.ID)
+	}
+	assert.ElementsMatch(t, []string{"pd-own", "pd-ancestor"}, ids,
+		"own and ancestor tenants drain; a sibling tenant's row never does")
 }
 
 // TestSQLiteCommandStore_CreateCommandRecords_Atomic proves the batch create is
@@ -474,6 +537,93 @@ func TestSQLiteCommandStore_CreateCommandRecords_Empty(t *testing.T) {
 	store := newTestCommandStore(t)
 	ctx := context.Background()
 	require.NoError(t, store.CreateCommandRecords(ctx, nil))
+}
+
+// testPushRecordForCommandStore returns a minimal PushRecord for
+// CreatePushAndCommandRecords tests.
+func testPushRecordForCommandStore(id string) *business.PushRecord {
+	return &business.PushRecord{
+		ID:       id,
+		ConfigID: "cfg-atomic",
+		TenantID: "tenant-001",
+		Version:  "v1",
+		Status:   business.PushStatusInProgress,
+		Data:     []byte("{}"),
+	}
+}
+
+// TestSQLiteCommandStore_CreatePushAndCommandRecords_Atomic proves the seam
+// handleConfigPush uses (Issue #3757, ADR-031 Decision 2 required test): the
+// push record (the "config write") and its per-steward delivery rows commit or
+// roll back together as one transaction, not as two independently-committing
+// writes. Both failure directions are exercised: a delivery-row failure must
+// roll back the push, and a push-row failure must roll back the deliveries.
+func TestSQLiteCommandStore_CreatePushAndCommandRecords_Atomic(t *testing.T) {
+	t.Run("delivery row failure rolls back the push record", func(t *testing.T) {
+		store := newTestCommandStore(t)
+		ctx := context.Background()
+
+		// Pre-seed a command record so the batch below collides with it and fails.
+		require.NoError(t, store.CreateCommandRecord(ctx, testCommandRecord("push-fail-cmd-1")))
+
+		push := testPushRecordForCommandStore("push-rollback-1")
+		records := []*business.CommandRecord{
+			testCommandRecord("push-fail-cmd-1"), // duplicate — must fail the whole tx
+		}
+
+		err := store.CreatePushAndCommandRecords(ctx, push, records)
+		require.Error(t, err, "a failing delivery row must fail the whole call")
+
+		pushStore := &SQLitePushStore{db: store.db}
+		_, getErr := pushStore.GetPush(ctx, "push-rollback-1")
+		assert.ErrorIs(t, getErr, business.ErrPushNotFound,
+			"the push record must not survive a batch whose delivery rows rolled back")
+	})
+
+	t.Run("push row failure rolls back the delivery records", func(t *testing.T) {
+		store := newTestCommandStore(t)
+		ctx := context.Background()
+
+		// Pre-seed a push record so CreatePushAndCommandRecords collides with it.
+		pushStore := &SQLitePushStore{db: store.db}
+		require.NoError(t, pushStore.CreatePush(ctx, testPushRecordForCommandStore("push-collide-1")))
+
+		push := testPushRecordForCommandStore("push-collide-1") // duplicate ID — must fail
+		records := []*business.CommandRecord{
+			testCommandRecord("push-fail-cmd-2"),
+		}
+
+		err := store.CreatePushAndCommandRecords(ctx, push, records)
+		require.Error(t, err, "a failing push row must fail the whole call")
+
+		_, getErr := store.GetCommandRecord(ctx, "push-fail-cmd-2")
+		assert.ErrorIs(t, getErr, business.ErrCommandNotFound,
+			"delivery rows must not survive a batch whose push row rolled back")
+	})
+
+	t.Run("push record and delivery rows commit together", func(t *testing.T) {
+		store := newTestCommandStore(t)
+		ctx := context.Background()
+
+		push := testPushRecordForCommandStore("push-success-1")
+		records := []*business.CommandRecord{
+			testCommandRecord("push-success-cmd-1"),
+			testCommandRecord("push-success-cmd-2"),
+		}
+
+		require.NoError(t, store.CreatePushAndCommandRecords(ctx, push, records))
+
+		pushStore := &SQLitePushStore{db: store.db}
+		gotPush, err := pushStore.GetPush(ctx, "push-success-1")
+		require.NoError(t, err)
+		assert.Equal(t, business.PushStatusInProgress, gotPush.Status)
+
+		for _, id := range []string{"push-success-cmd-1", "push-success-cmd-2"} {
+			got, err := store.GetCommandRecord(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, business.DeliveryStatusPending, got.DeliveryStatus)
+		}
+	})
 }
 
 // TestSQLiteCommandStore_PendingSurvivesRestart proves a pending delivery row is
