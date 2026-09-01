@@ -25,24 +25,13 @@ type DatabaseCaseStore struct {
 
 // NewDatabaseCaseStore opens a pooled Postgres connection, initialises the schema,
 // and returns a ready-to-use CaseStore.
-func NewDatabaseCaseStore(dsn string, config map[string]interface{}) (*DatabaseCaseStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to open case store connection: %w", err)
-	}
-	db.SetMaxOpenConns(getIntFromConfig(config, "max_open_connections", 25))
-	db.SetMaxIdleConns(getIntFromConfig(config, "max_idle_connections", 5))
-	db.SetConnMaxLifetime(time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute)
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("database: failed to ping case store: %w", err)
-	}
+func NewDatabaseCaseStore(db *sql.DB, config map[string]interface{}) (*DatabaseCaseStore, error) {
 	store := &DatabaseCaseStore{db: db}
 	if err := store.initSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("database: failed to initialise case store schema: %w", err)
 	}
 	return store, nil
+
 }
 
 func (s *DatabaseCaseStore) initSchema() error {
@@ -59,10 +48,9 @@ func (s *DatabaseCaseStore) initSchema() error {
 func (s *DatabaseCaseStore) Initialize(ctx context.Context) error { return nil }
 
 // Close releases the database connection.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseCaseStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 

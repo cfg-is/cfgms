@@ -271,6 +271,25 @@ Interfaces are organized into five sub-packages under `pkg/storage/interfaces/`:
 
 ## Configuration Example
 
+**Connection pooling (database provider, ADR-031 Decision 6).** A controller
+process holds exactly one `database`-provider instance, and that instance opens
+one shared `*sql.DB` connection pool per distinct connection string — not one
+pool per store. Every business store (audit, RBAC, tenant, session, case, alert,
+and the rest) configured with the same connection string reuses the same pool,
+so `max_open_connections` below sizes the node's connection budget for that
+database, not a single store's. A pool is opened once per connection string,
+from whichever store using it is created first; set the sizing keys on the
+`business` config block, which is where the provider is first exercised in
+practice. There is no longer a per-store `max_open_connections` or
+`max_idle_connections` key — those were removed, not deprecated.
+
+Pools are keyed by connection string rather than one-per-process because the
+provider registry hands the same instance to every consumer, and a deployment
+may point different storage blocks (for example `business` and `config`, or
+`storage.cluster.postgres_dsn` and `storage.config.dsn`) at different databases.
+A caller configured for one database is never served a pool opened for another:
+that would silently discard its target database, credentials, and `sslmode`.
+
 ```yaml
 # cfgms.yaml — five-type storage composition (commercial/SaaS example)
 controller:
@@ -280,7 +299,7 @@ controller:
       config:
         host: cfgms-postgres.internal
         database: cfgms
-        max_open_connections: 100
+        max_open_connections: 100 # sizes the shared pool for this connection string, not a per-store pool
 
     config:
       provider: postgres

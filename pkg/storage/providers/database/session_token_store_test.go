@@ -32,15 +32,14 @@ func newTestSessionTokenStore(t *testing.T) *DatabaseSessionTokenStore {
 		t.Skip("Skipping database tests in short mode")
 	}
 	db := getTestDB(t) // skips if postgres not reachable
+	t.Cleanup(func() { _ = db.Close() })
 	// Drop and recreate the table so each test starts clean.
 	ctx := context.Background()
 	_, dropErr := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
 	require.NoError(t, dropErr)
-	_ = db.Close()
 
-	store, err := NewDatabaseSessionTokenStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseSessionTokenStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 

@@ -27,24 +27,13 @@ type DatabasePushStore struct {
 
 // NewDatabasePushStore opens a pooled Postgres connection, initialises the
 // schema, and returns a ready-to-use PushStore.
-func NewDatabasePushStore(dsn string, config map[string]interface{}) (*DatabasePushStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to open push store connection: %w", err)
-	}
-	db.SetMaxOpenConns(getIntFromConfig(config, "max_open_connections", 25))
-	db.SetMaxIdleConns(getIntFromConfig(config, "max_idle_connections", 5))
-	db.SetConnMaxLifetime(time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute)
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("database: failed to ping push store: %w", err)
-	}
+func NewDatabasePushStore(db *sql.DB, config map[string]interface{}) (*DatabasePushStore, error) {
 	store := &DatabasePushStore{db: db}
 	if err := store.initSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("database: failed to initialise push schema: %w", err)
 	}
 	return store, nil
+
 }
 
 func (s *DatabasePushStore) initSchema() error {
@@ -58,10 +47,9 @@ func (s *DatabasePushStore) initSchema() error {
 }
 
 // Close releases the database connection.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabasePushStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 

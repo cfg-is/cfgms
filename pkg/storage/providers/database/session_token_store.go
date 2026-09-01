@@ -41,27 +41,13 @@ type graceStamperDB interface {
 // session_token_store schema under an advisory lock, and returns a ready-to-use store.
 // config may contain the standard connection-pool keys used by the rest of this package:
 // "max_open_connections", "max_idle_connections", "connection_max_lifetime_minutes".
-func NewDatabaseSessionTokenStore(dsn string, config map[string]interface{}) (*DatabaseSessionTokenStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to open session token store connection: %w", err)
-	}
-
-	db.SetMaxOpenConns(getIntFromConfig(config, "max_open_connections", 25))
-	db.SetMaxIdleConns(getIntFromConfig(config, "max_idle_connections", 5))
-	db.SetConnMaxLifetime(time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("database: failed to ping session token store: %w", err)
-	}
-
+func NewDatabaseSessionTokenStore(db *sql.DB, config map[string]interface{}) (*DatabaseSessionTokenStore, error) {
 	store := &DatabaseSessionTokenStore{db: db}
 	if err := store.initializeSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("database: failed to initialise session token store schema: %w", err)
 	}
 	return store, nil
+
 }
 
 // initializeSchema creates the session_token_store table under a Postgres advisory lock
@@ -83,10 +69,9 @@ func (s *DatabaseSessionTokenStore) initializeSchema() error {
 }
 
 // Close releases the database connection pool.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseSessionTokenStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 

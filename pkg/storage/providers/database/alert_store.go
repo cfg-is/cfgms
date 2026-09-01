@@ -26,30 +26,13 @@ type DatabaseAlertStore struct {
 }
 
 // NewDatabaseAlertStore opens a PostgreSQL-backed AlertStore at dsn.
-func NewDatabaseAlertStore(dsn string, config map[string]interface{}) (*DatabaseAlertStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+func NewDatabaseAlertStore(db *sql.DB, config map[string]interface{}) (*DatabaseAlertStore, error) {
 	store := &DatabaseAlertStore{db: db, schemas: NewDatabaseSchemas()}
 	if err := store.initSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialise alert store schema: %w", err)
 	}
 	return store, nil
+
 }
 
 func (s *DatabaseAlertStore) initSchema() error {
@@ -67,8 +50,10 @@ func (s *DatabaseAlertStore) initSchema() error {
 }
 
 // Close closes the underlying database connection.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseAlertStore) Close() error {
-	return s.db.Close()
+	return nil
 }
 
 // AcknowledgeAlert implements AlertStore.AcknowledgeAlert.

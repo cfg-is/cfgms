@@ -34,30 +34,14 @@ var _ business.SessionStore = (*DatabaseSessionStore)(nil)
 // NewDatabaseSessionStore opens a pooled Postgres connection, initialises the schema, and
 // returns a ready-to-use SessionStore. config["session_hmac_key"] is required; the constructor
 // returns an error when it is absent or empty to prevent silent insecure fallback.
-func NewDatabaseSessionStore(dsn string, config map[string]interface{}) (*DatabaseSessionStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to open session store connection: %w", err)
-	}
-
-	db.SetMaxOpenConns(getIntFromConfig(config, "max_open_connections", 25))
-	db.SetMaxIdleConns(getIntFromConfig(config, "max_idle_connections", 5))
-	db.SetConnMaxLifetime(time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("database: failed to ping session store: %w", err)
-	}
-
+func NewDatabaseSessionStore(db *sql.DB, config map[string]interface{}) (*DatabaseSessionStore, error) {
 	keyStr, ok := config["session_hmac_key"].(string)
 	if !ok || keyStr == "" {
-		_ = db.Close()
 		return nil, fmt.Errorf("database: session_hmac_key is required in session store config; provide a securely-generated random key")
 	}
 
 	store := &DatabaseSessionStore{db: db, hmacKey: []byte(keyStr)}
 	if err := store.initializeSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("database: failed to initialise session store schema: %w", err)
 	}
 	return store, nil
@@ -78,10 +62,9 @@ func (s *DatabaseSessionStore) initializeSchema() error {
 func (s *DatabaseSessionStore) Initialize(_ context.Context) error { return nil }
 
 // Close releases the database connection.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseSessionStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 

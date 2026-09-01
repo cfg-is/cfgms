@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	_ "github.com/lib/pq"
 
@@ -24,24 +23,13 @@ type DatabaseAssurancePolicyStore struct {
 
 // NewDatabaseAssurancePolicyStore opens a pooled Postgres connection, initialises
 // the schema, and returns a ready-to-use AssurancePolicyStore.
-func NewDatabaseAssurancePolicyStore(dsn string, config map[string]interface{}) (*DatabaseAssurancePolicyStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to open assurance policy store connection: %w", err)
-	}
-	db.SetMaxOpenConns(getIntFromConfig(config, "max_open_connections", 25))
-	db.SetMaxIdleConns(getIntFromConfig(config, "max_idle_connections", 5))
-	db.SetConnMaxLifetime(time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute)
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("database: failed to ping assurance policy store: %w", err)
-	}
+func NewDatabaseAssurancePolicyStore(db *sql.DB, config map[string]interface{}) (*DatabaseAssurancePolicyStore, error) {
 	store := &DatabaseAssurancePolicyStore{db: db}
 	if err := store.initSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("database: failed to initialise assurance policy schema: %w", err)
 	}
 	return store, nil
+
 }
 
 func (s *DatabaseAssurancePolicyStore) initSchema() error {
@@ -55,10 +43,9 @@ func (s *DatabaseAssurancePolicyStore) initSchema() error {
 }
 
 // Close releases the database connection.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseAssurancePolicyStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 

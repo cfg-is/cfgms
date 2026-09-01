@@ -150,27 +150,27 @@ func TestDatabaseAuditStore_GetAuditEntry_NoIPAddress(t *testing.T) {
 // under -tags=integration (the tag `make test-integration-db` passes) and broke the build.
 func newRegressionTenantStore(t *testing.T) *DatabaseTenantStore {
 	t.Helper()
-	dsn := buildTestDSN()
-	store, err := NewDatabaseTenantStore(dsn, getTestConfig())
+	db := getTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := NewDatabaseTenantStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
 func newTestRBACStore(t *testing.T) *DatabaseRBACStore {
 	t.Helper()
-	dsn := buildTestDSN()
-	store, err := NewDatabaseRBACStore(dsn, getTestConfig())
+	db := getTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := NewDatabaseRBACStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
 func newTestAuditStore(t *testing.T) *DatabaseAuditStore {
 	t.Helper()
-	dsn := buildTestDSN()
-	store, err := NewDatabaseAuditStore(dsn, getTestConfig())
+	db := getTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := NewDatabaseAuditStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }

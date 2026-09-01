@@ -26,25 +26,7 @@ type DatabaseRegistrationTokenStore struct {
 }
 
 // NewDatabaseRegistrationTokenStore creates a new PostgreSQL-based registration token store
-func NewDatabaseRegistrationTokenStore(dsn string, config map[string]interface{}) (*DatabaseRegistrationTokenStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+func NewDatabaseRegistrationTokenStore(db *sql.DB, config map[string]interface{}) (*DatabaseRegistrationTokenStore, error) {
 	store := &DatabaseRegistrationTokenStore{
 		db:      db,
 		config:  config,
@@ -52,11 +34,11 @@ func NewDatabaseRegistrationTokenStore(dsn string, config map[string]interface{}
 	}
 
 	if err := store.initializeSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 
 	return store, nil
+
 }
 
 // initializeSchema creates the necessary database tables and indexes for registration tokens
@@ -88,8 +70,10 @@ func (s *DatabaseRegistrationTokenStore) Initialize(ctx context.Context) error {
 }
 
 // Close implements RegistrationTokenStore.Close
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseRegistrationTokenStore) Close() error {
-	return s.db.Close()
+	return nil
 }
 
 // SaveToken implements RegistrationTokenStore.SaveToken using UPSERT semantics.

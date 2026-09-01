@@ -23,7 +23,7 @@ func newTestTriggerStore(t *testing.T) *DatabaseTriggerStore {
 	schemas := NewDatabaseSchemas()
 	require.NoError(t, schemas.CreateTriggersTable(context.Background(), db))
 
-	store, err := NewDatabaseTriggerStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseTriggerStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

@@ -24,9 +24,8 @@ func newTestPushStore(t *testing.T) *DatabasePushStore {
 	schemas := NewDatabaseSchemas()
 	require.NoError(t, schemas.CreatePushRecordsTable(context.Background(), db))
 
-	store, err := NewDatabasePushStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabasePushStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -178,9 +177,10 @@ func TestDatabasePushStore_ResumeScenario(t *testing.T) {
 	require.NoError(t, storeA.UpdatePushStatus(ctx, "push-resume-001", business.PushStatusInProgress))
 
 	// Simulate leader B: open a new PushStore connection against the same DB.
-	storeB, err := NewDatabasePushStore(buildTestDSN(), getTestConfig())
+	dbB := getTestDB(t)
+	defer func() { _ = dbB.Close() }()
+	storeB, err := NewDatabasePushStore(dbB, getTestConfig())
 	require.NoError(t, err)
-	defer func() { _ = storeB.Close() }()
 
 	// Leader B calls GetPendingPushes — it must find leader A's in_progress push.
 	records, err := storeB.GetPendingPushes(ctx)

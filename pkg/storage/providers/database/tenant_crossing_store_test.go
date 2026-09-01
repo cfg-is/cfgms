@@ -23,7 +23,7 @@ func newTestTenantCrossingStore(t *testing.T) *DatabaseTenantCrossingStore {
 	ctx := context.Background()
 	require.NoError(t, schemas.CreateTenantCrossingsTable(ctx, db))
 
-	store, err := NewDatabaseTenantCrossingStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseTenantCrossingStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

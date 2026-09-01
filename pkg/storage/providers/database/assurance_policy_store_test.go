@@ -24,7 +24,7 @@ func newTestAssurancePolicyStore(t *testing.T) *DatabaseAssurancePolicyStore {
 	ctx := context.Background()
 	require.NoError(t, schemas.CreateAssurancePolicyOverridesTable(ctx, db))
 
-	store, err := NewDatabaseAssurancePolicyStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseAssurancePolicyStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

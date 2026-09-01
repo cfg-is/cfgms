@@ -24,7 +24,7 @@ func newTestPendingRefreshStore(t *testing.T) *DatabasePendingRefreshStore {
 	ctx := context.Background()
 	require.NoError(t, schemas.CreatePendingRefreshRequestsTable(ctx, db))
 
-	store, err := NewDatabasePendingRefreshStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabasePendingRefreshStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store
