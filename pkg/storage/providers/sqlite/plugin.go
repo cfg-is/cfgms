@@ -522,6 +522,7 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		AssurancePolicy:     &SQLiteAssurancePolicyStore{db: db},
 		TenantCrossing:      &SQLiteTenantCrossingStore{db: db},
 		Case:                &SQLiteCaseStore{db: db},
+		Lease:               &SQLiteLeaseStore{db: db},
 	}, nil
 }
 
@@ -553,6 +554,16 @@ func (p *SQLiteProvider) CreateNonceStore(config map[string]interface{}) (busine
 		return nil, err
 	}
 	return &SQLiteNonceStore{db: db}, nil
+}
+
+// CreateLeaseStore returns a SQLite-backed LeaseStore — the fenced singleton-claim
+// primitive (ADR-031 Decision 5, Issue #3756). Implements interfaces.LeaseStoreCreator.
+func (p *SQLiteProvider) CreateLeaseStore(config map[string]interface{}) (business.LeaseStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteLeaseStore{db: db}, nil
 }
 
 // init auto-registers the SQLite provider so it is available after a blank import.

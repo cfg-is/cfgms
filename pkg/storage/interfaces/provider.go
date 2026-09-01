@@ -54,6 +54,7 @@ type BusinessStoreBundle struct {
 	AssurancePolicy     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
 	TenantCrossing      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	Case                business.CaseStore            // ADR-022 §8: cockpit investigation cases
+	Lease               business.LeaseStore           // ADR-031 Decision 5: fenced singleton-claim leases
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -99,6 +100,18 @@ type CaseStoreCreator interface {
 // the store nil in the manager.
 type NonceStoreCreator interface {
 	CreateNonceStore(config map[string]interface{}) (business.NonceStore, error)
+}
+
+// LeaseStoreCreator is an optional StorageProvider extension for backends that
+// support the fenced singleton-claim lease primitive (ADR-031 Decision 5, Issue
+// #3756) that backs pkg/ha's HasLeadership()/GetTerm() (Issue #3760).
+// Backends that do not implement this interface leave the store nil in the
+// manager, and ha.Manager refuses to start a cluster deployment against them.
+// A backend whose lease rows are shared by every controller node — the only kind
+// that can carry cluster leadership — additionally implements
+// business.NodeSharedLeaseStore and declares SharedAcrossNodes() true.
+type LeaseStoreCreator interface {
+	CreateLeaseStore(config map[string]interface{}) (business.LeaseStore, error)
 }
 
 // StorageProvider defines the interface that all storage backends must implement.
@@ -616,6 +629,17 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		}
 	}
 
+	// Lease store is optional at the interface level: only providers implementing
+	// LeaseStoreCreator supply one (ADR-031 Decision 5). ha.Manager converts a nil
+	// into a loud startup failure for the modes that need it.
+	var leaseStore business.LeaseStore
+	if lsc, ok := provider.(LeaseStoreCreator); ok {
+		leaseStore, err = lsc.CreateLeaseStore(config)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("failed to create lease store: %w", err)
+		}
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -633,6 +657,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
 		nonceStore:             nonceStore,
+		leaseStore:             leaseStore,
 	}, nil
 }
 
@@ -660,6 +685,7 @@ type StorageManager struct {
 	tenantCrossingStore      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	caseStore                business.CaseStore            // ADR-022 §8: cockpit investigation cases
 	nonceStore               business.NonceStore           // Issue #3755, ADR-031: durable registration-refresh nonce
+	leaseStore               business.LeaseStore           // ADR-031 Decision 5: fenced singleton-claim leases
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -830,6 +856,25 @@ func (sm *StorageManager) SetNonceStore(s business.NonceStore) {
 	sm.nonceStore = s
 }
 
+// GetLeaseStore returns the fenced singleton-claim lease store (ADR-031 Decision 5,
+// Issue #3756). Returns nil when the running provider does not implement
+// LeaseStoreCreator; callers must nil-check before use. ha.Manager treats a nil
+// value as a fatal startup condition in ClusterMode rather than degrading to an
+// unfenced leadership check.
+//
+// A non-nil store is not by itself a cluster-wide authority: the node-local tiers
+// supply one too, and a lease held in a per-node database excludes no other node.
+// Callers using the lease as cluster authority must additionally require
+// business.LeaseStoreIsNodeShared.
+func (sm *StorageManager) GetLeaseStore() business.LeaseStore {
+	return sm.leaseStore
+}
+
+// SetLeaseStore wires the lease store after construction.
+func (sm *StorageManager) SetLeaseStore(s business.LeaseStore) {
+	sm.leaseStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -881,6 +926,7 @@ func (sm *StorageManager) Close() error {
 		sm.tenantCrossingStore,
 		sm.caseStore,
 		sm.nonceStore,
+		sm.leaseStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -1136,6 +1182,18 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 			sm.SetNonceStore(nonceStore)
 		}
 	}
+	// Wire lease store if the provider implements LeaseStoreCreator (ADR-031 Decision 5,
+	// Issue #3756). This is the substrate pkg/ha's HasLeadership()/GetTerm() run on in
+	// cluster deployments (Issue #3760), so a failure here must not be swallowed.
+	if lsc, ok := provider.(LeaseStoreCreator); ok {
+		leaseStore, err := lsc.CreateLeaseStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create lease store: %w", err)
+		}
+		if leaseStore != nil {
+			sm.SetLeaseStore(leaseStore)
+		}
+	}
 	return sm, nil
 }
 
@@ -1222,6 +1280,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		if nonceStore != nil {
 			sm.SetNonceStore(nonceStore)
 		}
+		sm.SetLeaseStore(bundle.Lease)
 		return sm, nil
 	}
 
@@ -1272,6 +1331,18 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	sm.SetAlertStore(alertStore)
 	if nonceStore != nil {
 		sm.SetNonceStore(nonceStore)
+	}
+	// Wire lease store if the SQLite provider implements LeaseStoreCreator (ADR-031
+	// Decision 5). The bundle path above takes bundle.Lease from the shared handle;
+	// this fallback opens its own.
+	if lsc, ok := sqProvider.(LeaseStoreCreator); ok {
+		leaseStore, err := lsc.CreateLeaseStore(sqliteCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("failed to create lease store (sqlite): %w", err)
+		}
+		if leaseStore != nil {
+			sm.SetLeaseStore(leaseStore)
+		}
 	}
 	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle
 	// (OpenBusinessStores). The non-bundle fallback path leaves them nil — acceptable since

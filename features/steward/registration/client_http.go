@@ -535,7 +535,7 @@ func verifyEnrollmentCertSet(set enrollmentCertSet) error {
 // safe against routine restarts and legitimate cluster rebuilds but not against a
 // network adversary who can both spoof the registration endpoint and be trusted by
 // the steward's configured trust store. See
-// docs/architecture/steward-operating-model.md §Raft-Term Command Fence.
+// docs/architecture/steward-operating-model.md §Fencing-Token Command Fence.
 func resetFenceRatchetOnEnrollment(r *stewardconfig.FenceRatchet, set enrollmentCertSet) error {
 	if err := verifyEnrollmentCertSet(set); err != nil {
 		return fmt.Errorf("fence ratchet retained: %w", err)

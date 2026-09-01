@@ -486,24 +486,24 @@ If the controller connection is lost, the steward continues converging on schedu
 
 The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
-### Raft-Term Command Fence (ADR-029 Decision 6)
+### Fencing-Token Command Fence (ADR-029 Decision 6; substrate updated by ADR-031 Decision 5 / Issue #3760)
 
-Every inbound `Command` carries the Raft term the controller cluster was at when it was published (`Command.Term`, #3390). The steward tracks the highest term it has observed and enforces a three-state ratchet on the receive path, ahead of command dispatch:
+Every inbound `Command` carries a fencing token stamped by the controller that published it (`Command.Term`, #3390). The field name and wire type are unchanged since #3390 — a `uint64` — only its source has moved: originally the Raft term the controller cluster was at (ADR-029 Decision 5), it is now the S3 database lease's monotonic fencing token (ADR-031 Decision 5, Issue #3760), read via `ha.Manager.GetTerm()` either way. Only a cluster deployment (`ha.mode: cluster`) holds that lease and therefore stamps a non-zero token; single-server and blue-green deployments have no lease to draw one from and publish unstamped commands, which the ratchet's first column already covers. The steward tracks the highest value it has observed and enforces a three-state ratchet on the receive path, ahead of command dispatch — this mechanism did not change when the source did:
 
 | Steward state | Unstamped command (`term` missing or 0) | Stamped command (`term > 0`) |
 |---|---|---|
-| Never seen a stamped command | **Accept** — genuine bootstrap, or mid-rollout behind a controller predating #3390 | **Accept**, record the term as the new high-water mark, set the ratchet |
+| Never seen a stamped command | **Accept** — genuine bootstrap, or mid-rollout behind a controller predating #3390 | **Accept**, record the value as the new high-water mark, set the ratchet |
 | Ratchet set | **Reject — downgrade attempt**, not legacy traffic | Accept iff `term >= highest_seen`; reject and leave the high-water mark unchanged otherwise |
 
-A rejected command is a refusal, not a transport error — it never reaches the command dispatch pipeline, and it does not disconnect the control channel or trigger a convergence-loop retry. Rejections are logged at `WARN` (every value derived from the rejected command passes through `logging.SanitizeLogValue()`, including the claimed term).
+A rejected command is a refusal, not a transport error — it never reaches the command dispatch pipeline, and it does not disconnect the control channel or trigger a convergence-loop retry. Rejections are logged at `WARN` (every value derived from the rejected command passes through `logging.SanitizeLogValue()`, including the claimed fencing token).
 
 #### Ratchet Persistence (#3437)
 
-Both ratchet fields — the ratchet-set flag and the high-water term — are persisted to `fence_ratchet.json` in the steward's cert store directory (`CertStoreDir`). The file is written atomically (write-to-tmp then rename) every time the ratchet advances. On startup, `NewTransportClient` loads the file; a missing or unreadable file is treated as "never seen a stamped command" (the same as first boot). This means a routine steward restart no longer resets the fence: a stale leader's old command cannot exploit a restart to look like "never seen a term before" and be accepted inside the dual-authority window the epic exists to close.
+Both ratchet fields — the ratchet-set flag and the high-water fencing token — are persisted to `fence_ratchet.json` in the steward's cert store directory (`CertStoreDir`). The file is written atomically (write-to-tmp then rename) every time the ratchet advances. On startup, `NewTransportClient` loads the file; a missing or unreadable file is treated as "never seen a stamped command" (the same as first boot). This means a routine steward restart no longer resets the fence: a stale leader's old command cannot exploit a restart to look like "never seen a fencing token before" and be accepted inside the dual-authority window the epic exists to close.
 
 #### Enrollment-Path Reset (#3437)
 
-A legitimate controller-cluster rebuild resets Raft terms to 1. Without a reset mechanism, a steward holding a persisted high-water term above 1 would permanently reject the new cluster — total loss of fleet control. The reset is `registration.resetFenceRatchetOnEnrollment`, which calls `FenceRatchet.ClearRatchet()` and removes the persisted state so the fence starts fresh on the next startup.
+A legitimate controller-cluster rebuild restarts the fencing-token source from its low-water value (Raft terms restarted at 1; the database lease's token starts fresh at 1 for a newly created lease row). Without a reset mechanism, a steward holding a persisted high-water value above that would permanently reject the new cluster — total loss of fleet control. The reset is `registration.resetFenceRatchetOnEnrollment`, which calls `FenceRatchet.ClearRatchet()` and removes the persisted state so the fence starts fresh on the next startup.
 
 **Where it fires.** The registration client (`features/steward/registration/client_http.go`) invokes the reset at its two enrollment-completion points, and nowhere else: `Register`'s HTTP 200 branch (immediate approval) and `PollStatus`'s `claimed` branch (approval by an operator). `cmd/steward/main.go`'s `registerAndConnect` supplies `HTTPConfig.CertStoreDir`, which is what gives the client a durable ratchet to clear; the certificate-refresh path (`refreshAndConnect`) leaves it unset, because re-issuing a certificate for the same cluster is not a cluster rebuild.
 

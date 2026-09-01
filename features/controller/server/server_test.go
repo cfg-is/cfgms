@@ -438,13 +438,7 @@ func TestInitializeHAManager_UsesDefaultConfig(t *testing.T) {
 func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
 	t.Setenv("CFGMS_NODE_ID", "test-cluster-node-uses-config-mode")
 
-	tempDir := t.TempDir()
-	sm, err := interfaces.CreateOSSStorageManager(
-		tempDir+"/flatfile",
-		tempDir+"/cfgms.db",
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
+	sm := newClusterTierStorageManager(t)
 
 	cfg := &config.Config{
 		HA: &config.HAConfig{
@@ -459,6 +453,184 @@ func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
 
 	assert.Equal(t, ha.ClusterMode, haManager.GetDeploymentMode(),
 		"HA manager must report ClusterMode when cfg.HA.Mode is \"cluster\"")
+
+	// ADR-031 Decision 5: outside SingleServerMode, HasLeadership() and the command
+	// fencing token are backed by the storage tier's lease. Startup must therefore
+	// produce a manager that can actually acquire it — not one that silently reports
+	// no leadership and stamps token 0 on every command sent to the fleet.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	require.NoError(t, haManager.Start(ctx),
+		"a cluster-mode HA manager built by the startup path must start, which requires a wired lease store")
+	require.Eventually(t, haManager.HasLeadership, 10*time.Second, 10*time.Millisecond,
+		"the startup-built manager must acquire the leadership lease")
+	assert.NotZero(t, haManager.GetTerm(),
+		"the startup-built manager must stamp a non-zero fencing token")
+}
+
+// TestInitializeHAManager_ClusterModeRequiresLeaseStore verifies the controller
+// refuses to build a cluster-mode HA manager when the storage tier supplies no
+// LeaseStore. Without this gate the substrate swap degrades silently: every
+// leader-gated mutating endpoint returns 503 forever and every outbound command is
+// stamped with fencing token 0, which the steward ratchet reads as "unstamped".
+func TestInitializeHAManager_ClusterModeRequiresLeaseStore(t *testing.T) {
+	t.Setenv("CFGMS_NODE_ID", "test-cluster-node-requires-lease-store")
+
+	cfg := &config.Config{
+		HA: &config.HAConfig{
+			Mode: "cluster",
+		},
+	}
+
+	// A nil storage manager supplies no lease store — the same condition an
+	// operator hits with a storage provider that does not implement
+	// interfaces.LeaseStoreCreator.
+	_, err := initializeHAManager(cfg, logging.NewNoopLogger(), nil, newTestCertManager(t), "")
+	require.Error(t, err, "cluster mode must not start without a leadership lease store")
+	assert.Contains(t, err.Error(), "requires a leadership lease store",
+		"error must name the missing substrate so an operator can act on it")
+}
+
+// TestInitializeHAManager_SingleServerModeNeedsNoLeaseStore verifies ADR-029
+// Decision 4 is untouched by the lease requirement: single-server deployments have
+// no quorum to lose and no peer to overlap with, so they start with no lease at all.
+func TestInitializeHAManager_SingleServerModeNeedsNoLeaseStore(t *testing.T) {
+	cfg := &config.Config{
+		HA: &config.HAConfig{
+			Mode: "single",
+		},
+	}
+
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), nil, nil, "")
+	require.NoError(t, err, "SingleServerMode must not require a lease store")
+	require.NotNil(t, haManager)
+	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, haManager.Start(ctx))
+	assert.True(t, haManager.HasLeadership(),
+		"SingleServerMode HasLeadership() must remain unconditionally true")
+}
+
+// nodeSharedLeaseStore is a real business.LeaseStore — every lease operation is
+// served by the wrapped store, nothing is faked — that additionally declares the
+// substrate-sharing property (business.NodeSharedLeaseStore) which, in production,
+// only the networked PostgreSQL store has. It exists so the cluster-mode startup
+// path's accepting branch is testable: the real shared store requires a live
+// PostgreSQL server, which unit tests do not have.
+type nodeSharedLeaseStore struct {
+	business.LeaseStore
+}
+
+func (nodeSharedLeaseStore) SharedAcrossNodes() bool { return true }
+
+// newClusterTierStorageManager returns a StorageManager standing in for the cluster
+// (Postgres) tier: real stores throughout, with the lease store declaring the
+// node-shared substrate a cluster deployment actually runs on.
+func newClusterTierStorageManager(t *testing.T) *interfaces.StorageManager {
+	t.Helper()
+	tempDir := t.TempDir()
+	sm, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	leaseStore := sm.GetLeaseStore()
+	require.NotNil(t, leaseStore)
+	sm.SetLeaseStore(nodeSharedLeaseStore{LeaseStore: leaseStore})
+	return sm
+}
+
+// TestInitializeHAManager_ClusterModeRejectsNodeLocalLeaseStore is the regression
+// test for the fail-open hole a non-nil lease-store check leaves behind (security
+// review, round 3). The node-local storage tier does supply a LeaseStore — a
+// per-node SQLite file — so "a lease store exists" is satisfied while the mutual
+// exclusion it is supposed to provide does not exist at all: every node acquires
+// the cluster leadership lease against its own database, reports HasLeadership()
+// == true, and mints its own fencing-token sequence from 1. Cluster mode must
+// refuse that substrate at startup and say which one to use instead.
+func TestInitializeHAManager_ClusterModeRejectsNodeLocalLeaseStore(t *testing.T) {
+	t.Setenv("CFGMS_NODE_ID", "test-cluster-node-local-lease-store")
+
+	tempDir := t.TempDir()
+	sm, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	require.NotNil(t, sm.GetLeaseStore(),
+		"the node-local tier supplies a lease store — that is precisely why a non-nil check is insufficient")
+	require.False(t, business.LeaseStoreIsNodeShared(sm.GetLeaseStore()),
+		"the node-local tier's lease store must not claim to be shared across nodes")
+
+	cfg := &config.Config{HA: &config.HAConfig{Mode: "cluster"}}
+
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
+	require.Error(t, err, "cluster mode must refuse a node-local leadership lease substrate")
+	assert.Contains(t, err.Error(), "node-local lease store",
+		"error must name the substrate defect")
+	assert.Contains(t, err.Error(), "storage.cluster.postgres_dsn",
+		"error must tell the operator which tier to configure")
+}
+
+// TestInitializeHAManager_EnvClusterModeWithNodeLocalTierRefused covers the way a
+// running deployment reaches the mismatch in production: server.New selects the
+// shared cluster (Postgres) tier from cfg.HA.Mode, while the HA manager's own mode
+// additionally honours CFGMS_HA_MODE. When the two disagree the node runs cluster
+// mode on the node-local tier — the substrate that cannot arbitrate leadership.
+// That must fail closed at startup, not resolve into every node believing it leads.
+func TestInitializeHAManager_EnvClusterModeWithNodeLocalTierRefused(t *testing.T) {
+	t.Setenv("CFGMS_NODE_ID", "test-env-cluster-node")
+	t.Setenv("CFGMS_HA_MODE", "cluster")
+
+	tempDir := t.TempDir()
+	sm, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	// cfg.HA.Mode is "single", so server.New composed the node-local tier above.
+	cfg := &config.Config{HA: &config.HAConfig{Mode: "single"}}
+
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
+	require.Error(t, err,
+		"an env-promoted cluster mode running on the node-local storage tier must be refused")
+	assert.Contains(t, err.Error(), "node-local lease store")
+}
+
+// TestInitializeHAManager_BlueGreenModeHasNoLeaseAuthority verifies the other half
+// of the same finding: ha.mode blue-green runs the node-local storage tier, so it
+// must not derive leadership from that tier's lease. It starts (no shared substrate
+// is required of it) but reports no leadership and stamps no fencing token on
+// either node — fail-closed, which is where blue-green sat before ADR-031.
+func TestInitializeHAManager_BlueGreenModeHasNoLeaseAuthority(t *testing.T) {
+	t.Setenv("CFGMS_NODE_ID", "test-blue-green-node")
+
+	tempDir := t.TempDir()
+	sm, err := interfaces.CreateOSSStorageManager(tempDir+"/flatfile", tempDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	cfg := &config.Config{HA: &config.HAConfig{Mode: "blue-green"}}
+
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
+	require.NoError(t, err, "blue-green must still start on the node-local storage tier")
+	require.NotNil(t, haManager)
+	assert.Equal(t, ha.BlueGreenMode, haManager.GetDeploymentMode())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, haManager.Start(ctx))
+	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
+
+	// Sample repeatedly: a lease-acquisition loop, if one were wired, would have
+	// completed several rounds within this window.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		require.False(t, haManager.HasLeadership(),
+			"blue-green must never derive leadership from a node-local lease")
+		require.Equal(t, uint64(0), haManager.GetTerm(),
+			"blue-green must stamp no fencing token; a per-node sequence is worse than none")
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestInitializeHAManager_InvalidMode verifies that an unrecognised ha.mode string

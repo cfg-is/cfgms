@@ -83,6 +83,44 @@ type LeaseStore interface {
 	Close() error
 }
 
+// NodeSharedLeaseStore is an optional LeaseStore extension by which an
+// implementation declares whether its lease rows are shared by every controller
+// node in the deployment.
+//
+// Mutual exclusion is a property of the substrate, not of the lease algorithm: a
+// perfectly correct fenced lease held in a per-node database file excludes
+// nothing, because each node contends only with itself. Every node then acquires
+// the same lease name, reports itself the singleton holder, and mints its own
+// token sequence starting at 1 — the failure the lease exists to prevent. A
+// deployment that uses the lease as cluster-wide authority (ADR-031 Decision 5)
+// must therefore verify the substrate is shared, not merely that a store exists.
+//
+// Implementations report the property of their backend, not of a particular
+// deployment: a networked database every node connects to is shared; a local file
+// or embedded database opened at a path on the node's own disk is not.
+type NodeSharedLeaseStore interface {
+	LeaseStore
+
+	// SharedAcrossNodes reports true only when every controller node in a
+	// multi-node deployment contends for the same lease rows through this
+	// backend.
+	SharedAcrossNodes() bool
+}
+
+// LeaseStoreIsNodeShared reports whether store's substrate is shared by all
+// controller nodes, and is therefore usable as cluster-wide authority.
+//
+// Fails closed in both directions: a nil store and a store that does not
+// implement NodeSharedLeaseStore are both reported as node-local. A backend that
+// is genuinely shared has to say so; silence never grants authority.
+func LeaseStoreIsNodeShared(store LeaseStore) bool {
+	if store == nil {
+		return false
+	}
+	shared, ok := store.(NodeSharedLeaseStore)
+	return ok && shared.SharedAcrossNodes()
+}
+
 // LeaseState is a snapshot of a lease row.
 type LeaseState struct {
 	Name     string

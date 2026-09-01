@@ -66,6 +66,17 @@ func newTestNonceStorePair(t *testing.T) (business.NonceStore, business.NonceSto
 	return nodeA, nodeB
 }
 
+// newTestFlatFileLeaseStore returns a real flat-file business.LeaseStore rooted at
+// t.TempDir(), for tests that wire ha.Manager.SetLeaseStore against a real (not
+// mocked) S3 database lease (pkg/lease, ADR-031 Decision 5, Issue #3760). The
+// concrete flatfile import is confined to this allowlisted */providers_test.go path.
+func newTestFlatFileLeaseStore(t *testing.T) business.LeaseStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileLeaseStore(t.TempDir())
+	require.NoError(t, err, "creating flat-file lease store")
+	return st
+}
+
 // alertStoreProviders returns a map of provider-name → AlertStore for table-driven
 // handler tests that must exercise every working provider against real components.
 // The flat-file store always participates (t.TempDir(), no external dependency); the

@@ -25,6 +25,7 @@ import (
 	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	cptypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -1530,20 +1531,197 @@ func TestManager_SingleServerMode_HasLeadership_UnconditionallyTrue(t *testing.T
 		"SingleServerMode IsRaftLeader() must return false (no Raft node to query)")
 }
 
-// TestManager_HasLeadership_ClusterMode_DelegatesAndExpires verifies that the
-// Manager's HasLeadership() delegates to RaftConsensus and respects lease expiry.
-func TestManager_HasLeadership_ClusterMode_DelegatesAndExpires(t *testing.T) {
+// newLeaseBackedClusterManager returns a ClusterMode *Manager (single-node Raft,
+// FastElectionConfig, real cert manager) with SetLeaseStore already called against
+// store. It does not Start the manager. Used by the lease-backed HasLeadership()/
+// GetTerm() tests below (Issue #3760, ADR-031 Decision 5).
+func newLeaseBackedClusterManager(t *testing.T, nodeID string, store business.LeaseStore) *Manager {
+	t.Helper()
+
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
 
 	cfg := DefaultConfig()
 	cfg.Mode = ClusterMode
-	cfg.Node.ID = "hasleader-cluster-test"
+	cfg.Node.ID = nodeID
 	cfg.Cluster = FastElectionConfig()
 	// Include the node itself in discovery so StartNode bootstraps a single-node
-	// cluster (not RestartNode with no voters, which never elects a leader).
+	// cluster (not RestartNode with no voters, which never elects a leader). Each
+	// manager runs its own independent single-node Raft cluster — the point of
+	// this story's substrate swap is that lease coordination between the two
+	// managers below is entirely decoupled from Raft.
 	cfg.Cluster.Discovery.Config["nodes"] = []interface{}{
-		map[string]interface{}{"id": "hasleader-cluster-test", "address": "127.0.0.1:0"},
+		map[string]interface{}{"id": nodeID, "address": "127.0.0.1:0"},
+	}
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t), "")
+	require.NoError(t, err)
+	require.NoError(t, manager.SetLeaseStore(store))
+	t.Cleanup(func() {
+		if manager.raftConsensus != nil {
+			manager.raftConsensus.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+		}
+	})
+	return manager
+}
+
+// TestManager_HasLeadership_ClusterMode_LeaseBackedAndExpires is the REQUIRED test
+// (Issue #3760 AC) proving Manager.HasLeadership()/GetTerm() are backed by the S3
+// database lease (pkg/lease, ADR-031 Decision 5), not RaftConsensus: HasLeadership()
+// becomes true once the lease is acquired, GetTerm() reports the lease's fencing
+// token, and — critically — HasLeadership() lapses once the background renewal
+// loop stops (Manager.Stop), driven purely by the lease's cached-authority
+// SafetyMargin, with no RaftConsensus field manipulated to produce the effect.
+func TestManager_HasLeadership_ClusterMode_LeaseBackedAndExpires(t *testing.T) {
+	store := newTestLeaseStore(t)
+	manager := newLeaseBackedClusterManager(t, "lease-hasleader-test", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+
+	// HasLeadership must become true once the background acquisition loop
+	// (started by Start()) acquires the database lease.
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		"HasLeadership must become true once the database lease is acquired")
+
+	token := manager.GetTerm()
+	assert.NotZero(t, token, "GetTerm must return the lease's fencing token once leadership is held")
+
+	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	assert.Equal(t, token, state.Token, "GetTerm must equal the lease store's own current token")
+	assert.Equal(t, "lease-hasleader-test", state.HolderID)
+
+	// Manager.Stop aggregates component shutdown errors, so it is asserted rather
+	// than discarded: a failure to shut the cluster down cleanly is a real defect.
+	require.NoError(t, manager.Stop(context.Background()))
+
+	// The renewal loop has stopped, so no further TryAcquire calls extend the
+	// cached authority window. Once FastElectionConfig's derived SafetyMargin
+	// (160ms: 0.8 × 200ms ElectionTimeout) lapses, HasLeadership must go false —
+	// driven by the lease cache alone, since RaftConsensus is no longer consulted.
+	assert.Eventually(t, func() bool { return !manager.HasLeadership() },
+		2*time.Second, 5*time.Millisecond,
+		"HasLeadership must become false once the cached lease authority window lapses without renewal")
+}
+
+// TestManager_HasLeadership_MultiNode_AgreesWithLeaseCurrentHolder is the REQUIRED
+// multi-node test (Issue #3760 AC) proving HasLeadership()/GetTerm() agree with the
+// lease's current holder/token across two Manager instances sharing one database —
+// here, one real (not mocked) flatfile business.LeaseStore, per CLAUDE.md's
+// no-mocks rule and the story's "no mocks" implementation note.
+func TestManager_HasLeadership_MultiNode_AgreesWithLeaseCurrentHolder(t *testing.T) {
+	store := newTestLeaseStore(t)
+
+	managerA := newLeaseBackedClusterManager(t, "lease-multi-a", store)
+	managerB := newLeaseBackedClusterManager(t, "lease-multi-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, managerA.Stop(context.Background()))
+		assert.NoError(t, managerB.Stop(context.Background()))
+	})
+
+	// Wait until exactly one manager reports leadership and its GetTerm() agrees
+	// with the store's own current-holder token — proving Manager.HasLeadership()/
+	// GetTerm() read through to the same S3 lease state, not an independent view.
+	require.Eventually(t, func() bool {
+		aHas, bHas := managerA.HasLeadership(), managerB.HasLeadership()
+		if aHas == bHas { // both false (not yet settled) or both true (should never happen)
+			return false
+		}
+
+		leader, leaderID := managerA, "lease-multi-a"
+		if bHas {
+			leader, leaderID = managerB, "lease-multi-b"
+		}
+
+		state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+		if err != nil || !state.Valid {
+			return false
+		}
+		return state.HolderID == leaderID && state.Token == leader.GetTerm()
+	}, 5*time.Second, 5*time.Millisecond,
+		"exactly one manager must hold leadership, and its GetTerm() must equal the lease store's current holder token")
+}
+
+// TestManager_DualAuthorityWindowBound_ThroughManager is the REQUIRED test
+// (Issue #3760 AC, "Security review finding, round 2") proving that two Manager
+// instances never both report HasLeadership() == true for longer than S3's derived
+// SafetyMargin, exercised through Manager specifically — not just pkg/lease.Manager
+// directly (see TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin in
+// pkg/lease) — proving the ha.Manager wiring didn't reintroduce the dual-authority
+// gap the primitive itself closed.
+func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
+	store := newTestLeaseStore(t)
+
+	managerA := newLeaseBackedClusterManager(t, "dual-auth-a", store)
+	managerB := newLeaseBackedClusterManager(t, "dual-auth-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.NoError(t, managerB.Start(ctx))
+
+	require.Eventually(t, func() bool {
+		return managerA.HasLeadership() || managerB.HasLeadership()
+	}, 5*time.Second, 5*time.Millisecond, "one of the two managers must acquire the lease")
+
+	winner, loser := managerA, managerB
+	if managerB.HasLeadership() {
+		winner, loser = managerB, managerA
+	}
+
+	// Stop the winner so its renewal loop stops (simulates a crashed leader), then
+	// poll both managers' HasLeadership() until the loser takes over. At every
+	// sampled instant at most one may report true.
+	require.NoError(t, winner.Stop(context.Background()))
+
+	deadline := time.Now().Add(3 * time.Second)
+	var loserEverAcquired bool
+	for time.Now().Before(deadline) {
+		winnerHas := winner.HasLeadership()
+		loserHas := loser.HasLeadership()
+		require.False(t, winnerHas && loserHas,
+			"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
+		if loserHas {
+			loserEverAcquired = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	assert.True(t, loserEverAcquired, "the surviving manager must eventually take over the lease")
+
+	require.NoError(t, loser.Stop(context.Background()))
+}
+
+// TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager proves the
+// leadership lease is wired by construction from the StorageManager the Manager is
+// handed, with no explicit SetLeaseStore call anywhere in the test. This is the
+// regression test for the substrate swap shipping without production wiring: an
+// opt-in setter that the controller startup path never calls leaves
+// HasLeadership() permanently false and GetTerm() permanently 0, which is a
+// disabled ADR-029 Decision 5 command fence, not a degraded one.
+func TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
+
+	require.NotNil(t, storageManager.GetLeaseStore(),
+		"the standard test storage tier must supply a LeaseStore; without one this test cannot prove the wiring")
+
+	const nodeID = "lease-autowire-node"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster = FastElectionConfig()
+	cfg.Cluster.Discovery.Config["nodes"] = []interface{}{
+		map[string]interface{}{"id": nodeID, "address": "127.0.0.1:0"},
 	}
 
 	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t), "")
@@ -1556,32 +1734,146 @@ func TestManager_HasLeadership_ClusterMode_DelegatesAndExpires(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	require.NoError(t, manager.Start(ctx))
-	// Manager.Stop aggregates component shutdown errors, so it is asserted rather
-	// than discarded: a failure to shut the cluster down cleanly is a real defect.
-	defer func() {
-		assert.NoError(t, manager.Stop(context.Background()))
-	}()
+	require.NoError(t, manager.Start(ctx),
+		"Start must succeed when the storage manager supplies a lease store")
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
 
-	// Wait for leadership.
-	require.Eventually(t, func() bool {
-		return manager.IsLeader()
-	}, 10*time.Second, 20*time.Millisecond, "single-node cluster must elect itself leader")
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		"HasLeadership must become true from the constructor-wired lease, with no explicit SetLeaseStore call")
 
-	// HasLeadership must return true once the lease is established.
-	require.Eventually(t, func() bool {
-		return manager.HasLeadership()
-	}, 5*time.Second, 10*time.Millisecond, "HasLeadership must be true once lease is established")
+	token := manager.GetTerm()
+	require.NotZero(t, token,
+		"GetTerm must stamp a non-zero fencing token; term 0 is read as 'unstamped' by the steward fence ratchet")
 
-	// Expire the lease via direct field access (simulates partition).
-	leaseDuration := time.Duration(float64(cfg.Cluster.ElectionTimeout) * 0.8)
-	rc := manager.raftConsensus
-	rc.mu.Lock()
-	rc.leaseLastAck = time.Now().Add(-(leaseDuration + time.Millisecond))
-	rc.mu.Unlock()
+	state, err := storageManager.GetLeaseStore().GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	assert.Equal(t, token, state.Token, "GetTerm must equal the wired store's own current token")
+	assert.Equal(t, nodeID, state.HolderID)
+}
 
+// TestManager_Start_ClusterMode_WithoutLeaseStore_Fails proves a cluster Manager
+// refuses to start when no lease store is available, rather than degrading to a
+// permanently-false HasLeadership() and a term-0 command stamp. Fail-loud, not
+// fail-quiet: the operator sees a startup error naming the missing substrate.
+func TestManager_Start_ClusterMode_WithoutLeaseStore_Fails(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "no-lease-store-node"
+	cfg.Cluster = FastElectionConfig()
+	cfg.Cluster.Discovery.Config["nodes"] = []interface{}{
+		map[string]interface{}{"id": "no-lease-store-node", "address": "127.0.0.1:0"},
+	}
+
+	// nil storage manager => no lease store to wire by construction.
+	manager, err := NewManager(cfg, logging.GetLogger(), nil, newTestCertManager(t), "")
+	require.NoError(t, err, "construction must still succeed; the lease is a start-time precondition")
+	t.Cleanup(func() {
+		if manager.raftConsensus != nil {
+			manager.raftConsensus.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = manager.Start(ctx)
+	require.Error(t, err, "Start must refuse to run without the lease that backs leadership authority")
+	assert.Contains(t, err.Error(), "requires a lease store")
+
+	// The control must be off, not silently permissive.
 	assert.False(t, manager.HasLeadership(),
-		"Manager.HasLeadership() must be false when underlying lease has expired")
-	assert.True(t, manager.IsLeader(),
-		"Manager.IsLeader() (protocol state) must remain true when only the lease expired")
+		"a manager that refused to start must not report leadership")
+	assert.Equal(t, uint64(0), manager.GetTerm())
+}
+
+// TestManager_BlueGreenMode_NeverLeaseBackedAuthority is the regression test for the
+// dual-authority hole this substrate swap opened on its first pass (security review,
+// round 3). Blue-green runs the node-local storage tier, so each node's StorageManager
+// supplies a lease store backed by *its own* database file. Wiring that as cluster
+// leadership let blue and green each acquire "controller-cluster-leadership" against
+// their own copy — both reporting HasLeadership() == true, each minting a fencing
+// sequence starting at 1, with the singleton claim and the command fence silently off.
+//
+// Blue-green therefore gets no lease-backed authority at all: it starts (no lease is
+// required of it), HasLeadership() stays false on both nodes, and GetTerm() stays 0.
+func TestManager_BlueGreenMode_NeverLeaseBackedAuthority(t *testing.T) {
+	newBlueGreenNode := func(nodeID string) *Manager {
+		cfg := DefaultConfig()
+		cfg.Mode = BlueGreenMode
+		cfg.Node.ID = nodeID
+		cfg.Cluster = FastElectionConfig()
+
+		// Each node has its own store, exactly as a per-node SQLite/flat-file
+		// storage tier gives it — the substrate that excludes nothing.
+		storageManager, err := storage.CreateTestStorageManager()
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
+		require.NotNil(t, storageManager.GetLeaseStore(),
+			"the node-local tier does supply a lease store; that is exactly why a non-nil check is not enough")
+
+		manager, err := NewManager(cfg, logging.GetLogger(), storageManager, newTestCertManager(t), "")
+		require.NoError(t, err)
+
+		// An explicit wiring attempt must not grant authority either.
+		require.NoError(t, manager.SetLeaseStore(newTestLeaseStore(t)),
+			"SetLeaseStore is a no-op in blue-green, not an error")
+		return manager
+	}
+
+	blue := newBlueGreenNode("blue-node")
+	green := newBlueGreenNode("green-node")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, blue.Start(ctx), "blue-green must start without a shared lease substrate")
+	require.NoError(t, green.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, blue.Stop(context.Background()))
+		assert.NoError(t, green.Stop(context.Background()))
+	})
+
+	// Sample over a window longer than a lease TTL would be, so a lease-acquisition
+	// loop — if one were ever wired here — would have completed several rounds.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		require.False(t, blue.HasLeadership(),
+			"blue must never report leadership from a node-local lease")
+		require.False(t, green.HasLeadership(),
+			"green must never report leadership from a node-local lease")
+		require.Equal(t, uint64(0), blue.GetTerm(),
+			"blue must stamp no fencing token; an independent per-node sequence is worse than none")
+		require.Equal(t, uint64(0), green.GetTerm())
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestManager_SetLeaseStore_NilStoreRejectedInClusterMode proves the explicit wiring
+// entry point reports a nil store as an error rather than quietly leaving the
+// authority substrate unwired, and that modes without lease-backed authority are
+// unaffected by what is passed.
+func TestManager_SetLeaseStore_NilStoreRejectedInClusterMode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "nil-lease-store-node"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), nil, newTestCertManager(t), "")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if manager.raftConsensus != nil {
+			manager.raftConsensus.Stop() //nolint:errcheck // Stop always returns nil; error is non-actionable in cleanup
+		}
+	})
+
+	require.Error(t, manager.SetLeaseStore(nil),
+		"SetLeaseStore(nil) must be an error in ClusterMode, where the lease is the authority source")
+
+	// SingleServerMode needs no lease (ADR-029 Decision 4), so nil stays a no-op.
+	singleCfg := DefaultConfig()
+	singleCfg.Mode = SingleServerMode
+	singleManager, err := NewManager(singleCfg, logging.GetLogger(), nil, nil, "")
+	require.NoError(t, err)
+	assert.NoError(t, singleManager.SetLeaseStore(nil),
+		"SingleServerMode must remain unaffected by the lease substrate")
+	assert.True(t, singleManager.HasLeadership(),
+		"SingleServerMode HasLeadership() must stay unconditionally true")
 }

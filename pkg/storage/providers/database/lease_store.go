@@ -15,8 +15,11 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// Compile-time assertion.
-var _ business.LeaseStore = (*DatabaseLeaseStore)(nil)
+// Compile-time assertions.
+var (
+	_ business.LeaseStore           = (*DatabaseLeaseStore)(nil)
+	_ business.NodeSharedLeaseStore = (*DatabaseLeaseStore)(nil)
+)
 
 // DatabaseLeaseStore implements business.LeaseStore using PostgreSQL. The
 // fencing-token increment and contention resolution are performed entirely by
@@ -183,3 +186,10 @@ func (s *DatabaseLeaseStore) Close() error {
 	}
 	return nil
 }
+
+// SharedAcrossNodes implements business.NodeSharedLeaseStore: true. Every
+// controller node in a cluster deployment connects to the same PostgreSQL
+// instance (storage.cluster.postgres_dsn), so contention for a lease name is
+// resolved by that one server's row locking across nodes — which is what makes
+// this store usable as cluster-wide authority (ADR-031 Decision 5).
+func (s *DatabaseLeaseStore) SharedAcrossNodes() bool { return true }
