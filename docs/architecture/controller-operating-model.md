@@ -611,7 +611,7 @@ The controller promotes a steward's source IP to **trusted status** only after i
 
 ### IP-Trust Dark-Window Expiry (Issue #1697)
 
-A trusted IP range is automatically revoked after 30 consecutive days with no registrations and no healthy stewards from that range (the **dark window**). The sweep is performed hourly by `IPTrustExpiryJob` (`features/controller/registration/ip_trust_expiry.go`).
+A trusted IP range is automatically revoked after 30 consecutive days with no registrations and no healthy stewards from that range (the **dark window**). The sweep is performed hourly by `IPTrustExpiryJob` (`features/controller/registration/ip_trust_expiry.go`). In a multi-node cluster, only the node holding the `controller-ip-trust-expiry` lease runs a given sweep cycle — see [Background-Loop Singleton Scheduling](#background-loop-singleton-scheduling-issue-3762-adr-031-decision-4).
 
 **Exemption:** Pre-seeded entries (`PreSeeded: true`) are never auto-revoked. Operator-owned ranges added via `cfg registration ip-trust add --pre-seeded` can only be revoked explicitly with `cfg registration ip-trust revoke`.
 
@@ -621,7 +621,7 @@ A trusted IP range is automatically revoked after 30 consecutive days with no re
 
 ### Pending-Registration Expiry (Issue #1697)
 
-Pending registration entries that have not been acted on within 5 days are automatically marked `expired` by `PendingExpiryJob` (`features/controller/registration/pending_expiry.go`). The sweep runs hourly and delegates to `PendingRegistrationStore.ExpireStale`.
+Pending registration entries that have not been acted on within 5 days are automatically marked `expired` by `PendingExpiryJob` (`features/controller/registration/pending_expiry.go`). The sweep runs hourly and delegates to `PendingRegistrationStore.ExpireStale`. In a multi-node cluster, only the node holding the `controller-pending-registration-expiry` lease runs a given sweep cycle — see [Background-Loop Singleton Scheduling](#background-loop-singleton-scheduling-issue-3762-adr-031-decision-4). The manual-review workflow's own pending-expiry sweep (`ManualReviewApprovalHook`) is a separate loop with its own lease; see that section.
 
 Expired entries are visible via `cfg registration pending` (status `expired`). They cannot be approved or denied after expiry; the steward must re-register to obtain a fresh pending entry.
 
@@ -1334,6 +1334,78 @@ All side-effecting controller endpoints are gated on lease-backed authority (ADR
 - **Steward binary publish** (#3543) — `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}` returns 503 when `HasLeadership()` is false; read and list endpoints remain available.
 - **Steward decommission/move/config write** (#3544) — `handleDecommissionSteward` (`DELETE /api/v1/stewards/{id}`), `handleMoveSteward` (`POST /api/v1/stewards/{id}/move`), `handleUpdateStewardConfig` (`PUT /api/v1/stewards/{id}/config`), and `handleDeleteStewardConfig` (`DELETE /api/v1/stewards/{id}/config`) each return 503 on a non-authoritative node; read-only status and config-read endpoints are unaffected.
 - **Batch-job/run-script command dispatch** (#3545) — fencing via Raft term-stamping, confirmed by test in #3545; `RollingBatchExecutor`'s command dispatch stamps `Term: p.currentTerm()` on every published command (`features/controller/commands/publisher.go:181`), so commands from a stale leader are rejected by followers holding a higher term. This surface is **not** `HasLeadership()`-gated — it operates at the Raft log level rather than the HTTP handler layer.
+
+#### Background-Loop Singleton Scheduling (Issue #3762, ADR-031 Decision 4)
+
+Before this story, every background sweep/expiry/scheduler loop ran on **every**
+cluster node unconditionally — a multi-node deployment did each sweep once per
+node per cycle rather than once per cluster. `HasLeadership()` gated exactly one
+of these, and only incidentally: `resumePendingPushes`, a one-shot startup replay
+(`features/controller/server/server.go`), not a periodic loop.
+
+Cluster-singleton loops now claim a `pkg/lease` lease before running each cycle,
+using the reusable `pkg/lease.SingletonJob` wrapper
+(`RunIfLeader(ctx, fn)`) so no call site hand-rolls its own acquire/renew/release
+sequence. `ha.Manager.NewBackgroundLoopLease(name, logger)` constructs one,
+backed by a lease population distinct from the cluster-leadership lease
+(`backgroundLoopLeaseTTL` = 90s, `backgroundLoopRenewInterval` = 20s, independent
+of `cfg.Cluster.ElectionTimeout`). It is nil-receiver-safe: a nil `*ha.Manager`
+(OSS single-node) and any non-`ClusterMode` deployment yield a `SingletonJob`
+that runs every cycle unconditionally — identical to pre-#3762 behavior, so only
+genuine multi-node clusters are affected.
+
+**How `RunIfLeader` works:** on each tick, the loop calls
+`leaseJob.RunIfLeader(ctx, cycleFn)`. It attempts `TryAcquire` for this cycle;
+if another node holds the lease, `cycleFn` is skipped entirely (`RunIfLeader`
+returns `false`). If acquired, a background goroutine renews the lease every
+`RenewInterval` for as long as `cycleFn` runs — so a cycle slower than the lease
+TTL does not lose the lease mid-execution and trigger a duplicate run elsewhere.
+The lease is not explicitly released when the cycle finishes; it is left to
+expire at TTL, which is simpler than a release round-trip and equally correct,
+since no other node can acquire it before then regardless.
+
+**Converted loops and their lease names:**
+
+| Loop | Lease name | Category |
+|------|-----------|----------|
+| IP-trust dark-window expiry (`IPTrustExpiryJob`) | `controller-ip-trust-expiry` | True singleton — one global sweep across all tenants |
+| Pending-registration expiry (`PendingExpiryJob`) | `controller-pending-registration-expiry` | True singleton |
+| Manual-review pending expiry (`ManualReviewApprovalHook`) | `controller-manual-review-pending-expiry` | True singleton — a second, independent sweep of the same `PendingRegistrationStore.ExpireStale`, pre-existing and out of scope to merge with the above (this story does not redesign loop business logic) |
+| Credential-request / enrolment-token expiry sweep | `controller-credential-request-expiry` | True singleton — one tick covers both the enrolment-token and orphaned-collected-certificate sweeps |
+| CLI-login request expiry sweep | `controller-cli-login-request-expiry` | True singleton |
+| DNA storage maintenance (`dnaStorage.Manager.runMaintenance`: flush, optimize, retention) | `controller-dna-storage-maintenance` | True singleton — the longest-running cycle of the set (see the renewal-under-load test below) |
+| Workflow trigger cron scheduler (`CronScheduler.checkAndExecuteDueTriggers`) | `controller-workflow-trigger-scheduler` | True singleton — a due trigger must fire once per cluster, not once per node |
+| Git-sync per-scope polling (`pkg/gitsync.Syncer`) | `controller-gitsync-scope-<tenant_path>/<namespace>` | True singleton, **one lease per scope** — scopes are independent (many may legitimately poll concurrently across a cluster), so this is many small singletons rather than one global sweep or a claimable work queue. Webhook-triggered syncs (`pkg/gitsync/webhook.go`) are **not** gated: a webhook must run on whichever node received the HTTP request, never wherever a different scope's polling lease happens to be held. |
+
+**No loop in the current, live set is queue-shaped** (a table of discrete,
+independently claimable work items) in the `SELECT ... FOR UPDATE SKIP LOCKED`
+sense. The one candidate that resembles queue-shaped work —
+`features/controller/dispatcher.Dispatcher`, which dispatches queued script
+executions per device — is excluded: its `ExecutionQueue` is an in-memory,
+node-local structure (`features/modules/stdlib/script/execution_queue.go`), not
+shared cluster state, so each node correctly dispatches only what was queued to
+it directly. Converting it to database work-claiming would require making that
+queue durable and shared first, which is a storage-layer change this story does
+not make.
+
+Several other loops matching a `time.NewTicker` search were found unwired to any
+production binary (RBAC JIT access-manager cleanup, the SIEM engine's four
+tickers, directory DNA drift/monitoring, `pkg/configrouting.SyncService`, and
+`features/config/git.DefaultGitManager`, superseded by `pkg/gitsync`) — dead
+code, not currently running, so they are out of this story's live-loop count and
+were left untouched.
+
+**Tests:** `pkg/lease/singleton_test.go` and
+`pkg/ha/background_loop_lease_test.go` prove the `SingletonJob`/
+`NewBackgroundLoopLease` primitives directly (two-node mutual exclusion, and a
+cycle far longer than the lease TTL renewing without a duplicate run). Each
+converted loop above carries its own two-node test proving the same property
+through its actual production wiring (e.g.
+`TestIPTrustExpiryJob_TwoNodes_OnlyOneRunsPerCycle`,
+`TestSyncer_PerScopeLease_TwoNodes_OnlyOneRunsPerCycle`); the DNA storage
+maintenance loop additionally carries
+`TestManager_MaintenanceLease_SlowCycleRenewsAcrossTTL_NoDuplicateRun`, the
+renewal-under-load test for the longest-running cycle.
 
 ## REST API
 

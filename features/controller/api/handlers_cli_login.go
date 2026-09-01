@@ -777,7 +777,7 @@ func (s *Server) startCliLoginRequestSweep() {
 			case <-s.stopCliLoginSweep:
 				return
 			case <-ticker.C:
-				s.sweepExpiredCliLoginRequests(context.Background())
+				s.cliLoginSweepLease.RunIfLeader(context.Background(), s.sweepExpiredCliLoginRequests)
 			}
 		}
 	}()

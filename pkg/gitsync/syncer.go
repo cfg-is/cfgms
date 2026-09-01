@@ -15,10 +15,23 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// gitsyncLeaseNamePrefix namespaces per-scope lease names so they cannot
+// collide with any other package's cluster-singleton lease population
+// (ADR-031 Decision 4).
+const gitsyncLeaseNamePrefix = "controller-gitsync-scope-"
+
+// LeaseJobFactory constructs the lease.SingletonJob a scope's polling cycle
+// runs behind, given that scope's unique key. Each scope is an independent
+// singleton (many scopes may legitimately sync concurrently across a
+// cluster), so the factory is called once per scope rather than sharing one
+// lease name across all of them.
+type LeaseJobFactory func(name string) (lease.SingletonJob, error)
 
 // SyncState represents the current state of a scope sync.
 type SyncState string
@@ -55,6 +68,15 @@ type Syncer struct {
 	newTickerFunc func(d time.Duration) (<-chan time.Time, func())
 	syncNotify    chan<- struct{} // optional; receives a value after each TriggerSync call
 	secretStore   secretsif.SecretStore
+
+	// leaseJobFactory, when non-nil, builds the per-scope cluster-singleton
+	// lease claim (ADR-031 Decision 4) each scope's polling cycle runs behind.
+	// nil (the default) means no shared lease substrate is wired — polling runs
+	// unconditionally, the correct behavior for a single-node deployment.
+	// Webhook-triggered syncs (pkg/gitsync/webhook.go) never consult this: a
+	// webhook must run on whichever node received the HTTP request, not on
+	// whichever node holds the scope's polling lease.
+	leaseJobFactory LeaseJobFactory
 }
 
 // Option is a functional option for NewSyncer.
@@ -84,6 +106,15 @@ func WithSyncNotify(ch chan<- struct{}) Option {
 func WithSecretStore(store secretsif.SecretStore) Option {
 	return func(s *Syncer) {
 		s.secretStore = store
+	}
+}
+
+// WithLeaseJobFactory configures the per-scope cluster-singleton lease claim
+// (ADR-031 Decision 4) each scope's polling cycle runs behind. See
+// Syncer.leaseJobFactory.
+func WithLeaseJobFactory(f LeaseJobFactory) Option {
+	return func(s *Syncer) {
+		s.leaseJobFactory = f
 	}
 }
 
@@ -160,6 +191,22 @@ func (s *Syncer) startScope(b ScopeBinding) {
 	scopeCtx, cancel := context.WithCancel(s.ctx)
 	s.cancelFuncs[key] = cancel
 
+	// Built once per scope-start (not per tick): the lease claim is stable for
+	// the lifetime of this polling goroutine, matching every other converted
+	// background loop's construction-time wiring (ADR-031 Decision 4).
+	leaseJob := lease.SingletonJob{}
+	if s.leaseJobFactory != nil {
+		job, err := s.leaseJobFactory(gitsyncLeaseNamePrefix + key)
+		if err != nil {
+			s.logger.Error("gitsync: failed to construct per-scope lease job; polling will run ungated",
+				"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+				"namespace", logging.SanitizeLogValue(b.Namespace),
+				"error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			leaseJob = job
+		}
+	}
+
 	go func() {
 		tickCh, stopTicker := s.newTickerFunc(b.PollingInterval)
 		defer stopTicker()
@@ -168,12 +215,14 @@ func (s *Syncer) startScope(b ScopeBinding) {
 			case <-scopeCtx.Done():
 				return
 			case <-tickCh:
-				if err := s.TriggerSync(scopeCtx, b); err != nil {
-					s.logger.Error("gitsync: polling sync failed",
-						"tenant_path", logging.SanitizeLogValue(b.TenantPath),
-						"namespace", logging.SanitizeLogValue(b.Namespace),
-						"error", err.Error())
-				}
+				leaseJob.RunIfLeader(scopeCtx, func(ctx context.Context) {
+					if err := s.TriggerSync(ctx, b); err != nil {
+						s.logger.Error("gitsync: polling sync failed",
+							"tenant_path", logging.SanitizeLogValue(b.TenantPath),
+							"namespace", logging.SanitizeLogValue(b.Namespace),
+							"error", logging.SanitizeLogValue(err.Error()))
+					}
+				})
 			}
 		}
 	}()

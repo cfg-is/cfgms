@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -555,7 +556,7 @@ func newTestManualReviewHook(t *testing.T) (*ManualReviewApprovalHook, business.
 	sm := pkgtesting.SetupTestStorage(t)
 	pendingStore := sm.GetPendingRegistrationStore()
 	require.NotNil(t, pendingStore, "OSS storage manager must provide a PendingRegistrationStore")
-	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger())
+	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger(), lease.SingletonJob{})
 	t.Cleanup(func() { hook.Stop() })
 	return hook, pendingStore
 }
@@ -629,7 +630,7 @@ func TestManualReviewApprovalHook_ExpireTimedOut(t *testing.T) {
 	require.NoError(t, pendingStore.AddPending(ctx, entry))
 
 	// Use a fresh hook so the background goroutine is fresh.
-	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger())
+	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger(), lease.SingletonJob{})
 	defer hook.Stop()
 
 	// Manually invoke the expiry sweep.
