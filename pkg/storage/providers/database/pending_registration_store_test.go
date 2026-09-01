@@ -28,7 +28,7 @@ func newTestPendingRegistrationStore(t *testing.T) *DatabasePendingRegistrationS
 	schemas := NewDatabaseSchemas()
 	require.NoError(t, schemas.CreatePendingRegistrationsTable(context.Background(), db))
 
-	store, err := NewDatabasePendingRegistrationStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabasePendingRegistrationStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

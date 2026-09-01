@@ -123,12 +123,11 @@ func tryNewDatabaseAlertStore(t *testing.T) business.AlertStore {
 		_ = db.Close()
 		return nil
 	}
-	_ = db.Close()
-	st, err := database.NewDatabaseAlertStore(dsn, map[string]interface{}{})
+	t.Cleanup(func() { _ = db.Close() })
+	st, err := database.NewDatabaseAlertStore(db, map[string]interface{}{})
 	if err != nil {
 		return nil
 	}
-	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
 

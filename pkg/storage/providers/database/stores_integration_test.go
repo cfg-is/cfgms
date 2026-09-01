@@ -26,12 +26,10 @@ func newTestSessionStore(t *testing.T) *DatabaseSessionStore {
 	schemas := NewDatabaseSchemas()
 	ctx := context.Background()
 	require.NoError(t, schemas.CreateSessionsTable(ctx, db))
-	dsn := buildTestDSN()
 	cfg := getTestConfig()
 	cfg["session_hmac_key"] = "test-hmac-key-for-integration-tests-only-32bytes"
-	store, err := NewDatabaseSessionStore(dsn, cfg)
+	store, err := NewDatabaseSessionStore(db, cfg)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -42,10 +40,8 @@ func newTestStewardStore(t *testing.T) *DatabaseStewardStore {
 	schemas := NewDatabaseSchemas()
 	ctx := context.Background()
 	require.NoError(t, schemas.CreateStewardRecordsTable(ctx, db))
-	dsn := buildTestDSN()
-	store, err := NewDatabaseStewardStore(dsn, getTestConfig())
+	store, err := NewDatabaseStewardStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -57,10 +53,8 @@ func newTestCommandStore(t *testing.T) *DatabaseCommandStore {
 	ctx := context.Background()
 	require.NoError(t, schemas.CreateCommandRecordsTable(ctx, db))
 	require.NoError(t, schemas.CreateCommandTransitionsTable(ctx, db))
-	dsn := buildTestDSN()
-	store, err := NewDatabaseCommandStore(dsn, getTestConfig())
+	store, err := NewDatabaseCommandStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 

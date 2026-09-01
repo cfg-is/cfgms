@@ -21,7 +21,7 @@ func newTestCaseStore(t *testing.T) *DatabaseCaseStore {
 	ctx := context.Background()
 	require.NoError(t, NewDatabaseSchemas().CreateCaseTables(ctx, db))
 
-	store, err := NewDatabaseCaseStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseCaseStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

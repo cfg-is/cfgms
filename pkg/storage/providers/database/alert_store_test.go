@@ -22,11 +22,10 @@ import (
 func newTestDatabaseAlertStore(t *testing.T) *DatabaseAlertStore {
 	t.Helper()
 	db := setupTestDatabase(t)
-	_ = db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 
-	store, err := NewDatabaseAlertStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseAlertStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -40,9 +39,10 @@ func TestDatabaseAlertStore_InitSchemaIsIdempotent(t *testing.T) {
 	first := newTestDatabaseAlertStore(t)
 	require.NotNil(t, first)
 
-	second, err := NewDatabaseAlertStore(buildTestDSN(), getTestConfig())
+	dbSecond := getTestDB(t)
+	t.Cleanup(func() { _ = dbSecond.Close() })
+	second, err := NewDatabaseAlertStore(dbSecond, getTestConfig())
 	require.NoError(t, err, "initSchema must be idempotent")
-	t.Cleanup(func() { _ = second.Close() })
 
 	// Both handles must see the same table.
 	ctx := context.Background()

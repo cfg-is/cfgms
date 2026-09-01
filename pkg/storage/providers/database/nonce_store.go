@@ -21,23 +21,11 @@ type DatabaseNonceStore struct {
 	db *sql.DB
 }
 
-// NewDatabaseNonceStore opens a pooled Postgres connection, initialises the
-// schema, and returns a ready-to-use NonceStore.
-func NewDatabaseNonceStore(dsn string, config map[string]interface{}) (*DatabaseNonceStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to open nonce store connection: %w", err)
-	}
-	db.SetMaxOpenConns(getIntFromConfig(config, "max_open_connections", 25))
-	db.SetMaxIdleConns(getIntFromConfig(config, "max_idle_connections", 5))
-	db.SetConnMaxLifetime(time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute)
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("database: failed to ping nonce store: %w", err)
-	}
+// NewDatabaseNonceStore initialises the schema on the given shared connection
+// pool and returns a ready-to-use NonceStore.
+func NewDatabaseNonceStore(db *sql.DB, config map[string]interface{}) (*DatabaseNonceStore, error) {
 	store := &DatabaseNonceStore{db: db}
 	if err := store.initSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("database: failed to initialise nonce schema: %w", err)
 	}
 	return store, nil
@@ -53,11 +41,8 @@ func (s *DatabaseNonceStore) initSchema() error {
 	return NewDatabaseSchemas().CreateRefreshNoncesTable(ctx, s.db)
 }
 
-// Close releases the database connection.
+// Close is a no-op — DatabaseProvider.Close() owns the shared pool's lifecycle.
 func (s *DatabaseNonceStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 

@@ -27,29 +27,9 @@ type DatabaseAuditStore struct {
 	schemas DatabaseSchemas
 }
 
-// NewDatabaseAuditStore creates a new PostgreSQL-based audit store
-func NewDatabaseAuditStore(dsn string, config map[string]interface{}) (*DatabaseAuditStore, error) {
-	// Open database connection with connection pooling
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	// Configure connection pool for audit workload
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 50) // Higher for audit writes
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 10)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	// Test connection
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+// NewDatabaseAuditStore creates a new PostgreSQL-based audit store backed by
+// the shared connection pool db (owned by DatabaseProvider).
+func NewDatabaseAuditStore(db *sql.DB, config map[string]interface{}) (*DatabaseAuditStore, error) {
 	store := &DatabaseAuditStore{
 		db:      db,
 		config:  config,
@@ -58,7 +38,6 @@ func NewDatabaseAuditStore(dsn string, config map[string]interface{}) (*Database
 
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 
@@ -945,9 +924,8 @@ func (s *DatabaseAuditStore) RefreshStatsView(ctx context.Context) error {
 }
 
 // Close closes the database connection
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseAuditStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }

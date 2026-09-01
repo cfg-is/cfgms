@@ -22,7 +22,7 @@ func newTestNonceStore(t *testing.T) *DatabaseNonceStore {
 	ctx := context.Background()
 	require.NoError(t, schemas.CreateRefreshNoncesTable(ctx, db))
 
-	store, err := NewDatabaseNonceStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseNonceStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store
@@ -107,11 +107,17 @@ func TestDatabaseNonceStore_CrossInstanceHandoff(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	require.NoError(t, NewDatabaseSchemas().CreateRefreshNoncesTable(context.Background(), db))
 
-	nodeA, err := NewDatabaseNonceStore(buildTestDSN(), getTestConfig())
+	// Two independent *sql.DB connections against the same test database,
+	// simulating two controller nodes that do not share a pool.
+	dbA := getTestDB(t)
+	t.Cleanup(func() { _ = dbA.Close() })
+	nodeA, err := NewDatabaseNonceStore(dbA, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nodeA.Close() })
 
-	nodeB, err := NewDatabaseNonceStore(buildTestDSN(), getTestConfig())
+	dbB := getTestDB(t)
+	t.Cleanup(func() { _ = dbB.Close() })
+	nodeB, err := NewDatabaseNonceStore(dbB, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nodeB.Close() })
 

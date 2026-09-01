@@ -16,6 +16,7 @@ package business_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
@@ -72,11 +73,19 @@ func newContractDatabaseStewardStoreOrSkip(t *testing.T) business.StewardStore {
 	}
 	dsn := fmt.Sprintf("host=localhost port=%d dbname=cfgms_test user=cfgms_test password=%s sslmode=disable",
 		port, password)
-	store, err := database.NewDatabaseStewardStore(dsn, map[string]interface{}{})
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Skipf("PostgreSQL not available for contract test: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		t.Skipf("PostgreSQL not available for contract test: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := database.NewDatabaseStewardStore(db, map[string]interface{}{})
+	if err != nil {
+		t.Skipf("PostgreSQL not available for contract test: %v", err)
+	}
 	return store
 }
 
@@ -227,11 +236,19 @@ func newContractDatabaseAuditStoreOrSkip(t *testing.T) business.AuditStore {
 	}
 	dsn := fmt.Sprintf("host=localhost port=%d dbname=cfgms_test user=cfgms_test password=%s sslmode=disable",
 		port, password)
-	store, err := database.NewDatabaseAuditStore(dsn, map[string]interface{}{})
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Skipf("PostgreSQL not available for contract test: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		t.Skipf("PostgreSQL not available for contract test: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := database.NewDatabaseAuditStore(db, map[string]interface{}{})
+	if err != nil {
+		t.Skipf("PostgreSQL not available for contract test: %v", err)
+	}
 	return store
 }
 

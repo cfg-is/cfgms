@@ -35,30 +35,13 @@ type DatabaseLeaseStore struct {
 	schemas DatabaseSchemas
 }
 
-// NewDatabaseLeaseStore opens a PostgreSQL-backed LeaseStore at dsn.
-func NewDatabaseLeaseStore(dsn string, config map[string]interface{}) (*DatabaseLeaseStore, error) {
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+// NewDatabaseLeaseStore creates a PostgreSQL-backed LeaseStore using the
+// shared connection pool db (owned by DatabaseProvider; ADR-031 Decision 6).
+func NewDatabaseLeaseStore(db *sql.DB, config map[string]interface{}) (*DatabaseLeaseStore, error) {
 	store := &DatabaseLeaseStore{db: db, schemas: NewDatabaseSchemas()}
 
 	ctx := context.Background()
 	if err := store.schemas.CreateLeaseTable(ctx, db); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to create cfgms_leases table: %w", err)
 	}
 
@@ -180,10 +163,9 @@ func (s *DatabaseLeaseStore) getLease(ctx context.Context, name string) (*busine
 }
 
 // Close closes the underlying database connection.
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseLeaseStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }
 

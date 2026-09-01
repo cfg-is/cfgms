@@ -24,7 +24,7 @@ func newTestRefreshPolicyStore(t *testing.T) *DatabaseRefreshPolicyStore {
 	ctx := context.Background()
 	require.NoError(t, schemas.CreateRefreshPoliciesTable(ctx, db))
 
-	store, err := NewDatabaseRefreshPolicyStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseRefreshPolicyStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

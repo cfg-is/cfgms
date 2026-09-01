@@ -66,9 +66,8 @@ func newTestTenantStore(t *testing.T) *DatabaseTenantStore {
 	purgeTenantTables(t, db)
 	t.Cleanup(func() { purgeTenantTables(t, db) })
 
-	store, err := NewDatabaseTenantStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseTenantStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -78,9 +77,10 @@ func newTestTenantStore(t *testing.T) *DatabaseTenantStore {
 // sharing one store's mutex.
 func newTenantStoreOnSharedDB(t *testing.T) *DatabaseTenantStore {
 	t.Helper()
-	store, err := NewDatabaseTenantStore(buildTestDSN(), getTestConfig())
+	db := getTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := NewDatabaseTenantStore(db, getTestConfig())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 

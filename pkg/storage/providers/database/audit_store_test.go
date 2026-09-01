@@ -45,15 +45,16 @@ func TestDatabaseAuditStore_AppendChainedEntry_ConcurrentWriters(t *testing.T) {
 	// leftover tables from a prior run so the schema is created fresh below.
 	_ = setupTestDatabase(t)
 
-	dsn := buildTestDSN()
+	dbA := getTestDB(t)
+	t.Cleanup(func() { _ = dbA.Close() })
+	dbB := getTestDB(t)
+	t.Cleanup(func() { _ = dbB.Close() })
 
-	storeA, err := NewDatabaseAuditStore(dsn, map[string]interface{}{})
+	storeA, err := NewDatabaseAuditStore(dbA, map[string]interface{}{})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = storeA.Close() })
 
-	storeB, err := NewDatabaseAuditStore(dsn, map[string]interface{}{})
+	storeB, err := NewDatabaseAuditStore(dbB, map[string]interface{}{})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = storeB.Close() })
 
 	const tenantID = "concurrent-chain-tenant"
 	const perWriter = 25

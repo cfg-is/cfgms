@@ -24,28 +24,7 @@ type DatabaseTenantStore struct {
 }
 
 // NewDatabaseTenantStore creates a new PostgreSQL-based tenant store
-func NewDatabaseTenantStore(dsn string, config map[string]interface{}) (*DatabaseTenantStore, error) {
-	// Open database connection with connection pooling
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	// Configure connection pool
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 25)
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 5)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	// Test connection
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+func NewDatabaseTenantStore(db *sql.DB, config map[string]interface{}) (*DatabaseTenantStore, error) {
 	store := &DatabaseTenantStore{
 		db:      db,
 		config:  config,
@@ -54,11 +33,11 @@ func NewDatabaseTenantStore(dsn string, config map[string]interface{}) (*Databas
 
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 
 	return store, nil
+
 }
 
 // initializeSchema creates the necessary database tables and indexes for tenants
@@ -96,8 +75,10 @@ func (s *DatabaseTenantStore) Initialize(ctx context.Context) error {
 }
 
 // Close implements TenantStore.Close
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseTenantStore) Close() error {
-	return s.db.Close()
+	return nil
 }
 
 // CreateTenant implements TenantStore.CreateTenant
