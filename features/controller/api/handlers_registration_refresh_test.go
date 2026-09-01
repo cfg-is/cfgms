@@ -43,6 +43,7 @@ type refreshFixture struct {
 	stewards business.StewardStore
 	pending  business.PendingRefreshStore
 	policies business.RefreshPolicyStore
+	nonces   business.NonceStore
 }
 
 // newRefreshFixture builds a Server for the registration-refresh handler tests.
@@ -100,13 +101,16 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 	stewards := storageManager.GetStewardStore()
 	pending := storageManager.GetPendingRefreshStore()
 	policies := storageManager.GetRefreshPolicyStore()
+	nonces := storageManager.GetNonceStore()
 	require.NotNil(t, stewards, "test storage must provide a real StewardStore")
 	require.NotNil(t, pending, "test storage must provide a real PendingRefreshStore")
 	require.NotNil(t, policies, "test storage must provide a real RefreshPolicyStore")
+	require.NotNil(t, nonces, "test storage must provide a real NonceStore")
 
 	server.SetStewardStore(stewards)
 	server.SetPendingRefreshStore(pending)
 	server.SetRefreshPolicyStore(policies)
+	server.SetNonceStore(nonces)
 
 	return &refreshFixture{
 		server:   server,
@@ -114,6 +118,7 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 		stewards: stewards,
 		pending:  pending,
 		policies: policies,
+		nonces:   nonces,
 	}
 }
 
@@ -133,6 +138,20 @@ func (f *refreshFixture) addPending(t *testing.T, entry *business.PendingRefresh
 func (f *refreshFixture) setPolicy(t *testing.T, policy *business.RefreshPolicy) {
 	t.Helper()
 	require.NoError(t, f.policies.SetPolicy(context.Background(), policy))
+}
+
+// plantNonce writes a nonce directly into the real NonceStore, bypassing the
+// challenge handler, so complete-endpoint tests can reach gates beyond the
+// nonce lookup without first calling handleRefreshChallenge.
+func (f *refreshFixture) plantNonce(t *testing.T, deviceID string) {
+	t.Helper()
+	entry, err := json.Marshal(&refreshNonceEntry{
+		NonceBytes: make([]byte, 32),
+		ServerTS:   uint64(time.Now().UnixNano()),
+		IssuedAt:   time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.nonces.PutNonce(context.Background(), refreshNonceKeyPrefix+deviceID, entry, nonceTTL))
 }
 
 // pendingCount returns the number of queued refresh entries across all tenants.
@@ -281,8 +300,9 @@ func TestHandleRefreshChallenge_RevokedDeviceReturns403(t *testing.T) {
 	f.server.handleRefreshChallenge(rec, r)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
-	// Verify no nonce was placed in cache.
-	_, found := f.server.nonceCache.Get(nonceCacheKeyPrefix + testDeviceID)
+	// Verify no nonce was stored.
+	_, found, err := f.nonces.GetAndConsumeNonce(context.Background(), refreshNonceKeyPrefix+testDeviceID)
+	require.NoError(t, err)
 	assert.False(t, found, "no nonce must be stored for revoked device")
 }
 
@@ -306,11 +326,7 @@ func TestHandleRefreshComplete_RevokedBeforePoP(t *testing.T) {
 	})
 
 	// Manually plant a nonce to rule out the "no nonce" 401 path.
-	f.server.nonceCache.Set(nonceCacheKeyPrefix+testDeviceID, &nonceEntry{ //nolint:errcheck // in-memory cache; Set only fails on empty key, which is impossible here
-		NonceBytes: make([]byte, 32),
-		ServerTS:   uint64(time.Now().UnixNano()),
-		IssuedAt:   time.Now(),
-	}, nonceTTL)
+	f.plantNonce(t, testDeviceID)
 
 	rec := postComplete(f.server, testDeviceID, RefreshCompleteRequest{
 		TenantID:  testTenantID,
@@ -349,6 +365,49 @@ func TestHandleRefreshComplete_NonceReplay(t *testing.T) {
 	// Second attempt with same nonce: nonce was consumed, must get 401.
 	rec2 := postComplete(f.server, testDeviceID, req)
 	assert.Equal(t, http.StatusUnauthorized, rec2.Code, "nonce replay must be rejected")
+}
+
+// TestHandleRefreshComplete_CrossNodeNonceHandoff is the [REQUIRED TEST] for
+// Issue #3755 (ADR-031 amendment to ADR-011): a nonce issued via one NonceStore
+// instance must be consumable via a second, independent instance backed by the
+// same durable store — simulating the challenge and completion landing on two
+// different controller nodes under any-node service (ADR-031 Decision 1).
+// Double-consumption must then fail from either node.
+func TestHandleRefreshComplete_CrossNodeNonceHandoff(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, nil)
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "steward-active",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pub),
+	})
+
+	nodeA, nodeB := newTestNonceStorePair(t)
+
+	// Challenge lands on node A.
+	f.server.SetNonceStore(nodeA)
+	challenge := issueChallenge(t, f.server, testDeviceID, testTenantID)
+	req := buildValidCompleteRequest(t, testDeviceID, testTenantID, challenge, priv, nil)
+
+	// Completion lands on node B — a different controller node sharing the
+	// same durable store. It must be able to read and consume the nonce that
+	// node A wrote.
+	f.server.SetNonceStore(nodeB)
+	rec1 := postComplete(f.server, testDeviceID, req)
+	require.Equal(t, http.StatusAccepted, rec1.Code,
+		"nonce issued via node A must be consumable via node B: %s", rec1.Body.String())
+
+	// Double-consumption must fail on node B (already consumed).
+	rec2 := postComplete(f.server, testDeviceID, req)
+	assert.Equal(t, http.StatusUnauthorized, rec2.Code, "nonce already consumed must not be usable again on node B")
+
+	// Double-consumption must also fail on node A (same durable store, no
+	// leftover entry to find regardless of which node looks).
+	f.server.SetNonceStore(nodeA)
+	rec3 := postComplete(f.server, testDeviceID, req)
+	assert.Equal(t, http.StatusUnauthorized, rec3.Code, "nonce already consumed must not be usable again on node A")
 }
 
 func TestHandleRefreshComplete_ExpiredNonce(t *testing.T) {
@@ -445,11 +504,7 @@ func TestHandleRefreshComplete_CrossTenantReturns403(t *testing.T) {
 	})
 
 	// Manually plant a nonce so we reach the cross-tenant gate.
-	f.server.nonceCache.Set(nonceCacheKeyPrefix+testDeviceID, &nonceEntry{ //nolint:errcheck // in-memory cache; Set only fails on empty key, which is impossible here
-		NonceBytes: make([]byte, 32),
-		ServerTS:   uint64(time.Now().UnixNano()),
-		IssuedAt:   time.Now(),
-	}, nonceTTL)
+	f.plantNonce(t, testDeviceID)
 
 	// Request from "tenant-b" for a steward that belongs to "tenant-a".
 	rec := postComplete(f.server, testDeviceID, RefreshCompleteRequest{
@@ -543,11 +598,7 @@ func TestProvenance_CannotUngateRevoked(t *testing.T) {
 	})
 
 	// Plant a nonce so we reach the revocation gate.
-	f.server.nonceCache.Set(nonceCacheKeyPrefix+testDeviceID, &nonceEntry{ //nolint:errcheck // in-memory cache; Set only fails on empty key, which is impossible here
-		NonceBytes: make([]byte, 32),
-		ServerTS:   uint64(time.Now().UnixNano()),
-		IssuedAt:   time.Now(),
-	}, nonceTTL)
+	f.plantNonce(t, testDeviceID)
 
 	rec := postComplete(f.server, testDeviceID, RefreshCompleteRequest{
 		TenantID:   testTenantID,

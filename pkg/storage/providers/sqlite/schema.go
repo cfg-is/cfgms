@@ -769,6 +769,15 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_assurance_policy_overrides_tenant_id ON assurance_policy_overrides(tenant_id)`,
 
+		// Registration-refresh challenge nonces (Issue #3755, ADR-031 amendment to
+		// ADR-011). GetAndConsumeNonce deletes the row it reads via DELETE ... RETURNING.
+		`CREATE TABLE IF NOT EXISTS refresh_nonces (
+			key        TEXT NOT NULL PRIMARY KEY,
+			entry      BLOB NOT NULL,
+			expires_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_refresh_nonces_expires_at ON refresh_nonces(expires_at)`,
+
 		// Durable sessions (Persistent=true only)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			session_id       TEXT PRIMARY KEY,

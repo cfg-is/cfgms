@@ -3,11 +3,13 @@
 package interfaces_test
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -91,6 +93,63 @@ func TestCreateClusterStorageManager_DatabaseProvider(t *testing.T) {
 	// store nil and every cluster-mode registration endpoint answering 503.
 	assert.NotNil(t, sm.GetPendingRegistrationStore(),
 		"database-backed pending registration store must be non-nil — a nil store makes every cluster-mode registration endpoint return 503")
+}
+
+// TestRegisteredDatabaseProvider_ImplementsNonceStoreCreator verifies the type
+// assertion CreateClusterStorageManager relies on actually holds for the
+// registered database provider. The wiring is `provider.(NonceStoreCreator)`, so
+// a provider missing CreateNonceStore compiles fine and silently leaves
+// sm.nonceStore nil — this test is what turns that into a failure. It needs no
+// Postgres instance, so it runs everywhere including short mode.
+func TestRegisteredDatabaseProvider_ImplementsNonceStoreCreator(t *testing.T) {
+	provider, err := interfaces.GetStorageProvider("database")
+	require.NoError(t, err)
+
+	_, ok := provider.(interfaces.NonceStoreCreator)
+	assert.True(t, ok,
+		"the database provider — the only ClusterCapable backend — must implement interfaces.NonceStoreCreator, "+
+			"otherwise CreateClusterStorageManager leaves the nonce store nil and every clustered registration-refresh request answers 503")
+}
+
+// TestCreateClusterStorageManager_NonceStoreShared verifies the durable nonce
+// store is wired into the cluster storage manager and is genuinely shared across
+// controller nodes: a nonce written through one manager's store is consumable
+// exactly once through a second, independently constructed manager's store —
+// the two-node case ADR-031 Decision 1 requires (Issue #3755).
+func TestCreateClusterStorageManager_NonceStoreShared(t *testing.T) {
+	pgDSN := skipIfNoPostgres(t)
+
+	nodeA, err := interfaces.CreateClusterStorageManager(pgDSN, testSessionHMACKey(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, nodeA)
+	defer func() { _ = nodeA.Close() }()
+
+	nodeB, err := interfaces.CreateClusterStorageManager(pgDSN, testSessionHMACKey(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, nodeB)
+	defer func() { _ = nodeB.Close() }()
+
+	storeA := nodeA.GetNonceStore()
+	require.NotNil(t, storeA,
+		"database-backed nonce store must be non-nil — a nil store makes every cluster-mode registration-refresh endpoint return 503")
+	storeB := nodeB.GetNonceStore()
+	require.NotNil(t, storeB)
+
+	ctx := context.Background()
+	key := fmt.Sprintf("cluster-nonce-%d", time.Now().UnixNano())
+	entry := []byte(`{"steward_id":"steward-3755","nonce":"abc"}`)
+	require.NoError(t, storeA.PutNonce(ctx, key, entry, time.Minute))
+
+	// The completion lands on the other node: it must see the challenge.
+	got, found, err := storeB.GetAndConsumeNonce(ctx, key)
+	require.NoError(t, err)
+	require.True(t, found, "a nonce issued on one controller node must be consumable on another node sharing Postgres")
+	assert.Equal(t, entry, got)
+
+	// Single-use holds across nodes: the issuing node cannot replay it.
+	_, found, err = storeA.GetAndConsumeNonce(ctx, key)
+	require.NoError(t, err)
+	assert.False(t, found, "a consumed nonce must not be consumable a second time from any node")
 }
 
 // TestCreateClusterStorageManager_WithS3Config verifies that s3Config is accepted

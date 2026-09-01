@@ -93,6 +93,14 @@ type CaseStoreCreator interface {
 	CreateCaseStore(config map[string]interface{}) (business.CaseStore, error)
 }
 
+// NonceStoreCreator is an optional StorageProvider extension for backends that
+// support durable registration-refresh nonce storage (Issue #3755, ADR-031
+// amendment to ADR-011). Backends that do not implement this interface leave
+// the store nil in the manager.
+type NonceStoreCreator interface {
+	CreateNonceStore(config map[string]interface{}) (business.NonceStore, error)
+}
+
 // StorageProvider defines the interface that all storage backends must implement.
 // Providers now return sub-package types from pkg/storage/interfaces/{business,config}.
 type StorageProvider interface {
@@ -496,6 +504,21 @@ func CreateTriggerStoreFromConfig(providerName string, config map[string]interfa
 	return provider.CreateTriggerStore(config)
 }
 
+// CreateNonceStoreFromConfig creates a NonceStore from configuration (Issue #3755,
+// ADR-031 amendment to ADR-011). Returns business.ErrNotSupported if the named
+// provider does not implement the optional NonceStoreCreator extension.
+func CreateNonceStoreFromConfig(providerName string, config map[string]interface{}) (business.NonceStore, error) {
+	provider, err := GetStorageProvider(providerName)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider '%s' not available: %w", providerName, err)
+	}
+	nsc, ok := provider.(NonceStoreCreator)
+	if !ok {
+		return nil, business.ErrNotSupported
+	}
+	return nsc.CreateNonceStore(config)
+}
+
 // Deprecated: CreateAllStoresFromConfig creates all storage interfaces from a single configuration.
 // Use CreateOSSStorageManager for new deployments. This function is retained for backward
 // compatibility with the database provider in single-backend mode.
@@ -575,6 +598,24 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("failed to create alert store: %w", err)
 	}
 
+	// Nonce store (Issue #3755, ADR-031 amendment to ADR-011). Single-provider mode
+	// is a live deployment shape — features/controller/server routes
+	// storage.provider == "database" here — so skipping this leaves nonceStore nil
+	// and every registration-refresh challenge/complete request answers 503 once the
+	// in-process nonce cache is gone. Sourced from the named provider itself, which
+	// is what makes each provider's CreateNonceStore (sqlite included) reachable in
+	// this shape rather than only through the OSS and cluster composites.
+	var nonceStore business.NonceStore
+	if nsc, ok := provider.(NonceStoreCreator); ok {
+		nonceStore, err = nsc.CreateNonceStore(config)
+		if err != nil {
+			if !errors.Is(err, business.ErrNotSupported) {
+				return nil, fmt.Errorf("failed to create nonce store: %w", err)
+			}
+			nonceStore = nil
+		}
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -591,6 +632,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		pushStore:              pushStore,
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
+		nonceStore:             nonceStore,
 	}, nil
 }
 
@@ -617,6 +659,7 @@ type StorageManager struct {
 	assurancePolicyStore     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
 	tenantCrossingStore      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	caseStore                business.CaseStore            // ADR-022 §8: cockpit investigation cases
+	nonceStore               business.NonceStore           // Issue #3755, ADR-031: durable registration-refresh nonce
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -775,6 +818,18 @@ func (sm *StorageManager) SetCaseStore(s business.CaseStore) {
 	sm.caseStore = s
 }
 
+// GetNonceStore returns the durable registration-refresh nonce store (Issue #3755,
+// ADR-031 amendment to ADR-011). Returns nil when not yet wired; callers must
+// nil-check before use.
+func (sm *StorageManager) GetNonceStore() business.NonceStore {
+	return sm.nonceStore
+}
+
+// SetNonceStore wires the nonce store after construction.
+func (sm *StorageManager) SetNonceStore(s business.NonceStore) {
+	sm.nonceStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -825,6 +880,7 @@ func (sm *StorageManager) Close() error {
 		sm.assurancePolicyStore,
 		sm.tenantCrossingStore,
 		sm.caseStore,
+		sm.nonceStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -1068,6 +1124,18 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 			sm.SetCaseStore(caseStore)
 		}
 	}
+	// Wire nonce store if the provider implements NonceStoreCreator (Issue #3755,
+	// ADR-031 Decision 1: any-node service requires the challenge nonce to be
+	// consumable from any controller node, not just the node that issued it).
+	if nsc, ok := provider.(NonceStoreCreator); ok {
+		nonceStore, err := nsc.CreateNonceStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create nonce store: %w", err)
+		}
+		if nonceStore != nil {
+			sm.SetNonceStore(nonceStore)
+		}
+	}
 	return sm, nil
 }
 
@@ -1117,6 +1185,17 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		return nil, fmt.Errorf("failed to create alert store (flatfile): %w", err)
 	}
 
+	// Nonce storage (Issue #3755, ADR-031 amendment to ADR-011) is sourced from the
+	// flatfile provider like IPTrustStore and AlertStore above: the OSS deployment
+	// is single-node, so the mutex-serialised flatfile implementation is sufficient.
+	var nonceStore business.NonceStore
+	if nsc, ok := ffProvider.(NonceStoreCreator); ok {
+		nonceStore, err = nsc.CreateNonceStore(flatfileCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("failed to create nonce store (flatfile): %w", err)
+		}
+	}
+
 	// Prefer single-connection bundle when the provider supports it.
 	// This opens the SQLite database exactly once and shares the *sql.DB across
 	// all seven business stores, preventing WAL read-lock slot exhaustion that
@@ -1140,6 +1219,9 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		sm.SetAssurancePolicyStore(bundle.AssurancePolicy)
 		sm.SetTenantCrossingStore(bundle.TenantCrossing)
 		sm.SetCaseStore(bundle.Case)
+		if nonceStore != nil {
+			sm.SetNonceStore(nonceStore)
+		}
 		return sm, nil
 	}
 
@@ -1188,6 +1270,9 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	sm.SetPendingRegistrationStore(pendingRegStore)
 	sm.SetIPTrustStore(ipTrustStore)
 	sm.SetAlertStore(alertStore)
+	if nonceStore != nil {
+		sm.SetNonceStore(nonceStore)
+	}
 	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle
 	// (OpenBusinessStores). The non-bundle fallback path leaves them nil — acceptable since
 	// this path is only taken when the provider does not implement BusinessStoreOpener,

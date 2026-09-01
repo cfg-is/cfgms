@@ -52,6 +52,20 @@ func newTestFlatFileAlertStore(t *testing.T) business.AlertStore {
 	return st
 }
 
+// newTestNonceStorePair returns two independent business.NonceStore instances
+// rooted at the same directory — simulating two controller nodes sharing one
+// durable nonce store (Issue #3755, ADR-031 Decision 1: any-node service). The
+// concrete flatfile import is confined to this allowlisted */providers_test.go path.
+func newTestNonceStorePair(t *testing.T) (business.NonceStore, business.NonceStore) {
+	t.Helper()
+	root := t.TempDir()
+	nodeA, err := flatfile.NewFlatFileNonceStore(root)
+	require.NoError(t, err, "creating flat-file nonce store for node A")
+	nodeB, err := flatfile.NewFlatFileNonceStore(root)
+	require.NoError(t, err, "creating flat-file nonce store for node B")
+	return nodeA, nodeB
+}
+
 // alertStoreProviders returns a map of provider-name → AlertStore for table-driven
 // handler tests that must exercise every working provider against real components.
 // The flat-file store always participates (t.TempDir(), no external dependency); the

@@ -43,7 +43,6 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -133,7 +132,7 @@ type Server struct {
 	pendingRefreshStore             business.PendingRefreshStore             // Issue #2096: durable pending-refresh queue
 	refreshPolicyStore              business.RefreshPolicyStore              // Issue #2096: per-tenant refresh policy
 	auditStore                      business.AuditStore                      // Issue #2098: direct audit store for test-mode count endpoint
-	nonceCache                      *cache.Cache                             // Issue #2096: in-memory nonce store (TTL 65s)
+	nonceStore                      business.NonceStore                      // Issue #3755, ADR-031: durable registration-refresh nonce store (any-node)
 	popVerifier                     PoPVerifier                              // Issue #2096: injectable for revoked-before-PoP testing
 	isolationEngine                 *tenantsecurity.TenantIsolationEngine    // Issue #2123: tenant isolation enforcement for scoped API keys
 	stewardEventLoggingManager      *logging.LoggingManager                  // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)
@@ -326,7 +325,6 @@ func New(
 		commandPublisher:        commandPublisher,         // Issue #1319: fan-out config push to active stewards
 		pushStore:               pushStore,                // Issue #1320: durable push-state persistence for HA failover
 		blobStore:               blobStore,                // Issue #1702: installer artifact storage
-		nonceCache:              newNonceCache(),          // Issue #2096: nonce store for registration-refresh
 		publicDownloadGuard:     newPublicDownloadGuard(defaultPublicDownloadGuardConfig()),
 		publicDownloadCache:     newPublicDownloadCache(),
 		popVerifier:             ed25519PoPVerifier{},    // Issue #2096: default PoP verifier; override in tests
@@ -1118,11 +1116,6 @@ func (s *Server) Close(ctx context.Context) error {
 			}
 		}
 
-		// Close nonce cache to stop its background cleanup goroutine (Issue #2096).
-		if s.nonceCache != nil {
-			s.nonceCache.Close()
-		}
-
 		// Stop the execution queue, which also stops its EphemeralKeyManager goroutine.
 		if s.runExecutionQueue != nil {
 			s.runExecutionQueue.Stop()
@@ -1538,6 +1531,25 @@ func (s *Server) SetRefreshPolicyStore(store business.RefreshPolicyStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshPolicyStore = store
+}
+
+// SetNonceStore wires the durable NonceStore for the registration-refresh
+// challenge/response nonce (Issue #3755, ADR-031 amendment to ADR-011). When
+// nil, the challenge and complete endpoints return 503.
+func (s *Server) SetNonceStore(store business.NonceStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nonceStore = store
+}
+
+// NonceStore returns the wired nonce store, or nil when unwired. Exposed so the
+// controller startup wiring can be regression-tested (Issue #3755) — handler
+// tests call SetNonceStore directly and therefore cannot catch a composition
+// root that never calls the setter.
+func (s *Server) NonceStore() business.NonceStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nonceStore
 }
 
 // SetTenantStore wires the TenantStore for tenant-hierarchy resolution (Issue #2839).
@@ -2542,15 +2554,4 @@ func (s *Server) scanAccountsForStalePermissions(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-// newNonceCache creates the short-lived nonce cache for registration-refresh (Issue #2096).
-// Entries have a 65-second TTL; the 60-second enforcement window is applied in the handler.
-func newNonceCache() *cache.Cache {
-	return cache.NewCache(cache.CacheConfig{
-		MaxRuntimeItems: 10000,
-		DefaultTTL:      nonceTTL,
-		CleanupInterval: 30 * time.Second,
-		EvictionPolicy:  cache.EvictionLRU,
-	})
 }

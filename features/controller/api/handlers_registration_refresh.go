@@ -38,18 +38,19 @@ func (ed25519PoPVerifier) Verify(pub ed25519.PublicKey, message, sig []byte) boo
 	return ed25519.Verify(pub, message, sig)
 }
 
-// nonceEntry is the value stored in the nonce cache keyed by "refresh-nonce:<device_id>".
-type nonceEntry struct {
-	NonceBytes []byte
-	ServerTS   uint64    // Unix nanoseconds; encoded BE-uint64 in the PoP message
-	IssuedAt   time.Time // wall-clock time for the 60s expiry check
+// refreshNonceEntry is the value stored in the durable NonceStore keyed by
+// "refresh-nonce:<device_id>" (Issue #3755, ADR-031 amendment to ADR-011).
+type refreshNonceEntry struct {
+	NonceBytes []byte    `json:"nonce_bytes"`
+	ServerTS   uint64    `json:"server_ts"` // Unix nanoseconds; encoded BE-uint64 in the PoP message
+	IssuedAt   time.Time `json:"issued_at"` // wall-clock time for the 60s expiry check
 }
 
-// nonce cache constants (ADR-010 §2).
+// nonce store constants (ADR-010 §2).
 const (
-	nonceCacheKeyPrefix = "refresh-nonce:"
-	nonceTTL            = 65 * time.Second // cache TTL; IssuedAt check enforces 60s
-	nonceMaxAge         = 60 * time.Second // enforced window for IssuedAt
+	refreshNonceKeyPrefix = "refresh-nonce:"
+	nonceTTL              = 65 * time.Second // store TTL; IssuedAt check enforces 60s
+	nonceMaxAge           = 60 * time.Second // enforced window for IssuedAt
 )
 
 // ---- Request / response types -----------------------------------------------
@@ -145,6 +146,15 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if s.nonceStore == nil {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSystemEvent, "refresh_challenge_error",
+			business.AuditResultError, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "nonce_store_unavailable"})
+		http.Error(w, "nonce store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Generate 32-byte cryptographically random nonce.
 	nonceBytes := make([]byte, 32)
 	if _, err := rand.Read(nonceBytes); err != nil {
@@ -167,17 +177,23 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 	// conversion is lossless through time.Time's supported 2262 limit.
 	serverTS := uint64(issuedAtNanos)
 
-	cacheKey := nonceCacheKeyPrefix + deviceID
-	if err := s.nonceCache.Set(cacheKey, &nonceEntry{
+	nonceKey := refreshNonceKeyPrefix + deviceID
+	entryBytes, err := json.Marshal(&refreshNonceEntry{
 		NonceBytes: nonceBytes,
 		ServerTS:   serverTS,
 		IssuedAt:   issuedAt,
-	}, nonceTTL); err != nil {
-		s.logger.Error("Failed to store nonce in cache", "error", logging.SanitizeLogValue(err.Error()))
+	})
+	if err != nil {
+		s.logger.Error("Failed to marshal nonce entry", "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
+		return
+	}
+	if err := s.nonceStore.PutNonce(r.Context(), nonceKey, entryBytes, nonceTTL); err != nil {
+		s.logger.Error("Failed to store nonce", "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
 			business.AuditResultError, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "cache_store_failed"})
+			map[string]interface{}{"reason": "store_write_failed"})
 		http.Error(w, "failed to issue challenge", http.StatusInternalServerError)
 		return
 	}
@@ -254,9 +270,31 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gate (3): nonce absent or expired → 401
-	cacheKey := nonceCacheKeyPrefix + deviceID
-	raw, found := s.nonceCache.Get(cacheKey)
+	if s.nonceStore == nil {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSystemEvent, "refresh_error",
+			business.AuditResultError, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "nonce_store_unavailable"})
+		http.Error(w, "nonce store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Gates (3) and (5): nonce absent/expired → 401; found → consumed atomically
+	// in the same store call (Issue #3755, ADR-031). A separate peek-then-delete
+	// would reopen the cross-node race this store exists to close, so lookup and
+	// consume collapse into one GetAndConsumeNonce call — deleted regardless of
+	// the outcome of the gates below, exactly as the prior cache.Delete did.
+	nonceKey := refreshNonceKeyPrefix + deviceID
+	rawEntry, found, err := s.nonceStore.GetAndConsumeNonce(r.Context(), nonceKey)
+	if err != nil {
+		s.logger.Error("Failed to consume nonce", "error", logging.SanitizeLogValue(err.Error()))
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSystemEvent, "refresh_error",
+			business.AuditResultError, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "store_read_failed"})
+		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
+		return
+	}
 	if !found {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
@@ -265,8 +303,8 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "challenge expired or not found", http.StatusUnauthorized)
 		return
 	}
-	nonce, ok := raw.(*nonceEntry)
-	if !ok {
+	var nonce refreshNonceEntry
+	if err := json.Unmarshal(rawEntry, &nonce); err != nil {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -285,9 +323,6 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "challenge nonce has expired", http.StatusUnauthorized)
 		return
 	}
-
-	// Gate (5): consume nonce — deleted regardless of subsequent result.
-	s.nonceCache.Delete(cacheKey)
 
 	// Decode nonce bytes from base64url.
 	nonceBytes, err := base64.RawURLEncoding.DecodeString(req.Nonce)
