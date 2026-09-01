@@ -247,6 +247,37 @@ func TestWebAuthnRevokeRejectsBearerOnly(t *testing.T) {
 	assert.Contains(t, err.Error(), "mTLS certificate")
 }
 
+// --- Required test: runWebAuthnRegister fails fast, without a controller round-trip ---
+//
+// AC: "cfg webauthn register fails fast: the real runWebAuthnRegister path returns the
+// actionable error naming the web UI enrollment path, without contacting the
+// controller's begin endpoint, starting any local listener, or opening a browser."
+
+func TestWebAuthnRegisterFailsFast(t *testing.T) {
+	beginCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/webauthn/register/begin") {
+			beginCalled = true
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	restore := saveWebAuthnFlags(t)
+	defer restore()
+
+	b := generateWebAuthnBundle(t)
+	bundlePath = writeBundleFile(t, b, srv.URL)
+	webAuthnUsername = "alice"
+
+	err := runWebAuthnRegister(webAuthnRegisterCmd, nil)
+	require.Error(t, err, "registration must fail fast — no configuration lets the CLI ceremony complete")
+	assert.False(t, beginCalled, "must not contact the controller's begin endpoint")
+	assert.Contains(t, err.Error(), "web UI", "error must name the web UI as the alternative")
+	assert.NotContains(t, strings.ToLower(err.Error()), "unsupported configuration",
+		"error must name the alternative explicitly, not say \"unsupported configuration\"")
+}
+
 // --- AC: last-credential guard ---
 
 // TestWebAuthnRevokeLastCredentialRequiresForce verifies that revoking the last

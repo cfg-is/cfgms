@@ -9,40 +9,25 @@
 // token alone cannot use these commands even though the underlying server endpoints
 // accept any AssuranceStrong principal (mTLS certs are AssuranceStrong by construction).
 //
-// Registration flow:
-//  1. CLI authenticates to controller via mTLS cert (admin bundle).
-//  2. CLI calls POST .../webauthn/register/begin → receives PublicKeyCredentialCreationOptions.
-//  3. CLI starts a local relay HTTP server on 127.0.0.1 (random port).
-//  4. CLI opens the default browser to the relay page.
-//  5. Browser runs navigator.credentials.create() with the embedded challenge.
-//  6. Browser posts the credential response back to the relay server.
-//  7. CLI calls POST .../webauthn/register/finish with the response.
-//
-// RPID note: the WebAuthn ceremony requires the browser origin to match the controller's
-// configured RPID. For the local relay to work, the controller must include
-// "http://127.0.0.1" (or "http://localhost") in its RPOrigins configuration.
-// In production deployments the admin typically opens the controller's web UI directly;
-// the relay is the correct path for first-boot bootstrap when no web UI session exists.
+// `cfg webauthn register` cannot run the WebAuthn ceremony itself: a browser refuses
+// navigator.credentials.create() unless the calling origin's effective domain matches
+// (or is a registrable suffix of) the relying party's rp_id, and a CLI-served loopback
+// page can never satisfy a real rp_id — see ADR-021 Amendment 4
+// (docs/architecture/decisions/021-identity-assurance-levels.md). The command fails
+// fast with an actionable error pointing the operator at browser passkey enrollment via
+// the web UI (ADR-021 Amendment 1 self-enrollment, Amendment 3 self-service passkey
+// management) instead of attempting a ceremony that cannot complete.
 package cmd
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
-	"sync"
-	"time"
 
 	"github.com/spf13/cobra"
-)
-
-const (
-	webAuthnDefaultTimeout = 5 * time.Minute
 )
 
 var (
@@ -51,7 +36,6 @@ var (
 	webAuthnLabel    string
 	webAuthnForce    bool
 	webAuthnJSON     bool
-	webAuthnTimeout  time.Duration
 )
 
 // webAuthnCmd is the root command: cfg webauthn ...
@@ -76,12 +60,11 @@ var webAuthnRegisterCmd = &cobra.Command{
 	Short: "Register a new WebAuthn passkey",
 	Long: `Register a new WebAuthn passkey (FIDO2 credential) for a web admin account.
 
-Authentication: requires the admin mTLS certificate (admin bundle). A Bearer session
-token alone is not sufficient — this command enforces the cert path by design.
-
-The registration ceremony runs in your default browser via a local relay server.
-Your controller must include "http://127.0.0.1" in its RPOrigins configuration for
-the relay to work (see controller WebAuthn configuration).
+This command cannot complete: a WebAuthn ceremony served from a CLI-local loopback page
+can never satisfy a configured relying party (ADR-021 Amendment 4) — the browser itself
+refuses navigator.credentials.create() because a 127.0.0.1 origin can never match a real
+rp_id. Register a passkey from the controller web UI instead, at the /passkeys page
+(ADR-021 Amendment 1 self-enrollment, Amendment 3 self-service passkey management).
 
 Examples:
   cfg webauthn register --username alice
@@ -130,7 +113,6 @@ func init() {
 	webAuthnCmd.PersistentFlags().StringVar(&webAuthnUsername, "username", "", "Web account username")
 
 	webAuthnRegisterCmd.Flags().StringVar(&webAuthnLabel, "label", "", "Human-readable label for the new credential")
-	webAuthnRegisterCmd.Flags().DurationVar(&webAuthnTimeout, "timeout", webAuthnDefaultTimeout, "Browser ceremony timeout")
 
 	webAuthnListCmd.Flags().BoolVar(&webAuthnJSON, "json", false, "Emit JSON output")
 
@@ -161,54 +143,32 @@ func getWebAuthnClient() (*APIClient, error) {
 	return client, nil
 }
 
+// errWebAuthnRegisterUnsupported is returned by runWebAuthnRegister before any
+// controller contact. A WebAuthn ceremony served from a CLI-local loopback listener
+// can never satisfy a configured relying party in any controller configuration — see
+// ADR-021 Amendment 4 (docs/architecture/decisions/021-identity-assurance-levels.md)
+// for the full case analysis. The operator must enroll a passkey from the controller
+// web UI instead (ADR-021 Amendment 1 self-enrollment, Amendment 3 self-service passkey
+// management).
+var errWebAuthnRegisterUnsupported = fmt.Errorf(
+	"cfg webauthn register cannot run the WebAuthn ceremony from the CLI: a browser " +
+		"refuses navigator.credentials.create() from a page served at http://127.0.0.1, " +
+		"which can never match a configured relying party (ADR-021 Amendment 4). " +
+		"Register a passkey from the controller web UI instead, at the /passkeys page " +
+		"(ADR-021 Amendment 1 self-enrollment, Amendment 3 self-service passkey management)")
+
 func runWebAuthnRegister(cmd *cobra.Command, args []string) error {
 	if webAuthnUsername == "" {
 		return fmt.Errorf("--username is required")
 	}
 
-	client, err := getWebAuthnClient()
-	if err != nil {
+	// Enforce the ADR-021 §7 cert-path requirement before failing fast, so a bearer-only
+	// caller still sees the mTLS error rather than the unrelated ceremony error.
+	if _, err := getWebAuthnClient(); err != nil {
 		return err
 	}
 
-	ctx := context.Background()
-
-	// Step 1: Begin — get the PublicKeyCredentialCreationOptions from the controller.
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Requesting WebAuthn registration challenge from controller...\n")
-	creationOptions, err := client.WebAuthnBeginRegistration(ctx, webAuthnUsername)
-	if err != nil {
-		return fmt.Errorf("failed to begin WebAuthn registration: %w", err)
-	}
-
-	// Step 2: Run browser-based ceremony via local relay.
-	timeout := webAuthnTimeout
-	if timeout == 0 {
-		timeout = webAuthnDefaultTimeout
-	}
-	credResponseJSON, err := runWebAuthnBrowserFlow(cmd.OutOrStdout(), creationOptions, timeout)
-	if err != nil {
-		return fmt.Errorf("WebAuthn ceremony failed: %w", err)
-	}
-
-	// Step 3: Finish — send the authenticator response to the controller.
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Completing registration with controller...\n")
-	result, err := client.WebAuthnFinishRegistration(ctx, webAuthnUsername, webAuthnLabel, credResponseJSON)
-	if err != nil {
-		return fmt.Errorf("failed to finish WebAuthn registration: %w", err)
-	}
-
-	if webAuthnJSON {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
-	}
-
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Passkey registered successfully!\n")
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Username:      %s\n", webAuthnUsername)
-	if result.Label != "" {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Label:         %s\n", result.Label)
-	}
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Registered at: %s\n", result.RegisteredAt)
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nYou can now log in to the controller web UI using this passkey.\n")
-	return nil
+	return errWebAuthnRegisterUnsupported
 }
 
 func runWebAuthnList(cmd *cobra.Command, args []string) error {
@@ -290,100 +250,8 @@ func runWebAuthnRevoke(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// runWebAuthnBrowserFlow starts a local relay HTTP server, opens the default browser
-// to the relay page, and waits for the browser to complete the WebAuthn ceremony and
-// POST back the credential response.
-//
-// The relay serves a single-page WebAuthn ceremony UI at GET /register and accepts the
-// credential response at POST /done. It shuts down after the first POST /done or after
-// the timeout elapses.
-func runWebAuthnBrowserFlow(out io.Writer, creationOptions json.RawMessage, timeout time.Duration) ([]byte, error) {
-	optionsJSON, err := json.Marshal(creationOptions)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal creation options: %w", err)
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("failed to start local relay server: %w", err)
-	}
-	// net.Listen("tcp", ...) is documented to return a *net.TCPListener whose Addr()
-	// is always a *net.TCPAddr, so this type assertion is unconditionally safe.
-	port := ln.Addr().(*net.TCPAddr).Port //nolint:forcetypeassert // see comment above: net "tcp" listener Addr() is always *net.TCPAddr
-
-	var (
-		resultMu sync.Mutex
-		result   []byte
-		resultCh = make(chan struct{}, 1)
-		relayErr error
-	)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprintf(w, webAuthnRelayHTML, string(optionsJSON))
-	})
-	mux.HandleFunc("/done", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		body, readErr := io.ReadAll(r.Body)
-		if readErr != nil {
-			http.Error(w, "read error", http.StatusInternalServerError)
-			resultMu.Lock()
-			relayErr = readErr
-			resultMu.Unlock()
-			select {
-			case resultCh <- struct{}{}:
-			default:
-			}
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-
-		resultMu.Lock()
-		result = body
-		resultMu.Unlock()
-		select {
-		case resultCh <- struct{}{}:
-		default:
-		}
-	})
-
-	srv := &http.Server{
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-
-	go func() { _ = srv.Serve(ln) }()
-	defer func() { _ = srv.Close() }()
-
-	relayURL := fmt.Sprintf("http://127.0.0.1:%d/register", port)
-	_, _ = fmt.Fprintf(out, "\nOpen this URL in your browser to complete the passkey registration:\n  %s\n\n", relayURL)
-	_, _ = fmt.Fprintf(out, "Waiting for browser ceremony (timeout: %s)...\n", timeout)
-
-	_ = openBrowser(relayURL)
-
-	select {
-	case <-resultCh:
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timed out waiting for browser to complete WebAuthn registration")
-	}
-
-	resultMu.Lock()
-	defer resultMu.Unlock()
-	if relayErr != nil {
-		return nil, fmt.Errorf("relay error: %w", relayErr)
-	}
-	return result, nil
-}
-
 // openBrowser opens url in the default browser. Errors are silently ignored —
-// the relay URL is always printed to stdout so the user can open it manually.
+// callers print url so the operator can open it manually if this fails.
 func openBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -402,85 +270,3 @@ func openBrowser(url string) error {
 	}
 	return cmd.Start()
 }
-
-// webAuthnRelayHTML is the single-page relay UI served to the browser.
-// %s is replaced with the JSON-encoded PublicKeyCredentialCreationOptions (the data
-// field from the controller's begin response, which contains the "publicKey" key).
-const webAuthnRelayHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CFGMS Passkey Registration</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; padding: 0 20px; }
-    h1 { font-size: 1.4em; }
-    button { padding: 10px 24px; font-size: 1em; cursor: pointer; }
-    #status { margin: 16px 0; color: #555; }
-    .error { color: #c00; }
-    .success { color: #060; }
-  </style>
-</head>
-<body>
-  <h1>CFGMS Passkey Registration</h1>
-  <p>Click the button below to register your passkey (security key or platform authenticator).</p>
-  <button id="btn" onclick="registerPasskey()">Register Passkey</button>
-  <p id="status">Ready.</p>
-  <script>
-    const creationOptions = %s;
-
-    function b64decode(s) {
-      const b = atob(s.replace(/-/g,'+').replace(/_/g,'/'));
-      return Uint8Array.from(b, c => c.charCodeAt(0));
-    }
-
-    function b64encode(buf) {
-      return btoa(String.fromCharCode(...new Uint8Array(buf)))
-        .replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
-    }
-
-    function prepareOptions(opts) {
-      const pk = opts.publicKey;
-      pk.challenge = b64decode(pk.challenge);
-      pk.user.id = b64decode(pk.user.id);
-      if (pk.excludeCredentials) {
-        pk.excludeCredentials = pk.excludeCredentials.map(c => ({...c, id: b64decode(c.id)}));
-      }
-      return opts;
-    }
-
-    async function registerPasskey() {
-      const btn = document.getElementById('btn');
-      const status = document.getElementById('status');
-      btn.disabled = true;
-      status.className = '';
-      status.textContent = 'Activating authenticator — follow the browser prompt...';
-      try {
-        const opts = prepareOptions(JSON.parse(JSON.stringify(creationOptions)));
-        const cred = await navigator.credentials.create(opts);
-        status.textContent = 'Sending result to cfg CLI...';
-        const body = JSON.stringify({
-          id: cred.id,
-          rawId: b64encode(cred.rawId),
-          type: cred.type,
-          response: {
-            clientDataJSON: b64encode(cred.response.clientDataJSON),
-            attestationObject: b64encode(cred.response.attestationObject),
-          }
-        });
-        const res = await fetch('/done', {method:'POST', headers:{'Content-Type':'application/json'}, body});
-        if (res.ok) {
-          status.className = 'success';
-          status.textContent = 'Passkey registered! You may close this tab.';
-        } else {
-          throw new Error('relay POST failed: ' + res.status);
-        }
-      } catch (e) {
-        status.className = 'error';
-        status.textContent = 'Error: ' + e.message;
-        btn.disabled = false;
-      }
-    }
-  </script>
-</body>
-</html>`
