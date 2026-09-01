@@ -125,6 +125,17 @@ type Provider struct {
 	// for refresh-on-connect cert delivery (Issue #1817).
 	onConnectHook StewardOnConnectHook
 
+	// tenantAdmission gates the Register (connect) and ControlChannel heartbeat
+	// paths with a per-tenant concurrency limit. Nil means no admission control
+	// (default). Injected via WithTenantAdmission (Issue #3759, ADR-031 Decision 6).
+	tenantAdmission TenantAdmission
+
+	// stewardTenantResolver maps an mTLS-verified steward identity to its tenant
+	// using server-side fleet records, so admission buckets are never keyed on a
+	// caller-supplied tenant field. Nil falls back to per-steward buckets.
+	// Injected via WithStewardTenantResolver.
+	stewardTenantResolver StewardTenantResolver
+
 	// Subscription handlers (client mode)
 	commandHandler interfaces.CommandHandler
 
@@ -1141,6 +1152,11 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 	// The authoritative tenant comes from the server-side RegistrationTokenStore lookup
 	// using the token string the steward supplies in creds.ClientId. creds.TenantId is only
 	// a post-derivation consistency check and must never be the source of truth.
+	//
+	// This block runs BEFORE the admission gate below (Issue #3759 security
+	// review): the gate's bucket key must be a tenant the caller has proven, so
+	// the proof has to come first.
+	var verifiedTenantID string
 	if ts := s.provider.registrationTokenStore; ts != nil {
 		creds := req.GetCredentials()
 
@@ -1177,6 +1193,25 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 		// issuance boundary can mint, and that boundary holds the per-device
 		// single-issuance guard (RegistrationTokenClaimer). The token's role
 		// here is tenant binding, which the checks above enforce.
+		verifiedTenantID = tokenData.TenantID
+	}
+
+	// Per-tenant admission control (Issue #3759, ADR-031 Decision 6): the same
+	// mechanism the DNA ingest path uses (TenantQueue, same per-tenant limit),
+	// on its own instance, so a single tenant cannot exhaust connect capacity on
+	// a shared cell.
+	//
+	// The bucket is keyed on server-verified state only — the tenant the
+	// registration token is bound to, else the tenant on this steward's fleet
+	// record, else the mTLS-verified certificate CN. creds.tenant_id is never an
+	// input: it is caller-supplied, so keying on it would let any steward with a
+	// valid certificate pin all of a victim tenant's connect and heartbeat slots.
+	if s.provider.tenantAdmission != nil {
+		bucket := s.provider.admissionBucket(ctx, stewardID, verifiedTenantID)
+		if aErr := s.provider.tenantAdmission.Acquire(bucket); aErr != nil {
+			return nil, status.Error(codes.ResourceExhausted, "tenant connect queue full")
+		}
+		defer s.provider.tenantAdmission.Release(bucket)
 	}
 
 	s.provider.logger.Info("steward registered", "steward_id", logging.SanitizeLogValue(stewardID), "version", logging.SanitizeLogValue(req.GetVersion()))
@@ -1225,6 +1260,17 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 				"steward_id", logging.SanitizeLogValue(stewardID))
 			return status.Error(codes.PermissionDenied, "steward reconnect not approved")
 		}
+	}
+
+	// Per-tenant admission bucket for every heartbeat on this stream (Issue
+	// #3759). Resolved ONCE here, at connect, from the server-side fleet record
+	// for the mTLS-verified CN — never from heartbeat.tenant_id, which is
+	// caller-supplied and unverified, and which a saturated bucket would let a
+	// steward use to silently drop an entire victim tenant's liveness traffic.
+	// Resolving once also keeps the per-heartbeat path free of store lookups.
+	var heartbeatBucket string
+	if s.provider.tenantAdmission != nil {
+		heartbeatBucket = s.provider.admissionBucket(stream.Context(), stewardID, "")
 	}
 
 	// Create a stream sender adapter for the registry
@@ -1295,6 +1341,27 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 					"authenticated_cn", logging.SanitizeLogValue(stewardID),
 					"payload_steward_id", logging.SanitizeLogValue(hb.StewardID))
 				s.provider.identityMismatches.Add(1)
+				continue
+			}
+
+			// Per-tenant admission control (Issue #3759, ADR-031 Decision 6): the
+			// same queue instance as the connect gate above — and the same
+			// mechanism the DNA path runs on its own instance, since that path's
+			// key is wire data. Acquire/Release bracket only this one heartbeat's
+			// dispatch — never deferred to stream teardown — so a saturated
+			// tenant sheds its own excess heartbeats without blocking the
+			// receive loop or other tenants' concurrently-connected streams.
+			// The bucket is heartbeatBucket, resolved server-side at connect;
+			// hb.TenantID is payload data and never selects a bucket.
+			if s.provider.tenantAdmission != nil {
+				if aErr := s.provider.tenantAdmission.Acquire(heartbeatBucket); aErr != nil {
+					s.provider.logger.Warn("controlchannel heartbeat dropped — tenant admission queue full",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"admission_bucket", logging.SanitizeLogValue(heartbeatBucket))
+					continue
+				}
+				s.provider.dispatchHeartbeat(hb)
+				s.provider.tenantAdmission.Release(heartbeatBucket)
 				continue
 			}
 			s.provider.dispatchHeartbeat(hb)
