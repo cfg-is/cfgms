@@ -83,6 +83,15 @@ var ErrImmutable = errors.New("flatfile: data is immutable and cannot be modifie
 // It is automatically registered on import via init().
 type FlatFileProvider struct{}
 
+// Compile-time assertions. The optional store-creator extensions are wired
+// through a type assertion in the storage-manager factories, so a missing
+// method silently leaves the store nil instead of failing the build at the
+// call site (Issue #3755).
+var (
+	_ interfaces.StorageProvider   = (*FlatFileProvider)(nil)
+	_ interfaces.NonceStoreCreator = (*FlatFileProvider)(nil)
+)
+
 // Name returns the provider name used for registration and configuration.
 func (p *FlatFileProvider) Name() string {
 	return "flatfile"
@@ -274,6 +283,22 @@ func (p *FlatFileProvider) CreateAlertStore(config map[string]interface{}) (busi
 	store, err := NewFlatFileAlertStore(root)
 	if err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create alert store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateNonceStore creates a flat-file-backed NonceStore (Issue #3755, ADR-031
+// amendment to ADR-011). Implements interfaces.NonceStoreCreator.
+// Config map must contain "root" (string): the root directory.
+// Entries are stored at <root>/nonces/refresh_nonces.json with atomic writes.
+func (p *FlatFileProvider) CreateNonceStore(config map[string]interface{}) (business.NonceStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileNonceStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create nonce store: %w", err)
 	}
 	return store, nil
 }

@@ -1346,6 +1346,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if rps := storageManager.GetRefreshPolicyStore(); rps != nil {
 		httpServer.SetRefreshPolicyStore(rps)
 	}
+	if ns := storageManager.GetNonceStore(); ns != nil {
+		httpServer.SetNonceStore(ns)
+	}
 	if aps := storageManager.GetAssurancePolicyStore(); aps != nil {
 		httpServer.SetAssurancePolicyStore(aps)
 	}

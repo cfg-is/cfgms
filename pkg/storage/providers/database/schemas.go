@@ -1096,6 +1096,29 @@ func (s DatabaseSchemas) CreatePendingRefreshRequestsTable(ctx context.Context, 
 	return nil
 }
 
+// CreateRefreshNoncesTable creates the refresh_nonces table backing the durable
+// NonceStore (Issue #3755, ADR-031 amendment to ADR-011). Each row is a
+// single-use registration-refresh challenge nonce; GetAndConsumeNonce deletes
+// the row it reads via DELETE ... RETURNING, which is atomic across concurrent
+// readers on different controller nodes.
+func (s DatabaseSchemas) CreateRefreshNoncesTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS refresh_nonces (
+			key        TEXT NOT NULL PRIMARY KEY,
+			entry      BYTEA NOT NULL,
+			expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create refresh_nonces table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CREATE INDEX IF NOT EXISTS idx_refresh_nonces_expires_at ON refresh_nonces(expires_at);",
+	); err != nil {
+		return fmt.Errorf("failed to create refresh_nonces index: %w", err)
+	}
+	return nil
+}
+
 // CreateSessionsTable creates the sessions table with HMAC-hashed token column and RLS.
 func (s DatabaseSchemas) CreateSessionsTable(ctx context.Context, db *sql.DB) error {
 	ddl := `
@@ -1443,6 +1466,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS case_content;",
 		"DROP TABLE IF EXISTS case_pins;",
 		"DROP TABLE IF EXISTS cases;",
+		"DROP TABLE IF EXISTS refresh_nonces;",
 	}
 
 	for _, query := range dropQueries {

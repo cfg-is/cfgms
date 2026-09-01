@@ -1,6 +1,12 @@
 # ADR-011: Registration-Refresh for Stewards Offline Past mTLS Cert Expiry
 
-**Status:** Accepted
+**Status:** Accepted. Amended by [ADR-031](031-controller-cluster-service-model.md) —
+the in-memory nonce cache design below is superseded by a durable `NonceStore`
+(Issue #3755): ADR-031 Decision 1's any-node service model means a challenge and
+its completion can land on different controller nodes, so the "single-instance
+controller in v1" assumption this ADR's nonce cache relied on no longer holds.
+The durable alternative this ADR originally deferred (see Alternatives Considered)
+is the implemented mechanism as of #3755.
 
 **Date:** 2026-06-20
 
@@ -107,7 +113,15 @@ Response (200):
 { "nonce": "<base64url 32 random bytes>", "server_ts": <unix-seconds-uint64>, "expires_in": 60 }
 ```
 
-The nonce is single-use, stored in an in-memory cache with a **65-second TTL** (60 s enforced server-side + 5 s grace for clock drift). It is consumed (deleted) on first use at `/complete`. A replayed, expired, or absent nonce is rejected with **401** — identical handling for all three, so a caller learns nothing from the distinction.
+The nonce is single-use, stored with a **65-second TTL** (60 s enforced server-side + 5 s grace for clock drift). It is consumed (deleted) on first use at `/complete`. A replayed, expired, or absent nonce is rejected with **401** — identical handling for all three, so a caller learns nothing from the distinction.
+
+**Amended by ADR-031 (Issue #3755):** originally an in-memory cache local to the
+issuing controller node. Under ADR-031's any-node service model the challenge
+and completion requests can land on different nodes, so the nonce is now stored
+in a durable `business.NonceStore` (`pkg/storage/interfaces/business`, with
+`database`/`sqlite`/`flatfile` implementations) shared across nodes; consumption
+is an atomic get-and-delete (`DELETE ... RETURNING` on SQL backends) so a nonce
+can never be consumed twice regardless of which node handles which request.
 
 #### Complete phase (`/refresh/complete`)
 
@@ -205,5 +219,5 @@ Provenance is corroboration, not proof: the cryptographic identity proof is the 
 - **`dormant` → force full re-registration.** Rejected — re-registration destroys fleet identity (violates R3). The dormancy backstop escalates to `require_approval`, preserving identity.
 - **Cert-serial revocation store as the device-revocation signal.** Rejected — it is admin-cert-scoped and not populated on device revocation; `StewardStatus == revoked` is the authoritative signal.
 - **DNA as an identity/provenance input.** Rejected — non-secret and ring-shared; excluded from provenance scoring.
-- **Shared nonce cache via HA replication.** Deferred — single-instance controller in v1; nonce cache is in-process and moves to the shared durable store when multi-controller HA ships.
+- **Shared nonce cache via HA replication.** Deferred — single-instance controller in v1; nonce cache is in-process and moves to the shared durable store when multi-controller HA ships. **Implemented by ADR-031 (Issue #3755):** the durable `business.NonceStore` described above.
 - **TPM-backed key storage in v1.** Deferred — out of scope; the `KeyStore` interface and `key_protection_level` attribute make it a drop-in.

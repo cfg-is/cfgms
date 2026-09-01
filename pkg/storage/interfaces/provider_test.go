@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -389,6 +390,26 @@ func TestCreateAllStoresFromConfig(t *testing.T) {
 		// which the factory tolerates by leaving the slot nil.
 		if manager.GetConfigStore() != nil {
 			t.Errorf("ConfigStore should be nil for the SQLite provider")
+		}
+
+		// Issue #3755: single-provider mode must wire the durable nonce store from
+		// the named provider. A nil store here means every registration-refresh
+		// challenge/complete request answers 503 in this deployment shape.
+		nonceStore := manager.GetNonceStore()
+		if nonceStore == nil {
+			t.Fatal("NonceStore should not be nil for the SQLite provider")
+		}
+		ctx := context.Background()
+		const nonceKey = "refresh-nonce:all-stores"
+		if err := nonceStore.PutNonce(ctx, nonceKey, []byte("challenge"), time.Minute); err != nil {
+			t.Fatalf("PutNonce failed: %v", err)
+		}
+		entry, found, err := nonceStore.GetAndConsumeNonce(ctx, nonceKey)
+		if err != nil {
+			t.Fatalf("GetAndConsumeNonce failed: %v", err)
+		}
+		if !found || string(entry) != "challenge" {
+			t.Fatalf("nonce round-trip mismatch: found=%v entry=%q", found, entry)
 		}
 	})
 

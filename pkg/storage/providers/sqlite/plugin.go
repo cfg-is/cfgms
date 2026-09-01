@@ -28,6 +28,10 @@ import (
 var (
 	_ interfaces.StorageProvider     = (*SQLiteProvider)(nil)
 	_ interfaces.BusinessStoreOpener = (*SQLiteProvider)(nil)
+	// The optional store-creator extensions are wired through a type assertion,
+	// so a missing method silently leaves the store nil rather than failing the
+	// build at the call site (Issue #3755).
+	_ interfaces.NonceStoreCreator = (*SQLiteProvider)(nil)
 )
 
 // SQLiteProvider implements the StorageProvider interface using SQLite for persistence.
@@ -539,6 +543,16 @@ func (p *SQLiteProvider) CreateCaseStore(config map[string]interface{}) (busines
 		return nil, err
 	}
 	return &SQLiteCaseStore{db: db}, nil
+}
+
+// CreateNonceStore returns a SQLite-backed NonceStore (Issue #3755, ADR-031
+// amendment to ADR-011). Implements interfaces.NonceStoreCreator.
+func (p *SQLiteProvider) CreateNonceStore(config map[string]interface{}) (business.NonceStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteNonceStore{db: db}, nil
 }
 
 // init auto-registers the SQLite provider so it is available after a blank import.

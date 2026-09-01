@@ -21,6 +21,16 @@ import (
 // DatabaseProvider implements the StorageProvider interface using PostgreSQL for persistence
 type DatabaseProvider struct{}
 
+// Compile-time assertions. The optional store-creator extensions are wired by
+// CreateClusterStorageManager through a type assertion, so a missing method is
+// not a compile error at the call site — it silently leaves the store nil and
+// the dependent endpoints answering 503 (Issue #3755, and #3401 before it).
+// These assertions turn that class of regression back into a build failure.
+var (
+	_ interfaces.StorageProvider   = (*DatabaseProvider)(nil)
+	_ interfaces.NonceStoreCreator = (*DatabaseProvider)(nil)
+)
+
 // Name returns the provider name
 func (p *DatabaseProvider) Name() string {
 	return "database"
@@ -292,6 +302,23 @@ func (p *DatabaseProvider) CreateCaseStore(config map[string]interface{}) (busin
 	store, err := NewDatabaseCaseStore(dsn, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database case store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateNonceStore creates a PostgreSQL-backed NonceStore (Issue #3755, ADR-031
+// amendment to ADR-011). Implements interfaces.NonceStoreCreator, which is what
+// CreateClusterStorageManager type-asserts on to wire the durable nonce store:
+// without this method the cluster (multi-node Postgres) deployment runs with a
+// nil nonce store and every registration-refresh endpoint answers 503.
+func (p *DatabaseProvider) CreateNonceStore(config map[string]interface{}) (business.NonceStore, error) {
+	dsn, err := p.getDSN(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseNonceStore(dsn, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database nonce store: %w", err)
 	}
 	return store, nil
 }
