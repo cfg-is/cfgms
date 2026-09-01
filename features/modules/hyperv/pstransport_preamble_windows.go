@@ -269,13 +269,25 @@ function Cfgms-MountSeedVHD {
     # for every subsequent VM on the host until an operator dismounts by hand.
     # Observed on cfg-lab: a seed VHD left Attached=True for two days after its
     # VM had been deleted.
+    # $ok distinguishes the two cleanup cases. On the SUCCESS path a dismount
+    # failure IS the leak this function exists to prevent, so it must throw. On
+    # the FAILURE path it must not: a throwing finally replaces the in-flight
+    # exception, losing the real cause — the exact diagnostic blindness that made
+    # this class of bug expensive to find.
+    $ok = $false
     try {
         Mount-VHD -Path $Path -Passthru |
             Initialize-Disk -PartitionStyle MBR -PassThru |
             New-Partition -UseMaximumSize -AssignDriveLetter |
             Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Label -Confirm:$false | Out-Null
+        $ok = $true
     } finally {
-        Cfgms-DismountAndVerify -Path $Path
+        if ($ok) {
+            Cfgms-DismountAndVerify -Path $Path
+        } else {
+            try { Cfgms-DismountAndVerify -Path $Path }
+            catch { Write-Warning ('cleanup dismount failed for ' + $Path + ': ' + $_.Exception.Message) }
+        }
     }
 }
 
@@ -322,6 +334,10 @@ function Cfgms-CopyToSeedVHD {
     # any Set-Content/Copy-Item below (or a null $letter when the labelled volume
     # is not found) would otherwise skip the dismount and leak a host-attached
     # VHD permanently, breaking seed attach for every later VM on this host.
+    # See the $ok note on Cfgms-MountSeedVHD: a dismount failure must throw on
+    # the success path (it is the leak) but must never replace an in-flight
+    # exception on the failure path.
+    $ok = $false
     try {
         $disk = Mount-VHD -Path $SeedPath -Passthru
         $letter = ($disk | Get-Disk | Get-Partition | Get-Volume |
@@ -333,8 +349,14 @@ function Cfgms-CopyToSeedVHD {
         if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
         if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
         if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
+        $ok = $true
     } finally {
-        Cfgms-DismountAndVerify -Path $SeedPath
+        if ($ok) {
+            Cfgms-DismountAndVerify -Path $SeedPath
+        } else {
+            try { Cfgms-DismountAndVerify -Path $SeedPath }
+            catch { Write-Warning ('cleanup dismount failed for ' + $SeedPath + ': ' + $_.Exception.Message) }
+        }
     }
 }
 

@@ -7,9 +7,13 @@ package hyperv
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRunFresh_DeadlineKillProducesDistinguishableError is the [REQUIRED TEST]
@@ -81,5 +85,54 @@ func TestRunFresh_NonZeroExitUsesGenericError(t *testing.T) {
 	}
 	if strings.Contains(msg, "killed by deadline") {
 		t.Fatalf("a normal non-zero exit must NOT be labeled a deadline kill; got: %v", err)
+	}
+}
+
+// ── #3168: runFresh failure diagnostics ────────────────────────────────────
+
+// TestFreshSeedOpError_EmptyOutputSaysSo is the [REQUIRED TEST] for the
+// diagnostic that made the #3168 investigation expensive. The old message,
+// `fresh seed op failed: exit status 1: `, reads as a truncated string — it
+// gives no hint that PowerShell genuinely printed nothing on either stream, and
+// names no verb, so a log reader cannot tell WHICH seed op failed or why there
+// is no detail. The empty case must say so in words and name the verb.
+func TestFreshSeedOpError_EmptyOutputSaysSo(t *testing.T) {
+	err := freshSeedOpError(errors.New("exit status 1"), "",
+		`Cfgms-AttachSeedDisk -Name "stw-01" -SeedPath "C:\seeds\s.vhdx"`, 1500*time.Millisecond)
+
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "exit status 1", "the underlying exec error must be preserved")
+	assert.Contains(t, msg, "NO output",
+		"an empty combined output must be stated explicitly, not left as a dangling colon")
+	assert.Contains(t, msg, "Cfgms-AttachSeedDisk",
+		"the failing verb must be named so a log reader knows which seed op died")
+	assert.Contains(t, msg, "1.5s", "elapsed time helps separate a hang from an instant failure")
+}
+
+// TestFreshSeedOpError_RealOutputIsSurfacedVerbatim: when PowerShell DID print
+// something, that text is the diagnosis and must be surfaced unchanged rather
+// than replaced by the generic empty-output wording.
+func TestFreshSeedOpError_RealOutputIsSurfacedVerbatim(t *testing.T) {
+	psText := "Add-VMHardDiskDrive : Failed to add device 'Virtual Hard Disk'. (0x80070020)"
+	err := freshSeedOpError(errors.New("exit status 1"), "\n  "+psText+"  \n",
+		"Cfgms-AttachSeedDisk -Name \"stw-01\"", time.Second)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), psText, "real PowerShell output must be surfaced verbatim")
+	assert.NotContains(t, err.Error(), "NO output",
+		"the empty-output wording must not appear when there IS output")
+}
+
+// TestPSVerbOf_DoesNotLeakArguments: the verb is safe to embed in an error, but
+// the argument tail carries host paths and other caller-supplied values that
+// must not be pasted into an error string.
+func TestPSVerbOf_DoesNotLeakArguments(t *testing.T) {
+	got := psVerbOf(`Cfgms-CopyToSeedVHD -SeedPath "C:\seeds\secret-host-path.vhdx" -Content "user-data"`)
+	assert.Equal(t, "Cfgms-CopyToSeedVHD", got)
+
+	for _, in := range []string{"", "   ", "Write-Output 'hi'", "$x = 1"} {
+		assert.Equal(t, "unknown", psVerbOf(in),
+			"a non-Cfgms expression must not be echoed back into an error message: %q", in)
 	}
 }
