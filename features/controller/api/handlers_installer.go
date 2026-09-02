@@ -57,10 +57,6 @@ type installerArtifactInfo struct {
 // Namespace "installers", Name "<platform>-<arch>". Returns 200 with the
 // computed size and SHA-256 checksum on success.
 func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.blobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return
@@ -232,10 +228,6 @@ func (s *Server) handleGetInstallerArtifact(w http.ResponseWriter, r *http.Reque
 // handleDeleteInstallerArtifact handles DELETE /api/v1/installer/artifacts/{platform}/{arch}.
 // Removes the installer artifact. Returns 204 on success (including when it did not exist).
 func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.blobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return

@@ -570,6 +570,24 @@ func TestPrincipalHasCertifiedRootScope_ValidCertGrants(t *testing.T) {
 	assert.True(t, principalHasCertifiedRootScope(p))
 }
 
+// findControllerRepoRoot walks up from the working directory to find the repository
+// root (presence of go.mod). Named to avoid conflicting with findRepoRoot in pkg/cert.
+func findControllerRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	for {
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root (go.mod not found)")
+		}
+		dir = parent
+	}
+}
+
 // ---- [REQUIRED TEST] structural: no non-certificate code path sets CertSerial --------
 
 // TestCertSerial_OnlySetByExtractAdminPrincipal is the [REQUIRED TEST]: it walks every
@@ -648,17 +666,61 @@ func TestPrincipalHasCertifiedRootScope_SingleCallSite(t *testing.T) {
 		"principalHasCertifiedRootScope must have exactly one call site outside its own declaration")
 }
 
-// ---- leadership gate ------------------------------------------------------------------
+// ---- any-node service (Issue #3761, ADR-031 Decision 1) --------------------------------
 
-// TestApproveCredentialRequest_LeadershipGate is the [REQUIRED TEST]: the approve
-// handler calls the lease-backed leadership check directly in its own body.
-func TestApproveCredentialRequest_LeadershipGate(t *testing.T) {
+// TestApproveCredentialRequest_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file. handleApproveCredentialRequest used to reject with 503, before reading the
+// request, whenever the serving node held no lease-backed leadership. Any-node service
+// means every cluster node serves the approval: the compare-and-swap persist
+// (persistPendingCredentialRequestCAS) in the shared store is the serialization point,
+// not leadership. Driven against a real, deliberately non-authoritative *ha.Manager
+// (ClusterMode, no lease ever acquired), the approval must succeed and be durably
+// recorded exactly as it would on a leader.
+func TestApproveCredentialRequest_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server := setupTestServer(t)
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	server.haManager = newNonAuthoritativeHAManager(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-requests/some-id/approve", nil)
-	req = withVars(req, map[string]string{"id": "some-id"})
-	rec := httptest.NewRecorder()
-	server.handleApproveCredentialRequest(rec, req)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	lodged := lodgeTestCredentialRequest(t, server, "approve-nonauth-tenant")
+	acct := createApprovalTestAccount(t, server, "nonauth-device-owner", "approve-nonauth-tenant")
+
+	approver := implicitAdminPrincipal("nonauth-approver")
+	approver.TenantID = "approve-nonauth-tenant"
+
+	rec := approveCredentialRequest(t, server, approver, lodged.RequestID, ApproveCredentialRequestBody{
+		Fingerprint: lodged.PublicKeyFingerprint,
+		AccountID:   acct.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"approval must succeed regardless of leadership: %s", rec.Body.String())
+	assert.Equal(t, credentialRequestStatusApproved, decodeApproveResponse(t, rec).Status)
+
+	stored, err := server.getPendingCredentialRequestByID(context.Background(), lodged.RequestID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, credentialRequestStatusApproved, stored.Status,
+		"the approval must be durably recorded on a non-authoritative node")
+	assert.Equal(t, acct.ID, stored.BoundAccountID)
+}
+
+// TestApproveCredentialRequest_SucceedsOnAuthoritativeNode is the mirror case for
+// continuity: a real, deliberately authoritative *ha.Manager (SingleServerMode, the
+// shape every OSS single-controller install runs) must still reach the same approval
+// logic unchanged.
+func TestApproveCredentialRequest_SucceedsOnAuthoritativeNode(t *testing.T) {
+	server := setupTestServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
+
+	lodged := lodgeTestCredentialRequest(t, server, "approve-auth-tenant")
+	acct := createApprovalTestAccount(t, server, "auth-device-owner", "approve-auth-tenant")
+
+	approver := implicitAdminPrincipal("auth-approver")
+	approver.TenantID = "approve-auth-tenant"
+
+	rec := approveCredentialRequest(t, server, approver, lodged.RequestID, ApproveCredentialRequestBody{
+		Fingerprint: lodged.PublicKeyFingerprint,
+		AccountID:   acct.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"approval must succeed on an authoritative node: %s", rec.Body.String())
+	assert.Equal(t, credentialRequestStatusApproved, decodeApproveResponse(t, rec).Status)
 }

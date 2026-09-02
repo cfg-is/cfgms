@@ -567,6 +567,81 @@ func TestOperatorPayloadSignFinish_Success_EndToEnd(t *testing.T) {
 	assert.Equal(t, uint32(1), acct.Credentials[0].SignCount)
 }
 
+// --- any-node service (Issue #3761, ADR-031 Decision 1) ---
+
+// TestOperatorPayloadSignBegin_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file: handleOperatorPayloadSignBegin no longer consults lease-backed leadership
+// before starting a ceremony. Any-node service means every cluster node serves this
+// request — the ceremony state is keyed on the caller's web session, so no node is
+// privileged. Driven against a real, deliberately non-authoritative *ha.Manager
+// (ClusterMode, no lease ever acquired), begin must return the same 200 and the same
+// challenge-equals-envelope-hash property a leader would.
+func TestOperatorPayloadSignBegin_SucceedsOnNonAuthoritativeNode(t *testing.T) {
+	server, username := setupOperatorPayloadSignServer(t)
+	credID := []byte("nonauthoritative-begin-cred")
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, credID, pubKey, 0)
+	principal := &Principal{ID: username}
+
+	server.haManager = newNonAuthoritativeHAManager(t)
+
+	rec := doSignBegin(t, server, principal, "nonauthoritative-sess", validBeginBody())
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var begin struct {
+		Data OperatorPayloadSignBeginResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &begin))
+	require.NotNil(t, begin.Data.Assertion)
+	assert.NotEmpty(t, begin.Data.EnvelopeHash)
+	assert.NotEmpty(t, begin.Data.Envelope.Nonce)
+
+	challengeBytes, err := base64.RawURLEncoding.DecodeString(begin.Data.Assertion.Response.Challenge.String())
+	require.NoError(t, err)
+	assert.Equal(t, begin.Data.EnvelopeHash, hex.EncodeToString(challengeBytes),
+		"a non-authoritative node must issue the same envelope-bound challenge a leader would")
+}
+
+// TestOperatorPayloadSignFinish_SucceedsOnNonAuthoritativeNode drives the full
+// begin→finish ceremony with a real ECDSA P-256 signature on a node that holds no
+// lease-backed leadership, proving handleOperatorPayloadSignFinish also serves from any
+// node and still advances and persists the credential's sign count.
+func TestOperatorPayloadSignFinish_SucceedsOnNonAuthoritativeNode(t *testing.T) {
+	server, username := setupOperatorPayloadSignServer(t)
+	credID := []byte("nonauthoritative-finish-cred")
+	priv, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, credID, pubKey, 0)
+	principal := &Principal{ID: username}
+
+	server.haManager = newNonAuthoritativeHAManager(t)
+
+	const sessID = "nonauthoritative-finish-sess"
+	beginRec := doSignBegin(t, server, principal, sessID, validBeginBody())
+	require.Equal(t, http.StatusOK, beginRec.Code, "body: %s", beginRec.Body.String())
+	var begin struct {
+		Data OperatorPayloadSignBeginResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
+
+	body := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
+		begin.Data.Assertion.Response.Challenge.String(), 1)
+	rec := doSignFinish(t, server, principal, sessID, body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var finish struct {
+		Data OperatorPayloadSignFinishResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &finish))
+	assert.NotEmpty(t, finish.Data.Signature)
+	assert.Equal(t, begin.Data.EnvelopeHash, finish.Data.EnvelopeHash)
+
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.Len(t, acct.Credentials, 1)
+	assert.Equal(t, uint32(1), acct.Credentials[0].SignCount,
+		"the sign count must advance and persist on a non-authoritative node")
+}
+
 // --- generateOperatorPayloadSignNonce ---
 
 // TestGenerateOperatorPayloadSignNonce_FunctionalProperties is the [REQUIRED TEST]: nonces

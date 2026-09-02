@@ -69,14 +69,6 @@ func (s *Server) handleListModuleApprovals(w http.ResponseWriter, r *http.Reques
 // handleApproveModuleBundle handles POST /api/v1/modules/approvals/{address}/approve.
 // Approves a queued module bundle, authorizing it for deployment to managed endpoints.
 func (s *Server) handleApproveModuleBundle(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// wired for registration/token endpoints by #3471; reused here unchanged —
-	// the name is registration-era but the check is generic (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	rawAddr := mux.Vars(r)["address"]
 
@@ -102,14 +94,6 @@ func (s *Server) handleApproveModuleBundle(w http.ResponseWriter, r *http.Reques
 // handleRejectModuleBundle handles POST /api/v1/modules/approvals/{address}/reject.
 // Rejects a queued module bundle, blocking it from deployment.
 func (s *Server) handleRejectModuleBundle(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// wired for registration/token endpoints by #3471; reused here unchanged —
-	// the name is registration-era but the check is generic (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	rawAddr := mux.Vars(r)["address"]
 

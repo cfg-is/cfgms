@@ -24,13 +24,8 @@ func registerCredentialRequestRoutes(s *Server, api *mux.Router) {
 	// per source address on mint (Issue #3717 implementation note).
 	//
 	// The mint and lodge handlers are built into named variables before being handed
-	// to Handle(), rather than inline, because architecture_test.go's mutating-handler
-	// scanner (TestNoUngatedMutatingHandler) walks a route's handler expression and
-	// returns the first <ident>.<field> selector it finds as the "handler name" — for
-	// a two-argument wrapper like sourceRateLimiter.middleware(trustedProxies, next),
-	// an inline call would make it misidentify the trustedProxies argument itself as
-	// the handler. Both handlers still call HasLeadership() directly in their own
-	// bodies (see handlers_credential_requests.go).
+	// to Handle(), rather than inline, so the rate limiter middleware wraps a stable
+	// handler reference.
 	mintHandler := s.enrolmentTokenMintLimiter.middleware(s.trustedProxies,
 		s.requirePermission("enrolment-token", "mint")(http.HandlerFunc(s.handleMintEnrolmentToken)),
 	)

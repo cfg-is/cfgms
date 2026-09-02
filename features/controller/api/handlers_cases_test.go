@@ -249,18 +249,21 @@ func TestHandleCreateCase_RejectsTenantOutsideSubtree(t *testing.T) {
 		"creating a case for another tenant must be rejected with 403")
 }
 
-// TestHandleCreateCase_NonLeaderRejects exercises the leadership-rejection branch
-// in handleCreateCase: a node that is not authoritative must refuse the mutation
-// with 503 and persist nothing. The store is wired here, so the 503 can only come
-// from the leadership guard, never from the nil-store branch.
-func TestHandleCreateCase_NonLeaderRejects(t *testing.T) {
+// TestHandleCreateCase_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// handlers_cases.go (Issue #3761, ADR-031 Decision 1): handleCreateCase used to
+// reject the mutation with 503 and persist nothing when the serving node held no
+// lease-backed leadership. Any-node service means every cluster node accepts the
+// write — the shared case store is the serialization point, not leadership — so
+// creating against a real, deliberately non-authoritative *ha.Manager (ClusterMode,
+// no lease ever acquired) must return 201 and persist the case.
+func TestHandleCreateCase_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	srv := setupCasesTestServer(t)
-	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	srv.haManager = newNonAuthoritativeHAManager(t)
 	apiKey := newCasesTestKey(t, srv, "test-tenant")
 
 	body := map[string]interface{}{
 		"ticket": map[string]interface{}{
-			"title": map[string]interface{}{"value": "case from a follower", "source": "operator"},
+			"title": map[string]interface{}{"value": "case from a non-authoritative node", "source": "operator"},
 		},
 	}
 	bodyBytes, err := json.Marshal(body)
@@ -272,12 +275,12 @@ func TestHandleCreateCase_NonLeaderRejects(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-		"a non-leader must reject create with 503: %s", rec.Body.String())
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"create must succeed regardless of leadership: %s", rec.Body.String())
 
 	cases, listErr := srv.CasesStore().ListCases(context.Background(), "test-tenant")
 	require.NoError(t, listErr)
-	assert.Empty(t, cases, "a create rejected by the leadership gate must not persist a case")
+	assert.Len(t, cases, 1, "the case must be persisted from a non-authoritative node")
 }
 
 // ── LIST ────────────────────────────────────────────────────────────────────
@@ -610,22 +613,22 @@ func TestHandleUpdateCase_CrossTenantReturns404(t *testing.T) {
 		"PUT from another tenant must return 404, not 403 (existence-oracle prevention)")
 }
 
-// TestHandleUpdateCase_NonLeaderRejects exercises the leadership-rejection branch
-// in handleUpdateCase: a node that is not authoritative must refuse the mutation
-// with 503 and leave the stored case untouched. The case exists and is in the
-// caller's tenant, and the store is wired, so the 503 can only come from the
-// leadership guard.
-func TestHandleUpdateCase_NonLeaderRejects(t *testing.T) {
+// TestHandleUpdateCase_SucceedsOnNonAuthoritativeNode covers handleUpdateCase under
+// any-node service (Issue #3761, ADR-031 Decision 1): the update used to be rejected
+// with 503 on a node holding no lease-backed leadership. It must now run the ordinary
+// update path against the shared case store, so the persisted status and ticket both
+// reflect the request.
+func TestHandleUpdateCase_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	srv := setupCasesTestServer(t)
 	cs := srv.CasesStore()
 	c := seedCase(t, cs, "test-tenant")
-	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	srv.haManager = newNonAuthoritativeHAManager(t)
 	apiKey := newCasesTestKey(t, srv, "test-tenant")
 
 	body := map[string]interface{}{
 		"status": "closed",
 		"ticket": map[string]interface{}{
-			"title": map[string]interface{}{"value": "updated by a follower", "source": "operator"},
+			"title": map[string]interface{}{"value": "updated from a non-authoritative node", "source": "operator"},
 		},
 	}
 	bodyBytes, err := json.Marshal(body)
@@ -637,15 +640,15 @@ func TestHandleUpdateCase_NonLeaderRejects(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-		"a non-leader must reject update with 503: %s", rec.Body.String())
+	require.Equal(t, http.StatusOK, rec.Code,
+		"update must succeed regardless of leadership: %s", rec.Body.String())
 
 	stored, getErr := cs.GetCase(context.Background(), c.ID)
 	require.NoError(t, getErr)
-	assert.Equal(t, business.CaseStatusOpen, stored.Status,
-		"an update rejected by the leadership gate must not change the persisted status")
-	assert.Equal(t, c.Ticket.Title.Value, stored.Ticket.Title.Value,
-		"an update rejected by the leadership gate must not change the persisted ticket")
+	assert.Equal(t, business.CaseStatusClosed, stored.Status,
+		"the update must have changed the persisted status")
+	assert.Equal(t, "updated from a non-authoritative node", stored.Ticket.Title.Value,
+		"the update must have changed the persisted ticket")
 }
 
 func TestHandleUpdateCase_NonexistentReturns404(t *testing.T) {
@@ -1032,11 +1035,14 @@ func TestHandleAddPin_NoProviderForEIDKindReturns503(t *testing.T) {
 		"eid pin with no entity graph provider must return 503: %s", rec.Body.String())
 }
 
-func TestHandleAddPin_NonLeaderRejects(t *testing.T) {
+// TestHandleAddPin_SucceedsOnNonAuthoritativeNode covers handleAddPin under any-node
+// service (Issue #3761, ADR-031 Decision 1): a node holding no lease-backed leadership
+// must persist the pin instead of returning 503.
+func TestHandleAddPin_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	srv := setupCasesTestServer(t)
 	cs := srv.CasesStore()
 	c := seedCase(t, cs, "test-tenant")
-	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	srv.haManager = newNonAuthoritativeHAManager(t)
 	apiKey := newCasesTestKey(t, srv, "test-tenant")
 
 	body := map[string]interface{}{
@@ -1051,12 +1057,12 @@ func TestHandleAddPin_NonLeaderRejects(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-		"non-leader must reject add pin with 503: %s", rec.Body.String())
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"add pin must succeed regardless of leadership: %s", rec.Body.String())
 
 	stored, err := cs.GetCase(context.Background(), c.ID)
 	require.NoError(t, err)
-	assert.Empty(t, stored.Pins, "add pin rejected by leadership gate must not persist a pin")
+	require.Len(t, stored.Pins, 1, "the pin must be persisted from a non-authoritative node")
 }
 
 // ── REMOVE PIN (DELETE /api/v1/cases/{id}/pins/{pin_id}) ────────────────────
@@ -1128,12 +1134,15 @@ func TestHandleRemovePin_CrossTenantCaseReturns404(t *testing.T) {
 	require.Len(t, stored.Pins, 1, "pin must not be removed from another tenant's case")
 }
 
-func TestHandleRemovePin_NonLeaderRejects(t *testing.T) {
+// TestHandleRemovePin_SucceedsOnNonAuthoritativeNode covers handleRemovePin under
+// any-node service (Issue #3761, ADR-031 Decision 1): a node holding no lease-backed
+// leadership must remove the pin instead of returning 503.
+func TestHandleRemovePin_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	srv := setupCasesTestServer(t)
 	cs := srv.CasesStore()
 	c := seedCase(t, cs, "test-tenant")
 	pin := seedPin(t, cs, c.ID, "observation-version", "obs-v1")
-	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	srv.haManager = newNonAuthoritativeHAManager(t)
 	apiKey := newCasesTestKey(t, srv, "test-tenant")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/cases/"+c.ID+"/pins/"+pin.ID, nil)
@@ -1141,12 +1150,12 @@ func TestHandleRemovePin_NonLeaderRejects(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-		"non-leader must reject remove pin with 503: %s", rec.Body.String())
+	require.Equal(t, http.StatusNoContent, rec.Code,
+		"remove pin must succeed regardless of leadership: %s", rec.Body.String())
 
 	stored, err := cs.GetCase(context.Background(), c.ID)
 	require.NoError(t, err)
-	require.Len(t, stored.Pins, 1, "remove pin rejected by leadership gate must not remove the pin")
+	assert.Empty(t, stored.Pins, "the pin must be removed from a non-authoritative node")
 }
 
 // ── ADD PIN: edge-identity and subject-time-range kinds ─────────────────────

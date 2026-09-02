@@ -139,12 +139,8 @@ func validateTicketInput(t caseTicketInput) error {
 
 // handleCreateCase handles POST /api/v1/cases.
 // Creates a case in the caller's tenant, rejecting a supplied tenant_id outside
-// the caller's subtree. Calls HasLeadership() per the architecture-checker rule.
+// the caller's subtree.
 func (s *Server) handleCreateCase(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.casesStore == nil {
 		http.Error(w, "cases store unavailable", http.StatusServiceUnavailable)
 		return
@@ -280,12 +276,7 @@ func (s *Server) handleGetCase(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateCase handles PUT /api/v1/cases/{id}.
 // Applies the same cross-tenant check as GET before allowing an update.
-// Calls HasLeadership() per the architecture-checker rule.
 func (s *Server) handleUpdateCase(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.casesStore == nil {
 		http.Error(w, "cases store unavailable", http.StatusServiceUnavailable)
 		return
@@ -541,13 +532,8 @@ func (s *Server) buildPinRef(w http.ResponseWriter, r *http.Request, req addPinR
 // handleAddPin handles POST /api/v1/cases/{id}/pins.
 // Adds a pin whose graph reference must resolve within the case's own tenant
 // subtree — checked against the case's TenantID, not the caller's ambient
-// tenant (binding PO constraint). Calls HasLeadership() per the architecture-
-// checker rule.
+// tenant (binding PO constraint).
 func (s *Server) handleAddPin(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.casesStore == nil {
 		http.Error(w, "cases store unavailable", http.StatusServiceUnavailable)
 		return
@@ -602,12 +588,7 @@ func (s *Server) handleAddPin(w http.ResponseWriter, r *http.Request) {
 
 // handleRemovePin handles DELETE /api/v1/cases/{id}/pins/{pin_id}.
 // Removes a pin from a case, gated by the same case-tenant check used for add.
-// Calls HasLeadership() per the architecture-checker rule.
 func (s *Server) handleRemovePin(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.casesStore == nil {
 		http.Error(w, "cases store unavailable", http.StatusServiceUnavailable)
 		return

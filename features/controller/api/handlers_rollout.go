@@ -72,14 +72,6 @@ var rolloutHaltChans sync.Map // map[rolloutID string] chan struct{}
 // the next ring is advanced. If a ring's failure rate exceeds its halt_threshold the
 // rollout transitions to halted and no further promotions occur.
 func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// wired for registration/token endpoints by #3471; reused here unchanged —
-	// the name is registration-era but the check is generic (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.rolloutStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable,
 			"Rollout store not configured; durable RolloutStore is required",
@@ -268,10 +260,6 @@ func (s *Server) handleGetRollout(w http.ResponseWriter, r *http.Request) {
 // Signals the rollout goroutine to stop advancing and transitions the rollout record
 // to halted status. Idempotent: halting an already-halted rollout returns 200.
 func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.rolloutStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable,
 			"Rollout store not configured",

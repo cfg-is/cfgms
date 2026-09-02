@@ -317,10 +317,6 @@ func (s *Server) getCollectedCredentialRequestBySerial(ctx context.Context, seri
 // already issued from the token and blocks every still-pending/approved request under it
 // from ever producing one, reporting a per-request outcome (Issue #3725 AC).
 func (s *Server) handleRevokeCredentialsByEnrolmentToken(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return
@@ -382,10 +378,6 @@ func (s *Server) handleRevokeCredentialsByEnrolmentToken(w http.ResponseWriter, 
 // not a certificate revocation, since collect (not approval) mints the certificate
 // (Issue #3725 AC).
 func (s *Server) handleCancelCredentialRequest(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return
@@ -531,10 +523,6 @@ func (s *Server) handleListOrphanedCredentials(w http.ResponseWriter, r *http.Re
 // actually orphaned (no account binding) before revoking, so this endpoint cannot be used
 // as a side channel to revoke a live, properly bound credential.
 func (s *Server) handleRevokeOrphanedCredential(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return

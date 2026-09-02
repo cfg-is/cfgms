@@ -1589,28 +1589,42 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		}
 	})
 
-	t.Run("leader check: follower skips fanout", func(t *testing.T) {
+	// [REQUIRED TEST] Issue #3761, ADR-031 Decision 1: the save=deploy fanout callback
+	// registered in New() used to return early when the node held no lease-backed
+	// leadership (the former server.go-level HasLeadership() gate), silently dropping the
+	// distribution of a config the node had just accepted and persisted. Any-node service
+	// means every cluster node fans out the writes it serves — only the node that received
+	// this specific SetConfiguration invokes its own callback instance, so there is no
+	// duplicate fan-out to suppress. Exercised against a real, deliberately
+	// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired).
+	t.Run("non-authoritative node still performs fanout", func(t *testing.T) {
 		fx := newControlPlaneFixture(t, "steward-1")
 		server, configSvc, controllerSvc := setupServerWithPublisher(t, fx)
 
 		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
 
-		// Override the leader check to report this node as a follower.
-		server.pushLeaderStatus = &stubLeaderStatus{leader: false}
+		// Real HA manager in the state a partitioned/follower controller is in:
+		// HasLeadership() reports false for the whole of this subtest.
+		haMgr := newNonAuthoritativeHAManager(t)
+		server.haManager = haMgr
+		require.False(t, haMgr.HasLeadership(),
+			"precondition: serving node must hold no lease-backed leadership")
 
 		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
 		require.NoError(t, err)
 
 		select {
 		case id := <-fx.delivered:
-			t.Fatalf("follower node must not perform fanout: steward %s received a command", id)
-		case <-time.After(200 * time.Millisecond):
-			// success: fanout suppressed on follower
+			assert.Equal(t, "steward-1", id,
+				"fanout must reach the tenant's steward regardless of leadership")
+		case <-time.After(3 * time.Second):
+			t.Fatal("save=deploy fanout must fire on a non-authoritative node")
 		}
+
+		assert.False(t, haMgr.HasLeadership(),
+			"node must still hold no leadership after serving the write")
 	})
 }
-
-// stubLeaderStatus is defined in handlers_push_test.go (shared across api package tests).
 
 // TestSeedTestAPIKeys verifies the env-gated test API key seeding block in New(),
 // including the installer key path added for Issue #1709 (PR #1831).

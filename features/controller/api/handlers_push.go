@@ -32,19 +32,6 @@ type egConfigstoreIngestor interface {
 	Ingest(ctx context.Context, rev configstorewriter.ConfigRevision, eids []egtypes.EID) error
 }
 
-// leaderStatus is the minimal interface the config-push handler needs from the
-// HA manager. *ha.Manager satisfies it automatically; test doubles use stubLeaderStatus.
-//
-// HasLeadership(), not IsLeader() (Issue #3389): config push is side-effecting —
-// past this gate, handleConfigPush resolves the selector, queries the fleet, writes
-// desired state to the entity graph, and fans out to stewards via commandPublisher,
-// with no Raft commit anywhere in that path. IsLeader()/IsRaftLeader() only guarantee
-// replicated-log write-safety, which never covered these effects — the lease-backed
-// HasLeadership() is the correct admission primitive here (ADR-029 Decision 3).
-type leaderStatus interface {
-	HasLeadership() bool
-}
-
 // configPushRequest is the JSON body for POST /api/v1/config/push.
 // Selector selects which stewards receive the push; it is required and must not
 // be empty — use "all" to target every steward in the configuration's tenant.
@@ -61,16 +48,6 @@ type configPushRequest struct {
 // (never the caller's tenant), records an audit event, triggers a fire-and-forget
 // fan-out to matched stewards via commandPublisher, and returns 202 Accepted.
 func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
-	// Reject callers without lease-backed authority immediately — only a node that
-	// currently holds the lease accepts config pushes (Issue #3389). During a normal
-	// leader handover this returns 503 for up to a lease duration; that is the accepted
-	// tradeoff recorded in epic #3386's design, not a regression. The message
-	// deliberately does not name or imply which other node holds leadership.
-	if checker := s.pushLeaderStatus; checker != nil && !checker.HasLeadership() {
-		s.respondError(w, http.StatusServiceUnavailable, "not the leader")
-		return
-	}
-
 	// Require an authenticated principal.
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {

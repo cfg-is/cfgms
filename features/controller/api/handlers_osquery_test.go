@@ -260,32 +260,16 @@ func TestHandleOsqueryQuery_AdminCallerUnrestricted(t *testing.T) {
 	assert.Len(t, ids, 2, "an admin caller with no tenant scope reaches the whole fleet")
 }
 
-// ---- Tests: REQUIRED TEST — leadership gate ---------------------------------
+// ---- Tests: REQUIRED TEST — any-node service --------------------------------
 
-// TestHandleOsqueryQuery_NonLeaderRejects verifies that a non-authoritative
-// controller node (HasLeadership() == false) returns 503 without dispatching.
-// This is the REQUIRED TEST for the leadership AC (Issue #3569).
-func TestHandleOsqueryQuery_NonLeaderRejects(t *testing.T) {
-	server := setupTestServer(t)
-	disp := &stubOsqueryDispatcher{}
-	server.SetOsqueryDispatcher(disp)
-	server.fleetQuery = fleetWithStewardIDs("steward-1")
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
-
-	body := osqueryQueryRequest{CatalogID: "host_info", Selector: "all"}
-	req := makeOsqueryRequest(t, server, body, osqueryStrongPrincipal())
-	rec := httptest.NewRecorder()
-
-	server.handleOsqueryQuery(rec, req)
-
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-		"non-leader must return 503 — dispatching from a follower violates leadership invariant")
-	assert.Empty(t, disp.calls, "dispatcher must not be called on a non-leader node")
-}
-
-// TestHandleOsqueryQuery_LeaderNilChecker verifies that a nil
-// registrationLeaderStatus (single-node deployment) dispatches normally.
-func TestHandleOsqueryQuery_LeaderNilChecker(t *testing.T) {
+// TestHandleOsqueryQuery_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file (Issue #3761, ADR-031 Decision 1): handleOsqueryQuery used to return 503
+// without dispatching when the serving node held no lease-backed leadership. Any-node
+// service means every cluster node answers the query — an osquery fan-out reads live
+// steward state over the data plane and mutates no controller state, so leadership is
+// irrelevant to it. Against a real, deliberately non-authoritative *ha.Manager
+// (ClusterMode, no lease ever acquired) the query must dispatch and return its rows.
+func TestHandleOsqueryQuery_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	disp := &stubOsqueryDispatcher{
 		rows: []*transportpb.OsqueryRow{
 			{Columns: map[string]string{"hostname": "host-a"}},
@@ -294,7 +278,7 @@ func TestHandleOsqueryQuery_LeaderNilChecker(t *testing.T) {
 	server := setupTestServer(t)
 	server.SetOsqueryDispatcher(disp)
 	server.fleetQuery = fleetWithStewardIDs("steward-1")
-	// registrationLeaderStatus is nil by default (setupTestServer does not wire HA).
+	server.haManager = newNonAuthoritativeHAManager(t)
 
 	body := osqueryQueryRequest{CatalogID: "host_info", Selector: "all"}
 	req := makeOsqueryRequest(t, server, body, osqueryStrongPrincipal())
@@ -303,9 +287,9 @@ func TestHandleOsqueryQuery_LeaderNilChecker(t *testing.T) {
 	handler := server.requirePermission("osquery", "execute")(http.HandlerFunc(server.handleOsqueryQuery))
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code,
-		"nil leadership checker must not reject the request (single-node mode)")
-	assert.Len(t, disp.calls, 1, "dispatcher must be called once for the single target steward")
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a non-authoritative node must still answer the query: %s", rec.Body.String())
+	assert.Len(t, disp.calls, 1, "the dispatcher must be called once for the single target steward")
 }
 
 // ---- Tests: REQUIRED TEST — assurance gate ----------------------------------

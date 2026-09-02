@@ -175,10 +175,6 @@ func fingerprintsMatch(supplied, storedFull string) bool {
 // the eventual credential will bind to, and records the decision on the pending
 // request — it signs nothing (see package doc comment).
 func (s *Server) handleApproveCredentialRequest(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return

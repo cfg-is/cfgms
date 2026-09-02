@@ -297,8 +297,18 @@ substrate for the zero-downtime upgrade flow described in epic #1917.
   steward record / config / RBAC entry at the same moment race on
   last-writer-wins semantics. No corruption, but the merge is unordered. This
   is acceptable for blue/green cutover (the primary writer is well-defined at
-  any given moment) but is **not** acceptable for multi-active HA — that
-  needs a separate epic with proper write coordination.
+  any given moment); on the flatfile/SQLite backends described here it remains
+  last-writer-wins.
+
+  For the ClusterMode/PostgreSQL deployment shape, this ceiling is resolved by
+  ADR-031 (Decision 1): the leadership gate that used to serialize writes onto
+  one node is removed — every node now accepts every write — and the shared
+  PostgreSQL database becomes the serialization point instead. Multi-writer
+  safety is enforced per write path with uniqueness constraints and
+  compare-and-set on version columns (`SecretStore.CompareAndSwapSecret` for
+  the credential/CLI-login lifecycle transitions, database-side sequencing for
+  the audit chain, a durable shared nonce store for registration refresh), not
+  by last-writer-wins. See ADR-031 for the full any-node service model.
 - **Schema migrations during cutover.** A migration that changes column or
   field shapes must run during a maintenance window or after both sides have
   upgraded. Blue/green cutover assumes both binaries speak the same storage

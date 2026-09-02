@@ -49,18 +49,10 @@ type osqueryQueryResponse struct {
 // handleOsqueryQuery handles POST /api/v1/osquery/query.
 //
 // Accepts a catalog query ID, optional typed parameters, and a fleet selector.
-// Checks leadership, dispatches to each targeted steward via S7's (Issue #3566)
-// QuerySteward method, and returns per-steward results with partial success on
-// individual steward failures. Every execution is audited.
+// Dispatches to each targeted steward via S7's (Issue #3566) QuerySteward method,
+// and returns per-steward results with partial success on individual steward
+// failures. Every execution is audited.
 func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// reused here per the same pattern as handlers_module_approval.go (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
 	if s.osqueryDispatcher == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Osquery dispatch not configured", "SERVICE_UNAVAILABLE")
 		return

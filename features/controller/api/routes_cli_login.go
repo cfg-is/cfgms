@@ -24,17 +24,11 @@ func init() { RegisterRoutes(registerCliLoginRoutes) }
 // Approve requires an authenticated, AssuranceStrong browser session
 // (requirePermission("cli-login", "approve"), permissionAssurance) and is mounted on
 // the authenticated api subrouter. The GET read (Issue #3722) shares the same gate —
-// the confirmation screen's only way to learn the true user code — and is exempt from
-// the leadership check that guards approve/collect's mutating branches, mirroring how
-// collect's own polling stays available on a non-leader (see handlers_cli_login.go).
+// the confirmation screen's only way to learn the true user code.
 //
 // The lodge and collect handlers are built into named variables before being handed to
-// Handle(), rather than inline, mirroring registerCredentialRequestRoutes: architecture_
-// test.go's mutating-handler scanner (TestNoUngatedMutatingHandler) walks a route's
-// handler expression and returns the first <ident>.<field> selector it finds as the
-// "handler name" — an inline sourceRateLimiter.middleware(trustedProxies, next) call
-// would make it misidentify the trustedProxies argument as the handler. Both handlers
-// still call HasLeadership() directly in their own bodies (see handlers_cli_login.go).
+// Handle(), rather than inline, mirroring registerCredentialRequestRoutes, so the rate
+// limiter middleware wraps a stable handler reference.
 func registerCliLoginRoutes(s *Server, api *mux.Router) {
 	api.Handle("/cli-login/{id}",
 		s.requirePermission("cli-login", "approve")(http.HandlerFunc(s.handleGetCliLoginRequest)),

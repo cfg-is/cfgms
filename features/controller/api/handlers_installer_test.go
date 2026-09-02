@@ -711,24 +711,26 @@ func TestHandleDownloadInstallPackage_InvalidArch(t *testing.T) {
 	assert.Equal(t, "INVALID_ARCH", errResp.Error.Code)
 }
 
-// --- Leadership gate ---
+// --- Any-node service (Issue #3761) ---
 
-// TestInstallerHandlerLeaderGate verifies that handleUploadInstallerArtifact and
-// handleDeleteInstallerArtifact return 503 and do not access s.blobStore when the
-// lease-backed authority checker reports no leadership (the partition scenario,
-// ADR-029 Decision 4).
-func TestInstallerHandlerLeaderGate(t *testing.T) {
-	follower := &stubRegistrationLeaderStatus{hasLeadership: false}
-
-	newFollowerServer := func(t *testing.T) (*Server, blob.BlobStore) {
+// TestInstallerHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for this
+// file (Issue #3761, ADR-031 Decision 1): handleUploadInstallerArtifact and
+// handleDeleteInstallerArtifact used to return 503 and leave s.blobStore untouched
+// when the serving node held no lease-backed leadership. Any-node service means every
+// cluster node accepts both writes — the shared blob store is the serialization point,
+// not leadership — so against a real, deliberately non-authoritative *ha.Manager
+// (ClusterMode, no lease ever acquired) the upload must land in the store and the
+// delete must remove what is there.
+func TestInstallerHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	newNonAuthoritativeServer := func(t *testing.T) (*Server, blob.BlobStore) {
 		t.Helper()
 		server, store := setupTestServerWithBlobStore(t)
-		server.registrationLeaderStatus = follower
+		server.haManager = newNonAuthoritativeHAManager(t)
 		return server, store
 	}
 
-	t.Run("upload rejects with 503 and does not write to blobStore", func(t *testing.T) {
-		server, store := newFollowerServer(t)
+	t.Run("upload succeeds and writes to blobStore", func(t *testing.T) {
+		server, store := newNonAuthoritativeServer(t)
 
 		body := bytes.NewBufferString("fake-installer-content")
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
@@ -738,21 +740,21 @@ func TestInstallerHandlerLeaderGate(t *testing.T) {
 
 		server.handleUploadInstallerArtifact(rec, req)
 
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		require.Equal(t, http.StatusOK, rec.Code,
+			"upload must succeed regardless of leadership: %s", rec.Body.String())
 
-		// Verify blobStore was never touched: no blobs should have been written.
 		blobs, err := store.ListBlobs(context.Background(), blob.BlobKey{
 			TenantID:  "test-tenant",
 			Namespace: "installers",
 		})
 		require.NoError(t, err)
-		assert.Empty(t, blobs, "blobStore must not be written when node is not authoritative")
+		assert.Len(t, blobs, 1, "the uploaded artifact must land in the blob store")
 	})
 
-	t.Run("delete rejects with 503 and does not modify blobStore", func(t *testing.T) {
-		server, store := newFollowerServer(t)
+	t.Run("delete succeeds and removes the artifact", func(t *testing.T) {
+		server, store := newNonAuthoritativeServer(t)
 
-		// Pre-store an artifact so we can verify it survives the rejected delete.
+		// Pre-store an artifact so the delete has something real to remove.
 		require.NoError(t, store.PutBlob(
 			context.Background(),
 			blob.BlobKey{TenantID: "test-tenant", Namespace: "installers", Name: "linux-amd64"},
@@ -767,80 +769,41 @@ func TestInstallerHandlerLeaderGate(t *testing.T) {
 
 		server.handleDeleteInstallerArtifact(rec, req)
 
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		require.Equal(t, http.StatusNoContent, rec.Code)
 
-		// Verify the artifact was not deleted — blobStore was not touched.
 		blobs, err := store.ListBlobs(context.Background(), blob.BlobKey{
 			TenantID:  "test-tenant",
 			Namespace: "installers",
 		})
 		require.NoError(t, err)
-		assert.Len(t, blobs, 1, "blobStore must not be modified when node is not authoritative")
+		assert.Empty(t, blobs, "the artifact must actually be deleted on a non-authoritative node")
 	})
 }
 
-// TestInstallerHandlerLeaderGate_PassThrough verifies that both handlers still reach
-// the existing upload/delete logic when the leadership checker is nil (single-server
-// deployment) or reports leadership (authoritative node).
-func TestInstallerHandlerLeaderGate_PassThrough(t *testing.T) {
-	t.Run("nil checker: upload still succeeds", func(t *testing.T) {
-		server, _ := setupTestServerWithBlobStore(t)
-		// registrationLeaderStatus is nil by default (setupTestServer does not wire HA).
+// TestInstallerHandlers_SucceedOnAuthoritativeNode is the mirror case: a real,
+// deliberately authoritative *ha.Manager (SingleServerMode) must also reach the
+// existing upload/delete logic unchanged — removing the gate must not have broken
+// the leader path either.
+func TestInstallerHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
+	server, _ := setupTestServerWithBlobStore(t)
+	server.haManager = newAuthoritativeHAManager(t)
 
-		body := bytes.NewBufferString("content")
-		req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
-		req = withTenant(req, "test-tenant")
-		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
-		rec := httptest.NewRecorder()
+	body := bytes.NewBufferString("content")
+	uploadReq := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+	uploadReq = withTenant(uploadReq, "test-tenant")
+	uploadReq = withVars(uploadReq, map[string]string{"platform": "linux", "arch": "amd64"})
+	uploadRec := httptest.NewRecorder()
 
-		server.handleUploadInstallerArtifact(rec, req)
+	server.handleUploadInstallerArtifact(uploadRec, uploadReq)
+	require.Equal(t, http.StatusOK, uploadRec.Code, uploadRec.Body.String())
 
-		assert.Equal(t, http.StatusOK, rec.Code)
-	})
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
+	deleteReq = withTenant(deleteReq, "test-tenant")
+	deleteReq = withVars(deleteReq, map[string]string{"platform": "linux", "arch": "amd64"})
+	deleteRec := httptest.NewRecorder()
 
-	t.Run("authoritative checker: upload still succeeds", func(t *testing.T) {
-		server, _ := setupTestServerWithBlobStore(t)
-		server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
-
-		body := bytes.NewBufferString("content")
-		req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
-		req = withTenant(req, "test-tenant")
-		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
-		rec := httptest.NewRecorder()
-
-		server.handleUploadInstallerArtifact(rec, req)
-
-		assert.Equal(t, http.StatusOK, rec.Code)
-	})
-
-	t.Run("nil checker: delete still reaches handler", func(t *testing.T) {
-		server, _ := setupTestServerWithBlobStore(t)
-
-		req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
-		req = withTenant(req, "test-tenant")
-		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
-		rec := httptest.NewRecorder()
-
-		server.handleDeleteInstallerArtifact(rec, req)
-
-		// 204 — reached existing delete logic (idempotent; artifact absent is fine).
-		assert.Equal(t, http.StatusNoContent, rec.Code)
-	})
-
-	t.Run("authoritative checker: delete still reaches handler", func(t *testing.T) {
-		server, _ := setupTestServerWithBlobStore(t)
-		server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
-
-		req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
-		req = withTenant(req, "test-tenant")
-		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
-		rec := httptest.NewRecorder()
-
-		server.handleDeleteInstallerArtifact(rec, req)
-
-		// 204 — reached existing delete logic.
-		assert.Equal(t, http.StatusNoContent, rec.Code)
-	})
+	server.handleDeleteInstallerArtifact(deleteRec, deleteReq)
+	assert.Equal(t, http.StatusNoContent, deleteRec.Code)
 }
 
 // TestHandleDownloadInstallPackage_RouterNoAuth verifies that the download route is

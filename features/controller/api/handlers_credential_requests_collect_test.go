@@ -402,34 +402,54 @@ func TestCollectCredentialRequest_ExpiredIsDistinguishable(t *testing.T) {
 	assert.Equal(t, "expired", decodeCollectStatusResponse(t, rec).Status)
 }
 
-// ---- leadership gate ----------------------------------------------------------------
+// ---- any-node service ----------------------------------------------------------------
 
-// TestCollectCredentialRequest_LeadershipGate is the [REQUIRED TEST]: the minting
-// branch calls the lease-backed leadership check, and a non-authoritative node leaves
-// the request "approved" rather than consuming it.
-func TestCollectCredentialRequest_LeadershipGate(t *testing.T) {
+// TestCollectCredentialRequest_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file (Issue #3761, ADR-031 Decision 1). The minting branch of collect used to
+// consult the lease-backed leadership check and answer 503 — leaving the request
+// "approved" — on any node that held no lease. Any-node service means every cluster node
+// now serves this request: the claim is serialized by the compare-and-swap against the
+// shared secret store, not by leadership. Against a real, deliberately non-authoritative
+// *ha.Manager (ClusterMode, no lease ever acquired) the collect must mint the certificate
+// and consume the request exactly as it would on a leader.
+func TestCollectCredentialRequest_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server := setupCollectTestServer(t)
-	fx := lodgeAndApprove(t, server, "collect-leadership", "collect-leadership-owner", ApproveCredentialRequestBody{})
-	// Lodged while still leader — mint and lodge are themselves leadership-gated, so a
-	// fixture needed for the follower branch below must be created first.
-	pending := lodgeTestCredentialRequest(t, server, "collect-leadership-poll")
+	fx := lodgeAndApprove(t, server, "collect-nonauthoritative", "collect-nonauthoritative-owner", ApproveCredentialRequestBody{})
+	pending := lodgeTestCredentialRequest(t, server, "collect-nonauthoritative-poll")
 
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	server.haManager = newNonAuthoritativeHAManager(t)
+
 	rec := collectCredentialRequest(t, server, fx.requestID, fx.collectSecret)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := decodeCollectResponse(t, rec)
+	assert.NotEmpty(t, resp.CertificatePEM, "a non-authoritative node must still mint the certificate")
+	assert.NotEmpty(t, resp.SerialNumber)
 
 	stored, err := server.getPendingCredentialRequestByID(context.Background(), fx.requestID)
 	require.NoError(t, err)
-	assert.Equal(t, credentialRequestStatusApproved, stored.Status, "a 503 from a non-leader must leave the request untouched")
+	require.NotNil(t, stored)
+	assert.Equal(t, credentialRequestStatusCollected, stored.Status,
+		"the request must be consumed by the collect, not left approved")
+	assert.Equal(t, resp.SerialNumber, stored.CollectedSerial)
 
-	// Polling responses must remain available regardless of leadership.
+	// Polling a still-pending request keeps working on the same node.
 	pollRec := collectCredentialRequest(t, server, pending.RequestID, pending.CollectSecret)
 	assert.Equal(t, http.StatusOK, pollRec.Code, pollRec.Body.String())
 	assert.Equal(t, "pending", decodeCollectStatusResponse(t, pollRec).Status)
+}
 
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
-	retryRec := collectCredentialRequest(t, server, fx.requestID, fx.collectSecret)
-	assert.Equal(t, http.StatusOK, retryRec.Code, retryRec.Body.String())
+// TestCollectCredentialRequest_SucceedsOnAuthoritativeNode is the mirror case: removing
+// the gate must not have disturbed the path a single-server (always authoritative)
+// controller takes.
+func TestCollectCredentialRequest_SucceedsOnAuthoritativeNode(t *testing.T) {
+	server := setupCollectTestServer(t)
+	fx := lodgeAndApprove(t, server, "collect-authoritative", "collect-authoritative-owner", ApproveCredentialRequestBody{})
+
+	server.haManager = newAuthoritativeHAManager(t)
+
+	rec := collectCredentialRequest(t, server, fx.requestID, fx.collectSecret)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, decodeCollectResponse(t, rec).CertificatePEM)
 }
 
 // ---- [REQUIRED TEST] no certificate observable without its account binding --------

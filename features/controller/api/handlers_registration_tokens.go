@@ -55,10 +55,6 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	// Parse request body; detect removed single_use field.
 	var req createTokenRequestWithSingleUseCheck
@@ -235,10 +231,6 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
@@ -306,10 +298,6 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -380,10 +368,6 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 
 // handleRotateRegistrationToken handles POST /api/v1/registration/tokens/{tenant_id}/rotate
 func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
 		s.logger.Error("Registration token store not available")

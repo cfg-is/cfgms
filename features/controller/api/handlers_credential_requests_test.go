@@ -113,38 +113,66 @@ func decodeLodgeResponse(t *testing.T, rec *httptest.ResponseRecorder) LodgeCred
 	return resp.Data
 }
 
-// ---- leadership gate (Issue #3717: every mutating handler must call HasLeadership) ---
+// ---- any-node service (Issue #3761, ADR-031 Decision 1) -------------------------------
 
-func TestCredentialRequests_LeadershipGate(t *testing.T) {
+// TestCredentialRequests_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for this
+// file (Issue #3761, ADR-031 Decision 1): handleMintEnrolmentToken,
+// handleRevokeEnrolmentToken, handleLodgeCredentialRequest and
+// handleDenyCredentialRequest each used to return 503 and write nothing when the
+// serving node held no lease-backed leadership. Any-node service means every cluster
+// node accepts all four writes — the shared secret store is the serialization point,
+// not leadership — so against a real, deliberately non-authoritative *ha.Manager
+// (ClusterMode, no lease ever acquired) each must succeed and its mutation must be
+// durably visible in the store.
+func TestCredentialRequests_SucceedOnNonAuthoritativeNode(t *testing.T) {
 	server := setupTestServer(t)
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	server.haManager = newNonAuthoritativeHAManager(t)
+	ctx := context.Background()
 
-	t.Run("mint", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/enrolment-tokens", bytes.NewReader([]byte(`{"tenant_id":"t"}`)))
-		rec := httptest.NewRecorder()
-		server.handleMintEnrolmentToken(rec, req)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	// mint: 201 with a live record in the store (mintTestEnrolmentToken asserts the
+	// status code itself).
+	minted := mintTestEnrolmentToken(t, server, "any-node-tenant")
+	require.NotEmpty(t, minted.Token)
+	mintedRecord, err := server.getEnrolmentTokenByID(ctx, minted.ID)
+	require.NoError(t, err)
+	require.NotNil(t, mintedRecord, "a non-authoritative node must persist the minted token")
+
+	// lodge: 201 with a pending request written to the store.
+	lodgeRec := lodgeCredentialRequest(t, server, minted.Token, LodgeCredentialRequestBody{
+		CSRPEM:   generateTestCSR(t, "any-node-device"),
+		Hostname: "any-node-host",
 	})
-	t.Run("revoke", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/enrolment-tokens/some-id/revoke", nil)
-		req = withVars(req, map[string]string{"id": "some-id"})
-		rec := httptest.NewRecorder()
-		server.handleRevokeEnrolmentToken(rec, req)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	})
-	t.Run("lodge", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-requests/lodge", nil)
-		rec := httptest.NewRecorder()
-		server.handleLodgeCredentialRequest(rec, req)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	})
-	t.Run("deny", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-requests/some-id/deny", nil)
-		req = withVars(req, map[string]string{"id": "some-id"})
-		rec := httptest.NewRecorder()
-		server.handleDenyCredentialRequest(rec, req)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	})
+	require.Equal(t, http.StatusCreated, lodgeRec.Code, lodgeRec.Body.String())
+	lodgeResp := decodeLodgeResponse(t, lodgeRec)
+	lodged, err := server.getPendingCredentialRequestByID(ctx, lodgeResp.RequestID)
+	require.NoError(t, err)
+	require.NotNil(t, lodged, "a non-authoritative node must persist the lodged request")
+	assert.Equal(t, credentialRequestStatusPending, lodged.Status)
+
+	// deny: 200 and the record actually moves to the terminal denied status.
+	denyReq := makeAdminRequest(t, "POST", "/api/v1/credential-requests/"+lodgeResp.RequestID+"/deny",
+		bytes.NewReader([]byte(`{"reason":"any-node denial"}`)))
+	denyReq.Header.Set("Content-Type", "application/json")
+	denyRec := httptest.NewRecorder()
+	server.router.ServeHTTP(denyRec, denyReq)
+	require.Equal(t, http.StatusOK, denyRec.Code, denyRec.Body.String())
+	denied, err := server.getPendingCredentialRequestByID(ctx, lodgeResp.RequestID)
+	require.NoError(t, err)
+	require.NotNil(t, denied)
+	assert.Equal(t, credentialRequestStatusDenied, denied.Status,
+		"the denial must be written by a non-authoritative node")
+
+	// revoke: 200 on a second, unspent token, and the revocation is durable.
+	second := mintTestEnrolmentToken(t, server, "any-node-tenant")
+	revokeReq := makeAdminRequest(t, "POST", "/api/v1/enrolment-tokens/"+second.ID+"/revoke", nil)
+	revokeRec := httptest.NewRecorder()
+	server.router.ServeHTTP(revokeRec, revokeReq)
+	require.Equal(t, http.StatusOK, revokeRec.Code, revokeRec.Body.String())
+	revoked, err := server.getEnrolmentTokenByID(ctx, second.ID)
+	require.NoError(t, err)
+	require.NotNil(t, revoked)
+	assert.True(t, revoked.Revoked, "the revocation must be written by a non-authoritative node")
+	assert.NotNil(t, revoked.RevokedAt)
 }
 
 // ---- mint / revoke ------------------------------------------------------------------

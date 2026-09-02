@@ -105,8 +105,6 @@ type Server struct {
 	scriptMonitor                   *script.ExecutionMonitor                 // Issue #708: active execution tracking
 	scriptRepo                      script.ScriptRepository                  // Issue #1670: git-backed script library
 	privilegeStore                  cfgconfig.ConfigStore                    // Issue #1670: controller-side script privilege metadata
-	pushLeaderStatus                leaderStatus                             // Issue #1318: leader check for config push (nil = leader)
-	registrationLeaderStatus        registrationLeaderStatus                 // Issue #3471: leader check for registration/token endpoints (nil = always leader)
 	commandPublisher                *commands.Publisher                      // Issue #1319: fan-out config push to active stewards
 	pushStore                       business.PushStore                       // Issue #1320: durable push-state persistence for HA failover
 	commandStore                    business.CommandStore                    // Issue #3757: durable delivery-lifecycle outbox for steward-directed writes (ADR-031 Decision 2)
@@ -363,17 +361,6 @@ func New(
 		cliLoginSweepLease:     cliLoginSweepLease,
 	}
 
-	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
-	if haManager != nil {
-		server.pushLeaderStatus = haManager
-	}
-
-	// Issue #3471: wire lease-backed leader-check for registration and token endpoints;
-	// nil haManager = OSS single-node = always authoritative (Decision 4, ADR-029).
-	if haManager != nil {
-		server.registrationLeaderStatus = haManager
-	}
-
 	// Story #380: Initialize three-tier auth defense system
 	server.authDefense = authdefense.New(
 		authdefense.DefaultConfig(),
@@ -499,11 +486,6 @@ func New(
 	// automatically distributes to all active stewards of the affected tenant.
 	if configService != nil && commandPublisher != nil {
 		configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
-			// Side-effecting: fans out to stewards outside the replicated log — same
-			// admission primitive as handleConfigPush (Issue #3389).
-			if checker := server.pushLeaderStatus; checker != nil && !checker.HasLeadership() {
-				return
-			}
 			cfg := &push.StewardConfiguration{
 				ConfigID:  cfgID,
 				TenantID:  tenantID,

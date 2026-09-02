@@ -360,3 +360,50 @@ func TestHandleRequestSigningCredential_SubStrongPrincipalRejected(t *testing.T)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// TestRequestSigningCredential_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST]
+// for handlers_signing_credential.go (Issue #3761, ADR-031 Decision 1).
+// handleRequestSigningCredential used to return 503 and issue nothing when the
+// serving node held no lease-backed leadership. Any-node service means every cluster
+// node mints this credential — the CA and its serial allocation are the serialization
+// point, not leadership — so a request driven against a real and deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired) must return
+// 201 with a usable certificate, exactly as TestHandleRequestSigningCredential_Success
+// does on an ungated node.
+func TestRequestSigningCredential_SucceedsOnNonAuthoritativeNode(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	server.haManager = newNonAuthoritativeHAManager(t)
+
+	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin-any-node")
+	priv, pubPEM := generateSigningCredentialTestKey(t)
+
+	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "operator-admin-any-node"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"credential issuance must succeed regardless of leadership: %s", rec.Body.String())
+
+	var resp struct {
+		Data SigningCredentialResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotEmpty(t, resp.Data.CertificatePEM,
+		"a non-authoritative node must still issue the payload-signing certificate")
+
+	// The issued credential is real, not a placeholder: it carries the caller-supplied
+	// public key and the payload-signing marker.
+	issuedCert, err := cert.ParseCertificateFromPEM([]byte(resp.Data.CertificatePEM))
+	require.NoError(t, err)
+	assert.True(t, cert.HasPayloadSigningMarker(issuedCert),
+		"issued cert must carry PayloadSigningMarkerOID")
+	issuedPub, ok := issuedCert.PublicKey.(*ecdsa.PublicKey)
+	require.True(t, ok, "issued cert public key must be ECDSA")
+	assert.True(t, issuedPub.Equal(&priv.PublicKey),
+		"issued cert public key must equal the caller-supplied public key")
+}

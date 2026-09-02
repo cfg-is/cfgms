@@ -426,10 +426,6 @@ func writeUniformLodgeUnauthorized(w http.ResponseWriter) {
 // handleMintEnrolmentToken handles POST /api/v1/enrolment-tokens. Mints a single-use,
 // short-lived enrolment token for tenantID; the raw value is returned exactly once.
 func (s *Server) handleMintEnrolmentToken(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return
@@ -497,10 +493,6 @@ func (s *Server) handleMintEnrolmentToken(w http.ResponseWriter, r *http.Request
 // Revokes an unspent token so it can never be used to lodge a request. A token that
 // has already been spent is not revocable — its one use is already consumed.
 func (s *Server) handleRevokeEnrolmentToken(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return
@@ -566,10 +558,6 @@ func (s *Server) handleRevokeEnrolmentToken(w http.ResponseWriter, r *http.Reque
 // token presented as a bearer credential (Issue #3717). Registered on the base
 // router, not the authenticated /api/v1 subrouter, mirroring handleRegister.
 func (s *Server) handleLodgeCredentialRequest(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -774,10 +762,6 @@ func (s *Server) handleListCredentialRequests(w http.ResponseWriter, r *http.Req
 // Marks a pending request denied so it can never later be approved or collected —
 // a terminal transition (Issue #3717 AC).
 func (s *Server) handleDenyCredentialRequest(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
 		return

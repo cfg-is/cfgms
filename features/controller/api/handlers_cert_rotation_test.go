@@ -217,9 +217,15 @@ func TestHandleCertRotation_NewSerialCrossAccountConflict(t *testing.T) {
 	assert.True(t, containsSerial(bindings, oldSerial), "old binding must be intact after conflict")
 }
 
-// TestHandleCertRotation_LeadershipGated verifies that the handler refuses with 503
-// when leadership is not held.
-func TestHandleCertRotation_LeadershipGated(t *testing.T) {
+// TestHandleCertRotation_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// handlers_cert_bindings.go (Issue #3761, ADR-031 Decision 1): handleRotateCert used
+// to refuse with 503 and leave the bindings untouched when the serving node held no
+// lease-backed leadership. Any-node service means every cluster node performs the
+// rotation — the shared account store and the certificate manager are the
+// serialization points, not leadership — so rotating against a real, deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired) must return 200,
+// bind the new serial and revoke the old one.
+func TestHandleCertRotation_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server, certMgr := setupCertBindingServer(t)
 	createTestAccount(t, server, "alice")
 
@@ -229,19 +235,19 @@ func TestHandleCertRotation_LeadershipGated(t *testing.T) {
 
 	newSerial := provisionTestClientCert(t, certMgr, "alice-leader-new")
 
-	// Inject a no-leadership checker.
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	// A real HA manager that holds no lease: HasLeadership() == false.
+	server.haManager = newNonAuthoritativeHAManager(t)
 
 	rec := rotateCertReq(t, server, strongPrincipal(), "alice", oldSerial, RotateCertRequest{
 		Serial: newSerial,
 	})
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "must refuse when not leader")
+	require.Equal(t, http.StatusOK, rec.Code, "rotation must succeed regardless of leadership: %s", rec.Body.String())
 
-	// Bindings must be unchanged (no partial mutation under non-leadership).
-	server.registrationLeaderStatus = nil
+	// The rotation must have completed both steps on the non-authoritative node.
 	bindings := getCertBindings(t, server, "alice")
-	assert.True(t, containsSerial(bindings, oldSerial), "old binding must be intact")
-	assert.False(t, containsSerial(bindings, newSerial), "new binding must not exist")
+	assert.True(t, containsSerial(bindings, newSerial), "new binding must exist")
+	assert.False(t, containsSerial(bindings, oldSerial), "old binding must be removed")
+	assert.True(t, certMgr.IsRevoked(oldSerial), "old cert must be revoked")
 }
 
 // TestHandleCertRotation_AccountNotFound verifies 404 when the account does not exist.

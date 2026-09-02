@@ -4167,144 +4167,167 @@ func TestHandleSetStewardVisibility_DurableStoreWriteFails(t *testing.T) {
 	assert.False(t, got.Hidden, "record must remain visible when the durable write fails")
 }
 
-// ---- Leadership gate tests (Issue #3544) ----
+// ---- Any-node service tests (Issue #3761, ADR-031 Decision 1) ----
 
-// TestStewardHandlerLeaderGate verifies that handleDecommissionSteward,
-// handleMoveSteward, handleUpdateStewardConfig, and handleDeleteStewardConfig
-// all return 503 and take no durable action when registrationLeaderStatus
-// reports no leadership — the partition scenario where a non-authoritative
-// controller must not execute fleet infrastructure operations (Issue #3544).
-func TestStewardHandlerLeaderGate(t *testing.T) {
-	follower := &stubRegistrationLeaderStatus{hasLeadership: false}
-
-	newFollowerServer := func(t *testing.T) *Server {
-		t.Helper()
-		server := setupTestServer(t)
-		server.registrationLeaderStatus = follower
-		return server
-	}
-
-	tests := []struct {
-		name    string
-		handler func(s *Server) *httptest.ResponseRecorder
-	}{
-		{
-			name: "handleDecommissionSteward rejects follower",
-			handler: func(s *Server) *httptest.ResponseRecorder {
-				w := httptest.NewRecorder()
-				r := withVars(
-					httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x", nil),
-					map[string]string{"id": "steward-x"},
-				)
-				s.handleDecommissionSteward(w, r)
-				return w
-			},
-		},
-		{
-			name: "handleMoveSteward rejects follower",
-			handler: func(s *Server) *httptest.ResponseRecorder {
-				w := httptest.NewRecorder()
-				r := withVars(
-					httptest.NewRequest(http.MethodPost, "/api/v1/stewards/steward-x/move", nil),
-					map[string]string{"id": "steward-x"},
-				)
-				s.handleMoveSteward(w, r)
-				return w
-			},
-		},
-		{
-			name: "handleUpdateStewardConfig rejects follower",
-			handler: func(s *Server) *httptest.ResponseRecorder {
-				w := httptest.NewRecorder()
-				r := withVars(
-					httptest.NewRequest(http.MethodPut, "/api/v1/stewards/steward-x/config", nil),
-					map[string]string{"id": "steward-x"},
-				)
-				s.handleUpdateStewardConfig(w, r)
-				return w
-			},
-		},
-		{
-			name: "handleDeleteStewardConfig rejects follower",
-			handler: func(s *Server) *httptest.ResponseRecorder {
-				w := httptest.NewRecorder()
-				r := withVars(
-					httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x/config", nil),
-					map[string]string{"id": "steward-x"},
-				)
-				s.handleDeleteStewardConfig(w, r)
-				return w
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := newFollowerServer(t)
-			rec := tc.handler(s)
-			assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "follower must return 503")
-			body := rec.Body.String()
-			assert.NotContains(t, body, "node", "503 body must not name a node")
-			assert.NotContains(t, body, "leader", "503 body must not imply which node holds leadership")
-		})
-	}
+// stewardConfigYAML is a minimal, fully valid steward configuration body accepted by
+// handleUpdateStewardConfig, used by the any-node service tests below.
+func stewardConfigYAML(stewardID string) string {
+	return `
+steward:
+  id: ` + stewardID + `
+  mode: controller
+  logging:
+    level: info
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+modules:
+  file: file
+resources:
+  - name: any-node-resource
+    module: file
+    config:
+      path: /tmp/any-node
+      content: hello
+`
 }
 
-// TestStewardHandlerLeaderGate_SingleServerMode verifies that a nil
-// registrationLeaderStatus (OSS single-server deployment) does not reject
-// any of the four gated endpoints — the gate must not fire in single-node mode.
-func TestStewardHandlerLeaderGate_SingleServerMode(t *testing.T) {
-	t.Run("handleDecommissionSteward passes gate with nil checker", func(t *testing.T) {
-		s := setupTestServer(t)
-		// registrationLeaderStatus is nil by default; stewardStore is also nil
-		// → handler returns 503 "Fleet store unavailable" (JSON body from writeErrorResponse),
-		// not "service unavailable\n" (plain text from the leader gate).
-		w := httptest.NewRecorder()
-		r := withVars(
-			httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x", nil),
-			map[string]string{"id": "steward-x"},
-		)
-		s.handleDecommissionSteward(w, r)
-		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
-			"single-server mode must not be rejected by the leader gate")
+// putStewardConfig calls handleUpdateStewardConfig directly with a scoped admin
+// principal and a valid YAML body, mirroring the happy-path shape used in
+// handlers_stewards_config_upload_test.go.
+func putStewardConfig(server *Server, stewardID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/stewards/"+stewardID+"/config",
+		strings.NewReader(stewardConfigYAML(stewardID)))
+	req.Header.Set("Content-Type", "application/yaml")
+	req = withPrincipal(req, &Principal{
+		ID: "admin", Assurance: session.AssuranceStrong, TenantID: "test-tenant",
+		Permissions: []string{"steward:write-config"},
+	})
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleUpdateStewardConfig(rec, req)
+	return rec
+}
+
+// TestStewardHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// handlers_stewards.go. handleDecommissionSteward, handleMoveSteward,
+// handleUpdateStewardConfig and handleDeleteStewardConfig used to return 503 and
+// take no durable action when the serving node held no lease-backed leadership
+// (the former partition gate, Issue #3544). Any-node service means every cluster
+// node accepts these writes — the shared stores are the serialization point, not
+// leadership — so each handler, driven against a real and deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired), must reach
+// the existing logic and produce its normal success result.
+func TestStewardHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	t.Run("handleDecommissionSteward tombstones the record", func(t *testing.T) {
+		server, st := setupDecommissionServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+			ID:       "s-decomm-anynode",
+			TenantID: "test-tenant",
+			Status:   business.StewardStatusActive,
+		}))
+		require.NoError(t, server.controllerService.RegisterSteward("s-decomm-anynode", "test-tenant", "addr", "active"))
+
+		rec := deleteDecommissionSteward(server, "s-decomm-anynode")
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"decommission must succeed regardless of leadership: %s", rec.Body.String())
+
+		got, err := st.GetSteward(context.Background(), "s-decomm-anynode")
+		require.NoError(t, err)
+		assert.Equal(t, business.StewardStatusDeregistered, got.Status,
+			"the durable tombstone must be written from a non-authoritative node")
 	})
 
-	t.Run("handleMoveSteward passes gate with nil checker", func(t *testing.T) {
-		s := setupTestServer(t)
-		// Missing JSON body → 400 Bad Request — gate did not fire.
-		w := httptest.NewRecorder()
-		r := withVars(
-			httptest.NewRequest(http.MethodPost, "/api/v1/stewards/steward-x/move", nil),
-			map[string]string{"id": "steward-x"},
-		)
-		s.handleMoveSteward(w, r)
-		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
-			"single-server mode must not be rejected by the leader gate")
+	t.Run("handleMoveSteward re-tenants the record", func(t *testing.T) {
+		server, st, _ := setupMoveStewardServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		require.NoError(t, server.controllerService.RegisterSteward("s-move-anynode", "source-tenant", "addr", "registered"))
+		seedSteward(t, st, &business.StewardRecord{
+			ID: "s-move-anynode", TenantID: "source-tenant", Status: business.StewardStatusRegistered,
+		})
+
+		rec := postMoveSteward(server, "s-move-anynode", "dest-tenant")
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"move must succeed regardless of leadership: %s", rec.Body.String())
+
+		got, err := st.GetSteward(context.Background(), "s-move-anynode")
+		require.NoError(t, err)
+		assert.Equal(t, "dest-tenant", got.TenantID,
+			"the durable tenant move must be written from a non-authoritative node")
 	})
 
-	t.Run("handleUpdateStewardConfig passes gate with nil checker", func(t *testing.T) {
-		s := setupTestServer(t)
-		// Empty body → JSON decode error → 400 Bad Request — gate did not fire.
-		w := httptest.NewRecorder()
-		r := withVars(
-			httptest.NewRequest(http.MethodPut, "/api/v1/stewards/steward-x/config", nil),
-			map[string]string{"id": "steward-x"},
-		)
-		s.handleUpdateStewardConfig(w, r)
-		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
-			"single-server mode must not be rejected by the leader gate")
+	t.Run("handleUpdateStewardConfig stores the configuration", func(t *testing.T) {
+		server := setupTestServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		rec := putStewardConfig(server, "s-config-anynode")
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"config update must succeed regardless of leadership: %s", rec.Body.String())
+
+		// The durable write is proven by the delete below finding a target; here the
+		// stored version history is the direct evidence the config reached storage.
+		versions, err := server.configService.GetConfigurationHistory(
+			context.Background(), "test-tenant", "s-config-anynode", 10)
+		require.NoError(t, err, "the config must be readable back from the durable store")
+		assert.NotEmpty(t, versions, "a non-authoritative node must persist the configuration")
 	})
 
-	t.Run("handleDeleteStewardConfig passes gate with nil checker", func(t *testing.T) {
-		s := setupTestServer(t)
-		// configService.DeleteConfiguration → "not found" → 404 — gate did not fire.
-		w := httptest.NewRecorder()
-		r := withVars(
-			httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/steward-x/config", nil),
-			map[string]string{"id": "steward-x"},
-		)
-		s.handleDeleteStewardConfig(w, r)
-		assert.NotEqual(t, "service unavailable\n", w.Body.String(),
-			"single-server mode must not be rejected by the leader gate")
+	t.Run("handleDeleteStewardConfig removes the configuration", func(t *testing.T) {
+		server := setupTestServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		// Store a configuration first so the delete has a real target.
+		require.Equal(t, http.StatusOK, putStewardConfig(server, "s-config-delete-anynode").Code)
+
+		doDelete := func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/s-config-delete-anynode/config", nil)
+			req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceStrong, TenantID: "test-tenant"})
+			req = withVars(req, map[string]string{"id": "s-config-delete-anynode"})
+			rec := httptest.NewRecorder()
+			server.handleDeleteStewardConfig(rec, req)
+			return rec
+		}
+
+		rec := doDelete()
+		require.Equal(t, http.StatusNoContent, rec.Code,
+			"config delete must succeed regardless of leadership: %s", rec.Body.String())
+
+		// Deleting again must report the configuration is gone, proving the first
+		// delete durably removed it rather than being short-circuited.
+		assert.Equal(t, http.StatusNotFound, doDelete().Code,
+			"the configuration must be gone after the delete")
 	})
+}
+
+// TestStewardHandlers_SucceedOnAuthoritativeNode is the mirror case: a real,
+// deliberately authoritative *ha.Manager (SingleServerMode) must also reach the
+// existing decommission logic unchanged — removing the gate must not have broken
+// the leader path either.
+func TestStewardHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
+	server, st := setupDecommissionServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
+
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-decomm-authoritative",
+		TenantID: "test-tenant",
+		Status:   business.StewardStatusActive,
+	}))
+	require.NoError(t, server.controllerService.RegisterSteward("s-decomm-authoritative", "test-tenant", "addr", "active"))
+
+	rec := deleteDecommissionSteward(server, "s-decomm-authoritative")
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"decommission must succeed on an authoritative node: %s", rec.Body.String())
+
+	got, err := st.GetSteward(context.Background(), "s-decomm-authoritative")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusDeregistered, got.Status)
 }

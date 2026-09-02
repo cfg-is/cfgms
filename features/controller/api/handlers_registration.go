@@ -27,13 +27,6 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// registrationLeaderStatus is the minimal interface the registration and
-// registration-token handlers need from the HA manager. *ha.Manager satisfies
-// it automatically (Decision 4, ADR-029); test doubles use stubRegistrationLeaderStatus.
-type registrationLeaderStatus interface {
-	HasLeadership() bool
-}
-
 // RegistrationRequest represents the steward registration request
 type RegistrationRequest struct {
 	Token string `json:"token"`
@@ -158,10 +151,6 @@ func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.R
 // Marks the pending entry as approved; no cert is generated here (generate-on-claim).
 // Returns 404 when the entry's tenant is outside the caller's subtree (no existence disclosure).
 func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	pendingID := mux.Vars(r)["id"]
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
@@ -319,10 +308,6 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		// a non-authoritative controller, but no fleet trust is granted from one.
 		// The steward retries the poll, so a 503 here is recoverable and the entry
 		// stays "approved" for the authoritative controller to serve.
-		if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-			return
-		}
 		// Generate-on-claim: persist "claimed" + claimed_at BEFORE generating the cert so
 		// a restart between this step and the response cannot yield a second cert.
 		// The UPDATE has AND status = 'approved', so a concurrent poll racing this one
@@ -599,10 +584,6 @@ type approveByCIDRRequest struct {
 // Idempotent: entries already approved/claimed/denied are skipped without error.
 // Scoped callers approve only within their own tenant subtree.
 func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
@@ -642,10 +623,6 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 // not delegated to storage) and approves matching entries. Returns the count approved.
 // Scoped callers approve only within their own tenant subtree.
 func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
@@ -779,17 +756,6 @@ func isValidDeviceID(id string) bool {
 // handleRegister handles steward registration via REST API
 // POST /api/v1/register
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	// Issue #3471: enrollment is the primary trust-granting operation — on an
-	// Approve decision this handler claims the token and mints a client
-	// certificate inline. A controller that still holds the raw Raft leader flag
-	// but has lost quorum must not be able to enroll a steward, nor complete a
-	// re-enrollment used to clear that steward's fencing ratchet (#3390).
-	// In SingleServerMode the checker is nil and no steward is ever rejected.
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
 	// Only allow POST
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

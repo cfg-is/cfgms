@@ -48,14 +48,6 @@ type clusterNodeDrainResponse struct {
 //
 // On success returns HTTP 202 Accepted: {"node_id": "...", "state": "draining"}.
 func (s *Server) handleClusterNodeDrain(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// wired for registration/token endpoints by #3471; reused here unchanged —
-	// the name is registration-era but the check is generic (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
@@ -115,14 +107,6 @@ type clusterNodeDecommissionResponse struct {
 // or defaultDecommissionTimeout elapses, then marks the node StateDecommissioned
 // and returns HTTP 200: {"node_id": "...", "state": "decommissioned"}.
 func (s *Server) handleClusterNodeDecommission(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// wired for registration/token endpoints by #3471; reused here unchanged —
-	// the name is registration-era but the check is generic (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {

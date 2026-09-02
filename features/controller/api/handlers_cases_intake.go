@@ -140,8 +140,6 @@ func claimsEmpty(c eginterfaces.IdentityClaims) bool {
 // handleCasesIntakeAssist handles POST /api/v1/cases/intake-assist.
 // Resolves technician-supplied device claims to tenant-filtered candidate eids.
 // Eids resolved outside the caller's tenant subtree are silently dropped (ADR-022 §7).
-//
-//architecture:allow-nogate — read-oriented POST (query semantics via body); mutates no state.
 func (s *Server) handleCasesIntakeAssist(w http.ResponseWriter, r *http.Request) {
 	if s.egProvider == nil {
 		http.Error(w, "entity graph unavailable", http.StatusServiceUnavailable)

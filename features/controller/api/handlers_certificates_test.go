@@ -2159,149 +2159,85 @@ func TestHandleRevokeCertificate_TenantScope_StoreFault_Returns500(t *testing.T)
 		"certificate must remain un-revoked when scope evaluation fails")
 }
 
-// TestCertificateHandlerLeaderGate verifies that handleProvisionCertificate,
-// handleRotateSigningCert, and handleRevokeCertificate all return 503 and
-// perform no certificate operation when registrationLeaderStatus is set and
-// not authoritative (the partition scenario: a non-authoritative controller
-// must not mint or revoke trust material).
-func TestCertificateHandlerLeaderGate(t *testing.T) {
-	follower := &stubRegistrationLeaderStatus{hasLeadership: false}
-
-	t.Run("handleProvisionCertificate rejects follower and issues nothing", func(t *testing.T) {
+// TestCertificateHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file (Issue #3761, ADR-031 Decision 1). handleProvisionCertificate,
+// handleRotateSigningCert and handleRevokeCertificate used to return 503 and
+// perform no certificate operation when the serving node held no lease-backed
+// leadership. Any-node service means every cluster node now serves these
+// certificate-lifecycle writes: driven against a real, deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired), each
+// handler must reach its normal success path and the certificate mutation must
+// actually land.
+func TestCertificateHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	t.Run("handleProvisionCertificate issues a certificate", func(t *testing.T) {
 		server, certMgr, _ := setupProvisionTestServer(t)
-		server.registrationLeaderStatus = follower
+		server.haManager = newNonAuthoritativeHAManager(t)
 
 		before, err := certMgr.ListCertificates()
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
-			strings.NewReader(`{"steward_id":"should-not-be-issued"}`))
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		server.handleProvisionCertificate(rec, req)
+		peer := newAdminPeerCert(t, certMgr)
+		rec := postProvision(server, peer, `{"steward_id":"provisioned-from-non-authoritative"}`)
 
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-			"non-authoritative controller must return 503 for provision")
+		require.Equal(t, http.StatusCreated, rec.Code,
+			"provision must succeed regardless of leadership; body: %s", rec.Body.String())
 		after, err := certMgr.ListCertificates()
 		require.NoError(t, err)
-		assert.Len(t, after, len(before),
-			"no certificate may be issued when not authoritative")
+		assert.Greater(t, len(after), len(before),
+			"the certificate must actually be issued on a non-authoritative node")
 	})
 
-	t.Run("handleRotateSigningCert rejects follower", func(t *testing.T) {
-		server, _, _ := setupRotationTestServer(t)
-		server.registrationLeaderStatus = follower
+	t.Run("handleRotateSigningCert rotates the signing certificate", func(t *testing.T) {
+		server, certMgr, _ := setupRotationTestServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
 
 		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{newAdminPeerCert(t, certMgr)}}
 		rec := httptest.NewRecorder()
-		server.handleRotateSigningCert(rec, req)
+		server.router.ServeHTTP(rec, req)
 
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-			"non-authoritative controller must return 503 for signing rotation")
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"signing rotation must succeed regardless of leadership; body: %s", rec.Body.String())
 	})
 
-	t.Run("handleRevokeCertificate rejects follower and does not revoke", func(t *testing.T) {
+	t.Run("handleRevokeCertificate revokes the certificate", func(t *testing.T) {
 		server, certMgr := setupCertTestServer(t)
-		server.registrationLeaderStatus = follower
+		server.haManager = newNonAuthoritativeHAManager(t)
 
 		issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
-			CommonName:   "should-not-be-revoked",
+			CommonName:   "revoked-from-non-authoritative",
 			Organization: "Test CFGMS",
-			ClientID:     "should-not-be-revoked",
+			ClientID:     "revoked-from-non-authoritative",
 			ValidityDays: 365,
 		})
 		require.NoError(t, err)
 
 		req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
-		req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{newAdminPeerCert(t, certMgr)}}
 		rec := httptest.NewRecorder()
-		server.handleRevokeCertificate(rec, req)
+		server.router.ServeHTTP(rec, req)
 
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-			"non-authoritative controller must return 503 for revoke")
-		assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
-			"cert must remain valid when the leadership gate blocks the revoke")
+		require.Equal(t, http.StatusOK, rec.Code,
+			"revoke must succeed regardless of leadership; body: %s", rec.Body.String())
+		assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+			"the certificate must actually be revoked on a non-authoritative node")
 	})
 }
 
-// TestCertificateHandlerLeaderGate_Passthrough verifies that a nil checker or an
-// authoritative checker (HasLeadership: true) does not block the three mutating
-// certificate handlers — they reach the existing issuance/rotation/revocation
-// logic unchanged.
-func TestCertificateHandlerLeaderGate_Passthrough(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		setLeader bool
-	}{
-		{"nil checker", false},
-		{"authoritative checker", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			leader := &stubRegistrationLeaderStatus{hasLeadership: true}
+// TestCertificateHandlers_SucceedOnAuthoritativeNode is the mirror case for
+// continuity: a real, deliberately authoritative *ha.Manager (SingleServerMode,
+// the shape every OSS single-controller install runs) must still reach the same
+// certificate-lifecycle logic. Removing the gate must not have broken the
+// authoritative path either.
+func TestCertificateHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
+	server, certMgr, _ := setupRotationTestServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
 
-			t.Run("handleProvisionCertificate reaches provisioning logic", func(t *testing.T) {
-				server, certMgr, _ := setupProvisionTestServer(t)
-				if tc.setLeader {
-					server.registrationLeaderStatus = leader
-				}
-				peer := newAdminPeerCert(t, certMgr)
-				rec := postProvision(server, peer, `{"steward_id":"leader-passthru"}`)
-				assert.Equal(t, http.StatusCreated, rec.Code,
-					"checker must not block the provisioning path; body: %s", rec.Body.String())
-			})
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{newAdminPeerCert(t, certMgr)}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
 
-			t.Run("handleRotateSigningCert reaches rotation logic", func(t *testing.T) {
-				server, certMgr, _ := setupRotationTestServer(t)
-				if tc.setLeader {
-					server.registrationLeaderStatus = leader
-				}
-				adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
-					CommonName:       "operator-admin",
-					Organization:     "CFGMS",
-					ValidityDays:     1,
-					TemplateModifier: cert.SetAdminMarker,
-				})
-				require.NoError(t, err)
-				x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
-				require.NoError(t, err)
-				req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
-				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
-				rec := httptest.NewRecorder()
-				server.router.ServeHTTP(rec, req)
-				assert.Equal(t, http.StatusOK, rec.Code,
-					"checker must not block the rotation path; body: %s", rec.Body.String())
-			})
-
-			t.Run("handleRevokeCertificate reaches revocation logic", func(t *testing.T) {
-				server, certMgr := setupCertTestServer(t)
-				if tc.setLeader {
-					server.registrationLeaderStatus = leader
-				}
-				issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
-					CommonName:   "passthru-revoke",
-					Organization: "Test CFGMS",
-					ClientID:     "passthru-revoke",
-					ValidityDays: 365,
-				})
-				require.NoError(t, err)
-				adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
-					CommonName:       "operator-admin",
-					Organization:     "CFGMS",
-					ValidityDays:     1,
-					TemplateModifier: cert.SetAdminMarker,
-				})
-				require.NoError(t, err)
-				x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
-				require.NoError(t, err)
-				req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
-				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
-				rec := httptest.NewRecorder()
-				server.router.ServeHTTP(rec, req)
-				assert.Equal(t, http.StatusOK, rec.Code,
-					"checker must not block the revocation path; body: %s", rec.Body.String())
-				assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
-					"cert must be revoked when checker does not block")
-			})
-		})
-	}
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"signing rotation must succeed on an authoritative node; body: %s", rec.Body.String())
 }

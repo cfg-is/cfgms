@@ -53,10 +53,6 @@ type RotateSigningCertResponse struct {
 // AssuranceStrong-gated in permissionAssurance — this guard mirrors that bar so the
 // defense holds even if rbacService is nil.
 func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
@@ -367,10 +363,6 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 // Tenant-scope check runs BEFORE calling Revoke — an out-of-scope revoke is a
 // denial-of-service against the owning steward's mTLS connectivity.
 func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.certManager == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
 		return
@@ -463,10 +455,6 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision
 func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.certProvisioningService == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate provisioning service not available", "SERVICE_UNAVAILABLE")
 		return
