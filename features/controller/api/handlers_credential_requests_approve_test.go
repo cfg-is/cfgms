@@ -516,12 +516,7 @@ func TestPrincipalHasCertifiedRootScope_RootScopedSessionRefused(t *testing.T) {
 func TestPrincipalHasCertifiedRootScope_RevokedCertFallsBackToOrdinarySession(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
 
-	tempDir := t.TempDir()
-	certManager, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: tempDir,
-		CAConfig:    &cert.CAConfig{Organization: "Test", Country: "US", ValidityDays: 365},
-	})
-	require.NoError(t, err)
+	certManager := newSharedTestCertManager(t)
 	srv.certManager = certManager
 
 	issuedCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{

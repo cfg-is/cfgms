@@ -20,16 +20,7 @@ import (
 // newTLSTestCertManager creates a real cert.Manager backed by a temp dir.
 func newTLSTestCertManager(t *testing.T) *cert.Manager {
 	t.Helper()
-	mgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: t.TempDir(),
-		CAConfig: &cert.CAConfig{
-			Organization: "Test CFGMS",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
-	return mgr
+	return newSharedTestCertManager(t)
 }
 
 // newMinimalTLSServer creates a minimal Server with only the fields needed by setupManagedTLS.

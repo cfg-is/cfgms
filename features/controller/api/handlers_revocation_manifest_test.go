@@ -71,7 +71,7 @@ func getRevocationManifest(t *testing.T, server *Server, certMgr *cert.Manager) 
 // (REQUIRED TEST, Issue #3691 AC).
 func TestHandleGetRevocationManifest_SignatureVerifies(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	rec, body := getRevocationManifest(t, server, certMgr)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -98,7 +98,7 @@ func TestHandleGetRevocationManifest_SignatureVerifies(t *testing.T) {
 // a higher version containing the newly revoked serial (REQUIRED TEST, Issue #3691 AC).
 func TestHandleGetRevocationManifest_RevokeIncreasesVersionAndSerials(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName:   "steward-manifest-revoke",
@@ -127,7 +127,7 @@ func TestHandleGetRevocationManifest_RevokeIncreasesVersionAndSerials(t *testing
 // deterministically sorted regardless of revocation order.
 func TestHandleGetRevocationManifest_SerialsSorted(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	for i := 0; i < 3; i++ {
 		issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
@@ -172,7 +172,7 @@ func TestHandleGetRevocationManifest_NoSigningCert_Returns500(t *testing.T) {
 // reachable without it even though it requires no elevated assurance.
 func TestHandleGetRevocationManifest_RequiresPermission(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 	apiKey := NewTestKey(t, server, []string{"steward:list"}) // unrelated permission
 
 	req := httptest.NewRequest("GET", "/api/v1/certificates/revocation-manifest", nil)
@@ -193,7 +193,7 @@ func TestHandleGetRevocationManifest_RequiresPermission(t *testing.T) {
 // manifest that omits revocations, so scoped callers get 403 and no serials at all.
 func TestHandleGetRevocationManifest_TenantScopedCallerDenied(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	// A revoked certificate belonging to a steward outside the caller's tenant.
 	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
@@ -227,7 +227,7 @@ func TestHandleGetRevocationManifest_TenantScopedCallerDenied(t *testing.T) {
 // manifest, including serials owned by stewards in any tenant.
 func TestHandleGetRevocationManifest_UnscopedCallerServedFleetWide(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName:   "steward-any-tenant",

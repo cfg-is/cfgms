@@ -150,19 +150,11 @@ func newHandleRegisterServer(t *testing.T, tokenStore registration.Store, certMg
 	return server, auditMgr
 }
 
-// newTestCertManager creates a real cert manager backed by a temp dir.
+// newTestCertManager creates a real cert manager backed by a temp dir, loaded from
+// the process-wide shared test CA (Issue #3797) rather than generating a fresh one.
 func newTestCertManager(t *testing.T) *cert.Manager {
 	t.Helper()
-	mgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: t.TempDir(),
-		CAConfig: &cert.CAConfig{
-			Organization: "Test CFGMS",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
-	return mgr
+	return newSharedTestCertManager(t)
 }
 
 // postRegister sends a POST /api/v1/register request with valid device identity fields

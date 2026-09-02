@@ -21,7 +21,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	caCleanup, err := buildSharedTestCA()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "build shared test CA: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
+
 	code := m.Run()
+	caCleanup()
 	cleanup()
 	os.Exit(code)
 }

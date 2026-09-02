@@ -30,6 +30,25 @@ type FlatFileAuditStore struct {
 	root             string
 	maxRetentionDays int
 	mutex            sync.Mutex // serialises appends across goroutines
+
+	// chainHeads caches the last chained entry this store appended per tenant,
+	// guarded by mutex. Without it AppendChainedEntry re-reads and JSON-decodes
+	// every entry in the tenant's audit files on every single append, making a
+	// run of N appends O(N^2) decodes — 1100 entries cost ~600k decodes, enough
+	// to stall the audit drain goroutine past a 60s Flush deadline under
+	// parallel test load (Issue #3797). The type is a single-process,
+	// single-writer store (see the doc comment above), so the head this process
+	// last wrote is authoritative; any path that writes or removes entries
+	// outside AppendChainedEntry invalidates the affected cache entries so the
+	// next append re-reads from disk.
+	chainHeads map[string]chainHead
+}
+
+// chainHead is the cached tail of one tenant's audit chain: the sequence number
+// and checksum the next appended entry must link to.
+type chainHead struct {
+	sequenceNumber uint64
+	checksum       string
 }
 
 // NewFlatFileAuditStore creates a new FlatFileAuditStore rooted at root.
@@ -44,6 +63,7 @@ func NewFlatFileAuditStore(root string, maxRetentionDays int) (*FlatFileAuditSto
 	return &FlatFileAuditStore{
 		root:             root,
 		maxRetentionDays: maxRetentionDays,
+		chainHeads:       make(map[string]chainHead),
 	}, nil
 }
 
@@ -118,6 +138,11 @@ func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	// This path writes a caller-supplied SequenceNumber straight to disk, so the
+	// tenant's durable chain head may move without AppendChainedEntry seeing it.
+	// Drop the cached head; the next chained append re-reads it from disk.
+	s.forgetChainHead(entry.TenantID)
+
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return fmt.Errorf("failed to create audit dir: %w", err)
 	}
@@ -152,6 +177,12 @@ func (s *FlatFileAuditStore) StoreAuditBatch(ctx context.Context, entries []*bus
 // single-process, single-writer store (documented on the type); there is no
 // cross-process deployment of the flatfile provider to defend against
 // (ADR-004 amendment, ADR-031 Decision 1, Issue #3754).
+//
+// The chain head comes from s.chainHeads when this store has already appended
+// for the tenant, and is read from disk once otherwise, so an append costs one
+// file write rather than a full re-scan of the tenant's audit files (Issue
+// #3797). Writes that bypass this method (StoreAuditEntry) and file removals
+// (ArchiveAuditEntries, PurgeAuditEntries) invalidate the cache.
 func (s *FlatFileAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
 	if entry == nil {
 		return fmt.Errorf("audit entry cannot be nil")
@@ -179,40 +210,69 @@ func (s *FlatFileAuditStore) AppendChainedEntry(ctx context.Context, tenantID st
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	last, err := s.GetLastAuditEntry(ctx, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to read chain head: %w", err)
+	head, cached := s.chainHeads[tenantID]
+	if !cached {
+		last, err := s.GetLastAuditEntry(ctx, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to read chain head: %w", err)
+		}
+		if last != nil {
+			head = chainHead{sequenceNumber: last.SequenceNumber, checksum: last.Checksum}
+		}
 	}
-	if last != nil {
-		entry.SequenceNumber = last.SequenceNumber + 1
-		entry.PreviousChecksum = last.Checksum
-	} else {
-		entry.SequenceNumber = 1
-		entry.PreviousChecksum = ""
-	}
+	entry.SequenceNumber = head.sequenceNumber + 1
+	entry.PreviousChecksum = head.checksum
 	entry.Checksum = computeChecksum(entry)
 
 	raw, err := json.Marshal(entry)
 	if err != nil {
+		s.forgetChainHead(tenantID)
 		return fmt.Errorf("failed to marshal audit entry: %w", err)
 	}
 	raw = append(raw, '\n')
 
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		s.forgetChainHead(tenantID)
 		return fmt.Errorf("failed to create audit dir: %w", err)
 	}
 
 	// #nosec G304 -- path validated by safeJoin inside dailyFilePath
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
+		s.forgetChainHead(tenantID)
 		return fmt.Errorf("failed to open audit file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	if _, err := f.Write(raw); err != nil {
+		// The write may have landed partially, so the durable head is unknown:
+		// drop the cached head and let the next append re-read it from disk.
+		s.forgetChainHead(tenantID)
 		return fmt.Errorf("failed to append audit entry: %w", err)
 	}
+
+	s.rememberChainHead(tenantID, entry.SequenceNumber, entry.Checksum)
 	return nil
+}
+
+// rememberChainHead records the entry this store just appended as tenantID's
+// chain head. Callers must hold s.mutex.
+func (s *FlatFileAuditStore) rememberChainHead(tenantID string, sequenceNumber uint64, checksum string) {
+	if s.chainHeads == nil {
+		s.chainHeads = make(map[string]chainHead)
+	}
+	s.chainHeads[tenantID] = chainHead{sequenceNumber: sequenceNumber, checksum: checksum}
+}
+
+// forgetChainHead drops tenantID's cached chain head so the next
+// AppendChainedEntry re-reads it from disk. Callers must hold s.mutex.
+func (s *FlatFileAuditStore) forgetChainHead(tenantID string) {
+	delete(s.chainHeads, tenantID)
+}
+
+// forgetAllChainHeads drops every cached chain head. Callers must hold s.mutex.
+func (s *FlatFileAuditStore) forgetAllChainHeads() {
+	clear(s.chainHeads)
 }
 
 // GetAuditEntry retrieves an audit entry by ID, walking the full directory tree.
@@ -709,6 +769,16 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*business.Audit
 func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	var count int64
 
+	// Archiving moves daily files out of the tenants' audit directories, which
+	// changes what GetLastAuditEntry reports. Drop every cached chain head once
+	// the walk has settled so the next append re-derives it from what remains
+	// on disk.
+	defer func() {
+		s.mutex.Lock()
+		s.forgetAllChainHeads()
+		s.mutex.Unlock()
+	}()
+
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil || d.IsDir() {
 			return nil
@@ -760,6 +830,15 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 		return 0, fmt.Errorf("open audit root: %w", err)
 	}
 	defer func() { _ = auditRoot.Close() }()
+
+	// Purging deletes daily files, which changes what GetLastAuditEntry reports.
+	// Drop every cached chain head once the walk has settled so the next append
+	// re-derives it from what remains on disk.
+	defer func() {
+		s.mutex.Lock()
+		s.forgetAllChainHeads()
+		s.mutex.Unlock()
+	}()
 
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil || d.IsDir() {

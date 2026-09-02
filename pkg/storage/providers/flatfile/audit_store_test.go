@@ -4,7 +4,10 @@ package flatfile_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -609,4 +612,177 @@ func TestListAuditEntries_HierarchicalTenantID(t *testing.T) {
 	byTenant, err := store.ListAuditEntries(ctx, &business.AuditFilter{TenantID: childA})
 	require.NoError(t, err)
 	assert.Len(t, byTenant, 2)
+}
+
+// seqChecksum is a deterministic stand-in for audit.Manager's HMAC checksum whose
+// output depends on the chain fields the store assigns.
+func seqChecksum(e *business.AuditEntry) string {
+	return fmt.Sprintf("chk-%d-%s", e.SequenceNumber, e.ID)
+}
+
+// chainedEntry returns a valid entry with its chain fields left unset, as
+// AppendChainedEntry callers supply them.
+func chainedEntry(id, tenantID string) *business.AuditEntry {
+	return minimalEntry(id, tenantID, time.Now().UTC())
+}
+
+// appendRawAuditLine writes entry directly into the tenant's daily JSONL file,
+// bypassing the store entirely, so a test can distinguish a cached chain head
+// from one re-read off disk.
+func appendRawAuditLine(t *testing.T, root string, entry *business.AuditEntry) {
+	t.Helper()
+	dir := filepath.Join(root, entry.TenantID, "audit")
+	require.NoError(t, os.MkdirAll(dir, 0750))
+	path := filepath.Join(dir, entry.Timestamp.UTC().Format("2006-01-02")+".jsonl")
+
+	raw, err := json.Marshal(entry)
+	require.NoError(t, err)
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, f.Close()) }()
+	_, err = f.Write(append(raw, '\n'))
+	require.NoError(t, err)
+}
+
+// TestAppendChainedEntry_ChainHeadIsCachedNotRescanned verifies that after the
+// first append for a tenant the chain head comes from the store's in-process
+// cache rather than a re-scan of the tenant's audit files.
+//
+// The proof is deterministic rather than timing-based: a line carrying a much
+// higher SequenceNumber is written straight into the tenant's daily file behind
+// the store's back. A re-scanning implementation would chain the next append off
+// that line; the cached implementation chains off what this store last wrote.
+// FlatFileAuditStore is documented as a single-process, single-writer store, so
+// out-of-band file mutation is outside its contract — this test pins the
+// consequence (Issue #3797: the per-append re-scan made N appends O(N^2), which
+// stalled the audit drain goroutine past a 60s Flush deadline).
+func TestAppendChainedEntry_ChainHeadIsCachedNotRescanned(t *testing.T) {
+	root := t.TempDir()
+	store, err := flatfile.NewFlatFileAuditStore(root, 90)
+	require.NoError(t, err)
+	ctx := context.Background()
+	const tenantID = "tenant-cache"
+
+	first := chainedEntry("cache-1", tenantID)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, first, seqChecksum))
+	require.Equal(t, uint64(1), first.SequenceNumber)
+
+	// Write an out-of-band line with a far higher sequence number into the same
+	// daily file. Only a re-scanning implementation would observe it.
+	interloper := minimalEntry("cache-interloper", tenantID, first.Timestamp)
+	interloper.SequenceNumber = 500
+	interloper.Checksum = "interloper-checksum"
+	appendRawAuditLine(t, root, interloper)
+
+	second := chainedEntry("cache-2", tenantID)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, second, seqChecksum))
+	assert.Equal(t, uint64(2), second.SequenceNumber,
+		"chain head must come from the in-process cache, not a re-scan of the tenant's audit files")
+	assert.Equal(t, first.Checksum, second.PreviousChecksum,
+		"cached head must supply the previous checksum")
+}
+
+// TestAppendChainedEntry_StoreAuditEntryInvalidatesChainHead verifies that a
+// direct StoreAuditEntry write — which carries a caller-assigned sequence number
+// and so can move the durable chain head — drops the cached head, making the
+// next chained append re-read it from disk.
+func TestAppendChainedEntry_StoreAuditEntryInvalidatesChainHead(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+	const tenantID = "tenant-invalidate"
+
+	first := chainedEntry("inv-1", tenantID)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, first, seqChecksum))
+	require.Equal(t, uint64(1), first.SequenceNumber)
+
+	direct := minimalEntry("inv-direct", tenantID, time.Now().UTC())
+	direct.SequenceNumber = 42
+	direct.Checksum = "direct-checksum"
+	require.NoError(t, store.StoreAuditEntry(ctx, direct))
+
+	next := chainedEntry("inv-2", tenantID)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, next, seqChecksum))
+	assert.Equal(t, uint64(43), next.SequenceNumber,
+		"a direct store write must invalidate the cached chain head")
+	assert.Equal(t, "direct-checksum", next.PreviousChecksum,
+		"the re-read head must link to the entry written directly")
+}
+
+// TestAppendChainedEntry_PurgeInvalidatesChainHead verifies that purging daily
+// files drops the cached chain head, so the next append derives its sequence
+// from what remains on disk instead of a head that no longer exists.
+func TestAppendChainedEntry_PurgeInvalidatesChainHead(t *testing.T) {
+	store := newTestAuditStore(t)
+	ctx := context.Background()
+	const tenantID = "tenant-purge"
+
+	// Both entries are dated five days ago so they share one daily file and the
+	// purge below removes every file this tenant has.
+	fiveDaysAgo := time.Now().UTC().AddDate(0, 0, -5)
+	old := minimalEntry("purge-old", tenantID, fiveDaysAgo)
+	old.SequenceNumber = 7
+	old.Checksum = "old-checksum"
+	require.NoError(t, store.StoreAuditEntry(ctx, old))
+
+	seeded := minimalEntry("purge-seed", tenantID, fiveDaysAgo)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, seeded, seqChecksum))
+	require.Equal(t, uint64(8), seeded.SequenceNumber)
+
+	// Purge everything older than yesterday: the tenant's only file predates that
+	// cutoff, so nothing of its chain survives.
+	purged, err := store.PurgeAuditEntries(ctx, time.Now().UTC().AddDate(0, 0, -1))
+	require.NoError(t, err)
+	require.Greater(t, purged, int64(0))
+
+	restarted := chainedEntry("purge-after", tenantID)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, restarted, seqChecksum))
+	assert.Equal(t, uint64(1), restarted.SequenceNumber,
+		"purging the tenant's files must invalidate the cached chain head")
+	assert.Empty(t, restarted.PreviousChecksum)
+}
+
+// TestAppendChainedEntry_HighVolumeChainIsGapFreeOnDisk appends the volume that
+// exposed the O(N^2) re-scan (Issue #3797) and verifies the durable result: every
+// sequence number 1..N present exactly once, each entry linked to its
+// predecessor, and a store opened fresh on the same root reporting head N.
+func TestAppendChainedEntry_HighVolumeChainIsGapFreeOnDisk(t *testing.T) {
+	root := t.TempDir()
+	store, err := flatfile.NewFlatFileAuditStore(root, 90)
+	require.NoError(t, err)
+	ctx := context.Background()
+	const tenantID = "tenant-volume"
+	const writeCount = 1100
+
+	prevChecksum := ""
+	for i := 0; i < writeCount; i++ {
+		entry := chainedEntry(fmt.Sprintf("vol-%d", i), tenantID)
+		require.NoError(t, store.AppendChainedEntry(ctx, tenantID, entry, seqChecksum))
+		require.Equal(t, uint64(i+1), entry.SequenceNumber, "append %d must be gap-free", i)
+		require.Equal(t, prevChecksum, entry.PreviousChecksum, "append %d must link to its predecessor", i)
+		prevChecksum = entry.Checksum
+	}
+
+	// A store opened fresh on the same root has an empty cache, so this asserts
+	// what actually reached disk.
+	reopened, err := flatfile.NewFlatFileAuditStore(root, 90)
+	require.NoError(t, err)
+	last, err := reopened.GetLastAuditEntry(ctx, tenantID)
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	assert.Equal(t, uint64(writeCount), last.SequenceNumber,
+		"durable chain head must reflect all %d appends", writeCount)
+	assert.Equal(t, prevChecksum, last.Checksum)
+
+	entries, err := reopened.ListAuditEntries(ctx, &business.AuditFilter{TenantID: tenantID, Limit: writeCount + 100})
+	require.NoError(t, err)
+	require.Len(t, entries, writeCount)
+	seen := make(map[uint64]bool, writeCount)
+	for _, e := range entries {
+		assert.False(t, seen[e.SequenceNumber], "sequence number %d assigned twice", e.SequenceNumber)
+		seen[e.SequenceNumber] = true
+	}
+	for i := uint64(1); i <= writeCount; i++ {
+		assert.True(t, seen[i], "sequence number %d missing from durable chain", i)
+	}
 }
