@@ -258,6 +258,18 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 	out, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 	if runErr != nil {
+		// A deadline kill leaks a host-attached VHD, so clean up BEFORE returning.
+		// exec.CommandContext kills powershell.exe when ctx expires, and a killed
+		// process never runs its finally block — so the try/finally inside
+		// Cfgms-MountSeedVHD / Cfgms-CopyToSeedVHD (#3766) cannot help here. Mount-VHD
+		// attaches host-wide, so the VHD stays attached after the process dies and the
+		// NEXT VM's Add-VMHardDiskDrive fails with a 0x80070020 sharing violation —
+		// one timeout silently breaks seed provisioning for every later VM on the host.
+		// Observed live on cfg-lab: a seed left Attached=True after a 30s module.Set
+		// deadline kill, on a steward already carrying the #3766 fix.
+		if ctx.Err() != nil {
+			t.dismountAfterKill(expression)
+		}
 		// Distinguish a module-call deadline kill from a genuine non-zero exit.
 		// When the module-call context is cancelled/expired, CommandContext kills
 		// the process, so runErr is a bare "signal: killed"/"exit status 1" and
@@ -273,6 +285,112 @@ func (t *psHostTransport) runFresh(ctx context.Context, expression string) (stri
 				"hyperv-ps-host: seed op killed by deadline after %s (ctx: %w)", elapsed, ctxErr)
 		}
 		return string(out), freshSeedOpError(runErr, string(out), expression, elapsed)
+	}
+	return string(out), nil
+}
+
+// seedCleanupDismountTimeout bounds the post-kill dismount. It is deliberately
+// short: the caller has already blown its deadline and is returning an error, so
+// cleanup must not extend the stall. Cfgms-DismountAndVerify's own retry loop is
+// ~6s worst case, so this leaves ample headroom.
+const seedCleanupDismountTimeout = 30 * time.Second
+
+// mountedSeedPathForCleanup returns the seed VHD path a killed expression may
+// have left ATTACHED to the host, or "" when the expression cannot leak a mount.
+//
+// Only the two verbs that call Mount-VHD can leak: Cfgms-MountSeedVHD (-Path)
+// and Cfgms-CopyToSeedVHD (-SeedPath). Cfgms-NewSeedVHD only creates a file, and
+// Cfgms-AttachSeedDisk attaches to the VM rather than mounting host-side, so
+// neither needs cleanup — dismounting for them would be a no-op at best and, if
+// the VM legitimately holds the disk, misleading noise in the audit trail.
+//
+// The value is parsed back out of the dispatched expression because that is the
+// only place the transport can see it; the dispatcher inlines arguments as
+// single-quoted PS literals (quoteForPS), doubling embedded quotes.
+func mountedSeedPathForCleanup(expression string) string {
+	trimmed := strings.TrimSpace(expression)
+	var flag string
+	switch {
+	case strings.HasPrefix(trimmed, "Cfgms-MountSeedVHD"):
+		flag = "-Path "
+	case strings.HasPrefix(trimmed, "Cfgms-CopyToSeedVHD"):
+		flag = "-SeedPath "
+	default:
+		return ""
+	}
+	idx := strings.Index(trimmed, flag)
+	if idx < 0 {
+		return ""
+	}
+	rest := trimmed[idx+len(flag):]
+	if !strings.HasPrefix(rest, "'") {
+		return ""
+	}
+	rest = rest[1:]
+	// Scan to the closing quote, treating '' as an escaped literal quote.
+	var b strings.Builder
+	for i := 0; i < len(rest); i++ {
+		if rest[i] != '\'' {
+			b.WriteByte(rest[i])
+			continue
+		}
+		if i+1 < len(rest) && rest[i+1] == '\'' {
+			b.WriteByte('\'')
+			i++
+			continue
+		}
+		return b.String()
+	}
+	return "" // unterminated literal — refuse to guess
+}
+
+// dismountAfterKill best-effort dismounts a seed VHD left attached by a killed
+// runFresh process.
+//
+// It runs on a FRESH context: the caller's context is already cancelled, which is
+// precisely why cleanup is needed, so reusing it would kill this process too and
+// leave the mount exactly as it was.
+//
+// Best-effort by design: the caller is already returning the real failure (the
+// deadline kill), and a cleanup error must not replace or mask it. The transport
+// has no logger, so a failed cleanup is not reported here — it surfaces as the
+// next seed attach failing on 0x80070020, which is the pre-fix behaviour and no
+// worse than not having tried.
+func (t *psHostTransport) dismountAfterKill(expression string) {
+	seedPath := mountedSeedPathForCleanup(expression)
+	if seedPath == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), seedCleanupDismountTimeout)
+	defer cancel()
+	// Cfgms-DismountAndVerify throws when the VHD is still attached after its
+	// retry loop, so a non-nil error here genuinely means the leak survived.
+	_, _ = t.runFreshNoCleanup(ctx, "Cfgms-DismountAndVerify -Path "+quoteForPS(seedPath))
+}
+
+// runFreshNoCleanup is runFresh without the post-kill dismount, used by
+// dismountAfterKill itself so a failing cleanup cannot recurse.
+func (t *psHostTransport) runFreshNoCleanup(ctx context.Context, expression string) (string, error) {
+	f, err := os.CreateTemp("", "cfgms-seedcleanup-*.ps1")
+	if err != nil {
+		return "", fmt.Errorf("hyperv-ps-host: create temp cleanup script: %w", err)
+	}
+	tmpPath := f.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, werr := io.WriteString(f, psHostPreamble+"\n"+expression+"\n"); werr != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("hyperv-ps-host: write temp cleanup script: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return "", fmt.Errorf("hyperv-ps-host: close temp cleanup script: %w", cerr)
+	}
+	cmd := exec.CommandContext(ctx, "powershell.exe",
+		"-NoProfile", "-NonInteractive", "-File", tmpPath,
+	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		return string(out), fmt.Errorf("hyperv-ps-host: post-kill seed dismount failed: %w: %s",
+			runErr, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
 }
