@@ -560,6 +560,46 @@ The controller can push a one-off script for immediate execution, outside the cf
 
 Results are reported back to the controller. Ad-hoc scripts do not modify the cfg.
 
+#### Operator Payload Signature Verification (Issues #3694/#3696/#3697)
+
+An inline ad-hoc command is verified in `preflightScriptSignature`
+(`features/steward/commands/execute_script.go`) before the executor ever runs. The
+signature covers `operatorpayload.CanonicalBytes` of the reconstructed envelope
+(content, shell, resolved target list, nonce, expiry) — never content alone — and the
+envelope must name this steward's own ID, must not be expired, and its nonce must not
+have been seen before, regardless of which credential type signed it.
+
+Two credential types are accepted, dispatched on which proof fields are present in the
+command:
+
+- **X.509 / CSR-issued payload-signing credential.** The operator signs with the
+  zero-custody credential `cfg credential request-signing-cert` issues (Issue #3696);
+  the certificate must chain to the steward's configured controller CA and carry the
+  payload-signing marker (`cert.HasPayloadSigningMarker`) — an admin mTLS bundle no
+  longer qualifies.
+- **WebAuthn assertion (Issue #3697).** A browser-only operator with no mTLS bundle
+  signs via the controller's `/api/v1/operator-payload/sign/begin`/`finish` ceremony
+  (Issue #3695): the assertion's `clientDataJSON.challenge` must equal
+  `sha256(CanonicalBytes(envelope))`, and the assertion signature must verify — as
+  `authenticatorData || SHA-256(clientDataJSON)` — against the credential's public key.
+  That public key has no certificate chain of its own, so it is resolved from the
+  CA-signed revocation manifest (`GET /api/v1/certificates/revocation-manifest`,
+  `features/controller/api/handlers_revocation_manifest.go`), extended with a
+  Kind-discriminated `authorized_webauthn_credentials` roster alongside the existing
+  revoked-serials list — never from an unsigned, live controller claim. The manifest's
+  own signature is chain-verified against the steward's controller CA via its embedded
+  `signer_certificate_pem` before any entry in it is trusted. Unlike the X.509 path,
+  WebAuthn verification has no "no CA roots configured" relaxation: the public key has
+  no other source, so it fails closed rather than silently skipping verification.
+
+Residual-risk profile (Issue #3695's own note, restated here for the verifying side): a
+WebAuthn private key is hardware-bound and never exists server-side at all, so the
+"controller durably retains an extractable private key indefinitely" problem the
+credential cutover (#3696) closes for the mTLS path is structurally impossible on the
+WebAuthn path. What remains is the shallower risk that a compromised controller mints a
+bogus WebAuthn registration — bounded by `webauthn:register`'s existing `AssuranceStrong`
+gate — not the deeper risk of silently stealing a years-old credential.
+
 ### Remote Terminal
 
 The controller can establish an interactive terminal session through the steward for live troubleshooting. The steward provides a secure, authenticated shell session back to the administrator.

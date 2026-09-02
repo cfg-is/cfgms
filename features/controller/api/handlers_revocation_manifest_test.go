@@ -2,6 +2,8 @@
 // Copyright 2026 Jordan Ritz
 //
 // Issue #3691: tests for the signed operator-certificate revocation manifest.
+// Issue #3697: tests for the manifest's AuthorizedWebAuthnCredentials extension and
+// SignerCertificatePEM field.
 package api
 
 import (
@@ -242,6 +244,102 @@ func TestHandleGetRevocationManifest_UnscopedCallerServedFleetWide(t *testing.T)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, body.Manifest.RevokedSerials, issued.SerialNumber,
 		"an unscoped admin must receive the complete fleet-wide manifest")
+}
+
+// setupManifestServerWithWebAuthn returns a setupCertTestServer server (real certMgr,
+// for manifest signing) additionally configured with WebAuthn and one pre-created
+// account, so a test can inject a credential and confirm it surfaces in the manifest.
+func setupManifestServerWithWebAuthn(t *testing.T) (*Server, *cert.Manager, string) {
+	t.Helper()
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	wa, err := NewWebAuthnFromConfig(tvRPID, tvRPID, []string{tvOrigin})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	const username = "manifest-webauthn-user"
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: username})
+	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
+
+	return server, certMgr, username
+}
+
+// TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_IncludesRegisteredCredential
+// verifies Issue #3697's manifest extension: a WebAuthn credential registered to any
+// account appears in the fleet-wide manifest as a Kind-discriminated entry carrying its
+// exact credential ID and COSE public key, and the manifest's signature still verifies
+// with the extended shape included.
+func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_IncludesRegisteredCredential(t *testing.T) {
+	server, certMgr, username := setupManifestServerWithWebAuthn(t)
+	credID := []byte("manifest-cred-1")
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, credID, pubKey, 0)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	require.Len(t, body.Manifest.AuthorizedWebAuthnCredentials, 1)
+	entry := body.Manifest.AuthorizedWebAuthnCredentials[0]
+	assert.Equal(t, AuthorizedWebAuthnCredentialKind, entry.Kind)
+	assert.Equal(t, credID, entry.CredentialID)
+	assert.Equal(t, pubKey, entry.PublicKey)
+
+	// The signature must still verify with AuthorizedWebAuthnCredentials populated —
+	// proves the extended shape didn't break the existing sign/verify round trip.
+	signingCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(signingCert.CertificatePEM)
+	require.NoError(t, err)
+	verifier, err := signature.NewVerifierFromCertificate(x509Cert)
+	require.NoError(t, err)
+	data, err := json.Marshal(body.Manifest)
+	require.NoError(t, err)
+	assert.NoError(t, verifier.Verify(data, body.Signature),
+		"manifest signature must verify with AuthorizedWebAuthnCredentials populated")
+}
+
+// TestHandleGetRevocationManifest_SignerCertificatePEM_ChainsToCA verifies Issue #3697's
+// SignerCertificatePEM field: it is the exact PurposeSigning certificate the signature
+// was produced with, and it chain-verifies against the CA — the property a caller with
+// no other side channel (e.g. a steward) relies on to trust it.
+func TestHandleGetRevocationManifest_SignerCertificatePEM_ChainsToCA(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.NotEmpty(t, body.SignerCertificatePEM)
+
+	signingCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	assert.Equal(t, string(signingCert.CertificatePEM), body.SignerCertificatePEM,
+		"SignerCertificatePEM must be the exact cert the signature was produced with")
+
+	parsedSigner, err := cert.ParseCertificateFromPEM([]byte(body.SignerCertificatePEM))
+	require.NoError(t, err)
+
+	caPEM, err := certMgr.GetCACertificate()
+	require.NoError(t, err)
+	pool := x509.NewCertPool()
+	require.True(t, pool.AppendCertsFromPEM(caPEM))
+
+	_, err = parsedSigner.Verify(x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	})
+	require.NoError(t, err, "SignerCertificatePEM must chain-verify to the CA with CodeSigning EKU")
+}
+
+// TestHandleGetRevocationManifest_NoWebAuthnCredentials_EmptyRoster verifies the
+// no-credentials case is a valid, signable empty roster rather than an error.
+func TestHandleGetRevocationManifest_NoWebAuthnCredentials_EmptyRoster(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Empty(t, body.Manifest.AuthorizedWebAuthnCredentials)
 }
 
 func sortStringsIsSorted(s []string) bool {
