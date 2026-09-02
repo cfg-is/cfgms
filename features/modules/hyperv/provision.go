@@ -59,6 +59,17 @@ type ProvisionRecord struct {
 	// that was never failed, and on legacy records written before #2467; callers
 	// must treat empty as "unknown" and NOT infer a seed-phase failure from it.
 	FailedFrom ProvisionState `json:"failed_from,omitempty"`
+	// RetryCount counts every create/seed-phase attempt made for this record —
+	// the original attempt AND every bounded auto-retry re-entry into creating
+	// (Issue #3802, ADR-009 §2 amendment). Incremented by provisionVM each time
+	// it advances the record into ProvisionStateCreating. seedPhaseRetryExhausted
+	// compares it against the effective budget (SourceConfig.retryBudget,
+	// default 3) to decide whether the exists-branch seed-phase-failure gate
+	// (applySourceGated) may retry again or must fall back to surface-and-wait.
+	// Not reset on success — once a record leaves ProvisionStateFailed it is no
+	// longer consulted, so a stale count from an earlier failed attempt is
+	// harmless.
+	RetryCount int `json:"retry_count,omitempty"`
 }
 
 // ProvisionStore is the persistence interface for VM provisioning records.
@@ -297,6 +308,22 @@ func failedDuringSeedPhase(record *ProvisionRecord) bool {
 	default:
 		return false
 	}
+}
+
+// defaultSeedPhaseRetryMax is the built-in bounded auto-retry budget (total
+// create/seed-phase attempts, including the original) applied when a VM
+// source declares no explicit retry_max (Issue #3802, ADR-009 §2 amendment).
+const defaultSeedPhaseRetryMax = 3
+
+// seedPhaseRetryExhausted reports whether a Failed seed-phase record (see
+// failedDuringSeedPhase) has used up its bounded auto-retry budget. maxRetries
+// is the effective total-attempt budget (SourceConfig.retryBudget: the
+// declared retry_max, or defaultSeedPhaseRetryMax when unset). A maxRetries of
+// 0 is the disable value — RetryCount starts at 0, so 0 >= 0 is immediately
+// exhausted and the seed-phase gate never retries. This is a pure function of
+// the record and the budget; it does not read or write the store.
+func seedPhaseRetryExhausted(record *ProvisionRecord, maxRetries int) bool {
+	return record.RetryCount >= maxRetries
 }
 
 // degradeProvision records that a VM which already exists on the host is in a

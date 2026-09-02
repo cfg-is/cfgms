@@ -62,7 +62,7 @@ Convergence makes the declared state true; the OS install is an implementation d
 - VM **exists but broken / won't boot** → surfaced as `degraded`; the module **does not** delete-and-rebuild.
 - **Destructive reprovision of an existing VM is explicit opt-in** via `source.on_existing: recreate` (default `never`). The default convergence path can never destroy a VM.
 
-To distinguish "my own incomplete provisioning attempt" (provably holds no workload — safe to resume/retry) from "a real existing VM," the module keeps a **per-VM provisioning record** (state below). Auto-retry of an own-incomplete attempt defaults **off** (surface-and-wait); bounded retry is an opt-in knob. Nothing is destroyed automatically, ever.
+To distinguish "my own incomplete provisioning attempt" (provably holds no workload — safe to resume/retry) from "a real existing VM," the module keeps a **per-VM provisioning record** (state below). Auto-retry of an own-incomplete **seed-phase** attempt (`FailedFrom: creating` or `absent`) defaults **on** with a bounded attempt budget; a config knob can disable or re-bound it. All other incomplete classes keep surface-and-wait. Nothing is destroyed automatically, ever. (Amended 2026-09-02, Epic #3799: a deadline-killed provision left an unrecoverable VM in production; the host-attached-VHD leak that made blind retries harmful was removed first.)
 
 ### 3. Provisioning state machine (long-running convergence)
 

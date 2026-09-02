@@ -132,6 +132,31 @@ func TestProvisionVM_SeedPathValidation(t *testing.T) {
 	}
 }
 
+// ── REQUIRED TEST: stale seed VHDX on disk (#3802) ──────────────────────────
+
+// TestPsNewSeedVHD_DeletesExistingFileBeforeCreate guards the WinRM-transport
+// half of the stale-seed-VHDX fix (Issue #3802): a bounded auto-retry re-enters
+// creating against the SAME seed path a killed attempt already partially built,
+// and New-VHD has no -Force/overwrite option — without a pre-create delete it
+// fails with "The file exists. (0x80070050)", wedging every retry. This asserts
+// the psNewSeedVHD script constant (the bare script the WinRM transport runs
+// directly — the ps-host transport instead dispatches to the already-fixed
+// Cfgms-NewSeedVHD preamble function, Issue #2466) deletes any existing file at
+// $Path BEFORE calling New-VHD.
+func TestPsNewSeedVHD_DeletesExistingFileBeforeCreate(t *testing.T) {
+	assert.Contains(t, psNewSeedVHD, "Remove-Item",
+		"psNewSeedVHD must delete a stale file at $Path before New-VHD")
+	assert.Contains(t, psNewSeedVHD, "New-VHD",
+		"psNewSeedVHD must still create the seed VHD")
+
+	removeIdx := strings.Index(psNewSeedVHD, "Remove-Item")
+	newVHDIdx := strings.Index(psNewSeedVHD, "New-VHD")
+	require.NotEqual(t, -1, removeIdx)
+	require.NotEqual(t, -1, newVHDIdx)
+	assert.Less(t, removeIdx, newVHDIdx,
+		"the stale-file delete must run BEFORE New-VHD, or a leftover seed VHDX still blocks creation")
+}
+
 // ── Gen1 create emits -Generation 1 ─────────────────────────────────────────
 
 // TestProvisionVM_Gen1CreatePassesGeneration drives an absent Gen1 VM (no

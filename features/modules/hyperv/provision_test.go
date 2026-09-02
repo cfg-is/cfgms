@@ -423,3 +423,42 @@ func TestFailedDuringSeedPhase(t *testing.T) {
 		})
 	}
 }
+
+// ─── #3802 bounded seed-phase auto-retry tests ────────────────────────────────
+
+// TestSeedPhaseRetryExhausted is the direct branch-matrix unit test for the
+// #3802 retry-budget classifier: a record is exhausted once RetryCount reaches
+// the effective budget, and a budget of 0 (the disable value) exhausts a fresh
+// (RetryCount 0) record immediately.
+func TestSeedPhaseRetryExhausted(t *testing.T) {
+	cases := []struct {
+		name       string
+		retryCount int
+		maxRetries int
+		want       bool
+	}{
+		{"fresh record, default budget", 0, defaultSeedPhaseRetryMax, false},
+		{"below budget", 2, defaultSeedPhaseRetryMax, false},
+		{"at budget: exhausted", 3, defaultSeedPhaseRetryMax, true},
+		{"past budget: exhausted", 4, defaultSeedPhaseRetryMax, true},
+		{"disabled budget (0): fresh record still exhausted", 0, 0, true},
+		{"re-bound budget: below", 4, 5, false},
+		{"re-bound budget: at", 5, 5, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateCreating, RetryCount: tc.retryCount}
+			assert.Equal(t, tc.want, seedPhaseRetryExhausted(rec, tc.maxRetries))
+		})
+	}
+}
+
+// TestDefaultSeedPhaseRetryMax pins the settled retry bound (3 total attempts:
+// the original create-phase attempt plus 2 automatic repair retries) so a
+// future change to the constant is a deliberate, reviewed decision rather than
+// an accidental one — this is the exact terminal value
+// (ProvisionRecord.RetryCount == 3 on a Failed/seed-phase record) the
+// visibility sibling story's fixture checks.
+func TestDefaultSeedPhaseRetryMax(t *testing.T) {
+	assert.Equal(t, 3, defaultSeedPhaseRetryMax)
+}

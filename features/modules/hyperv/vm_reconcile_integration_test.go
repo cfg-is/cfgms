@@ -574,12 +574,15 @@ func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
 }
 
 // TestApplySourceGated_FailedSeedPhaseDoesNotStartVM is the [REQUIRED TEST] for
-// the #2467 seed-phase gate. An existing, powered-OFF VM whose own provisioning
-// record failed during the host-side seed/create phase (Failed, FailedFrom=
-// creating — the phase the seed steps run in, never reached installing) must be
-// surfaced-and-waited-on: the module leaves the VM OFF and issues no Start-VM,
-// rather than powering on a guest that has no working seed. applySourceGated
-// (via Set) must return nil (surface-and-wait), not an error.
+// the #2467/#3802 seed-phase gate's terminal state: an existing, powered-OFF VM
+// whose own provisioning record failed during the host-side seed/create phase
+// (Failed, FailedFrom=creating) AND has exhausted its bounded auto-retry budget
+// (RetryCount == defaultSeedPhaseRetryMax) must be surfaced-and-waited-on: the
+// module leaves the VM OFF, issues no Start-VM and no seed rebuild, rather than
+// powering on a guest that has no working seed or retrying past its budget.
+// applySourceGated (via Set) must return nil (surface-and-wait), not an error.
+// This is the exact terminal state (RetryCount == 3 on a Failed/seed-phase
+// record) the visibility sibling story's fixture checks.
 func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 	// getVM (call 0) reports the VM present but OFF; desired state is running
 	// (sourceVMConfigMap sets state: running), so absent the gate the VM would be
@@ -590,9 +593,10 @@ func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 	}
 	m := provisionModuleWithTransport(t, transport)
 
-	// Seed the VM's own record as a seed-phase failure: Failed, having failed
-	// from creating. This is exactly what failProvision records when New-VHD /
-	// format / write-seed / attach-seed fails during provisionVM.
+	// Seed the VM's own record as a seed-phase failure that has already used up
+	// its bounded auto-retry budget: Failed, having failed from creating, at
+	// RetryCount == defaultSeedPhaseRetryMax (3) — the original attempt plus 2
+	// automatic repair retries, all failed.
 	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
 		VMName:        "stw-01",
 		State:         ProvisionStateFailed,
@@ -601,11 +605,12 @@ func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 		StartedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 		LastError:     `hyperv: create seed VHDX for VM "stw-01": exit status 1`,
+		RetryCount:    defaultSeedPhaseRetryMax,
 	}))
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // state: running, on_existing: never
 	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg),
-		"a seed-phase-failed VM must surface-and-wait (return nil), not error")
+		"a retry-exhausted seed-phase-failed VM must surface-and-wait (return nil), not error")
 
 	transport.mu.Lock()
 	calls := transport.calls
@@ -617,13 +622,114 @@ func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 		"surface-and-wait must not create or recreate the VM")
 	assert.Empty(t, callsContaining(calls, "Remove-VM"),
 		"surface-and-wait must never destroy the existing VM")
+	assert.Empty(t, callsContaining(calls, "New-VHD"),
+		"a retry-exhausted record must NOT trigger another seed-build attempt")
 
 	// Surface-and-wait does not mutate the record — it is left at failed for an
-	// operator or a future converge cycle to retry from a clean seed.
+	// operator (per the visibility sibling story) to retry from a clean seed.
 	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
 	require.NoError(t, err)
 	assert.Equal(t, ProvisionStateFailed, rec.State)
 	assert.Equal(t, ProvisionStateCreating, rec.FailedFrom)
+	assert.Equal(t, defaultSeedPhaseRetryMax, rec.RetryCount,
+		"retry-exhausted must not be incremented further")
+}
+
+// TestApplySourceGated_FailedSeedPhaseRetriesWithinBudget is the [REQUIRED
+// TEST] for the #3802 bounded auto-retry itself: an existing, powered-OFF VM
+// whose own provisioning record failed during the create/seed phase, with
+// RetryCount below the budget, must have provisionVM RE-INVOKED on the next
+// applySourceGated call — not just logged and left alone. This asserts the
+// real seed-build PS calls happen again (New-VHD, Mount/Format, seed attach,
+// install-ISO attach, Start-VM) and that RetryCount increments, proving a
+// genuine re-invocation rather than a no-op return.
+func TestApplySourceGated_FailedSeedPhaseRetriesWithinBudget(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Off"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateFailed,
+		FailedFrom:    ProvisionStateCreating,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		LastError:     `hyperv: create seed VHDX for VM "stw-01": exit status 1`,
+		RetryCount:    1, // one prior failed attempt; still well within the default budget of 3
+	}))
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // state: running, on_existing: never
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.NotEmpty(t, callsContaining(calls, "New-VHD"),
+		"a retry within budget must rebuild the seed VHDX — a real re-invocation of provisionVM, not a no-op")
+	assert.NotEmpty(t, callsContaining(calls, "Add-VMHardDiskDrive"),
+		"a retry within budget must re-attach the rebuilt seed disk")
+	assert.NotEmpty(t, callsContaining(calls, "Start-VM"),
+		"a successful repair completes the create/seed phase and powers the VM on, same as a fresh attempt")
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"the VM already exists on the host — retry must never call createVM")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"retry must never destroy the existing VM")
+
+	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rec.RetryCount, "RetryCount must increment on the retry re-entry into creating")
+	assert.Equal(t, ProvisionStateInstalling, rec.State,
+		"a successful repair advances the record to installing, exactly like a fresh create-from-source attempt")
+}
+
+// TestApplySourceGated_DegradedVMNeverAutoRetried is the [REQUIRED TEST]
+// guarding against #3802 accidentally widening scope: a VM surfaced as
+// degraded (broken-but-not-seed-phase — isHealthyVMState false, no seed-phase
+// failure record) must NEVER be auto-retried or auto-remediated. Only
+// FailedFrom: creating/absent seed-phase failures are eligible for the bounded
+// auto-retry added by this story; ADR-009 §2's degraded-class invariant
+// (observed, never remediated) is untouched.
+func TestApplySourceGated_DegradedVMNeverAutoRetried(t *testing.T) {
+	transport := &testWinRMTransport{
+		output: existingSourceVMJSON("stw-01", "Critical"),
+	}
+	m := provisionModuleWithTransport(t, transport)
+
+	// The VM already carries a DEGRADED record from a prior convergence cycle
+	// (not Failed, so failedDuringSeedPhase is false and the new retry gate
+	// never even evaluates it).
+	require.NoError(t, m.provisionStore.SetProvision(context.Background(), &ProvisionRecord{
+		VMName:        "stw-01",
+		State:         ProvisionStateDegraded,
+		CorrelationID: "stw-01",
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		LastError:     "hyperv: VM in broken state: Critical",
+	}))
+
+	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")}
+	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg))
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+
+	assert.Empty(t, callsContaining(calls, "New-VHD"),
+		"a degraded (broken, non-seed-phase) VM must never trigger the seed-build auto-retry path")
+	assert.Empty(t, callsContaining(calls, "Start-VM"),
+		"a degraded VM must never be auto-started via the retry path")
+	assert.Empty(t, callsContaining(calls, "Remove-VM"),
+		"a degraded VM must never be torn down")
+	assert.Empty(t, callsContaining(calls, "New-VM"),
+		"a degraded VM must never be recreated")
+
+	rec, err := m.provisionStore.GetProvision(context.Background(), "stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateDegraded, rec.State, "degraded stays degraded — never auto-remediated")
+	assert.Equal(t, 0, rec.RetryCount, "RetryCount must not be touched by the degraded path")
 }
 
 // TestApplySourceGated_FailedAfterInstallingStillConverges is the companion
