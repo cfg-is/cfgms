@@ -608,6 +608,22 @@ locales, or enrollment variants by authoring a stored profile and referencing it
 here, with **no Go code change**. See
 [Adding an unattended-install profile without code changes](../../../docs/operations/hyperv-profile-authoring.md).
 
+Profiles are authored, listed, shown, and deleted with `cfg hyperv profile`
+(Issue #3785):
+
+```sh
+cfg hyperv profile create debian-12-acme-corp --file profile.yaml
+cfg hyperv profile ls
+cfg hyperv profile show debian-12-acme-corp
+cfg hyperv profile delete debian-12-acme-corp
+```
+
+Because a stored profile is rendered and executed as **root** by cloud-init/
+preseed at guest first boot, `create` and `delete` require an admin session at
+strong assurance with a fresh user-presence proof, and the profile is validated
+server-side (name, `answer_format`, that `template` parses, and a size cap)
+before it is ever stored.
+
 ### Install media staging is out of scope
 
 `source.iso` is a path on the Hyper-V host (typically on a CSV). Getting the ISO

@@ -369,6 +369,8 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"osquery:execute":              true, // Issue #3569
 		"signing-credential:request":   true, // Issue #3687: mints a CSR-signing credential
 		"credential-request:approve":   true, // Issue #3718: decides the marker set/account binding for a credential
+		"hyperv-profile:create":        true, // Issue #3785: rendered and executed as root at guest first boot
+		"hyperv-profile:delete":        true, // Issue #3785: mirrors module:approve/module:reject
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {

@@ -203,6 +203,14 @@ var permissionAssurance = map[string]Requirement{
 	// session:create uses. AssuranceStrong, no RequireUserPresence — mirrors
 	// session:create's own bar exactly, since approval performs exactly that mint.
 	"cli-login:approve": {Min: session.AssuranceStrong},
+
+	// Hyper-V VM-provisioning profile write path (Issue #3785). A stored profile
+	// is rendered and executed as root by cloud-init/preseed at guest first boot,
+	// so create/delete are code-execution-equivalent on every future VM that
+	// references it — gated identically to module:approve. read/list are
+	// intentionally absent (no elevated assurance floor for reads).
+	"hyperv-profile:create": {Min: session.AssuranceStrong, RequireUserPresence: true},
+	"hyperv-profile:delete": {Min: session.AssuranceStrong, RequireUserPresence: true},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

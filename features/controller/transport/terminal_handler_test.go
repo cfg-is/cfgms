@@ -863,6 +863,11 @@ func TestTerminalHandler_AuditAndRecordingBothProduced(t *testing.T) {
 	rec, recErr := mgr.GetSessionRecording(sess.ID)
 	require.NoError(t, recErr)
 	require.NotNil(t, rec, "session recording must exist (recorder wired by DefaultSessionManager with RecordSessions: true)")
+	// The session is still open, so this exercises the live-recording read path:
+	// GetRecording drains the recorder's writer, so every frame handed to
+	// HandleOutput before this call is on disk and visible here.
+	assert.Contains(t, string(rec.Data), "echo hello",
+		"recording must contain the steward output produced during the session")
 }
 
 // ---------------------------------------------------------------------------

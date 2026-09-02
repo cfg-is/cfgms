@@ -140,7 +140,8 @@ d-i preseed/late_command string \
 // defaultLinuxProfile returns the built-in Debian 12 UnattendProfile used when a
 // Linux VM source declares no profile:// reference. It is a real, renderable
 // profile (preseed format) wired to the default registration-token secret key
-// and bundle URL; operators override it by authoring a stored-config profile.
+// and bundle URL; operators override it by authoring a stored-config profile
+// via `cfg hyperv profile create` (Issue #3785).
 func defaultLinuxProfile() *UnattendProfile {
 	return &UnattendProfile{
 		Name:         linuxDefaultProfileName,
