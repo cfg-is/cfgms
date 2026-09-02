@@ -898,6 +898,7 @@ func TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError(t *testing.T)
 		StewardID:        "s1",
 		TenantID:         "t1",
 		TransportAddress: "https://ctrl.example.com",
+		ClientKey:        "fake-key-pem",    // present so the TOFU pin path is what's under test, not the empty-key guard
 		CACert:           "not-a-valid-pem", // invalid PEM → computeCAPEMFingerprint fails → pinTOFUCA returns error
 	}
 
@@ -908,6 +909,36 @@ func TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError(t *testing.T)
 	savedID, loadErr := loadIdentity(dir)
 	require.NoError(t, loadErr)
 	assert.Nil(t, savedID, "identity must not be persisted to disk when TOFU CA pin fails")
+}
+
+// TestConnectWithApprovedRegistration_EmptyClientKey_ReturnsLoudError is the
+// defense-in-depth regression test for the PR #3844 acceptance-review finding:
+// an approved registration that carries no private key (e.g. a resumed
+// pending-registration poll that had no matching in-memory key — see
+// registerAndConnect's pending-state handling and
+// registration.HTTPClient.ResumePendingClientKey) must fail loudly rather than
+// silently fall through to connecting without mTLS.
+func TestConnectWithApprovedRegistration_EmptyClientKey_ReturnsLoudError(t *testing.T) {
+	dir := t.TempDir()
+	logger := logging.NewLogger("error")
+
+	reg := approvedRegistration{
+		StewardID:        "s1",
+		TenantID:         "t1",
+		TransportAddress: "https://ctrl.example.com",
+		ClientCert:       "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+		CACert:           "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+		// ClientKey intentionally left empty.
+	}
+
+	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceCompileBaked, "", stewardconfig.StewardConfig{}, false, logger)
+	require.Error(t, err, "must return a hard error when the approved registration carries no private key")
+	assert.Contains(t, err.Error(), "no usable steward private key")
+
+	// Identity MUST NOT be saved: connecting without mTLS is not an acceptable fallback.
+	savedID, loadErr := loadIdentity(dir)
+	require.NoError(t, loadErr)
+	assert.Nil(t, savedID, "identity must not be persisted to disk when the approved registration carries no private key")
 }
 
 // TestTrustSourceDowngradeGuard verifies that checkTrustDowngrade enforces the

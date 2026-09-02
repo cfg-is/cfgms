@@ -399,6 +399,100 @@ func TestPollStatus_ErrorStatus_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "status poll failed with HTTP 401")
 }
 
+// TestPendingClientKeyPEM_NoRegisterCall_ReturnsError verifies that a client
+// which never called Register has no pending key to retrieve (Issue #3780
+// follow-up: cmd/steward's registerAndConnect calls this right after a 202 to
+// persist the key alongside the pending ID).
+func TestPendingClientKeyPEM_NoRegisterCall_ReturnsError(t *testing.T) {
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: "https://controller.example.com", Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	_, err = client.PendingClientKeyPEM()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Register has not been called")
+}
+
+// TestResumePendingClientKey_InvalidPEM_ReturnsError verifies that a corrupted
+// or non-PEM persisted key is rejected rather than silently ignored.
+func TestResumePendingClientKey_InvalidPEM_ReturnsError(t *testing.T) {
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: "https://controller.example.com", Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	err = client.ResumePendingClientKey("not a pem block")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode persisted steward private key")
+}
+
+// TestResumePendingClientKey_RestoresKeyAcrossRestart_PollStatusPairsIt is the
+// regression test for the PR #3844 acceptance-review finding: a steward that
+// restarts while its registration is quarantined must not lose the ability to
+// pair an eventually claimed certificate with a usable private key.
+//
+// It drives the actual restart path with two independent HTTPClient instances
+// (client1 simulates the process that generated the CSR and died while
+// quarantined; client2 simulates the resumed process): client1's key is
+// extracted via PendingClientKeyPEM (what cmd/steward persists to
+// PendingState), then restored into client2 via ResumePendingClientKey (what
+// cmd/steward does on resume) before polling. The claimed certificate comes
+// from a real pkg/cert CA signing the CSR client1 actually submitted, so the
+// assertion that tls.X509KeyPair succeeds proves the resumed key is genuinely
+// usable — not just present.
+func TestResumePendingClientKey_RestoresKeyAcrossRestart_PollStatusPairsIt(t *testing.T) {
+	issuer := newIssuingCA(t)
+	logger := logging.NewLogger("debug")
+
+	var gotCSRPEM string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/register" {
+			var req RegistrationRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			gotCSRPEM = req.CSRPEM
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"pending_id":"pending-restart-1","steward_id":"steward-restart","status":"pending"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		body, err := json.Marshal(RegistrationStatusResponse{
+			Status:     "claimed",
+			StewardID:  "steward-restart",
+			ClientCert: issuer.signCSR(t, gotCSRPEM, "steward-restart"),
+			CACert:     issuer.caPEM,
+		})
+		require.NoError(t, err)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	// client1: the process that registers and is quarantined, then "dies".
+	client1, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logger})
+	require.NoError(t, err)
+	_, pendingResp, err := client1.Register(context.Background(), RegistrationRequest{Token: "reg-token"})
+	require.NoError(t, err)
+	require.NotNil(t, pendingResp)
+
+	persistedKeyPEM, err := client1.PendingClientKeyPEM()
+	require.NoError(t, err)
+	require.NotEmpty(t, persistedKeyPEM, "the key generated for the CSR must be retrievable for persistence")
+
+	// client2: an entirely new process instance resuming after restart. Without
+	// ResumePendingClientKey it would have no key to pair with the claim.
+	client2, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logger})
+	require.NoError(t, err)
+	require.NoError(t, client2.ResumePendingClientKey(persistedKeyPEM))
+
+	resp, err := client2.PollStatus(context.Background(), pendingResp.PendingID, "reg-token", 0, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "claimed", resp.Status)
+	require.NotEmpty(t, resp.ClientKeyPEM, "resumed client must pair the claimed certificate with the restored key")
+
+	tlsCert, err := tls.X509KeyPair([]byte(resp.ClientCert), []byte(resp.ClientKeyPEM))
+	require.NoError(t, err, "the controller-issued cert and the key restored across the simulated restart must form a usable pair")
+	_, ok := tlsCert.PrivateKey.(*ecdsa.PrivateKey)
+	require.True(t, ok, "the resumed private key must be the ECDSA key client1 originally generated")
+}
+
 // TestRegistrationRequest_IncludesDeviceIDAndIdentityKeyPub verifies that the new fields
 // are serialised to JSON and sent to the controller.
 func TestRegistrationRequest_IncludesDeviceIDAndIdentityKeyPub(t *testing.T) {

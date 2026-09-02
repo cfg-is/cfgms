@@ -1151,23 +1151,46 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	if pendingState, loadErr := loadPendingState(certStoreDir); loadErr != nil {
 		logger.Warn("Failed to load pending registration state; re-registering", "error", loadErr)
 	} else if pendingState != nil {
-		logger.Info("Resuming pending registration from previous run",
-			"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
-		approved, pollErr := pollForApproval(ctx, httpClient, pendingState.PendingID, token,
-			pollTimeout, 5*time.Second, 60*time.Second, logger)
-		if pollErr != nil {
-			_ = clearPendingState(certStoreDir)
-			return nil, pollErr
-		}
-		if approved != nil {
-			enrichApprovedWithDeviceIdentity(approved, ks)
-			_ = clearPendingState(certStoreDir)
-			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
-		}
-		// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
-		logger.Info("Persisted pending record expired on controller; performing fresh registration")
-		if clearErr := clearPendingState(certStoreDir); clearErr != nil {
-			logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+		switch pendingState.ClientKeyPEM {
+		case "":
+			// Pending-state file predates Issue #3780's follow-up (or the key field was
+			// otherwise lost). There is no way to pair a later claim with a usable key
+			// on this process instance, and a claimed pending record cannot be re-polled
+			// (single-claim) — resuming would either hang or silently connect without
+			// mTLS. Loud, and fall through to a fresh registration instead.
+			logger.Warn("Persisted pending registration has no steward private key; cannot resume, re-registering",
+				"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
+			if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+				logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+			}
+		default:
+			if resumeErr := httpClient.ResumePendingClientKey(pendingState.ClientKeyPEM); resumeErr != nil {
+				logger.Warn("Failed to restore persisted steward private key for pending registration; re-registering",
+					"pending_id", logging.SanitizeLogValue(pendingState.PendingID),
+					"error", logging.SanitizeLogValue(resumeErr.Error()))
+				if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+					logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+				}
+				break
+			}
+			logger.Info("Resuming pending registration from previous run",
+				"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
+			approved, pollErr := pollForApproval(ctx, httpClient, pendingState.PendingID, token,
+				pollTimeout, 5*time.Second, 60*time.Second, logger)
+			if pollErr != nil {
+				_ = clearPendingState(certStoreDir)
+				return nil, pollErr
+			}
+			if approved != nil {
+				enrichApprovedWithDeviceIdentity(approved, ks)
+				_ = clearPendingState(certStoreDir)
+				return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
+			}
+			// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
+			logger.Info("Persisted pending record expired on controller; performing fresh registration")
+			if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+				logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+			}
 		}
 	}
 
@@ -1201,7 +1224,16 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			"pending_id", logging.SanitizeLogValue(pendingResp.PendingID),
 			"steward_id", logging.SanitizeLogValue(pendingResp.StewardID),
 			"tenant_id", logging.SanitizeLogValue(pendingResp.TenantID))
-		if saveErr := savePendingState(certStoreDir, PendingState{PendingID: pendingResp.PendingID}); saveErr != nil {
+		// Persist the private key generated for this CSR alongside the pending ID
+		// (Issue #3780 follow-up) so a restart during the quarantine poll window can
+		// resume this same key rather than losing the ability to pair an eventually
+		// claimed certificate with a usable identity.
+		pendingKeyPEM, pendingKeyErr := httpClient.PendingClientKeyPEM()
+		if pendingKeyErr != nil {
+			logger.Warn("Failed to retrieve steward private key for pending-registration persistence; a restart during quarantine will require re-registration",
+				"error", logging.SanitizeLogValue(pendingKeyErr.Error()))
+		}
+		if saveErr := savePendingState(certStoreDir, PendingState{PendingID: pendingResp.PendingID, ClientKeyPEM: pendingKeyPEM}); saveErr != nil {
 			logger.Warn("Failed to persist pending registration ID; restart will re-register", "error", saveErr)
 		}
 		approved, pollErr := pollForApproval(ctx, httpClient, pendingResp.PendingID, token,
@@ -1338,6 +1370,16 @@ func connectWithApprovedRegistration(
 	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
+	// An approved registration with no private key cannot form a usable mTLS
+	// identity (Issue #3780 follow-up). This is a defense-in-depth check: the
+	// normal case is caught earlier by re-registering instead of resuming a
+	// pending record with no persisted key, but a caller reaching this function
+	// with an empty key must fail loudly rather than fall through to connecting
+	// without mTLS.
+	if reg.ClientKey == "" {
+		return nil, fmt.Errorf("approved registration carries no usable steward private key — the key generated for its CSR did not survive to this point (e.g. a restart during the quarantine poll window); re-run registration with a fresh token")
+	}
+
 	// Persist the identity record so that a subsequent restart can reconnect
 	// without HTTP re-registration (Issue #1719).
 	persistedID := StewardIdentity{

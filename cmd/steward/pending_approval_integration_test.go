@@ -145,51 +145,76 @@ func TestManualReviewFlow_RegisterPollApprove(t *testing.T) {
 }
 
 // TestManualReviewFlow_RestartResumesPendingID verifies that a steward restart loads the
-// persisted pending_id and resumes polling rather than creating a new pending record.
+// persisted pending_id and resumes polling rather than creating a new pending record —
+// and, per the PR #3844 acceptance-review finding, that the resumed process ends up with
+// a genuinely usable credential, not just a resumed pending_id. Register runs on a
+// separate, "pre-restart" HTTPClient instance; the "restart" is a brand-new HTTPClient
+// instance that never called Register and so never generated a keypair of its own —
+// exactly the failure condition the finding described. Only persisting the CSR key
+// alongside PendingState and restoring it via ResumePendingClientKey before polling
+// lets the resumed instance pair the claimed certificate with a usable key.
 func TestManualReviewFlow_RestartResumesPendingID(t *testing.T) {
 	const pendingID = "pending-restart-xyz"
 	logger := logging.NewLogger("error")
 
-	// Simulate immediate approval on first poll (restart scenario — was pending when it died).
-	approvedBody := registration.RegistrationStatusResponse{
-		Status:           "claimed",
-		StewardID:        "steward-restarted",
-		TenantID:         "tenant-restart",
-		TransportAddress: "ctrl.example.com:4433",
-		ClientCert:       "CLIENT-CERT",
-		CACert:           "CA-CERT",
-	}
-	approvedJSON, err := json.Marshal(approvedBody)
-	require.NoError(t, err)
-
+	var gotCSRPEM string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/register" {
+			var req registration.RegistrationRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			gotCSRPEM = req.CSRPEM
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"pending_id":"` + pendingID + `","steward_id":"steward-restarted","status":"pending"}`))
+			return
+		}
 		// Verify the steward is polling the correct pending ID.
 		assert.Contains(t, r.URL.Path, pendingID)
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(approvedJSON)
+		_, _ = w.Write([]byte(`{"status":"claimed","steward_id":"steward-restarted","tenant_id":"tenant-restart","transport_address":"ctrl.example.com:4433","client_cert":"CLIENT-CERT","ca_cert":"CA-CERT"}`))
 	}))
 	defer srv.Close()
 
-	httpClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
+	// === "Previous run": register (202 pending), then persist state — including the
+	// CSR private key, not just the pending ID — as registerAndConnect does. ===
+	preRestartClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
 		ControllerURL: srv.URL,
 		Logger:        logger,
 	})
 	require.NoError(t, err)
 
-	// Simulate previous run: save pending state to disk.
-	certStoreDir := t.TempDir()
-	require.NoError(t, savePendingState(certStoreDir, PendingState{PendingID: pendingID}))
+	_, pendingResp, regErr := preRestartClient.Register(context.Background(), registration.RegistrationRequest{Token: "reg-token-restart"})
+	require.NoError(t, regErr)
+	require.NotNil(t, pendingResp)
+	assert.Equal(t, pendingID, pendingResp.PendingID)
+	assert.NotEmpty(t, gotCSRPEM, "the previous run must submit a CSR before dying")
 
-	// Simulate restart: load the pending state.
+	pendingKeyPEM, keyErr := preRestartClient.PendingClientKeyPEM()
+	require.NoError(t, keyErr)
+	require.NotEmpty(t, pendingKeyPEM)
+
+	certStoreDir := t.TempDir()
+	require.NoError(t, savePendingState(certStoreDir, PendingState{PendingID: pendingResp.PendingID, ClientKeyPEM: pendingKeyPEM}))
+
+	// === Simulate restart: a brand-new process loads the persisted state and a
+	// brand-new HTTPClient instance restores the key before resuming the poll. ===
 	loaded, err := loadPendingState(certStoreDir)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
+	require.NotEmpty(t, loaded.ClientKeyPEM, "the persisted pending state must carry the steward's private key across the simulated restart")
+
+	resumedClient, err := registration.NewHTTPClient(&registration.HTTPConfig{
+		ControllerURL: srv.URL,
+		Logger:        logger,
+	})
+	require.NoError(t, err)
+	require.NoError(t, resumedClient.ResumePendingClientKey(loaded.ClientKeyPEM),
+		"the resumed process must restore the key before polling")
 
 	// Resume polling with the loaded pending ID (no new registration call).
 	result, pollErr := pollForApproval(
 		context.Background(),
-		httpClient,
+		resumedClient,
 		loaded.PendingID,
 		"reg-token-restart",
 		30*time.Second,
@@ -201,6 +226,10 @@ func TestManualReviewFlow_RestartResumesPendingID(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, "steward-restarted", result.StewardID)
 	assert.Equal(t, "CLIENT-CERT", result.ClientCert)
+	require.NotEmpty(t, result.ClientKey,
+		"the resumed process must produce a usable private key, not just a resumed pending_id — PR #3844 acceptance-review finding #1")
+	assert.Equal(t, pendingKeyPEM, result.ClientKey,
+		"the resumed process's credential must be paired with the same key generated by the process that died while quarantined")
 }
 
 // TestManualReviewFlow_Denied_ExitsWithClearMessage verifies that a "denied" response
