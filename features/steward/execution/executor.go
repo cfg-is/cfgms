@@ -226,6 +226,8 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 				report.NonCompliantCount++
 			case StatusDeferred:
 				report.DeferredCount++
+			case StatusRetryExhausted:
+				report.RetryExhaustedCount++
 			}
 		}
 	}
@@ -248,6 +250,7 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 		"skipped", report.SkippedCount,
 		"non_compliant", report.NonCompliantCount,
 		"deferred", report.DeferredCount,
+		"retry_exhausted", report.RetryExhaustedCount,
 		"duration", report.EndTime.Sub(report.StartTime))
 
 	return report
@@ -487,6 +490,22 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 				"deferred_until", result.DeferredUntil)
 			return result
 		}
+		// Retry-exhausted: a module's Set returned RetryExhaustedError because a
+		// provably-safe, bounded auto-retry has used up its attempt budget. This is a
+		// distinct, queryable terminal state — not a generic convergence failure, and
+		// not a state that will keep retrying automatically like StatusDeferred.
+		var retryExhaustedErr *modules.RetryExhaustedError
+		if errors.As(err, &retryExhaustedErr) {
+			result.Status = StatusRetryExhausted
+			result.Error = err.Error()
+			e.enqueueOutcome(correlationID, "retry-exhausted", result.ExecutionTime)
+			e.logger.Warn("module.Set: bounded auto-retry budget exhausted",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"failed_from", logging.SanitizeLogValue(retryExhaustedErr.FailedFrom),
+				"last_error", logging.SanitizeLogValue(retryExhaustedErr.LastError))
+			return result
+		}
 		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
 		// Outcome: Set failed; record before error-handling may continue.
 		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
@@ -698,6 +717,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 
 	hasErrors := false
 	hasNonCompliant := false
+	hasRetryExhausted := false
 
 	// Group per-resource results into per-module statuses
 	for _, result := range execReport.ResourceResults {
@@ -717,6 +737,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		errorCount, _ := moduleStatus.Details["error_count"].(int)
 		nonCompliantCount, _ := moduleStatus.Details["non_compliant_count"].(int)
 		deferredCount, _ := moduleStatus.Details["deferred_count"].(int)
+		retryExhaustedCount, _ := moduleStatus.Details["retry_exhausted_count"].(int)
 		totalCount, _ := moduleStatus.Details["total_count"].(int)
 		totalCount++
 
@@ -746,18 +767,33 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 			if moduleStatus.Status == "OK" {
 				moduleStatus.Status = "DEFERRED"
 			}
+		case StatusRetryExhausted:
+			// Bounded auto-retry gave up — a distinct, operator-actionable terminal state,
+			// not a generic error and not an automatic-retry-next-pass deferral.
+			retryExhaustedCount++
+			hasRetryExhausted = true
+			if moduleStatus.Status == "OK" {
+				moduleStatus.Status = "RETRY_EXHAUSTED"
+			}
+			if result.Error != "" {
+				errList, _ := moduleStatus.Details["retry_exhausted_errors"].([]string)
+				moduleStatus.Details["retry_exhausted_errors"] = append(errList, fmt.Sprintf("%s: %s", result.ResourceName, result.Error))
+			}
 		}
 
 		moduleStatus.Details["success_count"] = successCount
 		moduleStatus.Details["error_count"] = errorCount
 		moduleStatus.Details["non_compliant_count"] = nonCompliantCount
 		moduleStatus.Details["deferred_count"] = deferredCount
+		moduleStatus.Details["retry_exhausted_count"] = retryExhaustedCount
 		moduleStatus.Details["total_count"] = totalCount
 
 		if errorCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Applied %d/%d resources (%d errors)", successCount, totalCount, errorCount)
 		} else if nonCompliantCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Monitored %d resources (%d non-compliant)", totalCount, nonCompliantCount)
+		} else if retryExhaustedCount > 0 {
+			moduleStatus.Message = fmt.Sprintf("Applied %d/%d resources (%d retry-exhausted)", successCount, totalCount, retryExhaustedCount)
 		} else if deferredCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Deferred %d/%d resources (outside reboot_window)", deferredCount, totalCount)
 		} else {
@@ -790,6 +826,9 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 	} else if hasNonCompliant {
 		report.Status = "NON_COMPLIANT"
 		report.Message = "Configuration monitored: drift detected but not corrected"
+	} else if hasRetryExhausted {
+		report.Status = "RETRY_EXHAUSTED"
+		report.Message = "Configuration applied: bounded auto-retry exhausted for at least one resource, needs an operator"
 	} else if hasDeferred {
 		report.Status = "DEFERRED"
 		report.Message = "Configuration partially deferred: reboot-gated actions outside window"
@@ -806,14 +845,21 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 }
 
 // applyOutcomeStatus maps a ResourceStatus to the apply-outcome status string used
-// in ApplyOutcomeRecord (ADR-022 §6, Issue #3375). The three-value classification
-// mirrors the per-module aggregation in the same loop.
+// in ApplyOutcomeRecord (ADR-022 §6, Issue #3375; "retry_exhausted" added by Issue
+// #3803). The classification mirrors the per-module aggregation in the same loop.
 func applyOutcomeStatus(s ResourceStatus) string {
 	switch s {
 	case StatusSuccess, StatusNoChange:
 		return "applied"
 	case StatusNonCompliant, StatusSkipped, StatusDeferred:
 		return "partial"
+	case StatusRetryExhausted:
+		// Deliberately its own bucket, not "partial": a retry-exhausted resource will
+		// NOT be retried again automatically (unlike deferred/skipped/non-compliant),
+		// and not "failed": it is a known, already-explained gate, not an
+		// unclassified convergence bug — this is exactly the distinction Issue #3803
+		// exists to make queryable.
+		return "retry_exhausted"
 	default: // StatusFailed, StatusTimeout, unknown
 		return "failed"
 	}

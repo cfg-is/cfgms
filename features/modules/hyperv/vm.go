@@ -1827,8 +1827,10 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		}
 		// Retry budget exhausted: fall back to the original surface-and-wait
 		// behavior — the VM stays off, never destroyed, never powered on. This is
-		// the terminal state the visibility sibling story (Epic #3799) surfaces to
-		// an operator.
+		// the terminal state the visibility sibling story (Issue #3803, Epic #3799)
+		// surfaces to an operator: return a typed sentinel instead of nil so the
+		// executor can classify this outcome distinctly from a generic convergence
+		// failure (module.go's RetryExhaustedError, mirroring RebootDeferredError).
 		if logger, ok := m.GetLogger(); ok {
 			logger.Warn("hyperv: provisioning failed during the seed/create phase; retry budget exhausted, surface-and-wait (VM stays off until reseeded, no power-on)",
 				"vm_name", logging.SanitizeLogValue(vmName),
@@ -1839,7 +1841,7 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"vm-provision-skip-failed-seed-phase", "vm:"+vmName, nil,
 			map[string]interface{}{"reason": "seed-phase failure; retry budget exhausted; VM left powered off"}, nil)
-		return nil
+		return modules.NewRetryExhaustedError(record.LastError, string(record.FailedFrom))
 	}
 
 	if !isHealthyVMState(currentVM.State) {

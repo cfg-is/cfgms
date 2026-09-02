@@ -161,3 +161,51 @@ func NewRebootDeferredError(nextWindow time.Time) *RebootDeferredError {
 func (e *RebootDeferredError) Is(target error) bool {
 	return target == ErrRebootDeferred
 }
+
+// RetryExhaustedError is returned by a module's Set when a provably-safe,
+// bounded auto-retry has used up its attempt budget and the resource has
+// settled into a terminal, operator-actionable state — as opposed to a
+// generic convergence failure, which may or may not be safe to keep retrying
+// automatically. The executor recognizes this error with errors.As and
+// classifies the result as StatusRetryExhausted, distinct from StatusDeferred
+// (which means "will retry automatically next pass") and from StatusFailed
+// (which means "unclassified failure").
+//
+// Use NewRetryExhaustedError to construct and errors.As to extract:
+//
+//	var re *modules.RetryExhaustedError
+//	if errors.As(err, &re) {
+//	    lastErr := re.LastError
+//	}
+type RetryExhaustedError struct {
+	// LastError is the error recorded from the final failed attempt.
+	LastError string
+	// FailedFrom identifies the phase the resource was in when it last failed
+	// (module-specific; e.g. a provisioning state name). May be empty when the
+	// module does not track phases.
+	FailedFrom string
+}
+
+// Error implements the error interface.
+func (e *RetryExhaustedError) Error() string {
+	if e.FailedFrom != "" {
+		return fmt.Sprintf("retry budget exhausted: last failed from %s: %s", e.FailedFrom, e.LastError)
+	}
+	return fmt.Sprintf("retry budget exhausted: %s", e.LastError)
+}
+
+// ErrRetryExhausted is a package-level sentinel for retry-exhaustion detection via errors.Is.
+// Prefer errors.As when the LastError/FailedFrom detail is needed.
+var ErrRetryExhausted = errors.New("bounded auto-retry budget exhausted")
+
+// NewRetryExhaustedError constructs a RetryExhaustedError with the given last-error
+// detail and failed-from phase.
+func NewRetryExhaustedError(lastError, failedFrom string) *RetryExhaustedError {
+	return &RetryExhaustedError{LastError: lastError, FailedFrom: failedFrom}
+}
+
+// Is implements errors.Is support so that errors.Is(err, ErrRetryExhausted) returns true
+// for any *RetryExhaustedError, regardless of the wrapped LastError/FailedFrom values.
+func (e *RetryExhaustedError) Is(target error) bool {
+	return target == ErrRetryExhausted
+}

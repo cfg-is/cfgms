@@ -52,16 +52,17 @@ type DriftEventHandler func(resourceName string, moduleName string, diff *stewar
 
 // ExecutionReport contains the results of configuration execution
 type ExecutionReport struct {
-	StartTime         time.Time
-	EndTime           time.Time
-	TotalResources    int
-	SuccessfulCount   int
-	FailedCount       int
-	SkippedCount      int
-	NonCompliantCount int
-	DeferredCount     int
-	ResourceResults   []ResourceResult
-	Errors            []string
+	StartTime           time.Time
+	EndTime             time.Time
+	TotalResources      int
+	SuccessfulCount     int
+	FailedCount         int
+	SkippedCount        int
+	NonCompliantCount   int
+	DeferredCount       int
+	RetryExhaustedCount int
+	ResourceResults     []ResourceResult
+	Errors              []string
 }
 
 // ResourceResult contains the result of executing a single resource
@@ -100,6 +101,14 @@ const (
 	// open time when known. Distinct from StatusFailed (the action is not in error — it is
 	// intentionally deferred) and StatusSkipped (the module did run but could not proceed).
 	StatusDeferred
+	// StatusRetryExhausted indicates a module's Set() returned a
+	// *modules.RetryExhaustedError: a provably-safe, bounded auto-retry has used up its
+	// attempt budget and the resource has settled into a terminal, operator-actionable
+	// state. Distinct from StatusDeferred (which retries automatically on the next
+	// convergence pass) and from StatusFailed (an unclassified failure that may or may
+	// not be safe to keep retrying) — this status is the queryable signal that automatic
+	// remediation already gave up and will not be retried again on its own.
+	StatusRetryExhausted
 )
 
 // NewConfigState creates a ConfigState from a raw configuration map.
