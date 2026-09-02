@@ -191,6 +191,11 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		Factory:       moduleFactory,
 		Comparator:    comparator,
 		ErrorHandling: cfg.Steward.ErrorHandling,
+		// Explicit rather than relying on executor.go's 120s fallback (Issue
+		// #3801) — see the matching comment at client_transport.go's ExecutorConfig
+		// literal for the reasoning (covers observed cloud-image VM provisioning,
+		// 25-27s, with comfortable headroom while still bounding a wedged module).
+		ModuleCallTimeoutSec: 120,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create executor: %w", err)
