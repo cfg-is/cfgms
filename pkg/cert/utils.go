@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -103,6 +104,18 @@ func ValidateKeyPair(certPEM, keyPEM []byte) error {
 			return fmt.Errorf("certificate public key is not RSA")
 		}
 		if privKey.N.Cmp(pubKey.N) != 0 || privKey.E != pubKey.E {
+			return fmt.Errorf("private key does not match certificate public key")
+		}
+	case *ecdsa.PrivateKey:
+		// Issue #3780: the steward generates its own ECDSA P-256 client keypair
+		// locally and submits a CSR — the controller signs the public key and
+		// never sees or generates a private key. Without this case, importing
+		// that certificate+key pair back on the steward always failed here.
+		pubKey, ok := cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok {
+			return fmt.Errorf("certificate public key is not ECDSA")
+		}
+		if !privKey.PublicKey.Equal(pubKey) {
 			return fmt.Errorf("private key does not match certificate public key")
 		}
 	default:
