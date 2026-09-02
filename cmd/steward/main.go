@@ -1006,12 +1006,23 @@ type approvedRegistration struct {
 	Group            string
 	TransportAddress string
 	ClientCert       string
-	ClientKey        string
-	CACert           string
-	ServerCert       string
-	SigningCert      string
-	DeviceID         string // stable device identity ID (Issue #2094)
-	IdentityKeyPub   string // base64-encoded Ed25519 public key (Issue #2094)
+	// ClientKey holds the steward's locally generated private key PEM (Issue
+	// #3780) — never a value read off the wire. For the immediate-approval and
+	// manual-review poll-approval paths it comes from RegistrationResponse's /
+	// RegistrationStatusResponse's local (non-wire) ClientKeyPEM field, populated
+	// by the registration client from the keypair it generated for the CSR. The
+	// registration-refresh path (S5) still sources this from the wire until it is
+	// migrated to the same CSR-based shape.
+	ClientKey      string
+	CACert         string
+	ServerCert     string
+	SigningCert    string
+	DeviceID       string // stable device identity ID (Issue #2094)
+	IdentityKeyPub string // base64-encoded Ed25519 public key (Issue #2094)
+	// IssuerChain is the PEM-concatenated chain from ClientCert's direct issuer up
+	// to (but not including) CACert (Issue #3778). Empty for a self-hosted,
+	// root-only controller.
+	IssuerChain string
 }
 
 // registerAndConnect registers the steward using HTTP REST API
@@ -1140,23 +1151,46 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	if pendingState, loadErr := loadPendingState(certStoreDir); loadErr != nil {
 		logger.Warn("Failed to load pending registration state; re-registering", "error", loadErr)
 	} else if pendingState != nil {
-		logger.Info("Resuming pending registration from previous run",
-			"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
-		approved, pollErr := pollForApproval(ctx, httpClient, pendingState.PendingID, token,
-			pollTimeout, 5*time.Second, 60*time.Second, logger)
-		if pollErr != nil {
-			_ = clearPendingState(certStoreDir)
-			return nil, pollErr
-		}
-		if approved != nil {
-			enrichApprovedWithDeviceIdentity(approved, ks)
-			_ = clearPendingState(certStoreDir)
-			return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
-		}
-		// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
-		logger.Info("Persisted pending record expired on controller; performing fresh registration")
-		if clearErr := clearPendingState(certStoreDir); clearErr != nil {
-			logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+		switch pendingState.ClientKeyPEM {
+		case "":
+			// Pending-state file predates Issue #3780's follow-up (or the key field was
+			// otherwise lost). There is no way to pair a later claim with a usable key
+			// on this process instance, and a claimed pending record cannot be re-polled
+			// (single-claim) — resuming would either hang or silently connect without
+			// mTLS. Loud, and fall through to a fresh registration instead.
+			logger.Warn("Persisted pending registration has no steward private key; cannot resume, re-registering",
+				"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
+			if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+				logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+			}
+		default:
+			if resumeErr := httpClient.ResumePendingClientKey(pendingState.ClientKeyPEM); resumeErr != nil {
+				logger.Warn("Failed to restore persisted steward private key for pending registration; re-registering",
+					"pending_id", logging.SanitizeLogValue(pendingState.PendingID),
+					"error", logging.SanitizeLogValue(resumeErr.Error()))
+				if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+					logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+				}
+				break
+			}
+			logger.Info("Resuming pending registration from previous run",
+				"pending_id", logging.SanitizeLogValue(pendingState.PendingID))
+			approved, pollErr := pollForApproval(ctx, httpClient, pendingState.PendingID, token,
+				pollTimeout, 5*time.Second, 60*time.Second, logger)
+			if pollErr != nil {
+				_ = clearPendingState(certStoreDir)
+				return nil, pollErr
+			}
+			if approved != nil {
+				enrichApprovedWithDeviceIdentity(approved, ks)
+				_ = clearPendingState(certStoreDir)
+				return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
+			}
+			// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
+			logger.Info("Persisted pending record expired on controller; performing fresh registration")
+			if clearErr := clearPendingState(certStoreDir); clearErr != nil {
+				logger.Warn("Failed to clear stale pending state file", "error", clearErr)
+			}
 		}
 	}
 
@@ -1190,7 +1224,16 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			"pending_id", logging.SanitizeLogValue(pendingResp.PendingID),
 			"steward_id", logging.SanitizeLogValue(pendingResp.StewardID),
 			"tenant_id", logging.SanitizeLogValue(pendingResp.TenantID))
-		if saveErr := savePendingState(certStoreDir, PendingState{PendingID: pendingResp.PendingID}); saveErr != nil {
+		// Persist the private key generated for this CSR alongside the pending ID
+		// (Issue #3780 follow-up) so a restart during the quarantine poll window can
+		// resume this same key rather than losing the ability to pair an eventually
+		// claimed certificate with a usable identity.
+		pendingKeyPEM, pendingKeyErr := httpClient.PendingClientKeyPEM()
+		if pendingKeyErr != nil {
+			logger.Warn("Failed to retrieve steward private key for pending-registration persistence; a restart during quarantine will require re-registration",
+				"error", logging.SanitizeLogValue(pendingKeyErr.Error()))
+		}
+		if saveErr := savePendingState(certStoreDir, PendingState{PendingID: pendingResp.PendingID, ClientKeyPEM: pendingKeyPEM}); saveErr != nil {
 			logger.Warn("Failed to persist pending registration ID; restart will re-register", "error", saveErr)
 		}
 		approved, pollErr := pollForApproval(ctx, httpClient, pendingResp.PendingID, token,
@@ -1222,10 +1265,11 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		Group:            regResp.Group,
 		TransportAddress: regResp.TransportAddress,
 		ClientCert:       regResp.ClientCert,
-		ClientKey:        regResp.ClientKey,
+		ClientKey:        regResp.ClientKeyPEM,
 		CACert:           regResp.CACert,
 		ServerCert:       regResp.ServerCert,
 		SigningCert:      regResp.SigningCert,
+		IssuerChain:      regResp.IssuerChain,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
 	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
@@ -1286,10 +1330,11 @@ func pollForApproval(
 				Group:            resp.Group,
 				TransportAddress: resp.TransportAddress,
 				ClientCert:       resp.ClientCert,
-				ClientKey:        resp.ClientKey,
+				ClientKey:        resp.ClientKeyPEM,
 				CACert:           resp.CACert,
 				ServerCert:       resp.ServerCert,
 				SigningCert:      resp.SigningCert,
+				IssuerChain:      resp.IssuerChain,
 			}, nil
 
 		case "denied":
@@ -1325,6 +1370,16 @@ func connectWithApprovedRegistration(
 	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
+	// An approved registration with no private key cannot form a usable mTLS
+	// identity (Issue #3780 follow-up). This is a defense-in-depth check: the
+	// normal case is caught earlier by re-registering instead of resuming a
+	// pending record with no persisted key, but a caller reaching this function
+	// with an empty key must fail loudly rather than fall through to connecting
+	// without mTLS.
+	if reg.ClientKey == "" {
+		return nil, fmt.Errorf("approved registration carries no usable steward private key — the key generated for its CSR did not survive to this point (e.g. a restart during the quarantine poll window); re-run registration with a fresh token")
+	}
+
 	// Persist the identity record so that a subsequent restart can reconnect
 	// without HTTP re-registration (Issue #1719).
 	persistedID := StewardIdentity{
@@ -1382,7 +1437,7 @@ func connectWithApprovedRegistration(
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
 	// offline queue encryption (Issue #920).
-	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, logger)
+	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, reg.IssuerChain, logger)
 
 	// Build the composite DNA collector early so we can wire the executor into it
 	// after InitializeConfigExecutor creates it (Issue #2435).
@@ -1824,7 +1879,15 @@ func refreshAndConnect(
 // (for offline queue encryption key persistence). Both are best-effort — a nil
 // return from either does not prevent the steward from connecting, it just
 // disables the respective feature.
-func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
+//
+// issuerChainPEM is the PEM-concatenated chain from the client certificate's
+// direct issuer up to (but not including) the CA certificate (Issue #3778).
+// When non-empty it is appended after the leaf before import, so the stored
+// certificate presents the full chain during the ongoing gRPC-over-QUIC
+// transport's TLS handshake — tls.X509KeyPair (used by cert.Manager's
+// GetClientCertificate) builds Certificate.Certificate from every DER block in
+// the PEM, not just the first.
+func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM, issuerChainPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
 	// ── SecretStore ──────────────────────────────────────────────────────────
 	var secretStore secretsif.SecretStore
 	secretsProvider, err := secretsif.GetSecretProvider("steward")
@@ -1843,8 +1906,24 @@ func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger l
 		return nil, secretStore
 	}
 
-	certStorePath := defaultCertStoreDir()
+	certMgr := buildClientCertManagerAtPath(defaultCertStoreDir(), clientCertPEM, clientKeyPEM, issuerChainPEM, logger)
+	return certMgr, secretStore
+}
 
+// buildClientCertManagerAtPath initialises (or loads) a cert.Manager rooted at
+// certStorePath and imports the steward's client certificate into it, returning
+// nil on any failure (best-effort — see buildCertManagerAndSecretStore). Split
+// out from buildCertManagerAndSecretStore so certStorePath can be a test-owned
+// t.TempDir() rather than the hardcoded, platform-stable defaultCertStoreDir().
+//
+// issuerChainPEM is the PEM-concatenated chain from the client certificate's
+// direct issuer up to (but not including) the CA certificate (Issue #3778).
+// When non-empty it is appended after the leaf before import, so the stored
+// certificate presents the full chain during the ongoing gRPC-over-QUIC
+// transport's TLS handshake — tls.X509KeyPair (used by cert.Manager's
+// GetClientCertificate) builds Certificate.Certificate from every DER block in
+// the PEM, not just the first.
+func buildClientCertManagerAtPath(certStorePath, clientCertPEM, clientKeyPEM, issuerChainPEM string, logger logging.Logger) *cert.Manager {
 	// Try to load an existing local CA (created on a previous run).
 	certMgr, mgrErr := cert.NewManager(&cert.ManagerConfig{
 		StoragePath:    certStorePath,
@@ -1863,19 +1942,25 @@ func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger l
 		})
 		if mgrErr != nil {
 			logger.Warn("Failed to create cert.Manager; on-demand TLS cert loading disabled", "error", mgrErr)
-			return nil, secretStore
+			return nil
 		}
 	}
 
-	// Import the client cert+key from the registration response.
+	// Import the client cert+key from the registration response. The issuer
+	// chain, when present, is concatenated after the leaf so the stored
+	// certificate carries the full chain (Issue #3778/#3780).
+	fullChainPEM := clientCertPEM
+	if issuerChainPEM != "" {
+		fullChainPEM = clientCertPEM + issuerChainPEM
+	}
 	if _, impErr := certMgr.ImportCertificate(
-		[]byte(clientCertPEM), []byte(clientKeyPEM), cert.CertificateTypeClient,
+		[]byte(fullChainPEM), []byte(clientKeyPEM), cert.CertificateTypeClient,
 	); impErr != nil {
 		logger.Warn("Failed to import client certificate into cert.Manager", "error", impErr)
-		return nil, secretStore
+		return nil
 	}
 
-	return certMgr, secretStore
+	return certMgr
 }
 
 // defaultCertStoreDir returns the platform-specific stable directory for the

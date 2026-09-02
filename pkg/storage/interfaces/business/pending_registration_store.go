@@ -73,6 +73,12 @@ type PendingRegistrationEntry struct {
 	// protected on the steward host.
 	KeyProtectionLevel string
 
+	// CSRPEM is the PEM-encoded certificate signing request the steward submitted
+	// with the original registration POST (Issue #3780). The claim step signs this
+	// exact CSR's public key into the steward's client certificate — the controller
+	// never generates or holds a private key for this credential.
+	CSRPEM string
+
 	// Hostname is the best-effort DNS hostname hint seeded from registration.
 	Hostname string
 

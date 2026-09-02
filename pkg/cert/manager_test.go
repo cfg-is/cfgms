@@ -4,6 +4,8 @@ package cert
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -514,6 +516,56 @@ func TestManager_ImportExportCertificate(t *testing.T) {
 	assert.Equal(t, originalCert.CommonName, importedCert.CommonName)
 	assert.Equal(t, originalCert.SerialNumber, importedCert.SerialNumber)
 	assert.Equal(t, CertificateTypePublicAPI, importedCert.Type)
+}
+
+// TestManager_ImportCertificate_ECDSAClientKey reproduces the steward's real
+// registration import path (Issue #3780): the steward generates an ECDSA
+// P-256 keypair locally, submits a CSR, the controller signs the public key
+// via SignClientCertificateRequest, and the steward then imports the
+// controller-issued certificate together with its own locally-held private
+// key. Before this key type was ECDSA, every client key here was RSA
+// (GenerateClientCertificate); ImportCertificate must accept the new key type
+// too, not just the CA's own RSA key.
+func TestManager_ImportCertificate_ECDSAClientKey(t *testing.T) {
+	tempDir := t.TempDir()
+	manager, err := NewManager(&ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &CAConfig{
+			Organization: "Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+
+	// Mirrors features/steward/registration/client_http.go's
+	// generateStewardKeypair: the steward generates its own ECDSA P-256
+	// keypair locally; the manager never sees the private key at signing time.
+	stewardKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	signedCert, err := manager.SignClientCertificateRequest(&stewardKey.PublicKey, &ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, signedCert)
+	assert.Empty(t, signedCert.PrivateKeyPEM, "the controller never generates or sees a private key for this credential")
+
+	// Mirrors client_http.go's encodeECDSAPrivateKeyPEM: PKCS8-encode the
+	// locally-held private key so it can be paired with the issued cert.
+	keyDER, err := x509.MarshalPKCS8PrivateKey(stewardKey)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+	// This is buildClientCertManagerAtPath's real call in cmd/steward/main.go:
+	// import the controller-issued cert alongside the steward's own ECDSA key.
+	importedCert, err := manager.ImportCertificate(signedCert.CertificatePEM, keyPEM, CertificateTypeClient)
+	require.NoError(t, err, "ImportCertificate must accept an ECDSA client key, not just RSA")
+	require.NotNil(t, importedCert)
+	assert.Equal(t, "steward-001", importedCert.CommonName)
 }
 
 func TestManager_SaveCertificateFiles(t *testing.T) {

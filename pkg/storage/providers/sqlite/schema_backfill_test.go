@@ -676,9 +676,10 @@ const legacyCfgmsPendingRegistrationsSchema = `CREATE TABLE IF NOT EXISTS cfgms_
 	status        TEXT NOT NULL DEFAULT 'pending'
 )`
 
-// cfgmsPendingDeviceIdentityColumns are the five columns added by Issue #3403.
+// cfgmsPendingDeviceIdentityColumns are the five columns added by Issue #3403,
+// plus csr_pem added by Issue #3780.
 var cfgmsPendingDeviceIdentityColumns = []string{
-	"device_id", "identity_key_pub", "key_protection_level", "hostname", "platform",
+	"device_id", "identity_key_pub", "key_protection_level", "csr_pem", "hostname", "platform",
 }
 
 // TestBackfillCfgmsPendingRegistrationColumns_LegacyTable verifies that
@@ -718,6 +719,7 @@ func TestBackfillCfgmsPendingRegistrationColumns_LegacyTable(t *testing.T) {
 		DeviceID:           "dev-legacy",
 		IdentityKeyPub:     []byte{0x01, 0x02, 0x03},
 		KeyProtectionLevel: "tpm",
+		CSRPEM:             "-----BEGIN CERTIFICATE REQUEST-----\nlegacy\n-----END CERTIFICATE REQUEST-----",
 		Hostname:           "host-legacy",
 		Platform:           "linux",
 	}
@@ -728,6 +730,7 @@ func TestBackfillCfgmsPendingRegistrationColumns_LegacyTable(t *testing.T) {
 	assert.Equal(t, "dev-legacy", got.DeviceID)
 	assert.Equal(t, []byte{0x01, 0x02, 0x03}, got.IdentityKeyPub)
 	assert.Equal(t, "tpm", got.KeyProtectionLevel)
+	assert.Equal(t, entry.CSRPEM, got.CSRPEM)
 	assert.Equal(t, "host-legacy", got.Hostname)
 	assert.Equal(t, "linux", got.Platform)
 }

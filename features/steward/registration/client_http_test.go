@@ -3,9 +3,12 @@
 package registration
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -97,15 +100,18 @@ func TestRegister_ErrorStatus_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestRegistrationResponse_JSONFieldNames is a regression guard that ensures
-// the wire format of RegistrationResponse has not changed. The JSON field names
-// client_cert, client_key, and ca_cert are consumed by stewards in production;
-// any rename would silently break existing deployments.
+// TestRegistrationResponse_JSONFieldNames is a regression guard that pins the
+// wire format of RegistrationResponse. client_cert and ca_cert are consumed by
+// stewards in production; any rename would silently break existing deployments.
+// No client_key field exists on the wire at all (Issue #3780): the steward
+// generates its own keypair locally and the private key never crosses the wire,
+// so ClientKeyPEM (json:"-") must never appear in the marshaled response even
+// when populated.
 func TestRegistrationResponse_JSONFieldNames(t *testing.T) {
 	resp := RegistrationResponse{
-		ClientCert: "cert-pem",
-		ClientKey:  "key-pem",
-		CACert:     "ca-pem",
+		ClientCert:   "cert-pem",
+		ClientKeyPEM: "should-never-be-marshaled",
+		CACert:       "ca-pem",
 	}
 
 	data, err := json.Marshal(resp)
@@ -115,11 +121,75 @@ func TestRegistrationResponse_JSONFieldNames(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &raw))
 
 	assert.Contains(t, raw, "client_cert", "wire field client_cert must not be renamed")
-	assert.Contains(t, raw, "client_key", "wire field client_key must not be renamed")
 	assert.Contains(t, raw, "ca_cert", "wire field ca_cert must not be renamed")
+	assert.NotContains(t, raw, "client_key", "client_key must never be part of the wire response (Issue #3780)")
 	assert.Equal(t, "cert-pem", raw["client_cert"])
-	assert.Equal(t, "key-pem", raw["client_key"])
 	assert.Equal(t, "ca-pem", raw["ca_cert"])
+	assert.NotContains(t, string(data), "should-never-be-marshaled", "ClientKeyPEM must never be serialized")
+}
+
+// TestRegistrationRequest_CSRPEMFieldName pins the csr_pem wire field name
+// (Issue #3780): a rename would silently break the controller's decode.
+func TestRegistrationRequest_CSRPEMFieldName(t *testing.T) {
+	req := RegistrationRequest{CSRPEM: "csr-pem-data"}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.Equal(t, "csr-pem-data", raw["csr_pem"])
+}
+
+// TestRegister_PrivateKeyNeverInResponseBody proves the steward's registered
+// tls.Certificate private key never appears in any HTTP response body — not just
+// that no client_key JSON key exists, but that the raw private key bytes
+// themselves are never present anywhere in what the controller actually sent
+// (Issue #3780 AC). The controller under test here is a real pkg/cert CA signing
+// the exact CSR the real HTTPClient submits.
+func TestRegister_PrivateKeyNeverInResponseBody(t *testing.T) {
+	issuer := newIssuingCA(t)
+
+	var rawResponseBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req RegistrationRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		body, err := json.Marshal(RegistrationResponse{
+			Success:    true,
+			StewardID:  "steward-abc",
+			TenantID:   "test-tenant",
+			ClientCert: issuer.signCSR(t, req.CSRPEM, "steward-abc"),
+			CACert:     issuer.caPEM,
+		})
+		require.NoError(t, err)
+		rawResponseBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	regResp, _, err := client.Register(context.Background(), RegistrationRequest{Token: "test-token"})
+	require.NoError(t, err)
+	require.NotNil(t, regResp)
+	require.NotEmpty(t, regResp.ClientKeyPEM, "the locally generated key must be attached to the response")
+
+	tlsCert, err := tls.X509KeyPair([]byte(regResp.ClientCert), []byte(regResp.ClientKeyPEM))
+	require.NoError(t, err, "controller-issued cert and locally generated key must form a usable pair")
+
+	ecKey, ok := tlsCert.PrivateKey.(*ecdsa.PrivateKey)
+	require.True(t, ok, "the registered private key must be the ECDSA key generateStewardKeypair produced")
+	keyDER, err := x509.MarshalPKCS8PrivateKey(ecKey)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, rawResponseBody, "the raw wire response body must have been captured")
+	assert.False(t, bytes.Contains(rawResponseBody, keyDER),
+		"the raw private key material must never appear as a byte sequence anywhere in the response body")
+	assert.NotContains(t, string(rawResponseBody), "PRIVATE KEY",
+		"the wire response must never contain a PEM-encoded private key block")
+	assert.NotContains(t, string(rawResponseBody), "client_key",
+		"the wire response must never carry a client_key field")
 }
 
 func TestNewHTTPClientAlwaysVerifiesTLS(t *testing.T) {
@@ -287,9 +357,12 @@ func TestPollStatus_Denied_IsTerminal(t *testing.T) {
 	assert.Equal(t, "denied", resp.Status)
 }
 
-// TestPollStatus_ApprovedWithCerts verifies that a claimed response with cert fields is decoded.
+// TestPollStatus_ApprovedWithCerts verifies that a claimed response with cert fields is
+// decoded, and that ClientKeyPEM stays empty when this client never called Register (so
+// it never generated a keypair to pair with the claimed certificate) — the wire response
+// carries no client_key field at all (Issue #3780).
 func TestPollStatus_ApprovedWithCerts(t *testing.T) {
-	body := `{"status":"claimed","steward_id":"s1","tenant_id":"t1","client_cert":"CERT","client_key":"KEY","ca_cert":"CA"}`
+	body := `{"status":"claimed","steward_id":"s1","tenant_id":"t1","client_cert":"CERT","ca_cert":"CA"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -305,7 +378,7 @@ func TestPollStatus_ApprovedWithCerts(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, "claimed", resp.Status)
 	assert.Equal(t, "CERT", resp.ClientCert)
-	assert.Equal(t, "KEY", resp.ClientKey)
+	assert.Empty(t, resp.ClientKeyPEM, "ClientKeyPEM stays empty when PollStatus is called without a prior Register on this client")
 	assert.Equal(t, "CA", resp.CACert)
 	assert.Equal(t, "s1", resp.StewardID)
 }
@@ -324,6 +397,100 @@ func TestPollStatus_ErrorStatus_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, resp)
 	assert.Contains(t, err.Error(), "status poll failed with HTTP 401")
+}
+
+// TestPendingClientKeyPEM_NoRegisterCall_ReturnsError verifies that a client
+// which never called Register has no pending key to retrieve (Issue #3780
+// follow-up: cmd/steward's registerAndConnect calls this right after a 202 to
+// persist the key alongside the pending ID).
+func TestPendingClientKeyPEM_NoRegisterCall_ReturnsError(t *testing.T) {
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: "https://controller.example.com", Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	_, err = client.PendingClientKeyPEM()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Register has not been called")
+}
+
+// TestResumePendingClientKey_InvalidPEM_ReturnsError verifies that a corrupted
+// or non-PEM persisted key is rejected rather than silently ignored.
+func TestResumePendingClientKey_InvalidPEM_ReturnsError(t *testing.T) {
+	client, err := NewHTTPClient(&HTTPConfig{ControllerURL: "https://controller.example.com", Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	err = client.ResumePendingClientKey("not a pem block")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode persisted steward private key")
+}
+
+// TestResumePendingClientKey_RestoresKeyAcrossRestart_PollStatusPairsIt is the
+// regression test for the PR #3844 acceptance-review finding: a steward that
+// restarts while its registration is quarantined must not lose the ability to
+// pair an eventually claimed certificate with a usable private key.
+//
+// It drives the actual restart path with two independent HTTPClient instances
+// (client1 simulates the process that generated the CSR and died while
+// quarantined; client2 simulates the resumed process): client1's key is
+// extracted via PendingClientKeyPEM (what cmd/steward persists to
+// PendingState), then restored into client2 via ResumePendingClientKey (what
+// cmd/steward does on resume) before polling. The claimed certificate comes
+// from a real pkg/cert CA signing the CSR client1 actually submitted, so the
+// assertion that tls.X509KeyPair succeeds proves the resumed key is genuinely
+// usable — not just present.
+func TestResumePendingClientKey_RestoresKeyAcrossRestart_PollStatusPairsIt(t *testing.T) {
+	issuer := newIssuingCA(t)
+	logger := logging.NewLogger("debug")
+
+	var gotCSRPEM string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/register" {
+			var req RegistrationRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			gotCSRPEM = req.CSRPEM
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"pending_id":"pending-restart-1","steward_id":"steward-restart","status":"pending"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		body, err := json.Marshal(RegistrationStatusResponse{
+			Status:     "claimed",
+			StewardID:  "steward-restart",
+			ClientCert: issuer.signCSR(t, gotCSRPEM, "steward-restart"),
+			CACert:     issuer.caPEM,
+		})
+		require.NoError(t, err)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	// client1: the process that registers and is quarantined, then "dies".
+	client1, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logger})
+	require.NoError(t, err)
+	_, pendingResp, err := client1.Register(context.Background(), RegistrationRequest{Token: "reg-token"})
+	require.NoError(t, err)
+	require.NotNil(t, pendingResp)
+
+	persistedKeyPEM, err := client1.PendingClientKeyPEM()
+	require.NoError(t, err)
+	require.NotEmpty(t, persistedKeyPEM, "the key generated for the CSR must be retrievable for persistence")
+
+	// client2: an entirely new process instance resuming after restart. Without
+	// ResumePendingClientKey it would have no key to pair with the claim.
+	client2, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logger})
+	require.NoError(t, err)
+	require.NoError(t, client2.ResumePendingClientKey(persistedKeyPEM))
+
+	resp, err := client2.PollStatus(context.Background(), pendingResp.PendingID, "reg-token", 0, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "claimed", resp.Status)
+	require.NotEmpty(t, resp.ClientKeyPEM, "resumed client must pair the claimed certificate with the restored key")
+
+	tlsCert, err := tls.X509KeyPair([]byte(resp.ClientCert), []byte(resp.ClientKeyPEM))
+	require.NoError(t, err, "the controller-issued cert and the key restored across the simulated restart must form a usable pair")
+	_, ok := tlsCert.PrivateKey.(*ecdsa.PrivateKey)
+	require.True(t, ok, "the resumed private key must be the ECDSA key client1 originally generated")
 }
 
 // TestRegistrationRequest_IncludesDeviceIDAndIdentityKeyPub verifies that the new fields

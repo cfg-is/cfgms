@@ -490,6 +490,7 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 		Token:          token.Token,
 		DeviceID:       testValidDeviceID,
 		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -533,6 +534,7 @@ func TestHandleRegister_HookError_Quarantines(t *testing.T) {
 		Token:          token.Token,
 		DeviceID:       testValidDeviceID,
 		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
