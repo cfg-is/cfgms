@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -48,16 +49,26 @@ type PendingExpiryConfig struct {
 
 	// Logger is used for diagnostic output.
 	Logger logging.Logger
+
+	// LeaseJob claims the cluster-singleton lease this sweep runs behind (ADR-031
+	// Decision 4). A zero-value LeaseJob (nil Manager) runs every cycle
+	// unconditionally — the correct behavior for a single-node deployment.
+	// Callers construct this via ha.Manager.NewBackgroundLoopLease, which is
+	// nil-receiver-safe.
+	LeaseJob lease.SingletonJob
 }
 
 // PendingExpiryJob marks pending registration entries older than Timeout as
 // expired. It delegates to PendingRegistrationStore.ExpireStale and is
-// idempotent — sweeping already-expired entries is a no-op (Issue #1697).
+// idempotent — sweeping already-expired entries is a no-op (Issue #1697). In a
+// multi-node cluster, only the node holding LeaseJob's lease runs a given
+// sweep cycle (ADR-031 Decision 4).
 type PendingExpiryJob struct {
 	store         business.PendingRegistrationStore
 	timeout       time.Duration
 	checkInterval time.Duration
 	logger        logging.Logger
+	leaseJob      lease.SingletonJob
 	cancel        context.CancelFunc
 }
 
@@ -76,6 +87,7 @@ func NewPendingExpiryJob(cfg PendingExpiryConfig) *PendingExpiryJob {
 		timeout:       timeout,
 		checkInterval: checkInterval,
 		logger:        cfg.Logger,
+		leaseJob:      cfg.LeaseJob,
 	}
 }
 
@@ -107,7 +119,7 @@ func (j *PendingExpiryJob) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			j.expireStale(ctx)
+			j.leaseJob.RunIfLeader(ctx, j.expireStale)
 		}
 	}
 }

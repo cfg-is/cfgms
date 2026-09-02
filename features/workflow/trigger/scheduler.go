@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -24,6 +25,7 @@ type CronScheduler struct {
 	running           bool
 	stopChan          chan struct{}
 	tickerInterval    time.Duration
+	leaseJob          lease.SingletonJob
 }
 
 // scheduledTrigger represents a scheduled trigger with its next execution time
@@ -73,6 +75,24 @@ func (cs *CronScheduler) SetTickerInterval(interval time.Duration) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 	cs.tickerInterval = interval
+}
+
+// SetLeaseJob wires the cluster-singleton lease claim (ADR-031 Decision 4)
+// checkAndExecuteDueTriggers runs behind each tick. Safe to call at any time,
+// including after Start (the next tick reads the newly set value) — Start may
+// run before a caller can wire this. A never-set (zero-value) lease job runs
+// every cycle unconditionally, the correct behavior for a single-node
+// deployment.
+func (cs *CronScheduler) SetLeaseJob(job lease.SingletonJob) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	cs.leaseJob = job
+}
+
+func (cs *CronScheduler) getLeaseJob() lease.SingletonJob {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.leaseJob
 }
 
 // Start starts the cron scheduler
@@ -232,7 +252,9 @@ func (cs *CronScheduler) schedulerLoop(ctx context.Context) {
 			logger.InfoCtx(ctx, "Scheduler loop stopped due to stop signal")
 			return
 		case now := <-ticker.C:
-			cs.checkAndExecuteDueTriggers(ctx, now)
+			cs.getLeaseJob().RunIfLeader(ctx, func(ctx context.Context) {
+				cs.checkAndExecuteDueTriggers(ctx, now)
+			})
 		}
 	}
 }

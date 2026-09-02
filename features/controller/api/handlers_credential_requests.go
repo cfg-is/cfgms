@@ -867,8 +867,10 @@ func (s *Server) startCredentialRequestSweep() {
 			case <-s.stopCredentialRequestSweep:
 				return
 			case <-ticker.C:
-				s.sweepExpiredCredentialRequests(context.Background())
-				s.sweepOrphanedCollectedCertificates(context.Background())
+				s.credentialRequestSweepLease.RunIfLeader(context.Background(), func(ctx context.Context) {
+					s.sweepExpiredCredentialRequests(ctx)
+					s.sweepOrphanedCollectedCertificates(ctx)
+				})
 			}
 		}
 	}()

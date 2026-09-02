@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -94,6 +95,23 @@ func NewTriggerManager(
 		workflowTrigger: workflowTrigger,
 		triggers:        make(map[string]*Trigger),
 		executions:      make(map[string]*TriggerExecution),
+	}
+}
+
+// leaseJobSetter is implemented by Scheduler implementations that support a
+// cluster-singleton lease claim (ADR-031 Decision 4) — currently CronScheduler
+// only. Type-asserted rather than added to the Scheduler interface so test
+// doubles that implement Scheduler without lease support are unaffected.
+type leaseJobSetter interface {
+	SetLeaseJob(job lease.SingletonJob)
+}
+
+// SetSchedulerLease wires the cluster-singleton lease claim the scheduler's
+// due-trigger check runs behind, if the configured Scheduler supports one. A
+// scheduler that does not (e.g. a test double) makes this a no-op.
+func (tm *TriggerManagerImpl) SetSchedulerLease(job lease.SingletonJob) {
+	if setter, ok := tm.scheduler.(leaseJobSetter); ok {
+		setter.SetLeaseJob(job)
 	}
 }
 

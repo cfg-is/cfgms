@@ -108,7 +108,28 @@ type Manager struct {
 	// often enough relative to the lease TTL to keep leaseManager's derived
 	// SafetyMargin() meaningful.
 	leaseRenewalInterval time.Duration
+
+	// backgroundLoopLeaseManager, when non-nil, backs SingletonJobs returned by
+	// NewBackgroundLoopLease (ADR-031 Decision 4) — a distinct lease population
+	// from leaseManager (cluster leadership): background loops (sweeps, expiry
+	// jobs, schedulers) contend under their own lease names, sized for typical
+	// sweep cadences (backgroundLoopLeaseTTL/backgroundLoopRenewInterval) rather
+	// than cfg.Cluster.ElectionTimeout. Wired alongside leaseManager from the
+	// same store by setLeaseStoreLocked; nil wherever leaseManager is nil.
+	backgroundLoopLeaseManager *lease.Manager
 }
+
+// backgroundLoopLeaseTTL and backgroundLoopRenewInterval configure every lease
+// NewBackgroundLoopLease constructs. A single fixed configuration (independent
+// of any one loop's own check interval) keeps the population's derived
+// SafetyMargin uniform and simple to reason about: a dead holder's lease frees
+// up within backgroundLoopLeaseTTL regardless of which loop it names, and
+// RunIfLeader's per-cycle TryAcquire renews it for a live holder on every tick
+// that lands within the TTL, whatever that loop's own cadence.
+const (
+	backgroundLoopLeaseTTL      = 90 * time.Second
+	backgroundLoopRenewInterval = 20 * time.Second
+)
 
 // NewManager creates a new HA manager.
 // certManager is required in ClusterMode to mint the mTLS client certificate that
@@ -536,6 +557,42 @@ func (m *Manager) GetTerm() uint64 {
 	return 0
 }
 
+// NewBackgroundLoopLease constructs a lease.SingletonJob for the cluster-
+// singleton background loop named name (ADR-031 Decision 4: leadership shrinks
+// to singleton scheduling). Background loops (sweeps, expiry jobs, schedulers)
+// are a distinct lease population from the cluster leadership lease
+// (clusterLeadershipLeaseName / HasLeadership()): each loop contends
+// independently under its own lease name, using backgroundLoopLeaseTTL/
+// backgroundLoopRenewInterval rather than cfg.Cluster.ElectionTimeout.
+//
+// The returned SingletonJob has a nil lease.Manager — so RunIfLeader always
+// executes fn — whenever this deployment has no shared lease substrate to
+// arbitrate on: SingleServerMode has one node and nothing to exclude (ADR-029
+// Decision 4), and any other non-ClusterMode deployment has no node-shared
+// store wired at all (see usesLeaseAuthority). This mirrors HasLeadership()'s
+// own fail-to-unconditional SingleServerMode short-circuit, so a background
+// loop that gates on this behaves identically to today's ungated loop on every
+// deployment that is not a multi-node cluster.
+//
+// Safe to call on a nil *Manager — many composition roots pass a nil
+// *ha.Manager for OSS single-node deployments (the same convention as the
+// existing "nil haManager = OSS single-node = always leader" checks), and
+// every background loop's call site can therefore use this method
+// unconditionally rather than repeating that nil check itself.
+func (m *Manager) NewBackgroundLoopLease(name string, logger logging.Logger) (lease.SingletonJob, error) {
+	if m == nil {
+		return lease.NewSingletonJob(nil, name, "single-node", 0, 0, logger)
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.backgroundLoopLeaseManager == nil {
+		return lease.NewSingletonJob(nil, name, m.nodeInfo.ID, 0, 0, logger)
+	}
+	return lease.NewSingletonJob(m.backgroundLoopLeaseManager, name, m.nodeInfo.ID, backgroundLoopLeaseTTL, backgroundLoopRenewInterval, logger)
+}
+
 // SetLeaseStore replaces the S3 database-lease store (pkg/lease, ADR-031 Decision 5)
 // that backs HasLeadership()/GetTerm() in ClusterMode. It is an override, not the
 // primary wiring: NewManager already wires the store supplied by the StorageManager
@@ -603,8 +660,14 @@ func (m *Manager) setLeaseStoreLocked(store business.LeaseStore) error {
 		return fmt.Errorf("failed to construct lease manager: %w", err)
 	}
 
+	blLM, err := lease.NewManager(store, backgroundLoopLeaseTTL, backgroundLoopRenewInterval, backgroundLoopRenewInterval)
+	if err != nil {
+		return fmt.Errorf("failed to construct background-loop lease manager: %w", err)
+	}
+
 	m.leaseManager = lm
 	m.leaseRenewalInterval = renewalInterval
+	m.backgroundLoopLeaseManager = blLM
 	return nil
 }
 

@@ -83,6 +83,7 @@ import (
 	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -686,6 +687,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
 	}
 	logger.Info("HA manager initialized successfully")
+
+	// ADR-031 Decision 4: wire the DNA storage maintenance sweep's cluster-
+	// singleton lease claim now that haManager exists. dnaStorageManager is
+	// constructed earlier (before haManager, which itself requires certManager),
+	// so its maintenance goroutine may already be running — SetMaintenanceLease
+	// is safe to call at any time; the next tick reads the newly set lease job.
+	if dnaStorageManager != nil {
+		maintenanceLeaseJob, err := haManager.NewBackgroundLoopLease("controller-dna-storage-maintenance", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct DNA storage maintenance lease job: %w", err)
+		}
+		dnaStorageManager.SetMaintenanceLease(maintenanceLeaseJob)
+	}
 
 	// Initialize registration token store for HTTP-based registration (Story #263)
 	var regStore pkgRegistration.Store
@@ -1463,15 +1477,22 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #1697: Create background expiry jobs.
 	// IPTrustExpiryJob is only wired when the IPTrustStore is available (database provider).
 	// PendingExpiryJob is only wired when the PendingRegistrationStore is available.
+	// ADR-031 Decision 4: each sweep claims its own cluster-singleton lease.
+	// NewBackgroundLoopLease is nil-receiver-safe.
 	var ipTrustExpiryJob *controllerRegistration.IPTrustExpiryJob
 	if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
 		darkWindow := cfg.Registration.GetIPTrustDarkWindow()
+		ipTrustLeaseJob, err := haManager.NewBackgroundLoopLease("controller-ip-trust-expiry", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct IP-trust expiry lease job: %w", err)
+		}
 		ipTrustExpiryJob = controllerRegistration.NewIPTrustExpiryJob(controllerRegistration.IPTrustExpiryConfig{
 			Store:         ipTrustStore,
 			TenantStore:   storageManager.GetTenantStore(),
 			DarkWindow:    darkWindow,
 			CheckInterval: time.Hour,
 			Logger:        logger,
+			LeaseJob:      ipTrustLeaseJob,
 		})
 		logger.Info("IP-trust expiry job created (Issue #1697)", "dark_window", darkWindow)
 	}
@@ -1479,11 +1500,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var pendingExpiryJob *controllerRegistration.PendingExpiryJob
 	if pendingStore := storageManager.GetPendingRegistrationStore(); pendingStore != nil {
 		pendingTimeout := cfg.Registration.GetPendingReviewTimeout()
+		pendingLeaseJob, err := haManager.NewBackgroundLoopLease("controller-pending-registration-expiry", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct pending-registration expiry lease job: %w", err)
+		}
 		pendingExpiryJob = controllerRegistration.NewPendingExpiryJob(controllerRegistration.PendingExpiryConfig{
 			Store:         pendingStore,
 			Timeout:       pendingTimeout,
 			CheckInterval: time.Hour,
 			Logger:        logger,
+			LeaseJob:      pendingLeaseJob,
 		})
 		logger.Info("Pending-registration expiry job created (Issue #1697)", "timeout", pendingTimeout)
 	}
@@ -1577,6 +1603,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
 		logger.Info("Workflow engine wired to HTTP API server")
+
+		// ADR-031 Decision 4: cluster-singleton lease claim for the cron
+		// scheduler's due-trigger check, so a multi-node cluster fires each due
+		// trigger once rather than once per node.
+		schedulerLeaseJob, err := haManager.NewBackgroundLoopLease("controller-workflow-trigger-scheduler", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct workflow-trigger scheduler lease job: %w", err)
+		}
+		triggerMgr.SetSchedulerLease(schedulerLeaseJob)
 	}
 
 	// Wire Tier-2 observe-module manifest provider from the module cache.
@@ -1619,7 +1654,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				// not configure (#3400 condition).
 				return nil, fmt.Errorf("registration.workflow %q requires PendingRegistrationStore but provider %q does not supply it", workflowName, storageManager.GetProviderName())
 			}
-			hook := api.NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logger)
+			manualReviewLeaseJob, err := haManager.NewBackgroundLoopLease("controller-manual-review-pending-expiry", logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to construct manual-review expiry lease job: %w", err)
+			}
+			hook := api.NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logger, manualReviewLeaseJob)
 			httpServer.SetApprovalHook(hook)
 			srv.manualReviewHook = hook
 			logger.Info("Manual-review registration approval hook wired (Issue #1599)")
@@ -1644,7 +1683,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #666: Wire git-sync component when a data directory is configured.
 	// The syncer writes through to the controller's config store.
 	if cfg.DataDir != "" {
-		gitSyncer, webhookHandler := initializeGitSync(cfg.DataDir, storageManager.GetConfigStore(), logger)
+		gitSyncer, webhookHandler := initializeGitSync(cfg.DataDir, storageManager.GetConfigStore(), logger, haManager)
 		if gitSyncer != nil {
 			srv.gitSyncer = gitSyncer
 			srv.webhookHandler = webhookHandler // Issue #681: retain for shutdown drain
@@ -1671,6 +1710,7 @@ func initializeGitSync(
 	dataDir string,
 	configStore cfgconfig.ConfigStore,
 	logger logging.Logger,
+	haManager *ha.Manager,
 ) (*gitsync.Syncer, *gitsync.WebhookHandler) {
 	workDir := filepath.Join(dataDir, ".gitsync", "repos")
 	bindingStore, err := gitsync.NewBindingStore(dataDir)
@@ -1678,7 +1718,14 @@ func initializeGitSync(
 		logger.Warn("git-sync: failed to create binding store, git-sync disabled", "error", err)
 		return nil, nil
 	}
-	syncer, err := gitsync.NewSyncer(configStore, bindingStore, workDir, logger)
+	// ADR-031 Decision 4: each scope's polling cycle claims its own
+	// cluster-singleton lease (many independent per-scope singletons, not one
+	// global sweep — see gitsync.LeaseJobFactory). NewBackgroundLoopLease is
+	// nil-receiver-safe.
+	leaseJobFactory := func(name string) (lease.SingletonJob, error) {
+		return haManager.NewBackgroundLoopLease(name, logger)
+	}
+	syncer, err := gitsync.NewSyncer(configStore, bindingStore, workDir, logger, gitsync.WithLeaseJobFactory(leaseJobFactory))
 	if err != nil {
 		logger.Warn("git-sync: failed to create syncer, git-sync disabled", "error", err)
 		return nil, nil

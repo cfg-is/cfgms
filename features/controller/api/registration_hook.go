@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -280,32 +281,41 @@ var ManualReviewApprovalHookStoreRequirements = []interfaces.StoreRequirement{
 // in a restricted state until an operator approves or denies via the CLI (#1522-B).
 //
 // A background goroutine sweeps for expired records every minute and marks them
-// as timed-out so operators can distinguish expired requests from active ones.
+// as timed-out so operators can distinguish expired requests from active ones. In
+// a multi-node cluster, only the node holding leaseJob's lease runs a given sweep
+// cycle (ADR-031 Decision 4).
 type ManualReviewApprovalHook struct {
-	store   business.PendingRegistrationStore
-	timeout time.Duration
-	logger  logging.Logger
-	cancel  context.CancelFunc
-	done    chan struct{}
+	store    business.PendingRegistrationStore
+	timeout  time.Duration
+	logger   logging.Logger
+	leaseJob lease.SingletonJob
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 // NewManualReviewApprovalHook creates a ManualReviewApprovalHook and starts
 // the background expiry goroutine. Call Stop() when the server shuts down.
+// leaseJob claims the cluster-singleton lease the expiry sweep runs behind; a
+// zero-value lease.SingletonJob (nil Manager) runs every cycle unconditionally
+// — the correct behavior for a single-node deployment. Callers construct it via
+// ha.Manager.NewBackgroundLoopLease, which is nil-receiver-safe.
 func NewManualReviewApprovalHook(
 	store business.PendingRegistrationStore,
 	timeout time.Duration,
 	logger logging.Logger,
+	leaseJob lease.SingletonJob,
 ) *ManualReviewApprovalHook {
 	if timeout <= 0 {
 		timeout = defaultManualReviewTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &ManualReviewApprovalHook{
-		store:   store,
-		timeout: timeout,
-		logger:  logger,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		store:    store,
+		timeout:  timeout,
+		logger:   logger,
+		leaseJob: leaseJob,
+		cancel:   cancel,
+		done:     make(chan struct{}),
 	}
 	go h.runExpiry(ctx)
 	return h
@@ -352,7 +362,7 @@ func (h *ManualReviewApprovalHook) runExpiry(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.expireTimedOut(ctx)
+			h.leaseJob.RunIfLeader(ctx, h.expireTimedOut)
 		}
 	}
 }

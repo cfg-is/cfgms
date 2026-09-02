@@ -31,6 +31,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -49,6 +50,34 @@ type Manager struct {
 	compressor Compressor
 	indexer    Indexer
 	pruneWg    sync.WaitGroup
+
+	// maintenanceLeaseMu guards maintenanceLease, read by startMaintenanceTasks'
+	// ticker loop and written by SetMaintenanceLease. NewManager starts that loop
+	// immediately (many call sites construct a Manager before any *ha.Manager
+	// exists), so the field defaults to the zero lease.SingletonJob (nil Manager,
+	// always runs) and callers that need cluster-singleton gating wire it in
+	// shortly after construction via SetMaintenanceLease (ADR-031 Decision 4).
+	maintenanceLeaseMu sync.RWMutex
+	maintenanceLease   lease.SingletonJob
+}
+
+// SetMaintenanceLease wires the cluster-singleton lease claim
+// (ADR-031 Decision 4) startMaintenanceTasks' ticker loop runs each cycle
+// behind. Safe to call at any time, including while the maintenance goroutine
+// is already running (NewManager starts it before a caller can wire this) —
+// the next tick reads the newly set value. A never-set (zero-value) lease
+// runs every cycle unconditionally, the correct behavior for a single-node
+// deployment.
+func (m *Manager) SetMaintenanceLease(job lease.SingletonJob) {
+	m.maintenanceLeaseMu.Lock()
+	defer m.maintenanceLeaseMu.Unlock()
+	m.maintenanceLease = job
+}
+
+func (m *Manager) getMaintenanceLease() lease.SingletonJob {
+	m.maintenanceLeaseMu.RLock()
+	defer m.maintenanceLeaseMu.RUnlock()
+	return m.maintenanceLease
 }
 
 // Config defines the configuration for DNA storage management.
@@ -657,8 +686,11 @@ func (m *Manager) startMaintenanceTasks() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Run periodic maintenance
-		m.runMaintenance()
+		// Run periodic maintenance, behind this cycle's cluster-singleton lease
+		// claim (ADR-031 Decision 4) — see SetMaintenanceLease.
+		m.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
+			m.runMaintenance()
+		})
 	}
 }
 

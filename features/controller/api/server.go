@@ -46,6 +46,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/registration"
@@ -184,6 +185,7 @@ type Server struct {
 	credentialRequestMu             sync.Mutex                               // Issue #3717: serializes enrolment-token spend-then-lodge on this node
 	stopCredentialRequestSweep      chan struct{}                            // Issue #3717: signals runCredentialRequestExpirySweep to exit
 	credentialRequestSweepDone      chan struct{}                            // Issue #3717: closed when the sweep goroutine exits
+	credentialRequestSweepLease     lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the credential-request/enrolment-token expiry sweep
 	credentialRequestCollectLimiter *sourceRateLimiter                       // Issue #3719: per-source rate limit on credential-request collect
 	credentialRequestCollectMu      sync.Mutex                               // Issue #3719: serializes the approved->collected compare-and-set
 	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
@@ -195,6 +197,7 @@ type Server struct {
 	cliLoginCollectMu               sync.Mutex                               // Issue #3721: serializes the approved->collected compare-and-set
 	stopCliLoginSweep               chan struct{}                            // Issue #3721: signals the cli-login expiry sweep to exit
 	cliLoginSweepDone               chan struct{}                            // Issue #3721: closed when the cli-login sweep goroutine exits
+	cliLoginSweepLease              lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the cli-login expiry sweep
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -288,6 +291,19 @@ func New(
 		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
 	}
 
+	// ADR-031 Decision 4: cluster-singleton lease claims for the two expiry
+	// sweeps below. NewBackgroundLoopLease is nil-receiver-safe — a nil
+	// haManager (OSS single-node) yields a SingletonJob that always runs,
+	// matching this sweep's pre-#3762 unconditional behavior.
+	credentialRequestSweepLease, err := haManager.NewBackgroundLoopLease("controller-credential-request-expiry", logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct credential-request expiry lease job: %w", err)
+	}
+	cliLoginSweepLease, err := haManager.NewBackgroundLoopLease("controller-cli-login-request-expiry", logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct cli-login expiry lease job: %w", err)
+	}
+
 	// Issue #1695: Parse TrustedProxies CIDRs once at startup so per-request
 	// extractSourceIP calls never parse strings.
 	var trustedProxies []net.IPNet
@@ -339,6 +355,7 @@ func New(
 		credentialRequestLodgeLimiter: newSourceRateLimiter(20, time.Minute),
 		stopCredentialRequestSweep:    make(chan struct{}),
 		credentialRequestSweepDone:    make(chan struct{}),
+		credentialRequestSweepLease:   credentialRequestSweepLease,
 		// Issue #3719: collect is polled by a waiting machine, so its budget is more
 		// generous than lodge's one-shot allowance.
 		credentialRequestCollectLimiter: newSourceRateLimiter(30, time.Minute),
@@ -348,6 +365,7 @@ func New(
 		cliLoginCollectLimiter: newSourceRateLimiter(30, time.Minute),
 		stopCliLoginSweep:      make(chan struct{}),
 		cliLoginSweepDone:      make(chan struct{}),
+		cliLoginSweepLease:     cliLoginSweepLease,
 	}
 
 	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
