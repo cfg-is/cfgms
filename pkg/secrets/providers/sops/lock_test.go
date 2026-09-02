@@ -93,6 +93,13 @@ func TestCASLockDir_NeverReturnsSharedTempDir(t *testing.T) {
 	assert.True(t, strings.HasPrefix(dir, explicit))
 }
 
+// The retry-classification coverage is split across three files because the
+// syscall error constants it turns on are themselves build-tagged. This file holds
+// the assertions that must hold on every platform; the two platform halves —
+// including the Windows ERROR_ACCESS_DENIED true-positive that is the entire
+// reason lock_windows.go exists — live in lock_windows_test.go and
+// lock_other_test.go alongside the implementations they cover (Issue #3817).
+
 // TestIsRetryableCASLockError_ExistIsRetryable proves the ordinary case — the lock
 // file already exists — is classified as retryable on every platform, exactly as
 // before this story: os.IsExist(err) alone drove the acquire loop's poll-vs-fail
