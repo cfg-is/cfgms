@@ -335,32 +335,47 @@ func TestCrossNode_CredentialRenewal_ConcurrentTransition(t *testing.T) {
 	fpB, _ := publicKeyFingerprint(newCSRB.RawSubjectPublicKeyInfo)
 
 	var wg sync.WaitGroup
-	var okA, okB bool
+	var issuedA, issuedB *cert.Certificate
 	var errA, errB error
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _, okA, errA = nodeA.renewBoundCertificate(context.Background(), issuedOld.SerialNumber, newCSRA, fpA, nil, "renewer-a")
+		issuedA, _, _, errA = nodeA.renewBoundCertificate(context.Background(), issuedOld.SerialNumber, newCSRA, fpA, nil, "renewer-a")
 	}()
 	go func() {
 		defer wg.Done()
-		_, _, okB, errB = nodeB.renewBoundCertificate(context.Background(), issuedOld.SerialNumber, newCSRB, fpB, nil, "renewer-b")
+		issuedB, _, _, errB = nodeB.renewBoundCertificate(context.Background(), issuedOld.SerialNumber, newCSRB, fpB, nil, "renewer-b")
 	}()
 	wg.Wait()
-	_ = okA
-	_ = okB
 
-	successes, conflicts := 0, 0
-	for _, err := range []error{errA, errB} {
-		switch err {
-		case nil:
+	// Two goroutines started together are not guaranteed to overlap: on a loaded
+	// runner one can complete the whole renewal — claim, sign, bind, revoke, unbind,
+	// release — before the other reaches its claim. Both interleavings must refuse the
+	// second renewal, for different reasons, and both are asserted here rather than
+	// only the one a fast machine happens to produce:
+	//   - overlapping: the loser cannot take the claim -> errCredentialRenewalInProgress
+	//   - serialized:  the loser takes the claim, then finds under it that the serial is
+	//                  no longer bound (the winner revoked and unbound it)
+	//                  -> errCredentialRenewalNoAccountBinding
+	// What must never happen in either is a second success, which is a second live
+	// certificate minted for one renewal of one serial.
+	results := []struct {
+		issued *cert.Certificate
+		err    error
+	}{{issuedA, errA}, {issuedB, errB}}
+	successes, refusals := 0, 0
+	for _, r := range results {
+		switch {
+		case r.err == nil:
 			successes++
-		case errCredentialRenewalInProgress:
-			conflicts++
+			assert.NotNil(t, r.issued, "a successful renewal must return the certificate it issued")
+		case errors.Is(r.err, errCredentialRenewalInProgress), errors.Is(r.err, errCredentialRenewalNoAccountBinding):
+			refusals++
+			assert.Nil(t, r.issued, "a refused renewal must never have signed a certificate: %v", r.err)
 		}
 	}
 	assert.Equal(t, 1, successes, "exactly one concurrent renewal must claim and sign a new certificate: errA=%v errB=%v", errA, errB)
-	assert.Equal(t, 1, conflicts, "the race loser must observe errCredentialRenewalInProgress before ever signing a new certificate")
+	assert.Equal(t, 1, refusals, "the race loser must be refused before signing anything, never succeed: errA=%v errB=%v", errA, errB)
 
 	final, err := nodeB.getAccount(context.Background(), "cross-node-renewal")
 	require.NoError(t, err)
@@ -371,6 +386,80 @@ func TestCrossNode_CredentialRenewal_ConcurrentTransition(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, newSerials, "exactly one new certificate must ever have been bound for this renewal, never two")
+}
+
+// TestCrossNode_CredentialRenewal_SecondAttemptAfterWinnerReleases pins the outcome
+// invariant behind the renewal claim, deterministically and without depending on how
+// two goroutines interleave: once a serial has been renewed, a second renewal of that
+// same serial on another node is refused and mints nothing — no matter that the claim
+// is by then long released. The claim record is a mutex, not a rate limiter; the winner
+// deletes it on return, so nothing about "the claim is free again" may be read as
+// permission to renew a serial that has already been renewed, revoked and unbound.
+//
+// nodeB resolves the binding before nodeA renews, so nodeB's account cache holds the
+// pre-renewal state and the refusal has to come from durable re-resolution rather than
+// from nodeB happening not to know about the old binding.
+//
+// This is the sequential form. The racing form — where nodeB resolves the binding and
+// is then descheduled until after nodeA has released the claim — is what
+// TestCrossNode_CredentialRenewal_ConcurrentTransition samples; that interleaving is
+// scheduler-dependent and cannot be forced from a test, which is precisely why
+// renewBoundCertificate re-resolves the account under the claim instead of before it
+// (Issue #3775).
+func TestCrossNode_CredentialRenewal_SecondAttemptAfterWinnerReleases(t *testing.T) {
+	nodeA, nodeB := setupTwoNodeSharedStoreServers(t)
+	nodeA.certManager = newTestCertManager(t)
+	nodeB.certManager = newTestCertManager(t)
+
+	rec := postAccount(t, nodeA, testAdminPrincipal(), AccountRequest{Username: "renewal-after-release"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	acct, err := nodeA.getAccount(context.Background(), "renewal-after-release")
+	require.NoError(t, err)
+
+	oldParsed, err := parseAndVerifyCSR(generateTestCSR(t, "renewal-after-release-old"))
+	require.NoError(t, err)
+	oldCfg := clientCertConfigForTest(t, acct)
+	issuedOld, err := nodeA.certManager.SignClientCertificateRequest(oldParsed.PublicKey, &oldCfg)
+	require.NoError(t, err)
+	oldFP, _ := publicKeyFingerprint(oldParsed.RawSubjectPublicKeyInfo)
+	require.NoError(t, nodeA.bindCertOnAccount(context.Background(), acct.Username, CertBinding{
+		Serial:      issuedOld.SerialNumber,
+		Fingerprint: oldFP,
+		BoundAt:     time.Now().UTC(),
+	}, "test-setup"))
+
+	// nodeB resolves the binding before nodeA renews, exactly as a losing attempt
+	// would, leaving nodeB's in-memory account cache holding the old serial.
+	staleOnB, err := nodeB.getAccountByCertSerial(context.Background(), issuedOld.SerialNumber)
+	require.NoError(t, err)
+	require.NotNil(t, staleOnB, "nodeB must start from the pre-renewal state this test is about")
+
+	winnerCSR, err := parseAndVerifyCSR(generateTestCSR(t, "renewal-after-release-winner"))
+	require.NoError(t, err)
+	winnerFP, _ := publicKeyFingerprint(winnerCSR.RawSubjectPublicKeyInfo)
+	winner, _, _, err := nodeA.renewBoundCertificate(
+		context.Background(), issuedOld.SerialNumber, winnerCSR, winnerFP, nil, "renewer-a")
+	require.NoError(t, err)
+	require.NotNil(t, winner)
+
+	loserCSR, err := parseAndVerifyCSR(generateTestCSR(t, "renewal-after-release-loser"))
+	require.NoError(t, err)
+	loserFP, _ := publicKeyFingerprint(loserCSR.RawSubjectPublicKeyInfo)
+	loser, _, _, err := nodeB.renewBoundCertificate(
+		context.Background(), issuedOld.SerialNumber, loserCSR, loserFP, nil, "renewer-b")
+	require.ErrorIs(t, err, errCredentialRenewalNoAccountBinding,
+		"a renewal of a serial that has already been renewed, revoked and unbound must be refused, "+
+			"not permitted because the claim it lost has since been released")
+	assert.Nil(t, loser, "the refused renewal must never have signed a certificate")
+
+	final, err := nodeA.getAccount(context.Background(), "renewal-after-release")
+	require.NoError(t, err)
+	serials := make([]string, 0, len(final.CertBindings))
+	for _, b := range final.CertBindings {
+		serials = append(serials, b.Serial)
+	}
+	assert.Equal(t, []string{winner.SerialNumber}, serials,
+		"exactly one certificate must be bound after the renewal — the winner's")
 }
 
 // TestCrossNode_CredentialRenewal_AbandonedClaimIsRecoverable proves a renewal that

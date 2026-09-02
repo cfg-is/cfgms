@@ -110,9 +110,12 @@ func TestCompareAndSwapSecret_ExpiredRecordIsTakenOver(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
+	// The live-claim control uses a TTL no scheduling delay can consume. Asserting
+	// "still live" against a millisecond-scale TTL races the assertion itself rather
+	// than testing the expiry rule.
 	v1, ok, err := store.CompareAndSwapSecret(ctx, "claim", 0, &interfaces.SecretRequest{
 		Key: "claim", Value: "held", TenantID: "tenant-1", CreatedBy: "crashed-holder",
-		TTL: 20 * time.Millisecond,
+		TTL: time.Hour,
 	})
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -125,17 +128,27 @@ func TestCompareAndSwapSecret_ExpiredRecordIsTakenOver(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
+	// Replace it with the state a crash between claim and release leaves behind: the
+	// same record, still indexed, with an elapsed TTL.
+	v2, ok, err := store.CompareAndSwapSecret(ctx, "claim", v1, &interfaces.SecretRequest{
+		Key: "claim", Value: "held", TenantID: "tenant-1", CreatedBy: "crashed-holder",
+		TTL: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, 2, v2)
+
 	require.Eventually(t, func() bool {
 		_, err := store.GetSecret(ctx, "claim")
 		return err != nil
 	}, time.Second, 5*time.Millisecond, "the record must become unreadable once its TTL elapses")
 
-	v2, ok, err := store.CompareAndSwapSecret(ctx, "claim", 0, &interfaces.SecretRequest{
+	v3, ok, err := store.CompareAndSwapSecret(ctx, "claim", 0, &interfaces.SecretRequest{
 		Key: "claim", Value: "taken-over", TenantID: "tenant-1", CreatedBy: "retrier",
 	})
 	require.NoError(t, err)
 	require.True(t, ok, "an expired record must be taken over, never block a create-if-absent forever")
-	assert.Equal(t, 2, v2, "the takeover continues the record's version sequence")
+	assert.Equal(t, 3, v3, "the takeover continues the record's version sequence")
 
 	got, err := store.GetSecret(ctx, "claim")
 	require.NoError(t, err)

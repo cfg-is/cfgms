@@ -169,10 +169,13 @@ func TestCompareAndSwapSecret_ExpiredRecordIsTakenOver(t *testing.T) {
 	store := newTestSOPSStore(t, filepath.Join(base, "data"), writeTestKey(t, base))
 	ctx := context.Background()
 
-	// The claim is created with a TTL and then abandoned — exactly what a crash
-	// between claim and release leaves behind.
+	// The live-claim control is created with a TTL long enough that no scheduling
+	// delay can consume it. Asserting "still live" against a millisecond-scale TTL
+	// races the assertion itself: on a loaded runner the encrypt/write/decrypt work
+	// between the two calls can outlast the TTL, and the test then fails for a reason
+	// that has nothing to do with the property it names.
 	v1, ok, err := store.CompareAndSwapSecret(ctx, "tenant-a/claim", 0, &secretsif.SecretRequest{
-		Key: "claim", Value: "", TenantID: "tenant-a", CreatedBy: "node-a", TTL: 20 * time.Millisecond,
+		Key: "claim", Value: "", TenantID: "tenant-a", CreatedBy: "node-a", TTL: time.Hour,
 	})
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -185,12 +188,24 @@ func TestCompareAndSwapSecret_ExpiredRecordIsTakenOver(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok, "a live claim must block a concurrent claim")
 
+	// Now build the state a crash between claim and release leaves behind: the same
+	// record, still on disk, with an elapsed TTL. Constructed through the same
+	// compare-and-set the claim path uses, so nothing here reaches around the API
+	// under test. Only the wait for expiry depends on wall-clock time, and waiting is
+	// the one direction that cannot fail early.
+	v2, ok, err := store.CompareAndSwapSecret(ctx, "tenant-a/claim", v1, &secretsif.SecretRequest{
+		Key: "claim", Value: "", TenantID: "tenant-a", CreatedBy: "node-a", TTL: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, 2, v2)
+
 	require.Eventually(t, func() bool {
 		_, err := store.GetSecret(ctx, "tenant-a/claim")
 		return err != nil
 	}, time.Second, 5*time.Millisecond, "the claim must become unreadable once its TTL elapses")
 
-	v2, ok, err := store.CompareAndSwapSecret(ctx, "tenant-a/claim", 0, &secretsif.SecretRequest{
+	v3, ok, err := store.CompareAndSwapSecret(ctx, "tenant-a/claim", 0, &secretsif.SecretRequest{
 		Key: "claim", Value: "taken-over", TenantID: "tenant-a", CreatedBy: "node-b",
 	})
 	require.NoError(t, err)
@@ -198,13 +213,13 @@ func TestCompareAndSwapSecret_ExpiredRecordIsTakenOver(t *testing.T) {
 
 	// The version continues the record's own sequence rather than restarting at 1,
 	// so a caller holding the pre-expiry version cannot resurrect it.
-	assert.Equal(t, 2, v2)
+	assert.Equal(t, 3, v3)
 
 	got, err := store.GetSecret(ctx, "tenant-a/claim")
 	require.NoError(t, err)
 	assert.Equal(t, "taken-over", got.Value)
 
-	_, ok, err = store.CompareAndSwapSecret(ctx, "tenant-a/claim", v1, &secretsif.SecretRequest{
+	_, ok, err = store.CompareAndSwapSecret(ctx, "tenant-a/claim", v2, &secretsif.SecretRequest{
 		Key: "claim", Value: "stale-writer", TenantID: "tenant-a", CreatedBy: "node-a",
 	})
 	require.NoError(t, err)

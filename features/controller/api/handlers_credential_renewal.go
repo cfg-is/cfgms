@@ -187,9 +187,16 @@ func markersFromCertificate(peerCert *x509.Certificate) []string {
 // concurrent renewals of the same certificate, on this node or a different one,
 // cannot both succeed and leave two unrelated new certificates bound (Issue #3775).
 //
-// Re-resolves the account and the old binding fresh, before claiming, rather than
-// trusting the caller's earlier lookup — the same freshness discipline
-// claimCredentialRequestForCollection (#3719) uses for its compare-and-set.
+// The freshness check is deliberately *inside* the claim, not before it. An account
+// lookup that precedes the claim proves nothing once the claim is granted: a renewal
+// that read the old binding, then lost the race and stalled, still finds the claim
+// released by the time it retries — the winner deletes it on return — and would go on
+// to sign a second certificate for a serial that has already been renewed, revoked and
+// unbound. Two live certificates for one renewal is exactly the double-grant the claim
+// exists to prevent, so the account and the old binding are re-resolved from the
+// durable store *after* the claim is held, and a serial that is no longer bound is
+// refused (Issue #3775). The lookup before the claim exists only to derive the tenant
+// the claim record lives under.
 //
 // Returns oldSerialCleanedUp=false (with err=nil) when the new certificate is
 // issued and bound successfully but revoking or unbinding the old serial afterward
@@ -203,11 +210,36 @@ func (s *Server) renewBoundCertificate(
 	markers []string,
 	actingPrincipalID string,
 ) (issued *cert.Certificate, acct *account, oldSerialCleanedUp bool, err error) {
+	bound, err := s.getAccountByCertSerial(ctx, oldSerial)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to look up account bound to presented certificate: %w", err)
+	}
+	if bound == nil {
+		return nil, nil, false, errCredentialRenewalNoAccountBinding
+	}
+
+	claimTenant := accountStorageTenant(bound.TenantID)
+	claimed, err := s.claimCertificateRenewal(ctx, claimTenant, oldSerial, actingPrincipalID)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to claim certificate renewal: %w", err)
+	}
+	if !claimed {
+		return nil, nil, false, errCredentialRenewalInProgress
+	}
+	defer s.releaseCertificateRenewalClaim(ctx, claimTenant, oldSerial)
+
+	// Under the claim, and only now, is the account state this renewal acts on
+	// trustworthy. Anything read before the claim may already have been replaced by
+	// the renewal that held it.
 	fresh, err := s.getAccountByCertSerial(ctx, oldSerial)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to look up account bound to presented certificate: %w", err)
 	}
 	if fresh == nil {
+		// The serial is no longer bound to any account: either a concurrent revoke
+		// removed the binding, or an earlier renewal of this same serial completed
+		// while this attempt was waiting. There is nothing left to renew, and signing
+		// anything here would mint a second certificate for one renewal.
 		return nil, nil, false, errCredentialRenewalNoAccountBinding
 	}
 	var oldBinding *CertBinding
@@ -218,22 +250,12 @@ func (s *Server) renewBoundCertificate(
 		}
 	}
 	if oldBinding == nil {
-		// The account lookup found the serial a moment ago (getAccountByCertSerial
-		// scans CertBindings itself), but a concurrent revoke could have removed the
-		// binding between that lookup and the claim below. Same refusal as no account
-		// at all: there is nothing left to renew.
+		// getAccountByCertSerial resolves by scanning CertBindings, so this is
+		// unreachable via that path today; kept as a fail-closed guard so a future
+		// change to the resolution path cannot silently reach the signing call with
+		// no binding to carry forward.
 		return nil, nil, false, errCredentialRenewalNoAccountBinding
 	}
-
-	claimTenant := accountStorageTenant(fresh.TenantID)
-	claimed, err := s.claimCertificateRenewal(ctx, claimTenant, oldSerial, actingPrincipalID)
-	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to claim certificate renewal: %w", err)
-	}
-	if !claimed {
-		return nil, nil, false, errCredentialRenewalInProgress
-	}
-	defer s.releaseCertificateRenewalClaim(ctx, claimTenant, oldSerial)
 
 	newCert, err := s.certManager.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
 		CommonName:       fresh.Username,

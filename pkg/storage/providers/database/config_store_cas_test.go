@@ -26,7 +26,7 @@ func newCASTestStore(t *testing.T) *DatabaseConfigStore {
 	db := setupTestDatabase(t)
 	t.Cleanup(func() { _ = db.Close() })
 
-	store, err := NewDatabaseConfigStore(buildTestDSN(), getTestConfig())
+	store, err := NewDatabaseConfigStore(db, getTestConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store
