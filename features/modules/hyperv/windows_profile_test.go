@@ -5,6 +5,7 @@ package hyperv
 import (
 	"context"
 	"encoding/xml"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -25,14 +26,64 @@ var bannedPatterns = []string{
 	"eval",
 }
 
-// assertNoBannedPatterns fails the test if any banned runtime-composition marker
-// appears in the rendered output (case-insensitive).
+// commandBearingElements are the autounattend element names whose text can
+// carry runtime-executed command content (ADR-009 §6: FirstLogonCommands run a
+// fixed cmd.exe argument list built from these). Only their text is scanned for
+// banned patterns. <AdministratorPassword>/<AutoLogon> <Value> elements hold an
+// opaque, randomly generated per-VM password (features/modules/hyperv/windows_profile.go's
+// randomAdminPassword) and are deliberately excluded: the password alphabet can
+// legitimately spell a banned substring (e.g. "iex"), and that is password
+// entropy, not command text.
+var commandBearingElements = map[string]bool{
+	"CommandLine": true,
+	"Path":        true,
+	"Description": true,
+}
+
+// bannedPatternViolations parses rendered with encoding/xml and returns one
+// description per (banned pattern, command-bearing element) match found in the
+// text of a commandBearingElements element, case-insensitive. Text outside a
+// command-bearing element — notably the random AdministratorPassword/AutoLogon
+// password — is never inspected, so a generated password that happens to spell
+// a banned substring (e.g. "iex") produces no violation. An empty result means
+// the document is clean.
+func bannedPatternViolations(rendered string) []string {
+	dec := xml.NewDecoder(strings.NewReader(rendered))
+	var stack []string
+	var violations []string
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch tk := tok.(type) {
+		case xml.StartElement:
+			stack = append(stack, tk.Name.Local)
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		case xml.CharData:
+			if len(stack) == 0 || !commandBearingElements[stack[len(stack)-1]] {
+				continue
+			}
+			lower := strings.ToLower(string(tk))
+			for _, p := range bannedPatterns {
+				if strings.Contains(lower, p) {
+					violations = append(violations, fmt.Sprintf("banned pattern %q in element <%s>", p, stack[len(stack)-1]))
+				}
+			}
+		}
+	}
+	return violations
+}
+
+// assertNoBannedPatterns fails the test if any banned runtime-composition
+// marker appears in the text of a command-bearing element (case-insensitive).
 func assertNoBannedPatterns(t *testing.T, rendered string) {
 	t.Helper()
-	lower := strings.ToLower(rendered)
-	for _, p := range bannedPatterns {
-		assert.NotContainsf(t, lower, p, "rendered output must not contain banned pattern %q", p)
-	}
+	violations := bannedPatternViolations(rendered)
+	assert.Emptyf(t, violations, "rendered output must not contain banned patterns in command-bearing elements: %v", violations)
 }
 
 // renderWindowsAutounattend renders the default Windows profile's autounattend
@@ -226,6 +277,52 @@ func TestRandomAdminPassword_ComplexAndUnique(t *testing.T) {
 		assert.True(t, strings.ContainsAny(pw, "23456789"), "needs a digit")
 		assert.True(t, strings.ContainsAny(pw, "-_#%+="), "needs a symbol")
 	}
+}
+
+// TestAutounattend_NoBannedPatterns_PasswordWithBannedSubstringIgnored is the
+// REQUIRED TEST (Issue #3833 AC2): a per-VM AdminPassword that happens to spell
+// banned substrings ("iex", "eval") must not trip the scan, because
+// <AdministratorPassword>/<AutoLogon> <Value> text is not command-bearing. This
+// is what randomAdminPassword's alphabet can legitimately produce and was the
+// root cause of the flake — the fix is to exclude the element, never to narrow
+// the password alphabet (out of scope, see windows_profile.go).
+func TestAutounattend_NoBannedPatterns_PasswordWithBannedSubstringIgnored(t *testing.T) {
+	rendered := renderWindowsAutounattend(t, ProfileVars{
+		VMName:         "WIN-09",
+		OSFamily:       "windows",
+		CorrelationID:  "stw-win-09b",
+		ProductEdition: defaultWindowsEdition,
+		AdminPassword:  "Aa3-iexeval-Bb4-Cc5x",
+		EnrollToken:    "tok-jkl",
+		CAFingerprint:  "3344",
+	})
+	assert.Contains(t, rendered, "Aa3-iexeval-Bb4-Cc5x",
+		"AdminPassword containing banned substrings must still render into the answer file")
+	assertNoBannedPatterns(t, rendered)
+}
+
+// TestAutounattend_NoBannedPatterns_CommandBearingElementCaught is the REQUIRED
+// TEST (Issue #3833 AC3): injecting a banned marker into a command-bearing
+// element must still be caught by the scan, proving the element-scoped rewrite
+// still guards ADR-009 §6. It exercises bannedPatternViolations (the detection
+// logic assertNoBannedPatterns wraps) directly, rather than running
+// assertNoBannedPatterns against a real *testing.T, so a deliberately-tainted
+// fixture doesn't fail this test itself.
+func TestAutounattend_NoBannedPatterns_CommandBearingElementCaught(t *testing.T) {
+	rendered := renderWindowsAutounattend(t, ProfileVars{
+		VMName:         "WIN-10",
+		OSFamily:       "windows",
+		CorrelationID:  "stw-win-10",
+		ProductEdition: defaultWindowsEdition,
+		AdminPassword:  "Aa3-Bb4-Cc5-Dd6-Ee7",
+		EnrollToken:    "tok-ghi",
+		CAFingerprint:  "1122",
+	})
+	tainted := strings.Replace(rendered, "<CommandLine>", `<CommandLine>powershell -Command "evil"; `, 1)
+	require.NotEqual(t, rendered, tainted, "the rendered output must contain a <CommandLine> open tag for this test to be meaningful")
+
+	violations := bannedPatternViolations(tainted)
+	assert.NotEmpty(t, violations, "scan must detect a banned pattern injected into a command-bearing element")
 }
 
 // TestRenderSeedAnswerFile_WindowsRendersAutounattend exercises the module-level
