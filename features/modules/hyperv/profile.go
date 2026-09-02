@@ -89,7 +89,7 @@ type EnrollConfig struct {
 
 // UnattendProfile is the operator-authored, stored-config definition of an
 // unattended install. It is YAML-serialised into the controller's stored-config
-// backend under hyperv/profiles/<name> (ADR-003) and referenced from a VM
+// backend under hyperv-profiles/<name> (ADR-003) and referenced from a VM
 // source as profile://<name>. No secret VALUES live here — only secret key
 // names, which are resolved from the secrets provider at render time.
 type UnattendProfile struct {

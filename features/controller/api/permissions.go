@@ -269,6 +269,15 @@ var knownPermissions = map[string]bool{
 	// cfg-CLI Bearer session for the approving principal, gated at AssuranceStrong (see
 	// permissionAssurance).
 	"cli-login:approve": true,
+	// Hyper-V VM-provisioning profile CRUD (Issue #3785): gates
+	// /api/v1/hyperv/profiles. A profile is rendered and executed as root by
+	// cloud-init/preseed at guest first boot, so create/delete are
+	// code-execution-equivalent and carry AssuranceStrong + RequireUserPresence
+	// (see permissionAssurance, mirrors module:approve). read/list do not.
+	"hyperv-profile:create": true,
+	"hyperv-profile:read":   true,
+	"hyperv-profile:list":   true,
+	"hyperv-profile:delete": true,
 }
 
 // isKnownPermission reports whether p is a recognized permission ID.

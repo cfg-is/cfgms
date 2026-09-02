@@ -1365,6 +1365,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetRoleConfigStore(cs)
 	}
 
+	// Issue #3785: Wire the hyperv-profile store into the HTTP API server, same
+	// gap and same underlying store as the role-config wiring immediately above —
+	// the hyperv profile REST endpoints (`/api/v1/hyperv/profiles`,
+	// handlers_hyperv_profiles.go) read the API server's hypervProfileConfigStore
+	// field directly and 503 "Hyperv profile store not available" until it is set.
+	if cs := storageManager.GetConfigStore(); cs != nil {
+		httpServer.SetHypervProfileConfigStore(cs)
+	}
+
 	// Issue #3253: Wire entity graph provider and its ConfigStore desired-state
 	// writer into the HTTP API server. egProvider was constructed above and
 	// registered in openedStores; both Set* calls are unconditional because

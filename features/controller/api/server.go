@@ -153,6 +153,7 @@ type Server struct {
 	cleanupDone                     chan struct{}                            // closed when cleanup goroutine exits
 	closeOnce                       sync.Once                                // idempotent Close
 	roleConfigStore                 cfgconfig.ConfigStore                    // Issue #2543: role-config storage under role-policies namespace
+	hypervProfileConfigStore        cfgconfig.ConfigStore                    // Issue #3785: hyperv profile storage under hyperv-profiles namespace
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
@@ -1424,6 +1425,24 @@ func (s *Server) RoleConfigStore() cfgconfig.ConfigStore {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.roleConfigStore
+}
+
+// SetHypervProfileConfigStore wires the config store used to persist hyperv
+// VM-provisioning profiles under the hyperv-profiles namespace (Issue #3785).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetHypervProfileConfigStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hypervProfileConfigStore = cs
+}
+
+// HypervProfileConfigStore returns the wired hyperv-profile config store, or nil
+// when unwired. Exposed so controller startup wiring can be regression-tested
+// (the hyperv profile REST endpoints 503 when this is nil — Issue #3785).
+func (s *Server) HypervProfileConfigStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hypervProfileConfigStore
 }
 
 // SetRegistry wires the active-steward connection registry so that
