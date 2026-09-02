@@ -772,6 +772,14 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 		SecretStore:       c.secretStore,
 		StewardID:         stewardID,
 		ModuleDNASnapshot: moduleDNAStore,
+		// Explicit rather than relying on executor.go's 120s fallback (Issue
+		// #3801): now that sync_config's ApplyConfiguration/StartMonitors run
+		// under a context with no command-level deadline (see the
+		// CommandSyncConfig handler above), this is the real effective budget
+		// per module.Get/Set/verifyChanges call (ADR-012 §7). 120s comfortably
+		// covers observed cloud-image VM provisioning (25-27s) with headroom
+		// for slower hosts while still bounding a wedged module.
+		ModuleCallTimeoutSec: 120,
 	}
 	// Assign the emitter only when one was built. ExecutorConfig.EventEmitter is an
 	// interface, so assigning a nil *EventEmitter unconditionally would store a
@@ -1195,6 +1203,12 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 			}
 		}
 
+		// ctx here is executeCommand's 30s-unless-overridden deadline
+		// (handler.go:475) — fine for the fast config-retrieval leg inside
+		// syncConfigNow, but syncConfigNow itself derives an independent
+		// background context before ApplyConfiguration/StartMonitors so THAT
+		// deadline does not also cap every module.Get/Set/verifyChanges call
+		// (Issue #3801; see the comment at syncConfigNow's Apply step).
 		return c.syncConfigNow(ctx, cmd.ID, modules)
 	})
 
@@ -1548,7 +1562,22 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	c.lastConfigVersion = version
 	c.lastConfigMu.Unlock()
 
-	report, err := executor.ApplyConfiguration(ctx, configYAML, version)
+	// From here on, ApplyConfiguration/StartMonitors and everything that depends on
+	// their result run under an independent background context rather than the
+	// ctx this function was called with. Command-triggered syncs arrive with
+	// executeCommand's 30s-unless-overridden deadline (handler.go:475), meant for
+	// CommandExecuteScript/CommandOpenTerminal; letting it also bound
+	// module.Get/Set/verifyChanges inside ApplyConfiguration would silently cap
+	// every module call at whatever remained of that 30s instead of the executor's
+	// own per-call ModuleCallTimeoutSec budget (ADR-012 §7) — even though that
+	// budget defaults to 120s and is set explicitly at both NewExecutor call
+	// sites. Mirrors the on-connect sync path (:993, Issue #2480), which already
+	// passes context.Background() for this same reason. GetConfiguration above
+	// deliberately keeps the caller's ctx: that leg is a fast data-plane fetch we
+	// still want cut short by an expired or cancelled ctx (Issue #3801).
+	applyCtx := context.Background()
+
+	report, err := executor.ApplyConfiguration(applyCtx, configYAML, version)
 	if err != nil {
 		c.logger.Error("Configuration application failed", "command_id", commandID, "error", err)
 		if report != nil {
@@ -1563,7 +1592,7 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	// Start module monitors for the new config's resources (Issue #2435).
 	// Full stop+restart — previous engine (from any prior config push) is closed first.
 	// TriggerConvergence re-applies the SAME config and must NOT restart monitors.
-	if startErr := executor.StartMonitors(ctx, goConfig.Resources); startErr != nil {
+	if startErr := executor.StartMonitors(applyCtx, goConfig.Resources); startErr != nil {
 		c.logger.Warn("Failed to start module monitors after config sync", "error", startErr)
 	}
 
@@ -1591,7 +1620,7 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	collector := c.dnaCollector
 	c.mu.RUnlock()
 	if collector != nil {
-		if attrs, err := collector.CollectAttributes(ctx); err == nil && len(attrs) > 0 {
+		if attrs, err := collector.CollectAttributes(applyCtx); err == nil && len(attrs) > 0 {
 			c.setCurrentDNAFromAttrs(attrs)
 			currentDNA = attrs
 		} else if err != nil {
@@ -1607,7 +1636,7 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 		}
 	}
 	currentDNA["config_hash"] = configHash
-	if pubErr := c.PublishDNAUpdate(ctx, currentDNA, configHash, ""); pubErr != nil {
+	if pubErr := c.PublishDNAUpdate(applyCtx, currentDNA, configHash, ""); pubErr != nil {
 		c.logger.Info("DNA update after config apply skipped", "error", pubErr)
 	}
 
@@ -1619,7 +1648,7 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	// makes "declare desired_version -> steward self-fetches and swaps" converge as soon
 	// as the new config lands. Idempotent: a no-op when desired_version is absent, equals
 	// the running version, or is already staged. (Issue #2833)
-	c.triggerVersionConvergence(ctx, goConfig.Steward.Upgrade.DesiredVersion, goConfig.Steward.Upgrade.AllowDowngrade)
+	c.triggerVersionConvergence(applyCtx, goConfig.Steward.Upgrade.DesiredVersion, goConfig.Steward.Upgrade.AllowDowngrade)
 
 	return nil
 }
