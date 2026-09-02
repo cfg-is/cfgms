@@ -193,7 +193,9 @@ func TestRenewCredential_Success(t *testing.T) {
 	assert.Equal(t, fx.accountID, resp.AccountID)
 	assert.Equal(t, []string{credentialMarkerAdmin}, resp.GrantedMarkers)
 
-	assert.True(t, server.certManager.IsRevoked(fx.oldSerial), "the old serial must be revoked after a successful renewal")
+	revoked, err := server.certManager.IsRevoked(fx.oldSerial)
+	require.NoError(t, err)
+	assert.True(t, revoked, "the old serial must be revoked after a successful renewal")
 
 	acct, err := server.getAccount(context.Background(), fx.accountUser)
 	require.NoError(t, err)
@@ -213,7 +215,9 @@ func TestRenewCredential_RefusedOutsideRenewalWindow(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, "OUTSIDE_RENEWAL_WINDOW", errCode(t, rec.Body.Bytes()))
 
-	assert.False(t, server.certManager.IsRevoked(fx.oldSerial), "a refused renewal must not revoke the still-valid old certificate")
+	revoked, err := server.certManager.IsRevoked(fx.oldSerial)
+	require.NoError(t, err)
+	assert.False(t, revoked, "a refused renewal must not revoke the still-valid old certificate")
 	assert.NotNil(t, certBindingBySerial(t, server, fx.accountUser, fx.oldSerial), "the old binding must remain intact")
 }
 
@@ -226,7 +230,9 @@ func TestRenewCredential_RefusedForAlreadyExpiredCertificate(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, "CERTIFICATE_EXPIRED", errCode(t, rec.Body.Bytes()))
 
-	assert.False(t, server.certManager.IsRevoked(fx.oldSerial))
+	revoked, err := server.certManager.IsRevoked(fx.oldSerial)
+	require.NoError(t, err)
+	assert.False(t, revoked)
 	assert.NotNil(t, certBindingBySerial(t, server, fx.accountUser, fx.oldSerial))
 }
 
@@ -375,7 +381,9 @@ func TestRenewCredential_OldSerialRevokedAndUnbound_ExactlyOneLiveCertificate(t 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := decodeRenewResponse(t, rec)
 
-	assert.True(t, server.certManager.IsRevoked(fx.oldSerial))
+	revoked, err := server.certManager.IsRevoked(fx.oldSerial)
+	require.NoError(t, err)
+	assert.True(t, revoked)
 	assert.Nil(t, certBindingBySerial(t, server, fx.accountUser, fx.oldSerial), "the old binding must be removed")
 	assert.NotNil(t, certBindingBySerial(t, server, fx.accountUser, resp.SerialNumber), "the new binding must exist")
 
@@ -415,7 +423,9 @@ func TestRenewCredential_BindFailureLeavesOldCredentialWorking(t *testing.T) {
 
 	// The old certificate must still be valid and bound — the host has a working
 	// credential, not none.
-	assert.False(t, server.certManager.IsRevoked(fx.oldSerial), "a failed renewal must never revoke the old, still-working certificate")
+	oldRevoked, err := server.certManager.IsRevoked(fx.oldSerial)
+	require.NoError(t, err)
+	assert.False(t, oldRevoked, "a failed renewal must never revoke the old, still-working certificate")
 	assert.NotNil(t, certBindingBySerial(t, server, fx.accountUser, fx.oldSerial))
 
 	// The orphaned newly-signed certificate must have been revoked (never left live
@@ -471,7 +481,9 @@ func TestRenewCredential_ReusingOldPublicKeyIsRefused(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "KEY_REUSE_REJECTED", errCode(t, rec.Body.Bytes()))
 
-	assert.False(t, server.certManager.IsRevoked(fx.oldSerial))
+	revoked, err := server.certManager.IsRevoked(fx.oldSerial)
+	require.NoError(t, err)
+	assert.False(t, revoked)
 	assert.NotNil(t, certBindingBySerial(t, server, fx.accountUser, fx.oldSerial))
 
 	// A fresh keypair still works.

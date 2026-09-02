@@ -489,7 +489,14 @@ func (s *Server) handleListOrphanedCredentials(w http.ResponseWriter, r *http.Re
 		if req.CollectedSerial == "" || req.BoundAccountID == "" {
 			continue
 		}
-		if s.certManager.IsRevoked(req.CollectedSerial) {
+		revoked, err := s.certManager.IsRevoked(req.CollectedSerial)
+		if err != nil {
+			s.logger.Error("Revocation check failed while listing orphaned credentials; skipping entry",
+				"cert_serial", logging.SanitizeLogValue(req.CollectedSerial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+		if revoked {
 			continue
 		}
 		acct, err := s.getAccountByID(r.Context(), req.BoundAccountID)
@@ -567,7 +574,15 @@ func (s *Server) handleRevokeOrphanedCredential(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if s.certManager.IsRevoked(serial) {
+	alreadyRevoked, err := s.certManager.IsRevoked(serial)
+	if err != nil {
+		s.logger.Error("Revocation check failed for orphan revoke",
+			"cert_serial", logging.SanitizeLogValue(serial),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to check revocation status", "STORE_ERROR")
+		return
+	}
+	if alreadyRevoked {
 		s.writeErrorResponse(w, http.StatusConflict, "Certificate is already revoked", "ALREADY_REVOKED")
 		return
 	}

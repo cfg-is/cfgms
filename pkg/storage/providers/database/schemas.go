@@ -841,6 +841,41 @@ func (s DatabaseSchemas) CreateLeaseTable(ctx context.Context, db *sql.DB) error
 	return nil
 }
 
+// CreateCertRevocationsTable creates the cfgms_cert_revocations table backing
+// the cluster-visible CertRevocationStore (ADR-031 Decision 1, Issue #3852).
+func (s DatabaseSchemas) CreateCertRevocationsTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS cfgms_cert_revocations (
+			serial     TEXT NOT NULL PRIMARY KEY,
+			revoked_at TIMESTAMP WITH TIME ZONE NOT NULL,
+			reason     TEXT NOT NULL DEFAULT ''
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create cfgms_cert_revocations table: %w", err)
+	}
+	return nil
+}
+
+// CreateSigningCursorTable creates the cfgms_signing_cursor table backing the
+// cluster-visible SigningCursorStore (ADR-031 Decision 1, Issue #3852). The
+// table only ever holds the single row keyed 'default' — one controller CA,
+// one signing cursor.
+func (s DatabaseSchemas) CreateSigningCursorTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS cfgms_signing_cursor (
+			id                  TEXT NOT NULL PRIMARY KEY,
+			current_serial      TEXT NOT NULL,
+			rotating_serial     TEXT,
+			overlap_window_days INTEGER NOT NULL,
+			rotated_at          TIMESTAMP WITH TIME ZONE NOT NULL,
+			retired_at          TIMESTAMP WITH TIME ZONE
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create cfgms_signing_cursor table: %w", err)
+	}
+	return nil
+}
+
 // CreateIPTrustRangesTable creates the cfgms_ip_trust_ranges table for tenant-scoped IP trust.
 func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
@@ -1503,6 +1538,8 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS case_pins;",
 		"DROP TABLE IF EXISTS cases;",
 		"DROP TABLE IF EXISTS refresh_nonces;",
+		"DROP TABLE IF EXISTS cfgms_cert_revocations;",
+		"DROP TABLE IF EXISTS cfgms_signing_cursor;",
 	}
 
 	for _, query := range dropQueries {

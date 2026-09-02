@@ -188,7 +188,11 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 	if !cert.HasPayloadSigningMarker(operatorCert) {
 		return fmt.Errorf("operator signing certificate is not a payload-signing certificate")
 	}
-	if s.certManager.IsRevoked(operatorCert.SerialNumber.String()) {
+	revoked, err := s.certManager.IsRevoked(operatorCert.SerialNumber.String())
+	if err != nil {
+		return fmt.Errorf("failed to check operator signing certificate revocation status: %w", err)
+	}
+	if revoked {
 		return fmt.Errorf("operator signing certificate is revoked")
 	}
 	return nil

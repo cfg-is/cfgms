@@ -1004,7 +1004,14 @@ func (s *Server) sweepOrphanedCollectedCertificates(ctx context.Context) {
 		if req.CollectedSerial == "" || req.BoundAccountID == "" {
 			continue
 		}
-		if s.certManager.IsRevoked(req.CollectedSerial) {
+		revoked, err := s.certManager.IsRevoked(req.CollectedSerial)
+		if err != nil {
+			s.logger.Error("Credential-request expiry sweep: revocation check failed",
+				"cert_serial", logging.SanitizeLogValue(req.CollectedSerial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+		if revoked {
 			continue
 		}
 		acct, err := s.getAccountByID(ctx, req.BoundAccountID)

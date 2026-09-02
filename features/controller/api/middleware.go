@@ -278,8 +278,20 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	serial := peerCert.SerialNumber.String()
 	// Story D: C2 fix — check revocation on every cert-auth request.
 	// certManager may be nil in OSS deployments that haven't initialised cert management.
-	if s.certManager != nil && s.certManager.IsRevoked(serial) {
-		return nil
+	if s.certManager != nil {
+		revoked, err := s.certManager.IsRevoked(serial)
+		if err != nil {
+			// Fail closed: a revocation-store outage must not be interpreted as
+			// "not revoked" — that would let a serial the operator believes is
+			// revoked keep authenticating (Issue #3852).
+			s.logger.Error("Revocation check failed; failing closed",
+				"cert_serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			return nil
+		}
+		if revoked {
+			return nil
+		}
 	}
 	fpSum := sha256.Sum256(peerCert.Raw)
 	fp := hex.EncodeToString(fpSum[:])

@@ -874,11 +874,15 @@ func TestSweepOrphanedCollectedCertificates_RevokesUnboundCertificate(t *testing
 		GrantAdminMarker: true,
 	})
 
-	require.False(t, server.certManager.IsRevoked(fx.serial), "sanity: the collected certificate starts out live")
+	revokedBefore, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	require.False(t, revokedBefore, "sanity: the collected certificate starts out live")
 
 	server.sweepOrphanedCollectedCertificates(ctx)
 
-	assert.True(t, server.certManager.IsRevoked(fx.serial),
+	revokedAfter, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter,
 		"a collected certificate with no account binding must be revoked by the sweep")
 
 	require.NoError(t, server.auditManager.Flush(ctx))
@@ -922,7 +926,9 @@ func TestSweepOrphanedCollectedCertificates_LeavesBoundCertificateAlone(t *testi
 
 	server.sweepOrphanedCollectedCertificates(ctx)
 
-	assert.False(t, server.certManager.IsRevoked(resp.SerialNumber),
+	certRevoked, err := server.certManager.IsRevoked(resp.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, certRevoked,
 		"a collected certificate that IS bound to its account must survive the sweep")
 	revokedAfter, err := server.certManager.ListRevoked()
 	require.NoError(t, err)
@@ -961,7 +967,9 @@ func TestSweepOrphanedCollectedCertificates_AlreadyRevokedIsSkipped(t *testing.T
 	revokedAfter, err := server.certManager.ListRevoked()
 	require.NoError(t, err)
 	assert.Len(t, revokedAfter, len(revokedBefore), "an already-revoked serial must not be revoked a second time")
-	assert.True(t, server.certManager.IsRevoked(fx.serial))
+	stillRevoked, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	assert.True(t, stillRevoked)
 	assert.Equal(t, 0, countAuditEntries(t, server, fx.tenantID,
 		"credential_request.orphaned_certificate_revoked", fx.requestID),
 		"the short-circuit must return before the audit event, so a repeating sweep does not repeat the event")
@@ -983,7 +991,9 @@ func TestSweepOrphanedCollectedCertificates_AccountLookupErrorDefersToNextSweep(
 
 	server.sweepOrphanedCollectedCertificates(ctx)
 
-	assert.False(t, server.certManager.IsRevoked(fx.serial),
+	revokedBefore, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	assert.False(t, revokedBefore,
 		"a failed account lookup must never be treated as an absent binding")
 	assert.Equal(t, 0, countAuditEntries(t, server, fx.tenantID,
 		"credential_request.orphaned_certificate_revoked", fx.requestID))
@@ -991,7 +1001,9 @@ func TestSweepOrphanedCollectedCertificates_AccountLookupErrorDefersToNextSweep(
 	server.secretStore = realStore
 	server.sweepOrphanedCollectedCertificates(ctx)
 
-	assert.True(t, server.certManager.IsRevoked(fx.serial),
+	revokedAfter, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter,
 		"once the account store recovers, the next sweep must revoke the orphan")
 }
 
@@ -1036,7 +1048,9 @@ func TestSweepOrphanedCollectedCertificates_SkipsRecordsWithNothingToRevoke(t *t
 	assert.Equal(t, 0, countAuditEntries(t, server, "sweep-skip-tenant",
 		"credential_request.orphaned_certificate_revoked", ""),
 		"a record with no serial, or no bound account, has nothing to revoke")
-	assert.False(t, server.certManager.IsRevoked("serial-with-no-bound-account"))
+	revoked, err := server.certManager.IsRevoked("serial-with-no-bound-account")
+	require.NoError(t, err)
+	assert.False(t, revoked)
 
 	// Both records survive the sweep — it revokes certificates, it never deletes records.
 	for _, id := range []string{noSerial.ID, noAccount.ID} {

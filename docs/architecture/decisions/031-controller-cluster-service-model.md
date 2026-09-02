@@ -260,5 +260,21 @@ ADR-025 (tenant-ID grammar under realm qualifiers), ADR-021 (Amendment 5's
 "one non-CSR credential" claim), steward-operating-model.md's registration wire
 contract (`client_key` in the response), and docs/operations/cluster-ca.md.
 
+**pkg/cert (Amended, Issue #3852)** — Decision 1 assumes the serialization the
+shared database provides; `pkg/cert`'s revocation list and config-signing
+rotation cursor were node-local JSON files, so that premise did not hold for
+`handleRevokeCertificate`, `handleRevokeCertBinding`, `handleRotateCert`, the
+containment revoke paths, and `handleRotateSigningCert` — the three findings
+Issue #3761's fix agent escalated as storage-shape problems a gating fix could
+not resolve. `pkg/cert/interfaces.RevocationStore` / `SigningCursorStore` close
+that gap: a file-backed implementation preserves single-node behavior
+unchanged, and a Postgres-backed implementation
+(`pkg/storage/providers/database`) is selected via `pkg/ha.Config.IsClusterMode()`
+when the controller runs clustered, making revocation and signing-cursor state
+satisfy Decision 1's premise like every other store this ADR covers. This was
+the prerequisite the founder chose (option B, 2026-09-02) to unblock #3761;
+the `HasLeadership()` gates named above are still in place and remain #3761's
+job to remove.
+
 The decisions/README.md index gains ADR-031's row; status columns for ADR-028/029
 update per above when this ADR is Accepted.

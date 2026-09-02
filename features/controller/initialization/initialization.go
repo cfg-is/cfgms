@@ -146,6 +146,7 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
 		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
 	}
+	wireClusterCertStores(managerCfg, cfg, storageManager)
 
 	var certManager *cert.Manager
 	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
@@ -463,8 +464,8 @@ func fileExists(path string) bool {
 // the regular controller startup path (server.go's loadExistingCertificateManager,
 // which would otherwise try to load a local ca.key that cluster-mode nodes
 // never have) need it.
-func BuildClusterCertManager(ctx context.Context, cfg *config.Config, certPath string, logger logging.Logger) (*cert.Manager, error) {
-	managerCfg, err := newClusterManagerConfig(cfg, certPath)
+func BuildClusterCertManager(ctx context.Context, cfg *config.Config, certPath string, storageManager *interfaces.StorageManager, logger logging.Logger) (*cert.Manager, error) {
+	managerCfg, err := newClusterManagerConfig(cfg, certPath, storageManager)
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +486,10 @@ func BuildClusterCertManagerWithStore(ctx context.Context, cfg *config.Config, c
 	if store == nil {
 		return nil, fmt.Errorf("secret store is required")
 	}
-	managerCfg, err := newClusterManagerConfig(cfg, certPath)
+	// storageManager is nil here: this entry point is used by callers (chiefly
+	// tests) that hold a SecretStore directly rather than a StorageManager.
+	// newClusterManagerConfig degrades to the file-backed default in that case.
+	managerCfg, err := newClusterManagerConfig(cfg, certPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -494,8 +498,10 @@ func BuildClusterCertManagerWithStore(ctx context.Context, cfg *config.Config, c
 
 // newClusterManagerConfig builds the cert.ManagerConfig a cluster-mode node's
 // CA is created or loaded with, including the external regional-intermediate
-// import paths when they are configured.
-func newClusterManagerConfig(cfg *config.Config, certPath string) (*cert.ManagerConfig, error) {
+// import paths when they are configured. storageManager, if non-nil, supplies
+// the cluster-visible revocation/signing-cursor stores (ADR-031 Decision 1,
+// Issue #3852 AC3); nil falls back to cert.NewManager's file-backed default.
+func newClusterManagerConfig(cfg *config.Config, certPath string, storageManager *interfaces.StorageManager) (*cert.ManagerConfig, error) {
 	caConfig := &cert.CAConfig{
 		Organization: "CFGMS",
 		Country:      "US",
@@ -508,13 +514,37 @@ func newClusterManagerConfig(cfg *config.Config, certPath string) (*cert.Manager
 	if err := applyClusterCAExternalPaths(caConfig, cfg.Certificate.ClusterCA); err != nil {
 		return nil, err
 	}
-	return &cert.ManagerConfig{
+	managerCfg := &cert.ManagerConfig{
 		StoragePath:          certPath,
 		CAConfig:             caConfig,
 		LoadExistingCA:       false,
 		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
 		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
-	}, nil
+	}
+	wireClusterCertStores(managerCfg, cfg, storageManager)
+	return managerCfg, nil
+}
+
+// wireClusterCertStores sets managerCfg.RevocationStore/SigningCursorStore
+// from storageManager's cluster-visible stores when the controller runs
+// clustered (pkg/ha.Config.IsClusterMode()), overriding cert.NewManager's
+// default node-local file-backed stores with the shared substrate (ADR-031
+// Decision 1, Issue #3852 AC3). storageManager may be nil, and its store
+// getters may return nil (the running storage provider does not implement
+// the *StoreCreator extension) — either case leaves managerCfg's fields
+// unset, and cert.NewManager falls back to the file-backed default. A
+// single-node deployment (IsClusterMode() false) is never touched here,
+// preserving AC2's "no behavioural change" guarantee.
+func wireClusterCertStores(managerCfg *cert.ManagerConfig, cfg *config.Config, storageManager *interfaces.StorageManager) {
+	if !cfg.HA.IsClusterMode() || storageManager == nil {
+		return
+	}
+	if s := storageManager.GetCertRevocationStore(); s != nil {
+		managerCfg.RevocationStore = s
+	}
+	if s := storageManager.GetSigningCursorStore(); s != nil {
+		managerCfg.SigningCursorStore = s
+	}
 }
 
 // applyClusterCAExternalPaths copies clusterCA's regional-intermediate import

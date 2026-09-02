@@ -346,7 +346,9 @@ func TestRevokeByEnrolmentToken_RevokesCollectedCertificate(t *testing.T) {
 
 	stored, err := server.getPendingCredentialRequestByID(context.Background(), fx.requestID)
 	require.NoError(t, err)
-	require.False(t, server.certManager.IsRevoked(collected.SerialNumber), "sanity: certificate starts out live")
+	revokedBefore, err := server.certManager.IsRevoked(collected.SerialNumber)
+	require.NoError(t, err)
+	require.False(t, revokedBefore, "sanity: certificate starts out live")
 
 	rec := revokeByEnrolmentToken(t, server, testAdminPrincipal(), stored.EnrolmentTokenID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -354,7 +356,9 @@ func TestRevokeByEnrolmentToken_RevokesCollectedCertificate(t *testing.T) {
 	require.Len(t, resp.Results, 1)
 	assert.Equal(t, "contained", resp.Results[0].Outcome)
 
-	assert.True(t, server.certManager.IsRevoked(collected.SerialNumber))
+	revokedAfter, err := server.certManager.IsRevoked(collected.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter)
 	acct, err := server.getAccount(context.Background(), fx.accountUser)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
@@ -411,7 +415,9 @@ func TestRevokeByEnrolmentToken_RevokeThenUnbindOrdering(t *testing.T) {
 	require.Len(t, resp.Results, 1)
 	assert.Equal(t, "error", resp.Results[0].Outcome)
 
-	assert.True(t, server.certManager.IsRevoked(collected.SerialNumber),
+	revoked, err := server.certManager.IsRevoked(collected.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
 		"the certificate must be revoked even though the unbind failed")
 	acct, err := server.getAccount(context.Background(), fx.accountUser)
 	require.NoError(t, err)
@@ -461,9 +467,15 @@ func TestRevokeByEnrolmentToken_NeverTouchesCertsOutsideEnrolmentFlow(t *testing
 	rec := revokeByEnrolmentToken(t, server, testAdminPrincipal(), stored.EnrolmentTokenID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	assert.True(t, server.certManager.IsRevoked(collected.SerialNumber), "sanity: the token's own collected certificate is revoked")
-	assert.False(t, server.certManager.IsRevoked(bootstrap.SerialNumber), "a bootstrap bundle certificate must never be touched by revoke-by-token")
-	assert.False(t, server.certManager.IsRevoked(steward.SerialNumber), "a steward certificate must never be touched by revoke-by-token")
+	collectedRevoked, err := server.certManager.IsRevoked(collected.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, collectedRevoked, "sanity: the token's own collected certificate is revoked")
+	bootstrapRevoked, err := server.certManager.IsRevoked(bootstrap.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, bootstrapRevoked, "a bootstrap bundle certificate must never be touched by revoke-by-token")
+	stewardRevoked, err := server.certManager.IsRevoked(steward.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, stewardRevoked, "a steward certificate must never be touched by revoke-by-token")
 }
 
 // ---- orphaned certificates ----------------------------------------------------------
@@ -518,11 +530,15 @@ func TestListOrphanedCredentials_TenantScoped(t *testing.T) {
 func TestRevokeOrphanedCredential_Success(t *testing.T) {
 	server := setupCollectTestServer(t)
 	fx := collectThenOrphan(t, server, "revoke-orphan-tenant", "revoke-orphan-owner", ApproveCredentialRequestBody{})
-	require.False(t, server.certManager.IsRevoked(fx.serial))
+	revokedBefore, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	require.False(t, revokedBefore)
 
 	rec := revokeOrphanedCredential(t, server, testAdminPrincipal(), fx.serial)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.True(t, server.certManager.IsRevoked(fx.serial))
+	revokedAfter, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter)
 
 	// Listing and revoking are separate actions: the now-revoked serial no longer
 	// appears in the list (sweepOrphanedCollectedCertificates' own IsRevoked skip
@@ -544,7 +560,9 @@ func TestRevokeOrphanedCredential_RefusesBoundCertificate(t *testing.T) {
 	rec := revokeOrphanedCredential(t, server, testAdminPrincipal(), collected.SerialNumber)
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Equal(t, "NOT_ORPHANED", decodeErrorCode(t, rec).Error.Code)
-	assert.False(t, server.certManager.IsRevoked(collected.SerialNumber))
+	revoked, err := server.certManager.IsRevoked(collected.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked)
 }
 
 func TestRevokeOrphanedCredential_UnknownSerial_NotFound(t *testing.T) {

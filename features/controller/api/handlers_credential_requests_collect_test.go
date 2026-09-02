@@ -476,7 +476,9 @@ func TestCollectCredentialRequest_BindFailureRevokesCertificateAndDeniesBootstra
 	require.Len(t, revokedAfter, len(revokedBefore)+1, "exactly one new certificate must have been revoked")
 
 	// The newly revoked serial must be the one collect signed.
-	assert.True(t, server.certManager.IsRevoked(stored.CollectedSerial))
+	collectedRevoked, err := server.certManager.IsRevoked(stored.CollectedSerial)
+	require.NoError(t, err)
+	assert.True(t, collectedRevoked)
 
 	// The account must not have gained a binding for it.
 	acct, err = server.getAccount(context.Background(), fx.accountUser)
