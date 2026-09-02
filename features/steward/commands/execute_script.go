@@ -539,13 +539,13 @@ func mergeEnv(base, additional map[string]string) map[string]string {
 }
 
 // OperatorCredentialVerifier verifies that an operator credential (proof) authorizes
-// envelope. It is the seam Issue #3694's Implementation Notes call for: today's only
-// implementation, x509OperatorCredentialVerifier, wraps the existing controller-issued
-// admin-bundle X.509 certificate check; a later credential-cutover story swaps that
-// implementation's marker check, and a still-later WebAuthn-verification story adds a
-// second implementation for the WebAuthn assertion shape — preflightScriptSignature
-// calls through this interface rather than a single hardcoded verification path so
-// neither change requires touching it again.
+// envelope. It is the seam Issue #3694's Implementation Notes call for:
+// x509OperatorCredentialVerifier wraps the X.509 certificate check, whose marker
+// requirement Issue #3696 switched from the admin-bundle marker to the CSR-issued
+// payload-signing marker; a still-later WebAuthn-verification story adds a second
+// implementation for the WebAuthn assertion shape — preflightScriptSignature calls
+// through this interface rather than a single hardcoded verification path so neither
+// change requires touching it again.
 type OperatorCredentialVerifier interface {
 	// Verify reports whether proof authorizes envelope under this credential type.
 	Verify(envelope operatorpayload.Envelope, proof []byte) error
@@ -553,9 +553,10 @@ type OperatorCredentialVerifier interface {
 
 // x509OperatorCredentialVerifier is the current OperatorCredentialVerifier
 // implementation: proof is the PEM-encoded operator certificate (signature_public_key),
-// verified against caRoots with the admin marker check (verifyOperatorCert, still
-// HasAdminMarker per Issue #3689 — unchanged by this story). It does not use envelope:
-// the cryptographic binding of the envelope to the signature is verified separately, by
+// verified against caRoots with the payload-signing marker check (verifyOperatorCert,
+// HasPayloadSigningMarker per Issue #3696 — the admin-bundle marker no longer qualifies
+// a certificate to sign an operator payload). It does not use envelope: the
+// cryptographic binding of the envelope to the signature is verified separately, by
 // script.VerifyScriptSignature, before this is ever called.
 type x509OperatorCredentialVerifier struct {
 	caRoots *x509.CertPool
@@ -566,7 +567,10 @@ func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proo
 }
 
 // verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it
-// chains to caRoots with client-auth EKU and has not expired.
+// chains to caRoots with client-auth EKU, has not expired, and carries the CFGMS
+// payload-signing marker (Issue #3696). An admin-bundle certificate — carrying
+// AdminMarkerOID but not PayloadSigningMarkerOID — chains and has the right EKU but is
+// rejected here: it authenticates mTLS transport, not operator payload signing.
 func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool) error {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
@@ -583,8 +587,8 @@ func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool) error {
 	if _, err := parsedCert.Verify(opts); err != nil {
 		return fmt.Errorf("certificate chain verification: %w", err)
 	}
-	if !cert.HasAdminMarker(parsedCert) {
-		return fmt.Errorf("operator certificate is not an administrator certificate")
+	if !cert.HasPayloadSigningMarker(parsedCert) {
+		return fmt.Errorf("operator certificate is not a payload-signing certificate")
 	}
 	return nil
 }

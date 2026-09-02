@@ -1555,11 +1555,13 @@ func TestExecuteScriptHandler_LibraryScript_ValidTrustedKey_Accepted(t *testing.
 // marker (Issue #3689), is accepted.
 func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing.T) {
 	ca, caPool := sigTestCA(t)
-	// Admin marker required (Issue #3689): verifyOperatorCert now rejects any cert
-	// lacking cert.HasAdminMarker, matching the controller-side
-	// validatePublicBetaCommandSignature check. Test files are exempt from
-	// SetAdminMarker's restricted-caller allow-list (TestSetAdminMarker_Architecture).
-	operatorCert := sigTestOperatorCert(t, ca, cert.SetAdminMarker) // valid, chained, not expired, admin-marked
+	// Payload-signing marker required (Issue #3696, superseding Issue #3689's
+	// admin-marker check): verifyOperatorCert now rejects any cert lacking
+	// cert.HasPayloadSigningMarker, matching the controller-issued CSR credential
+	// (cfg credential request-signing-cert) rather than the admin bundle. Test files
+	// are exempt from SetPayloadSigningMarker's restricted-caller allow-list
+	// (TestSetPayloadSigningMarker_Architecture).
+	operatorCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker) // valid, chained, not expired, payload-signing-marked
 
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{

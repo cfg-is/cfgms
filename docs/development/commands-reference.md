@@ -561,8 +561,20 @@ controller signs the submitted public key (never generating or seeing a private
 key for it) and returns a certificate carrying the CFGMS payload-signing marker —
 not the admin marker used by mTLS transport bundles, so the two credential types
 remain distinguishable by construction. The resulting keypair signs
-`operatorpayload.Envelope`s (a future `cfg payload sign` command); it is never
-used for mTLS session authentication.
+`operatorpayload.Envelope`s; it is never used for mTLS session authentication.
+
+**Consumers (Issue #3696):** `cfg steward run-command` and `cfg steward exec` sign
+the inline command's operator envelope with this credential — loaded from the
+credential store (`--credential-name`, default `signing-key`) and the certificate
+at `CFGMS_SIGNING_CERT` or the default `--cert-out` path above. Neither command
+reads the admin bundle's key for this signature: the admin bundle (or an active
+session) is still required to authenticate the API connection itself, but the
+controller never holds the payload-signing private key at any point — the
+zero-custody property this credential exists for is enforced end-to-end only once
+these commands stop accepting an admin-bundle-signed envelope, which this story
+completes. Run `cfg credential request-signing-cert` once per operator machine
+before using either command; a missing credential fails fast with an error naming
+the command to run.
 
 The endpoint is gated by the `signing-credential:request` permission at
 `AssuranceStrong` plus a fresh user-presence proof, so this command requires an

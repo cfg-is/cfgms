@@ -3,6 +3,9 @@
 package cmd
 
 import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -72,11 +75,53 @@ func generateTestBundleWithRSA(t *testing.T, dir string) string {
 	return p
 }
 
+// generateTestSigningCredential creates a payload-signing ECDSA keypair and
+// self-signed certificate, stores the private key in the credential store under
+// signingCredentialName, and writes the certificate PEM to CFGMS_SIGNING_CERT — all
+// under a fresh t.TempDir() so nothing touches the real user config directory. This is
+// signCommandContent's credential source since Issue #3696 switched client-side
+// payload signing from the admin bundle to the zero-custody CSR-issued credential; the
+// steward-side dispatch tests only exercise transport/business logic and don't care
+// about chain-of-trust, so a self-signed cert (unlike sigTestOperatorCert in
+// features/steward/commands) is sufficient here.
+func generateTestSigningCredential(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	overrideCredentialsDir(t, dir)
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test-signing-credential"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	credStore, err := newCredentialStore()
+	require.NoError(t, err)
+	require.NoError(t, credStore.Store(context.Background(), signingCredentialName, keyPEM))
+
+	certPath := filepath.Join(dir, "signing-cert.pem")
+	require.NoError(t, os.WriteFile(certPath, certPEM, 0600))
+	t.Setenv("CFGMS_SIGNING_CERT", certPath)
+}
+
 // saveStewardRunGlobals captures the current values of all run-command flag variables
 // and all global function variables that affect bundle resolution, then restores them
-// via t.Cleanup so tests cannot pollute each other's state.
+// via t.Cleanup so tests cannot pollute each other's state. It also provisions a test
+// payload-signing credential (Issue #3696) so run-command/exec tests that reach
+// signCommandContent find one — harmless for tests (e.g. run-script) that never sign.
 func saveStewardRunGlobals(t *testing.T) {
 	t.Helper()
+	generateTestSigningCredential(t)
 	origURL := stewardURL
 	origInsecure := stewardTLSInsecure
 	origTarget := stewardRunTarget
@@ -300,12 +345,15 @@ func TestStewardRunCommand_SignsAndBase64Encodes(t *testing.T) {
 	require.NoError(t, err, "content must be valid base64")
 	assert.Equal(t, "echo hello", string(decoded))
 
-	// signature block must be present with all required fields
+	// signature block must be present with all required fields. The signature comes
+	// from the payload-signing credential (Issue #3696) generateTestSigningCredential
+	// provisions inside saveStewardRunGlobals — an ECDSA key — not from the RSA admin
+	// bundle above, which now authenticates only the API connection.
 	sigRaw, ok := body["signature"]
 	require.True(t, ok, "signature block must be present in request body")
 	sigMap, ok := sigRaw.(map[string]interface{})
 	require.True(t, ok, "signature must be a JSON object")
-	assert.Equal(t, "rsa-sha256", sigMap["algorithm"], "algorithm must be rsa-sha256 for RSA key")
+	assert.Equal(t, "ecdsa-sha256", sigMap["algorithm"], "algorithm must be ecdsa-sha256 for the payload-signing credential's ECDSA key")
 	assert.NotEmpty(t, sigMap["value"], "signature value must not be empty")
 	assert.NotEmpty(t, sigMap["public_key"], "public_key must not be empty")
 
