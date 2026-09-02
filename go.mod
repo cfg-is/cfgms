@@ -1,6 +1,6 @@
 module github.com/cfgis/cfgms
 
-go 1.26.0
+go 1.26
 
 toolchain go1.27.0
 
@@ -27,7 +27,7 @@ require (
 	github.com/masterzen/winrm v0.0.0-20260407182533-5570be7f80cf
 	github.com/mattn/go-isatty v0.0.24
 	github.com/openbao/openbao/api/v2 v2.6.0
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.61.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
