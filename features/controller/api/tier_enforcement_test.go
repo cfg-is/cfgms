@@ -168,6 +168,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// CLI login confirmation screen's read (Issue #3722, Epic #3711) — shares
 	// cli-login:approve with the route above, mirroring script:admin's GET+PUT sharing.
 	{"GET", "/api/v1/cli-login/test-request-id", "cli-login:approve"},
+	// Steward config push (Issue #3792) — root-equivalent write on the target host;
+	// previously reachable by any AssuranceMachine (API-key) principal cross-tenant.
+	{"PUT", "/api/v1/stewards/test-steward-id/config", "steward:write-config"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

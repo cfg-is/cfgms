@@ -1215,9 +1215,16 @@ func TestTenantContextPropagation(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-1/config", bytes.NewReader(configBody))
 	req.Header.Set("X-API-Key", configWriteKey)
 	req.Header.Set("Content-Type", "application/json")
+	req = withVars(req, map[string]string{"id": "test-steward-1"})
 	rec := httptest.NewRecorder()
 
-	server.router.ServeHTTP(rec, req)
+	// Exercise authenticationMiddleware directly (not the full router) so this
+	// regression test stays focused on context propagation. Issue #3792 gates
+	// steward:write-config at AssuranceStrong via requirePermission, which an
+	// API-key principal (AssuranceMachine) can never satisfy — routing through
+	// the full router would 403 here for an unrelated reason.
+	handler := server.authenticationMiddleware(http.HandlerFunc(server.handleUpdateStewardConfig))
+	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, "Config write should succeed; body: %s", rec.Body.String())
 

@@ -19,6 +19,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	storageifaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -64,7 +65,6 @@ func useStorageWriteFailingConfigService(t *testing.T, server *Server) {
 // 500 STORAGE_ERROR (Issue #2482).
 func TestHandleUpdateStewardConfig_InvalidResourceName_Returns400(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
 
 	body := []byte(`
 steward:
@@ -87,8 +87,7 @@ resources:
       content: x
 `)
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-invalid-rsrc/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-invalid-rsrc/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -112,7 +111,6 @@ resources:
 // into HTTP 400 VALIDATION_ERROR, not 500 STORAGE_ERROR (Issue #2482).
 func TestHandleUpdateStewardConfig_ServiceValidationFailure_Returns400(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
 
 	// Both resource names are individually valid (pass the handler regex) but
 	// collide, which only the service-layer validator detects.
@@ -142,8 +140,7 @@ resources:
       content: b
 `)
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-dup-rsrc/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-dup-rsrc/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -164,7 +161,6 @@ resources:
 // accidentally block valid uploads).
 func TestHandleUpdateStewardConfig_ValidConfig_Returns200(t *testing.T) {
 	server := setupTestServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
 
 	body := []byte(`
 steward:
@@ -187,8 +183,7 @@ resources:
       content: hello
 `)
 
-	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-valid/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, "PUT", "/api/v1/stewards/test-steward-valid/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/yaml")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -207,7 +202,6 @@ func TestProductionBuildRejectsTestConfigOverwrite(t *testing.T) {
 	const stewardID = "security-audit-steward"
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "test-tenant", "addr", "active"))
 
-	writeKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
 	readKey := NewEphemeralTestKey(t, server, []string{"steward:read-config"}, "test-tenant", 5*time.Minute)
 
 	configBody := func(content string) []byte {
@@ -232,8 +226,7 @@ resources:
       content: ` + content + "\n")
 	}
 
-	seedReq := httptest.NewRequest(http.MethodPut, "/api/v1/stewards/"+stewardID+"/config", bytes.NewReader(configBody("authorized-original")))
-	seedReq.Header.Set("X-API-Key", writeKey)
+	seedReq := makeAdminRequest(t, http.MethodPut, "/api/v1/stewards/"+stewardID+"/config", bytes.NewReader(configBody("authorized-original")))
 	seedReq.Header.Set("Content-Type", "application/yaml")
 	seedRec := httptest.NewRecorder()
 	server.router.ServeHTTP(seedRec, seedReq)
@@ -264,7 +257,6 @@ resources:
 func TestHandleUpdateStewardConfig_StorageError_Returns500(t *testing.T) {
 	server := setupTestServer(t)
 	useStorageWriteFailingConfigService(t, server)
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
 
 	// Submit a config that passes all validation (valid resource name, valid YAML,
 	// required fields present) so the only failure is the underlying StoreConfig call.
@@ -290,10 +282,11 @@ resources:
 `)
 
 	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-storage-err/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/yaml")
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceStrong, TenantID: "test-tenant", Permissions: []string{"steward:write-config"}})
+	req = withVars(req, map[string]string{"id": "test-steward-storage-err"})
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	server.handleUpdateStewardConfig(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code,
 		"storage failure must return 500, not 400; body: %s", rec.Body.String())
@@ -318,8 +311,6 @@ func TestHandleUpdateStewardConfig_WithCommandStore_ReferencesDeliveryRecord(t *
 	require.NotNil(t, commandStore)
 	server.SetCommandStore(commandStore)
 
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
-
 	body := []byte(`
 steward:
   id: test-steward-delivery-record
@@ -342,10 +333,11 @@ resources:
 `)
 
 	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-delivery-record/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/yaml")
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceStrong, TenantID: "test-tenant", Permissions: []string{"steward:write-config"}})
+	req = withVars(req, map[string]string{"id": "test-steward-delivery-record"})
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	server.handleUpdateStewardConfig(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -372,7 +364,6 @@ resources:
 // than claiming a trackable record that does not exist.
 func TestHandleUpdateStewardConfig_NoCommandStore_FallsBackToBareStatus(t *testing.T) {
 	server := setupTestServer(t) // commandStore is nil here
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
 
 	body := []byte(`
 steward:
@@ -396,10 +387,11 @@ resources:
 `)
 
 	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-no-command-store/config", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/yaml")
+	req = withPrincipal(req, &Principal{ID: "admin", Assurance: session.AssuranceStrong, TenantID: "test-tenant", Permissions: []string{"steward:write-config"}})
+	req = withVars(req, map[string]string{"id": "test-steward-no-command-store"})
 	rec := httptest.NewRecorder()
-	server.router.ServeHTTP(rec, req)
+	server.handleUpdateStewardConfig(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -410,4 +402,108 @@ resources:
 	assert.Equal(t, "stored", resp["status"])
 	_, hasCommandID := resp["command_id"]
 	assert.False(t, hasCommandID, "no commandStore means no delivery record to reference")
+}
+
+// validCfgUploadBody returns a minimal valid YAML StewardConfig body for stewardID,
+// reused across the tenant-scope tests below (Issue #3792).
+func validCfgUploadBody(stewardID string) []byte {
+	return []byte(`
+steward:
+  id: ` + stewardID + `
+  mode: controller
+  logging:
+    level: info
+    format: text
+  error_handling:
+    module_load_failure: continue
+    resource_failure: warn
+    configuration_error: fail
+modules:
+  file: file
+resources:
+  - name: my-managed-file
+    module: file
+    config:
+      path: /tmp/managed
+      content: hello
+`)
+}
+
+// TestHandleUpdateStewardConfig_CrossTenant_Returns404 is the [REQUIRED TEST] for
+// Issue #3792: a caller scoped to tenant "tenant-a" must not be able to push config
+// to a steward registered under a disjoint tenant "tenant-b" — rejected with 404
+// (not 403, to avoid disclosing that the steward exists) and never applied.
+func TestHandleUpdateStewardConfig_CrossTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	const stewardID = "cross-tenant-steward"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "tenant-b", "addr", "active"))
+
+	body := validCfgUploadBody(stewardID)
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/"+stewardID+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/yaml")
+	req = withPrincipal(req, &Principal{ID: "scoped-admin", Assurance: session.AssuranceStrong, TenantID: "tenant-a", Permissions: []string{"steward:write-config"}})
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleUpdateStewardConfig(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a caller scoped to tenant-a must not reach a steward in tenant-b; body: %s", rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "STEWARD_NOT_FOUND", resp.Error.Code)
+
+	// The config must never have been applied: a same-tenant admin reading it back
+	// must not see the cross-tenant write's content.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/"+stewardID+"/config", nil)
+	getReq = withPrincipal(getReq, &Principal{ID: "admin", Assurance: session.AssuranceStrong, ImplicitAdmin: true})
+	getReq = withVars(getReq, map[string]string{"id": stewardID})
+	getRec := httptest.NewRecorder()
+	server.handleGetStewardConfig(getRec, getReq)
+	assert.NotEqual(t, http.StatusOK, getRec.Code,
+		"rejected cross-tenant push must not have stored any configuration for the steward")
+}
+
+// TestHandleUpdateStewardConfig_SameTenantSubtree_Returns200 is the [REQUIRED TEST]
+// for Issue #3792: a caller scoped to "tenant-a" can still push config to a steward
+// registered in its own tenant subtree "tenant-a/child" (not just an exact match).
+func TestHandleUpdateStewardConfig_SameTenantSubtree_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+	const stewardID = "subtree-steward"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "tenant-a/child", "addr", "active"))
+
+	body := validCfgUploadBody(stewardID)
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/"+stewardID+"/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/yaml")
+	req = withPrincipal(req, &Principal{ID: "scoped-admin", Assurance: session.AssuranceStrong, TenantID: "tenant-a", Permissions: []string{"steward:write-config"}})
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleUpdateStewardConfig(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a caller scoped to tenant-a must reach a steward in tenant-a/child; body: %s", rec.Body.String())
+}
+
+// TestHandleUpdateStewardConfig_APIKeyRefusedInsufficientAssurance is the
+// [REQUIRED TEST] for Issue #3792: steward:write-config is root-equivalent on the
+// target host, so an API-key principal (AssuranceMachine) holding the permission
+// must still be refused — API keys can never satisfy AssuranceStrong (they cannot
+// step up), so this must be a plain 403, not a step-up challenge.
+func TestHandleUpdateStewardConfig_APIKeyRefusedInsufficientAssurance(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:write-config"}, "test-tenant", 5*time.Minute)
+
+	body := validCfgUploadBody("api-key-refused-steward")
+	req := httptest.NewRequest("PUT", "/api/v1/stewards/api-key-refused-steward/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/yaml")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"an API-key principal must be refused steward:write-config regardless of permission grant; body: %s", rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "INSUFFICIENT_PERMISSIONS", resp.Error.Code)
 }

@@ -700,6 +700,39 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Resolve the tenant the config is stored under. This endpoint targets a
+	// specific steward, so the config must be stored under THAT steward's
+	// tenant — not the caller's. Using the caller's tenant would store the
+	// config where neither the save=deploy fanout nor the steward's own sync
+	// can find it. Fall back to the caller's tenant (then "default") only when
+	// the steward is not yet known. (Issue #1572)
+	tenantID := "default"
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+		tenantID = tid
+	}
+	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
+		tenantID = info.TenantID
+	}
+
+	// Tenant-subtree authorization (Issue #3792): a scoped caller may only push
+	// config to a steward within its own tenant subtree. An unscoped caller
+	// (mTLS admin, callerTenant == "") retains global authority, mirroring
+	// handleApproveRegistration. Checked before the body is even read, so a
+	// caller with no authority over the target tenant learns nothing about the
+	// request beyond a 404 — not even whether the body is well-formed. Returns
+	// 404 rather than 403 to avoid disclosing that a steward exists in a tenant
+	// outside the caller's authority.
+	callerTenant := s.callerTenantID(r)
+	if callerTenant != "" {
+		inSubtree := tenantID == callerTenant || strings.HasPrefix(tenantID, callerTenant+"/")
+		if !inSubtree {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
+	}
+
+	tenantIDForLog := logging.SanitizeLogValue(tenantID)
+
 	// Parse request body into StewardConfig
 	// Support both JSON (legacy) and YAML (production .cfg format)
 	var config stewardtypes.StewardConfig
@@ -751,23 +784,6 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-
-	// Resolve the tenant the config is stored under. This endpoint targets a
-	// specific steward, so the config must be stored under THAT steward's
-	// tenant — not the caller's. An admin in tenant "default" may push config
-	// to a steward in any tenant; using the caller's tenant would store the
-	// config where neither the save=deploy fanout nor the steward's own sync
-	// can find it. Fall back to the caller's tenant (then "default") only when
-	// the steward is not yet known. (Issue #1572)
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
-	}
-	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
-		tenantID = info.TenantID
-	}
-
-	tenantIDForLog := logging.SanitizeLogValue(tenantID)
 
 	s.logger.Info("Configuration upload request received",
 		"steward_id", stewardIDForLog,
