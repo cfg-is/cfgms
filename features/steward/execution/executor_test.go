@@ -1344,3 +1344,276 @@ func TestApplyConfiguration_ApplyOutcomeRecordHasTimestamp(t *testing.T) {
 	assert.False(t, report.ApplyOutcomes[0].Timestamp.Before(before),
 		"Timestamp must not precede the call to ApplyConfiguration")
 }
+
+// ─── Story #3803: retry-exhausted sentinel classification ─────────────────────
+
+// retryExhaustedSetModule is a real test module that reports drift on Get() and
+// then returns a *modules.RetryExhaustedError from Set(), simulating a module
+// (e.g. hyperv) whose bounded auto-retry has used up its attempt budget on a
+// provably-safe, already-explained gate.
+type retryExhaustedSetModule struct {
+	lastError  string
+	failedFrom string
+}
+
+func (m *retryExhaustedSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *retryExhaustedSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return modules.NewRetryExhaustedError(m.lastError, m.failedFrom)
+}
+
+var _ modules.Module = (*retryExhaustedSetModule)(nil)
+
+// TestExecuteResource_RetryExhausted_ProducesStatusRetryExhausted is the
+// [REQUIRED TEST] proving the retry-exhausted seed-phase-failure case produces
+// the new distinct status end-to-end through ExecuteResource — not just that
+// the sentinel error type exists — and that it emits the ADR-012 §2
+// "retry-exhausted" outcome event (the mechanism that actually reaches the
+// controller's log stream, per Issue #3803).
+func TestExecuteResource_RetryExhausted_ProducesStatusRetryExhausted(t *testing.T) {
+	emitter := &recordingEmitter{}
+
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{
+		lastError:  `hyperv: create seed VHDX for VM "stw-01": exit status 1`,
+		failedFrom: "creating",
+	})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		StewardID:     "test-steward-retry-exhausted",
+		EventEmitter:  emitter,
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "retry-exhausted-resource",
+		Module: "retry-exhausted",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusRetryExhausted, result.Status,
+		"a module.Set returning RetryExhaustedError must produce StatusRetryExhausted")
+	assert.False(t, result.ChangesApplied,
+		"ChangesApplied must be false when Set returns RetryExhaustedError (no change was applied)")
+	assert.NotEmpty(t, result.Error,
+		"result.Error must carry the retry-exhausted error message for operator visibility")
+
+	entries := emitter.Entries()
+	require.Len(t, entries, 2, "a retry-exhausted resource must emit detection + retry-exhausted outcome")
+
+	detection := entries[0]
+	assert.Equal(t, "detection", detection.Fields["event_kind"])
+
+	outcome := entries[1]
+	assert.Equal(t, "outcome", outcome.Fields["event_kind"],
+		"second entry must be the outcome event")
+	assert.Equal(t, "retry-exhausted", outcome.Fields["action"],
+		"the outcome event action must be 'retry-exhausted', mirroring the 'deferred' precedent")
+	assert.Equal(t, detection.CorrelationId, outcome.CorrelationId,
+		"detection and retry-exhausted outcome must share the same correlation_id")
+}
+
+// TestExecuteResource_RetryExhausted_DistinctFromDeferredAndFailed verifies that
+// StatusRetryExhausted is its own value, distinct from both StatusDeferred (which
+// retries automatically) and StatusFailed (an unclassified failure).
+func TestExecuteResource_RetryExhausted_DistinctFromDeferredAndFailed(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{lastError: "boom", failedFrom: "creating"})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "retry-exhausted-resource",
+		Module: "retry-exhausted",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.NotEqual(t, execution.StatusDeferred, result.Status,
+		"a retry-exhausted error must NOT produce StatusDeferred — it will not be retried automatically")
+	assert.NotEqual(t, execution.StatusFailed, result.Status,
+		"a retry-exhausted error must NOT produce StatusFailed — it is a known, already-explained gate")
+	assert.Equal(t, execution.StatusRetryExhausted, result.Status)
+}
+
+// TestExecuteConfiguration_RetryExhaustedCount verifies that StatusRetryExhausted
+// resources are counted in ExecutionReport.RetryExhaustedCount and not in
+// FailedCount or DeferredCount.
+func TestExecuteConfiguration_RetryExhaustedCount(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{lastError: "boom", failedFrom: "creating"})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	cfg := stewardconfig.StewardConfig{
+		Resources: []stewardconfig.ResourceConfig{
+			{
+				Name:   "retry-exhausted-resource",
+				Module: "retry-exhausted",
+				Config: map[string]interface{}{"state": "desired"},
+			},
+		},
+	}
+
+	report := executor.ExecuteConfiguration(context.Background(), cfg)
+
+	assert.Equal(t, 1, report.TotalResources)
+	assert.Equal(t, 1, report.RetryExhaustedCount,
+		"retry-exhausted resource must increment RetryExhaustedCount")
+	assert.Equal(t, 0, report.FailedCount,
+		"retry-exhausted resource must NOT increment FailedCount")
+	assert.Equal(t, 0, report.DeferredCount,
+		"retry-exhausted resource must NOT increment DeferredCount")
+}
+
+// TestApplyConfiguration_RetryExhausted_ReachesConfigStatusReport is the
+// [REQUIRED TEST] proving the distinct status reaches ConfigStatusReport / the
+// heartbeat path — not just the steward's local log — as required by Issue
+// #3803. Before this story, module.Set returning nil for the surface-and-wait
+// case meant nothing abnormal reached the controller at all; this asserts the
+// ApplyOutcomeRecord, per-module status, and top-level report status all now
+// surface the retry-exhausted state distinctly.
+func TestApplyConfiguration_RetryExhausted_ReachesConfigStatusReport(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("retry-exhausted", &retryExhaustedSetModule{
+		lastError:  "exit status 1",
+		failedFrom: "creating",
+	})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	configJSON := `{
+  "steward": {"id": "test-steward", "mode": "controller"},
+  "resources": [
+    {
+      "name": "retry-exhausted-resource",
+      "module": "retry-exhausted",
+      "config": {"state": "desired"}
+    }
+  ]
+}`
+
+	report, applyErr := executor.ApplyConfiguration(context.Background(), []byte(configJSON), "v-retry-exhausted-1")
+	require.NoError(t, applyErr, "a retry-exhausted resource must not surface as an ApplyConfiguration error return")
+	require.NotNil(t, report)
+
+	require.Len(t, report.ApplyOutcomes, 1, "one ApplyOutcomeRecord for the retry-exhausted resource")
+	assert.Equal(t, "retry_exhausted", report.ApplyOutcomes[0].Status,
+		"the apply-outcome status must be the distinct 'retry_exhausted' bucket, not 'failed' or 'partial'")
+	assert.NotEmpty(t, report.ApplyOutcomes[0].Error,
+		"the apply-outcome record must carry the retry-exhausted error detail")
+
+	moduleStatus, ok := report.Modules["retry-exhausted"]
+	require.True(t, ok, "the retry-exhausted module must appear in the Modules aggregation")
+	assert.Equal(t, "RETRY_EXHAUSTED", moduleStatus.Status,
+		"the per-module status must be a distinct RETRY_EXHAUSTED, not OK or ERROR")
+
+	assert.Equal(t, "RETRY_EXHAUSTED", report.Status,
+		"the top-level ConfigStatusReport status must surface retry-exhausted distinctly")
+}
+
+// stillDriftedAfterSetModule is a real test module whose Set() succeeds (returns
+// nil) but whose state never actually converges: every Get() call (both the
+// initial drift check and the post-Set verification call inside verifyChanges)
+// reports the same drifted state, so verifyChanges always finds remaining
+// differences and fails with "verification failed: ...".
+type stillDriftedAfterSetModule struct{}
+
+func (m *stillDriftedAfterSetModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
+	return &mapConfigState{data: map[string]interface{}{"state": "drifted"}}, nil
+}
+
+func (m *stillDriftedAfterSetModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
+	return nil
+}
+
+var _ modules.Module = (*stillDriftedAfterSetModule)(nil)
+
+// TestExecuteResource_VerifyMismatch_UnaffectedByRetryExhaustedChange is the
+// [REQUIRED TEST] proving the generic verifyChanges "verification failed" path
+// is UNCHANGED by Issue #3803 for every other resource type/failure mode — this
+// story must not become a backdoor that silences real drift-verification
+// failures for unrelated modules. Set() returns plain nil (not a
+// RetryExhaustedError), so this must still produce StatusFailed with the
+// original "verification failed" message, exactly as before this story.
+func TestExecuteResource_VerifyMismatch_UnaffectedByRetryExhaustedChange(t *testing.T) {
+	errCfg := stewardconfig.ErrorHandlingConfig{
+		ModuleLoadFailure:  stewardconfig.ActionContinue,
+		ResourceFailure:    stewardconfig.ActionWarn,
+		ConfigurationError: stewardconfig.ActionFail,
+	}
+	f := factory.New(discovery.ModuleRegistry{}, errCfg, logging.ForModule("executor_test"))
+	f.RegisterModule("still-drifted", &stillDriftedAfterSetModule{})
+
+	executor, err := execution.NewExecutor(&execution.ExecutorConfig{
+		Logger:        logging.ForModule("executor_test"),
+		Factory:       f,
+		ErrorHandling: errCfg,
+		DriftMode:     stewardconfig.DriftModeApply,
+	})
+	require.NoError(t, err)
+
+	resource := stewardconfig.ResourceConfig{
+		Name:   "still-drifted-resource",
+		Module: "still-drifted",
+		Config: map[string]interface{}{"state": "desired"},
+	}
+
+	result := executor.ExecuteResource(context.Background(), resource)
+
+	assert.Equal(t, execution.StatusFailed, result.Status,
+		"an unrelated module's genuine verification mismatch must still produce StatusFailed")
+	assert.NotEqual(t, execution.StatusRetryExhausted, result.Status,
+		"a plain verifyChanges mismatch must NOT be reclassified as StatusRetryExhausted")
+	assert.Contains(t, result.Error, "verification failed",
+		"the original verification-failed message must be preserved unchanged")
+	assert.True(t, result.ChangesApplied,
+		"Set succeeded, so ChangesApplied must be true even though verification then failed")
+}

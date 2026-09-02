@@ -303,12 +303,15 @@ type ApplyOutcomeRecord struct {
 	// ModuleName is the module that managed this resource.
 	ModuleName string `json:"module_name"`
 
-	// Status is the outcome classification: "applied", "partial", or "failed".
+	// Status is the outcome classification: "applied", "partial", "retry_exhausted",
+	// or "failed". "retry_exhausted" (Issue #3803) is a known, already-explained gate —
+	// a bounded auto-retry used up its attempt budget and needs an operator — distinct
+	// from "failed", which is an unclassified convergence failure.
 	// Derived from the executor's ResourceStatus at the controller side.
 	Status string `json:"status"`
 
-	// Error contains the per-resource error detail when Status is "failed".
-	// Empty on success.
+	// Error contains the per-resource error detail when Status is "failed" or
+	// "retry_exhausted". Empty on success.
 	Error string `json:"error,omitempty"`
 
 	// Timestamp is when this resource's execution completed.
