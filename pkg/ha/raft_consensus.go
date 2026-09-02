@@ -944,6 +944,17 @@ func (rc *RaftConsensus) updateLeadership(ss *raft.SoftState) {
 	}
 }
 
+// SetOnBecomeLeader sets the callback invoked (in a goroutine) when this node
+// transitions from non-leader to leader. It takes rc.mu for the write because
+// the runRaft goroutine started in NewRaftConsensus reads onBecomeLeader under
+// rc.mu inside updateLeadership; an unsynchronized assignment races that read
+// whenever the caller (Manager.Start) wires the callback after construction.
+func (rc *RaftConsensus) SetOnBecomeLeader(cb func(ctx context.Context, departedNodeID string)) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.onBecomeLeader = cb
+}
+
 // GetSessionsForNode returns steward IDs from ClusterState.Sessions whose
 // NodeID matches the given node ID string. Used by the HA leader to identify
 // stewards orphaned by a departed controller node.
