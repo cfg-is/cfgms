@@ -65,14 +65,28 @@ func newLeaseLeaderHAManager(t *testing.T) *ha.Manager {
 // (handlers_raft_ha_test.go); this is the true-leadership counterpart — the state
 // that only exists once a node actually holds the database lease.
 func TestBothStatusSurfaces_Leader_IsLeaderAndRaftIsLeaderAgree(t *testing.T) {
-	haManager := newLeaseLeaderHAManager(t)
-
+	// Do the expensive, variable-latency setup (RBAC init and its SQLite writes
+	// inside setupTestServer, then ephemeral key generation) BEFORE acquiring the
+	// lease, not after. newLeaseLeaderHAManager's require.Eventually only proves
+	// the lease was held at the moment it observed HasLeadership() == true: the
+	// local-authority cache backing that check is valid for just
+	// FastElectionConfig's derived SafetyMargin (160ms — 0.8 × 200ms
+	// ElectionTimeout, see ClusterConfig.LeaseDuration / lease.SafetyMargin), a
+	// window sized for the background renewal loop's own ~20ms cadence, not for a
+	// one-time setup step sandwiched in front of the assertions. On a loaded CI
+	// runner setupTestServer alone can take longer than that margin, so a manager
+	// started first can have its cached authority lapse before the HTTP requests
+	// below ever run (Issue #3840). Acquiring the lease last confines the window
+	// between "lease confirmed held" and the assertions to two cheap in-process
+	// ServeHTTP calls — the same shape every passing pkg/ha
+	// Eventually-then-immediate-assertion test already uses.
 	server := setupTestServer(t)
+	apiKey := NewEphemeralTestKey(t, server, []string{"ha:read-status"}, "test-tenant", 5*time.Minute)
+
+	haManager := newLeaseLeaderHAManager(t)
 	server.mu.Lock()
 	server.haManager = haManager
 	server.mu.Unlock()
-
-	apiKey := NewEphemeralTestKey(t, server, []string{"ha:read-status"}, "test-tenant", 5*time.Minute)
 
 	raftReq := httptest.NewRequest("GET", "/api/v1/raft/status", nil)
 	raftReq.Header.Set("X-API-Key", apiKey)
