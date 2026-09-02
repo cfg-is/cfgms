@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,8 +17,11 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // realGathererInitialDNA builds a DNA snapshot the way a real steward's
@@ -525,6 +529,251 @@ func TestSyncDNA_WarnLogContainsStewardIDAndMissingFields(t *testing.T) {
 	assert.NotContains(t, fields, "hostname")
 }
 
+// realFirstSyncRaceDNA builds the DNA snapshot shape a steward's very first
+// SyncDNA publish actually has in production (Issue #3807): collectBasicInfo
+// (features/steward/dna/dna.go) populates "hostname" synchronously, but "os"
+// is written only by the asynchronous background software collector, which
+// PartitionHostFacts's caller (dna.Collector.Collect) has merely just kicked
+// off — not waited for — on this first call. The host:os fragment this
+// produces therefore carries "hostname" alone, exactly like
+// realGathererInitialDNA except os is dropped to model the race instead of a
+// module-ownership gap.
+func realFirstSyncRaceDNA(t *testing.T, id, hostname string) *commonpb.DNA {
+	t.Helper()
+	attrs := map[string]string{"hostname": hostname}
+	fragments, envelopes, err := sdna.PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
+	require.NoError(t, err)
+	return &commonpb.DNA{
+		Id:              id,
+		SyncFingerprint: "fp-" + id,
+		Fragments:       fragments,
+		Envelopes:       envelopes,
+	}
+}
+
+// TestSyncDNA_FirstSyncAcceptsHostnameWhenOSNotYetCollected is the REQUIRED
+// regression test for Issue #3807: a steward's hostname is collected
+// synchronously and is genuinely present on the very first DNA sync, but a
+// sibling required field (os) is written only by the async background
+// collector and has not landed yet. Before the fix, checkDNAIntegrity's
+// all-or-nothing gate discarded the WHOLE snapshot — including the perfectly
+// good hostname — because os was momentarily missing, and the steward's
+// 30-minute DNA refresh interval (features/steward/client/client_transport.go)
+// meant the corrected snapshot was not retried for a long time. There is no
+// previously-known-good DNA for a brand new steward, so nothing is protected
+// by rejecting wholesale; the fix persists what is genuinely present instead
+// of discarding it. This is the same attrs["hostname"] read path exercised by
+// features/controller/api/types.go and handlers_stewards.go.
+func TestSyncDNA_FirstSyncAcceptsHostnameWhenOSNotYetCollected(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	log := logging.NewCapturingLogger()
+	svc := NewControllerServiceWithStorage(log, storage)
+	ctx := context.Background()
+
+	// Brand new steward: registered, but no DNA has ever been accepted yet
+	// (matches production: RegistrationRequest never populates Hostname/OS,
+	// so RegisterStewardWithAttributes seeds no pre-sync fragment).
+	svc.mu.Lock()
+	svc.stewards["steward-linux-guest"] = &StewardInfo{
+		ID:       "steward-linux-guest",
+		TenantID: "tenant-a",
+		DNA:      nil,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	raceDNA := realFirstSyncRaceDNA(t, "steward-linux-guest", "cidata-a2-cfg7002-02")
+	status, err := svc.SyncDNA(ctx, raceDNA)
+	require.NoError(t, err)
+	assert.Equal(t, commonpb.Status_OK, status.Code)
+
+	info, ok := svc.GetStewardInfo("steward-linux-guest")
+	require.True(t, ok)
+	require.NotNil(t, info.DNA, "DNA must be accepted: hostname is genuinely present")
+	assert.Equal(t, "cidata-a2-cfg7002-02", FlattenDNAFragments(info.DNA.GetFragments())["hostname"],
+		"hostname must survive to the controller-side view even though os has not been collected yet")
+
+	// The partial acceptance must be visibly distinguishable from a silent,
+	// unlogged loss: an operator or auditor reading logs can see os is still
+	// outstanding for this steward.
+	entry, found := log.FindWarn("dna_integrity_partial_accept")
+	require.True(t, found, "expected a WARN log distinguishing a partial-but-genuine accept from a silent loss")
+	val, ok := entry["missing_fields"]
+	require.True(t, ok)
+	fields, isSlice := val.([]string)
+	require.True(t, isSlice)
+	assert.Contains(t, fields, "os")
+
+	// Persisted to durable history — not silently dropped like a fully
+	// degenerate snapshot.
+	history, err := storage.GetHistory(ctx, "steward-linux-guest", &fleetStorage.QueryOptions{IncludeData: true})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, history.TotalCount, "a genuinely partial first sync must be persisted, not dropped")
+}
+
+// TestSyncDNA_FirstSyncStillRejectsWhenNothingIsPresent verifies the fix does
+// not weaken protection for a truly degenerate first sync (no fields
+// collected at all, e.g. a steward whose hostname genuinely cannot be
+// determined) — it must still be rejected, keeping that case distinguishable
+// from the merely-partial one above.
+func TestSyncDNA_FirstSyncStillRejectsWhenNothingIsPresent(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	log := logging.NewCapturingLogger()
+	svc := NewControllerServiceWithStorage(log, storage)
+	ctx := context.Background()
+
+	svc.mu.Lock()
+	svc.stewards["steward-unknown"] = &StewardInfo{
+		ID:       "steward-unknown",
+		TenantID: "tenant-a",
+		DNA:      nil,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	emptyDNA := &commonpb.DNA{Id: "steward-unknown"}
+	_, err := svc.SyncDNA(ctx, emptyDNA)
+	require.NoError(t, err)
+
+	info, ok := svc.GetStewardInfo("steward-unknown")
+	require.True(t, ok)
+	assert.Nil(t, info.DNA, "a snapshot with nothing usable must still be rejected wholesale")
+
+	_, found := log.FindWarn("dna_integrity_rejected")
+	assert.True(t, found, "a fully degenerate first sync must still be reported as rejected")
+
+	history, err := storage.GetHistory(ctx, "steward-unknown", &fleetStorage.QueryOptions{IncludeData: true})
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, history.TotalCount, "a fully degenerate snapshot must not be persisted")
+}
+
+// TestSyncDNA_ReconnectionRehydratedEntryStillProtectsDurableDNA is the
+// security regression test for the partial-accept guard (Issue #3807): the
+// record the guard protects is the DURABLE one (written by storeDNA, served by
+// GET /api/v1/stewards), so "does this steward already have a good record?"
+// must not be answered from the in-memory registry alone.
+//
+// The divergence is reachable in band, not only as a restart race. A steward
+// that sends IsReconnection=true after a controller restart is resolved from
+// the durable StewardStore and rehydrated into the registry; if that entry
+// carried zero fragments, a follow-up snapshot publishing only hostname would
+// be partial-accepted and would overwrite the durable last-known-good record,
+// regressing an established `os` back to missing. Under the threat model
+// (stewards run on possibly-compromised hosts) that is an attacker-driven way
+// to shed a fact used for fleet/config targeting.
+func TestSyncDNA_ReconnectionRehydratedEntryStillProtectsDurableDNA(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	log := logging.NewCapturingLogger()
+	ctx := context.Background()
+
+	// A complete durable record already exists for this steward, along with the
+	// durable fleet-registry record a reconnection resolves against.
+	goodDNA := realGathererInitialDNA(t, "dev-reconnect", "reconnect-host", "linux")
+	require.NoError(t, storage.Store(ctx, "dev-reconnect", goodDNA,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-reconnect", "tenant-a"))
+
+	sm := pkgtesting.SetupTestStorage(t)
+	stewardStore := sm.GetStewardStore()
+	require.NotNil(t, stewardStore)
+	require.NoError(t, stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID:           "dev-reconnect",
+		TenantID:     "tenant-a",
+		Status:       business.StewardStatusActive,
+		RegisteredAt: time.Now().UTC().Truncate(time.Second),
+	}))
+
+	// Controller restart: a fresh service with an empty in-memory registry over
+	// the same durable stores.
+	svc := NewControllerServiceWithStorage(log, storage)
+	svc.SetStewardStore(stewardStore)
+
+	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+	resp, err := svc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
+		Version:        "1.0.0",
+		InitialDna:     &commonpb.DNA{Id: "dev-reconnect"},
+		IsReconnection: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "dev-reconnect", resp.StewardId,
+		"precondition: the reconnection must resolve against the durable fleet record")
+
+	// The rehydrated registry entry is seeded from durable DNA rather than an
+	// empty snapshot, so the registry agrees with GET /api/v1/stewards.
+	info, ok := svc.GetStewardInfo("dev-reconnect")
+	require.True(t, ok)
+	require.NotNil(t, info.DNA)
+	assert.Equal(t, "linux", FlattenDNAFragments(info.DNA.GetFragments())["os"],
+		"a reconnection must rehydrate the last-known-good DNA, not an empty snapshot")
+
+	// The attack: publish a snapshot carrying hostname only, dropping os.
+	_, err = svc.SyncDNA(tenantCtx, realFirstSyncRaceDNA(t, "dev-reconnect", "reconnect-host"))
+	require.NoError(t, err)
+
+	_, partial := log.FindWarn("dna_integrity_partial_accept")
+	assert.False(t, partial, "a steward with a prior good record must never be partial-accepted")
+	_, rejected := log.FindWarn("dna_integrity_rejected")
+	assert.True(t, rejected, "the os-shedding snapshot must be rejected")
+
+	// The durable last-known-good record is intact and history was not appended.
+	record, err := storage.GetLatestByDeviceID(ctx, "dev-reconnect")
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, "linux", FlattenDNAFragments(record.DNA.GetFragments())["os"],
+		"the durable record must still carry the established os")
+
+	history, err := storage.GetHistory(ctx, "dev-reconnect", &fleetStorage.QueryOptions{IncludeData: true})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, history.TotalCount,
+		"the degraded snapshot must not be appended to durable history")
+}
+
+// TestSyncDNA_EmptyInMemoryDNAConsultsDurableRecord pins the guard itself,
+// independent of how the registry entry came to be empty. Registration with a
+// degenerate InitialDna also overwrites StewardInfo.DNA (leaving it nil) while
+// a complete durable record survives, so the durable consult — not the
+// rehydration seeding — is what must reject the follow-up partial snapshot.
+func TestSyncDNA_EmptyInMemoryDNAConsultsDurableRecord(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	log := logging.NewCapturingLogger()
+	svc := NewControllerServiceWithStorage(log, storage)
+	ctx := context.Background()
+
+	goodDNA := makeValidDNA("dev-empty-mem")
+	require.NoError(t, storage.Store(ctx, "dev-empty-mem", goodDNA,
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+
+	// In-memory entry carries no fragments at all.
+	svc.mu.Lock()
+	svc.stewards["dev-empty-mem"] = &StewardInfo{
+		ID:       "dev-empty-mem",
+		TenantID: "tenant-a",
+		DNA:      &commonpb.DNA{Id: "dev-empty-mem"},
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	_, err := svc.SyncDNA(ctx, realFirstSyncRaceDNA(t, "dev-empty-mem", "empty-mem-host"))
+	require.NoError(t, err)
+
+	_, partial := log.FindWarn("dna_integrity_partial_accept")
+	assert.False(t, partial,
+		"an empty in-memory entry must not be mistaken for a steward with nothing to protect")
+
+	record, err := storage.GetLatestByDeviceID(ctx, "dev-empty-mem")
+	require.NoError(t, err)
+	assert.Equal(t, "linux", FlattenDNAFragments(record.DNA.GetFragments())["os"],
+		"the durable record must still carry the established os")
+
+	history, err := storage.GetHistory(ctx, "dev-empty-mem", &fleetStorage.QueryOptions{IncludeData: true})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, history.TotalCount,
+		"the degraded snapshot must not be appended to durable history")
+}
+
 // --- Integration tests: AcceptRegistration write guard ---
 
 // TestAcceptRegistration_RejectsDegenerateInitialDNA verifies that a registration
@@ -648,6 +897,99 @@ func TestAcceptRegistration_RejectsNilInitialDNA(t *testing.T) {
 	info, ok := svc.GetStewardInfo(resp.StewardId)
 	require.True(t, ok)
 	assert.Nil(t, info.DNA)
+}
+
+// TestAcceptRegistration_DegenerateSnapshotDoesNotCarryForwardOtherTenantDNA
+// pins the tenant scope of the degenerate-snapshot carry-forward. The
+// in-memory reconnection lookup (findStewardByDNAId) matches a caller-asserted
+// DNA ID across the whole registry with no tenant scoping, so a caller in
+// tenant B can land on a tenant-A steward's ID. The entry rewritten below is
+// stamped with the CALLER's tenant, so carrying tenant A's last-known-good DNA
+// forward into it would publish tenant A's host facts (hostname, os) under
+// tenant B — and the next heartbeat, whose durable write is guarded by
+// steward.DNA != nil, would persist them under tenant B in the fleet store
+// that backs GET /api/v1/stewards. Only a same-tenant prior may be carried
+// forward.
+func TestAcceptRegistration_DegenerateSnapshotDoesNotCarryForwardOtherTenantDNA(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	ctx := context.Background()
+
+	// Tenant A's steward is live in the registry with a complete DNA snapshot.
+	svc.mu.Lock()
+	svc.stewards["dev-tenant-a"] = &StewardInfo{
+		ID:       "dev-tenant-a",
+		TenantID: "tenant-a",
+		DNA:      realGathererInitialDNA(t, "dev-tenant-a", "tenant-a-host", "linux"),
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	// Tenant B asserts tenant A's DNA ID with a degenerate snapshot.
+	tenantBCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-b")
+	resp, err := svc.AcceptRegistration(tenantBCtx, &controllerpb.RegisterRequest{
+		Version:        "1.0.0",
+		InitialDna:     &commonpb.DNA{Id: "dev-tenant-a"},
+		IsReconnection: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "dev-tenant-a", resp.StewardId,
+		"precondition: the in-memory reconnection lookup is not tenant-scoped, so the cross-tenant ID resolves")
+
+	info, ok := svc.GetStewardInfo("dev-tenant-a")
+	require.True(t, ok)
+	assert.Nil(t, info.DNA,
+		"another tenant's DNA must never be carried forward into an entry stamped with the caller's tenant")
+
+	// The heartbeat durable-write guard therefore still suppresses the write:
+	// tenant A's host facts are not persisted under tenant B.
+	status, err := svc.ProcessHeartbeat(tenantBCtx, &controllerpb.HeartbeatRequest{
+		StewardId: "dev-tenant-a",
+		Status:    "active",
+	})
+	require.NoError(t, err)
+	require.Equal(t, commonpb.Status_OK, status.Code)
+
+	_, err = storage.GetLatestByDeviceID(ctx, "dev-tenant-a")
+	assert.Error(t, err,
+		"no durable DNA record may be written for a cross-tenant registration carrying a degenerate snapshot")
+}
+
+// TestAcceptRegistration_DegenerateSnapshotCarriesForwardSameTenantDNA is the
+// counterpart: within one tenant the carry-forward must still happen. A
+// reconnecting steward re-registers with a bare {Id} snapshot, and blanking
+// StewardInfo.DNA there would make the registry disagree with the durable
+// record and leave the SyncDNA integrity guard nothing in memory to compare
+// against.
+func TestAcceptRegistration_DegenerateSnapshotCarriesForwardSameTenantDNA(t *testing.T) {
+	storage := newTestFleetStorage(t)
+	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+	ctx := context.Background()
+
+	svc.mu.Lock()
+	svc.stewards["dev-same-tenant"] = &StewardInfo{
+		ID:       "dev-same-tenant",
+		TenantID: "tenant-a",
+		DNA:      realGathererInitialDNA(t, "dev-same-tenant", "same-tenant-host", "linux"),
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	svc.mu.Unlock()
+
+	tenantACtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+	resp, err := svc.AcceptRegistration(tenantACtx, &controllerpb.RegisterRequest{
+		Version:        "1.0.0",
+		InitialDna:     &commonpb.DNA{Id: "dev-same-tenant"},
+		IsReconnection: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "dev-same-tenant", resp.StewardId)
+
+	info, ok := svc.GetStewardInfo("dev-same-tenant")
+	require.True(t, ok)
+	require.NotNil(t, info.DNA, "a same-tenant prior snapshot must be carried forward")
+	assert.Equal(t, "linux", FlattenDNAFragments(info.DNA.GetFragments())["os"])
 }
 
 // --- Manifest-driven required-field loader tests (ADR-020 / Issue #2642) ---
