@@ -118,9 +118,17 @@ type postRunCommandRequest struct {
 // of POST /api/v1/runs/command (Issue #3694): the prior SecurityProfilePublicBeta gate
 // is gone, so this now changes behavior for every deployment, not just public-beta
 // ones. It performs cryptographic verification plus operator-credential trust
-// (CA chain, admin marker, revocation); expiry and nonce-replay enforcement are the
-// steward's responsibility (independent of the outer command's own replay window),
-// not re-checked here.
+// (CA chain, payload-signing marker, revocation); expiry and nonce-replay enforcement
+// are the steward's responsibility (independent of the outer command's own replay
+// window), not re-checked here.
+//
+// The marker requirement is HasPayloadSigningMarker, not HasAdminMarker (Issue #3696).
+// This endpoint sits on the trust boundary between the two ends of the signed ad-hoc
+// path, and all three must agree on one credential type: cfg signs with the zero-custody
+// CSR credential (signCommandContent, cmd/cfg/cmd/steward.go), this check mediates the
+// submission, and the steward re-verifies on delivery (verifyOperatorCert,
+// features/steward/commands/execute_script.go). An admin transport bundle authenticates
+// mTLS; it does not authorize signing an operator payload.
 func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, targets []string, nonce string, expiresAt time.Time, sig *execCommandSignature) error {
 	if sig == nil || sig.Algorithm == "" || sig.Value == "" || sig.PublicKey == "" {
 		return fmt.Errorf("ad-hoc execution requires an operator signature")
@@ -177,8 +185,8 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 	}); err != nil {
 		return fmt.Errorf("operator signing certificate is not trusted by the controller CA: %w", err)
 	}
-	if !cert.HasAdminMarker(operatorCert) {
-		return fmt.Errorf("operator signing certificate is not an administrator certificate")
+	if !cert.HasPayloadSigningMarker(operatorCert) {
+		return fmt.Errorf("operator signing certificate is not a payload-signing certificate")
 	}
 	if s.certManager.IsRevoked(operatorCert.SerialNumber.String()) {
 		return fmt.Errorf("operator signing certificate is revoked")

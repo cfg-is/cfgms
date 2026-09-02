@@ -565,9 +565,11 @@ remain distinguishable by construction. The resulting keypair signs
 
 **Consumers (Issue #3696):** `cfg steward run-command` and `cfg steward exec` sign
 the inline command's operator envelope with this credential — loaded from the
-credential store (`--credential-name`, default `signing-key`) and the certificate
-at `CFGMS_SIGNING_CERT` or the default `--cert-out` path above. Neither command
-reads the admin bundle's key for this signature: the admin bundle (or an active
+credential store under the default `signing-key` entry (neither command exposes a
+`--credential-name` override; that flag only applies to `request-signing-cert`
+itself) and the certificate at `CFGMS_SIGNING_CERT` or the default `--cert-out`
+path above. Neither command reads the admin bundle's key for this signature: the
+admin bundle (or an active
 session) is still required to authenticate the API connection itself, but the
 controller never holds the payload-signing private key at any point — the
 zero-custody property this credential exists for is enforced end-to-end only once
@@ -575,6 +577,13 @@ these commands stop accepting an admin-bundle-signed envelope, which this story
 completes. Run `cfg credential request-signing-cert` once per operator machine
 before using either command; a missing credential fails fast with an error naming
 the command to run.
+
+All three enforcement points on this path require the same credential type, so an
+admin bundle is not a substitute at any of them: the CLI signs with the
+payload-signing credential, `POST /api/v1/runs/command` rejects a submission whose
+signing certificate lacks the payload-signing marker
+(`validatePublicBetaCommandSignature`), and the steward re-verifies the marker
+independently when the command is delivered (`verifyOperatorCert`).
 
 The endpoint is gated by the `signing-credential:request` permission at
 `AssuranceStrong` plus a fresh user-presence proof, so this command requires an
