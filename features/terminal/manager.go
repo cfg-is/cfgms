@@ -20,11 +20,19 @@ type DefaultSessionManager struct {
 	recorder  Recorder
 	cleanupCh chan string
 	stopCh    chan struct{}
-	// stopped records that Stop has already run. Stop closes stopCh, so a second
-	// call would panic on close of a closed channel; shutdown paths legitimately
-	// converge (explicit shutdown plus a deferred safety net), so the second call
-	// must be a no-op rather than a crash.
+	// cleanupDone is closed by cleanupRoutine when it returns, letting callers
+	// (Stop, quiesceBackgroundCleanup) wait for the background ticker to have
+	// fully stopped rather than merely signaled.
+	cleanupDone chan struct{}
+	// stopped records that Stop has already run its teardown (closing sessions
+	// and the recorder). A second call must be a no-op rather than repeating
+	// that teardown.
 	stopped bool
+	// cleanupStopSignaled records that stopCh has already been closed, whether
+	// by Stop or by the test-only quiesceBackgroundCleanup. stopCh must only
+	// ever be closed once — a second close panics — so every close goes through
+	// signalCleanupStopLocked.
+	cleanupStopSignaled bool
 	// afterCollectHook, if non-nil, is called after the timed-out ID slice is
 	// collected and m.mu is released, but before the termination loop begins.
 	// Used in tests to inject deterministic race conditions.
@@ -53,11 +61,12 @@ func NewSessionManager(config *Config, logger logging.Logger) (SessionManager, e
 	}
 
 	manager := &DefaultSessionManager{
-		config:    config,
-		logger:    logger,
-		sessions:  make(map[string]*Session),
-		cleanupCh: make(chan string, 100),
-		stopCh:    make(chan struct{}),
+		config:      config,
+		logger:      logger,
+		sessions:    make(map[string]*Session),
+		cleanupCh:   make(chan string, 100),
+		stopCh:      make(chan struct{}),
+		cleanupDone: make(chan struct{}),
 	}
 
 	// Initialize recorder if recording is enabled. RecordSessions is a security
@@ -205,8 +214,12 @@ func (m *DefaultSessionManager) GetSessionRecording(sessionID string) (*SessionR
 	return m.recorder.GetRecording(sessionID)
 }
 
-// cleanupRoutine runs in the background to clean up timed-out sessions
+// cleanupRoutine runs in the background to clean up timed-out sessions.
+// cleanupDone is closed on return so callers can wait for the ticker to have
+// actually stopped, not merely been signaled to stop.
 func (m *DefaultSessionManager) cleanupRoutine() {
+	defer close(m.cleanupDone)
+
 	ticker := time.NewTicker(1 * time.Minute) // Check every minute
 	defer ticker.Stop()
 
@@ -233,10 +246,13 @@ func (m *DefaultSessionManager) CleanupTimedOutSessions() {
 			timedOut = append(timedOut, id)
 		}
 	}
+	// Captured under the same lock tests use to install it, so a hook write
+	// racing this read is never observed as a torn or stale value.
+	hook := m.afterCollectHook
 	m.mu.Unlock()
 
-	if m.afterCollectHook != nil {
-		m.afterCollectHook(timedOut)
+	if hook != nil {
+		hook(timedOut)
 	}
 
 	for _, id := range timedOut {
@@ -271,6 +287,29 @@ func (m *DefaultSessionManager) RequestCleanup(sessionID string) {
 	}
 }
 
+// signalCleanupStopLocked closes stopCh at most once, whether the caller is
+// Stop or quiesceBackgroundCleanup. Callers must hold m.mu.
+func (m *DefaultSessionManager) signalCleanupStopLocked() {
+	if m.cleanupStopSignaled {
+		return
+	}
+	m.cleanupStopSignaled = true
+	close(m.stopCh)
+}
+
+// quiesceBackgroundCleanup halts the background cleanup ticker and waits for
+// cleanupRoutine to actually exit, without closing live sessions or the
+// recorder. Test-only: lets a test install afterCollectHook and drive
+// CleanupTimedOutSessions itself without the ticker racing that call. Safe to
+// call more than once, and safe to call before a later Stop().
+func (m *DefaultSessionManager) quiesceBackgroundCleanup() {
+	m.mu.Lock()
+	m.signalCleanupStopLocked()
+	m.mu.Unlock()
+
+	<-m.cleanupDone
+}
+
 // Stop stops the session manager and cleans up resources. It is idempotent:
 // repeated calls return nil without re-closing stopCh or re-closing sessions.
 func (m *DefaultSessionManager) Stop(ctx context.Context) error {
@@ -283,7 +322,7 @@ func (m *DefaultSessionManager) Stop(ctx context.Context) error {
 	m.stopped = true
 
 	// Signal cleanup routine to stop
-	close(m.stopCh)
+	m.signalCleanupStopLocked()
 
 	// Close all active sessions
 	for sessionID, session := range m.sessions {
