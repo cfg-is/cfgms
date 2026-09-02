@@ -663,14 +663,25 @@ func kvSecretToSecret(tenantID, keyName string, kv *openbao.KVSecret) *interface
 	return secret
 }
 
-// isNotFound returns true for HTTP 404-style errors from the OpenBao client.
+// isNotFound reports whether err represents an absent secret, judged by the
+// OpenBao client's own classification rather than by matching rendered error
+// text. Substring matching on err.Error() previously misclassified any error
+// whose rendered text happened to contain "404" (an ephemeral port number, a
+// request path, a request ID) or the phrase "not found" (a DNS or connection
+// failure rendering as "host not found") as absence — turning a backend
+// outage into a false report that the secret does not exist.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	return err == openbao.ErrSecretNotFound ||
-		strings.Contains(err.Error(), "404") ||
-		strings.Contains(err.Error(), "not found")
+	if errors.Is(err, openbao.ErrSecretNotFound) {
+		return true
+	}
+	var respErr *openbao.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.StatusCode == http.StatusNotFound
+	}
+	return false
 }
 
 // hasAllTags returns true if secret tags contain all filter tags.

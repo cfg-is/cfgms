@@ -7,10 +7,12 @@ package openbao
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	openbao "github.com/openbao/openbao/api/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -78,4 +80,39 @@ func TestGetSecret_ReadFailureDoesNotWrapErrSecretNotFound(t *testing.T) {
 				"a failed read must not be classified as an absent secret")
 		})
 	}
+}
+
+// TestIsNotFound_503WithTextContaining404IsNotClassified is the REQUIRED
+// regression test for Issue #3855: isNotFound previously substring-matched
+// err.Error(), so a non-404 response whose rendered text happens to contain
+// "404" (an ephemeral port, a request path, a request ID) was misclassified
+// as an absent secret. The error is built directly, not via an httptest
+// server bound to a matching ephemeral port, so this test's outcome does not
+// depend on which port the OS happens to hand out.
+func TestIsNotFound_503WithTextContaining404IsNotClassified(t *testing.T) {
+	respErr := &openbao.ResponseError{
+		HTTPMethod: http.MethodGet,
+		URL:        "http://127.0.0.1:40412/v1/secret/data/root/cluster-ca",
+		StatusCode: http.StatusServiceUnavailable,
+		Errors:     []string{"service is unavailable"},
+	}
+	err := fmt.Errorf("error encountered while reading secret: %w", respErr)
+
+	require.Contains(t, err.Error(), "404",
+		"test setup: rendered error text must contain the substring this test guards against")
+	assert.False(t, isNotFound(err),
+		"a 503 must not be classified as not-found merely because its rendered text contains \"404\"")
+}
+
+// TestIsNotFound_ConnectionErrorMentioningNotFoundIsNotClassified is the
+// REQUIRED regression test for the second unsound substring arm: an error
+// whose text contains the phrase "not found" but which carries no HTTP
+// status at all (a DNS or connection failure) is not an absent secret.
+func TestIsNotFound_ConnectionErrorMentioningNotFoundIsNotClassified(t *testing.T) {
+	err := fmt.Errorf("dial tcp: lookup openbao.internal: host not found")
+
+	require.Contains(t, err.Error(), "not found",
+		"test setup: rendered error text must contain the phrase this test guards against")
+	assert.False(t, isNotFound(err),
+		"a connection failure must not be classified as not-found merely because its text says \"not found\"")
 }
