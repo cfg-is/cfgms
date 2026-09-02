@@ -85,9 +85,10 @@ type monitorFields struct {
 	monitorStop    chan struct{} // closed by StopMonitors; recreated by StartMonitors
 	monitorWg      sync.WaitGroup
 
-	// monitorStateMu guards monitorState.
-	monitorStateMu sync.Mutex
-	monitorState   map[string]map[string]interface{}
+	// monitorStateMu guards monitorState and monitorStateObserver.
+	monitorStateMu       sync.Mutex
+	monitorState         map[string]map[string]interface{}
+	monitorStateObserver func(resourceID string)
 
 	// monitorDebounceWindow is the per-resource debounce interval (default 1500ms).
 	// Overridden by SetMonitorDebounceWindow for tests.
@@ -118,6 +119,22 @@ func (e *Executor) SetMonitorDebounceWindow(d time.Duration) {
 	e.monitorMu.Lock()
 	e.monitorDebounceWindow = d
 	e.monitorMu.Unlock()
+}
+
+// SetMonitorStateObserver registers a callback invoked synchronously,
+// immediately after cacheMonitorState applies a ChangeEvent's snapshot to
+// monitorState for the given resourceID — i.e. once
+// CollectModuleDNAAttributes / CollectModuleFragments are guaranteed to
+// reflect that event. This fires on the debounce-independent cache-write
+// path (a module's ChangeEvent is cached as soon as the fan-in goroutine
+// reads it, before the debounced targeted reconcile runs), so callers that
+// need to know "the change has landed" can wait on this instead of polling
+// CollectModuleDNAAttributes with a wall-clock timeout. Pass nil to clear.
+// Safe to call at any time; guarded by monitorStateMu.
+func (e *Executor) SetMonitorStateObserver(fn func(resourceID string)) {
+	e.monitorStateMu.Lock()
+	e.monitorStateObserver = fn
+	e.monitorStateMu.Unlock()
 }
 
 // SetMonitorFanInCap overrides the fan-in channel capacity for tests.
@@ -369,7 +386,12 @@ func (e *Executor) cacheMonitorState(evt modules.ChangeEvent) bool {
 		e.monitorState = make(map[string]map[string]interface{})
 	}
 	e.monitorState[evt.ResourceID] = copied
+	observer := e.monitorStateObserver
 	e.monitorStateMu.Unlock()
+
+	if observer != nil {
+		observer(evt.ResourceID)
+	}
 	return true
 }
 
