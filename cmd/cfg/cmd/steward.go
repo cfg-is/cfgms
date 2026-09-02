@@ -19,11 +19,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/spf13/cobra"
 )
@@ -207,9 +207,14 @@ var stewardRunCommandCmd = &cobra.Command{
 
 The argument is treated as a file path if the path exists on disk; otherwise
 it is used as the inline script body. Content is base64-encoded and signed with
-the operator's mTLS bundle key before transmission.
+a dedicated payload-signing credential before transmission — a private key
+generated locally by cfg and never transmitted, distinct from the admin bundle
+used for mTLS transport authentication. The controller never holds this
+signing key at any point.
 
-Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
+Requires an active session or admin bundle for the API connection (--bundle or
+CFGMS_ADMIN_BUNDLE), and a payload-signing credential for the signature — run
+'cfg credential request-signing-cert' first if none exists.
 
 Examples:
   # Inline command to a single host by bare hostname
@@ -237,7 +242,9 @@ hostname, id:, glob, or attribute filter. The command is submitted as a signed
 inline script and dispatched to every steward the selector matches.
 The CLI blocks until all jobs reach a terminal state or the timeout elapses.
 
-Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
+Requires an active session or admin bundle for the API connection (--bundle or
+CFGMS_ADMIN_BUNDLE), and a payload-signing credential for the signature — run
+'cfg credential request-signing-cert' first if none exists.
 
 The --shell flag is required. Allowed values: bash, sh, pwsh (cmd on Windows as fallback).
 
@@ -1507,7 +1514,7 @@ func printPendingRegistrationCount(client *APIClient) {
 type commandSignature struct {
 	Algorithm string `json:"algorithm"`
 	Value     string `json:"value"`      // base64-encoded raw signature bytes
-	PublicKey string `json:"public_key"` // cert PEM from the operator bundle
+	PublicKey string `json:"public_key"` // cert PEM from the payload-signing credential
 }
 
 // runRecord mirrors the fields returned by GET /api/v1/runs/{run_id}.
@@ -2048,30 +2055,34 @@ func readCommandContent(arg string) ([]byte, error) {
 	return []byte(arg), nil
 }
 
-// signCommandContent locates the operator's admin bundle, extracts its private
-// key, and signs content. Returns an error if no bundle or no private key is found.
+// signCommandContent signs content with the zero-custody CSR-issued payload-signing
+// credential (Issue #3696) — the keypair `cfg credential request-signing-cert`
+// generates locally and never transmits, distinct from the admin bundle used for mTLS
+// transport authentication. The controller never holds this private key at any point:
+// it signed only the public half at issuance (features/controller/api/handlers_signing_credential.go).
 func signCommandContent(content []byte) (*commandSignature, error) {
-	bundleEnvVal, _ := os.LookupEnv("CFGMS_ADMIN_BUNDLE")
-	bundleFilePath, err := findBundlePath(bundleEnvVal)
+	credStore, err := newCredentialStore()
 	if err != nil {
-		return nil, fmt.Errorf("bundle resolution failed: %w", err)
-	}
-	if bundleFilePath == "" {
-		return nil, fmt.Errorf("no admin bundle found: run-command requires a bundle with a private key for signing; use --bundle or set CFGMS_ADMIN_BUNDLE")
+		return nil, fmt.Errorf("credential store unavailable: %w", err)
 	}
 
-	b, err := bundle.Read(bundleFilePath)
+	keyPEM, err := credStore.Load(context.Background(), signingCredentialName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read bundle at %s: %w", bundleFilePath, err)
+		return nil, fmt.Errorf("no payload-signing credential found: run 'cfg credential request-signing-cert' first: %w", err)
 	}
 
-	if b.KeyPEM == "" {
-		return nil, fmt.Errorf("bundle at %s has no private key: run-command requires signing capability", bundleFilePath)
+	privKey, err := parsePrivKeyFromPEM(string(keyPEM))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse payload-signing credential private key: %w", err)
 	}
 
-	privKey, err := parsePrivKeyFromPEM(b.KeyPEM)
+	certPath, err := signingCertPath()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse bundle private key: %w", err)
+		return nil, err
+	}
+	certPEM, err := os.ReadFile(certPath) // #nosec G304 -- fixed default location or an operator-set CFGMS_SIGNING_CERT path, not user/network input
+	if err != nil {
+		return nil, fmt.Errorf("no payload-signing certificate found at %s: run 'cfg credential request-signing-cert' first: %w", certPath, err)
 	}
 
 	var algorithm string
@@ -2081,7 +2092,7 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 	case *ecdsa.PrivateKey:
 		algorithm = "ecdsa-sha256"
 	default:
-		return nil, fmt.Errorf("unsupported key type %T in bundle (expected RSA or ECDSA)", privKey)
+		return nil, fmt.Errorf("unsupported key type %T in payload-signing credential (expected RSA or ECDSA)", privKey)
 	}
 
 	digest, err := hashContent(content, algorithm)
@@ -2097,8 +2108,23 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 	return &commandSignature{
 		Algorithm: algorithm,
 		Value:     base64.StdEncoding.EncodeToString(sigBytes),
-		PublicKey: b.CertPEM,
+		PublicKey: string(certPEM),
 	}, nil
+}
+
+// signingCertPath resolves the payload-signing certificate location: the
+// CFGMS_SIGNING_CERT environment variable when set to a non-empty value, otherwise the
+// default location 'cfg credential request-signing-cert' writes to when run without
+// --cert-out (<user config dir>/cfgms/signing-cert.pem).
+func signingCertPath() (string, error) {
+	if p, ok := os.LookupEnv("CFGMS_SIGNING_CERT"); ok && p != "" {
+		return p, nil
+	}
+	configDir, err := userConfigDirFn()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine user config directory: %w", err)
+	}
+	return filepath.Join(configDir, "cfgms", "signing-cert.pem"), nil
 }
 
 // generateOperatorNonce returns a fresh operatorpayload.Envelope nonce: at least
@@ -2116,10 +2142,11 @@ func generateOperatorNonce() (string, error) {
 // buildAndSignEnvelope resolves the fields of an operatorpayload.Envelope binding
 // content, shell, and the caller's already-resolved target steward IDs to a fresh
 // nonce and a bounded expiry, then signs its canonical bytes with the operator's
-// admin-bundle key (Issue #3694). Returns the signature to embed in the request body
-// alongside the returned envelope, whose Targets/Nonce/ExpiresAt the caller forwards
-// as separate request fields so the controller and steward can independently verify
-// against the exact bytes that were signed.
+// zero-custody payload-signing credential (Issue #3694; credential switched from the
+// admin bundle to the CSR-issued key by Issue #3696). Returns the signature to embed
+// in the request body alongside the returned envelope, whose Targets/Nonce/ExpiresAt
+// the caller forwards as separate request fields so the controller and steward can
+// independently verify against the exact bytes that were signed.
 func buildAndSignEnvelope(content []byte, shell string, targets []string) (*commandSignature, operatorpayload.Envelope, error) {
 	nonce, err := generateOperatorNonce()
 	if err != nil {

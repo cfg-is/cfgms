@@ -17,6 +17,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -506,4 +507,68 @@ func TestExecuteScriptHandler_InlineCommandWithScope_NoRelaySocket(t *testing.T)
 	}
 	assert.True(t, sawWarn,
 		"handler must log a warning when an inline command carries required_api_scope")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #3696 — operator payload signing switches to the zero-custody
+// CSR-issued credential; the admin-bundle marker no longer qualifies a
+// certificate to sign an operator payload.
+// ---------------------------------------------------------------------------
+
+// TestExecuteScriptHandler_InlineScript_AdminBundleCert_RejectedForPayloadSigning
+// is a REQUIRED test (Issue #3696 AC): a certificate shaped exactly like one
+// IssueAdminBundle would mint — chained to the controller CA, unexpired,
+// carrying cert.AdminMarkerOID via cert.SetAdminMarker — must no longer
+// authorize signing an operator payload now that verifyOperatorCert checks
+// cert.HasPayloadSigningMarker instead of cert.HasAdminMarker. The envelope is
+// submitted through the real dispatch path (h.HandleCommand), not a direct
+// call to verifyOperatorCert/HasPayloadSigningMarker with hand-built inputs,
+// so the assertion covers the actual wiring a cfg-signed payload traverses.
+func TestExecuteScriptHandler_InlineScript_AdminBundleCert_RejectedForPayloadSigning(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	// IssueAdminBundle-shaped: admin-marked, NOT payload-signing-marked.
+	adminCert := sigTestOperatorCert(t, ca, cert.SetAdminMarker)
+
+	h := newHandlerWithSigning(t, nil, true, caPool)
+
+	content := []byte(echoScriptBody("hello"))
+	params := sigTestOperatorEnvelopeParams(t, adminCert.PrivateKeyPEM, string(adminCert.CertificatePEM), content, platformShell(), "steward-test")
+	params["execution_id"] = "sig-admin-bundle-001"
+	sc := testSignedCommandWithParams("sig-admin-bundle-001", cpTypes.CommandExecuteScript, params)
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"an admin-bundle-shaped credential (AdminMarkerOID, no PayloadSigningMarkerOID) must not authorize payload signing")
+}
+
+// TestExecuteScriptHandler_InlineScript_PayloadSigningCert_Accepted is a
+// REQUIRED test (Issue #3696 AC): a genuine S10-issued payload-signing
+// credential — chained to the controller CA, unexpired, carrying
+// cert.PayloadSigningMarkerOID via cert.SetPayloadSigningMarker — is accepted
+// end-to-end through the real dispatch path (h.HandleCommand).
+func TestExecuteScriptHandler_InlineScript_PayloadSigningCert_Accepted(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signingCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	content := []byte(echoScriptBody("operator-hello"))
+	params := sigTestOperatorEnvelopeParams(t, signingCert.PrivateKeyPEM, string(signingCert.CertificatePEM), content, platformShell(), "steward-test")
+	params["execution_id"] = "sig-payload-signing-001"
+	sc := testSignedCommandWithParams("sig-payload-signing-001", cpTypes.CommandExecuteScript, params)
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "inline command signed by a genuine payload-signing credential must be accepted")
 }

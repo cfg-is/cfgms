@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -128,8 +129,23 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 // targets and returns the request-body fields handlePostRunCommand now requires
 // unconditionally (Issue #3694): signature, targets, nonce, expires_at. The operator
 // cert is issued by server's own certManager so it chains to the CA the controller
-// verifies against, and carries the admin marker.
+// verifies against, and carries the payload-signing marker.
+//
+// Payload-signing marker, not admin (Issue #3696): validatePublicBetaCommandSignature
+// requires the same credential type cfg now signs with and the steward now verifies on
+// delivery. Minting an admin-marked cert here would let a controller-side regression
+// pass CI while the real end-to-end path is inoperable. Test files are exempt from
+// SetPayloadSigningMarker's restricted-caller allow-list
+// (TestSetPayloadSigningMarker_Architecture).
 func signedOperatorEnvelopeFields(t *testing.T, server *Server, content []byte, shell string, targets []string) map[string]interface{} {
+	t.Helper()
+	return signedOperatorEnvelopeFieldsWithMarker(t, server, content, shell, targets, cert.SetPayloadSigningMarker)
+}
+
+// signedOperatorEnvelopeFieldsWithMarker is signedOperatorEnvelopeFields with the
+// issued operator cert's marker under test control, so the negative case (an
+// admin-bundle-shaped credential) can be driven through the real request path.
+func signedOperatorEnvelopeFieldsWithMarker(t *testing.T, server *Server, content []byte, shell string, targets []string, marker func(*x509.Certificate)) map[string]interface{} {
 	t.Helper()
 	require.NotNil(t, server.certManager, "test server must have a certManager to sign an operator envelope")
 
@@ -138,7 +154,7 @@ func signedOperatorEnvelopeFields(t *testing.T, server *Server, content []byte, 
 		ValidityDays:     1,
 		KeySize:          2048,
 		ClientID:         "test-operator",
-		TemplateModifier: cert.SetAdminMarker,
+		TemplateModifier: marker,
 	})
 	require.NoError(t, err)
 
@@ -416,6 +432,60 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"a non-admin principal with no tenant must remain unauthorized")
+}
+
+// TestRunCommand_AdminMarkerOnlyCredential_Rejected locks the controller half of the
+// Issue #3696 cutover. The signed ad-hoc path has three enforcement points that must
+// agree on one credential type — cfg's signCommandContent, this endpoint, and the
+// steward's verifyOperatorCert. While this check still required HasAdminMarker, the
+// payload-signing credential cfg sends was rejected here and the admin bundle that
+// passed here was rejected at the steward: no certificate on the documented issuance
+// path satisfied both, and the whole path was inoperable.
+//
+// An IssueAdminBundle-shaped credential (AdminMarkerOID, no PayloadSigningMarkerOID)
+// is driven through the real POST /runs/command path — same body, same handler, same
+// signing as the positive tests — and must be rejected.
+func TestRunCommand_AdminMarkerOnlyCredential_Rejected(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+
+	envelope := signedOperatorEnvelopeFieldsWithMarker(t, server, []byte("hostname"), "pwsh",
+		[]string{"steward-1"}, cert.SetAdminMarker)
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin,
+		withEnvelopeFields(map[string]interface{}{
+			"target":  "id:steward-1",
+			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+			"shell":   "pwsh",
+		}, envelope))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"an admin-marked credential without the payload-signing marker must not authorize an operator payload; body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "payload-signing",
+		"rejection must name the missing credential type")
+}
+
+// TestRunCommand_PayloadSigningCredential_Accepted is the positive half of the same
+// boundary: the credential type `cfg credential request-signing-cert` actually issues
+// (PayloadSigningMarkerOID, no AdminMarkerOID — handlers_signing_credential.go) is
+// accepted by POST /runs/command. Together with the negative case above, this pins the
+// endpoint to the one credential type both other enforcement points now require.
+func TestRunCommand_PayloadSigningCredential_Accepted(t *testing.T) {
+	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
+	server, _, _ := setupRunServer(t, stewards)
+	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+
+	envelope := signedOperatorEnvelopeFieldsWithMarker(t, server, []byte("hostname"), "pwsh",
+		[]string{"steward-1"}, cert.SetPayloadSigningMarker)
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin,
+		withEnvelopeFields(map[string]interface{}{
+			"target":  "id:steward-1",
+			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+			"shell":   "pwsh",
+		}, envelope))
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"the CSR-issued payload-signing credential must be accepted; body: %s", rec.Body.String())
 }
 
 // TestRunLifecycle_AdminMTLSEmptyTenant covers the FULL cfg steward exec lifecycle
