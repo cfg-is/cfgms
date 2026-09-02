@@ -639,6 +639,27 @@ type ClusterCAConfig struct {
 
 	// VaultMountPath is the KV v2 mount path (default: "secret").
 	VaultMountPath string `yaml:"vault_mount_path,omitempty"`
+
+	// ExternalIntermediateCertPath, ExternalIntermediateKeyPath, and
+	// ExternalIntermediateChainPath name PEM files holding a regional
+	// intermediate CA certificate, its private key, and its issuer chain up to
+	// the offline root, obtained out-of-band from the root ceremony (ADR-032
+	// Decision 2: "cell init requests an intermediate from the root ceremony
+	// instead of self-generating the fleet root"). When set, cluster CA init
+	// imports this material instead of self-generating a fleet root; all three
+	// must be set together. Optional — omitting them preserves today's
+	// self-generate-and-store-in-vault behavior. The private key file is read
+	// once at import time and is never written to any node's local disk; only
+	// the vault holds a durable copy, same as the self-generated case.
+	ExternalIntermediateCertPath string `yaml:"external_intermediate_cert_path,omitempty"`
+
+	// ExternalIntermediateKeyPath is the private key counterpart to
+	// ExternalIntermediateCertPath. See that field's doc for the full picture.
+	ExternalIntermediateKeyPath string `yaml:"external_intermediate_key_path,omitempty"`
+
+	// ExternalIntermediateChainPath is the issuer chain (root-terminal) for
+	// ExternalIntermediateCertPath. See that field's doc for the full picture.
+	ExternalIntermediateChainPath string `yaml:"external_intermediate_chain_path,omitempty"`
 }
 
 // ServerCertificateConfig contains server certificate settings

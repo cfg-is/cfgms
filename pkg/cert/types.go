@@ -172,6 +172,17 @@ type CAConfig struct {
 	// caller. Required because PathLength's zero value is itself a valid,
 	// meaningful setting (leaf-only CA) distinct from "not set".
 	PathLengthSet bool
+
+	// ExternalCertPath, ExternalKeyPath, and ExternalChainPath name PEM files
+	// holding an externally-issued intermediate CA certificate, its private
+	// key, and its issuer chain up to the offline root (ADR-032 Decision 2),
+	// supplied out-of-band at controller boot. Empty ExternalCertPath (the
+	// default) preserves today's self-generate behavior; when set, all three
+	// must be set together and the CA is imported via ImportSubordinateCA
+	// instead of generated.
+	ExternalCertPath  string
+	ExternalKeyPath   string
+	ExternalChainPath string
 }
 
 // ServerCertConfig contains configuration for server certificate generation

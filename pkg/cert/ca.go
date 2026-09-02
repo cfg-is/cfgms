@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -189,6 +190,70 @@ func (ca *CA) LoadCA(storagePath string) error {
 
 	ca.certificate = caCert
 	ca.privateKey = rsaKey
+	ca.initialized = true
+
+	return nil
+}
+
+// ImportSubordinateCA loads an externally-issued intermediate CA certificate
+// and private key — obtained out-of-band from an offline root ceremony (see
+// ADR-032 Decision 2: "cell init requests an intermediate from the root
+// ceremony instead of self-generating the fleet root") — making this CA
+// immediately able to sign leaves under it. Mirrors LoadCA's parse/assign
+// shape, but sources bytes from parameters instead of a storage path: the
+// caller controls how the material was obtained (a mounted secret file, a
+// vault read, etc).
+//
+// issuerChainPEM is the chain from this certificate's own issuer up to and
+// including the ultimate trust root (root-terminal), and is threaded into
+// ca.issuerChainPEM so GetCACertificate can locate the trust root and
+// issued certificates' IssuerChainPEM can carry this intermediate for
+// handshake chain assembly. It is validated in full before being recorded —
+// see validateIssuerChain — so a chain that does not actually link to
+// certPEM, or does not terminate in a self-signed root, is rejected here
+// rather than silently becoming a broken (or falsely-trusted) anchor later.
+func (ca *CA) ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM []byte) error {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return fmt.Errorf("failed to decode CA certificate PEM")
+	}
+
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse CA certificate: %w", err)
+	}
+
+	if !caCert.IsCA {
+		return fmt.Errorf("imported certificate is not a CA certificate (IsCA is false)")
+	}
+
+	parsedKey, err := ParsePrivateKeyFromPEM(keyPEM)
+	if err != nil {
+		return fmt.Errorf("failed to parse CA private key: %w", err)
+	}
+
+	rsaKey, ok := parsedKey.(*rsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("CA private key must be RSA, got unsupported key type")
+	}
+
+	if err := ValidateKeyPair(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("CA key does not match certificate: %w", err)
+	}
+
+	if err := validateIssuerChain(caCert, issuerChainPEM); err != nil {
+		return fmt.Errorf("invalid CA issuer chain: %w", err)
+	}
+
+	org := "CFGMS"
+	if len(caCert.Subject.Organization) > 0 {
+		org = caCert.Subject.Organization[0]
+	}
+
+	ca.config = &CAConfig{Organization: org}
+	ca.certificate = caCert
+	ca.privateKey = rsaKey
+	ca.issuerChainPEM = issuerChainPEM
 	ca.initialized = true
 
 	return nil
@@ -970,18 +1035,60 @@ func (ca *CA) calculateFingerprint(certDER []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// Secret-name suffixes for the three pieces of CA material a cluster node
+// publishes to the shared vault under its configured key path: the CA's own
+// certificate at "<tenantID>/<keyPath>", its private key at
+// "<tenantID>/<keyPath><caKeySecretSuffix>", and — when the CA is a subordinate
+// rather than a root — its root-terminal issuer chain at
+// "<tenantID>/<keyPath><caChainSecretSuffix>".
+const (
+	caKeySecretSuffix   = "-key"
+	caChainSecretSuffix = "-chain"
+)
+
+// ErrCAMaterialAbsent reports that no CA certificate is published at the
+// configured vault key path, so nothing can be loaded from it. It is the one
+// LoadCAFromSecretStore failure a caller may answer by generating and
+// publishing a new CA: any other failure means CA material is present but
+// unusable, and replacing it would invalidate every certificate the cluster has
+// already issued under it.
+var ErrCAMaterialAbsent = errors.New("no CA material is published in the secret store")
+
 // LoadCAFromSecretStore retrieves CA cert+key PEM from a SecretStore and
 // populates the CA in-memory without writing the key to local disk.
 // keyPath is the secret key name for the CA certificate (without tenantID prefix).
-// The CA private key is loaded from "<tenantID>/<keyPath>-key".
+// The CA private key is loaded from "<tenantID>/<keyPath>-key" and, for a
+// subordinate CA, its issuer chain from "<tenantID>/<keyPath>-chain".
 // This is the cluster-mode path — call LoadCA for single-node deployments.
+//
+// Fails closed when the stored certificate is not self-signed and no issuer
+// chain is stored beside it: without the chain, GetCACertificate would fall
+// back to publishing this CA's own certificate as the fleet's permanent trust
+// anchor, so a node loading a bare intermediate would hand stewards a
+// routinely-rotated intermediate to pin while peers holding the chain publish
+// the root. Diverging anchors inside one cluster is worse than refusing to boot.
 func (ca *CA) LoadCAFromSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string) error {
 	certSecret, err := store.GetSecret(ctx, tenantID+"/"+keyPath)
 	if err != nil {
+		// ErrCAMaterialAbsent, and only this branch, tells a caller that the key
+		// path is unclaimed and bootstrapping a new CA into it is safe. Every
+		// other failure means material may well BE published, which must never be
+		// resolved by generating a replacement over the top of it.
+		//
+		// So the sentinel is raised only for the store's genuine not-found signal.
+		// A read denied by policy (create/update granted, read withheld), an
+		// expired token, a KV mount misconfiguration and a read timeout are all
+		// reachable ways for this read to fail with the real fleet CA sitting
+		// intact at the key path; reporting any of them as absence would let one
+		// controller boot publish a brand-new root over it and break the chain of
+		// every steward certificate already issued.
+		if errors.Is(err, secretsinterfaces.ErrSecretNotFound) {
+			return fmt.Errorf("%w (no CA certificate at %q: %w)", ErrCAMaterialAbsent, tenantID+"/"+keyPath, err)
+		}
 		return fmt.Errorf("failed to get CA certificate from secret store: %w", err)
 	}
 
-	keySecret, err := store.GetSecret(ctx, tenantID+"/"+keyPath+"-key")
+	keySecret, err := store.GetSecret(ctx, tenantID+"/"+keyPath+caKeySecretSuffix)
 	if err != nil {
 		return fmt.Errorf("failed to get CA private key from secret store: %w", err)
 	}
@@ -1013,6 +1120,34 @@ func (ca *CA) LoadCAFromSecretStore(ctx context.Context, store secretsinterfaces
 		return fmt.Errorf("CA key does not match certificate in secret store: %w", err)
 	}
 
+	// A missing chain secret is the normal, expected shape for a self-generated
+	// root, so a genuinely absent chain is not an error on its own — it only
+	// becomes one when the loaded certificate is not self-signed, which the
+	// validation below decides. Absence is matched on ErrSecretNotFound rather
+	// than inferred from any failed read: a chain that exists but cannot be read
+	// would otherwise be silently dropped, and this node would then publish a
+	// different trust anchor from the peers that did read it — the anchor
+	// divergence this function exists to prevent.
+	var chainPEM []byte
+	chainSecret, chainErr := store.GetSecret(ctx, tenantID+"/"+keyPath+caChainSecretSuffix)
+	switch {
+	case chainErr == nil:
+		chainPEM = []byte(chainSecret.Value)
+	case !errors.Is(chainErr, secretsinterfaces.ErrSecretNotFound):
+		return fmt.Errorf("failed to read CA issuer chain at %q, so this node cannot determine the fleet trust anchor: %w",
+			tenantID+"/"+keyPath+caChainSecretSuffix, chainErr)
+	}
+
+	if len(chainPEM) == 0 {
+		if err := verifySelfSigned(caCert); err != nil {
+			return fmt.Errorf("CA certificate at %q is not self-signed but no issuer chain is stored at %q, "+
+				"so this node cannot determine the fleet trust anchor: %w",
+				tenantID+"/"+keyPath, tenantID+"/"+keyPath+caChainSecretSuffix, err)
+		}
+	} else if err := validateIssuerChain(caCert, chainPEM); err != nil {
+		return fmt.Errorf("invalid CA issuer chain in secret store: %w", err)
+	}
+
 	org := "CFGMS"
 	if len(caCert.Subject.Organization) > 0 {
 		org = caCert.Subject.Organization[0]
@@ -1020,49 +1155,220 @@ func (ca *CA) LoadCAFromSecretStore(ctx context.Context, store secretsinterfaces
 	ca.config = &CAConfig{Organization: org}
 	ca.certificate = caCert
 	ca.privateKey = rsaKey
+	ca.issuerChainPEM = chainPEM
 	ca.initialized = true
 
 	return nil
 }
 
-// StoreCAToSecretStore stores the CA certificate and private key PEM in a SecretStore.
-// Called during cluster-mode first-boot init to publish CA material to the shared
-// vault so subsequent nodes can load it via LoadCAFromSecretStore.
-// The cert is stored at "<tenantID>/<keyPath>" and the key at "<tenantID>/<keyPath>-key".
+// StoreCAToSecretStore stores the CA's own certificate, private key, and — when
+// this CA is a subordinate — its root-terminal issuer chain in a SecretStore.
+// Called during cluster-mode first-boot init to publish CA material to the
+// shared vault so subsequent nodes can load it via LoadCAFromSecretStore. The
+// cert is stored at "<tenantID>/<keyPath>", the key at "<tenantID>/<keyPath>-key",
+// and the chain at "<tenantID>/<keyPath>-chain".
+//
+// This stores ca.certificate itself, not GetCACertificate()'s result: for an
+// imported intermediate (see ImportSubordinateCA) GetCACertificate returns the
+// ultimate trust root, which is not the certificate ca.privateKey belongs to —
+// storing that pairing here would leave the vault holding a cert/key mismatch.
+// The issuer chain is what lets a node that loads this material back out resolve
+// the same trust anchor rather than pinning the intermediate as the fleet root.
+//
+// This never overwrites a different CA identity already published at the key
+// path. The caller reaches it having decided the path is unclaimed — the
+// self-generate bootstrap in NewManagerFromSecretStore calls it after
+// LoadCAFromSecretStore reported ErrCAMaterialAbsent — and that decision rests on
+// a vault read that can be wrong for reasons the caller cannot see (a policy
+// granting create/update but not read, an expired token, a mount slip). So each
+// secret is written create-if-absent and an already-published value is accepted
+// only when it is the same material, exactly as on the import path: a
+// misclassified read fails closed here instead of re-rooting the fleet.
 func (ca *CA) StoreCAToSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string) error {
+	return ca.publishCAMaterialIfAbsent(ctx, store, tenantID, keyPath)
+}
+
+// StoreImportedCAToSecretStore publishes an imported CA's own certificate,
+// private key, and root-terminal issuer chain to the shared vault without ever
+// replacing a different CA identity that is already published there.
+//
+// The import path (ADR-032 Decision 2) runs on every process start of every
+// cluster node, not only at --init, so an unconditional write would let a
+// config-file edit — adding the external_intermediate_* keys to a cluster that
+// already holds a self-generated fleet root, or a node booting with stale
+// intermediate material mid-rotation — silently replace the vault's CA identity.
+// Every peer would then serve a different anchor and every previously issued
+// steward certificate would stop chaining to it: a fleet-wide trust break with
+// no error and no operator confirmation.
+//
+// So each secret is written create-if-absent via CompareAndSwapSecret (two nodes
+// importing concurrently cannot interleave a half-written identity), and an
+// already-published value is accepted only when it is the same material —
+// otherwise this fails closed with an error naming the mismatching fingerprints.
+// Re-import of the same external files therefore stays idempotent, while
+// importing different material requires an explicit operator rotation of the
+// vault's key path rather than happening as a side effect of a boot.
+func (ca *CA) StoreImportedCAToSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string) error {
+	return ca.publishCAMaterialIfAbsent(ctx, store, tenantID, keyPath)
+}
+
+// publishCAMaterialIfAbsent writes this CA's certificate, private key and (when
+// it is a subordinate) its issuer chain to the vault create-if-absent, keeping
+// already-published material and failing closed when that material is a
+// different identity. Both publish paths — self-generated bootstrap and external
+// import — use it: neither may replace a published CA identity, because doing so
+// invalidates every certificate the cluster has already issued.
+func (ca *CA) publishCAMaterialIfAbsent(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string) error {
 	if !ca.initialized {
 		return fmt.Errorf("CA is not initialized")
 	}
 
-	certPEM, err := ca.GetCACertificate()
-	if err != nil {
-		return fmt.Errorf("failed to get CA certificate: %w", err)
+	if err := putSecretIfAbsentOrVerify(ctx, store, tenantID, keyPath,
+		"CFGMS cluster CA certificate", ca.ownCertificatePEM(), sameCertificatePEM); err != nil {
+		return err
 	}
 
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(ca.privateKey),
-	})
-
-	if err := store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
-		Key:         keyPath,
-		Value:       string(certPEM),
-		TenantID:    tenantID,
-		CreatedBy:   "cfgms-controller-init",
-		Description: "CFGMS cluster CA certificate",
-	}); err != nil {
-		return fmt.Errorf("failed to store CA certificate in secret store: %w", err)
+	if err := putSecretIfAbsentOrVerify(ctx, store, tenantID, keyPath+caKeySecretSuffix,
+		"CFGMS cluster CA private key", ca.privateKeyPEM(), samePrivateKeyPEM); err != nil {
+		return err
 	}
 
-	if err := store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
-		Key:         keyPath + "-key",
-		Value:       string(keyPEM),
-		TenantID:    tenantID,
-		CreatedBy:   "cfgms-controller-init",
-		Description: "CFGMS cluster CA private key",
-	}); err != nil {
-		return fmt.Errorf("failed to store CA private key in secret store: %w", err)
+	if len(ca.issuerChainPEM) > 0 {
+		if err := putSecretIfAbsentOrVerify(ctx, store, tenantID, keyPath+caChainSecretSuffix,
+			"CFGMS cluster CA issuer chain", ca.issuerChainPEM, sameCertificateChainPEM); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// putSecretIfAbsentOrVerify stores value at "<tenantID>/<key>" only when nothing
+// is stored there yet, using a compare-and-swap against "absent"
+// (expectedVersion 0) so concurrent writers cannot both win. When a value is
+// already present — either found up front or written by the peer that won the
+// race — it is kept, and equal decides whether it is the same material; a
+// mismatch is returned as an error rather than overwritten.
+func putSecretIfAbsentOrVerify(
+	ctx context.Context,
+	store secretsinterfaces.SecretStore,
+	tenantID, key, description string,
+	value []byte,
+	equal func(stored, want []byte) error,
+) error {
+	lookup := tenantID + "/" + key
+
+	if existing, err := store.GetSecret(ctx, lookup); err == nil {
+		if eqErr := equal([]byte(existing.Value), value); eqErr != nil {
+			return fmt.Errorf("refusing to overwrite the %s already published at %q: %w", description, lookup, eqErr)
+		}
+		return nil
+	}
+
+	_, ok, err := store.CompareAndSwapSecret(ctx, lookup, 0, &secretsinterfaces.SecretRequest{
+		Key:         key,
+		Value:       string(value),
+		TenantID:    tenantID,
+		CreatedBy:   "cfgms-controller-init",
+		Description: description,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to store %s in secret store: %w", description, err)
+	}
+	if ok {
+		return nil
+	}
+
+	// Lost the create-if-absent race (or the up-front read failed for a reason
+	// other than absence): whatever is there now must be the same material.
+	existing, getErr := store.GetSecret(ctx, lookup)
+	if getErr != nil {
+		return fmt.Errorf("%s at %q is already claimed but could not be read back for comparison: %w", description, lookup, getErr)
+	}
+	if eqErr := equal([]byte(existing.Value), value); eqErr != nil {
+		return fmt.Errorf("refusing to overwrite the %s already published at %q: %w", description, lookup, eqErr)
+	}
+	return nil
+}
+
+// sameCertificatePEM reports whether two PEM blobs encode the same certificate,
+// comparing parsed DER rather than PEM text so a difference in encoding
+// (line endings, headers) is not mistaken for a different identity. The error
+// names both SHA-256 fingerprints — the certificates' own bytes, never operator
+// input — so an operator can tell which material is which.
+func sameCertificatePEM(stored, want []byte) error {
+	storedCert, err := ParseCertificateFromPEM(stored)
+	if err != nil {
+		return fmt.Errorf("stored certificate could not be parsed for comparison: %w", err)
+	}
+	wantCert, err := ParseCertificateFromPEM(want)
+	if err != nil {
+		return fmt.Errorf("certificate being imported could not be parsed for comparison: %w", err)
+	}
+	if !bytes.Equal(storedCert.Raw, wantCert.Raw) {
+		return fmt.Errorf("stored certificate fingerprint %s does not match the imported certificate fingerprint %s",
+			certificateFingerprint(storedCert), certificateFingerprint(wantCert))
+	}
+	return nil
+}
+
+// sameCertificateChainPEM reports whether two PEM blobs encode the same
+// certificate chain, entry for entry.
+func sameCertificateChainPEM(stored, want []byte) error {
+	storedChain, err := ParseCertificateChainFromPEM(stored)
+	if err != nil {
+		return fmt.Errorf("stored issuer chain could not be parsed for comparison: %w", err)
+	}
+	wantChain, err := ParseCertificateChainFromPEM(want)
+	if err != nil {
+		return fmt.Errorf("issuer chain being imported could not be parsed for comparison: %w", err)
+	}
+	if len(storedChain) != len(wantChain) {
+		return fmt.Errorf("stored issuer chain has %d entries, the imported issuer chain has %d",
+			len(storedChain), len(wantChain))
+	}
+	for i := range storedChain {
+		if !bytes.Equal(storedChain[i].Raw, wantChain[i].Raw) {
+			return fmt.Errorf("stored issuer chain entry %d fingerprint %s does not match the imported entry fingerprint %s",
+				i, certificateFingerprint(storedChain[i]), certificateFingerprint(wantChain[i]))
+		}
+	}
+	return nil
+}
+
+// samePrivateKeyPEM reports whether two PEM blobs encode the same private key,
+// comparing the parsed keys so PKCS#1 and PKCS#8 encodings of one key are not
+// mistaken for two different keys. No key material appears in the error.
+func samePrivateKeyPEM(stored, want []byte) error {
+	storedKey, err := ParsePrivateKeyFromPEM(stored)
+	if err != nil {
+		return fmt.Errorf("stored private key could not be parsed for comparison: %w", err)
+	}
+	wantKey, err := ParsePrivateKeyFromPEM(want)
+	if err != nil {
+		return fmt.Errorf("private key being imported could not be parsed for comparison: %w", err)
+	}
+	type equaler interface{ Equal(crypto.PrivateKey) bool }
+	storedEq, ok := storedKey.(equaler)
+	if !ok {
+		return fmt.Errorf("stored private key type does not support comparison")
+	}
+	if !storedEq.Equal(wantKey) {
+		return fmt.Errorf("stored private key does not match the private key being imported")
+	}
+	return nil
+}
+
+// certificateFingerprint returns a certificate's SHA-256 fingerprint as hex.
+func certificateFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// privateKeyPEM returns this CA's private key encoded as PKCS#1 PEM.
+func (ca *CA) privateKeyPEM() []byte {
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(ca.privateKey),
+	})
 }

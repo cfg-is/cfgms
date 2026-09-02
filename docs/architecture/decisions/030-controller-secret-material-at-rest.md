@@ -228,7 +228,7 @@ value from the same OpenBao path. The local `systemd-creds` sealing is per-machi
 disk image from one node cannot be replayed on another, but the underlying plaintext is
 authoritative in OpenBao and byte-identical across the fleet.
 
-**Why OpenBao over cloud KMS.** OpenBao is already deployed as the cluster CA backend and
+**Why OpenBao over cloud KMS.** OpenBao is already deployed as the regional intermediate backend and
 already has a provider in `pkg/secrets/providers/openbao`. For deployments on cloud
 infrastructure where a cloud KMS (AWS KMS, Azure Key Vault, GCP KMS) is preferred, the delivery
 mechanism is identical — values are pulled at bootstrap and sealed locally — but the source is

@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -744,6 +745,139 @@ func TestLoadCAFromSecretStore_MissingKeyReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "CA private key")
 }
 
+// TestLoadCAFromSecretStore_MissingCertIsReportedAbsent pins the one failure a
+// caller may answer by generating a new fleet CA: a genuinely absent secret,
+// signalled by the store as ErrSecretNotFound.
+func TestLoadCAFromSecretStore_MissingCertIsReportedAbsent(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	err := (&CA{}).LoadCAFromSecretStore(ctx, store, "root", "cluster-ca")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCAMaterialAbsent)
+}
+
+// TestLoadCAFromSecretStore_UnreadableCertIsNotReportedAbsent is the REQUIRED
+// security test for the re-rooting finding: a vault read that fails for any
+// reason other than "the secret does not exist" must NOT be reported as absent
+// CA material. ErrCAMaterialAbsent is the caller's licence to generate and
+// publish a new fleet root, and every failure below leaves the real CA sitting
+// intact at the key path — a policy granting create/update but not read, an
+// expired token, a KV mount misconfiguration, a read timeout during a vault
+// blip. Misclassifying any of them re-roots the fleet on a single controller
+// boot: every steward certificate already issued stops chaining.
+func TestLoadCAFromSecretStore_UnreadableCertIsNotReportedAbsent(t *testing.T) {
+	ctx := context.Background()
+
+	ca, err := NewCA(&CAConfig{Organization: "Established", Country: "US", ValidityDays: 3650})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+
+	readFailures := map[string]error{
+		"permission denied": fmt.Errorf("failed to get secret root/cluster-ca: Error making API request. Code: 403. Errors: * permission denied"),
+		"token expired":     fmt.Errorf("failed to get secret root/cluster-ca: Error making API request. Code: 403. Errors: * permission denied (token expired)"),
+		"mount misconfigured": fmt.Errorf("failed to get secret root/cluster-ca: Error making API request. Code: 400. Errors: " +
+			"* preflight capability check returned 403, no KV v2 engine at this mount"),
+		"read timeout": context.DeadlineExceeded,
+	}
+
+	for name, readErr := range readFailures {
+		t.Run(name, func(t *testing.T) {
+			inner := newInMemSecretStore()
+			require.NoError(t, ca.StoreCAToSecretStore(ctx, inner, "root", "cluster-ca"))
+
+			store := newFaultySecretStore(inner)
+			store.failReads("root/cluster-ca", readErr)
+
+			loadErr := (&CA{}).LoadCAFromSecretStore(ctx, store, "root", "cluster-ca")
+			require.Error(t, loadErr)
+			assert.NotErrorIs(t, loadErr, ErrCAMaterialAbsent,
+				"a read failure that is not a genuine absence must never license a bootstrap over published CA material")
+			assert.ErrorIs(t, loadErr, readErr, "the underlying vault failure must reach the operator")
+		})
+	}
+}
+
+// TestLoadCAFromSecretStore_UnreadableChainFailsClosed covers the same
+// misclassification on the issuer-chain read. A chain that exists but cannot be
+// read must not be silently treated as "no chain": this node would then publish
+// its own certificate as the fleet trust anchor while peers that did read the
+// chain publish the root, diverging anchors inside one cluster.
+func TestLoadCAFromSecretStore_UnreadableChainFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	certPEM, keyPEM, chainPEM, _ := importableIntermediateMaterial(t)
+
+	inner := newInMemSecretStore()
+	for key, value := range map[string]string{
+		"cluster-ca":       string(certPEM),
+		"cluster-ca-key":   string(keyPEM),
+		"cluster-ca-chain": string(chainPEM),
+	} {
+		require.NoError(t, inner.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
+			Key: key, Value: value, TenantID: "root", CreatedBy: "test",
+		}))
+	}
+
+	store := newFaultySecretStore(inner)
+	store.failReads("root/cluster-ca-chain", fmt.Errorf("Error making API request. Code: 403. Errors: * permission denied"))
+
+	ca := &CA{}
+	err := ca.LoadCAFromSecretStore(ctx, store, "root", "cluster-ca")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read CA issuer chain")
+	assert.False(t, ca.initialized, "a CA that cannot read its published issuer chain must not become usable")
+}
+
+// TestStoreCAToSecretStore_RefusesToReplaceDifferentPublishedIdentity proves the
+// second half of the fix: even a caller that wrongly believes the key path is
+// unclaimed cannot destroy published CA material through this function. The
+// write is create-if-absent and a different identity already there fails closed.
+func TestStoreCAToSecretStore_RefusesToReplaceDifferentPublishedIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	established, err := NewCA(&CAConfig{Organization: "Established", Country: "US", ValidityDays: 3650})
+	require.NoError(t, err)
+	require.NoError(t, established.Initialize(nil))
+	require.NoError(t, established.StoreCAToSecretStore(ctx, store, "root", "cluster-ca"))
+
+	replacement, err := NewCA(&CAConfig{Organization: "Replacement", Country: "US", ValidityDays: 3650})
+	require.NoError(t, err)
+	require.NoError(t, replacement.Initialize(nil))
+
+	err = replacement.StoreCAToSecretStore(ctx, store, "root", "cluster-ca")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to overwrite")
+
+	storedCert, err := store.GetSecret(ctx, "root/cluster-ca")
+	require.NoError(t, err)
+	assert.Equal(t, string(established.ownCertificatePEM()), storedCert.Value, "the published CA certificate must be untouched")
+
+	storedKey, err := store.GetSecret(ctx, "root/cluster-ca-key")
+	require.NoError(t, err)
+	assert.Equal(t, string(established.privateKeyPEM()), storedKey.Value, "the published CA private key must be untouched")
+}
+
+// TestStoreCAToSecretStore_RepublishingSameMaterialIsIdempotent keeps the
+// create-if-absent write usable on the paths that legitimately re-run it (the
+// disk-to-vault migration, a re-boot that republishes what it loaded).
+func TestStoreCAToSecretStore_RepublishingSameMaterialIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	ca, err := NewCA(&CAConfig{Organization: "Established", Country: "US", ValidityDays: 3650})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+
+	require.NoError(t, ca.StoreCAToSecretStore(ctx, store, "root", "cluster-ca"))
+	require.NoError(t, ca.StoreCAToSecretStore(ctx, store, "root", "cluster-ca"),
+		"republishing identical CA material must converge, not fail")
+
+	loaded := &CA{}
+	require.NoError(t, loaded.LoadCAFromSecretStore(ctx, store, "root", "cluster-ca"))
+	assert.Equal(t, ca.ownCertificatePEM(), loaded.ownCertificatePEM())
+}
+
 // TestCA_Initialize_UnsetPathLengthPreservesLeafOnlyBehavior verifies that a
 // CAConfig with no PathLength override produces byte-identical
 // MaxPathLen/MaxPathLenZero behavior to today's hardcoded leaf-only CA.
@@ -1117,4 +1251,111 @@ func TestValidateIssuerChain_RejectsGarbagePEM(t *testing.T) {
 	err := validateIssuerChain(root.certificate, []byte("not a pem block at all"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse issuer chain")
+}
+
+// externalIntermediateMaterial builds a real root CA and a regional
+// intermediate signed under it (mirroring an offline root ceremony's output),
+// and returns the PEM bytes ImportSubordinateCA consumes: the intermediate's
+// own certificate, its private key, and the root-terminal issuer chain.
+func externalIntermediateMaterial(t *testing.T) (certPEM, keyPEM, chainPEM, rootCertPEM []byte) {
+	t.Helper()
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	root, rootCertPEM := newRootCAForChainTests(t, 1)
+	subCert, err := root.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Regional Intermediate",
+		Organization: "Test Org",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+
+	keyPEM = pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(subKey),
+	})
+
+	return subCert.CertificatePEM, keyPEM, rootCertPEM, rootCertPEM
+}
+
+// TestCA_ImportSubordinateCA_TrustAnchorIsRootNotIntermediate is the
+// trust-anchor-identity check: GetCACertificate() on an imported subordinate
+// must return the offline root's own certificate PEM, byte-for-byte, and must
+// NOT equal the imported intermediate's own certificate PEM. Chain validity
+// alone would pass whether the pinned anchor is the root or the intermediate,
+// so this asserts identity. A freshly issued leaf's IssuerChainPEM must carry
+// the intermediate, proving the two fields hold deliberately different
+// material. [REQUIRED TEST]
+func TestCA_ImportSubordinateCA_TrustAnchorIsRootNotIntermediate(t *testing.T) {
+	certPEM, keyPEM, chainPEM, rootCertPEM := externalIntermediateMaterial(t)
+
+	ca := &CA{}
+	require.NoError(t, ca.ImportSubordinateCA(certPEM, keyPEM, chainPEM))
+	assert.True(t, ca.IsInitialized())
+
+	got, err := ca.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, got, "GetCACertificate() must return the root, not the imported intermediate")
+	assert.NotEqual(t, certPEM, got, "GetCACertificate() must never return the imported intermediate's own certificate as the trust anchor")
+
+	leaf, err := ca.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, leaf.IssuerChainPEM,
+		"a leaf issued by the imported CA must carry the intermediate's own PEM as its issuer chain, for handshake chain assembly")
+}
+
+// TestCA_ImportSubordinateCA_RejectsNonCACertificate ensures a leaf
+// certificate (IsCA: false) cannot be imported as a CA's active identity.
+func TestCA_ImportSubordinateCA_RejectsNonCACertificate(t *testing.T) {
+	root, _ := newRootCAForChainTests(t, 1)
+	leaf, err := root.GenerateServerCertificate(&ServerCertConfig{CommonName: "not-a-ca", ValidityDays: 30})
+	require.NoError(t, err)
+
+	ca := &CA{}
+	err = ca.ImportSubordinateCA(leaf.CertificatePEM, leaf.PrivateKeyPEM, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a CA certificate")
+	assert.False(t, ca.IsInitialized())
+}
+
+// TestCA_ImportSubordinateCA_RejectsMismatchedKeyPair ensures a cert/key pair
+// that do not belong together is rejected rather than silently imported.
+func TestCA_ImportSubordinateCA_RejectsMismatchedKeyPair(t *testing.T) {
+	certPEM, _, chainPEM, _ := externalIntermediateMaterial(t)
+
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	wrongKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(otherKey),
+	})
+
+	ca := &CA{}
+	err = ca.ImportSubordinateCA(certPEM, wrongKeyPEM, chainPEM)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match")
+	assert.False(t, ca.IsInitialized())
+}
+
+// TestCA_ImportSubordinateCA_RejectsBrokenIssuerChain proves a chain that does
+// not actually link to the imported certificate is rejected, not silently
+// recorded — the same fail-closed rule validateIssuerChain enforces elsewhere.
+func TestCA_ImportSubordinateCA_RejectsBrokenIssuerChain(t *testing.T) {
+	certPEM, keyPEM, _, _ := externalIntermediateMaterial(t)
+
+	unrelatedRoot, unrelatedRootPEM := newRootCAForChainTests(t, 1)
+	_ = unrelatedRoot
+
+	ca := &CA{}
+	err := ca.ImportSubordinateCA(certPEM, keyPEM, unrelatedRootPEM)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid CA issuer chain")
+	assert.False(t, ca.IsInitialized())
 }

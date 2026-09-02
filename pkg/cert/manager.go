@@ -50,6 +50,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -271,6 +272,96 @@ func (m *Manager) SignSubordinateCA(pubKey crypto.PublicKey, config *Subordinate
 	}
 
 	return cert, nil
+}
+
+// ImportSubordinateCA replaces this Manager's active CA identity with an
+// externally-issued intermediate CA certificate, private key, and issuer chain
+// (see CA.ImportSubordinateCA), then refreshes the validator/renewer that were
+// built against the previous CA certificate and rewrites the local ca.crt —
+// public certificate only, mirroring NewManagerFromSecretStore's identical
+// constraint that a cluster-mode CA private key never touches local disk.
+func (m *Manager) ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM []byte) error {
+	if err := m.ca.ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM); err != nil {
+		return fmt.Errorf("failed to import subordinate CA: %w", err)
+	}
+
+	m.validator = NewValidator(m.ca.certificate)
+	m.renewer = NewRenewer(m.ca, m.store, m.validator)
+
+	caDir := filepath.Join(m.config.StoragePath, "ca")
+	if err := os.MkdirAll(caDir, 0700); err != nil {
+		return fmt.Errorf("failed to create CA directory: %w", err)
+	}
+	caCertPEM, err := m.ca.GetCACertificate()
+	if err != nil {
+		return fmt.Errorf("failed to get CA certificate: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(caDir, "ca.crt"), caCertPEM, 0600); err != nil {
+		return fmt.Errorf("failed to write CA certificate to disk: %w", err)
+	}
+
+	return nil
+}
+
+// NewManagerFromImportedCA builds a cluster-mode Manager whose active CA
+// identity is an externally-issued regional intermediate (ADR-032 Decision 2),
+// then publishes the cert, key, and issuer chain to the given SecretStore via
+// StoreImportedCAToSecretStore, so every cluster node that imports the same
+// external material converges on the same vault-held identity — including the
+// chain, without which a peer loading from the vault would pin the intermediate
+// as the fleet root. Like NewManagerFromSecretStore, the private key is never
+// written to local disk — only the public ca.crt is.
+//
+// This path runs on every process start, not only at --init, so it never
+// replaces a different identity already published at the key path: importing
+// material that does not match what the vault holds fails closed rather than
+// silently re-rooting the fleet. See StoreImportedCAToSecretStore.
+//
+// This is the cluster-mode entry point for importing an offline-root-issued
+// intermediate. Use NewManagerFromSecretStore for the self-generated-root path.
+func NewManagerFromImportedCA(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string, config *ManagerConfig, certPEM, keyPEM, issuerChainPEM []byte) (*Manager, error) {
+	if store == nil {
+		return nil, fmt.Errorf("secret store is required")
+	}
+	if tenantID == "" || keyPath == "" {
+		return nil, fmt.Errorf("tenantID and keyPath are required")
+	}
+	if config == nil {
+		return nil, fmt.Errorf("manager config is required")
+	}
+	if config.StoragePath == "" {
+		return nil, fmt.Errorf("storage path is required")
+	}
+	if config.RenewalThresholdDays == 0 {
+		config.RenewalThresholdDays = 30
+	}
+
+	fileStore, err := NewFileStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
+	}
+
+	revStore, err := newRevocationStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+
+	m := &Manager{
+		ca:         &CA{},
+		store:      fileStore,
+		config:     config,
+		revocation: revStore,
+	}
+
+	if err := m.ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM); err != nil {
+		return nil, err
+	}
+
+	if err := m.ca.StoreImportedCAToSecretStore(ctx, store, tenantID, keyPath); err != nil {
+		return nil, fmt.Errorf("failed to store imported CA in secret store: %w", err)
+	}
+
+	return m, nil
 }
 
 // GenerateSigningCertificate creates a config signing certificate and stores it
@@ -838,8 +929,12 @@ func (m *Manager) GetSigningCursorState() (*SigningCertCursor, error) {
 // from a SecretStore. The CA private key is never written to local disk.
 //
 // If no CA exists at caKeyPath in the store, a new CA is generated using config.CAConfig
-// and stored. Only the CA public certificate is written to storagePath/ca/ca.crt so
-// the TLS stack can load it; the private key remains in-process only.
+// and published create-if-absent, so a key path that turns out to hold a CA already —
+// a peer that won the race, or material the load could not read — is adopted rather
+// than overwritten. A load failure that is not a genuine absence never reaches the
+// generate branch at all. Only the CA public certificate is written to
+// storagePath/ca/ca.crt so the TLS stack can load it; the private key remains
+// in-process only.
 //
 // This is the cluster-mode entry point. Use NewManager for single-node deployments.
 func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, caKeyPath string, config *ManagerConfig) (*Manager, error) {
@@ -868,6 +963,15 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 	ca := &CA{}
 	loadErr := ca.LoadCAFromSecretStore(ctx, store, tenantID, caKeyPath)
 	if loadErr != nil {
+		// Bootstrap only into an unclaimed key path. Material that is present but
+		// unusable — a cert with no matching key, or a subordinate cert whose
+		// issuer chain is missing — must surface as an error: generating a
+		// replacement over it would silently re-root the fleet and invalidate
+		// every certificate already issued under the published CA.
+		if !errors.Is(loadErr, ErrCAMaterialAbsent) {
+			return nil, fmt.Errorf("cluster CA material at %q could not be loaded and will not be replaced: %w",
+				tenantID+"/"+caKeyPath, loadErr)
+		}
 		if config.CAConfig == nil {
 			return nil, fmt.Errorf("CA config required to generate new cluster CA (load failed: %w)", loadErr)
 		}
@@ -891,10 +995,20 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 		if err := newCA.Initialize(genConfig); err != nil {
 			return nil, fmt.Errorf("failed to initialize cluster CA: %w", err)
 		}
+		// The publish is create-if-absent, so it also fails when the key path was
+		// in fact claimed — by a peer that won the race, or by material the load
+		// above could not see because the read itself failed. In that case the
+		// published material is the cluster's real CA and this node adopts it
+		// rather than replacing it; the generated CA is discarded unpublished.
 		if err := newCA.StoreCAToSecretStore(ctx, store, tenantID, caKeyPath); err != nil {
-			return nil, fmt.Errorf("failed to store cluster CA in secret store: %w", err)
+			published := &CA{}
+			if adoptErr := published.LoadCAFromSecretStore(ctx, store, tenantID, caKeyPath); adoptErr != nil {
+				return nil, fmt.Errorf("failed to store cluster CA in secret store: %w", err)
+			}
+			ca = published
+		} else {
+			ca = newCA
 		}
-		ca = newCA
 	}
 
 	// Write only the CA certificate (public) to disk for TLS config.
