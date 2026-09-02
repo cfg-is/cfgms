@@ -61,6 +61,9 @@ var (
 	// enforce, best-effort, or disabled (or empty, which defaults to enforce).
 	ErrInvalidSourceSecureBoot = errors.New("hyperv: invalid source secure_boot: must be enforce, best-effort, or disabled")
 
+	// ErrInvalidSourceRetryMax is returned when source retry_max is negative.
+	ErrInvalidSourceRetryMax = errors.New("hyperv: invalid source retry_max: must be zero or a positive integer")
+
 	// ErrInvalidHARoleSeedDir is returned when an HA-role VM places its primary
 	// VHDX on a Cluster Shared Volume but the module-level seed_dir is empty or
 	// also on CSV. The provisioning seed directory must be host-local so the
@@ -139,6 +142,28 @@ type SourceConfig struct {
 	// or "disabled" (secure boot is turned off immediately, the template call
 	// is never attempted). Ignored for Gen1 (no secure boot).
 	SecureBoot string `yaml:"secure_boot,omitempty"`
+	// RetryMax bounds the seed-phase bounded auto-retry budget (Issue #3802,
+	// ADR-009 §2 amendment): the total number of create/seed-phase attempts
+	// (the original attempt plus repairs) applySourceGated's exists-branch will
+	// make against a VM whose own provisioning record failed during the
+	// create/seed phase (FailedFrom: creating, or absent) before it falls back
+	// to surface-and-wait. nil (unset) uses the built-in default of 3. An
+	// explicit 0 disables auto-retry entirely — every seed-phase failure
+	// surfaces-and-waits, matching the pre-#3802 default. An explicit N>0
+	// re-bounds the budget to N. The degraded (broken-but-not-seed-phase)
+	// class is never affected by this setting — it never auto-remediates.
+	RetryMax *int `yaml:"retry_max,omitempty"`
+}
+
+// retryBudget returns the effective seed-phase bounded auto-retry budget: the
+// declared RetryMax, or defaultSeedPhaseRetryMax when unset. s may be nil
+// (defensive only — applySourceGated's exists-branch is only reached with a
+// non-nil cfg.Source).
+func (s *SourceConfig) retryBudget() int {
+	if s == nil || s.RetryMax == nil {
+		return defaultSeedPhaseRetryMax
+	}
+	return *s.RetryMax
 }
 
 // VMNetworkAdapter holds the observed MAC address of a VM's virtual network
@@ -568,6 +593,9 @@ func (s *SourceConfig) validate() error {
 	default:
 		return ErrInvalidSourceSecureBoot
 	}
+	if s.RetryMax != nil && *s.RetryMax < 0 {
+		return ErrInvalidSourceRetryMax
+	}
 	return nil
 }
 
@@ -605,6 +633,24 @@ func parseSourceMap(v interface{}) *SourceConfig {
 		src.ResizeGB = int(v)
 	case float64:
 		src.ResizeGB = int(v)
+	}
+	// retry_max is tri-state (unset/0/N>0), so it must round-trip as a *int, not
+	// collapse an absent key into the same zero value as an explicit disable.
+	switch v := m["retry_max"].(type) {
+	case int:
+		n := v
+		src.RetryMax = &n
+	case int64:
+		n := int(v)
+		src.RetryMax = &n
+	case float64:
+		n := int(v)
+		src.RetryMax = &n
+	case *int:
+		if v != nil {
+			n := *v
+			src.RetryMax = &n
+		}
 	}
 	if comp, ok := m["completion"].(map[string]interface{}); ok {
 		src.Completion.Mode, _ = comp["mode"].(string)
@@ -682,6 +728,7 @@ func (c *VMConfig) AsMap() map[string]interface{} {
 			"on_existing": c.Source.OnExisting,
 			"edition":     c.Source.Edition,
 			"secure_boot": c.Source.SecureBoot,
+			"retry_max":   c.Source.RetryMax,
 		}
 	}
 	// ha_role is only emitted when present so a non-HA VMConfig round-trips
@@ -1718,34 +1765,63 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		return err
 	}
 
-	// Seed-phase-failure gate (#2467): a VM whose own provisioning failed during
-	// the host-side create/seed phase (before the guest ever started installing)
-	// must NOT be powered on — it has no working seed, so starting it would boot
-	// an unprovisioned guest. Surface-and-wait (the VM stays off) until an
-	// operator or a future converge cycle retries from a clean seed (e.g. once
-	// the S4 seed-idempotency fix, #2466, unwedges the seed file). This mirrors
-	// the own-incomplete-attempt surface-and-wait idiom in the absent branch
-	// above. A record that failed AFTER reaching installing/finalizing (a
-	// different, post-power-on failure class such as a controller-side completion
-	// timeout, completion/reconciler.go) is deliberately NOT caught here and keeps
-	// converging normally.
+	// Seed-phase-failure gate (#2467, bounded auto-retry added by #3802): a VM
+	// whose own provisioning failed during the host-side create/seed phase
+	// (before the guest ever started installing) must NOT be powered on with no
+	// working seed. Per ADR-009 §2's amended invariant, this class provably holds
+	// no operator workload (isOwnIncompleteAttempt's own reasoning) and the
+	// host-attached-VHD leak that made a blind retry unsafe is fixed on develop,
+	// so — within a bounded attempt budget — the module re-invokes provisionVM
+	// to repair the seed and retry the install, instead of only surfacing and
+	// waiting forever. A record that failed AFTER reaching installing/finalizing
+	// (a different, post-power-on failure class such as a controller-side
+	// completion timeout, completion/reconciler.go) is deliberately NOT caught
+	// here and keeps converging normally.
 	//
 	// This runs BEFORE the isHealthyVMState/degraded check on purpose: a
 	// seed-phase failure is a more precise diagnosis than "existing VM looks
-	// unhealthy", and surface-and-wait (VM stays off) is the correct outcome for
-	// both a healthy-looking and a broken observed state — neither should power a
-	// seedless guest on. A record failed during the seed phase therefore takes
-	// precedence over the degraded surface.
+	// unhealthy", and both retry and (once the budget is exhausted)
+	// surface-and-wait are the correct outcomes for both a healthy-looking and a
+	// broken observed state — neither should power a seedless guest on outside
+	// this gate. A record failed during the seed phase therefore takes
+	// precedence over the degraded surface. The degraded/broken-VM class itself
+	// (isHealthyVMState false, below) is completely untouched by this gate: it
+	// is never auto-retried or auto-remediated, matching ADR-009 §2's invariant
+	// for that class.
 	if failedDuringSeedPhase(record) {
+		maxRetries := cfg.Source.retryBudget()
+		if !seedPhaseRetryExhausted(record, maxRetries) {
+			// Within budget: the VM already exists on the host (this is the
+			// exists-branch), so only the seed build + attach + power-on steps are
+			// redone via provisionVM — never createVM. provisionVM's own re-entry
+			// guard (vm_provision.go) already falls through correctly from a
+			// Failed record into creating; it needs no change for this to work.
+			if logger, ok := m.GetLogger(); ok {
+				logger.Warn("hyperv: provisioning failed during the seed/create phase; retrying (bounded auto-retry)",
+					"vm_name", logging.SanitizeLogValue(vmName),
+					"failed_from", string(record.FailedFrom),
+					"retry_count", record.RetryCount,
+					"retry_max", maxRetries)
+			}
+			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+				"vm-provision-retry-failed-seed-phase", "vm:"+vmName, nil,
+				map[string]interface{}{"reason": "seed-phase failure; bounded auto-retry", "retry_count": record.RetryCount}, nil)
+			return m.provisionVM(ctx, vmName, hostName, cfg)
+		}
+		// Retry budget exhausted: fall back to the original surface-and-wait
+		// behavior — the VM stays off, never destroyed, never powered on. This is
+		// the terminal state the visibility sibling story (Epic #3799) surfaces to
+		// an operator.
 		if logger, ok := m.GetLogger(); ok {
-			logger.Warn("hyperv: provisioning failed during the seed/create phase; surface-and-wait (VM stays off until reseeded, no power-on)",
+			logger.Warn("hyperv: provisioning failed during the seed/create phase; retry budget exhausted, surface-and-wait (VM stays off until reseeded, no power-on)",
 				"vm_name", logging.SanitizeLogValue(vmName),
 				"failed_from", string(record.FailedFrom),
+				"retry_count", record.RetryCount,
 				"last_error", logging.SanitizeLogValue(record.LastError))
 		}
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"vm-provision-skip-failed-seed-phase", "vm:"+vmName, nil,
-			map[string]interface{}{"reason": "seed-phase failure; VM left powered off"}, nil)
+			map[string]interface{}{"reason": "seed-phase failure; retry budget exhausted; VM left powered off"}, nil)
 		return nil
 	}
 

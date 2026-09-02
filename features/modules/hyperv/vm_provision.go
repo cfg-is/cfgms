@@ -28,8 +28,16 @@ import (
 
 const (
 	// psNewSeedVHD ensures the seed's parent directory exists (seed_dir may be a
-	// fresh local path), then wraps New-VHD to create the empty dynamic seed disk.
-	psNewSeedVHD = `New-Item -ItemType Directory -Force -Path (Split-Path -Path $Path -Parent) | Out-Null; New-VHD -Path $Path -SizeBytes $SizeBytes -Dynamic | Out-Null`
+	// fresh local path), deletes any stale file already at $Path, then wraps
+	// New-VHD to create the empty dynamic seed disk. The delete step is REQUIRED,
+	// not defensive: New-VHD has no -Force/overwrite option and fails with "The
+	// file exists. (0x80070050)" against a partially-built seed VHDX left on disk
+	// by a killed attempt — exactly the file a bounded seed-phase auto-retry
+	// (Issue #3802) re-enters creating against. Mirrors the already-fixed
+	// ps-host preamble (Cfgms-NewSeedVHD, Issue #2466); this is the WinRM-
+	// transport counterpart, which runs the script text directly rather than
+	// dispatching to the preamble.
+	psNewSeedVHD = `New-Item -ItemType Directory -Force -Path (Split-Path -Path $Path -Parent) | Out-Null; if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }; New-VHD -Path $Path -SizeBytes $SizeBytes -Dynamic | Out-Null`
 
 	// psMountSeedVHD wraps the Mount-VHD → Initialize-Disk → New-Partition →
 	// Format-Volume pipeline: lay a FAT32 CFGMS_SEED volume on the seed disk, then
@@ -373,6 +381,12 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		// controller-side (#2050).
 		return nil
 	}
+
+	// RetryCount counts every entry into creating — the original attempt (record
+	// was absent) and every bounded auto-retry re-entry (record was failed;
+	// Issue #3802). advanceProvision persists the whole record below, so bumping
+	// the in-memory value here is enough; no extra store write is needed.
+	record.RetryCount++
 
 	// absent → creating once the VM and disks exist.
 	if err := m.advanceProvision(ctx, cfg, vmName, record, ProvisionStateCreating); err != nil {

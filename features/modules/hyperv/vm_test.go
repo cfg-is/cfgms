@@ -993,6 +993,108 @@ func TestSourceConfig_Validate(t *testing.T) {
 		cfg := &VMConfig{Name: "no-src-vm", VHDPath: `C:\VMs\no-src.vhdx`}
 		require.NoError(t, cfg.Validate(), "absent source: block must not affect validation")
 	})
+
+	// ── retry_max (#3802 bounded seed-phase auto-retry) validation ──────────
+	t.Run("nil retry_max (unset) is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.RetryMax = nil
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("retry_max zero (explicit disable) is valid", func(t *testing.T) {
+		cfg := validBase()
+		zero := 0
+		cfg.Source.RetryMax = &zero
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("retry_max positive (re-bound) is valid", func(t *testing.T) {
+		cfg := validBase()
+		five := 5
+		cfg.Source.RetryMax = &five
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("negative retry_max is invalid", func(t *testing.T) {
+		cfg := validBase()
+		negative := -1
+		cfg.Source.RetryMax = &negative
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidSourceRetryMax)
+	})
+}
+
+// TestSourceConfig_RetryBudget covers the #3802 effective-budget resolution:
+// unset uses the built-in default, an explicit 0 disables (returns 0, which
+// seedPhaseRetryExhausted treats as immediately exhausted), and an explicit
+// N>0 re-bounds the budget.
+func TestSourceConfig_RetryBudget(t *testing.T) {
+	assert.Equal(t, defaultSeedPhaseRetryMax, (&SourceConfig{}).retryBudget(),
+		"unset retry_max must use the built-in default")
+
+	zero := 0
+	assert.Equal(t, 0, (&SourceConfig{RetryMax: &zero}).retryBudget(),
+		"explicit retry_max: 0 must disable auto-retry (budget 0)")
+
+	five := 5
+	assert.Equal(t, 5, (&SourceConfig{RetryMax: &five}).retryBudget(),
+		"explicit retry_max: N must re-bound the budget to N")
+
+	var nilSource *SourceConfig
+	assert.Equal(t, defaultSeedPhaseRetryMax, nilSource.retryBudget(),
+		"a nil SourceConfig must not panic and must fall back to the default")
+}
+
+// TestParseSourceMap_RetryMax covers the executor-config-map round-trip for
+// retry_max: absent stays nil (unset/default), and int/int64/float64 numeric
+// shapes (the JSON/YAML decode variants the executor's generic map can produce)
+// all parse to the same *int value.
+func TestParseSourceMap_RetryMax(t *testing.T) {
+	base := func(extra map[string]interface{}) map[string]interface{} {
+		m := map[string]interface{}{
+			"iso":       `C:\ISO\server.iso`,
+			"os_family": "windows",
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+
+	t.Run("absent retry_max stays nil", func(t *testing.T) {
+		src := parseSourceMap(base(nil))
+		require.NotNil(t, src)
+		assert.Nil(t, src.RetryMax)
+	})
+
+	t.Run("int retry_max", func(t *testing.T) {
+		src := parseSourceMap(base(map[string]interface{}{"retry_max": 5}))
+		require.NotNil(t, src)
+		require.NotNil(t, src.RetryMax)
+		assert.Equal(t, 5, *src.RetryMax)
+	})
+
+	t.Run("int64 retry_max", func(t *testing.T) {
+		src := parseSourceMap(base(map[string]interface{}{"retry_max": int64(5)}))
+		require.NotNil(t, src)
+		require.NotNil(t, src.RetryMax)
+		assert.Equal(t, 5, *src.RetryMax)
+	})
+
+	t.Run("float64 retry_max (JSON numeric shape)", func(t *testing.T) {
+		src := parseSourceMap(base(map[string]interface{}{"retry_max": float64(5)}))
+		require.NotNil(t, src)
+		require.NotNil(t, src.RetryMax)
+		assert.Equal(t, 5, *src.RetryMax)
+	})
+
+	t.Run("explicit zero retry_max (disable) round-trips as zero, not nil", func(t *testing.T) {
+		src := parseSourceMap(base(map[string]interface{}{"retry_max": 0}))
+		require.NotNil(t, src)
+		require.NotNil(t, src.RetryMax)
+		assert.Equal(t, 0, *src.RetryMax)
+	})
 }
 
 // TestVMConfig_AsMap_SwitchNameReflectsFullSet is the drift-detection
