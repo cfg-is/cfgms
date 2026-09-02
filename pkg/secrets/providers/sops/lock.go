@@ -78,6 +78,17 @@ func lockFilePath(dir, tenantID, key string) string {
 	return filepath.Join(dir, hex.EncodeToString(h[:])+".lock")
 }
 
+// isRetryableCASLockError reports whether err from the O_CREATE|O_EXCL acquire
+// attempt means "someone else holds the lock" — so the caller should keep polling
+// — as opposed to a genuine hard failure such as permission denied on the lock
+// directory itself or a vanished parent directory. os.IsExist covers the ordinary
+// EEXIST/ERROR_FILE_EXISTS case on every platform; isWindowsPendingDeleteAccessDenied
+// covers the Windows-only ERROR_ACCESS_DENIED a lock file mid-delete returns for the
+// same overlap (see acquireCASLock).
+func isRetryableCASLockError(err error) bool {
+	return os.IsExist(err) || isWindowsPendingDeleteAccessDenied(err)
+}
+
 // acquireCASLock acquires a real, cross-process mutual-exclusion lock scoped to
 // one tenant+key pair, using atomic O_CREATE|O_EXCL file creation — guaranteed
 // atomic by the OS on every platform CFGMS targets. The caller must call the
@@ -94,7 +105,7 @@ func acquireCASLock(ctx context.Context, dir, tenantID, key string) (func(), err
 			_ = f.Close()
 			return func() { _ = os.Remove(path) }, nil
 		}
-		if !os.IsExist(err) {
+		if !isRetryableCASLockError(err) {
 			return nil, fmt.Errorf("failed to acquire compare-and-swap lock: %w", err)
 		}
 		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > casLockStaleAfter {

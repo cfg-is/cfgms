@@ -3,10 +3,13 @@
 package sops
 
 import (
+	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -88,4 +91,50 @@ func TestCASLockDir_NeverReturnsSharedTempDir(t *testing.T) {
 	assert.Equal(t, filepath.Join(explicit, casLockSubdir), dir)
 	assert.NotEqual(t, filepath.Join(os.TempDir(), "cfgms-sops"+casLockSubdir), dir)
 	assert.True(t, strings.HasPrefix(dir, explicit))
+}
+
+// TestIsRetryableCASLockError_ExistIsRetryable proves the ordinary case — the lock
+// file already exists — is classified as retryable on every platform, exactly as
+// before this story: os.IsExist(err) alone drove the acquire loop's poll-vs-fail
+// decision.
+func TestIsRetryableCASLockError_ExistIsRetryable(t *testing.T) {
+	err := &fs.PathError{Op: "open", Path: "x.lock", Err: fs.ErrExist}
+	assert.True(t, isRetryableCASLockError(err))
+}
+
+// TestIsRetryableCASLockError_UnrelatedErrorIsHardFailure proves an error that is
+// neither os.IsExist nor the Windows pending-delete access-denied case is still
+// classified as a hard failure on every platform — the fix must not widen the retry
+// path to swallow arbitrary errors (permission denied on the lock directory itself,
+// a vanished parent directory, and so on).
+func TestIsRetryableCASLockError_UnrelatedErrorIsHardFailure(t *testing.T) {
+	err := &fs.PathError{Op: "open", Path: "x.lock", Err: fs.ErrNotExist}
+	assert.False(t, isRetryableCASLockError(err))
+
+	permErr := &fs.PathError{Op: "open", Path: "x.lock", Err: fs.ErrPermission}
+	assert.False(t, isRetryableCASLockError(permErr))
+}
+
+// TestAcquireCASLock_UnrelatedOpenErrorIsHardFailure is the AC2 cross-platform
+// regression proof: an open error unrelated to lock contention must return
+// immediately as a hard failure rather than spin-poll until the acquire timeout.
+// The lock directory's parent is a regular file rather than a directory — as if the
+// parent directory had been removed and replaced out from under the caller — which
+// makes os.MkdirAll (and, were it to get that far, the O_CREATE|O_EXCL open) fail
+// with an error that is neither os.IsExist nor the Windows access-denied case on any
+// platform.
+func TestAcquireCASLock_UnrelatedOpenErrorIsHardFailure(t *testing.T) {
+	base := t.TempDir()
+	blocker := filepath.Join(base, "not-a-directory")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
+	dir := filepath.Join(blocker, "locks")
+
+	start := time.Now()
+	release, err := acquireCASLock(context.Background(), dir, "tenant", "key")
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Nil(t, release)
+	assert.Less(t, elapsed, casLockAcquireTimeout,
+		"an unrelated open error must fail fast, not poll until the acquire timeout")
 }
