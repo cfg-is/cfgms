@@ -59,6 +59,7 @@ func testDBPendingEntry(pendingID, tenantID string) *business.PendingRegistratio
 		DeviceID:           deviceID,
 		IdentityKeyPub:     keyPub,
 		KeyProtectionLevel: "tpm",
+		CSRPEM:             "-----BEGIN CERTIFICATE REQUEST-----\n" + pendingID + "\n-----END CERTIFICATE REQUEST-----",
 		Hostname:           "host-" + pendingID,
 		Platform:           "linux",
 	}
@@ -74,6 +75,7 @@ func assertDBDeviceIdentity(t *testing.T, pendingID string, got *business.Pendin
 	assert.Equal(t, deviceID, got.DeviceID, "device_id must round-trip")
 	assert.Equal(t, keyPub, got.IdentityKeyPub, "identity_key_pub must round-trip byte-for-byte")
 	assert.Equal(t, "tpm", got.KeyProtectionLevel, "key_protection_level must round-trip")
+	assert.Equal(t, "-----BEGIN CERTIFICATE REQUEST-----\n"+pendingID+"\n-----END CERTIFICATE REQUEST-----", got.CSRPEM, "csr_pem must round-trip")
 	assert.Equal(t, "host-"+pendingID, got.Hostname, "hostname must round-trip")
 	assert.Equal(t, "linux", got.Platform, "platform must round-trip")
 }
@@ -472,9 +474,10 @@ const legacyCfgmsPendingRegistrationsSchemaPG = `
 		status        TEXT NOT NULL DEFAULT 'pending'
 	)`
 
-// pgPendingDeviceIdentityColumns are the five columns added by Issue #3403.
+// pgPendingDeviceIdentityColumns are the five columns added by Issue #3403,
+// plus csr_pem added by Issue #3780.
 var pgPendingDeviceIdentityColumns = []string{
-	"device_id", "identity_key_pub", "key_protection_level", "hostname", "platform",
+	"device_id", "identity_key_pub", "key_protection_level", "csr_pem", "hostname", "platform",
 }
 
 // pgPendingColumnExists reports whether the named column exists on
@@ -537,15 +540,16 @@ func TestCreatePendingRegistrationsTable_MigratesLegacyTable(t *testing.T) {
 	}
 
 	// The legacy row keeps its data and picks up the NOT NULL defaults.
-	var deviceID, keyProtection, hostname, platform string
+	var deviceID, keyProtection, csrPEM, hostname, platform string
 	var keyPub []byte
 	require.NoError(t, db.QueryRowContext(ctx, `
-		SELECT device_id, identity_key_pub, key_protection_level, hostname, platform
+		SELECT device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 		FROM cfgms_pending_registrations WHERE pending_id = 'pg-legacy'`).
-		Scan(&deviceID, &keyPub, &keyProtection, &hostname, &platform))
+		Scan(&deviceID, &keyPub, &keyProtection, &csrPEM, &hostname, &platform))
 	assert.Empty(t, deviceID, "legacy row must default to an empty device_id")
 	assert.Empty(t, keyPub, "legacy row must default to an empty identity_key_pub")
 	assert.Empty(t, keyProtection)
+	assert.Empty(t, csrPEM, "legacy row must default to an empty csr_pem")
 	assert.Empty(t, hostname)
 	assert.Empty(t, platform)
 

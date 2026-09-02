@@ -5,10 +5,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -29,6 +33,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
+	stwreg "github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -47,12 +52,32 @@ const testValidDeviceID = "a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c
 // avoiding a hardcoded test credential.
 var testValidIdentityKeyPub string
 
+// testValidCSRPEM is a PEM-encoded CERTIFICATE REQUEST over a throwaway ECDSA
+// P-256 keypair, generated once per test binary run (Issue #3780). Registration
+// handler tests need a real, signature-verifying CSR to exercise the
+// steward-submits-a-CSR flow, but do not care about the specific keypair —
+// reused across tests the same way testValidIdentityKeyPub is.
+var testValidCSRPEM string
+
 func init() {
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		panic("test setup: failed to generate Ed25519 key: " + err.Error())
 	}
 	testValidIdentityKeyPub = base64.StdEncoding.EncodeToString([]byte(pub))
+
+	csrPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic("test setup: failed to generate CSR keypair: " + err.Error())
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:            pkix.Name{CommonName: "test-steward"},
+		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}, csrPriv)
+	if err != nil {
+		panic("test setup: failed to create test CSR: " + err.Error())
+	}
+	testValidCSRPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
 }
 
 // newTestRegistrationStore creates a real SQLite-backed registration.Store for handler tests.
@@ -211,6 +236,7 @@ func postRegister(server *Server, token string) *httptest.ResponseRecorder {
 		Token:          token,
 		DeviceID:       testValidDeviceID,
 		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 }
 
@@ -339,6 +365,7 @@ func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) 
 				Token:          tokenStr,
 				DeviceID:       deviceID,
 				IdentityKeyPub: testValidIdentityKeyPub,
+				CSRPEM:         testValidCSRPEM,
 			})
 		}(i)
 	}
@@ -354,7 +381,6 @@ func TestHandleRegister_ConcurrentClaimsIssueAtMostOneCertificate(t *testing.T) 
 			var resp RegistrationResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			assert.NotEmpty(t, resp.ClientCert)
-			assert.NotEmpty(t, resp.ClientKey)
 		case http.StatusConflict:
 			conflicts++
 			assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE")
@@ -385,6 +411,7 @@ func TestHandleRegister_PerennialTokenEnrollsManyDevices(t *testing.T) {
 			Token:          tokenStr,
 			DeviceID:       fmt.Sprintf("%064x", i+1),
 			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusOK, rec.Code,
 			"device %d must enrol on the perennial token: %s", i, rec.Body.String())
@@ -799,6 +826,7 @@ func TestHandleRegister_ConcurrentClaimsCreateAtMostOnePendingRegistration(t *te
 				Token:          tokenStr,
 				DeviceID:       deviceID,
 				IdentityKeyPub: testValidIdentityKeyPub,
+				CSRPEM:         testValidCSRPEM,
 			})
 		}(i)
 	}
@@ -845,6 +873,7 @@ func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *te
 			Token:          tokenStr,
 			DeviceID:       deviceID,
 			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code,
 			"device %d must be quarantined, not refused: %s", i, rec.Body.String())
@@ -861,6 +890,7 @@ func TestHandleRegister_QuarantineKeepsPerennialTokenUsableAndDeviceScoped(t *te
 			Token:          tokenStr,
 			DeviceID:       deviceID,
 			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, "retry body: %s", rec.Body.String())
 		var resp RegistrationPendingResponse
@@ -894,11 +924,124 @@ func TestHandleRegister_ApproveReturns200WithCert(t *testing.T) {
 	var resp RegistrationResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.ClientCert, "client_cert must be present and non-empty on approve")
-	assert.NotEmpty(t, resp.ClientKey, "client_key must be present and non-empty on approve")
 	assert.NotEmpty(t, resp.CACert, "ca_cert must be present and non-empty on approve")
 	assert.NotEmpty(t, resp.StewardID, "steward_id must be present on approve")
 	assert.Equal(t, "test-tenant", resp.TenantID)
 	assert.Empty(t, resp.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
+	assert.NotContains(t, rec.Body.String(), "client_key", "no private key is ever generated by the controller (Issue #3780)")
+}
+
+// TestRegistration_EndToEnd_ClaimToMTLSHandshake drives the full CSR-based
+// registration flow with no mocks: a real pkg/cert-backed controller (via the real
+// HTTP router) is registered against by a real features/steward/registration.HTTPClient,
+// through the quarantine -> approve -> claim path, and the resulting controller-signed
+// certificate is paired with the steward's own locally generated key to complete a
+// genuine mTLS handshake against a throwaway listener — proving the steward-held key
+// is actually usable, not merely present (Issue #3780 AC).
+func TestRegistration_EndToEnd_ClaimToMTLSHandshake(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	certMgr := newTestCertManager(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, certMgr)
+	server.SetApprovalHook(&quarantineHookForTest{})
+
+	pendingStore := pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore()
+	require.NotNil(t, pendingStore)
+	server.SetPendingStore(pendingStore)
+
+	ts := httptest.NewServer(server.router)
+	defer ts.Close()
+
+	const regToken = "cfgms_reg_e2e_mtls"
+	tok := &registration.Token{
+		Token:         regToken,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	stewardClient, err := stwreg.NewHTTPClient(&stwreg.HTTPConfig{
+		ControllerURL: ts.URL,
+		Logger:        logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	// Step 1: Register -> quarantine (202). The real steward client generates its
+	// own keypair and submits a CSR.
+	_, pendingResp, err := stewardClient.Register(context.Background(), stwreg.RegistrationRequest{
+		Token:          regToken,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, pendingResp)
+	require.NotEmpty(t, pendingResp.PendingID)
+
+	// Step 2: Operator approves.
+	require.NoError(t, pendingStore.UpdateStatus(context.Background(),
+		pendingResp.PendingID, business.PendingRegistrationStatusApproved))
+
+	// Step 3: Steward polls -> claim (buildClaimResponse signs the CSR from step 1).
+	claimResp, err := stewardClient.PollStatus(context.Background(), pendingResp.PendingID, regToken, 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, "claimed", claimResp.Status)
+	require.NotEmpty(t, claimResp.ClientCert)
+	require.NotEmpty(t, claimResp.ClientKeyPEM, "the steward's locally generated key must be attached to the claim response")
+
+	// Step 4: Combine the steward-held key with the controller-issued certificate
+	// exactly as the steward's own transport layer does, and complete a real mTLS
+	// handshake against a throwaway listener that requires and verifies the client
+	// certificate against the same CA.
+	stewardTLSCert, err := tls.X509KeyPair([]byte(claimResp.ClientCert), []byte(claimResp.ClientKeyPEM))
+	require.NoError(t, err, "controller-issued certificate and steward-held key must form a usable TLS pair")
+
+	caCertPool := x509.NewCertPool()
+	require.True(t, caCertPool.AppendCertsFromPEM([]byte(claimResp.CACert)))
+
+	listenerCert, err := certMgr.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName:   "mtls-listener.test",
+		DNSNames:     []string{"mtls-listener.test"},
+		Organization: "CFGMS Test",
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	listenerTLSCert, err := tls.X509KeyPair(listenerCert.CertificatePEM, listenerCert.PrivateKeyPEM)
+	require.NoError(t, err)
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{listenerTLSCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caCertPool,
+		MinVersion:   tls.VersionTLS12,
+	})
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	accepted := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			accepted <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			accepted <- fmt.Errorf("accepted connection is not a *tls.Conn")
+			return
+		}
+		accepted <- tlsConn.HandshakeContext(context.Background())
+	}()
+
+	clientConn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+		Certificates: []tls.Certificate{stewardTLSCert},
+		RootCAs:      caCertPool,
+		ServerName:   "mtls-listener.test",
+		MinVersion:   tls.VersionTLS12,
+	})
+	require.NoError(t, err, "the steward-held key and controller-issued certificate must complete a real mTLS handshake")
+	defer func() { _ = clientConn.Close() }()
+
+	require.NoError(t, <-accepted, "the listener must accept and verify the steward's client certificate against the delivered CA")
 }
 
 // TestHandleRegister_ApproveReturns200WithCert_IntermediateCA_IncludesIssuerChain
@@ -1157,6 +1300,7 @@ func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
 		RegisteredAt: now,
 		ExpiresAt:    now.Add(5 * 24 * time.Hour),
 		Status:       business.PendingRegistrationStatusPending,
+		CSRPEM:       testValidCSRPEM,
 	}
 	require.NoError(t, pendingStore.AddPending(context.Background(), entry))
 
@@ -1195,7 +1339,6 @@ func TestHandleRegistrationStatus_Lifecycle(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 		assert.Equal(t, "claimed", body.Status)
 		assert.NotEmpty(t, body.ClientCert, "client_cert must be present after approval")
-		assert.NotEmpty(t, body.ClientKey, "client_key must be present after approval")
 		assert.NotEmpty(t, body.CACert, "ca_cert must be present after approval")
 		assert.Empty(t, body.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
 
@@ -1249,6 +1392,7 @@ func TestHandleRegistrationStatus_ClaimIntermediateCA_IncludesIssuerChain(t *tes
 		RegisteredAt: now,
 		ExpiresAt:    now.Add(5 * 24 * time.Hour),
 		Status:       business.PendingRegistrationStatusPending,
+		CSRPEM:       testValidCSRPEM,
 	}))
 	require.NoError(t, pendingStore.UpdateStatus(context.Background(),
 		"pending-intermediate-claim-1", business.PendingRegistrationStatusApproved))
@@ -1769,6 +1913,7 @@ func TestHandleRegister_PersistsDeviceIdentity(t *testing.T) {
 		Token:              "cfgms_reg_persist_identity",
 		DeviceID:           deviceID,
 		IdentityKeyPub:     identityKeyPub,
+		CSRPEM:             testValidCSRPEM,
 		KeyProtectionLevel: "tpm",
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -1801,6 +1946,7 @@ func TestHandleRegister_MissingDeviceID_400(t *testing.T) {
 	rec := postRegisterWithBody(server, RegistrationRequest{
 		Token:          "cfgms_reg_no_device_id",
 		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
 		// DeviceID intentionally omitted
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1831,6 +1977,7 @@ func TestHandleRegister_MalformedDeviceID_400(t *testing.T) {
 			Token:          "cfgms_reg_bad_device_id",
 			DeviceID:       badID,
 			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "DeviceID %q must be rejected with 400", badID)
 	}
@@ -1881,9 +2028,68 @@ func TestHandleRegister_InvalidIdentityKeyPub_400(t *testing.T) {
 			Token:          "cfgms_reg_bad_key_pub",
 			DeviceID:       testValidDeviceID,
 			IdentityKeyPub: badPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "IdentityKeyPub %q must be rejected with 400", badPub)
 	}
+}
+
+// TestHandleRegister_MissingCSRPEM_400 verifies that a registration request with
+// csr_pem unset is rejected before any certificate is signed (Issue #3780 AC).
+func TestHandleRegister_MissingCSRPEM_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_no_csr",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_no_csr",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		// CSRPEM intentionally omitted
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "csr_pem")
+	assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE", "no certificate may be signed when csr_pem is missing")
+}
+
+// TestHandleRegister_CSRContainsPrivateKeyMaterial_400 verifies that a csr_pem body
+// smuggling private key material alongside the CERTIFICATE REQUEST block is rejected
+// (via containsPrivateKeyMaterial) before any certificate is signed (Issue #3780 AC).
+func TestHandleRegister_CSRContainsPrivateKeyMaterial_400(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, _ := newHandleRegisterServer(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	tok := &registration.Token{
+		Token:         "cfgms_reg_csr_with_key",
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	smuggledCSR := testValidCSRPEM + string(keyPEM)
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          "cfgms_reg_csr_with_key",
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         smuggledCSR,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "private key material")
+	assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE", "no certificate may be signed when the CSR carries embedded private key material")
 }
 
 // TestHandleRegister_DuplicateDeviceIDWithinTenant_409 verifies that registering the
@@ -1906,6 +2112,7 @@ func TestHandleRegister_DuplicateDeviceIDWithinTenant_409(t *testing.T) {
 		Token:          "cfgms_reg_dup_device_id",
 		DeviceID:       testValidDeviceID,
 		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 	assert.Equal(t, http.StatusOK, rec1.Code, "first registration must succeed")
 
@@ -1914,6 +2121,7 @@ func TestHandleRegister_DuplicateDeviceIDWithinTenant_409(t *testing.T) {
 		Token:          "cfgms_reg_dup_device_id",
 		DeviceID:       testValidDeviceID,
 		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 	assert.Equal(t, http.StatusConflict, rec2.Code,
 		"duplicate DeviceID within the same tenant must return HTTP 409")
@@ -1950,6 +2158,7 @@ func TestHandleRegister_DuplicateDeviceIDCrossTenant_200(t *testing.T) {
 		Token:          "cfgms_reg_cross_tenant_a",
 		DeviceID:       deviceID,
 		IdentityKeyPub: keyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 	assert.Equal(t, http.StatusOK, rec1.Code, "registration under tenant-a must succeed")
 
@@ -1958,6 +2167,7 @@ func TestHandleRegister_DuplicateDeviceIDCrossTenant_200(t *testing.T) {
 		Token:          "cfgms_reg_cross_tenant_b",
 		DeviceID:       deviceID,
 		IdentityKeyPub: keyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 	assert.Equal(t, http.StatusOK, rec2.Code,
 		"same DeviceID under a different tenant must be accepted (namespaces are independent)")
@@ -2018,6 +2228,7 @@ func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
 			Token:          tokenStr,
 			DeviceID:       testValidDeviceID,
 			IdentityKeyPub: testValidIdentityKeyPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		require.NoError(t, err)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
@@ -2074,7 +2285,6 @@ func TestProvisionedVMRegistration_IPTrustGate(t *testing.T) {
 		var resp RegistrationResponse
 		require.NoError(t, json.NewDecoder(bytes.NewReader(rawBody)).Decode(&resp))
 		assert.NotEmpty(t, resp.ClientCert, "auto-admitted registration must include a client cert")
-		assert.NotEmpty(t, resp.ClientKey, "auto-admitted registration must include a client key")
 		assert.NotEmpty(t, resp.CACert, "auto-admitted registration must include the CA cert")
 		assert.Equal(t, tenantID, resp.TenantID,
 			"auto-admission response must reflect the registering tenant")
@@ -2107,6 +2317,7 @@ func TestHandleRegister_HostnameSeededBeforeDNASync(t *testing.T) {
 		Token:          "cfgms_reg_hostname_seed",
 		DeviceID:       deviceID,
 		IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+		CSRPEM:         testValidCSRPEM,
 		Hostname:       "worker-node-42",
 		OS:             "linux",
 	})
@@ -2528,6 +2739,7 @@ func TestHandleRegistrationStatus_ClaimLeaderGate(t *testing.T) {
 			RegisteredAt: now,
 			ExpiresAt:    now.Add(5 * 24 * time.Hour),
 			Status:       business.PendingRegistrationStatusPending,
+			CSRPEM:       testValidCSRPEM,
 		}))
 		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID,
 			business.PendingRegistrationStatusApproved))
@@ -2635,6 +2847,7 @@ func TestHandleRegister_ClaimPath_WritesDurableRecordAndSurvivesRestart(t *testi
 		Token:          regToken,
 		DeviceID:       deviceID,
 		IdentityKeyPub: identityKeyPub,
+		CSRPEM:         testValidCSRPEM,
 	})
 	require.Equal(t, http.StatusAccepted, rec1.Code, "quarantine must return 202")
 	var qResp RegistrationPendingResponse
@@ -2733,6 +2946,7 @@ func TestHandleRegistrationStatus_ClaimRejectsDuplicateDeviceIDInTenant(t *testi
 			Token:          regToken,
 			DeviceID:       deviceID,
 			IdentityKeyPub: identityKeyPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, "quarantine must return 202")
 		var qResp RegistrationPendingResponse
@@ -2830,6 +3044,7 @@ func TestBuildClaimResponse_DuplicateDeviceIDAcrossTenantsAllowed(t *testing.T) 
 		DeviceID:       deviceID,
 		IdentityKeyPub: []byte(pub),
 		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
 	}, regToken)
 	require.NoError(t, err, "a device_id held in another tenant must not block this claim")
 	require.NotNil(t, resp)
@@ -2865,6 +3080,7 @@ func TestBuildClaimResponse_SameStewardIDReclaimIsNotAConflict(t *testing.T) {
 		DeviceID:       deviceID,
 		IdentityKeyPub: []byte(pub),
 		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
 	}
 
 	_, err = server.buildClaimResponse(context.Background(), entry, regToken)
@@ -2936,6 +3152,7 @@ func TestHandleRegistrationStatus_ConcurrentClaimsOneDeviceIDYieldOneRecord(t *t
 			Token:          regToken,
 			DeviceID:       deviceID,
 			IdentityKeyPub: identityKeyPub,
+			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, "quarantine must return 202")
 		var qResp RegistrationPendingResponse
@@ -3079,6 +3296,7 @@ func TestHandleRegistrationStatus_DistinctStewardIDsAcrossConcurrentRegistration
 			Token:          regToken,
 			DeviceID:       deviceID,
 			IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+			CSRPEM:         testValidCSRPEM,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, "device %d must quarantine: %s", i, rec.Body.String())
 
@@ -3188,6 +3406,7 @@ func TestBuildClaimResponse_RefusesDuplicateStewardIDForDifferentDevice(t *testi
 		DeviceID:       deviceIDA,
 		IdentityKeyPub: []byte(pubA),
 		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
 	}
 	entryB := &business.PendingRegistrationEntry{
 		PendingID:      "pend-collision-b",
@@ -3196,6 +3415,7 @@ func TestBuildClaimResponse_RefusesDuplicateStewardIDForDifferentDevice(t *testi
 		DeviceID:       deviceIDB,
 		IdentityKeyPub: []byte(pubB),
 		RegisteredAt:   time.Now().UTC(),
+		CSRPEM:         testValidCSRPEM,
 	}
 
 	// First claim succeeds: device A wins and its record is written.

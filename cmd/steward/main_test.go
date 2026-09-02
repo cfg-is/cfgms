@@ -8,7 +8,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -379,7 +381,6 @@ func statusBody(t *testing.T, status, stewardID, tenantID, transport, cert, key,
 		TenantID:         tenantID,
 		TransportAddress: transport,
 		ClientCert:       cert,
-		ClientKey:        key,
 		CACert:           ca,
 	}
 	b, err := json.Marshal(resp)
@@ -679,6 +680,120 @@ func generateMainTestCACert(t *testing.T) (certPEM, fingerprint string) {
 	fingerprint = hex.EncodeToString(hash[:])
 	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
 	return
+}
+
+// TestBuildCertManagerAndSecretStore_LeafPlusChain verifies that
+// buildCertManagerAndSecretStore concatenates the leaf certificate with a
+// non-empty issuer chain (Issue #3778/#3780) and that the resulting cert.Manager
+// presents the full chain during a real TLS handshake — tls.Certificate.Certificate
+// must carry more than one DER entry, verified by dialing a listener that trusts
+// only the root CA, never the intermediate directly. [REQUIRED TEST]
+func TestBuildCertManagerAndSecretStore_LeafPlusChain(t *testing.T) {
+	logger := logging.NewNoopLogger()
+
+	// Real root CA, a subordinate (regional intermediate) signed from it, and a
+	// steward client leaf issued by the intermediate — the Issue #3778 shape.
+	rootMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization:  "CFGMS Test Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    1,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+	rootCertPEM, err := rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	subCert, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &cert.SubordinateCAConfig{
+		CommonName:   "CFGMS Test Regional Intermediate",
+		Organization: "CFGMS Test",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+	subKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(subKey)})
+
+	intermediateMgr, err := cert.NewManagerFromCAMaterial(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, subCert.CertificatePEM, subKeyPEM, rootCertPEM)
+	require.NoError(t, err)
+
+	leaf, err := intermediateMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-chain-test",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-chain-test",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, leaf.IssuerChainPEM, "leaf issued by an intermediate-backed manager must carry a non-empty issuer chain")
+
+	certMgr := buildClientCertManagerAtPath(t.TempDir(),
+		string(leaf.CertificatePEM), string(leaf.PrivateKeyPEM), string(leaf.IssuerChainPEM), logger)
+	require.NotNil(t, certMgr, "cert.Manager must be created for a valid cert+key pair")
+
+	tlsCert, err := certMgr.GetClientCertificate(context.Background())
+	require.NoError(t, err)
+	require.Greater(t, len(tlsCert.Certificate), 1,
+		"the stored certificate must carry more than one DER entry: leaf + issuer chain")
+
+	// Prove it during a real TLS handshake against a listener that trusts only
+	// the root — the intermediate must be presented, not just stored.
+	rootPool := x509.NewCertPool()
+	require.True(t, rootPool.AppendCertsFromPEM(rootCertPEM))
+
+	listenerCert, err := rootMgr.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName:   "chain-listener.test",
+		DNSNames:     []string{"chain-listener.test"},
+		Organization: "CFGMS Test",
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	listenerTLSCert, err := tls.X509KeyPair(listenerCert.CertificatePEM, listenerCert.PrivateKeyPEM)
+	require.NoError(t, err)
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{listenerTLSCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    rootPool,
+		MinVersion:   tls.VersionTLS12,
+	})
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	accepted := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			accepted <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			accepted <- fmt.Errorf("accepted connection is not a *tls.Conn")
+			return
+		}
+		accepted <- tlsConn.HandshakeContext(context.Background())
+	}()
+
+	clientConn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+		GetClientCertificate: func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return certMgr.GetClientCertificate(context.Background())
+		},
+		RootCAs:    rootPool,
+		ServerName: "chain-listener.test",
+		MinVersion: tls.VersionTLS12,
+	})
+	require.NoError(t, err, "the presented leaf+chain must verify against a root-only trust store")
+	defer func() { _ = clientConn.Close() }()
+
+	require.NoError(t, <-accepted,
+		"the listener must accept and verify the intermediate-issued leaf against the root-only CA pool")
 }
 
 // TestResolveTrustSource verifies the trust-source resolution rules from ADR-013 §3.

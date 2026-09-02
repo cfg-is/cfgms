@@ -61,8 +61,8 @@ func (s *SQLitePendingRegistrationStore) AddPending(ctx context.Context, entry *
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO cfgms_pending_registrations
 			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
-			 device_id, identity_key_pub, key_protection_level, hostname, platform)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.PendingID,
 		entry.StewardID,
 		entry.TenantID,
@@ -75,6 +75,7 @@ func (s *SQLitePendingRegistrationStore) AddPending(ctx context.Context, entry *
 		entry.DeviceID,
 		keyPub,
 		entry.KeyProtectionLevel,
+		entry.CSRPEM,
 		entry.Hostname,
 		entry.Platform,
 	)
@@ -92,7 +93,7 @@ func (s *SQLitePendingRegistrationStore) AddPending(ctx context.Context, entry *
 func (s *SQLitePendingRegistrationStore) GetPendingByID(ctx context.Context, pendingID string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
-		       device_id, identity_key_pub, key_protection_level, hostname, platform
+		       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 		FROM cfgms_pending_registrations WHERE pending_id = ?`, pendingID)
 	return scanPendingEntry(row)
 }
@@ -103,7 +104,7 @@ func (s *SQLitePendingRegistrationStore) GetPendingByID(ctx context.Context, pen
 func (s *SQLitePendingRegistrationStore) GetPendingByToken(ctx context.Context, tokenStr string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
-		       device_id, identity_key_pub, key_protection_level, hostname, platform
+		       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 		FROM cfgms_pending_registrations WHERE token_str IN (?, ?) LIMIT 1`,
 		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	return scanPendingEntry(row)
@@ -152,13 +153,13 @@ func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenant
 	if tenantID == "" {
 		query = `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
-			       device_id, identity_key_pub, key_protection_level, hostname, platform
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 			FROM cfgms_pending_registrations WHERE status = ? ORDER BY registered_at ASC`
 		args = []interface{}{business.PendingRegistrationStatusPending}
 	} else {
 		query = `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
-			       device_id, identity_key_pub, key_protection_level, hostname, platform
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 			FROM cfgms_pending_registrations WHERE tenant_id = ? AND status = ? ORDER BY registered_at ASC`
 		args = []interface{}{tenantID, business.PendingRegistrationStatusPending}
 	}
@@ -190,12 +191,12 @@ func (s *SQLitePendingRegistrationStore) ListAll(ctx context.Context, tenantID s
 	if tenantID == "" {
 		query = `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
-			       device_id, identity_key_pub, key_protection_level, hostname, platform
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 			FROM cfgms_pending_registrations ORDER BY registered_at ASC`
 	} else {
 		query = `
 			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
-			       device_id, identity_key_pub, key_protection_level, hostname, platform
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 			FROM cfgms_pending_registrations WHERE tenant_id = ? ORDER BY registered_at ASC`
 		args = []interface{}{tenantID}
 	}
@@ -254,7 +255,7 @@ func scanPendingEntry(row *sql.Row) (*business.PendingRegistrationEntry, error) 
 	err := row.Scan(
 		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
 		&registeredStr, &expiresStr, &claimedStr, &e.Status,
-		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.Hostname, &e.Platform,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.CSRPEM, &e.Hostname, &e.Platform,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrPendingRegistrationNotFound
@@ -278,7 +279,7 @@ func scanPendingRow(rows *sql.Rows) (*business.PendingRegistrationEntry, error) 
 	if err := rows.Scan(
 		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
 		&registeredStr, &expiresStr, &claimedStr, &e.Status,
-		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.Hostname, &e.Platform,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.CSRPEM, &e.Hostname, &e.Platform,
 	); err != nil {
 		return nil, err
 	}

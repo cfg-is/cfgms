@@ -895,6 +895,7 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 			device_id            TEXT NOT NULL DEFAULT '',
 			identity_key_pub     BYTEA NOT NULL DEFAULT '',
 			key_protection_level TEXT NOT NULL DEFAULT '',
+			csr_pem              TEXT NOT NULL DEFAULT '',
 			hostname             TEXT NOT NULL DEFAULT '',
 			platform             TEXT NOT NULL DEFAULT ''
 		);
@@ -903,11 +904,12 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 		return fmt.Errorf("failed to create cfgms_pending_registrations table: %w", err)
 	}
 
-	// Idempotent migrations for existing deployments (Issue #3403).
+	// Idempotent migrations for existing deployments (Issue #3403; csr_pem added by #3780).
 	alterations := []string{
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS device_id            TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS identity_key_pub     BYTEA NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS key_protection_level TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS csr_pem              TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS hostname             TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE cfgms_pending_registrations ADD COLUMN IF NOT EXISTS platform             TEXT NOT NULL DEFAULT ''`,
 	}

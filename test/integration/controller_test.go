@@ -5,14 +5,18 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"testing"
@@ -132,6 +136,33 @@ func (s *ControllerTestSuite) TestControllerHealthEndpoint() {
 	s.T().Logf("Health status: %v", status)
 }
 
+// generateRegistrationKeypairAndCSR generates a fresh ECDSA P-256 keypair and a
+// self-signed PEM CERTIFICATE REQUEST over its public key, mirroring
+// features/steward/registration/client_http.go's generateStewardKeypair /
+// buildRegistrationCSR (Issue #3780). Returns the PKCS8 PEM-encoded private key
+// (held only by the caller, never transmitted) and the CSR PEM to submit.
+func generateRegistrationKeypairAndCSR(commonName string) (keyPEM, csrPEM string, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("generate registration keypair: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal registration private key: %w", err)
+	}
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:            pkix.Name{CommonName: commonName},
+		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}, priv)
+	if err != nil {
+		return "", "", fmt.Errorf("create registration CSR: %w", err)
+	}
+	csrPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
+	return keyPEM, csrPEM, nil
+}
+
 // TestStewardRegistration tests the full registration flow with a real token and real API
 func (s *ControllerTestSuite) TestStewardRegistration() {
 	// Get the registration token store from the running controller
@@ -163,11 +194,18 @@ func (s *ControllerTestSuite) TestStewardRegistration() {
 	deviceID := hex.EncodeToString(digest[:])
 	identityKeyPub := base64.StdEncoding.EncodeToString(pubKey)
 
+	// Generate the steward's mTLS keypair locally and submit only the public half
+	// as a CSR (Issue #3780); the private key never crosses the wire, so the
+	// controller signs a public key it did not generate.
+	_, csrPEM, err := generateRegistrationKeypairAndCSR("integration-test-steward")
+	require.NoError(s.T(), err, "Should generate registration keypair and CSR")
+
 	// Call the registration API endpoint
 	reqBody, err := json.Marshal(map[string]string{
 		"token":            token.Token,
 		"device_id":        deviceID,
 		"identity_key_pub": identityKeyPub,
+		"csr_pem":          csrPEM,
 	})
 	require.NoError(s.T(), err)
 

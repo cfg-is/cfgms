@@ -107,10 +107,15 @@ func (s *RegistrationTestSuite) TestPerennialToken() {
 		pub, _, err := ed25519.GenerateKey(rand.Reader)
 		s.NoError(err)
 		h := sha256.Sum256(pub)
+		// Each registration submits a locally generated CSR (Issue #3780); the
+		// matching private key stays in this process.
+		_, csrPEM, csrErr := generateTestRegistrationKeypairAndCSR()
+		s.Require().NoError(csrErr)
 		reqBody := map[string]string{
 			"token":            "integration_reusable",
 			"device_id":        hex.EncodeToString(h[:]),
 			"identity_key_pub": base64.StdEncoding.EncodeToString(pub),
+			"csr_pem":          csrPEM,
 		}
 		reqJSON, err := json.Marshal(reqBody)
 		s.NoError(err)
@@ -162,10 +167,18 @@ func (s *RegistrationTestSuite) TestConcurrentRegistrations() {
 				return
 			}
 			h := sha256.Sum256(pub)
+			// Each concurrent registration submits its own locally generated CSR
+			// (Issue #3780); the matching private key never leaves this process.
+			_, csrPEM, csrErr := generateTestRegistrationKeypairAndCSR()
+			if csrErr != nil {
+				results <- csrErr
+				return
+			}
 			reqBody := map[string]string{
 				"token":            token,
 				"device_id":        hex.EncodeToString(h[:]),
 				"identity_key_pub": base64.StdEncoding.EncodeToString(pub),
+				"csr_pem":          csrPEM,
 			}
 			reqJSON, marshalErr := json.Marshal(reqBody)
 			if marshalErr != nil {

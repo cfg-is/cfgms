@@ -99,6 +99,11 @@ POST /api/v1/stewards/{device_id}/refresh/challenge
 POST /api/v1/stewards/{device_id}/refresh/complete
 ```
 
+N/A — the original registration wire contract (`POST /api/v1/register`,
+`GET /api/v1/registration/status/{pending_id}`) is defined in ADR-032 and
+`docs/architecture/steward-operating-model.md` §Registration Flow, not here.
+This ADR documents only the refresh endpoints above.
+
 #### Challenge phase (`/refresh/challenge`)
 
 Request: `{ "device_id": "<64-char hex>" }`

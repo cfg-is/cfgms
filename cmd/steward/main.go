@@ -1006,12 +1006,23 @@ type approvedRegistration struct {
 	Group            string
 	TransportAddress string
 	ClientCert       string
-	ClientKey        string
-	CACert           string
-	ServerCert       string
-	SigningCert      string
-	DeviceID         string // stable device identity ID (Issue #2094)
-	IdentityKeyPub   string // base64-encoded Ed25519 public key (Issue #2094)
+	// ClientKey holds the steward's locally generated private key PEM (Issue
+	// #3780) — never a value read off the wire. For the immediate-approval and
+	// manual-review poll-approval paths it comes from RegistrationResponse's /
+	// RegistrationStatusResponse's local (non-wire) ClientKeyPEM field, populated
+	// by the registration client from the keypair it generated for the CSR. The
+	// registration-refresh path (S5) still sources this from the wire until it is
+	// migrated to the same CSR-based shape.
+	ClientKey      string
+	CACert         string
+	ServerCert     string
+	SigningCert    string
+	DeviceID       string // stable device identity ID (Issue #2094)
+	IdentityKeyPub string // base64-encoded Ed25519 public key (Issue #2094)
+	// IssuerChain is the PEM-concatenated chain from ClientCert's direct issuer up
+	// to (but not including) CACert (Issue #3778). Empty for a self-hosted,
+	// root-only controller.
+	IssuerChain string
 }
 
 // registerAndConnect registers the steward using HTTP REST API
@@ -1222,10 +1233,11 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		Group:            regResp.Group,
 		TransportAddress: regResp.TransportAddress,
 		ClientCert:       regResp.ClientCert,
-		ClientKey:        regResp.ClientKey,
+		ClientKey:        regResp.ClientKeyPEM,
 		CACert:           regResp.CACert,
 		ServerCert:       regResp.ServerCert,
 		SigningCert:      regResp.SigningCert,
+		IssuerChain:      regResp.IssuerChain,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
 	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
@@ -1286,10 +1298,11 @@ func pollForApproval(
 				Group:            resp.Group,
 				TransportAddress: resp.TransportAddress,
 				ClientCert:       resp.ClientCert,
-				ClientKey:        resp.ClientKey,
+				ClientKey:        resp.ClientKeyPEM,
 				CACert:           resp.CACert,
 				ServerCert:       resp.ServerCert,
 				SigningCert:      resp.SigningCert,
+				IssuerChain:      resp.IssuerChain,
 			}, nil
 
 		case "denied":
@@ -1382,7 +1395,7 @@ func connectWithApprovedRegistration(
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
 	// offline queue encryption (Issue #920).
-	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, logger)
+	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, reg.IssuerChain, logger)
 
 	// Build the composite DNA collector early so we can wire the executor into it
 	// after InitializeConfigExecutor creates it (Issue #2435).
@@ -1824,7 +1837,15 @@ func refreshAndConnect(
 // (for offline queue encryption key persistence). Both are best-effort — a nil
 // return from either does not prevent the steward from connecting, it just
 // disables the respective feature.
-func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
+//
+// issuerChainPEM is the PEM-concatenated chain from the client certificate's
+// direct issuer up to (but not including) the CA certificate (Issue #3778).
+// When non-empty it is appended after the leaf before import, so the stored
+// certificate presents the full chain during the ongoing gRPC-over-QUIC
+// transport's TLS handshake — tls.X509KeyPair (used by cert.Manager's
+// GetClientCertificate) builds Certificate.Certificate from every DER block in
+// the PEM, not just the first.
+func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM, issuerChainPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
 	// ── SecretStore ──────────────────────────────────────────────────────────
 	var secretStore secretsif.SecretStore
 	secretsProvider, err := secretsif.GetSecretProvider("steward")
@@ -1843,8 +1864,24 @@ func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger l
 		return nil, secretStore
 	}
 
-	certStorePath := defaultCertStoreDir()
+	certMgr := buildClientCertManagerAtPath(defaultCertStoreDir(), clientCertPEM, clientKeyPEM, issuerChainPEM, logger)
+	return certMgr, secretStore
+}
 
+// buildClientCertManagerAtPath initialises (or loads) a cert.Manager rooted at
+// certStorePath and imports the steward's client certificate into it, returning
+// nil on any failure (best-effort — see buildCertManagerAndSecretStore). Split
+// out from buildCertManagerAndSecretStore so certStorePath can be a test-owned
+// t.TempDir() rather than the hardcoded, platform-stable defaultCertStoreDir().
+//
+// issuerChainPEM is the PEM-concatenated chain from the client certificate's
+// direct issuer up to (but not including) the CA certificate (Issue #3778).
+// When non-empty it is appended after the leaf before import, so the stored
+// certificate presents the full chain during the ongoing gRPC-over-QUIC
+// transport's TLS handshake — tls.X509KeyPair (used by cert.Manager's
+// GetClientCertificate) builds Certificate.Certificate from every DER block in
+// the PEM, not just the first.
+func buildClientCertManagerAtPath(certStorePath, clientCertPEM, clientKeyPEM, issuerChainPEM string, logger logging.Logger) *cert.Manager {
 	// Try to load an existing local CA (created on a previous run).
 	certMgr, mgrErr := cert.NewManager(&cert.ManagerConfig{
 		StoragePath:    certStorePath,
@@ -1863,19 +1900,25 @@ func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM string, logger l
 		})
 		if mgrErr != nil {
 			logger.Warn("Failed to create cert.Manager; on-demand TLS cert loading disabled", "error", mgrErr)
-			return nil, secretStore
+			return nil
 		}
 	}
 
-	// Import the client cert+key from the registration response.
+	// Import the client cert+key from the registration response. The issuer
+	// chain, when present, is concatenated after the leaf so the stored
+	// certificate carries the full chain (Issue #3778/#3780).
+	fullChainPEM := clientCertPEM
+	if issuerChainPEM != "" {
+		fullChainPEM = clientCertPEM + issuerChainPEM
+	}
 	if _, impErr := certMgr.ImportCertificate(
-		[]byte(clientCertPEM), []byte(clientKeyPEM), cert.CertificateTypeClient,
+		[]byte(fullChainPEM), []byte(clientKeyPEM), cert.CertificateTypeClient,
 	); impErr != nil {
 		logger.Warn("Failed to import client certificate into cert.Manager", "error", impErr)
-		return nil, secretStore
+		return nil
 	}
 
-	return certMgr, secretStore
+	return certMgr
 }
 
 // defaultCertStoreDir returns the platform-specific stable directory for the
