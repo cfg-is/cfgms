@@ -67,11 +67,19 @@ func newRecordingAuditStore(t *testing.T) *recordingAuditStore {
 }
 
 // newRecordingAuditManager returns an audit.Manager backed by that real store.
+//
+// t.Cleanup registers Stop() after newRecordingAuditStore's own Close()
+// cleanup, so LIFO ordering quiesces the manager's drain goroutine first, then
+// closes the store, then lets t.TempDir() remove the directory — otherwise the
+// drain goroutine can still be writing under the tenant directory when
+// TempDir's RemoveAll walks it, which surfaces on Windows as "the directory is
+// not empty" (Issue #3795).
 func newRecordingAuditManager(t *testing.T) (*audit.Manager, *recordingAuditStore) {
 	t.Helper()
 	store := newRecordingAuditStore(t)
 	mgr, err := audit.NewManager(store, "hyperv-test")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
 	return mgr, store
 }
 
