@@ -117,11 +117,11 @@ func TestContainerHealthcheckHasVerifiedTLSClient(t *testing.T) {
 // TestRuntimeImagesApplyPendingAlpineSecurityUpdates locks in the fix for the
 // controller image's Trivy failure (Issue #3627). Pinning the runtime base by
 // digest bounds what a release build starts from, but it cannot deliver a
-// package fix that upstream has not rebuilt the image with — alpine:3.23 still
-// resolves to the digest shipping libssl3/libcrypto3 3.5.7-r0 (CVE-2026-14456,
-// HIGH), there is no 3.23.6 tag, and alpine:3.24 carries the same openssl CVEs.
-// The steward image has always run `apk upgrade` and scanned clean while the
-// controller image, which did not, failed. Both runtime stages must upgrade.
+// package fix that upstream has not rebuilt the image with — alpine:3.24 still
+// resolves to a digest shipping libssl3/libcrypto3 3.5.7-r0 (CVE-2026-14456,
+// HIGH), fixed in 3.5.8-r0 (Issue #3842). The steward image has always run
+// `apk upgrade` and scanned clean while the controller image, which did not,
+// failed. Both runtime stages must upgrade.
 func TestRuntimeImagesApplyPendingAlpineSecurityUpdates(t *testing.T) {
 	for _, path := range []string{"cmd/controller/Dockerfile", "cmd/steward/Dockerfile"} {
 		t.Run(path, func(t *testing.T) {

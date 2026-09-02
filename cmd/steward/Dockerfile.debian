@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build stage
-FROM golang:1.27.0-alpine3.23@sha256:3747dcba41c8b0db3211fda4db61638b980e17ac5bb3c94460a975a9cfe19395 AS builder
+FROM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -32,13 +32,12 @@ RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/g
     -ldflags="-s -w" \
     -o cfgms-launcher ./cmd/cfgms-steward-launcher
 
-# Final stage - Debian bookworm-slim for fleet testing
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+# Final stage - Debian 13 (trixie) for fleet testing
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
