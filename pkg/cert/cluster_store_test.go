@@ -13,10 +13,14 @@
 // Every test here is skipped when no test Postgres database is reachable
 // (CFGMS_TEST_DB_* env vars), matching pkg/storage/providers/database's own
 // test convention.
+//
+// newClusterManager and dropClusterTables — the two helpers that actually
+// import pkg/storage/providers/database — live in providers_test.go, not
+// here, so that file (not this one) carries the import; see
+// scripts/check-providers.sh's */providers_test.go allowlist entry.
 package cert_test
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -31,7 +35,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/cert"
-	"github.com/cfgis/cfgms/pkg/storage/providers/database"
 )
 
 func clusterTestConfig() map[string]interface{} {
@@ -68,36 +71,6 @@ func clusterTestDB(t *testing.T) (*sql.DB, string) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db, ""
-}
-
-// newClusterManager builds a cert.Manager backed by its own FileStore (a
-// fresh temp dir — simulating a node with no knowledge of any other node's
-// locally-issued certificates) but a RevocationStore/SigningCursorStore
-// backed by db, simulating one controller node in a cluster deployment.
-func newClusterManager(t *testing.T, db *sql.DB) *cert.Manager {
-	t.Helper()
-	revStore, err := database.NewDatabaseCertRevocationStore(db, clusterTestConfig())
-	require.NoError(t, err)
-	curStore, err := database.NewDatabaseSigningCursorStore(db, clusterTestConfig())
-	require.NoError(t, err)
-
-	m, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: t.TempDir(),
-		CAConfig: &cert.CAConfig{
-			Organization: "Test",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-		RevocationStore:    revStore,
-		SigningCursorStore: curStore,
-	})
-	require.NoError(t, err)
-	return m
-}
-
-func dropClusterTables(t *testing.T, db *sql.DB) {
-	t.Helper()
-	require.NoError(t, database.NewDatabaseSchemas().DropAllTables(context.Background(), db))
 }
 
 // TestClusterRevocation_ObservedAcrossNodes is the AC4 [REQUIRED TEST]:
