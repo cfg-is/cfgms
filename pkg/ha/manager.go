@@ -328,9 +328,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	// commands to stewards orphaned by the departed leader.
 	if m.raftConsensus != nil {
 		rc := m.raftConsensus
-		rc.onBecomeLeader = func(ctx context.Context, departedNodeID string) {
+		rc.SetOnBecomeLeader(func(ctx context.Context, departedNodeID string) {
 			go m.handleBecomeLeader(ctx, departedNodeID)
-		}
+		})
 	}
 
 	// Start the S3 database-lease acquisition loop (ADR-031 Decision 5) when a

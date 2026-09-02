@@ -1877,3 +1877,28 @@ func TestManager_SetLeaseStore_NilStoreRejectedInClusterMode(t *testing.T) {
 	assert.True(t, singleManager.HasLeadership(),
 		"SingleServerMode HasLeadership() must stay unconditionally true")
 }
+
+// TestManager_Start_OnBecomeLeaderWiring_NoDataRace is a regression test for Issue
+// #3821: Manager.Start assigned rc.onBecomeLeader directly on the RaftConsensus
+// struct, racing the runRaft goroutine's locked read inside updateLeadership
+// (raft_consensus.go:931 as of the report). That goroutine is already running by
+// the time Start reaches the wiring step — it is spawned inside NewRaftConsensus
+// (raft_consensus.go:422) — so any unsynchronized write performed after
+// construction races the locked read. This mirrors newLeaseLeaderHAManager
+// (features/controller/api/handlers_ha_test.go): single-node ClusterMode,
+// FastElectionConfig, a real lease store, Start with the raft goroutine already
+// running, then wait for HasLeadership — the same write/read pair, run under
+// `go test -race`.
+func TestManager_Start_OnBecomeLeaderWiring_NoDataRace(t *testing.T) {
+	store := newTestLeaseStore(t)
+	manager := newLeaseBackedClusterManager(t, "onbecomeleader-race-node", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		"single-node cluster must acquire leadership; the race is between Start's "+
+			"onBecomeLeader wiring and updateLeadership's locked read on the leader transition")
+}
