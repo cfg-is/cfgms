@@ -397,10 +397,20 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 				s.logger.Info("Reconnection: resolved steward from durable fleet store",
 					"steward_id", logging.SanitizeLogValue(resolved.ID))
 				stewardID = resolved.ID
-				// Rehydrate into memory so subsequent lookups succeed.
+				// Rehydrate into memory so subsequent lookups succeed. Seed the
+				// DNA field from durable storage (as RecordHeartbeat and
+				// EnsureSteward do) rather than an empty snapshot: an in-memory
+				// entry claiming zero fragments while a complete durable record
+				// exists makes the registry disagree with GET /api/v1/stewards
+				// and weakens the SyncDNA integrity guard. Storage I/O runs
+				// outside s.mu so the registry does not serialize behind it.
+				durableDNA := s.lookupDurableDNA(stewardID)
 				s.mu.Lock()
 				if _, ok := s.stewards[stewardID]; !ok {
-					dna := &common.DNA{Id: stewardID}
+					dna := durableDNA
+					if dna == nil {
+						dna = &common.DNA{Id: stewardID}
+					}
 					s.stewards[stewardID] = &StewardInfo{
 						ID:            stewardID,
 						TenantID:      resolved.TenantID,
@@ -466,8 +476,27 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 		registrationDNA = req.InitialDna
 	}
 
-	// Store/update steward information
+	// Store/update steward information. A degenerate snapshot must not blank an
+	// established DNA field either: a reconnecting steward re-registers with a
+	// bare {Id} snapshot, so replacing the entry's DNA with nil here would make
+	// the registry disagree with the durable record and leave the SyncDNA
+	// integrity guard nothing in memory to compare against. The prior
+	// last-known-good snapshot is carried forward instead — but only when that
+	// prior entry belongs to the CALLER's tenant. stewardID is not always
+	// tenant-gated on the way here: the in-memory reconnection lookup
+	// (findStewardByDNAId) matches a caller-asserted DNA ID across the whole
+	// registry, so an unscoped carry-forward would copy another tenant's host
+	// facts into the entry stamped with the caller's tenant just below, and the
+	// next heartbeat's storeDNA would persist them under that tenant. Only the
+	// durable branch above carries its own tenant gate. A genuinely new
+	// registration has no prior entry, so its DNA stays nil when the snapshot is
+	// degenerate.
 	s.mu.Lock()
+	if registrationDNA == nil {
+		if prior, priorExists := s.stewards[stewardID]; priorExists && prior.TenantID == tenantID {
+			registrationDNA = prior.DNA
+		}
+	}
 	s.stewards[stewardID] = &StewardInfo{
 		ID:            stewardID,
 		TenantID:      tenantID,
@@ -571,13 +600,43 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 	// the snapshot is also not appended to history.
 	dnaCheck := checkDNAIntegrity(dna, configTypeFullOSDevice)
 	if !dnaCheck.valid {
-		s.logger.Warn("dna_integrity_rejected",
+		// A steward that already has a known-good DNA record is protected
+		// unconditionally: an incomplete update must never regress an
+		// established field back to missing. A brand new steward with no
+		// prior record has nothing to protect, so a genuinely-present field
+		// (e.g. hostname, collected synchronously) is not discarded merely
+		// because a sibling field (e.g. os, collected only by an async
+		// background gatherer) has not arrived on this same first sync
+		// (Issue #3807) — the all-or-nothing gate previously threw the good
+		// field away too, and the steward's 30-minute DNA refresh interval
+		// meant the corrected snapshot was not retried for a long time.
+		//
+		// "Has a prior good record" is answered from DURABLE storage as well as
+		// memory, because the record this guard protects is the durable one
+		// (written by storeDNA, served by GET /api/v1/stewards). The two
+		// legitimately diverge: a reconnection or an authenticated reconnect
+		// rehydrates the registry entry, and a registration whose initial
+		// snapshot was degenerate leaves StewardInfo.DNA nil — in each case
+		// memory holds zero fragments while a complete durable record exists.
+		// Reading memory alone would let a steward drive itself into that empty
+		// state (IsReconnection=true) and then shed an established required
+		// field such as os, which fleet/config targeting relies on.
+		hasPriorGoodDNA := len(FlattenDNAFragments(steward.DNA.GetFragments())) > 0
+		if !hasPriorGoodDNA {
+			hasPriorGoodDNA = len(FlattenDNAFragments(s.lookupDurableDNA(dna.Id).GetFragments())) > 0
+		}
+		if hasPriorGoodDNA || !dnaCheck.anyRequiredFieldPresent {
+			s.logger.Warn("dna_integrity_rejected",
+				"steward_id", logging.SanitizeLogValue(dna.Id),
+				"missing_fields", dnaCheck.missingFields)
+			return &common.Status{
+				Code:    common.Status_OK,
+				Message: "DNA rejected: degenerate snapshot (missing core identity fields)",
+			}, nil
+		}
+		s.logger.Warn("dna_integrity_partial_accept",
 			"steward_id", logging.SanitizeLogValue(dna.Id),
 			"missing_fields", dnaCheck.missingFields)
-		return &common.Status{
-			Code:    common.Status_OK,
-			Message: "DNA rejected: degenerate snapshot (missing core identity fields)",
-		}, nil
 	}
 
 	// Update in-memory DNA

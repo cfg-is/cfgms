@@ -106,6 +106,17 @@ func buildRequiredFieldsFromManifestFS(fsys fs.FS, root string) (map[configType]
 type dnaIntegrityResult struct {
 	valid         bool
 	missingFields []string
+
+	// anyRequiredFieldPresent is true when at least one of the config type's
+	// required fields has a non-empty value in the flattened fragment set,
+	// even though the snapshot as a whole is not valid. It distinguishes a
+	// fully degenerate snapshot (every required field absent — nothing
+	// usable) from a partial one, e.g. hostname collected synchronously
+	// while a sibling field like os — written only by an async background
+	// collector — has not landed yet (Issue #3807). SyncDNA uses this to
+	// decide whether a genuinely-present field may be persisted instead of
+	// being discarded alongside a merely-not-yet-collected one.
+	anyRequiredFieldPresent bool
 }
 
 // checkDNAIntegrity returns whether the DNA snapshot satisfies the required-field
@@ -160,7 +171,10 @@ func checkDNAIntegrityWithTable(dna *common.DNA, ct configType, table map[config
 		}
 	}
 	if len(missing) > 0 {
-		return dnaIntegrityResult{missingFields: missing}
+		return dnaIntegrityResult{
+			missingFields:           missing,
+			anyRequiredFieldPresent: len(missing) < len(required),
+		}
 	}
-	return dnaIntegrityResult{valid: true}
+	return dnaIntegrityResult{valid: true, anyRequiredFieldPresent: len(required) > 0}
 }
