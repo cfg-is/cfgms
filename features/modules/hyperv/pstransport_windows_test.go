@@ -8,6 +8,7 @@ package hyperv
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -135,4 +136,128 @@ func TestPSVerbOf_DoesNotLeakArguments(t *testing.T) {
 		assert.Equal(t, "unknown", psVerbOf(in),
 			"a non-Cfgms expression must not be echoed back into an error message: %q", in)
 	}
+}
+
+// ── #3168 follow-up: deadline kill must not leak a host-attached seed VHD ────
+
+// TestMountedSeedPathForCleanup_OnlyMountingVerbs is the [REQUIRED TEST] for the
+// post-kill dismount decision. exec.CommandContext KILLS powershell.exe when the
+// module-call deadline fires, and a killed process never runs its finally block —
+// so the try/finally added to the mount functions in #3766 cannot clean up this
+// path. Mount-VHD attaches host-wide, so the VHD survives the dead process and
+// fails the NEXT VM's Add-VMHardDiskDrive with 0x80070020.
+//
+// Only the two verbs that actually Mount-VHD may leak. Dismounting for the others
+// would be wrong: Cfgms-AttachSeedDisk attaches the disk to the VM, and force-
+// dismounting there could yank a disk the VM legitimately holds.
+func TestMountedSeedPathForCleanup_OnlyMountingVerbs(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		want string
+	}{
+		{
+			"MountSeedVHD leaks -Path",
+			`Cfgms-MountSeedVHD -Path 'C:\cfgms-seeds\cfgms-seed-web-01.vhdx' -Label 'CIDATA'`,
+			`C:\cfgms-seeds\cfgms-seed-web-01.vhdx`,
+		},
+		{
+			"CopyToSeedVHD leaks -SeedPath",
+			`Cfgms-CopyToSeedVHD -SeedPath 'C:\seeds\s.vhdx' -FileName 'user-data' -Content 'x'`,
+			`C:\seeds\s.vhdx`,
+		},
+		{
+			"NewSeedVHD only creates a file — nothing mounted",
+			`Cfgms-NewSeedVHD -Path 'C:\seeds\s.vhdx' -SizeBytes 268435456`,
+			"",
+		},
+		{
+			"AttachSeedDisk attaches to the VM, not the host — must NOT be dismounted",
+			`Cfgms-AttachSeedDisk -Name 'web-01' -SeedPath 'C:\seeds\s.vhdx'`,
+			"",
+		},
+		{
+			"unrelated verb",
+			`Cfgms-GetVM -Name 'web-01'`,
+			"",
+		},
+		{
+			"embedded quote is unescaped from the doubled PS form",
+			`Cfgms-MountSeedVHD -Path 'C:\se''ed\s.vhdx'`,
+			`C:\se'ed\s.vhdx`,
+		},
+		{
+			"unterminated literal refuses to guess",
+			`Cfgms-MountSeedVHD -Path 'C:\seeds\s.vhdx`,
+			"",
+		},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, mountedSeedPathForCleanup(tc.expr))
+		})
+	}
+}
+
+// TestMountedSeedPathForCleanup_RoundTripsDispatcherQuoting proves the extractor
+// understands exactly what the dispatcher emits, rather than a hand-written
+// approximation of it: the path is rendered with quoteForPS and must come back
+// byte-identical. Without this, a path containing a quote would silently yield a
+// wrong path and the cleanup would dismount nothing (or the wrong disk).
+func TestMountedSeedPathForCleanup_RoundTripsDispatcherQuoting(t *testing.T) {
+	for _, path := range []string{
+		`C:\cfgms-seeds\cfgms-seed-web-01.vhdx`,
+		`C:\ClusterStorage\CSV01\seeds\seed.vhdx`,
+		`C:\od''d\se'ed name.vhdx`,
+		`C:\with space\seed.vhdx`,
+	} {
+		expr := "Cfgms-MountSeedVHD -Path " + quoteForPS(path) + " -Label 'CIDATA'"
+		assert.Equal(t, path, mountedSeedPathForCleanup(expr),
+			"extractor must round-trip whatever quoteForPS produced")
+	}
+}
+
+// TestDismountAfterKill_UsesFreshContext guards the subtlety that makes this fix
+// work at all: the cleanup runs BECAUSE the caller's context was cancelled, so it
+// must not reuse that context — doing so would kill the cleanup process
+// immediately and leave the mount exactly as it was.
+//
+// Asserted structurally (the cleanup path shells out, so it cannot run in a unit
+// test on a non-Hyper-V host): dismountAfterKill must derive its context from
+// context.Background(), never from a caller-supplied one — its signature takes no
+// context at all, which is what makes that impossible to get wrong.
+func TestDismountAfterKill_TakesNoCallerContext(t *testing.T) {
+	src := funcSourceTextPS(t, "dismountAfterKill")
+	assert.Contains(t, src, "context.Background()",
+		"cleanup must start from a fresh context — the caller's is already cancelled")
+	assert.NotContains(t, src, "ctx context.Context",
+		"dismountAfterKill must not accept a caller context; reusing the cancelled one would no-op the cleanup")
+	assert.Contains(t, src, "runFreshNoCleanup",
+		"cleanup must not recurse through runFresh's own kill handling")
+}
+
+// funcSourceTextPS returns the source text of a function in
+// pstransport_windows.go, for assertions about how a function is written rather
+// than what it returns. Used where behaviour cannot be exercised in a unit test
+// (the cleanup path shells out to powershell.exe) but a structural invariant
+// still needs pinning.
+func funcSourceTextPS(t *testing.T, name string) string {
+	t.Helper()
+	src, err := os.ReadFile("pstransport_windows.go")
+	require.NoError(t, err)
+	s := string(src)
+	marker := ") " + name + "("
+	start := strings.Index(s, marker)
+	require.NotEqual(t, -1, start, "function %s not found", name)
+	// Walk back to the start of the func declaration line.
+	for start > 0 && !strings.HasPrefix(s[start:], "func ") {
+		start--
+	}
+	rest := s[start+1:]
+	end := strings.Index(rest, "\nfunc ")
+	if end == -1 {
+		return s[start:]
+	}
+	return s[start : start+1+end]
 }
