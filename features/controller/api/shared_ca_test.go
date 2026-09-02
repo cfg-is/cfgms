@@ -35,10 +35,8 @@ var (
 	// it — see ensureSharedSigningCertificate. Tests asserting the absence of a
 	// signing cert (e.g. TestHandleGetRevocationManifest_NoSigningCert_Returns500)
 	// must keep calling certMgr.EnsureSigningCertificate directly without seeding.
-	sharedSigningCertSerial       string
-	sharedSigningCertPEM          []byte
-	sharedSigningKeyPEM           []byte
-	sharedSigningCertMetadataJSON []byte
+	sharedSigningCertPEM []byte
+	sharedSigningKeyPEM  []byte
 )
 
 // buildSharedTestCA generates the process-wide shared test CA (and one config-signing
@@ -114,16 +112,9 @@ func buildSharedTestCA() (func(), error) {
 		cleanup()
 		return nil, err
 	}
-	signingMetadataJSON, err := os.ReadFile(filepath.Join(signingCertDir, "metadata.json")) // #nosec G304 -- fixed template path this process just wrote
-	if err != nil {
-		cleanup()
-		return nil, err
-	}
 
-	sharedSigningCertSerial = signingCert.SerialNumber
 	sharedSigningCertPEM = signingCertPEM
 	sharedSigningKeyPEM = signingKeyPEM
-	sharedSigningCertMetadataJSON = signingMetadataJSON
 
 	return cleanup, nil
 }
@@ -145,35 +136,18 @@ func seedSharedTestCA(t *testing.T, storagePath string) {
 	}
 }
 
-// seedSharedSigningCert installs the process-wide shared config-signing certificate
-// into storagePath, the layout Manager.EnsureSigningCertificate expects to find an
-// existing CertificateTypeConfigSigning record in. Callers must still call
-// EnsureSigningCertificate(nil) afterward — this only makes that call a no-op.
-func seedSharedSigningCert(t *testing.T, storagePath string) {
-	t.Helper()
-	certDir := filepath.Join(storagePath, sharedSigningCertSerial)
-	if err := os.MkdirAll(certDir, 0o700); err != nil {
-		t.Fatalf("seedSharedSigningCert: mkdir %s: %v", certDir, err)
-	}
-	if err := os.WriteFile(filepath.Join(certDir, "cert.pem"), sharedSigningCertPEM, 0o600); err != nil {
-		t.Fatalf("seedSharedSigningCert: write cert.pem: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(certDir, "key.pem"), sharedSigningKeyPEM, 0o600); err != nil {
-		t.Fatalf("seedSharedSigningCert: write key.pem: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(certDir, "metadata.json"), sharedSigningCertMetadataJSON, 0o600); err != nil {
-		t.Fatalf("seedSharedSigningCert: write metadata.json: %v", err)
-	}
-}
-
-// ensureSharedSigningCertificate seeds the shared config-signing certificate into
-// certMgr's storage and then calls EnsureSigningCertificate(nil), which becomes a
-// cheap no-op (store already has a CertificateTypeConfigSigning record) instead of
-// paying RSA-4096 keygen. Only use where a test needs *a* signing cert as scaffolding
-// — never in a test asserting the absence of one.
+// ensureSharedSigningCertificate imports the process-wide shared config-signing
+// certificate into certMgr through the production ImportCertificate path — which
+// stores via FileStore.StoreCertificate and updates its in-memory by-serial index
+// — and then calls EnsureSigningCertificate(nil), which becomes a cheap no-op
+// (store already has a CertificateTypeConfigSigning record) instead of paying
+// RSA-4096 keygen. Only use where a test needs *a* signing cert as scaffolding —
+// never in a test asserting the absence of one.
 func ensureSharedSigningCertificate(t *testing.T, certMgr *cert.Manager) {
 	t.Helper()
-	seedSharedSigningCert(t, certMgr.GetStoragePath())
+	if _, err := certMgr.ImportCertificate(sharedSigningCertPEM, sharedSigningKeyPEM, cert.CertificateTypeConfigSigning); err != nil {
+		t.Fatalf("ensureSharedSigningCertificate: import: %v", err)
+	}
 	if err := certMgr.EnsureSigningCertificate(nil); err != nil {
 		t.Fatalf("ensureSharedSigningCertificate: %v", err)
 	}
