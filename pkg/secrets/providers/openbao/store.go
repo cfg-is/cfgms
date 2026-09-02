@@ -7,7 +7,9 @@ package openbao
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -46,22 +48,131 @@ func (s *OpenBaoSecretStore) kvPath(tenantID, key string) string {
 // StoreSecret writes a secret to OpenBao KV v2.
 // M-AUTH-1: TenantID is required; empty TenantID returns ErrTenantRequired.
 func (s *OpenBaoSecretStore) StoreSecret(ctx context.Context, req *interfaces.SecretRequest) error {
+	if err := validateSecretRequest(req); err != nil {
+		return err
+	}
+
+	path := s.kvPath(req.TenantID, req.Key)
+	_, err := s.client.KVv2(s.mountPath).Put(ctx, logging.SanitizeLogValue(path), kvData(req))
+	if err != nil {
+		return fmt.Errorf("failed to store secret %s: %w",
+			logging.SanitizeLogValue(req.Key), err)
+	}
+
+	return nil
+}
+
+// CompareAndSwapSecret implements interfaces.SecretStore.CompareAndSwapSecret using
+// OpenBao KV v2's native check-and-set option — a real server-side atomic write, so
+// this is correct across any number of controller nodes concurrently writing the
+// same key (OpenBao is this codebase's one ClusterCapable SecretStore provider).
+// expectedVersion 0 uses OpenBao's own "must not already exist" CAS semantics.
+func (s *OpenBaoSecretStore) CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *interfaces.SecretRequest) (int, bool, error) {
+	if err := validateSecretRequest(req); err != nil {
+		return 0, false, err
+	}
+	if key == "" {
+		return 0, false, fmt.Errorf("secret key cannot be empty")
+	}
+	if expectedVersion < 0 {
+		return 0, false, fmt.Errorf("expected version cannot be negative")
+	}
+
+	logical, stored, err := s.casCurrentVersion(ctx, req.TenantID, req.Key)
+	if err != nil {
+		return 0, false, err
+	}
+	if logical != expectedVersion {
+		return 0, false, nil
+	}
+
+	// The read above is advisory: it only translates the caller's expectedVersion
+	// (in which an expired record counts as absent) into the version OpenBao
+	// actually holds. The check-and-set below is still the single atomic decision,
+	// evaluated by the OpenBao server, so a concurrent write from another node
+	// between the two makes this report a lost race rather than clobber anything.
+	return s.putWithCheckAndSet(ctx, req, stored)
+}
+
+// casCurrentVersion reports the version CompareAndSwapSecret must compare
+// expectedVersion against, alongside the version OpenBao physically holds.
+//
+// The two differ for a record past the application-level expires_at this provider
+// writes. The interface requires an expired record to be treated as absent, so
+// logical is 0 for one while stored keeps the real KV version — which is what lets
+// a create-if-absent take an abandoned TTL-bounded claim over with a check-and-set
+// rather than be blocked by it forever (Issue #3775). OpenBao does not evaluate
+// expires_at itself, so this provider must.
+func (s *OpenBaoSecretStore) casCurrentVersion(ctx context.Context, tenantID, key string) (logical, stored int, err error) {
+	path := s.kvPath(tenantID, key)
+	kvSecret, err := s.client.KVv2(s.mountPath).Get(ctx, logging.SanitizeLogValue(path))
+	if err != nil {
+		if isNotFound(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("failed to read current secret %s for compare-and-swap: %w",
+			logging.SanitizeLogValue(key), err)
+	}
+	if kvSecret == nil || kvSecret.VersionMetadata == nil {
+		return 0, 0, nil
+	}
+
+	current := kvSecretToSecret(tenantID, key, kvSecret)
+	if current.ExpiresAt != nil && time.Now().After(*current.ExpiresAt) {
+		return 0, current.Version, nil
+	}
+	return current.Version, current.Version, nil
+}
+
+// putWithCheckAndSet performs one KV v2 check-and-set write, translating a
+// check-and-set mismatch into the interface's ok=false/nil-error lost-race result
+// and leaving every other failure as a genuine error.
+func (s *OpenBaoSecretStore) putWithCheckAndSet(ctx context.Context, req *interfaces.SecretRequest, expectedVersion int) (int, bool, error) {
+	path := s.kvPath(req.TenantID, req.Key)
+	kvSecret, err := s.client.KVv2(s.mountPath).Put(ctx, logging.SanitizeLogValue(path), kvData(req),
+		openbao.WithCheckAndSet(expectedVersion))
+	if err != nil {
+		if isCheckAndSetMismatch(err) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("failed to compare-and-swap secret %s: %w",
+			logging.SanitizeLogValue(req.Key), err)
+	}
+
+	newVersion := 0
+	if kvSecret != nil && kvSecret.VersionMetadata != nil {
+		newVersion = kvSecret.VersionMetadata.Version
+	}
+	return newVersion, true, nil
+}
+
+// CompareAndSwapIsClusterAtomic implements
+// interfaces.ClusterAtomicCompareAndSwapper. OpenBao KV v2's check-and-set is
+// evaluated by the OpenBao server, so the guarantee holds for any number of
+// controller nodes writing the same key concurrently.
+func (s *OpenBaoSecretStore) CompareAndSwapIsClusterAtomic() bool { return true }
+
+// validateSecretRequest applies the validation shared by every write path.
+func validateSecretRequest(req *interfaces.SecretRequest) error {
+	if req == nil {
+		return fmt.Errorf("secret request cannot be nil")
+	}
 	if req.Key == "" {
 		return fmt.Errorf("secret key cannot be empty")
 	}
 	if req.TenantID == "" {
 		return fmt.Errorf("TenantID is required: %w", cfgconfig.ErrTenantRequired)
 	}
+	return nil
+}
 
-	path := s.kvPath(req.TenantID, req.Key)
-
+// kvData builds the KV v2 data payload shared by StoreSecret and CompareAndSwapSecret.
+func kvData(req *interfaces.SecretRequest) map[string]interface{} {
 	data := map[string]interface{}{
 		"value":       req.Value,
 		"created_by":  req.CreatedBy,
 		"description": req.Description,
 	}
-
-	// Embed tags and metadata into the KV data payload.
 	if len(req.Tags) > 0 {
 		data["tags"] = strings.Join(req.Tags, ",")
 	}
@@ -73,14 +184,24 @@ func (s *OpenBaoSecretStore) StoreSecret(ctx context.Context, req *interfaces.Se
 	if req.TTL > 0 {
 		data["expires_at"] = time.Now().Add(req.TTL).Format(time.RFC3339)
 	}
+	return data
+}
 
-	_, err := s.client.KVv2(s.mountPath).Put(ctx, logging.SanitizeLogValue(path), data)
-	if err != nil {
-		return fmt.Errorf("failed to store secret %s: %w",
-			logging.SanitizeLogValue(req.Key), err)
+// isCheckAndSetMismatch reports whether err is OpenBao's response to a failed
+// check-and-set write (HTTP 400, "check-and-set parameter did not match the
+// current version" / "check-and-set parameter required for this call") rather than
+// an infrastructure failure. CompareAndSwapSecret's contract requires this to be a
+// non-error, ok=false result — a genuine store failure must not be mistaken for a
+// lost race, and vice versa.
+func isCheckAndSetMismatch(err error) bool {
+	var respErr *openbao.ResponseError
+	if !errors.As(err, &respErr) {
+		return false
 	}
-
-	return nil
+	if respErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(strings.ToLower(respErr.Error()), "check-and-set")
 }
 
 // GetSecret retrieves the current version of a secret.

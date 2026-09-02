@@ -916,14 +916,15 @@ func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *account, credent
 // because they have no mTLS cert fallback. mTLS/API-key principals are exempt: they retain
 // alternative access paths (ADR-021 §7) and may revoke the last credential.
 //
-// Atomicity: the last-credential check and removal are a single compare-and-swap under
-// s.credentialMu, with a fresh store reload inside the mutex. This prevents two concurrent
-// revokes from each seeing the pre-removal count and racing to zero.
+// Atomicity: the last-credential check and removal are a single compare-and-swap
+// (CompareAndSwapSecret, Issue #3775), with a fresh store reload beforehand. This
+// prevents two concurrent revokes — on this node or a different one — from each
+// seeing the pre-removal count and racing to zero.
 //
 // Cookie-auth principals are also self-scoped: the target account is resolved from the
 // session, not the path parameter (Issue #2992 IDOR fix).
 func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.Request) {
-	// Phase 1: IDOR check and credential ID parsing (outside the CAS mutex).
+	// Phase 1: IDOR check and credential ID parsing (outside the CAS critical section).
 	acct, principal, ok := s.resolveAccountForCredentials(w, r)
 	if !ok {
 		return
@@ -946,15 +947,13 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 		actingPrincipalID = principal.ID
 	}
 
-	// Phase 2: CAS critical section — fresh reload, last-credential check, persist.
-	// A single mutex ensures that no two concurrent revokes can both see the
-	// pre-removal count, both pass the last-credential guard, and both persist zero
-	// credentials.
-	s.credentialMu.Lock()
-
+	// Phase 2: compare-and-set critical section — fresh reload, last-credential
+	// check, persist via CompareAndSwapSecret keyed on the version just read. This
+	// ensures that no two concurrent revokes — on this node or a different one —
+	// can both see the pre-removal count, both pass the last-credential guard, and
+	// both persist zero credentials (Issue #3775).
 	freshAcct, freshErr := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
 	if freshErr != nil {
-		s.credentialMu.Unlock()
 		s.logger.Error("Failed to reload account for credential revocation",
 			"username", logging.SanitizeLogValue(acct.Username),
 			"error", logging.SanitizeLogValue(freshErr.Error()))
@@ -963,7 +962,6 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 		return
 	}
 	if freshAcct == nil {
-		s.credentialMu.Unlock()
 		s.writeErrorResponse(w, http.StatusNotFound,
 			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
@@ -979,7 +977,6 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 		remaining = append(remaining, c)
 	}
 	if !found {
-		s.credentialMu.Unlock()
 		s.writeErrorResponse(w, http.StatusNotFound,
 			"Credential not found on this account", "CREDENTIAL_NOT_FOUND")
 		return
@@ -990,7 +987,6 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 	// to human accounts — only to mTLS-authenticated principals). Recovery requires
 	// an admin-initiated account reset.
 	if isCookieAuth && len(remaining) == 0 {
-		s.credentialMu.Unlock()
 		s.writeErrorResponse(w, http.StatusConflict,
 			"Cannot remove the last passkey — add a backup passkey first, or request an admin reset to recover account access",
 			"LAST_CREDENTIAL")
@@ -999,8 +995,8 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 
 	updatedAcct := *freshAcct
 	updatedAcct.Credentials = remaining
-	if persistErr := s.persistAccount(r.Context(), &updatedAcct, actingPrincipalID); persistErr != nil {
-		s.credentialMu.Unlock()
+	newVersion, ok, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, actingPrincipalID)
+	if persistErr != nil {
 		s.logger.Error("Failed to persist credential revocation",
 			"username", logging.SanitizeLogValue(freshAcct.Username),
 			"error", logging.SanitizeLogValue(persistErr.Error()))
@@ -1008,8 +1004,15 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 			"Failed to persist credential revocation", "STORE_ERROR")
 		return
 	}
+	if !ok {
+		// Lost the race: a concurrent revoke (or any other account write) already
+		// changed this account between the reload above and this compare-and-set.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry the revocation", "ACCOUNT_MODIFIED")
+		return
+	}
+	updatedAcct.Version = newVersion
 	s.cacheAccount(&updatedAcct)
-	s.credentialMu.Unlock()
 
 	s.logger.Info("WebAuthn credential revoked",
 		"username", logging.SanitizeLogValue(freshAcct.Username),

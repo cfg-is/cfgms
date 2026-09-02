@@ -21,6 +21,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -42,6 +45,22 @@ const (
 
 	// maxKeyLength bounds the namespaced key (e.g. cfgms/session/<connection>).
 	maxKeyLength = 256
+
+	// casVersionKeySuffix names the companion OS-keychain entry
+	// CompareAndSwapSecret uses to track a key's version, since the underlying
+	// backend has no notion of versioning of its own (GetCapabilities reports
+	// SupportsVersioning: false; GetSecret always reports Version 1).
+	//
+	// It must stay printable ASCII. Every backend passes the key to the OS as a
+	// process argument or a kernel keyring description — secret-tool takes it in
+	// argv and add_key takes it as the key description — and none of those accept
+	// a NUL byte, so a NUL separator here fails every write with a bare "invalid
+	// argument" from exec or the keyring rather than a storage error (Issue #3775).
+	//
+	// "#" cannot occur in the cfgms/<namespace>/<name> key shape this provider is
+	// given, and CompareAndSwapSecret rejects any key that already contains the
+	// suffix, so a caller cannot address a version entry as if it were a secret.
+	casVersionKeySuffix = "#cfgms-cas-version"
 )
 
 // errSecretNotFound is the sentinel a backend returns when a key is absent.
@@ -135,6 +154,11 @@ func (p *Provider) CreateSecretStore(_ map[string]interface{}) (interfaces.Secre
 // listable secret database).
 type Store struct {
 	backend backend
+	// casMu serializes CompareAndSwapSecret's read-check-write sequence against
+	// the version companion entry. This is in-process only — oskeychain is not
+	// cluster-capable (ClusterCapable returns false): it holds one local CLI
+	// session token, not state shared across controller nodes.
+	casMu sync.Mutex
 }
 
 // newStore wraps a backend in a Store.
@@ -189,6 +213,73 @@ func (s *Store) DeleteSecret(_ context.Context, key string) error {
 		return fmt.Errorf("oskeychain: delete %q: %w", key, err)
 	}
 	return nil
+}
+
+// CompareAndSwapSecret implements interfaces.SecretStore.CompareAndSwapSecret. The
+// backend has no atomic check-and-set primitive of its own, so this tracks a
+// version number in a companion OS-keychain entry (key+casVersionKeySuffix) and
+// serializes the read-check-write sequence with casMu.
+//
+// The interface's "an expired secret does not exist" rule needs no code here:
+// this provider has no notion of expiry at all — StoreSecret ignores
+// SecretRequest.TTL, GetSecret never refuses a record as expired, and nothing
+// records an ExpiresAt — so no stored record can ever be in the expired state the
+// rule is about. It holds one local CLI session token, not TTL-bounded claims.
+func (s *Store) CompareAndSwapSecret(_ context.Context, key string, expectedVersion int, req *interfaces.SecretRequest) (int, bool, error) {
+	if req == nil {
+		return 0, false, errors.New("oskeychain: secret request is nil")
+	}
+	if req.Key == "" {
+		return 0, false, errors.New("oskeychain: secret key cannot be empty")
+	}
+	if key == "" {
+		return 0, false, errors.New("oskeychain: secret key cannot be empty")
+	}
+	if len(req.Key) > maxKeyLength {
+		return 0, false, fmt.Errorf("oskeychain: secret key exceeds maximum length of %d characters", maxKeyLength)
+	}
+	if len(key) > maxKeyLength {
+		return 0, false, fmt.Errorf("oskeychain: secret key exceeds maximum length of %d characters", maxKeyLength)
+	}
+	if strings.Contains(key, casVersionKeySuffix) {
+		return 0, false, fmt.Errorf("oskeychain: secret key must not contain %q", casVersionKeySuffix)
+	}
+	if req.Value == "" {
+		return 0, false, errors.New("oskeychain: secret value cannot be empty")
+	}
+	if len(req.Value) > maxSecretSize {
+		return 0, false, fmt.Errorf("oskeychain: secret value exceeds maximum size of %d bytes", maxSecretSize)
+	}
+
+	s.casMu.Lock()
+	defer s.casMu.Unlock()
+
+	// The swap is keyed on the caller's lookup key, not req.Key: the interface
+	// stores req "at key", and GetSecret reads that same string back, so writing
+	// under req.Key would file the record where no reader looks whenever a caller
+	// passes a qualified key (every controller caller passes tenantID+"/"+req.Key).
+	versionKey := key + casVersionKeySuffix
+	currentVersion := 0
+	if raw, err := s.backend.get(versionKey); err == nil {
+		if v, convErr := strconv.Atoi(string(raw)); convErr == nil {
+			currentVersion = v
+		}
+	} else if !errors.Is(err, errSecretNotFound) {
+		return 0, false, fmt.Errorf("oskeychain: read version for %q: %w", key, err)
+	}
+
+	if currentVersion != expectedVersion {
+		return 0, false, nil
+	}
+
+	if err := s.backend.set(key, []byte(req.Value)); err != nil {
+		return 0, false, fmt.Errorf("oskeychain: compare-and-swap %q: %w", key, err)
+	}
+	newVersion := currentVersion + 1
+	if err := s.backend.set(versionKey, []byte(strconv.Itoa(newVersion))); err != nil {
+		return 0, false, fmt.Errorf("oskeychain: persist version for %q: %w", key, err)
+	}
+	return newVersion, true, nil
 }
 
 // unsupported wraps errors.ErrUnsupported with the operation name. The OS

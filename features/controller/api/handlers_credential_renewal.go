@@ -54,6 +54,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // credentialRenewalWindow bounds how long before expiry a certificate may be
@@ -67,6 +68,80 @@ const credentialRenewalWindow = 30 * 24 * time.Hour
 // serial resolves to no bound account — the bootstrap-fallback case. Refused outright
 // (Issue #3724 AC): that principal has no account to renew against.
 var errCredentialRenewalNoAccountBinding = errors.New("no account is bound to the presented certificate")
+
+// errCredentialRenewalInProgress is returned when a concurrent renewal of the same
+// certificate has already claimed it (Issue #3775). Surfaced as 409 Conflict — the
+// caller may safely retry once the earlier renewal (or its claim's short TTL) resolves.
+var errCredentialRenewalInProgress = errors.New("a renewal of this certificate is already in progress")
+
+// credentialRenewalClaimTTL bounds how long a renewal claim blocks a second attempt
+// at the same certificate. Short: a legitimate renewal completes in one round trip
+// (sign, bind, revoke, unbind), so this only needs to outlive that — not the
+// certificate's own renewal window — and a short TTL bounds how long a crashed
+// renewal attempt can block a legitimate retry.
+//
+// The TTL is load-bearing, not decorative. SecretStore.CompareAndSwapSecret treats
+// a record past its expiry as absent, so the create-if-absent claim below takes
+// over an abandoned claim once this elapses (Issue #3775). Without that rule, a
+// controller that died between claim and release would leave a version-1 record no
+// read path can see and no sweeper removes, and every future renewal of that serial
+// would answer 409 forever — a permanent lockout for a host whose only credential is
+// the certificate it can no longer renew. Shortening or lengthening this changes how
+// long that recovery takes; removing the expiry-as-absent rule removes recovery
+// altogether.
+const credentialRenewalClaimTTL = 2 * time.Minute
+
+// credentialRenewalClaimKey namespaces the durable claim record renewBoundCertificate
+// creates to atomically claim exclusive renewal rights over oldSerial, distinct from
+// any account or credential-request record.
+func credentialRenewalClaimKey(oldSerial string) string {
+	return "credential-renewal-claim-" + oldSerial
+}
+
+// claimCertificateRenewal atomically claims exclusive renewal rights over oldSerial
+// via a create-if-absent compare-and-set (expectedVersion 0): the durable record this
+// creates cannot be created twice, so of any number of concurrent renewal attempts for
+// the same certificate — on this node or a different one — at most one ever proceeds
+// to sign a new certificate (Issue #3775).
+//
+// expectedVersion is always 0, including when an abandoned claim record is still
+// present: the store treats a record past credentialRenewalClaimTTL as absent, and
+// the takeover it then performs is itself a compare-and-set against that record's
+// actual version. So a crashed renewal delays the next attempt by at most the TTL
+// and still cannot let two attempts claim the same certificate at once.
+func (s *Server) claimCertificateRenewal(ctx context.Context, tenantID, oldSerial, actingPrincipalID string) (bool, error) {
+	key := credentialRenewalClaimKey(oldSerial)
+	_, ok, err := s.secretStore.CompareAndSwapSecret(ctx, tenantID+"/"+key, 0, &secretsif.SecretRequest{
+		Key:         key,
+		Value:       "",
+		TenantID:    tenantID,
+		CreatedBy:   actingPrincipalID,
+		Description: "credential renewal claim",
+		Tags:        []string{"credential_renewal_claim"},
+		TTL:         credentialRenewalClaimTTL,
+	})
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+// releaseCertificateRenewalClaim deletes the claim record claimCertificateRenewal
+// created, so a subsequent renewal attempt for the same certificate — whether this
+// one succeeded or failed — is not blocked until credentialRenewalClaimTTL expires.
+// Mirrors a mutex's unconditional unlock-on-return: the claim exists only to
+// serialize callers racing *inside* one renewal attempt, not to rate-limit
+// sequential attempts. Logged, not propagated — a failed delete costs the next
+// renewal of this serial a wait of at most credentialRenewalClaimTTL, after which
+// claimCertificateRenewal takes the expired record over, so it degrades the
+// experience without stranding the credential.
+func (s *Server) releaseCertificateRenewalClaim(ctx context.Context, tenantID, oldSerial string) {
+	key := credentialRenewalClaimKey(oldSerial)
+	if err := s.secretStore.DeleteSecret(ctx, tenantID+"/"+key); err != nil {
+		s.logger.Warn("Failed to release credential renewal claim; the next renewal of this serial takes it over once it expires",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
 
 // RenewCredentialRequest is the POST /api/v1/credential-renewal body. CSRPEM is the
 // only field: the account being renewed into is derived exclusively from the
@@ -106,14 +181,22 @@ func markersFromCertificate(peerCert *x509.Certificate) []string {
 	return markers
 }
 
-// renewBoundCertificate performs the issue-and-rebind sequence under
-// credentialRenewalMu, which serializes the whole sequence so two concurrent
-// renewals of the same certificate cannot both succeed and leave two unrelated new
-// certificates bound.
+// renewBoundCertificate performs the issue-and-rebind sequence. It first claims
+// exclusive renewal rights over oldSerial via claimCertificateRenewal — a durable
+// compare-and-set create-if-absent record — before signing anything, so two
+// concurrent renewals of the same certificate, on this node or a different one,
+// cannot both succeed and leave two unrelated new certificates bound (Issue #3775).
 //
-// Re-resolves the account and the old binding fresh, inside the lock, rather than
-// trusting the caller's earlier (pre-lock) lookup — the same freshness discipline
-// claimCredentialRequestForCollection (#3719) uses for its compare-and-set.
+// The freshness check is deliberately *inside* the claim, not before it. An account
+// lookup that precedes the claim proves nothing once the claim is granted: a renewal
+// that read the old binding, then lost the race and stalled, still finds the claim
+// released by the time it retries — the winner deletes it on return — and would go on
+// to sign a second certificate for a serial that has already been renewed, revoked and
+// unbound. Two live certificates for one renewal is exactly the double-grant the claim
+// exists to prevent, so the account and the old binding are re-resolved from the
+// durable store *after* the claim is held, and a serial that is no longer bound is
+// refused (Issue #3775). The lookup before the claim exists only to derive the tenant
+// the claim record lives under.
 //
 // Returns oldSerialCleanedUp=false (with err=nil) when the new certificate is
 // issued and bound successfully but revoking or unbinding the old serial afterward
@@ -127,14 +210,36 @@ func (s *Server) renewBoundCertificate(
 	markers []string,
 	actingPrincipalID string,
 ) (issued *cert.Certificate, acct *account, oldSerialCleanedUp bool, err error) {
-	s.credentialRenewalMu.Lock()
-	defer s.credentialRenewalMu.Unlock()
+	bound, err := s.getAccountByCertSerial(ctx, oldSerial)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to look up account bound to presented certificate: %w", err)
+	}
+	if bound == nil {
+		return nil, nil, false, errCredentialRenewalNoAccountBinding
+	}
 
+	claimTenant := accountStorageTenant(bound.TenantID)
+	claimed, err := s.claimCertificateRenewal(ctx, claimTenant, oldSerial, actingPrincipalID)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to claim certificate renewal: %w", err)
+	}
+	if !claimed {
+		return nil, nil, false, errCredentialRenewalInProgress
+	}
+	defer s.releaseCertificateRenewalClaim(ctx, claimTenant, oldSerial)
+
+	// Under the claim, and only now, is the account state this renewal acts on
+	// trustworthy. Anything read before the claim may already have been replaced by
+	// the renewal that held it.
 	fresh, err := s.getAccountByCertSerial(ctx, oldSerial)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to look up account bound to presented certificate: %w", err)
 	}
 	if fresh == nil {
+		// The serial is no longer bound to any account: either a concurrent revoke
+		// removed the binding, or an earlier renewal of this same serial completed
+		// while this attempt was waiting. There is nothing left to renew, and signing
+		// anything here would mint a second certificate for one renewal.
 		return nil, nil, false, errCredentialRenewalNoAccountBinding
 	}
 	var oldBinding *CertBinding
@@ -145,10 +250,10 @@ func (s *Server) renewBoundCertificate(
 		}
 	}
 	if oldBinding == nil {
-		// The account lookup found the serial a moment ago (getAccountByCertSerial
-		// scans CertBindings itself), but a concurrent revoke could have removed the
-		// binding between that lookup and this lock. Same refusal as no account at
-		// all: there is nothing left to renew.
+		// getAccountByCertSerial resolves by scanning CertBindings, so this is
+		// unreachable via that path today; kept as a fail-closed guard so a future
+		// change to the resolution path cannot silently reach the signing call with
+		// no binding to carry forward.
 		return nil, nil, false, errCredentialRenewalNoAccountBinding
 	}
 
@@ -312,6 +417,11 @@ func (s *Server) handleRenewCredential(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errCredentialRenewalNoAccountBinding) {
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"No account is bound to the presented certificate; renewal is not permitted", "NO_ACCOUNT_BINDING")
+			return
+		}
+		if errors.Is(err, errCredentialRenewalInProgress) {
+			s.writeErrorResponse(w, http.StatusConflict,
+				"A renewal of this certificate is already in progress", "RENEWAL_IN_PROGRESS")
 			return
 		}
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to renew certificate", "RENEWAL_FAILED")

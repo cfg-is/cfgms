@@ -49,6 +49,10 @@ func (s *gitRouterMemorySecretStore) StoreSecret(_ context.Context, req *secrets
 	s.secrets[req.Key] = req.Value
 	return nil
 }
+func (s *gitRouterMemorySecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsiface.SecretRequest) (int, bool, error) {
+	s.secrets[req.Key] = req.Value
+	return 1, true, nil
+}
 func (s *gitRouterMemorySecretStore) DeleteSecret(_ context.Context, key string) error {
 	delete(s.secrets, key)
 	return nil

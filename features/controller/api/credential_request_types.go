@@ -94,6 +94,12 @@ type enrolmentToken struct {
 	// is single-use, unlike the perennial steward registration token).
 	SpentAt          *time.Time
 	SpentByRequestID string
+
+	// Version is the secret store's version for this record at the time it was
+	// read (SecretMetadata.Version) — 0 for a record that does not yet exist.
+	// Callers pass it as CompareAndSwapSecret's expectedVersion so a concurrent
+	// writer cannot silently clobber this record (Issue #3775).
+	Version int
 }
 
 // valid reports whether t may still be spent by a lodge at time now: not revoked,
@@ -171,6 +177,12 @@ type pendingCredentialRequest struct {
 	// sweepOrphanedCollectedCertificates needs to find and revoke the certificate
 	// rather than leaving an untracked live credential.
 	CollectedSerial string
+
+	// Version is the secret store's version for this record at the time it was
+	// read (SecretMetadata.Version) — 0 for a record that does not yet exist.
+	// Callers pass it as CompareAndSwapSecret's expectedVersion so a concurrent
+	// writer cannot silently clobber this record (Issue #3775).
+	Version int
 }
 
 // hashCredentialSecret returns the SHA-256 hex digest of a raw secret (an enrolment

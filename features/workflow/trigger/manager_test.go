@@ -997,6 +997,13 @@ func (s *inMemorySecretStore) GetSecret(_ context.Context, key string) (*secrets
 	return &secretsif.Secret{Key: key, Value: v}, nil
 }
 
+func (s *inMemorySecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsif.SecretRequest) (int, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[req.Key] = req.Value
+	return 1, true, nil
+}
+
 func (s *inMemorySecretStore) DeleteSecret(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

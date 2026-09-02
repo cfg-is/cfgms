@@ -37,8 +37,9 @@ import (
 
 // testSessionStore is a thread-safe in-memory SecretStore for injecting via sessionStoreFn.
 type testSessionStore struct {
-	mu      sync.Mutex
-	secrets map[string]string
+	mu       sync.Mutex
+	secrets  map[string]string
+	versions map[string]int
 }
 
 func newTestSessionStore() *testSessionStore {
@@ -50,6 +51,20 @@ func (s *testSessionStore) StoreSecret(_ context.Context, req *interfaces.Secret
 	defer s.mu.Unlock()
 	s.secrets[req.Key] = req.Value
 	return nil
+}
+
+func (s *testSessionStore) CompareAndSwapSecret(_ context.Context, key string, expectedVersion int, req *interfaces.SecretRequest) (int, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.versions == nil {
+		s.versions = make(map[string]int)
+	}
+	if s.versions[key] != expectedVersion {
+		return 0, false, nil
+	}
+	s.secrets[req.Key] = req.Value
+	s.versions[key]++
+	return s.versions[key], true, nil
 }
 
 func (s *testSessionStore) GetSecret(_ context.Context, key string) (*interfaces.Secret, error) {

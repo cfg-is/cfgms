@@ -62,6 +62,20 @@ func enrolmentTokenStoreKey(id string) string { return enrolmentTokenKeyPrefix +
 // because StoreSecret always stamps CreatedAt fresh on every call, including updates
 // (spend, revoke) — the same reason accounts.go persists its own "created_at" key.
 func (s *Server) persistEnrolmentToken(ctx context.Context, tok *enrolmentToken) error {
+	return s.secretStore.StoreSecret(ctx, buildEnrolmentTokenSecretRequest(tok))
+}
+
+// persistEnrolmentTokenCAS writes tok through CompareAndSwapSecret, keyed on
+// tok.Version — the version read alongside the record being transitioned. A lost
+// race (ok=false) means a concurrent writer already changed this token; the
+// caller must treat that identically to an unspent-token failure, never retry
+// with the stale in-memory value (Issue #3775).
+func (s *Server) persistEnrolmentTokenCAS(ctx context.Context, tok *enrolmentToken) (newVersion int, ok bool, err error) {
+	req := buildEnrolmentTokenSecretRequest(tok)
+	return s.secretStore.CompareAndSwapSecret(ctx, tok.TenantID+"/"+req.Key, tok.Version, req)
+}
+
+func buildEnrolmentTokenSecretRequest(tok *enrolmentToken) *secretsif.SecretRequest {
 	meta := map[string]string{
 		secretsif.MetadataKeySecretType: enrolmentTokenSecretType,
 		"id":                            tok.ID,
@@ -85,7 +99,7 @@ func (s *Server) persistEnrolmentToken(ctx context.Context, tok *enrolmentToken)
 	if ttl <= 0 {
 		ttl = time.Second // already past expiry; persist briefly so the sweep can find and remove it
 	}
-	return s.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+	return &secretsif.SecretRequest{
 		Key:         enrolmentTokenStoreKey(tok.ID),
 		Value:       "", // no secret value — the hash lives in metadata, matching accounts.go
 		TenantID:    tok.TenantID,
@@ -94,7 +108,7 @@ func (s *Server) persistEnrolmentToken(ctx context.Context, tok *enrolmentToken)
 		Tags:        []string{"enrolment_token"},
 		TTL:         ttl,
 		Metadata:    meta,
-	})
+	}
 }
 
 // enrolmentTokenFromMetadata reconstructs an enrolmentToken from a stored record.
@@ -107,6 +121,7 @@ func enrolmentTokenFromMetadata(m *secretsif.SecretMetadata) *enrolmentToken {
 		CreatedBy:        m.Metadata["created_by"],
 		Revoked:          m.Metadata["revoked"] == "true",
 		SpentByRequestID: m.Metadata["spent_by_request_id"],
+		Version:          m.Version,
 	}
 	if ts := m.Metadata["created_at"]; ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
@@ -207,6 +222,20 @@ func enrolmentTokenToResponseRedacted(tok *enrolmentToken) EnrolmentTokenRespons
 func credentialRequestStoreKey(id string) string { return credentialRequestKeyPrefix + id }
 
 func (s *Server) persistPendingCredentialRequest(ctx context.Context, req *pendingCredentialRequest) error {
+	return s.secretStore.StoreSecret(ctx, buildCredentialRequestSecretRequest(req))
+}
+
+// persistPendingCredentialRequestCAS writes req through CompareAndSwapSecret, keyed
+// on req.Version — the version read alongside the record being transitioned. A lost
+// race (ok=false) means a concurrent writer already transitioned this request; the
+// caller must treat that as a conflict, never retry with the stale in-memory value
+// (Issue #3775).
+func (s *Server) persistPendingCredentialRequestCAS(ctx context.Context, req *pendingCredentialRequest) (newVersion int, ok bool, err error) {
+	secretReq := buildCredentialRequestSecretRequest(req)
+	return s.secretStore.CompareAndSwapSecret(ctx, req.TenantID+"/"+secretReq.Key, req.Version, secretReq)
+}
+
+func buildCredentialRequestSecretRequest(req *pendingCredentialRequest) *secretsif.SecretRequest {
 	meta := map[string]string{
 		secretsif.MetadataKeySecretType: credentialRequestSecretType,
 		"id":                            req.ID,
@@ -246,7 +275,7 @@ func (s *Server) persistPendingCredentialRequest(ctx context.Context, req *pendi
 	if ttl <= 0 {
 		ttl = time.Second
 	}
-	return s.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+	return &secretsif.SecretRequest{
 		Key:         credentialRequestStoreKey(req.ID),
 		Value:       "",
 		TenantID:    req.TenantID,
@@ -254,7 +283,7 @@ func (s *Server) persistPendingCredentialRequest(ctx context.Context, req *pendi
 		Tags:        []string{"credential_request"},
 		TTL:         ttl,
 		Metadata:    meta,
-	})
+	}
 }
 
 func pendingCredentialRequestFromMetadata(m *secretsif.SecretMetadata) *pendingCredentialRequest {
@@ -276,6 +305,7 @@ func pendingCredentialRequestFromMetadata(m *secretsif.SecretMetadata) *pendingC
 		ApprovedBy:           m.Metadata["approved_by"],
 		BoundAccountID:       m.Metadata["bound_account_id"],
 		SelfApproved:         m.Metadata["self_approved"] == "true",
+		Version:              m.Version,
 	}
 	if gm := m.Metadata["granted_markers"]; gm != "" {
 		req.GrantedMarkers = strings.Split(gm, ",")
@@ -624,26 +654,29 @@ func (s *Server) handleLodgeCredentialRequest(w http.ResponseWriter, r *http.Req
 
 	// Spend the token before persisting the pending request — it is spent the moment
 	// a request is lodged against it, whether or not that request is ever approved
-	// (Issue #3717 implementation note). credentialRequestMu serializes this
-	// check-then-write section so two concurrent lodges on this node cannot both
-	// observe an unspent token; a cross-node race under HA remains a known, accepted
-	// limitation (worst case: two pending requests recorded against one token — this
-	// story issues no certificate, so that is not a trust bypass).
-	s.credentialRequestMu.Lock()
+	// (Issue #3717 implementation note). The spend is a durable compare-and-set keyed
+	// on the version read alongside freshTok: two concurrent lodges against the same
+	// token — on this node or a different one — can never both observe it unspent and
+	// both persist a spend; the loser gets the same uniform unauthorized response as
+	// an already-spent token (Issue #3775).
 	freshTok, freshErr := s.getEnrolmentTokenByHash(r.Context(), hashCredentialSecret(rawToken))
 	if freshErr != nil || !freshTok.valid(time.Now().UTC()) {
-		s.credentialRequestMu.Unlock()
 		writeUniformLodgeUnauthorized(w)
 		return
 	}
 	spentAt := time.Now().UTC()
 	freshTok.SpentAt = &spentAt
 	freshTok.SpentByRequestID = reqID
-	spendErr := s.persistEnrolmentToken(r.Context(), freshTok)
-	s.credentialRequestMu.Unlock()
+	_, spendOK, spendErr := s.persistEnrolmentTokenCAS(r.Context(), freshTok)
 	if spendErr != nil {
 		s.logger.Error("Failed to spend enrolment token", "error", logging.SanitizeLogValue(spendErr.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "credential request service unavailable", "STORE_ERROR")
+		return
+	}
+	if !spendOK {
+		// Lost the race: a concurrent lodge already spent this token between the
+		// read above and this compare-and-set.
+		writeUniformLodgeUnauthorized(w)
 		return
 	}
 

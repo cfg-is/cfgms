@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // setupKeyFileForGuardTest creates a real 32-byte AES key file under dir and
@@ -575,4 +576,59 @@ func TestHasPathPrefix_WindowsIsCaseInsensitive(t *testing.T) {
 		return
 	}
 	assert.False(t, same, "case folding must stay Windows-only: POSIX paths are case-sensitive")
+}
+
+// TestNewSecretStore_ClusterModeRejectsNonAtomicSwap is the fail-closed proof for
+// Issue #3775: cluster mode must refuse a secret store whose compare-and-swap is not
+// atomic across controller nodes.
+//
+// The flatfile-backed store coordinates with an OS file lock, which is real but
+// node-scoped. Without this gate a cluster-mode controller would run every
+// credential-issuing transition — enrolment-token spend, approved->collected,
+// CLI-login collect, account revoke, the renewal claim — on a swap two nodes can both
+// win, minting two client certificates for one approval. assertClusterBackendsReady
+// checks only the storage provider and would not catch it.
+func TestNewSecretStore_ClusterModeRejectsNonAtomicSwap(t *testing.T) {
+	persistentBase := persistentDirForGuardTest(t)
+	keyPath := setupKeyFileForGuardTest(t, t.TempDir())
+
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(persistentBase, "secrets"))
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "")
+
+	cfg := config.DefaultConfig()
+	cfg.Storage = flatfileConfigForGuardTest()
+	cfg.HA = &config.HAConfig{Mode: "cluster"}
+	require.True(t, cfg.HA.IsClusterMode(), "fixture must actually be in cluster mode")
+
+	_, err := NewSecretStore(cfg)
+	require.Error(t, err, "cluster mode must refuse a secret store with a node-local compare-and-swap")
+	assert.Contains(t, err.Error(), "atomic across nodes",
+		"the error must name the missing property so an operator knows what to change")
+	assert.NotContains(t, err.Error(), "refusing ephemeral secret storage",
+		"the persistent path must not be what failed here")
+}
+
+// TestNewSecretStore_SingleModeAllowsFileLockedSwap is the other half of the gate:
+// outside cluster mode there is no second node, so the file-locked swap is the
+// correct primitive and must not be refused. A gate that rejected it everywhere
+// would make the single-node flatfile deployment unstartable.
+func TestNewSecretStore_SingleModeAllowsFileLockedSwap(t *testing.T) {
+	persistentBase := persistentDirForGuardTest(t)
+	keyPath := setupKeyFileForGuardTest(t, t.TempDir())
+
+	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(persistentBase, "secrets"))
+	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "")
+
+	cfg := config.DefaultConfig()
+	cfg.Storage = flatfileConfigForGuardTest()
+	require.False(t, cfg.HA.IsClusterMode(), "default configuration must not be cluster mode")
+
+	store, err := NewSecretStore(cfg)
+	require.NoError(t, err, "single-node mode must accept the file-locked compare-and-swap")
+	require.NotNil(t, store)
+	assert.False(t, secretsif.CompareAndSwapIsClusterAtomic(store),
+		"the store must still report honestly that its swap is not cluster-atomic")
+	require.NoError(t, store.Close())
 }

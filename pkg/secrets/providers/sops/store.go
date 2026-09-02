@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,21 @@ type SOPSSecretStore struct {
 	config       *SOPSSecretStoreConfig
 	providerName string
 	aead         cipher.AEAD
+
+	// conditionalStore is the backing ConfigStore when it can perform an atomic
+	// conditional write itself (PostgreSQL: "UPDATE ... WHERE version = $expected").
+	// Non-nil is what makes CompareAndSwapSecret atomic across controller nodes;
+	// nil means the file-lock fallback below is in use and the guarantee stops at
+	// the boundary of a shared filesystem. Resolved once at construction so the
+	// property a caller relies on cannot change per call (Issue #3775).
+	conditionalStore cfgconfig.ConditionalConfigStore
+
+	// casLockRoot is the directory CompareAndSwapSecret places lock files in when
+	// conditionalStore is nil. Empty means no private lock root could be derived
+	// and CompareAndSwapSecret refuses rather than degrading to a shared location;
+	// casUnavailableErr carries the reason.
+	casLockRoot       string
+	casUnavailableErr error
 }
 
 type encryptedEnvelope struct {
@@ -83,6 +99,20 @@ func NewSOPSSecretStore(config *SOPSSecretStoreConfig) (*SOPSSecretStore, error)
 		config:       config,
 		providerName: config.StorageProvider,
 		aead:         aead,
+	}
+
+	// Resolve the compare-and-swap strategy once, here, so that
+	// CompareAndSwapIsClusterAtomic reports a stable property of this store rather
+	// than something re-derived per call. Preference order is not arbitrary: a
+	// backend that can decide the comparison and the write in one storage-layer
+	// operation is the only shape whose atomicity survives a second controller node,
+	// so it wins whenever it is available (Issue #3775).
+	if conditional, ok := configStore.(cfgconfig.ConditionalConfigStore); ok {
+		store.conditionalStore = conditional
+	} else if lockRoot, lockErr := casLockDir(config); lockErr == nil {
+		store.casLockRoot = lockRoot
+	} else {
+		store.casUnavailableErr = lockErr
 	}
 
 	// Initialize cache if enabled
@@ -209,7 +239,16 @@ func (s *SOPSSecretStore) decrypt(encrypted []byte, tenantID, key string) ([]byt
 // StoreSecret stores a secret
 // M-AUTH-1: Stores an authenticated encrypted envelope as ConfigEntry data.
 func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.SecretRequest) error {
-	// Validate request
+	if err := validateSecretRequest(req); err != nil {
+		return err
+	}
+	_, err := s.writeSecretEntry(ctx, req)
+	return err
+}
+
+// validateSecretRequest applies the validation shared by every write path
+// (StoreSecret and CompareAndSwapSecret).
+func validateSecretRequest(req *secretsif.SecretRequest) error {
 	if req == nil {
 		return fmt.Errorf("secret request cannot be nil")
 	}
@@ -225,14 +264,20 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 	if len(req.Value) > 1<<20 {
 		return fmt.Errorf("secret value exceeds 1048576 byte limit")
 	}
+	return nil
+}
 
-	// Create secret metadata
+// buildSecretEntry encrypts req into the authenticated envelope that goes on the
+// wire to the ConfigStore, without writing anything. Split out from
+// writeSecretEntry so CompareAndSwapSecret can hand the same envelope to a
+// conditional write instead of an unconditional StoreConfig (Issue #3775).
+func (s *SOPSSecretStore) buildSecretEntry(req *secretsif.SecretRequest) (*secretsif.Secret, *cfgconfig.ConfigEntry, error) {
 	secret := &secretsif.Secret{
 		Key:         req.Key,
 		Value:       req.Value,
 		Metadata:    req.Metadata,
 		Tags:        req.Tags,
-		Version:     1, // Version will be set by ConfigStore
+		Version:     1, // placeholder only — never read back; the ConfigStore's own Version is authoritative (see getSecretWithTenant)
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 		CreatedBy:   req.CreatedBy,
@@ -250,11 +295,11 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 	// Convert secret to JSON for storage
 	secretData, err := json.Marshal(secret)
 	if err != nil {
-		return fmt.Errorf("failed to marshal secret: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal secret: %w", err)
 	}
 	encryptedData, err := s.encrypt(secretData, req.TenantID, req.Key)
 	if err != nil {
-		return fmt.Errorf("failed to encrypt secret: %w", err)
+		return nil, nil, fmt.Errorf("failed to encrypt secret: %w", err)
 	}
 
 	// Store the encrypted envelope as a ConfigEntry.
@@ -279,22 +324,225 @@ func (s *SOPSSecretStore) StoreSecret(ctx context.Context, req *secretsif.Secret
 		configEntry.Tags = append(configEntry.Tags, fmt.Sprintf("type:%s", secretType))
 	}
 
+	return secret, configEntry, nil
+}
+
+// cacheSecret refreshes the cache entry for a just-written secret.
+func (s *SOPSSecretStore) cacheSecret(req *secretsif.SecretRequest, secret *secretsif.Secret) {
+	if s.cache == nil {
+		return
+	}
+	cacheKey := s.getCacheKey(req.TenantID, req.Key)
+	cacheTTL := time.Duration(s.config.CacheTTL) * time.Second
+	if req.TTL > 0 && req.TTL < cacheTTL {
+		cacheTTL = req.TTL // Use shorter TTL if secret expires sooner
+	}
+	_ = s.cache.Set(cacheKey, secret, cacheTTL)
+}
+
+// writeSecretEntry encrypts req and writes it through the configured ConfigStore,
+// updating the cache on success. This is an unconditional overwrite: it is the
+// StoreSecret path, never the compare-and-swap path.
+func (s *SOPSSecretStore) writeSecretEntry(ctx context.Context, req *secretsif.SecretRequest) (*secretsif.Secret, error) {
+	secret, configEntry, err := s.buildSecretEntry(req)
+	if err != nil {
+		return nil, err
+	}
+
 	// Store only the authenticated encrypted envelope in the ConfigStore.
 	if err := s.configStore.StoreConfig(ctx, configEntry); err != nil {
-		return fmt.Errorf("failed to store secret: %w", err)
+		return nil, fmt.Errorf("failed to store secret: %w", err)
 	}
 
-	// Update cache if enabled
-	if s.cache != nil {
-		cacheKey := s.getCacheKey(req.TenantID, req.Key)
-		cacheTTL := time.Duration(s.config.CacheTTL) * time.Second
-		if req.TTL > 0 && req.TTL < cacheTTL {
-			cacheTTL = req.TTL // Use shorter TTL if secret expires sooner
+	s.cacheSecret(req, secret)
+
+	return secret, nil
+}
+
+// CompareAndSwapIsClusterAtomic implements
+// secretsif.ClusterAtomicCompareAndSwapper. It reports true only when the backing
+// ConfigStore performs the version comparison and the write as one atomic
+// storage-layer operation — the only arrangement under which two controller nodes
+// racing the same state transition cannot both win.
+//
+// It is false for a file-lock-coordinated backend. That lock is a genuine
+// cross-process lock and is correct for two processes on one host sharing a
+// directory, but O_CREAT|O_EXCL is not dependably atomic over a network
+// filesystem, so it must not be presented to a caller as a cluster guarantee.
+// Callers that need the cluster property gate on this rather than assuming it
+// (Issue #3775).
+func (s *SOPSSecretStore) CompareAndSwapIsClusterAtomic() bool {
+	return s.conditionalStore != nil
+}
+
+// casCurrentVersion reads the version CompareAndSwapSecret must compare
+// expectedVersion against, alongside the version physically stored.
+//
+// The two differ for an expired secret, and that difference is the whole point.
+// A secret past its expiry is invisible to every read path (getSecretWithTenant
+// refuses it, ListSecrets skips it), so for comparison purposes it does not
+// exist: logical is 0, and a create-if-absent may take it over. stored keeps the
+// real version so the takeover can still be written conditionally — the steal
+// itself is a compare-and-set against the expired record's actual version, so
+// exactly one of several nodes trying to take over the same expired record wins.
+//
+// Without this, a TTL-bearing claim record whose creator crashed before releasing
+// it would block its transition permanently: nothing in this provider ever
+// removes an expired record, so the claim's TTL would be a documented fail-safe
+// that does not exist (Issue #3775).
+func (s *SOPSSecretStore) casCurrentVersion(ctx context.Context, tenantID, key string) (logical int, stored int64, err error) {
+	configKey := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "secrets",
+		Name:      key,
+	}
+
+	existing, err := s.configStore.GetConfig(ctx, configKey)
+	if err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return 0, 0, nil
 		}
-		_ = s.cache.Set(cacheKey, secret, cacheTTL)
+		return 0, 0, fmt.Errorf("failed to read current secret version: %w", err)
 	}
 
-	return nil
+	plaintext, err := s.decrypt(existing.Data, tenantID, key)
+	if err != nil {
+		// The record exists but cannot be authenticated. Surface it rather than
+		// treating an unreadable record as absent, which would let a caller
+		// overwrite something it could not verify.
+		return 0, 0, fmt.Errorf("failed to decrypt current secret for compare-and-swap: %w", err)
+	}
+	var secret secretsif.Secret
+	if err := json.Unmarshal(plaintext, &secret); err != nil {
+		return 0, 0, fmt.Errorf("failed to unmarshal current secret for compare-and-swap: %w", err)
+	}
+
+	if s.isExpired(&secret) {
+		return 0, existing.Version, nil
+	}
+	return int(existing.Version), existing.Version, nil
+}
+
+// CompareAndSwapSecret implements interfaces.SecretStore.CompareAndSwapSecret.
+//
+// ConfigStore.StoreConfig is an unconditional overwrite that derives its new
+// version from a preceding read, so building a compare-and-set on it requires
+// atomicity from somewhere else. This takes it from one of two places, chosen
+// once at construction (NewSOPSSecretStore) and reported by
+// CompareAndSwapIsClusterAtomic:
+//
+//   - The backing ConfigStore's own conditional write
+//     (cfgconfig.ConditionalConfigStore — PostgreSQL's "UPDATE ... WHERE version =
+//     $expected"). The database decides the comparison and the write together, so
+//     two controller nodes racing the same transition cannot both win. This is the
+//     cluster-mode shape, where the storage provider is "database".
+//   - Otherwise, an OS-visible file lock on the store's own private data root
+//     (acquireCASLock), which serializes callers on this host and across processes
+//     sharing that root. This is the single-node flatfile shape.
+//
+// When neither is available — a backend with no conditional-write primitive and no
+// private filesystem root — this refuses with an error instead of performing an
+// unprotected read-check-write. There is no third, weaker mode: a compare-and-set
+// that silently stops being atomic is worse than one that says so, because every
+// call site (enrolment-token spend, approved->collected, account revoke, renewal
+// claim) mints certificates on the strength of winning it.
+func (s *SOPSSecretStore) CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	if err := validateSecretRequest(req); err != nil {
+		return 0, false, err
+	}
+	if key == "" {
+		return 0, false, fmt.Errorf("secret key cannot be empty")
+	}
+	if expectedVersion < 0 {
+		return 0, false, fmt.Errorf("expected version cannot be negative")
+	}
+
+	switch {
+	case s.conditionalStore != nil:
+		return s.compareAndSwapConditional(ctx, expectedVersion, req)
+	case s.casLockRoot != "":
+		release, err := acquireCASLock(ctx, s.casLockRoot, req.TenantID, req.Key)
+		if err != nil {
+			return 0, false, fmt.Errorf("failed to acquire compare-and-swap lock: %w", err)
+		}
+		defer release()
+		return s.compareAndSwapUnderLock(ctx, expectedVersion, req)
+	default:
+		return 0, false, fmt.Errorf(
+			"compare-and-swap is unavailable for storage provider %q: %w; "+
+				"configure a backend with a conditional-write primitive (database) or a private storage root (flatfile)",
+			s.providerName, s.casUnavailableErr)
+	}
+}
+
+// compareAndSwapConditional performs the swap using the backing store's own
+// conditional write, which is atomic across controller nodes.
+//
+// The read is advisory: it translates the caller's expectedVersion (in which an
+// expired record counts as absent) into the version physically stored, which is
+// what the conditional write must be keyed on so that taking an expired record
+// over replaces it rather than colliding with it. The write remains the single
+// atomic decision — if another node changes the key between the read and the
+// write, the write matches nothing and this reports a lost race, exactly as if the
+// read had never happened.
+func (s *SOPSSecretStore) compareAndSwapConditional(ctx context.Context, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	logical, stored, err := s.casCurrentVersion(ctx, req.TenantID, req.Key)
+	if err != nil {
+		return 0, false, err
+	}
+	if logical != expectedVersion {
+		return 0, false, nil
+	}
+
+	secret, configEntry, err := s.buildSecretEntry(req)
+	if err != nil {
+		return 0, false, err
+	}
+
+	newVersion, ok, err := s.conditionalStore.CompareAndSwapConfig(ctx, configEntry, stored)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to compare-and-swap secret: %w", err)
+	}
+	if !ok {
+		return 0, false, nil
+	}
+
+	secret.Version = int(newVersion)
+	s.cacheSecret(req, secret)
+	return int(newVersion), true, nil
+}
+
+// compareAndSwapUnderLock performs the read-check-write sequence for backends with
+// no conditional-write primitive. The caller must already hold the
+// tenant+key-scoped file lock.
+func (s *SOPSSecretStore) compareAndSwapUnderLock(ctx context.Context, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	logical, _, err := s.casCurrentVersion(ctx, req.TenantID, req.Key)
+	if err != nil {
+		return 0, false, err
+	}
+	if logical != expectedVersion {
+		return 0, false, nil
+	}
+
+	secret, configEntry, err := s.buildSecretEntry(req)
+	if err != nil {
+		return 0, false, err
+	}
+	if err := s.configStore.StoreConfig(ctx, configEntry); err != nil {
+		return 0, false, fmt.Errorf("failed to store secret: %w", err)
+	}
+
+	// Not every ConfigStore stamps the version it assigned back onto the entry it
+	// was handed (flatfile writes a copy), so read it back. Still inside the lock,
+	// so no other writer can have moved it.
+	written, err := s.configStore.GetConfig(ctx, configEntry.Key)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to read version after compare-and-swap write: %w", err)
+	}
+
+	secret.Version = int(written.Version)
+	s.cacheSecret(req, secret)
+	return int(written.Version), true, nil
 }
 
 // GetSecret retrieves a secret
@@ -356,6 +604,13 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 	if err := json.Unmarshal(plaintext, &secret); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal secret: %w", err)
 	}
+	// The encrypted payload's own Version field is stamped once at write time and
+	// never updated on subsequent writes (writeSecretEntry always marshals
+	// Version: 1) — it is not a reliable version number. The ConfigStore's own
+	// auto-incrementing Version is authoritative and is what CompareAndSwapSecret
+	// keys on, so every read path must report it, not the stale payload value
+	// (Issue #3775).
+	secret.Version = int(configEntry.Version)
 
 	// Check expiration
 	if s.isExpired(&secret) {
@@ -478,10 +733,14 @@ func (s *SOPSSecretStore) ListSecrets(ctx context.Context, filter *secretsif.Sec
 		}
 
 		metadata = append(metadata, &secretsif.SecretMetadata{
-			Key:         secret.Key,
-			Metadata:    secret.Metadata,
-			Tags:        secret.Tags,
-			Version:     secret.Version,
+			Key:      secret.Key,
+			Metadata: secret.Metadata,
+			Tags:     secret.Tags,
+			// config.Version (the ConfigStore's own auto-incrementing version) is
+			// authoritative — secret.Version is stamped once at write time and never
+			// updated on subsequent writes; see getSecretWithTenant's identical fix
+			// (Issue #3775).
+			Version:     int(config.Version),
 			CreatedAt:   secret.CreatedAt,
 			UpdatedAt:   secret.UpdatedAt,
 			ExpiresAt:   secret.ExpiresAt,
