@@ -78,15 +78,38 @@ resources:
 	require.NoError(t, e.StartMonitors(ctx, resources))
 	t.Cleanup(e.StopMonitors)
 
+	// The only asynchronous step here is the fan-in goroutine reading this
+	// ChangeEvent off the module's Changes() channel and caching it — a
+	// goroutine-scheduling gap, not the debounce window (cacheMonitorState
+	// runs as soon as the event is dequeued, ahead of the debounced targeted
+	// reconcile). SetMonitorStateObserver fires synchronously the instant that
+	// cache write lands, so waiting on it is an exact synchronization point
+	// rather than a polling loop racing a fixed timeout — the fix for the
+	// macOS queue-leg flake in Issue #3796.
+	applied := make(chan struct{}, 1)
+	e.SetMonitorStateObserver(func(gotResourceID string) {
+		if gotResourceID == resourceID {
+			select {
+			case applied <- struct{}{}:
+			default:
+			}
+		}
+	})
+
 	mod.SendChange(modules.ChangeEvent{
 		ResourceID: resourceID,
 		ChangeType: modules.ChangeTypeModified,
 		Details:    execution.NewConfigState(details),
 	})
 
-	require.Eventually(t, func() bool {
-		return len(e.CollectModuleDNAAttributes(ctx)) > 0
-	}, 2*time.Second, 10*time.Millisecond,
+	select {
+	case <-applied:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the monitor state observer to apply the ChangeEvent — cacheMonitorState never fired for " + resourceID)
+	}
+	e.SetMonitorStateObserver(nil)
+
+	require.NotEmpty(t, e.CollectModuleDNAAttributes(ctx),
 		"real module DNA source must publish attributes before use")
 
 	return e
@@ -120,15 +143,9 @@ func TestDNACollectorAdapter_SetModuleDNASource_PurityTest(t *testing.T) {
 	wg.Wait()
 
 	// Through the adapter, the wired source's module attribute must be present.
-	// Use Eventually: after Issue #3332 CollectAttributes no longer calls
-	// dna.Collector.Collect() which previously masked a timing window between
-	// the ChangeEvent and the debounce flush. Wait explicitly instead.
-	require.Eventually(t, func() bool {
-		attrs, _ := adapter.CollectAttributes(ctx)
-		return attrs["res-a.state"] == "running"
-	}, 2*time.Second, 10*time.Millisecond,
-		"adapter.CollectAttributes must surface the wired source's module attribute")
-
+	// newModuleDNAExecutor only returns src once its ChangeEvent has been
+	// synchronously observed landing in monitorState (Issue #3796), so this
+	// read is a single deterministic assertion, not a polling wait.
 	attrs1, err := adapter.CollectAttributes(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "running", attrs1["res-a.state"],
@@ -139,13 +156,8 @@ func TestDNACollectorAdapter_SetModuleDNASource_PurityTest(t *testing.T) {
 	adapter.setModuleDNASource(src2)
 
 	// The adapter must now read from src2 — proving setModuleDNASource stored src2
-	// under the RWMutex and CollectAttributes reads the live field.
-	require.Eventually(t, func() bool {
-		attrs, _ := adapter.CollectAttributes(ctx)
-		return attrs["res-b.state"] == "healthy"
-	}, 2*time.Second, 10*time.Millisecond,
-		"setModuleDNASource must swap the live source read by adapter.CollectAttributes")
-
+	// under the RWMutex and CollectAttributes reads the live field. Deterministic
+	// for the same reason as above: src2's ChangeEvent has already landed.
 	attrs2, err := adapter.CollectAttributes(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", attrs2["res-b.state"],
