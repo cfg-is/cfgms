@@ -629,7 +629,7 @@ func TestTelemetryStream_ReconnectsOnStreamError(t *testing.T) {
 		Collector: col,
 		Logger:    logging.NewNoopLogger(),
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	ts.Start(ctx)
 
@@ -641,10 +641,18 @@ func TestTelemetryStream_ReconnectsOnStreamError(t *testing.T) {
 	}
 
 	if collectorSupported {
+		// Bound this wait by the overall test context deadline instead of an
+		// independent fixed timer: a real collector.Snapshot call plus the
+		// sampler's first tick on the hosted windows-latest merge-group runner
+		// is not guaranteed to complete inside a tight fixed window (observed
+		// timing out at a hardcoded 5s -- Issue #3829), even though the
+		// reconnect itself (proven above) is fast and deterministic. Sharing
+		// ctx here does not mask a hung reconnect -- that already succeeded --
+		// it only tolerates slower real I/O on the reconnected stream.
 		select {
 		case <-snapshotAfterReconnect:
-		case <-time.After(5 * time.Second):
-			t.Fatal("timeout: reconnected stream did not resume sampling")
+		case <-ctx.Done():
+			t.Fatal("timeout: reconnected stream did not resume sampling before test context deadline")
 		}
 	}
 
