@@ -149,6 +149,12 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 
 	var certManager *cert.Manager
 	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
+		if err := applyClusterCAExternalPaths(caConfig, cfg.Certificate.ClusterCA); err != nil {
+			if rbErr := rollback.Execute(); rbErr != nil {
+				logger.Error("Rollback failed after cluster CA config validation error", "rollback_error", rbErr.Error())
+			}
+			return nil, err
+		}
 		certManager, err = InitClusterCA(context.Background(), cfg, managerCfg, logger)
 	} else {
 		certManager, err = cert.NewManager(managerCfg)
@@ -458,6 +464,38 @@ func fileExists(path string) bool {
 // which would otherwise try to load a local ca.key that cluster-mode nodes
 // never have) need it.
 func BuildClusterCertManager(ctx context.Context, cfg *config.Config, certPath string, logger logging.Logger) (*cert.Manager, error) {
+	managerCfg, err := newClusterManagerConfig(cfg, certPath)
+	if err != nil {
+		return nil, err
+	}
+	return InitClusterCA(ctx, cfg, managerCfg, logger)
+}
+
+// BuildClusterCertManagerWithStore is BuildClusterCertManager against a
+// caller-supplied SecretStore instead of one opened from
+// certificate.cluster_ca's vault settings. The caller owns the store's
+// lifecycle — this does not close it.
+//
+// Callers that already hold an open vault connection use this to avoid opening
+// a second one; it is also the seam that lets the cluster-CA logic be exercised
+// against a real in-process SecretStore implementation without a live OpenBao
+// instance, so no test has to substitute anything for the real "openbao"
+// provider in the process-wide provider registry.
+func BuildClusterCertManagerWithStore(ctx context.Context, cfg *config.Config, certPath string, store secretsinterfaces.SecretStore, logger logging.Logger) (*cert.Manager, error) {
+	if store == nil {
+		return nil, fmt.Errorf("secret store is required")
+	}
+	managerCfg, err := newClusterManagerConfig(cfg, certPath)
+	if err != nil {
+		return nil, err
+	}
+	return initClusterCAWithStore(ctx, cfg, managerCfg, store, logger)
+}
+
+// newClusterManagerConfig builds the cert.ManagerConfig a cluster-mode node's
+// CA is created or loaded with, including the external regional-intermediate
+// import paths when they are configured.
+func newClusterManagerConfig(cfg *config.Config, certPath string) (*cert.ManagerConfig, error) {
 	caConfig := &cert.CAConfig{
 		Organization: "CFGMS",
 		Country:      "US",
@@ -467,28 +505,66 @@ func BuildClusterCertManager(ctx context.Context, cfg *config.Config, certPath s
 	if cfg.Certificate.Server != nil && cfg.Certificate.Server.Organization != "" {
 		caConfig.Organization = cfg.Certificate.Server.Organization
 	}
-	managerCfg := &cert.ManagerConfig{
+	if err := applyClusterCAExternalPaths(caConfig, cfg.Certificate.ClusterCA); err != nil {
+		return nil, err
+	}
+	return &cert.ManagerConfig{
 		StoragePath:          certPath,
 		CAConfig:             caConfig,
 		LoadExistingCA:       false,
 		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
 		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
-	}
-	return InitClusterCA(ctx, cfg, managerCfg, logger)
+	}, nil
 }
 
-// InitClusterCA creates the cert Manager using a CA sourced from OpenBao. It
+// applyClusterCAExternalPaths copies clusterCA's regional-intermediate import
+// paths (ADR-032 Decision 2) onto caConfig, the shape InitClusterCA reads to
+// decide between importing and self-generating. Fails closed on a partially
+// configured set of paths — a confusing failure deep inside a file read is
+// worse than an explicit config error before any CA material is touched.
+func applyClusterCAExternalPaths(caConfig *cert.CAConfig, clusterCA *config.ClusterCAConfig) error {
+	if clusterCA == nil {
+		return nil
+	}
+
+	paths := []string{
+		clusterCA.ExternalIntermediateCertPath,
+		clusterCA.ExternalIntermediateKeyPath,
+		clusterCA.ExternalIntermediateChainPath,
+	}
+	set := 0
+	for _, p := range paths {
+		if p != "" {
+			set++
+		}
+	}
+	if set != 0 && set != len(paths) {
+		return fmt.Errorf("certificate.cluster_ca external_intermediate_{cert,key,chain}_path must all be set together or all be empty")
+	}
+
+	caConfig.ExternalCertPath = clusterCA.ExternalIntermediateCertPath
+	caConfig.ExternalKeyPath = clusterCA.ExternalIntermediateKeyPath
+	caConfig.ExternalChainPath = clusterCA.ExternalIntermediateChainPath
+	return nil
+}
+
+// InitClusterCA creates the cert Manager for a cluster-mode controller. It
 // builds the vault config from cfg.Certificate.ClusterCA, splits the VaultKeyPath
-// into tenantID and key components, and delegates to cert.NewManagerFromSecretStore.
-// The vault token must come from OPENBAO_TOKEN or BAO_TOKEN env vars; it is not
-// read from the config file. Exported so server.go's regular (post-init)
-// startup path can reuse it via BuildClusterCertManager above.
+// into tenantID and key components, and either imports an externally-issued
+// regional intermediate CA (ADR-032 Decision 2, when managerCfg.CAConfig names
+// external cert/key/chain paths — see applyClusterCAExternalPaths) or delegates
+// to cert.NewManagerFromSecretStore's self-generate-or-load path. The vault
+// token must come from OPENBAO_TOKEN or BAO_TOKEN env vars; it is not read from
+// the config file. Exported so server.go's regular (post-init) startup path can
+// reuse it via BuildClusterCertManager above.
 func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.ManagerConfig, logger logging.Logger) (*cert.Manager, error) {
 	clusterCA := cfg.Certificate.ClusterCA
 
-	logger.Info("Cluster mode: loading CA from vault",
-		"vault_address", clusterCA.VaultAddress,
-		"vault_key_path", clusterCA.VaultKeyPath)
+	// Validated before the vault connection is opened so a malformed key path
+	// reports itself as a config error rather than as a connection failure.
+	if _, _, err := splitVaultKeyPath(clusterCA.VaultKeyPath); err != nil {
+		return nil, err
+	}
 
 	vaultConfig := map[string]interface{}{
 		"address": clusterCA.VaultAddress,
@@ -500,12 +576,6 @@ func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.Man
 		vaultConfig["tls_cert"] = clusterCA.VaultTLSCert
 	}
 
-	parts := strings.SplitN(clusterCA.VaultKeyPath, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return nil, fmt.Errorf("certificate.cluster_ca.vault_key_path must be in format 'tenantID/key-name', got: %q", clusterCA.VaultKeyPath)
-	}
-	tenantID, keyPath := parts[0], parts[1]
-
 	store, err := secretsinterfaces.CreateSecretStoreFromConfig("openbao", vaultConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OpenBao secret store for cluster CA: %w", err)
@@ -516,11 +586,94 @@ func InitClusterCA(ctx context.Context, cfg *config.Config, managerCfg *cert.Man
 		}
 	}()
 
+	return initClusterCAWithStore(ctx, cfg, managerCfg, store, logger)
+}
+
+// initClusterCAWithStore is InitClusterCA's body once a SecretStore is open: it
+// splits the configured vault key path into its tenant and key components and
+// either imports externally-issued regional intermediate material or delegates
+// to cert.NewManagerFromSecretStore's self-generate-or-load path. It never
+// closes store — whoever opened it owns it.
+func initClusterCAWithStore(ctx context.Context, cfg *config.Config, managerCfg *cert.ManagerConfig, store secretsinterfaces.SecretStore, logger logging.Logger) (*cert.Manager, error) {
+	clusterCA := cfg.Certificate.ClusterCA
+
+	logger.Info("Cluster mode: loading CA from vault",
+		"vault_address", clusterCA.VaultAddress,
+		"vault_key_path", clusterCA.VaultKeyPath)
+
+	tenantID, keyPath, err := splitVaultKeyPath(clusterCA.VaultKeyPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if managerCfg.CAConfig != nil && managerCfg.CAConfig.ExternalCertPath != "" {
+		manager, err := importClusterIntermediateCA(ctx, store, tenantID, keyPath, managerCfg, logger)
+		if err != nil {
+			return nil, err
+		}
+		return manager, nil
+	}
+
 	manager, err := cert.NewManagerFromSecretStore(ctx, store, tenantID, keyPath, managerCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize cluster CA from vault: %w", err)
 	}
 
 	logger.Info("Cluster CA loaded from vault", "tenant_id", tenantID, "key_path", keyPath)
+	return manager, nil
+}
+
+// splitVaultKeyPath splits certificate.cluster_ca.vault_key_path into the
+// tenant ID and key name the SecretStore addresses secrets by.
+func splitVaultKeyPath(vaultKeyPath string) (tenantID, keyPath string, err error) {
+	parts := strings.SplitN(vaultKeyPath, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("certificate.cluster_ca.vault_key_path must be in format 'tenantID/key-name', got: %q", vaultKeyPath)
+	}
+	return parts[0], parts[1], nil
+}
+
+// importClusterIntermediateCA reads the externally-issued regional
+// intermediate CA certificate, private key, and issuer chain named by
+// managerCfg.CAConfig's External*Path fields (ADR-032 Decision 2), and imports
+// the material as the cluster's active CA via cert.NewManagerFromImportedCA,
+// which publishes the cert, key, and issuer chain to the shared vault so every
+// cluster node that imports the same external material converges on the same
+// identity — and which fails closed rather than replacing a different identity
+// already published there.
+//
+// The private key is read from local disk here — the only place it exists
+// outside the offline root ceremony's own output — but it is never written
+// back to any node's local disk; NewManagerFromImportedCA's vault write is the
+// only durable copy, exactly matching the self-generated case's invariant.
+func importClusterIntermediateCA(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string, managerCfg *cert.ManagerConfig, logger logging.Logger) (*cert.Manager, error) {
+	caConfig := managerCfg.CAConfig
+
+	// #nosec G304 -- cluster CA import reads operator-supplied intermediate CA
+	// material from a controlled, admin-configured path
+	// (certificate.cluster_ca.external_intermediate_cert_path), the same
+	// controlled-path pattern LoadCA uses for caCertPath.
+	certPEM, err := os.ReadFile(caConfig.ExternalCertPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external intermediate CA certificate: %w", err)
+	}
+	// #nosec G304 -- see above; certificate.cluster_ca.external_intermediate_key_path
+	keyPEM, err := os.ReadFile(caConfig.ExternalKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external intermediate CA private key: %w", err)
+	}
+	// #nosec G304 -- see above; certificate.cluster_ca.external_intermediate_chain_path
+	chainPEM, err := os.ReadFile(caConfig.ExternalChainPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external intermediate CA issuer chain: %w", err)
+	}
+
+	manager, err := cert.NewManagerFromImportedCA(ctx, store, tenantID, keyPath, managerCfg, certPEM, keyPEM, chainPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to import regional intermediate CA for cluster: %w", err)
+	}
+
+	logger.Info("Cluster CA imported from external intermediate material and stored in vault",
+		"tenant_id", tenantID, "key_path", keyPath)
 	return manager, nil
 }

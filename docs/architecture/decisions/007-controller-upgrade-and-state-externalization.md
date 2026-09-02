@@ -94,7 +94,7 @@ Host-level blue/green and host-to-host state migration are **non-goals** for thi
 
 ### SaaS cluster
 
-The deployment target for the managed SaaS offering is **cluster-by-default**: shared Postgres for the DNA/fleet store, shared blob storage for config and audit, and a shared key vault for the CA. In this model, blue/green is a **rolling cluster upgrade** — add a new node on the new version, drain the old node, decommission it — which is the standard pattern for any stateless-process cluster backed by shared durable storage. This is tracked under epic #2051.
+The deployment target for the managed SaaS offering is **cluster-by-default**: shared Postgres for the DNA/fleet store, shared blob storage for config and audit, and a shared key vault holding the region's intermediate CA; the root is offline and never in any cluster vault (ADR-032 Decision 2). In this model, blue/green is a **rolling cluster upgrade** — add a new node on the new version, drain the old node, decommission it — which is the standard pattern for any stateless-process cluster backed by shared durable storage. This is tracked under epic #2051.
 
 ### Reframing of prior enablers
 

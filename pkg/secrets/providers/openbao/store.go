@@ -206,6 +206,14 @@ func isCheckAndSetMismatch(err error) bool {
 
 // GetSecret retrieves the current version of a secret.
 // The key must be in the format "tenantID/keyName".
+//
+// An absent secret is reported as an error wrapping interfaces.ErrSecretNotFound,
+// and only an absent secret is: a denial (the token's policy grants create/update
+// but not read), an expired token, a KV mount misconfiguration or a read timeout
+// all return an error that does NOT wrap the sentinel. Callers act on the
+// difference — pkg/cert's cluster-CA load treats "not found" as an unclaimed key
+// path it may bootstrap a new fleet CA into, so classifying a transient failure as
+// absence would re-root the fleet.
 func (s *OpenBaoSecretStore) GetSecret(ctx context.Context, key string) (*interfaces.Secret, error) {
 	tenantID, keyName, err := splitKey(key)
 	if err != nil {
@@ -216,13 +224,15 @@ func (s *OpenBaoSecretStore) GetSecret(ctx context.Context, key string) (*interf
 	kvSecret, err := s.client.KVv2(s.mountPath).Get(ctx, logging.SanitizeLogValue(path))
 	if err != nil {
 		if isNotFound(err) {
-			return nil, fmt.Errorf("secret not found: %s", logging.SanitizeLogValue(key))
+			return nil, fmt.Errorf("secret not found: %s: %w",
+				logging.SanitizeLogValue(key), interfaces.ErrSecretNotFound)
 		}
 		return nil, fmt.Errorf("failed to get secret %s: %w",
 			logging.SanitizeLogValue(key), err)
 	}
 	if kvSecret == nil {
-		return nil, fmt.Errorf("secret not found: %s", logging.SanitizeLogValue(key))
+		return nil, fmt.Errorf("secret not found: %s: %w",
+			logging.SanitizeLogValue(key), interfaces.ErrSecretNotFound)
 	}
 
 	return kvSecretToSecret(tenantID, keyName, kvSecret), nil

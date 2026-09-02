@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -1154,4 +1155,441 @@ func TestNewManagerFromCAMaterial_AcceptsSelfSignedRootWithEmptyChain(t *testing
 	anchor, err := mgr.GetCACertificate()
 	require.NoError(t, err)
 	assert.Equal(t, rootCertPEM, anchor)
+}
+
+// importableIntermediateMaterial builds a fresh root CA and a regional
+// intermediate signed under it, returning the PEM bytes an offline root
+// ceremony would hand a cell: the intermediate's own certificate, its
+// private key, and the root-terminal issuer chain (here just the root, one
+// hop away).
+func importableIntermediateMaterial(t *testing.T) (certPEM, keyPEM, chainPEM, rootCertPEM []byte) {
+	t.Helper()
+
+	rootMgr, err := NewManager(&ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization:  "Test Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    1,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+
+	rootCertPEM, err = rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	subCert, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &SubordinateCAConfig{
+		CommonName:   "Regional Intermediate",
+		Organization: "Test Org",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+
+	keyPEM = pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(subKey),
+	})
+
+	return subCert.CertificatePEM, keyPEM, rootCertPEM, rootCertPEM
+}
+
+// TestManager_ImportSubordinateCA_TrustAnchorIsRootAndNoLocalKey proves the
+// Manager-level wrapper: after import, GetCACertificate() returns the root
+// (not the imported intermediate's own cert), a freshly issued leaf carries
+// the intermediate in IssuerChainPEM, and the private key is never written to
+// local disk — only the public ca.crt is.
+func TestManager_ImportSubordinateCA_TrustAnchorIsRootAndNoLocalKey(t *testing.T) {
+	certPEM, keyPEM, chainPEM, rootCertPEM := importableIntermediateMaterial(t)
+
+	// Bootstrap the Manager from in-memory CA material (NewManagerFromCAMaterial
+	// never touches local disk) rather than NewManager, which — being the
+	// single-node path — deliberately writes its self-generated ca.key to disk
+	// at construction; that write would be a false positive for the "never
+	// touches local disk" assertion this test makes about ImportSubordinateCA.
+	placeholderCA, err := NewCA(&CAConfig{Organization: "Placeholder", Country: "US", ValidityDays: 365})
+	require.NoError(t, err)
+	require.NoError(t, placeholderCA.Initialize(nil))
+	placeholderCertPEM, err := placeholderCA.GetCACertificate()
+	require.NoError(t, err)
+	placeholderKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(placeholderCA.privateKey),
+	})
+
+	storageDir := t.TempDir()
+	mgr, err := NewManagerFromCAMaterial(&ManagerConfig{
+		StoragePath: storageDir,
+	}, placeholderCertPEM, placeholderKeyPEM, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.ImportSubordinateCA(certPEM, keyPEM, chainPEM))
+
+	anchor, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, anchor)
+	assert.NotEqual(t, certPEM, anchor)
+
+	leaf, err := mgr.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, leaf.IssuerChainPEM)
+
+	assert.FileExists(t, filepath.Join(storageDir, "ca", "ca.crt"))
+	_, statErr := os.Stat(filepath.Join(storageDir, "ca", "ca.key"))
+	assert.True(t, os.IsNotExist(statErr), "the imported intermediate's private key must never be written to local disk")
+}
+
+// TestNewManagerFromImportedCA_StoresIntermediateInVault is the REQUIRED test
+// for the cluster-mode import path: the imported intermediate becomes the
+// Manager's active CA (trust anchor = root, leaf issuer chain = intermediate),
+// the private key is never written to local disk, and the SecretStore ends up
+// holding the intermediate's OWN cert+key pair — not the root — so a second
+// node loading the same secret gets a working, matched pair rather than a
+// root cert paired with an intermediate's private key.
+func TestNewManagerFromImportedCA_StoresIntermediateInVault(t *testing.T) {
+	certPEM, keyPEM, chainPEM, rootCertPEM := importableIntermediateMaterial(t)
+
+	ctx := context.Background()
+	store := newInMemSecretStore()
+	storageDir := t.TempDir()
+
+	mgr, err := NewManagerFromImportedCA(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: storageDir,
+	}, certPEM, keyPEM, chainPEM)
+	require.NoError(t, err)
+
+	anchor, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, anchor)
+	assert.NotEqual(t, certPEM, anchor)
+
+	leaf, err := mgr.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, leaf.IssuerChainPEM)
+
+	// SECURITY: the private key must not exist anywhere on local disk.
+	_, statErr := os.Stat(filepath.Join(storageDir, "ca", "ca.key"))
+	assert.True(t, os.IsNotExist(statErr))
+	assert.FileExists(t, filepath.Join(storageDir, "ca", "ca.crt"))
+
+	// The vault must hold the intermediate's own cert+key as a matched pair,
+	// loadable independently of this Manager instance.
+	loaded := &CA{}
+	require.NoError(t, loaded.LoadCAFromSecretStore(ctx, store, "root", "cluster-ca"))
+	assert.Equal(t, certPEM, loaded.ownCertificatePEM(), "the vault must hold the intermediate's own certificate, not the root")
+
+	// SECURITY (trust-anchor convergence): the issuer chain must be persisted
+	// alongside the pair and restored on load. Without it this vault-loaded CA
+	// would publish the intermediate as the fleet's permanent trust anchor while
+	// the importing node publishes the root — stewards enrolled via different
+	// cluster nodes would pin different anchors, and leaves issued here would
+	// carry no intermediate for chain building.
+	loadedAnchor, err := loaded.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, loadedAnchor,
+		"a vault-loaded CA must publish the offline root as the trust anchor, exactly as the importing node does")
+	assert.NotEqual(t, certPEM, loadedAnchor)
+
+	loadedLeaf, err := loaded.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-002",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-002",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, certPEM, loadedLeaf.IssuerChainPEM,
+		"leaves issued by a vault-loaded CA must carry the intermediate so they chain to the published root")
+	leafX509, err := ParseCertificateFromPEM(loadedLeaf.CertificatePEM)
+	require.NoError(t, err)
+	require.NoError(t, leafX509.CheckSignatureFrom(loaded.certificate),
+		"the vault-loaded CA must actually be able to sign with the intermediate's own key")
+}
+
+// TestNewManagerFromImportedCA_ReimportOfSameMaterialIsIdempotent proves the
+// every-boot re-import (and a second cluster node importing the same external
+// files) converges rather than erroring or rewriting the vault.
+func TestNewManagerFromImportedCA_ReimportOfSameMaterialIsIdempotent(t *testing.T) {
+	certPEM, keyPEM, chainPEM, rootCertPEM := importableIntermediateMaterial(t)
+
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	_, err := NewManagerFromImportedCA(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, certPEM, keyPEM, chainPEM)
+	require.NoError(t, err)
+
+	second, err := NewManagerFromImportedCA(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, certPEM, keyPEM, chainPEM)
+	require.NoError(t, err, "re-importing identical material must succeed — this path runs on every process start")
+
+	anchor, err := second.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, anchor)
+
+	stored, err := store.GetSecret(ctx, "root/cluster-ca")
+	require.NoError(t, err)
+	assert.Equal(t, string(certPEM), stored.Value)
+}
+
+// TestNewManagerFromImportedCA_RefusesToReplaceDifferentVaultIdentity is the
+// REQUIRED security test for the silent-overwrite finding: the import path runs
+// on every process start, so it must never replace a CA identity already
+// published at the key path. Importing different material — a config edit on a
+// cluster that already holds a self-generated root, or a node booting with
+// stale intermediate material mid-rotation — must fail closed with the vault
+// untouched, because an overwrite invalidates every certificate the cluster has
+// already issued.
+func TestNewManagerFromImportedCA_RefusesToReplaceDifferentVaultIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+
+	// An established cluster: self-generated root already published in the vault.
+	established, err := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Established Cluster",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.NoError(t, err)
+	establishedAnchor, err := established.GetCACertificate()
+	require.NoError(t, err)
+
+	establishedKey, err := store.GetSecret(ctx, "root/cluster-ca-key")
+	require.NoError(t, err)
+
+	certPEM, keyPEM, chainPEM, _ := importableIntermediateMaterial(t)
+	mgr, err := NewManagerFromImportedCA(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, certPEM, keyPEM, chainPEM)
+
+	require.Error(t, err, "importing a different CA identity over an established one must fail closed")
+	assert.Nil(t, mgr)
+	assert.Contains(t, err.Error(), "refusing to overwrite")
+
+	storedCert, err := store.GetSecret(ctx, "root/cluster-ca")
+	require.NoError(t, err)
+	assert.Equal(t, string(establishedAnchor), storedCert.Value, "the vault's CA certificate must be untouched")
+
+	storedKey, err := store.GetSecret(ctx, "root/cluster-ca-key")
+	require.NoError(t, err)
+	assert.Equal(t, establishedKey.Value, storedKey.Value, "the vault's CA private key must be untouched")
+
+	// The established cluster must still load and issue exactly as before.
+	reloaded, err := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+	})
+	require.NoError(t, err)
+	reloadedAnchor, err := reloaded.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, establishedAnchor, reloadedAnchor)
+}
+
+// TestNewManagerFromSecretStore_UnreadableVaultDoesNotReRootFleet is the
+// REQUIRED security test for the re-rooting finding. A vault read that fails for
+// any reason other than genuine absence — here a policy that grants create and
+// update on the CA key path but withholds read — must not reach the bootstrap
+// branch. If it did, this single controller boot would generate a brand-new
+// fleet root, overwrite the published CA certificate and private key, and every
+// steward certificate already issued would stop chaining.
+func TestNewManagerFromSecretStore_UnreadableVaultDoesNotReRootFleet(t *testing.T) {
+	ctx := context.Background()
+	inner := newInMemSecretStore()
+
+	established, err := NewManagerFromSecretStore(ctx, inner, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Established Cluster",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.NoError(t, err)
+	establishedAnchor, err := established.GetCACertificate()
+	require.NoError(t, err)
+	establishedKey, err := inner.GetSecret(ctx, "root/cluster-ca-key")
+	require.NoError(t, err)
+
+	store := newFaultySecretStore(inner)
+	store.failReads("root/cluster-ca",
+		fmt.Errorf("Error making API request. Code: 403. Errors: * 1 error occurred: * permission denied"))
+
+	mgr, err := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Replacement",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.Error(t, err, "a CA read that failed for a reason other than absence must never be answered by generating a new root")
+	assert.Nil(t, mgr)
+	assert.Contains(t, err.Error(), "will not be replaced")
+
+	storedCert, err := inner.GetSecret(ctx, "root/cluster-ca")
+	require.NoError(t, err)
+	assert.Equal(t, string(establishedAnchor), storedCert.Value, "the vault's CA certificate must be untouched")
+
+	storedKey, err := inner.GetSecret(ctx, "root/cluster-ca-key")
+	require.NoError(t, err)
+	assert.Equal(t, establishedKey.Value, storedKey.Value, "the vault's CA private key must be untouched")
+}
+
+// TestNewManagerFromSecretStore_BootstrapNeverOverwritesClaimedKeyPath is the
+// defense-in-depth half of the same fix: even when the load is misclassified as
+// absent and the generate branch runs anyway, the publish is create-if-absent,
+// so the published CA survives. The store here reports the CA certificate as
+// absent on the first read only — the shape of a vault blip, a stale cache, or a
+// classification bug — while the real material sits in the vault throughout.
+//
+// The node must end up serving the published CA, not the one it generated.
+func TestNewManagerFromSecretStore_BootstrapNeverOverwritesClaimedKeyPath(t *testing.T) {
+	ctx := context.Background()
+	inner := newInMemSecretStore()
+
+	established, err := NewManagerFromSecretStore(ctx, inner, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Established Cluster",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.NoError(t, err)
+	establishedAnchor, err := established.GetCACertificate()
+	require.NoError(t, err)
+	establishedKey, err := inner.GetSecret(ctx, "root/cluster-ca-key")
+	require.NoError(t, err)
+
+	store := newFaultySecretStore(inner)
+	store.reportAbsent("root/cluster-ca", 1)
+
+	mgr, err := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Replacement",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.NoError(t, err, "the node must converge on the published CA rather than fail")
+	require.NotNil(t, mgr)
+
+	anchor, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, establishedAnchor, anchor,
+		"the node must serve the fleet's published trust anchor, never the root it generated over a claimed key path")
+
+	storedCert, err := inner.GetSecret(ctx, "root/cluster-ca")
+	require.NoError(t, err)
+	assert.Equal(t, string(establishedAnchor), storedCert.Value, "the vault's CA certificate must be untouched")
+
+	storedKey, err := inner.GetSecret(ctx, "root/cluster-ca-key")
+	require.NoError(t, err)
+	assert.Equal(t, establishedKey.Value, storedKey.Value, "the vault's CA private key must be untouched")
+
+	// The adopted CA must be usable: its leaves chain to the published anchor.
+	leaf, err := mgr.GenerateClientCertificate(&ClientCertConfig{
+		CommonName:   "steward-003",
+		ClientID:     "steward-003",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	leafX509, err := ParseCertificateFromPEM(leaf.CertificatePEM)
+	require.NoError(t, err)
+	anchorCert, err := ParseCertificateFromPEM(anchor)
+	require.NoError(t, err)
+	require.NoError(t, leafX509.CheckSignatureFrom(anchorCert))
+}
+
+// TestLoadCAFromSecretStore_NonSelfSignedWithoutChainFailsClosed proves the
+// other half of the trust-anchor guarantee: a vault holding an intermediate's
+// cert+key with no issuer chain beside it must not load at all. Loading it
+// would make GetCACertificate() fall back to the intermediate's own
+// certificate, publishing a routinely-rotated intermediate as the fleet's
+// permanent, TOFU-pinned trust anchor.
+func TestLoadCAFromSecretStore_NonSelfSignedWithoutChainFailsClosed(t *testing.T) {
+	certPEM, keyPEM, _, _ := importableIntermediateMaterial(t)
+
+	ctx := context.Background()
+	store := newInMemSecretStore()
+	require.NoError(t, store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
+		Key: "cluster-ca", Value: string(certPEM), TenantID: "root", CreatedBy: "test",
+	}))
+	require.NoError(t, store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
+		Key: "cluster-ca-key", Value: string(keyPEM), TenantID: "root", CreatedBy: "test",
+	}))
+
+	ca := &CA{}
+	err := ca.LoadCAFromSecretStore(ctx, store, "root", "cluster-ca")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no issuer chain is stored")
+	assert.False(t, ca.initialized, "a CA that cannot determine its trust anchor must not become usable")
+
+	// The bootstrap branch must not treat "present but unusable" as "absent" and
+	// generate a replacement root over the published intermediate.
+	mgr, mgrErr := NewManagerFromSecretStore(ctx, store, "root", "cluster-ca", &ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &CAConfig{
+			Organization: "Replacement",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+	})
+	require.Error(t, mgrErr, "unusable-but-present CA material must never be silently replaced")
+	assert.Nil(t, mgr)
+	assert.Contains(t, mgrErr.Error(), "will not be replaced")
+
+	stored, getErr := store.GetSecret(ctx, "root/cluster-ca")
+	require.NoError(t, getErr)
+	assert.Equal(t, string(certPEM), stored.Value, "the published CA certificate must be untouched")
+}
+
+// TestNewManagerFromImportedCA_InputValidation covers the error paths for
+// missing required arguments, mirroring TestNewManagerFromSecretStore_InputValidation.
+func TestNewManagerFromImportedCA_InputValidation(t *testing.T) {
+	ctx := context.Background()
+	store := newInMemSecretStore()
+	certPEM, keyPEM, chainPEM, _ := importableIntermediateMaterial(t)
+	validConfig := &ManagerConfig{StoragePath: t.TempDir()}
+
+	tests := []struct {
+		name     string
+		store    secretsinterfaces.SecretStore
+		tenantID string
+		keyPath  string
+		config   *ManagerConfig
+		wantErr  string
+	}{
+		{"nil store", nil, "root", "ca", validConfig, "secret store is required"},
+		{"empty tenantID", store, "", "ca", validConfig, "tenantID and keyPath are required"},
+		{"empty keyPath", store, "root", "", validConfig, "tenantID and keyPath are required"},
+		{"nil config", store, "root", "ca", nil, "manager config is required"},
+		{"empty StoragePath", store, "root", "ca", &ManagerConfig{}, "storage path is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewManagerFromImportedCA(ctx, tt.store, tt.tenantID, tt.keyPath, tt.config, certPEM, keyPEM, chainPEM)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
