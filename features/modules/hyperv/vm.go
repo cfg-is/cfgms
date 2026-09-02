@@ -64,6 +64,12 @@ var (
 	// ErrInvalidSourceRetryMax is returned when source retry_max is negative.
 	ErrInvalidSourceRetryMax = errors.New("hyperv: invalid source retry_max: must be zero or a positive integer")
 
+	// ErrInvalidSourceEdition is returned when source edition contains a
+	// character that could break out of the raw XML text node it is
+	// interpolated into (autounattendTemplate's
+	// <Value>{{ .ProductEdition }}</Value>, Issue #3788).
+	ErrInvalidSourceEdition = errors.New("hyperv: invalid source edition: must not contain '<', '>', '&', quotes, or newlines")
+
 	// ErrInvalidHARoleSeedDir is returned when an HA-role VM places its primary
 	// VHDX on a Cluster Shared Volume but the module-level seed_dir is empty or
 	// also on CSV. The provisioning seed directory must be host-local so the
@@ -90,6 +96,14 @@ var vmNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
 
 // vhdPathPattern validates Windows absolute paths.
 var vhdPathPattern = regexp.MustCompile(`^[A-Za-z]:\\.*`)
+
+// sourceEditionPattern is the allowlist for source.edition — a free-text
+// Windows image/edition name interpolated into a raw XML text node
+// (autounattendTemplate's <Value>{{ .ProductEdition }}</Value>, Issue #3788).
+// It admits the characters real edition names use (letters, digits, space,
+// parens, dot, slash, plus, hyphen) and excludes '<', '>', '&', quotes, and
+// newlines, which would let a value inject additional XML structure.
+var sourceEditionPattern = regexp.MustCompile(`^[A-Za-z0-9 ()./+\-]{1,256}$`)
 
 // CompletionConfig specifies how the provisioner detects that the installed OS
 // is ready and has registered its steward.
@@ -595,6 +609,9 @@ func (s *SourceConfig) validate() error {
 	}
 	if s.RetryMax != nil && *s.RetryMax < 0 {
 		return ErrInvalidSourceRetryMax
+	}
+	if s.Edition != "" && !sourceEditionPattern.MatchString(s.Edition) {
+		return ErrInvalidSourceEdition
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,45 @@ var (
 	errHostRequired          = errors.New("hyperv: winrm_host is required")
 	errUserSecretKeyRequired = errors.New("hyperv: winrm_user_secret key is required")
 	errPassSecretKeyRequired = errors.New("hyperv: winrm_pass_secret key is required")
+
+	// errInvalidDebugSSHKey is returned when debug_ssh_authorized_key does not
+	// match a single-line SSH public key (Issue #3788). The value is
+	// interpolated unquoted into cloudInitUserDataTemplate's
+	// ssh_authorized_keys: YAML list item; a newline in the value would inject
+	// additional cloud-config structure that cloud-init runs as root.
+	errInvalidDebugSSHKey = errors.New("hyperv: invalid debug_ssh_authorized_key: must be a single-line SSH public key (\"ssh-<type> <base64> [comment]\")")
+
+	// errInvalidEnrollToken is returned when enroll_token contains a
+	// newline, quote, or shell metacharacter (Issue #3788). The value is
+	// interpolated unquoted into the preseed late_command shell line and into a
+	// cmd.exe /c command line in the Windows autounattend template.
+	errInvalidEnrollToken = errors.New("hyperv: invalid enroll_token: must be an opaque token containing only letters, digits, '.', '_', or '-'")
+
+	// errInvalidEnrollCAFingerprint is returned when enroll_ca_fingerprint
+	// contains a newline, quote, or shell metacharacter (Issue #3788). Same
+	// injection-prone sinks as enroll_token.
+	errInvalidEnrollCAFingerprint = errors.New("hyperv: invalid enroll_ca_fingerprint: must be a hex digest, optionally colon-separated")
 )
+
+// debugSSHKeyPattern is the allowlist for debug_ssh_authorized_key: a
+// single-line "<type> <base64> [comment]" SSH public key, matching the
+// standard authorized_keys entry shape. It admits the common key types plus an
+// optional trailing comment (letters, digits, '@', '.', '_', '-', spaces) and
+// excludes newlines, quotes, and YAML-structural characters — the value is
+// interpolated unquoted into a YAML list item
+// (cloudInitUserDataTemplate's ssh_authorized_keys: block).
+var debugSSHKeyPattern = regexp.MustCompile(`^(ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) [A-Za-z0-9+/]+=*( [A-Za-z0-9@._\-]{1,255})?$`)
+
+// enrollTokenPattern is the allowlist for enroll_token: an opaque bearer-token
+// alphabet (base64url-safe characters plus '.' for JWT-shaped tokens) with no
+// newline, quote, or shell metacharacter — the value is interpolated unquoted
+// into a preseed late_command shell line and a cmd.exe command line.
+var enrollTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]{1,512}$`)
+
+// enrollCAFingerprintPattern is the allowlist for enroll_ca_fingerprint: hex
+// digest characters with optional colon separators (the conventional SHA-256
+// fingerprint presentation), same injection-prone sinks as enroll_token.
+var enrollCAFingerprintPattern = regexp.MustCompile(`^[A-Fa-f0-9:]{1,128}$`)
 
 // hypervModule implements modules.Module and modules.Configurable for remote
 // Hyper-V management via WinRM. Credentials are fetched from SecretStore on
@@ -352,11 +391,20 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	// These ride the existing config sync; absence is non-fatal (a VM source
 	// without enrollment still creates/installs, it just won't auto-register).
 	m.enrollToken, _ = configMap["enroll_token"].(string)
+	if m.enrollToken != "" && !enrollTokenPattern.MatchString(m.enrollToken) {
+		return errInvalidEnrollToken
+	}
 	m.enrollCAFingerprint, _ = configMap["enroll_ca_fingerprint"].(string)
+	if m.enrollCAFingerprint != "" && !enrollCAFingerprintPattern.MatchString(m.enrollCAFingerprint) {
+		return errInvalidEnrollCAFingerprint
+	}
 	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
 	m.enrollLauncherPath, _ = configMap["enroll_launcher_path"].(string)
 	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
 	m.debugSSHAuthorizedKey, _ = configMap["debug_ssh_authorized_key"].(string)
+	if m.debugSSHAuthorizedKey != "" && !debugSSHKeyPattern.MatchString(m.debugSSHAuthorizedKey) {
+		return errInvalidDebugSSHKey
+	}
 	m.seedDir, _ = configMap["seed_dir"].(string)
 
 	// Failover-cluster scope cap (S5). cluster_name bounds which cluster this

@@ -102,6 +102,47 @@ func TestAutounattend_NoBannedPatterns(t *testing.T) {
 		"enrollment must pass the CA fingerprint via --fingerprint")
 }
 
+// TestAutounattend_EnrollTokenInjectionRejectedByRenderBackstop is the
+// REQUIRED TEST render-level backstop (Issue #3788): an EnrollToken value
+// carrying a newline must be refused by Render even if it somehow bypassed
+// Configure's enrollTokenPattern allowlist — the newline would otherwise let
+// the value break out of the FirstLogonCommands <CommandLine> element.
+func TestAutounattend_EnrollTokenInjectionRejectedByRenderBackstop(t *testing.T) {
+	store := newInlineStore()
+	out, err := NewProfileRenderer().Render(context.Background(), defaultWindowsProfile(), ProfileVars{
+		VMName:         "WIN-07",
+		OSFamily:       "windows",
+		CorrelationID:  "stw-win-07",
+		ProductEdition: defaultWindowsEdition,
+		AdminPassword:  "Aa3-Bb4-Cc5-Dd6-Ee7",
+		EnrollToken:    "tok\"; Remove-VM; \"\ndel C:\\",
+		CAFingerprint:  "AB12",
+	}, store)
+	require.Error(t, err, "a newline-bearing EnrollToken must be rejected by Render's defence-in-depth backstop")
+	assert.Nil(t, out, "no partial output may escape a rejected render")
+}
+
+// TestAutounattend_ProductEditionInjectionRejectedByRenderBackstop is the
+// REQUIRED TEST render-level backstop (Issue #3788): a ProductEdition value
+// carrying XML-breaking characters together with a newline must be refused by
+// Render, so the injected structure never reaches the rendered <Value> node —
+// no partial output escapes. SourceConfig.validate() (vm.go, exercised in
+// vm_test.go) is the primary gate that rejects '<'/'&' at config-apply time;
+// this backstop covers a value that also carries a control character.
+func TestAutounattend_ProductEditionInjectionRejectedByRenderBackstop(t *testing.T) {
+	store := newInlineStore()
+	payload := "Windows Server</Value></MetaData><Bad>x</Bad>\n<MetaData><Value>2025"
+	out, err := NewProfileRenderer().Render(context.Background(), defaultWindowsProfile(), ProfileVars{
+		VMName:         "WIN-08",
+		OSFamily:       "windows",
+		CorrelationID:  "stw-win-08",
+		ProductEdition: payload,
+		AdminPassword:  "Aa3-Bb4-Cc5-Dd6-Ee7",
+	}, store)
+	require.Error(t, err, "a control-character-bearing ProductEdition must be rejected by Render's defence-in-depth backstop")
+	assert.Nil(t, out, "no partial output may escape a rejected render")
+}
+
 // TestAutounattend_AutoLogonAndAdminPassword guards that the one-shot AutoLogon
 // and Administrator password (which let FirstLogonCommands run unattended) are
 // rendered, and that the random password substitutes via {{ .AdminPassword }}.

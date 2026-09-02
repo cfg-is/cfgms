@@ -626,6 +626,83 @@ func TestModule_Configure_RejectsUnknownTransport(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown transport")
 }
 
+// TestModule_Configure_RejectsInvalidDebugSSHKey verifies Configure rejects a
+// debug_ssh_authorized_key that is not a single-line SSH public key — in
+// particular a value carrying a newline, which would otherwise inject
+// additional cloud-config YAML structure into cloudInitUserDataTemplate's
+// ssh_authorized_keys: list item (Issue #3788).
+func TestModule_Configure_RejectsInvalidDebugSSHKey(t *testing.T) {
+	payloads := []string{
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA operator\nruncmd:\n  - [ evil ]", // newline injects a second YAML key
+		"not-a-key-at-all",       // fails the type/base64 allowlist entirely
+		"ssh-ed25519",            // missing the base64 body
+		"ssh-ed25519 \"; evil\"", // quote is not in the allowed comment charset
+	}
+	for _, payload := range payloads {
+		m := &hypervModule{executor: &stubHypervExecutor{}}
+		require.NoError(t, m.SetSecretStore(newInlineStore()))
+		err := m.Configure(mapConfigState{"debug_ssh_authorized_key": payload})
+		require.Error(t, err, "payload %q must be rejected", payload)
+		assert.ErrorIs(t, err, errInvalidDebugSSHKey, "payload %q should return errInvalidDebugSSHKey", payload)
+	}
+}
+
+// TestModule_Configure_AcceptsValidDebugSSHKey verifies a well-formed
+// single-line SSH public key (with and without a trailing comment) passes
+// Configure's allowlist.
+func TestModule_Configure_AcceptsValidDebugSSHKey(t *testing.T) {
+	m := &hypervModule{executor: &stubHypervExecutor{}}
+	require.NoError(t, m.SetSecretStore(newInlineStore()))
+	cfg := mapConfigState{
+		"transport":                "winrm",
+		"winrm_host":               "10.0.0.1",
+		"winrm_user_secret":        "svc-user",
+		"winrm_pass_secret":        "svc-pass",
+		"debug_ssh_authorized_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADEBUGKEY operator@lab",
+	}
+	require.NoError(t, m.Configure(cfg))
+	assert.Equal(t, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAADEBUGKEY operator@lab", m.debugSSHAuthorizedKey)
+}
+
+// TestModule_Configure_RejectsInvalidEnrollToken verifies Configure rejects an
+// enroll_token carrying a newline, quote, or shell metacharacter — the value
+// is interpolated unquoted into the preseed late_command shell line
+// (linux_profile.go) and a cmd.exe command line (windows_profile.go),
+// Issue #3788.
+func TestModule_Configure_RejectsInvalidEnrollToken(t *testing.T) {
+	payloads := []string{
+		"tok\nin-target rm -rf /", // newline injects a second preseed command
+		`tok"; Remove-VM; "`,      // quote breaks out of the cmd.exe quoted arg
+		"tok; evil",               // shell metacharacter
+		"tok$(evil)",              // subexpression
+	}
+	for _, payload := range payloads {
+		m := &hypervModule{executor: &stubHypervExecutor{}}
+		require.NoError(t, m.SetSecretStore(newInlineStore()))
+		err := m.Configure(mapConfigState{"enroll_token": payload})
+		require.Error(t, err, "payload %q must be rejected", payload)
+		assert.ErrorIs(t, err, errInvalidEnrollToken, "payload %q should return errInvalidEnrollToken", payload)
+	}
+}
+
+// TestModule_Configure_RejectsInvalidEnrollCAFingerprint verifies Configure
+// rejects an enroll_ca_fingerprint carrying a newline, quote, or shell
+// metacharacter — same injection-prone sinks as enroll_token.
+func TestModule_Configure_RejectsInvalidEnrollCAFingerprint(t *testing.T) {
+	payloads := []string{
+		"AB12\nin-target rm -rf /",
+		`AB12"; Remove-VM; "`,
+		"AB12; evil",
+	}
+	for _, payload := range payloads {
+		m := &hypervModule{executor: &stubHypervExecutor{}}
+		require.NoError(t, m.SetSecretStore(newInlineStore()))
+		err := m.Configure(mapConfigState{"enroll_ca_fingerprint": payload})
+		require.Error(t, err, "payload %q must be rejected", payload)
+		assert.ErrorIs(t, err, errInvalidEnrollCAFingerprint, "payload %q should return errInvalidEnrollCAFingerprint", payload)
+	}
+}
+
 // ─── Module interface compliance tests ─────────────────────────────────────────
 
 // TestModule_ImplementsConfigurable verifies that *hypervModule satisfies modules.Configurable.

@@ -551,7 +551,7 @@ Optional provisioning-debug config:
 | Key | Purpose |
 |-----|---------|
 | `enroll_launcher_path` | Host path to `cfgms-steward-launcher`, staged onto the seed so the guest performs a launcher-managed (push-upgradeable) install. |
-| `debug_ssh_authorized_key` | An SSH **public** key added to a provisioned Linux guest's `authorized_keys` so an operator can log in and diagnose a failed enrollment. Public key only (not a secret); omit to disable (production default). |
+| `debug_ssh_authorized_key` | An SSH **public** key added to a provisioned Linux guest's `authorized_keys` so an operator can log in and diagnose a failed enrollment. Public key only (not a secret); omit to disable (production default). Must be a single-line `ssh-<type> <base64> [comment]` value — a newline or other character outside the allowlist is rejected at config-apply, since the value is interpolated into a cloud-config YAML list item. |
 
 ### Annotated Linux example (legacy netinst ISO + preseed)
 
