@@ -114,11 +114,16 @@ func signTestCertificateOutsideEnrolmentFlow(t *testing.T, server *Server, commo
 }
 
 // accountPersistFailingSecretStore wraps a real SecretStore and fails only
-// StoreSecret calls tagged "account" — every other operation (including the
-// credential-request listing revoke-by-token itself depends on) is served by the
-// real store. Used to inject a failure between certManager.Revoke and
-// removeCertBindingFromAccount's persistAccount call, mirroring
-// accountListFailingSecretStore's narrow-by-tag shape (handlers_credential_requests_test.go).
+// account-tagged persists — StoreSecret and CompareAndSwapSecret alike — every
+// other operation (including the credential-request listing revoke-by-token itself
+// depends on) is served by the real store. Used to inject a failure between
+// certManager.Revoke and removeCertBindingFromAccount's persistAccountCAS call,
+// mirroring accountListFailingSecretStore's narrow-by-tag shape
+// (handlers_credential_requests_test.go). CompareAndSwapSecret must be covered
+// alongside StoreSecret: removeCertBindingFromAccount persists through
+// persistAccountCAS (Issue #3761, ADR-031 Decision 1), so a fixture that only
+// intercepted StoreSecret would let the real store's CompareAndSwapSecret succeed
+// and silently defeat the injected failure.
 type accountPersistFailingSecretStore struct {
 	secretsif.SecretStore
 	failErr error
@@ -131,6 +136,15 @@ func (s *accountPersistFailingSecretStore) StoreSecret(ctx context.Context, req 
 		}
 	}
 	return s.SecretStore.StoreSecret(ctx, req)
+}
+
+func (s *accountPersistFailingSecretStore) CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	for _, tag := range req.Tags {
+		if tag == "account" {
+			return 0, false, s.failErr
+		}
+	}
+	return s.SecretStore.CompareAndSwapSecret(ctx, key, expectedVersion, req)
 }
 
 // ---- cancel -------------------------------------------------------------------------
