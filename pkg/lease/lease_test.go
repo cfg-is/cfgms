@@ -326,17 +326,19 @@ func TestManager_CurrentHolder_UsesStoreValidityNotLocalWallClock(t *testing.T) 
 // property the dual-authority-window bound test below depends on.
 func TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL(t *testing.T) {
 	store := newTestStore(t)
-	// The parameters are chosen so the margin is a small fraction of the TTL
-	// (400ms of 2s), not a near-miss (800ms of 1s). The test samples a single
-	// instant that must fall after the margin and before the row's expiry; with a
-	// near-miss the whole budget for the two store round-trips plus scheduling is
-	// ttl-sleepFor, which on a loaded machine (the full suite runs packages in
-	// parallel and the flatfile store does real file IO) is not a bound the
-	// property under test depends on — it is the test racing itself. Widening the
-	// gap makes the sampled instant unambiguous and shortens the sleep.
-	ttl := 2 * time.Second
-	renewalInterval := 800 * time.Millisecond
-	maxRenewalLatency := 800 * time.Millisecond
+	// The parameters are chosen so the margin gives generous headroom over a
+	// slow store round-trip, not just over the TTL. The first assertion below
+	// depends on TryAcquire's single store round-trip finishing inside the
+	// margin: on the Windows merge-queue leg, where the flatfile store does
+	// real file IO while the whole suite runs packages in parallel, that
+	// round-trip was observed at ~1s (Issue #3819). A previous 400ms margin
+	// left no room for that; this margin is 3.6s
+	// (= leaseTTL - renewalInterval - maxAllowedRenewalLatency
+	//  = 8s - 2.2s - 2.2s), leaving roughly 2.6s of headroom even if that
+	// latency triples.
+	ttl := 8 * time.Second
+	renewalInterval := 2200 * time.Millisecond
+	maxRenewalLatency := 2200 * time.Millisecond
 	m, err := NewManager(store, ttl, renewalInterval, maxRenewalLatency)
 	require.NoError(t, err)
 	margin := m.SafetyMargin()
@@ -351,8 +353,10 @@ func TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL(t *testing.T) {
 	require.True(t, has, "immediately after acquiring, local authority must be valid")
 
 	// Sleep past the safety margin but still well within the lease's real TTL:
-	// margin+100ms = 500ms, leaving ~1.5s of the 2s TTL for the store round-trip
-	// below plus any scheduling delay under -race.
+	// margin+100ms = 3.7s, under the ttl/2 = 4s guard below, and leaving
+	// 8s-3.7s = 4.3s of the TTL for the store round-trip in CurrentHolder
+	// below — comfortably clearing a round-trip several times slower than the
+	// ~1s Windows observation.
 	sleepFor := margin + 100*time.Millisecond
 	require.Less(t, sleepFor, ttl/2, "test sleep must land well before the real TTL expires")
 	time.Sleep(sleepFor)
@@ -419,9 +423,17 @@ func TestManager_HasLocalAuthority_WindowAnchoredAtCallStartNotCallReturn(t *tes
 // valid local authority.
 func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing.T) {
 	store := newTestStore(t)
-	ttl := 300 * time.Millisecond
-	renewalInterval := 50 * time.Millisecond
-	maxRenewalLatency := 50 * time.Millisecond // safetyMargin = 200ms
+	// Same Windows-latency headroom rationale as
+	// TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL above, which
+	// this test's own doc comment references (Issue #3819): ttl=3s,
+	// renewalInterval=800ms, maxRenewalLatency=800ms derives a margin of
+	// 3s-800ms-800ms = 1.4s, well clear of a single ~1s slow store
+	// round-trip. The polling deadline extends 2s past the nominal ttl so
+	// holder-2's post-expiry TryAcquire has room to complete even if that
+	// single round-trip is slow, rather than racing the deadline.
+	ttl := 3 * time.Second
+	renewalInterval := 800 * time.Millisecond
+	maxRenewalLatency := 800 * time.Millisecond // safetyMargin = 1.4s
 
 	mHolder1, err := NewManager(store, ttl, renewalInterval, maxRenewalLatency)
 	require.NoError(t, err)
@@ -439,7 +451,7 @@ func TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin(t *testing
 	acquireTime := time.Now()
 
 	var holder2EverAcquired bool
-	deadline := acquireTime.Add(ttl + 200*time.Millisecond)
+	deadline := acquireTime.Add(ttl + 2*time.Second)
 	for time.Now().Before(deadline) {
 		_, holder1HasAuthority := mHolder1.HasLocalAuthority(name, holder1)
 
