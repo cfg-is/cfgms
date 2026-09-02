@@ -41,6 +41,28 @@ func TestLinuxCloudInit_DebugSSHKey(t *testing.T) {
 	assert.NotContains(t, string(out2), "ssh_authorized_keys", "no debug SSH access unless explicitly configured")
 }
 
+// TestLinuxCloudInit_DebugSSHKey_RenderRejectsNewline is the REQUIRED TEST
+// render-level backstop (Issue #3788): a DebugSSHKey value carrying a newline
+// must be refused by Render even if it somehow bypassed Configure's
+// debugSSHKeyPattern allowlist — the newline would otherwise let the value
+// introduce a second cloud-config YAML key inside cloudInitUserDataTemplate's
+// ssh_authorized_keys: list item.
+func TestLinuxCloudInit_DebugSSHKey_RenderRejectsNewline(t *testing.T) {
+	profile := defaultLinuxCloudInitProfile()
+	vars := ProfileVars{
+		VMName:        "stw-lin-02",
+		OSFamily:      "linux",
+		CorrelationID: "stw-corr-2",
+		EnrollToken:   "tok",
+		CAFingerprint: "abcd",
+		BundleURL:     profile.Enroll.BundleURL,
+		DebugSSHKey:   "ssh-ed25519 AAAA operator\nruncmd:\n  - [ evil ]",
+	}
+	out, err := NewProfileRenderer().Render(context.Background(), profile, vars, preseedTestStore())
+	require.Error(t, err, "a newline-bearing DebugSSHKey must be rejected by Render's defence-in-depth backstop")
+	assert.Nil(t, out, "no partial output may escape a rejected render")
+}
+
 // TestLinuxCloudInit_InstallUsesControllerCAFlag guards against the flag-name drift
 // that silently broke enrollment: the cloud-init install line must invoke
 // `cfgms-steward install ... --controller-ca ...` (the actual flag registered by

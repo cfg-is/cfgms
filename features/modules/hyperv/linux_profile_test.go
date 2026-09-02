@@ -93,3 +93,23 @@ func TestLinuxPreseed_NoBannedPatterns(t *testing.T) {
 			"rendered preseed must not contain banned pattern %q", banned)
 	}
 }
+
+// TestLinuxPreseed_EnrollTokenInjectionRejectedByRenderBackstop is the
+// REQUIRED TEST render-level backstop (Issue #3788): an EnrollToken value
+// carrying a newline must be refused by Render even if it somehow bypassed
+// Configure's enrollTokenPattern allowlist — the newline would otherwise let
+// the value inject an additional preseed command into the
+// `d-i preseed/late_command string` shell line.
+func TestLinuxPreseed_EnrollTokenInjectionRejectedByRenderBackstop(t *testing.T) {
+	profile := defaultLinuxProfile()
+	out, err := NewProfileRenderer().Render(context.Background(), profile, ProfileVars{
+		VMName:        "stw-lin-03",
+		OSFamily:      "linux",
+		CorrelationID: "stw-lin-03",
+		EnrollToken:   "tok\nin-target rm -rf /",
+		AdminPassword: "Aa3-Bb4-Cc5-Dd6-Ee7",
+		BundleURL:     profile.Enroll.BundleURL,
+	}, preseedTestStore())
+	require.Error(t, err, "a newline-bearing EnrollToken must be rejected by Render's defence-in-depth backstop")
+	assert.Nil(t, out, "no partial output may escape a rejected render")
+}

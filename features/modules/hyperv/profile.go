@@ -209,6 +209,9 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 	if store == nil {
 		return nil, errors.New("hyperv: nil secret store")
 	}
+	if err := validateProfileVarsNoControlChars(vars); err != nil {
+		return nil, err
+	}
 
 	// secretErr captures a failure from inside the "secret" template func so we
 	// can surface the real cause (e.g. ErrSecretNotFound) instead of the wrapped
@@ -269,6 +272,39 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 	}
 
 	return buf.Bytes(), nil
+}
+
+// controlCharPattern matches any ASCII control character (0x00-0x1F) or DEL
+// (0x7F), including newline and carriage return — the injection primitive for
+// every sink these vars are interpolated into (YAML list item, shell line,
+// cmd.exe command line, XML text node).
+var controlCharPattern = regexp.MustCompile(`[\x00-\x1f\x7f]`)
+
+// validateProfileVarsNoControlChars is a defence-in-depth backstop (Issue
+// #3788): even if a value slipped past Configure/SourceConfig.validate(),
+// Render refuses to interpolate a control character into any answer-file
+// template. Checked in a fixed field order so the reported field is
+// deterministic when more than one is invalid.
+func validateProfileVarsNoControlChars(v ProfileVars) error {
+	fields := []struct {
+		name, value string
+	}{
+		{"VMName", v.VMName},
+		{"OSFamily", v.OSFamily},
+		{"EnrollToken", v.EnrollToken},
+		{"CorrelationID", v.CorrelationID},
+		{"ProductEdition", v.ProductEdition},
+		{"BundleURL", v.BundleURL},
+		{"CAFingerprint", v.CAFingerprint},
+		{"AdminPassword", v.AdminPassword},
+		{"DebugSSHKey", v.DebugSSHKey},
+	}
+	for _, f := range fields {
+		if controlCharPattern.MatchString(f.value) {
+			return fmt.Errorf("hyperv: profile var %s contains a control character", f.name)
+		}
+	}
+	return nil
 }
 
 // parseProfileName strips the profile:// prefix from a source.unattend reference
