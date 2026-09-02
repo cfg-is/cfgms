@@ -1,0 +1,248 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+//
+// Cross-node cluster-store tests for Issue #3852 AC4, AC5, and AC6. These
+// exercise cert.Manager end-to-end against the Postgres-backed
+// RevocationStore/SigningCursorStore (pkg/storage/providers/database), so
+// they live in an external cert_test package rather than package cert:
+// pkg/storage/providers/database transitively imports pkg/cert (via
+// pkg/storage/interfaces/business's config-signing path), so a package cert
+// (internal) test file importing it would cycle. cert_test has no such
+// problem — nothing imports cert_test.
+//
+// Every test here is skipped when no test Postgres database is reachable
+// (CFGMS_TEST_DB_* env vars), matching pkg/storage/providers/database's own
+// test convention.
+package cert_test
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"sync"
+	"testing"
+
+	_ "github.com/lib/pq" // PostgreSQL driver
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/storage/providers/database"
+)
+
+func clusterTestConfig() map[string]interface{} {
+	port := 5432
+	if portStr := os.Getenv("CFGMS_TEST_DB_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+	}
+	return map[string]interface{}{
+		"host": "localhost", "port": port, "database": "cfgms_test",
+		"username": "cfgms_test", "password": os.Getenv("CFGMS_TEST_DB_PASSWORD"), "sslmode": "disable",
+	}
+}
+
+// clusterTestDB opens an independent connection to the test database,
+// simulating a distinct controller node's own pool rather than a shared one.
+// Returns a skip reason when no test database is reachable.
+func clusterTestDB(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	if testing.Short() {
+		return nil, "skipping database tests in short mode"
+	}
+	cfg := clusterTestConfig()
+	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
+		cfg["host"], cfg["port"], cfg["database"], cfg["username"], cfg["password"], cfg["sslmode"])
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, "PostgreSQL test database not available: " + err.Error()
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, "PostgreSQL test database not reachable: " + err.Error()
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, ""
+}
+
+// newClusterManager builds a cert.Manager backed by its own FileStore (a
+// fresh temp dir — simulating a node with no knowledge of any other node's
+// locally-issued certificates) but a RevocationStore/SigningCursorStore
+// backed by db, simulating one controller node in a cluster deployment.
+func newClusterManager(t *testing.T, db *sql.DB) *cert.Manager {
+	t.Helper()
+	revStore, err := database.NewDatabaseCertRevocationStore(db, clusterTestConfig())
+	require.NoError(t, err)
+	curStore, err := database.NewDatabaseSigningCursorStore(db, clusterTestConfig())
+	require.NoError(t, err)
+
+	m, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "Test",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+		RevocationStore:    revStore,
+		SigningCursorStore: curStore,
+	})
+	require.NoError(t, err)
+	return m
+}
+
+func dropClusterTables(t *testing.T, db *sql.DB) {
+	t.Helper()
+	require.NoError(t, database.NewDatabaseSchemas().DropAllTables(context.Background(), db))
+}
+
+// TestClusterRevocation_ObservedAcrossNodes is the AC4 [REQUIRED TEST]:
+// revoke a serial via manager A, and IsRevoked on manager B — a wholly
+// separate *cert.Manager instance, with its own FileStore and its own
+// database connection — returns true without restarting B or re-reading a
+// file by hand. This must fail if RevocationStore is reverted to the
+// node-local file-backed default: manager B's file store lives in its own
+// t.TempDir() and would never see a write to manager A's.
+func TestClusterRevocation_ObservedAcrossNodes(t *testing.T) {
+	seedDB, skip := clusterTestDB(t)
+	if skip != "" {
+		t.Skip(skip)
+	}
+	dropClusterTables(t, seedDB)
+
+	dbA, skipA := clusterTestDB(t)
+	require.Empty(t, skipA)
+	dbB, skipB := clusterTestDB(t)
+	require.Empty(t, skipB)
+
+	managerA := newClusterManager(t, dbA)
+	managerB := newClusterManager(t, dbB)
+
+	certA, err := managerA.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "node-a-issued",
+		Organization: "CFGMS",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, managerA.Revoke(certA.SerialNumber))
+
+	revoked, err := managerB.IsRevoked(certA.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked, "a serial revoked on manager A must be observed as revoked on manager B without a restart")
+}
+
+// TestClusterRevocation_NeverFailsSilentlyOffIssuingNode is the AC5
+// [REQUIRED TEST]: a revoke issued on a node that does not hold the serial
+// locally either succeeds cluster-wide or returns an error — it must never
+// report success while leaving the certificate trusted (Issue #3761
+// escalation finding 2). manager B has never seen certA's serial in its own
+// FileStore (certA was generated by manager A, in a different temp dir), so
+// this exercises exactly the "served off the issuing node" path.
+func TestClusterRevocation_NeverFailsSilentlyOffIssuingNode(t *testing.T) {
+	seedDB, skip := clusterTestDB(t)
+	if skip != "" {
+		t.Skip(skip)
+	}
+	dropClusterTables(t, seedDB)
+
+	dbA, skipA := clusterTestDB(t)
+	require.Empty(t, skipA)
+	dbB, skipB := clusterTestDB(t)
+	require.Empty(t, skipB)
+
+	managerA := newClusterManager(t, dbA)
+	managerB := newClusterManager(t, dbB)
+
+	certA, err := managerA.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "node-a-issued-2",
+		Organization: "CFGMS",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// managerB does not hold certA.SerialNumber in its local FileStore.
+	revokeErr := managerB.Revoke(certA.SerialNumber)
+	require.NoError(t, revokeErr, "revoke from a non-issuing node must succeed cluster-wide, not silently fail")
+
+	revokedOnA, err := managerA.IsRevoked(certA.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revokedOnA, "the revoke issued on B must actually be visible on A — success must not be a lie")
+
+	// The explicit error path: an empty serial is the one input Revoke still
+	// rejects, and it must return an error rather than silently succeeding.
+	assert.Error(t, managerB.Revoke(""), "revoking an empty serial must return an error, never a silent success")
+}
+
+// TestClusterSigningCursor_ConcurrentTransitionsConverge is the AC6
+// [REQUIRED TEST]: concurrent RotateSigningCertificate calls from two
+// distinct cert.Manager instances (simulating two controller nodes) must
+// converge on one cursor — exactly one winner, every other caller rejected
+// with "rotation already in progress" — never two divergent cursors. Run
+// under -race: go test -race ./pkg/cert/...
+func TestClusterSigningCursor_ConcurrentTransitionsConverge(t *testing.T) {
+	seedDB, skip := clusterTestDB(t)
+	if skip != "" {
+		t.Skip(skip)
+	}
+	dropClusterTables(t, seedDB)
+
+	dbA, skipA := clusterTestDB(t)
+	require.Empty(t, skipA)
+	dbB, skipB := clusterTestDB(t)
+	require.Empty(t, skipB)
+
+	managerA := newClusterManager(t, dbA)
+	managerB := newClusterManager(t, dbB)
+
+	// Seed an initial signing certificate + cursor so both managers contend
+	// on the guarded (second) rotation, not the always-succeeds first one.
+	_, err := managerA.GenerateSigningCertificate(&cert.SigningCertConfig{
+		CommonName: "cfgms-config-signer", ValidityDays: 30, KeySize: 2048,
+	})
+	require.NoError(t, err)
+	seedCert, err := managerA.RotateSigningCertificate(30)
+	require.NoError(t, err)
+	require.NotNil(t, seedCert)
+
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, rotErr := managerA.RotateSigningCertificate(30)
+		results <- rotErr
+	}()
+	go func() {
+		defer wg.Done()
+		_, rotErr := managerB.RotateSigningCertificate(30)
+		results <- rotErr
+	}()
+	wg.Wait()
+	close(results)
+
+	var successes, inProgress int
+	for rotErr := range results {
+		switch {
+		case rotErr == nil:
+			successes++
+		case errors.Is(rotErr, cert.ErrSigningRotationInProgress):
+			inProgress++
+		default:
+			require.NoError(t, rotErr, "unexpected error type")
+		}
+	}
+	assert.Equal(t, 1, successes, "exactly one of the two concurrent cross-node rotations must win")
+	assert.Equal(t, 1, inProgress, "the other must be rejected as in-progress, never silently diverge")
+
+	// Both managers must observe the same, single winning cursor.
+	cursorA, err := managerA.GetSigningCursorState()
+	require.NoError(t, err)
+	cursorB, err := managerB.GetSigningCursorState()
+	require.NoError(t, err)
+	assert.Equal(t, cursorA.CurrentSerial, cursorB.CurrentSerial, "both nodes must converge on one cursor, never diverge")
+}
