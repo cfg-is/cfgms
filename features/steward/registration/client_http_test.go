@@ -4,7 +4,11 @@ package registration
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -440,4 +444,90 @@ func TestRefreshComplete_403_ReturnsErrRefreshRejected(t *testing.T) {
 	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"))
 	assert.Nil(t, resp)
 	require.ErrorIs(t, err, ErrRefreshRejected)
+}
+
+// newIntermediateBackedEnrollmentCertSet builds a real CFGMS root CA, signs a
+// subordinate (regional intermediate) from it, and issues a leaf from that
+// intermediate — mirroring what a controller cell backed by an imported regional
+// intermediate returns from a claimed registration (Issue #3778). Returns the
+// full enrollmentCertSet plus the root-only PEM a steward would have pinned at
+// its original enrollment.
+func newIntermediateBackedEnrollmentCertSet(t *testing.T) (set enrollmentCertSet, rootCertPEM []byte) {
+	t.Helper()
+
+	rootMgr, err := cfgcert.NewManager(&cfgcert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cfgcert.CAConfig{
+			Organization:  "CFGMS Test Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    1,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+
+	rootCertPEM, err = rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subCert, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &cfgcert.SubordinateCAConfig{
+		CommonName:   "CFGMS Test Regional Intermediate",
+		Organization: "CFGMS Test",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+
+	subKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(subKey),
+	})
+
+	intermediateMgr, err := cfgcert.NewManagerFromCAMaterial(&cfgcert.ManagerConfig{
+		StoragePath: t.TempDir(),
+	}, subCert.CertificatePEM, subKeyPEM, rootCertPEM)
+	require.NoError(t, err)
+
+	leaf, err := intermediateMgr.GenerateClientCertificate(&cfgcert.ClientCertConfig{
+		CommonName:   "steward-intermediate",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-intermediate",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, leaf.IssuerChainPEM, "leaf issued by an intermediate-backed manager must carry a non-empty issuer chain")
+
+	return enrollmentCertSet{
+		stewardID:   "steward-intermediate",
+		clientCert:  string(leaf.CertificatePEM),
+		clientKey:   string(leaf.PrivateKeyPEM),
+		caCert:      string(rootCertPEM),
+		issuerChain: string(leaf.IssuerChainPEM),
+	}, rootCertPEM
+}
+
+// TestVerifyEnrollmentCertSet_IntermediateChain_SucceedsWithRootOnlyPin proves
+// the steward's TLS verification (verifyEnrollmentCertSet) succeeds against a
+// leaf presented with its intermediate when only the root is pre-trusted — the
+// real pkg/cert-generated chain, no static test certs. [REQUIRED TEST]
+func TestVerifyEnrollmentCertSet_IntermediateChain_SucceedsWithRootOnlyPin(t *testing.T) {
+	set, _ := newIntermediateBackedEnrollmentCertSet(t)
+
+	err := verifyEnrollmentCertSet(set)
+	assert.NoError(t, err, "leaf + delivered issuer chain must verify against a root-only trust pool")
+}
+
+// TestVerifyEnrollmentCertSet_IntermediateChain_FailsWithoutChain proves the
+// chain is actually load-bearing: the same leaf, presented WITHOUT its issuer
+// chain, must fail to verify against the same root-only pool — otherwise the
+// success above would be vacuous.
+func TestVerifyEnrollmentCertSet_IntermediateChain_FailsWithoutChain(t *testing.T) {
+	set, _ := newIntermediateBackedEnrollmentCertSet(t)
+	set.issuerChain = ""
+
+	err := verifyEnrollmentCertSet(set)
+	assert.Error(t, err, "a leaf from an intermediate CA must not verify against a root-only pool without its issuer chain")
 }

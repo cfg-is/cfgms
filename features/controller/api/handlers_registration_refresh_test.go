@@ -1049,6 +1049,37 @@ func TestRefresh_AutoAccept_NoProvenanceBaseline(t *testing.T) {
 	assert.NotEmpty(t, resp.ClientCert)
 	assert.NotEmpty(t, resp.ClientKey)
 	assert.NotEmpty(t, resp.CACert)
+	assert.Empty(t, resp.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
+}
+
+// TestRefresh_AutoAccept_IntermediateCA_IncludesIssuerChain verifies issuer_chain
+// is present and non-empty on the refresh-complete response (buildRefreshClaimResponse)
+// when the controller's cert manager is backed by an intermediate CA (Issue #3778).
+// [REQUIRED TEST]
+func TestRefresh_AutoAccept_IntermediateCA_IncludesIssuerChain(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestIntermediateCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID:                 "s-active",
+		DeviceID:           testDeviceID,
+		TenantID:           testTenantID,
+		Status:             business.StewardStatusActive,
+		IdentityKeyPub:     []byte(pub),
+		LastProvenanceJSON: "", // no baseline — first refresh after registration
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "auto_accept"})
+
+	challenge := issueChallenge(t, f.server, testDeviceID, testTenantID)
+	req := buildValidCompleteRequest(t, testDeviceID, testTenantID, challenge, priv, nil)
+
+	rec := postComplete(f.server, testDeviceID, req)
+	require.Equal(t, http.StatusOK, rec.Code, "auto_accept with no provenance baseline must issue cert immediately: %s", rec.Body.String())
+
+	var resp RefreshCompleteResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "approved", resp.Status)
+	assert.NotEmpty(t, resp.ClientCert)
+	assert.NotEmpty(t, resp.IssuerChain, "issuer_chain must be present and non-empty when the cert manager is backed by an intermediate CA")
 }
 
 // ---- Root-scoped ADR-025 Decision 1 guard tests for handleApproveRefresh (Issue #3303) ---

@@ -3,6 +3,7 @@
 package cert
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -28,6 +29,14 @@ type CA struct {
 	privateKey  *rsa.PrivateKey
 	config      *CAConfig
 	initialized bool
+
+	// issuerChainPEM is the PEM-concatenated chain from this CA's own issuer up to
+	// and including the ultimate trust root, ordered nearest-issuer-first / root-
+	// last — so its terminal (last) entry is always the root. Empty when this CA is
+	// itself the root (self-signed) CA, which is true for every CA today: nothing
+	// populates this field before S3's ImportSubordinateCA. Settable at load/init
+	// time by a caller that loads this CA as a previously-signed subordinate.
+	issuerChainPEM []byte
 }
 
 // NewCA creates a new Certificate Authority manager
@@ -185,18 +194,152 @@ func (ca *CA) LoadCA(storagePath string) error {
 	return nil
 }
 
-// GetCACertificate returns the CA certificate in PEM format
+// GetCACertificate returns the PEM-encoded trust anchor a caller should treat as
+// permanent — for a self-signed root this is the CA's own certificate; for an
+// imported regional intermediate (see ImportSubordinateCA) this is the true
+// offline root, never the intermediate's own currently-active certificate.
 func (ca *CA) GetCACertificate() ([]byte, error) {
 	if !ca.initialized {
 		return nil, fmt.Errorf("CA is not initialized")
 	}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{
+	if len(ca.issuerChainPEM) == 0 {
+		return ca.ownCertificatePEM(), nil
+	}
+
+	parents, err := ParseCertificateChainFromPEM(ca.issuerChainPEM)
+	if err != nil || len(parents) == 0 {
+		return nil, fmt.Errorf("failed to parse issuer chain to locate trust root: %w", err)
+	}
+
+	// Defense in depth for the fleet-wide, permanently-pinned value this returns:
+	// the terminal entry is only the trust root if it is actually self-signed. A
+	// chain handed over in the conventional root-FIRST bundle order would
+	// otherwise silently publish an intermediate as the fleet's permanent anchor.
+	// Callers entering the trust boundary are validated in full by
+	// validateIssuerChain; this re-check covers *CA values assembled by any other
+	// path inside the package, and fails closed rather than returning the wrong
+	// anchor.
+	root := parents[len(parents)-1]
+	if err := verifySelfSigned(root); err != nil {
+		return nil, fmt.Errorf("terminal issuer chain entry is not a self-signed root, so no trust anchor can be determined "+
+			"(the chain must be ordered nearest-issuer-first with the root last): %w", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: root.Raw,
+	}), nil
+}
+
+// validateIssuerChain verifies that issuerChainPEM is a usable issuer chain for
+// caCert before any of it is allowed to become a trust anchor. The chain is
+// ordered nearest-issuer-first / root-last, so a valid chain satisfies all of:
+//
+//  1. its first entry actually issued caCert,
+//  2. every entry is signed by its successor (the chain links, with no gaps),
+//  3. its terminal entry is a self-signed root.
+//
+// An empty chain declares caCert itself to be the trust anchor, which is only
+// true when caCert is self-signed.
+//
+// Every rule fails closed: GetCACertificate's result is written to ca/ca.crt,
+// baked into installers, returned as ca_cert on registration and refresh, and
+// TOFU-pinned permanently by stewards, so an unverified blob reaching it turns
+// an intermediate compromise into a permanent fleet-wide root compromise.
+func validateIssuerChain(caCert *x509.Certificate, issuerChainPEM []byte) error {
+	if caCert == nil {
+		return fmt.Errorf("CA certificate is required")
+	}
+
+	if len(issuerChainPEM) == 0 {
+		if err := verifySelfSigned(caCert); err != nil {
+			return fmt.Errorf("CA certificate is not self-signed but no issuer chain was supplied: %w", err)
+		}
+		return nil
+	}
+
+	parents, err := ParseCertificateChainFromPEM(issuerChainPEM)
+	if err != nil {
+		return fmt.Errorf("failed to parse issuer chain: %w", err)
+	}
+
+	// chain[0] is the CA's own certificate; each subsequent entry must be the
+	// issuer of the one before it.
+	chain := append([]*x509.Certificate{caCert}, parents...)
+	for i := 0; i < len(chain)-1; i++ {
+		if err := verifyIssuedBy(chain[i], chain[i+1]); err != nil {
+			if i == 0 {
+				return fmt.Errorf("issuer chain entry 0 did not issue the CA certificate: %w", err)
+			}
+			return fmt.Errorf("issuer chain does not link: entry %d is not signed by entry %d: %w", i-1, i, err)
+		}
+	}
+
+	root := chain[len(chain)-1]
+	if err := verifySelfSigned(root); err != nil {
+		return fmt.Errorf("terminal issuer chain entry is not a self-signed root "+
+			"(the chain must be ordered nearest-issuer-first with the root last): %w", err)
+	}
+
+	return nil
+}
+
+// verifyIssuedBy reports whether parent issued child: parent must be a CA, its
+// subject must match child's issuer, and it must have produced child's signature.
+func verifyIssuedBy(child, parent *x509.Certificate) error {
+	if !parent.IsCA {
+		return fmt.Errorf("issuer certificate is not a CA")
+	}
+	if !bytes.Equal(child.RawIssuer, parent.RawSubject) {
+		return fmt.Errorf("issuer name mismatch")
+	}
+	if err := child.CheckSignatureFrom(parent); err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+	return nil
+}
+
+// verifySelfSigned reports whether cert is a self-signed root: its own subject is
+// its issuer and its own key produced its signature.
+func verifySelfSigned(cert *x509.Certificate) error {
+	return verifyIssuedBy(cert, cert)
+}
+
+// ownCertificatePEM returns this CA's own certificate re-encoded as PEM.
+func (ca *CA) ownCertificatePEM() []byte {
+	return pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
 		Bytes: ca.certificate.Raw,
 	})
+}
 
-	return certPEM, nil
+// issuedCertIssuerChainPEM returns the value that belongs in IssuerChainPEM for a
+// certificate this CA signs: the chain from the signed certificate's direct issuer
+// (this CA) up to but not including the ultimate trust root. Empty when this CA is
+// itself the root, since the direct issuer of the signed certificate is then the
+// root and there is nothing between issuer and root to record.
+func (ca *CA) issuedCertIssuerChainPEM() []byte {
+	if len(ca.issuerChainPEM) == 0 {
+		return nil
+	}
+
+	chain := append([]byte{}, ca.ownCertificatePEM()...)
+
+	// ca.issuerChainPEM is root-terminal; every entry except the final one (the
+	// root) belongs alongside this CA's own certificate in the issued
+	// certificate's chain.
+	parents, err := ParseCertificateChainFromPEM(ca.issuerChainPEM)
+	if err != nil || len(parents) == 0 {
+		return chain
+	}
+	for _, p := range parents[:len(parents)-1] {
+		chain = append(chain, pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: p.Raw,
+		})...)
+	}
+	return chain
 }
 
 // IsInitialized returns true if the CA is initialized
@@ -322,6 +465,7 @@ func (ca *CA) GenerateServerCertificate(config *ServerCertConfig) (*Certificate,
 		ExpiresAt:      template.NotAfter,
 		IsValid:        true,
 		CertificatePEM: certPEM,
+		IssuerChainPEM: ca.issuedCertIssuerChainPEM(),
 		PrivateKeyPEM:  keyPEM,
 		Fingerprint:    fingerprint,
 		Issuer:         ca.certificate.Subject.CommonName,
@@ -410,6 +554,7 @@ func (ca *CA) GenerateClientCertificate(config *ClientCertConfig) (*Certificate,
 		ExpiresAt:      template.NotAfter,
 		IsValid:        true,
 		CertificatePEM: certPEM,
+		IssuerChainPEM: ca.issuedCertIssuerChainPEM(),
 		PrivateKeyPEM:  keyPEM,
 		Fingerprint:    fingerprint,
 		Issuer:         ca.certificate.Subject.CommonName,
@@ -498,6 +643,7 @@ func (ca *CA) SignClientCertificateRequest(pubKey crypto.PublicKey, config *Clie
 		ExpiresAt:      template.NotAfter,
 		IsValid:        true,
 		CertificatePEM: certPEM,
+		IssuerChainPEM: ca.issuedCertIssuerChainPEM(),
 		PrivateKeyPEM:  nil,
 		Fingerprint:    fingerprint,
 		Issuer:         ca.certificate.Subject.CommonName,
@@ -604,6 +750,7 @@ func (ca *CA) SignSubordinateCA(pubKey crypto.PublicKey, config *SubordinateCACo
 		ExpiresAt:      template.NotAfter,
 		IsValid:        true,
 		CertificatePEM: certPEM,
+		IssuerChainPEM: ca.issuedCertIssuerChainPEM(),
 		PrivateKeyPEM:  nil,
 		Fingerprint:    fingerprint,
 		Issuer:         ca.certificate.Subject.CommonName,
@@ -690,6 +837,7 @@ func (ca *CA) GenerateSigningCertificate(config *SigningCertConfig) (*Certificat
 		ExpiresAt:      template.NotAfter,
 		IsValid:        true,
 		CertificatePEM: certPEM,
+		IssuerChainPEM: ca.issuedCertIssuerChainPEM(),
 		PrivateKeyPEM:  keyPEM,
 		Fingerprint:    fingerprint,
 		Issuer:         ca.certificate.Subject.CommonName,

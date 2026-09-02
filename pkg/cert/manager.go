@@ -45,9 +45,11 @@ package cert
 import (
 	"context"
 	"crypto"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,29 +162,35 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 		revocation: revStore,
 	}
 
-	// Store the CA certificate in the certificate store for easy retrieval
+	// Store the CA certificate in the certificate store for easy retrieval. Reads
+	// ca.certificate directly rather than calling ca.GetCACertificate(): once that
+	// method means "the ultimate trust root" (see its doc comment), pairing its PEM
+	// with this CA's own metadata (CommonName, SerialNumber, Fingerprint) would be
+	// self-contradictory for an imported intermediate. This block only ever runs on
+	// fresh generation (!config.LoadExistingCA), so it is byte-identical to today's
+	// behavior for the self-generated-root case this always was.
 	if !config.LoadExistingCA {
 		caInfo, err := ca.GetCAInfo()
 		if err == nil {
-			// Get the CA certificate PEM
-			caCertPEM, err := ca.GetCACertificate()
-			if err == nil {
-				// Create a Certificate object for the CA
-				caCertificate := &Certificate{
-					Type:           CertificateTypeCA,
-					CommonName:     caInfo.CommonName,
-					SerialNumber:   caInfo.SerialNumber,
-					CreatedAt:      caInfo.CreatedAt,
-					ExpiresAt:      caInfo.ExpiresAt,
-					IsValid:        caInfo.IsValid,
-					CertificatePEM: caCertPEM,
-					Fingerprint:    caInfo.Fingerprint,
-					Issuer:         "Self-signed CA",
-				}
-
-				// Store the CA certificate (ignore errors as this is for convenience)
-				_ = store.StoreCertificate(caCertificate)
+			caCertPEM := pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: ca.certificate.Raw,
+			})
+			// Create a Certificate object for the CA
+			caCertificate := &Certificate{
+				Type:           CertificateTypeCA,
+				CommonName:     caInfo.CommonName,
+				SerialNumber:   caInfo.SerialNumber,
+				CreatedAt:      caInfo.CreatedAt,
+				ExpiresAt:      caInfo.ExpiresAt,
+				IsValid:        caInfo.IsValid,
+				CertificatePEM: caCertPEM,
+				Fingerprint:    caInfo.Fingerprint,
+				Issuer:         "Self-signed CA",
 			}
+
+			// Store the CA certificate (ignore errors as this is for convenience)
+			_ = store.StoreCertificate(caCertificate)
 		}
 	}
 
@@ -654,14 +662,20 @@ func (m *Manager) ImportCertificate(certPEM, keyPEM []byte, certType Certificate
 	return cert, nil
 }
 
-// ExportCertificate exports a certificate and optionally its private key
-func (m *Manager) ExportCertificate(serialNumber string, includePrivateKey bool) (certPEM []byte, keyPEM []byte, err error) {
+// ExportCertificate exports a certificate and optionally its private key. When
+// includeChain is true and the certificate carries a non-empty IssuerChainPEM
+// (only possible when it was issued by an intermediate CA), the chain is appended
+// to certPEM after the leaf.
+func (m *Manager) ExportCertificate(serialNumber string, includePrivateKey, includeChain bool) (certPEM []byte, keyPEM []byte, err error) {
 	cert, err := m.store.GetCertificate(serialNumber)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get certificate: %w", err)
 	}
 
 	certPEM = cert.CertificatePEM
+	if includeChain && len(cert.IssuerChainPEM) > 0 {
+		certPEM = append(append([]byte{}, certPEM...), cert.IssuerChainPEM...)
+	}
 
 	if includePrivateKey && cert.PrivateKeyPEM != nil {
 		keyPEM = cert.PrivateKeyPEM
@@ -908,6 +922,98 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 	return &Manager{
 		ca:         ca,
 		store:      fileStore,
+		validator:  validator,
+		renewer:    renewer,
+		config:     config,
+		revocation: revStore,
+	}, nil
+}
+
+// NewManagerFromCAMaterial builds a Manager whose active CA identity is an
+// already-issued certificate and its caller-held private key, with issuerChainPEM
+// recorded as the chain from that certificate's own issuer up to and including
+// the ultimate trust root (empty when certPEM is itself a root).
+//
+// issuerChainPEM is validated in full before it is recorded (see
+// validateIssuerChain): it must be ordered nearest-issuer-first with the root
+// last, every entry must be signed by its successor, its first entry must have
+// issued certPEM, and its terminal entry must be self-signed. A chain supplied in
+// the conventional root-first bundle order is rejected here rather than silently
+// publishing an intermediate as the fleet's permanent trust anchor.
+//
+// This is the in-memory primitive underneath what will become S3's
+// ImportSubordinateCA (vault-backed offline-root import) — that story adds the
+// storage plumbing; this story only needs the resulting shape to exist so
+// callers outside pkg/cert can exercise "the cert manager is backed by an
+// intermediate CA" (Issue #3778) without waiting on it. Production managers are
+// built via NewManager or NewManagerFromSecretStore.
+func NewManagerFromCAMaterial(config *ManagerConfig, certPEM, keyPEM, issuerChainPEM []byte) (*Manager, error) {
+	if config == nil {
+		return nil, fmt.Errorf("manager config is required")
+	}
+	if config.StoragePath == "" {
+		return nil, fmt.Errorf("storage path is required")
+	}
+	if config.RenewalThresholdDays == 0 {
+		config.RenewalThresholdDays = 30
+	}
+
+	store, err := NewFileStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
+	}
+
+	x509Cert, err := ParseCertificateFromPEM(certPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
+	}
+
+	parsedKey, err := ParsePrivateKeyFromPEM(keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CA private key: %w", err)
+	}
+	rsaKey, ok := parsedKey.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("CA private key must be RSA, got unsupported key type")
+	}
+
+	if err := ValidateKeyPair(certPEM, keyPEM); err != nil {
+		return nil, fmt.Errorf("CA key does not match certificate: %w", err)
+	}
+
+	// The issuer chain is caller-supplied material whose terminal entry becomes the
+	// fleet's permanently-pinned trust anchor (GetCACertificate -> ca/ca.crt,
+	// installers, registration/refresh ca_cert, steward TOFU pin). Validate it here,
+	// at the boundary it enters on, rather than trusting its position: reject unless
+	// it links to certPEM, links internally, and terminates in a self-signed root.
+	if err := validateIssuerChain(x509Cert, issuerChainPEM); err != nil {
+		return nil, fmt.Errorf("invalid CA issuer chain: %w", err)
+	}
+
+	org := "CFGMS"
+	if len(x509Cert.Subject.Organization) > 0 {
+		org = x509Cert.Subject.Organization[0]
+	}
+
+	ca := &CA{
+		certificate:    x509Cert,
+		privateKey:     rsaKey,
+		config:         &CAConfig{Organization: org},
+		initialized:    true,
+		issuerChainPEM: issuerChainPEM,
+	}
+
+	validator := NewValidator(ca.certificate)
+	renewer := NewRenewer(ca, store, validator)
+
+	revStore, err := newRevocationStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+
+	return &Manager{
+		ca:         ca,
+		store:      store,
 		validator:  validator,
 		renewer:    renewer,
 		config:     config,

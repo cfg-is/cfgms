@@ -66,6 +66,16 @@ func (fs *FileStore) StoreCertificate(cert *Certificate) error {
 		return fmt.Errorf("failed to write certificate: %w", err)
 	}
 
+	// Store the issuer chain PEM (if any). Only present when this certificate was
+	// issued by an intermediate CA (Issue #3778); absent for every certificate
+	// issued today.
+	if len(cert.IssuerChainPEM) > 0 {
+		chainPath := filepath.Join(certDir, "chain.pem")
+		if err := os.WriteFile(chainPath, cert.IssuerChainPEM, 0600); err != nil {
+			return fmt.Errorf("failed to write issuer chain: %w", err)
+		}
+	}
+
 	// Store private key PEM (if available) with restricted permissions
 	if cert.PrivateKeyPEM != nil {
 		keyPath := filepath.Join(certDir, "key.pem")
@@ -140,6 +150,17 @@ func (fs *FileStore) GetCertificate(serialNumber string) (*Certificate, error) {
 		}
 	}
 
+	// Load issuer chain PEM (if exists)
+	var issuerChainPEM []byte
+	chainPath := filepath.Join(certDir, "chain.pem")
+	if _, err := os.Stat(chainPath); err == nil {
+		// #nosec G304 - Certificate storage requires loading chain files from controlled paths
+		issuerChainPEM, err = os.ReadFile(chainPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read issuer chain: %w", err)
+		}
+	}
+
 	// Load metadata
 	metadataPath := filepath.Join(certDir, "metadata.json")
 	// #nosec G304 - Certificate storage requires loading metadata files from controlled paths
@@ -168,6 +189,7 @@ func (fs *FileStore) GetCertificate(serialNumber string) (*Certificate, error) {
 		ExpiresAt:      metadata.ExpiresAt,
 		IsValid:        metadata.IsValid,
 		CertificatePEM: certPEM,
+		IssuerChainPEM: issuerChainPEM,
 		PrivateKeyPEM:  keyPEM,
 		Fingerprint:    metadata.Fingerprint,
 		Issuer:         metadata.Issuer,

@@ -188,7 +188,7 @@ func (s *SigningRotationService) EnsureStewardCurrent(ctx context.Context, stewa
 		return fmt.Errorf("signing rotation service: load signing cursor: %w", err)
 	}
 
-	certPEM, _, err := s.certManager.ExportCertificate(signingCert.SerialNumber, false)
+	certPEM, _, err := s.certManager.ExportCertificate(signingCert.SerialNumber, false, false)
 	if err != nil {
 		return fmt.Errorf("signing rotation service: export signing cert serial=%s: %w", signingCert.SerialNumber, err)
 	}
@@ -247,7 +247,7 @@ func (s *SigningRotationService) buildRotatingSigner(serial string) signature.Si
 	if serial == "" {
 		return nil
 	}
-	certPEM, keyPEM, err := s.certManager.ExportCertificate(serial, true)
+	certPEM, keyPEM, err := s.certManager.ExportCertificate(serial, true, false)
 	if err != nil || len(keyPEM) == 0 {
 		s.logger.Warn("signing rotation: could not export rotating cert for push_signing_cert signing; falling back to dynamic signer",
 			"serial", logging.SanitizeLogValue(serial),

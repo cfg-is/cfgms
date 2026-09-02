@@ -63,6 +63,12 @@ type RegistrationResponse struct {
 	ClientKey  string `json:"client_key,omitempty"`
 	CACert     string `json:"ca_cert,omitempty"`
 
+	// IssuerChain is the PEM-concatenated chain from ClientCert's direct issuer up
+	// to (but not including) CACert (Issue #3778). Empty when the controller's cert
+	// manager is backed by a root-only CA (self-hosted default); populated when it
+	// is backed by an imported regional intermediate.
+	IssuerChain string `json:"issuer_chain,omitempty"`
+
 	// Controller's server certificate (public key) for configuration signature verification
 	ServerCert string `json:"server_cert,omitempty"`
 
@@ -105,6 +111,7 @@ type RegistrationStatusResponse struct {
 	ClientCert       string `json:"client_cert,omitempty"`
 	ClientKey        string `json:"client_key,omitempty"`
 	CACert           string `json:"ca_cert,omitempty"`
+	IssuerChain      string `json:"issuer_chain,omitempty"`
 	ServerCert       string `json:"server_cert,omitempty"`
 	SigningCert      string `json:"signing_cert,omitempty"`
 }
@@ -528,7 +535,7 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 
 	var serverCert []byte
 	if s.signerCertSerial != "" {
-		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false)
+		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false, false)
 		if err == nil && len(certPEM) > 0 {
 			serverCert = certPEM
 		}
@@ -549,6 +556,7 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		ClientCert:       string(clientCert.CertificatePEM),
 		ClientKey:        string(clientCert.PrivateKeyPEM),
 		CACert:           string(caCert),
+		IssuerChain:      string(clientCert.IssuerChainPEM),
 		ServerCert:       string(serverCert),
 	}
 
@@ -1058,7 +1066,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Get server certificate (public key) for configuration signature verification
 	var serverCert []byte
 	if s.certManager != nil && s.signerCertSerial != "" {
-		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false)
+		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false, false)
 		if err == nil && len(certPEM) > 0 {
 			serverCert = certPEM
 			s.logger.Info("Providing signer certificate to steward for signature verification",
@@ -1111,6 +1119,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	resp.ClientCert = string(clientCert.CertificatePEM)
 	resp.ClientKey = string(clientCert.PrivateKeyPEM)
 	resp.CACert = string(caCert)
+	resp.IssuerChain = string(clientCert.IssuerChainPEM)
 	resp.ServerCert = string(serverCert) // For config signature verification (backward compat)
 
 	// Always provide the dedicated signing certificate (separated architecture is mandatory)

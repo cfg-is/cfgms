@@ -40,6 +40,8 @@ The steward validates the controller's server cert against a pinned **CA trust a
 - **Address:** pin a **root domain** (e.g. `*.cfg.is`), not a literal URL → a single stable hostname fronts the cluster (DNS/LB/anycast); subdomains/regions/endpoints flex underneath.
 - **Trust:** pin the **CA**, not a specific controller cert → all cluster nodes present certs chaining to the pinned CA.
 
+**Chain-aware amendment (Issue #3778, ADR-032).** For a SaaS cell, "pin the CA" means the steward pins the **shared offline root**, never the cell's currently-active regional intermediate — `pkg/cert`'s `GetCACertificate()` returns that root even when the cert manager issuing leaves is itself backed by an imported intermediate. Leaves arrive as **leaf + intermediate chains** (`issuer_chain` alongside `client_cert`/`ca_cert` in the registration and refresh responses), and the steward's TLS trust pool is built from leaf + chain + root accordingly — see the steward-operating-model's Bootstrap TLS Trust section. This is what makes routine intermediate rotation (§4) possible without re-enrollment: the pinned anchor never changes when only the intermediate does. The self-hosted single-CA pin, where there is no intermediate and no chain, is unchanged by this amendment.
+
 ### 3. Trust-source spectrum — one codebase, three enrollment postures (a build/install flag)
 
 The steward generalizes from "baked URL + CA" to a **trust-source** that may be supplied at compile time, at install time, or learned at first contact. All three are the **same CFGMS-signed codebase**; they differ only in *where the connection-CA pin comes from*:
@@ -57,6 +59,8 @@ In every mode the pinned CA is stored **immutably and protected** (OS keychain, 
 ### 4. Day-2 trust maintenance is uniform — a signed, root-constrained update channel
 
 Regardless of enrollment mode, once trust is established, controller/cluster changes (new nodes, regions, failover endpoints, CA rotation) flow through one channel: the controller pushes a **signed** directive that the steward accepts only if it (a) is signed by a key chaining to the **currently-pinned CA** and (b) targets an endpoint **within the pinned root domain**. The root-domain constraint bounds even a *compromised* controller — it can re-balance stewards across its own cluster but cannot exfiltrate them to an attacker domain. Migration to an unrelated controller (different CA) is a re-enroll, not an update.
+
+**Regional-intermediate issuance (Issue #3778) is a first-class event on this same channel, not a special case.** Because the pinned anchor is always the shared root (§2), a region rotating its active intermediate — or a cell newly issuing under a fresh regional intermediate — is just another certificate the steward's existing leaf-verification already handles: the new leaf's `issuer_chain` bridges to the same never-changing pinned root. No signed directive, no re-enrollment, and no pin update are needed for intermediate rotation specifically; that is the property this story's test suite (`pkg/cert` intermediate-rotation-survival coverage) proves directly.
 
 ### 5. Code-signing for community releases; sovereign re-sign is the multi-root boundary
 
