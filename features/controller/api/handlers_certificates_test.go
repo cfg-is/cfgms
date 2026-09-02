@@ -565,7 +565,7 @@ func TestHandleListCertificates_TenantScope_InternalCertVisibleToAll(t *testing.
 	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
 
 	// Generate a signing cert (no ClientID — controller-internal).
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	// Register a steward in a different tenant and issue a cert for it.
 	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
@@ -898,7 +898,7 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
 	certMgr := newTestCertManager(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	rotationSvc := service.NewSigningRotationService(certMgr, logger)
 	rotationSvc.SetControllerService(controllerService)
@@ -1168,15 +1168,7 @@ func setupProvisionTestServer(t *testing.T) (*Server, *cert.Manager, string) {
 	// Cert manager with a test-owned storage path (newTestCertManager hides its
 	// t.TempDir()), so the storage-fault test can make the cert store unwritable.
 	certStoragePath := filepath.Join(t.TempDir(), "certs")
-	certMgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: certStoragePath,
-		CAConfig: &cert.CAConfig{
-			Organization: "Test CFGMS",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
+	certMgr := newSharedTestCertManagerAt(t, certStoragePath)
 
 	provisioningSvc := service.NewCertificateProvisioningService(certMgr, logger)
 
@@ -1973,7 +1965,7 @@ func internalCertSerial(t *testing.T, certMgr *cert.Manager) string {
 func TestHandleRevokeCertificate_TenantScope_InternalCert_Returns404_AndDoesNotRevoke(t *testing.T) {
 	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
 
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 	serial := internalCertSerial(t, certMgr)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/"+serial+"/revoke", nil)
@@ -1997,7 +1989,7 @@ func TestHandleRevokeCertificate_TenantScope_InternalCert_Returns404_AndDoesNotR
 func TestHandleRevokeCertificate_InternalCert_UnscopedAdminSucceeds(t *testing.T) {
 	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
 
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 	serial := internalCertSerial(t, certMgr)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/"+serial+"/revoke", nil)

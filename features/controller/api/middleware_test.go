@@ -850,16 +850,7 @@ func issueCertAndBuildRequest(t *testing.T, method, path string, certManager *ce
 // cert whose serial is in the revoked-serials list returns nil (request rejected).
 // This is the Story D C2 fix: the revocation check must occur on every cert-auth request.
 func TestExtractAdminPrincipal_ChecksRevocation(t *testing.T) {
-	tempDir := t.TempDir()
-	certManager, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: tempDir,
-		CAConfig: &cert.CAConfig{
-			Organization: "Test",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
+	certManager := newSharedTestCertManager(t)
 
 	server := setupTestServerWithCertMgr(t, certManager)
 
@@ -3265,16 +3256,7 @@ func TestRecordCertBindingUse_RejectedOrUnboundAuthProducesZeroWrites(t *testing
 	}
 
 	t.Run("revoked serial", func(t *testing.T) {
-		tempDir := t.TempDir()
-		certManager, err := cert.NewManager(&cert.ManagerConfig{
-			StoragePath: tempDir,
-			CAConfig: &cert.CAConfig{
-				Organization: "Test",
-				Country:      "US",
-				ValidityDays: 365,
-			},
-		})
-		require.NoError(t, err)
+		certManager := newSharedTestCertManager(t)
 		srv := setupTestServerWithCertMgr(t, certManager)
 
 		req, serial := issueCertAndBuildRequest(t, http.MethodGet, "/api/v1/test", certManager)
@@ -3746,12 +3728,7 @@ func TestCertificateAuthPath_UnchangedByAmendment4(t *testing.T) {
 
 	t.Run("revoked certificate is rejected outright", func(t *testing.T) {
 		server := setupTestServer(t)
-		tempDir := t.TempDir()
-		certManager, err := cert.NewManager(&cert.ManagerConfig{
-			StoragePath: tempDir,
-			CAConfig:    &cert.CAConfig{Organization: "Test", Country: "US", ValidityDays: 365},
-		})
-		require.NoError(t, err)
+		certManager := newSharedTestCertManager(t)
 		server.certManager = certManager
 
 		issuedCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{

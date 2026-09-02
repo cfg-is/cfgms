@@ -493,15 +493,7 @@ func extractTarGz(t *testing.T, data []byte) map[string][]byte {
 // It also writes an init marker with the computed CA fingerprint to caPath.
 func setupTestCertManager(t *testing.T, caPath string) (*cert.Manager, string) {
 	t.Helper()
-	certMgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: t.TempDir(),
-		CAConfig: &cert.CAConfig{
-			Organization: "Test CFGMS",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
+	certMgr := newSharedTestCertManager(t)
 
 	caCertPEM, err := certMgr.GetCACertificate()
 	require.NoError(t, err)
