@@ -248,13 +248,35 @@ func TestDatabaseSessionTokenStore_SetUpdatesExistingEntry(t *testing.T) {
 	require.NoError(t, store.Set(ctx, hash, sess))
 
 	updated := *sess
-	updated.LastActivity = now.Add(5 * time.Minute)
+	// Postgres TIMESTAMP WITH TIME ZONE columns store microsecond precision, so the
+	// value Get() returns is rounded to microseconds; round the expectation the same
+	// way rather than comparing against a nanosecond-precision time.Now() value that
+	// the column can never represent exactly.
+	updated.LastActivity = now.Add(5 * time.Minute).Round(time.Microsecond)
 	require.NoError(t, store.Set(ctx, hash, &updated))
 
 	got, err := store.Get(ctx, hash)
 	require.NoError(t, err)
 	assert.True(t, got.LastActivity.Equal(updated.LastActivity),
 		"LastActivity should be updated; got %v want %v", got.LastActivity, updated.LastActivity)
+}
+
+// TestRoundToStorablePrecision verifies the microsecond-quantization helper against the
+// exact values from the Issue #3864 CI failure: Postgres returned 2026-09-03
+// 01:42:51.117902 +0000 UTC for a value written as .117901613 (nanosecond precision) —
+// i.e. Postgres rounds to the nearest microsecond rather than truncating.
+func TestRoundToStorablePrecision(t *testing.T) {
+	in := time.Date(2026, 9, 3, 1, 42, 51, 117901613, time.UTC)
+	want := time.Date(2026, 9, 3, 1, 42, 51, 117902000, time.UTC)
+
+	got := roundToStorablePrecision(in)
+	assert.True(t, got.Equal(want), "got %v want %v", got, want)
+
+	assert.True(t, roundToStorablePrecision(time.Time{}).IsZero(), "zero time must remain zero")
+
+	// A value already at microsecond precision must round-trip unchanged.
+	exact := time.Date(2026, 9, 3, 1, 42, 51, 117902000, time.UTC)
+	assert.True(t, roundToStorablePrecision(exact).Equal(exact))
 }
 
 // TestDatabaseSessionTokenStore_NoRawTokenInStoredRows performs a raw-SQL scan of

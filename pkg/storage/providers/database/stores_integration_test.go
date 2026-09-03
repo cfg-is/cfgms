@@ -207,9 +207,14 @@ func TestDatabaseSessionStore_CleanupExpired(t *testing.T) {
 	store := newTestSessionStore(t)
 	ctx := context.Background()
 
-	past := time.Now().UTC().Truncate(time.Millisecond)
+	// makeSampleSession stamps CreatedAt with its own time.Now() call; backdate both
+	// CreatedAt and ExpiresAt so ExpiresAt stays after CreatedAt (Session.Validate
+	// rejects the insert otherwise) while still landing in the past relative to now,
+	// so CleanupExpiredSessions picks the row up.
+	now := time.Now().UTC().Truncate(time.Millisecond)
 	sess := makeSampleSession("sess-exp", "user-exp", "tenant-exp")
-	sess.ExpiresAt = past.Add(-time.Minute) // already expired
+	sess.CreatedAt = now.Add(-2 * time.Hour)
+	sess.ExpiresAt = now.Add(-time.Hour) // already expired
 	require.NoError(t, store.CreateSession(ctx, sess))
 
 	n, err := store.CleanupExpiredSessions(ctx)

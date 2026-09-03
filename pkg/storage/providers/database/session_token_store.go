@@ -93,7 +93,7 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 
 	var lastProvenAt interface{}
 	if !sess.LastProvenAt.IsZero() {
-		lastProvenAt = sess.LastProvenAt.UTC()
+		lastProvenAt = roundToStorablePrecision(sess.LastProvenAt.UTC())
 	}
 	var credentialID interface{}
 	if len(sess.CredentialID) > 0 {
@@ -125,9 +125,9 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		sess.PrincipalID,
 		sess.ConnectionName,
 		sess.TenantID,
-		sess.IssuedAt.UTC(),
-		sess.LastActivity.UTC(),
-		sess.AbsoluteExpiresAt.UTC(),
+		roundToStorablePrecision(sess.IssuedAt.UTC()),
+		roundToStorablePrecision(sess.LastActivity.UTC()),
+		roundToStorablePrecision(sess.AbsoluteExpiresAt.UTC()),
 		int(sess.Assurance),
 		sess.BoundIP,
 		lastProvenAt,
@@ -299,9 +299,22 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 func (s *DatabaseSessionTokenStore) StampGraceExpiry(ctx context.Context, tokenHash string, expiresAt time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE session_token_store SET hash_expires_at = $1 WHERE token_hash = $2`,
-		expiresAt.UTC(), tokenHash)
+		roundToStorablePrecision(expiresAt.UTC()), tokenHash)
 	if err != nil {
 		return fmt.Errorf("database: session token stamp grace expiry failed: %w", err)
 	}
 	return nil
+}
+
+// roundToStorablePrecision quantizes t to microsecond precision, matching the
+// precision of a Postgres TIMESTAMP WITH TIME ZONE column. Postgres itself rounds
+// (not truncates) any sub-microsecond remainder on write, so a value that already
+// carries only microsecond precision round-trips unchanged; without this, a
+// nanosecond-precision Go time.Time written here reads back rounded by Postgres,
+// diverging from the in-memory value the caller still holds.
+func roundToStorablePrecision(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.Round(time.Microsecond)
 }
