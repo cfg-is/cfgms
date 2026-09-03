@@ -198,6 +198,16 @@ jobs:
         go test -v -race -timeout=10m ./test/integration/... \
           -run "^Test(Certificate|ConfigValidation|Epic6Compliance|RegistrationTokenPersistence)$"
 
+        # Run the cluster-visible cert revocation/signing-cursor store tests and
+        # the database provider tests they depend on (Issue #3852 AC4-AC6, AC7
+        # contract test). CFGMS_TEST_DB_HOST/PORT/PASSWORD come from .env.test,
+        # sourced above; postgres-test is already running from the setup step.
+        # -p 1 matches the `test-integration-db` Makefile target: both packages
+        # share the one Postgres instance and drop every table in their own
+        # setup (setupTestDatabase / dropClusterTables), so running them
+        # concurrently would let one package truncate another's fixtures mid-test.
+        go test -v -race -p 1 -timeout=10m ./pkg/cert/... ./pkg/storage/providers/database/...
+
         echo "✅ Integration tests completed"
 
     - name: Cleanup Controller
