@@ -10,6 +10,7 @@
 package interfaces_test
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -60,6 +61,17 @@ func testPostgresConfig() map[string]interface{} {
 // testPostgresDB opens a connection to the test database, returning a skip
 // reason when it is not reachable rather than failing the test — matching
 // pkg/storage/providers/database/plugin_test.go's getTestDB convention.
+//
+// It also drops and recreates every table before returning, matching that
+// package's setupTestDatabase and pkg/cert's own dropClusterTables. Without
+// this, the contract test's "database" case inherits whatever state the last
+// test to touch cfgms_test left behind: this package, pkg/cert, and
+// pkg/storage/providers/database all share one Postgres schema when run in
+// the same CI job (Issue #3852 AC7 wiring), and pkg/cert's cluster tests seed
+// a real signing-cursor row without ever cleaning it up — so this contract
+// test's "no rotation has occurred yet" assumption fails whenever pkg/cert's
+// package runs first, which alphabetical package ordering guarantees for
+// `go test ./pkg/cert/...`.
 func testPostgresDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	if testing.Short() {
@@ -77,5 +89,9 @@ func testPostgresDB(t *testing.T) (*sql.DB, string) {
 		return nil, "PostgreSQL test database not reachable: " + err.Error()
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	if err := database.NewDatabaseSchemas().DropAllTables(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, "failed to reset test database state: " + err.Error()
+	}
 	return db, ""
 }
