@@ -91,10 +91,8 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		return fmt.Errorf("database: session token set: failed to set tenant context: %w", err)
 	}
 
-	var lastProvenAt interface{}
-	if !sess.LastProvenAt.IsZero() {
-		lastProvenAt = roundToStorablePrecision(sess.LastProvenAt.UTC())
-	}
+	ts := computeStorableSessionTimestamps(sess)
+
 	var credentialID interface{}
 	if len(sess.CredentialID) > 0 {
 		credentialID = sess.CredentialID
@@ -125,12 +123,12 @@ func (s *DatabaseSessionTokenStore) Set(ctx context.Context, tokenHash string, s
 		sess.PrincipalID,
 		sess.ConnectionName,
 		sess.TenantID,
-		roundToStorablePrecision(sess.IssuedAt.UTC()),
-		roundToStorablePrecision(sess.LastActivity.UTC()),
-		roundToStorablePrecision(sess.AbsoluteExpiresAt.UTC()),
+		ts.issuedAt,
+		ts.lastActivity,
+		ts.absoluteExpiresAt,
 		int(sess.Assurance),
 		sess.BoundIP,
-		lastProvenAt,
+		ts.lastProvenAt,
 		credentialID,
 		sess.RootScoped,
 		sess.Channel,
@@ -306,12 +304,46 @@ func (s *DatabaseSessionTokenStore) StampGraceExpiry(ctx context.Context, tokenH
 	return nil
 }
 
+// storableSessionTimestamps holds sess's write-path timestamp fields rounded to
+// microsecond precision, matching a Postgres TIMESTAMP WITH TIME ZONE column.
+// lastProvenAt is nil (not a zero time.Time) when sess.LastProvenAt is unset, so it
+// can be passed directly as a nullable SQL parameter.
+type storableSessionTimestamps struct {
+	issuedAt          time.Time
+	lastActivity      time.Time
+	absoluteExpiresAt time.Time
+	lastProvenAt      interface{}
+}
+
+// computeStorableSessionTimestamps rounds sess's timestamp fields for the write path
+// without mutating sess itself. sess is reachable from session.Manager's in-memory
+// index (registered under its per-session lock only after Set returns, in the Issue
+// path — see manager.go's issue()), so writing back into sess's fields from here would
+// race a concurrent reader/writer that holds that lock instead of this call's caller.
+//
+// Postgres itself rounds (not truncates) any sub-microsecond remainder when a
+// TIMESTAMP WITH TIME ZONE value is written, so the value a subsequent Get returns is
+// already at microsecond precision regardless of what this function computes — this
+// rounding does not change what ends up durably stored (verified against a real
+// Postgres instance: neutralizing roundToStorablePrecision to an identity function
+// left every round-trip read unchanged). What it fixes is comparing that stored value
+// against an in-memory time.Time that still carries nanosecond precision, which never
+// round-trips exactly on Postgres.
+func computeStorableSessionTimestamps(sess *session.Session) storableSessionTimestamps {
+	var lastProvenAt interface{}
+	if !sess.LastProvenAt.IsZero() {
+		lastProvenAt = roundToStorablePrecision(sess.LastProvenAt.UTC())
+	}
+	return storableSessionTimestamps{
+		issuedAt:          roundToStorablePrecision(sess.IssuedAt.UTC()),
+		lastActivity:      roundToStorablePrecision(sess.LastActivity.UTC()),
+		absoluteExpiresAt: roundToStorablePrecision(sess.AbsoluteExpiresAt.UTC()),
+		lastProvenAt:      lastProvenAt,
+	}
+}
+
 // roundToStorablePrecision quantizes t to microsecond precision, matching the
-// precision of a Postgres TIMESTAMP WITH TIME ZONE column. Postgres itself rounds
-// (not truncates) any sub-microsecond remainder on write, so a value that already
-// carries only microsecond precision round-trips unchanged; without this, a
-// nanosecond-precision Go time.Time written here reads back rounded by Postgres,
-// diverging from the in-memory value the caller still holds.
+// precision of a Postgres TIMESTAMP WITH TIME ZONE column.
 func roundToStorablePrecision(t time.Time) time.Time {
 	if t.IsZero() {
 		return t
