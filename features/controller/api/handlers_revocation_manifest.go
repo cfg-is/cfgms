@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -28,15 +29,51 @@ const RevocationManifestKind = "operator-cert-revocation"
 // sibling entry type (Issue #3697).
 const AuthorizedWebAuthnCredentialKind = "webauthn-credential"
 
+// OperatorPayloadSignGrant is the permission ID whose presence in
+// AuthorizedWebAuthnCredential.Grants authorizes the credential to sign an operator
+// payload. It is the same string requirePermission("operator-payload", "sign") builds
+// (buildPermissionID), so the roster's authority predicate and the signing ceremony's
+// own route gate are decided by one value, not by two that could drift apart.
+const OperatorPayloadSignGrant = "operator-payload:sign"
+
 // AuthorizedWebAuthnCredential is a CA-signed roster entry (Issue #3697) naming one
 // registered WebAuthn credential's COSE public key, keyed by credential ID, so a
 // steward verifying a WebAuthn-signed operator payload can resolve the signer's public
 // key from a source it independently trusts rather than an unsigned, live controller
 // claim. CredentialID and PublicKey mirror WebAuthnCredential.ID/.PublicKey exactly.
+//
+// The entry carries the authority the owning account actually holds, because roster
+// membership is not authorization: a passkey exists on an account so its owner can log
+// in, which says nothing about whether that owner may execute a script as SYSTEM on a
+// steward. TenantID/RootScope and Grants are the two predicates the steward re-checks
+// against a manifest it has chain-verified for itself:
+//
+//   - Grants lists the permission IDs the owning account holds that are meaningful to a
+//     verifying steward. An entry without OperatorPayloadSignGrant is present for
+//     completeness (a steward may resolve a key for another purpose later) but
+//     authorizes no execution.
+//   - TenantID is the owning account's tenant path, and RootScope is true only for an
+//     unscoped platform-administrator account (TenantID == "" by explicit grant). A
+//     steward accepts an entry only when RootScope is set or its own tenant path is the
+//     entry's tenant or a descendant of it — without this the roster's fleet-wide reach
+//     would let a credential registered in one tenant authorize execution in another.
 type AuthorizedWebAuthnCredential struct {
-	Kind         string `json:"kind"`
-	CredentialID []byte `json:"credential_id"`
-	PublicKey    []byte `json:"public_key"`
+	Kind         string   `json:"kind"`
+	CredentialID []byte   `json:"credential_id"`
+	PublicKey    []byte   `json:"public_key"`
+	TenantID     string   `json:"tenant_id"`
+	RootScope    bool     `json:"root_scope"`
+	Grants       []string `json:"grants"`
+}
+
+// WebAuthnRelyingParty carries the controller's WebAuthn relying-party binding in the
+// signed manifest (Issue #3697) so a steward can perform the W3C WebAuthn §7.2 checks
+// that need it — rpIdHash against sha256(ID), and clientDataJSON.origin against Origins
+// — for which it has no other trustworthy source. Both are copied verbatim from the
+// configured webauthn.Config the signing ceremony itself runs under.
+type WebAuthnRelyingParty struct {
+	ID      string   `json:"id"`
+	Origins []string `json:"origins"`
 }
 
 // RevocationManifest is the compact, signable set of currently revoked
@@ -44,11 +81,21 @@ type AuthorizedWebAuthnCredential struct {
 // WebAuthn credential public keys. RevokedSerials is always sorted, and
 // AuthorizedWebAuthnCredentials is always sorted by CredentialID, so the same
 // underlying state serializes to identical bytes before signing.
+//
+// IssuedAt (Issue #3697) is the freshness anchor. Version counts revoked serials only,
+// so it does not move when a credential leaves the roster — on its own it would make an
+// older manifest listing a de-registered credential indistinguishable from the current
+// one, and de-registering a compromised passkey would never take effect on any steward.
+// IssuedAt advances on every issuance regardless of which part of the content changed,
+// so a consumer can both bound a manifest's age and refuse one older than the newest it
+// has already accepted.
 type RevocationManifest struct {
 	Kind                          string                         `json:"kind"`
 	Version                       int64                          `json:"version"`
+	IssuedAt                      time.Time                      `json:"issued_at"`
 	RevokedSerials                []string                       `json:"revoked_serials"`
 	AuthorizedWebAuthnCredentials []AuthorizedWebAuthnCredential `json:"authorized_webauthn_credentials,omitempty"`
+	WebAuthnRelyingParty          *WebAuthnRelyingParty          `json:"webauthn_relying_party,omitempty"`
 }
 
 // SignedRevocationManifest is the JSON body served by
@@ -71,7 +118,8 @@ type SignedRevocationManifest struct {
 // builds the deterministic manifest to sign. Version is the count of revoked
 // serials: Manager.Revoke only ever adds an entry (there is no un-revoke
 // primitive), so this count strictly increases with every new revocation and
-// never regresses.
+// never regresses. IssuedAt is stamped here, at second resolution, so it is
+// identical in the signed bytes and in the served response.
 func buildRevocationManifest(certMgr *cert.Manager) (*RevocationManifest, error) {
 	entries, err := certMgr.ListRevoked()
 	if err != nil {
@@ -87,6 +135,7 @@ func buildRevocationManifest(certMgr *cert.Manager) (*RevocationManifest, error)
 	return &RevocationManifest{
 		Kind:           RevocationManifestKind,
 		Version:        int64(len(serials)),
+		IssuedAt:       time.Now().UTC().Truncate(time.Second),
 		RevokedSerials: serials,
 	}, nil
 }
@@ -120,15 +169,48 @@ func signRevocationManifest(certMgr *cert.Manager, manifest *RevocationManifest)
 	return sig, nil
 }
 
-// buildAuthorizedWebAuthnCredentials reads every registered WebAuthn credential
-// fleet-wide (across every account, not tenant-scoped — the manifest is fleet-wide by
-// construction, same rationale as RevokedSerials) and flattens them into CA-signed
-// manifest entries keyed by credential ID (Issue #3697), so a steward can resolve a
-// WebAuthn credential's public key from a source it independently trusts instead of an
-// unsigned, live controller claim. Entries are sorted by CredentialID so the manifest
-// serializes to identical bytes regardless of account enumeration order. A nil
-// secretStore (e.g. some test servers) yields an empty roster, not an error — a manifest
-// with no WebAuthn credentials is a valid, signable state.
+// accountHoldsOperatorPayloadSigning reports whether acct's own authority allows it to
+// sign an operator payload, deciding roster membership the same way requirePermission
+// decides the signing route (middleware.go hasPermission): a root-scope account is a
+// platform administrator holding every permission, and any other account holds exactly
+// the permissions configured on it. A disabled account holds none — Disabled is a login
+// gate that leaves credentials and role assignments in place (Issue #3126), so the
+// credentials of a disabled account are still enumerable here and must be excluded
+// explicitly rather than assumed gone.
+func accountHoldsOperatorPayloadSigning(acct *account) bool {
+	if acct == nil || acct.Disabled {
+		return false
+	}
+	if acct.RootScope {
+		return true
+	}
+	for _, permission := range acct.Permissions {
+		if permission == OperatorPayloadSignGrant {
+			return true
+		}
+	}
+	return false
+}
+
+// buildAuthorizedWebAuthnCredentials flattens the WebAuthn credentials of every account
+// that actually holds operator-payload signing authority into CA-signed manifest entries
+// keyed by credential ID (Issue #3697), so a steward can resolve a WebAuthn credential's
+// public key from a source it independently trusts instead of an unsigned, live
+// controller claim.
+//
+// The roster is an allow-list, so it is built from the accounts' authority, not from the
+// mere existence of a passkey: accountHoldsOperatorPayloadSigning excludes disabled and
+// zero-privilege accounts, and each surviving entry carries the owning account's tenant
+// and granted permission so the steward can re-check both against a manifest it verified
+// itself. Enumeration is still fleet-wide — a manifest cannot be tenant-scoped without
+// making Version incomparable across callers, and the endpoint is closed to
+// tenant-scoped callers for that reason (handleGetRevocationManifest) — but a fleet-wide
+// allow-list is only safe because each entry states the tenant it is valid for.
+//
+// Entries are sorted by CredentialID so the manifest serializes to identical bytes
+// regardless of account enumeration order. A nil secretStore (e.g. some test servers)
+// yields an empty roster, not an error — a manifest with no WebAuthn credentials is a
+// valid, signable state.
 func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]AuthorizedWebAuthnCredential, error) {
 	if s.secretStore == nil {
 		return nil, nil
@@ -150,11 +232,17 @@ func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]Auth
 		if err != nil || acct == nil {
 			continue
 		}
+		if !accountHoldsOperatorPayloadSigning(acct) {
+			continue
+		}
 		for _, credential := range acct.Credentials {
 			entries = append(entries, AuthorizedWebAuthnCredential{
 				Kind:         AuthorizedWebAuthnCredentialKind,
 				CredentialID: credential.ID,
 				PublicKey:    credential.PublicKey,
+				TenantID:     acct.TenantID,
+				RootScope:    acct.RootScope,
+				Grants:       []string{OperatorPayloadSignGrant},
 			})
 		}
 	}
@@ -162,6 +250,22 @@ func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]Auth
 		return bytes.Compare(entries[i].CredentialID, entries[j].CredentialID) < 0
 	})
 	return entries, nil
+}
+
+// webAuthnRelyingPartyBinding returns the configured relying-party ID and origins for
+// the manifest, or nil when WebAuthn is not configured on this controller. Nil is the
+// correct state rather than an error: with no relying party there can be no assertion to
+// verify, and a steward that finds a roster entry without this binding refuses the
+// assertion instead of guessing which origin to expect.
+func (s *Server) webAuthnRelyingPartyBinding() *WebAuthnRelyingParty {
+	wa := s.getWebAuthn()
+	if wa == nil || wa.Config == nil || wa.Config.RPID == "" || len(wa.Config.RPOrigins) == 0 {
+		return nil
+	}
+	origins := make([]string, len(wa.Config.RPOrigins))
+	copy(origins, wa.Config.RPOrigins)
+	sort.Strings(origins)
+	return &WebAuthnRelyingParty{ID: wa.Config.RPID, Origins: origins}
 }
 
 // handleGetRevocationManifest handles GET /api/v1/certificates/revocation-manifest.
@@ -214,6 +318,7 @@ func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	manifest.AuthorizedWebAuthnCredentials = webauthnCreds
+	manifest.WebAuthnRelyingParty = s.webAuthnRelyingPartyBinding()
 
 	sig, err := signRevocationManifest(s.certManager, manifest)
 	if err != nil {

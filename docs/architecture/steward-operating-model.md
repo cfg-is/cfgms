@@ -580,17 +580,58 @@ command:
 - **WebAuthn assertion (Issue #3697).** A browser-only operator with no mTLS bundle
   signs via the controller's `/api/v1/operator-payload/sign/begin`/`finish` ceremony
   (Issue #3695): the assertion's `clientDataJSON.challenge` must equal
-  `sha256(CanonicalBytes(envelope))`, and the assertion signature must verify — as
-  `authenticatorData || SHA-256(clientDataJSON)` — against the credential's public key.
-  That public key has no certificate chain of its own, so it is resolved from the
-  CA-signed revocation manifest (`GET /api/v1/certificates/revocation-manifest`,
+  `operatorpayload.ChallengeHash(envelope)` — SHA-256 over a **domain-separated**
+  preimage, never over bare `CanonicalBytes`, so an assertion collected during any other
+  ceremony at the same relying party (a routine passkey login, say) cannot be replayed as
+  an operator authorization — and the assertion signature must verify, as
+  `authenticatorData || SHA-256(clientDataJSON)`, against the credential's public key.
+
+  The steward applies the mandatory W3C WebAuthn §7.2 assertion checks in full rather
+  than treating `authenticatorData` as opaque signature input: `clientDataJSON.type` must
+  be `webauthn.get`, its `origin` must be one the relying-party binding names,
+  `authenticatorData`'s `rpIdHash` must equal `SHA-256(rpID)`, and both the **User
+  Present** and **User Verified** flags must be set. Requiring UV matches the
+  controller's own `protocol.VerificationRequired` ceremony — the steward exists to check
+  the controller independently, so it applies no weaker verification than the party it
+  checks.
+
+  The credential's public key has no certificate chain of its own, so it is resolved from
+  the CA-signed revocation manifest (`GET /api/v1/certificates/revocation-manifest`,
   `features/controller/api/handlers_revocation_manifest.go`), extended with a
   Kind-discriminated `authorized_webauthn_credentials` roster alongside the existing
   revoked-serials list — never from an unsigned, live controller claim. The manifest's
   own signature is chain-verified against the steward's controller CA via its embedded
-  `signer_certificate_pem` before any entry in it is trusted. Unlike the X.509 path,
-  WebAuthn verification has no "no CA roots configured" relaxation: the public key has
-  no other source, so it fails closed rather than silently skipping verification.
+  `signer_certificate_pem` before any entry in it is trusted, and it also carries the
+  relying-party binding (`webauthn_relying_party`) the origin and `rpIdHash` checks are
+  made against, since a steward has no other trustworthy source for it.
+
+  Roster membership is not authorization. Each entry states the authority its owning
+  account actually holds, and the steward re-checks both predicates:
+
+  - **Grant.** The entry must carry `operator-payload:sign` — the same permission the
+    controller gates the signing ceremony on. The controller builds the roster from
+    accounts holding that permission (root-scope administrators hold every permission),
+    and excludes disabled accounts, whose credentials survive the disable by design
+    (Issue #3126).
+  - **Tenant.** The entry names its owning account's tenant path, or is marked root
+    scope. A steward accepts a root-scope entry fleet-wide, and a tenant-scoped entry
+    only when its own tenant path is that tenant or a descendant of it. Without this the
+    roster's fleet-wide reach would let a credential registered in one tenant authorize
+    execution in another.
+
+  The manifest is also freshness-bound, because it travels inside the command and is
+  otherwise a bearer artifact: it carries an `issued_at` instant, the steward refuses one
+  older than 15 minutes or dated in its own future, and it keeps a high-water mark of the
+  newest instant accepted so a captured older manifest — the copy that still lists a
+  since-removed credential — cannot roll it back. Without that, de-registering a
+  compromised passkey or disabling its account would never take effect on a steward,
+  since `version` counts revoked certificate serials and does not move when the roster
+  changes. The high-water mark is process-scoped; after a restart the age bound alone
+  applies until the first manifest is accepted.
+
+  Unlike the X.509 path, WebAuthn verification has no "no CA roots configured"
+  relaxation: the public key has no other source, so it fails closed rather than silently
+  skipping verification.
 
 Residual-risk profile (Issue #3695's own note, restated here for the verifying side): a
 WebAuthn private key is hardware-bound and never exists server-side at all, so the

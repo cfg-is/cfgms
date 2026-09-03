@@ -630,16 +630,27 @@ func sigTestWebAuthnKeypair(t *testing.T) (*ecdsa.PrivateKey, []byte) {
 }
 
 // sigTestSignManifest builds a CA-signed manifest (JSON bytes, ready for the
-// webauthn_manifest param) carrying credEntries, signed by signingCert via the same
-// signature.NewSigner construction the controller's signRevocationManifest uses
+// webauthn_manifest param) carrying credEntries, issued now and bound to the test
+// relying party, signed by signingCert via the same signature.NewSigner construction
+// the controller's signRevocationManifest uses
 // (features/controller/api/handlers_revocation_manifest.go).
 func sigTestSignManifest(t *testing.T, signingCert *cert.Certificate, credEntries []authorizedWebAuthnCredential) []byte {
+	t.Helper()
+	return sigTestSignManifestAt(t, signingCert, credEntries, time.Now().UTC().Truncate(time.Second),
+		&webauthnRelyingParty{ID: sigTestRPID, Origins: []string{sigTestAssertionOrigin}})
+}
+
+// sigTestSignManifestAt is sigTestSignManifest with the issuance instant and
+// relying-party binding chosen by the caller, for freshness and RP-binding tests.
+func sigTestSignManifestAt(t *testing.T, signingCert *cert.Certificate, credEntries []authorizedWebAuthnCredential, issuedAt time.Time, rp *webauthnRelyingParty) []byte {
 	t.Helper()
 	manifest := revocationManifestPayload{
 		Kind:                          revocationManifestKind,
 		Version:                       1,
+		IssuedAt:                      issuedAt,
 		RevokedSerials:                []string{},
 		AuthorizedWebAuthnCredentials: credEntries,
+		WebAuthnRelyingParty:          rp,
 	}
 	data, err := json.Marshal(manifest)
 	require.NoError(t, err)
@@ -699,7 +710,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_Accepted(t *testing.T) {
 	priv, pubKey := sigTestWebAuthnKeypair(t)
 	credID := []byte("webauthn-cred-accept-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
-		{Kind: authorizedWebAuthnCredentialKind, CredentialID: credID, PublicKey: pubKey},
+		sigTestAuthorizedEntry(credID, pubKey),
 	})
 
 	cb, getEvents := collectEvents()
@@ -762,7 +773,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_TargetMismatch_Rejected(t *t
 	priv, pubKey := sigTestWebAuthnKeypair(t)
 	credID := []byte("webauthn-cred-mismatch-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
-		{Kind: authorizedWebAuthnCredentialKind, CredentialID: credID, PublicKey: pubKey},
+		sigTestAuthorizedEntry(credID, pubKey),
 	})
 
 	cb, err := New(&Config{StewardID: "host-B", OnStatus: noopStatus, Logger: newTestLogger(t), RequireSignedAdhoc: true, ControllerCARoots: caPool})
@@ -789,7 +800,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_ExpiredEnvelope_Rejected(t *
 	priv, pubKey := sigTestWebAuthnKeypair(t)
 	credID := []byte("webauthn-cred-expired-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
-		{Kind: authorizedWebAuthnCredentialKind, CredentialID: credID, PublicKey: pubKey},
+		sigTestAuthorizedEntry(credID, pubKey),
 	})
 
 	h := newHandlerWithSigning(t, nil, true, caPool)
@@ -813,7 +824,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_NonceReplay_Rejected(t *test
 	priv, pubKey := sigTestWebAuthnKeypair(t)
 	credID := []byte("webauthn-cred-replay-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
-		{Kind: authorizedWebAuthnCredentialKind, CredentialID: credID, PublicKey: pubKey},
+		sigTestAuthorizedEntry(credID, pubKey),
 	})
 
 	cb, getEvents := collectEvents()
@@ -849,4 +860,156 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_NonceReplay_Rejected(t *test
 
 	err = h.HandleCommand(context.Background(), replaySc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand, "a reused operator envelope nonce must be rejected")
+}
+
+// TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected covers
+// verifyWebAuthnOperatorSignature's fail-closed branch: with no controller CA roots
+// configured, a WebAuthn-signed inline command is rejected outright. This is where the
+// WebAuthn path deliberately diverges from the X.509 path, which falls back to
+// any_valid signature verification when no roots are configured — a WebAuthn public key
+// has no source other than the CA-verified manifest, so "no roots" cannot mean "skip the
+// credential check". Asserted directly so a regression back to fail-open cannot ship.
+func TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected(t *testing.T) {
+	ca, _ := sigTestCA(t)
+	signingCert := sigTestSigningCert(t, ca)
+	priv, pubKey := sigTestWebAuthnKeypair(t)
+	credID := []byte("webauthn-cred-no-ca-roots")
+	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
+		sigTestAuthorizedEntry(credID, pubKey),
+	})
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  cb,
+		Logger:    newTestLogger(t),
+		// No ControllerCARoots: the manifest cannot be chain-verified here.
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	content := []byte(echoScriptBody("hello"))
+	params := sigTestWebAuthnAssertionParams(t, priv, credID, manifestJSON, content, platformShell(),
+		[]string{"steward-test"}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+	params["execution_id"] = "sig-webauthn-no-ca-001"
+	sc := testSignedCommandWithParams("sig-webauthn-no-ca-001", cpTypes.CommandExecuteScript, params)
+
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a WebAuthn-signed command must be rejected when no controller CA roots are configured")
+	assert.Contains(t, err.Error(), "requires a configured controller CA")
+	assert.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted),
+		"nothing may execute when the manifest cannot be chain-verified")
+}
+
+// TestExecuteScriptHandler_WebAuthnSignedPayload_ForeignTenantCredential_Rejected proves
+// the dispatch path really passes this steward's own tenant to the verifier: a roster
+// entry owned by an account in another tenant does not authorize execution here, even
+// though the manifest is fleet-wide, correctly signed, and the assertion is valid.
+func TestExecuteScriptHandler_WebAuthnSignedPayload_ForeignTenantCredential_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signingCert := sigTestSigningCert(t, ca)
+	priv, pubKey := sigTestWebAuthnKeypair(t)
+	credID := []byte("webauthn-cred-foreign-tenant")
+
+	entry := sigTestAuthorizedEntry(credID, pubKey)
+	entry.RootScope = false
+	entry.TenantID = "root/msp-b"
+	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{entry})
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+		TenantID:           "root/msp-a/client-1",
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	content := []byte(echoScriptBody("hello"))
+	params := sigTestWebAuthnAssertionParams(t, priv, credID, manifestJSON, content, platformShell(),
+		[]string{"steward-test"}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+	params["execution_id"] = "sig-webauthn-foreign-tenant-001"
+	sc := testSignedCommandWithParams("sig-webauthn-foreign-tenant-001", cpTypes.CommandExecuteScript, params)
+
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a credential registered in another tenant must not authorize execution on this steward")
+	assert.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
+}
+
+// TestExecuteScriptHandler_WebAuthnSignedPayload_UnauthorizedGrant_Rejected proves the
+// dispatch path enforces the roster entry's authority: a credential that is in the
+// CA-signed manifest but carries no operator-payload signing grant — the shape a passkey
+// on a zero-privilege account would have — executes nothing.
+func TestExecuteScriptHandler_WebAuthnSignedPayload_UnauthorizedGrant_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signingCert := sigTestSigningCert(t, ca)
+	priv, pubKey := sigTestWebAuthnKeypair(t)
+	credID := []byte("webauthn-cred-no-grant")
+
+	entry := sigTestAuthorizedEntry(credID, pubKey)
+	entry.Grants = nil
+	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{entry})
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	content := []byte(echoScriptBody("hello"))
+	params := sigTestWebAuthnAssertionParams(t, priv, credID, manifestJSON, content, platformShell(),
+		[]string{"steward-test"}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+	params["execution_id"] = "sig-webauthn-no-grant-001"
+	sc := testSignedCommandWithParams("sig-webauthn-no-grant-001", cpTypes.CommandExecuteScript, params)
+
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a rostered credential without the signing grant must not authorize execution")
+	assert.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
+}
+
+// TestExecuteScriptHandler_WebAuthnSignedPayload_StaleManifest_Rejected proves the
+// dispatch path enforces manifest freshness end-to-end, so a captured manifest listing a
+// since-removed credential cannot be presented indefinitely.
+func TestExecuteScriptHandler_WebAuthnSignedPayload_StaleManifest_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signingCert := sigTestSigningCert(t, ca)
+	priv, pubKey := sigTestWebAuthnKeypair(t)
+	credID := []byte("webauthn-cred-stale-manifest")
+
+	stale := time.Now().Add(-webauthnManifestMaxAge - time.Minute).UTC().Truncate(time.Second)
+	manifestJSON := sigTestSignManifestAt(t, signingCert,
+		[]authorizedWebAuthnCredential{sigTestAuthorizedEntry(credID, pubKey)}, stale,
+		&webauthnRelyingParty{ID: sigTestRPID, Origins: []string{sigTestAssertionOrigin}})
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	content := []byte(echoScriptBody("hello"))
+	params := sigTestWebAuthnAssertionParams(t, priv, credID, manifestJSON, content, platformShell(),
+		[]string{"steward-test"}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+	params["execution_id"] = "sig-webauthn-stale-001"
+	sc := testSignedCommandWithParams("sig-webauthn-stale-001", cpTypes.CommandExecuteScript, params)
+
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand, "a stale manifest must not authorize execution")
+	assert.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
 }

@@ -523,7 +523,14 @@ func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope,
 // Unlike verifyX509OperatorSignature, there is no "any_valid, no CA roots configured"
 // relaxation: a WebAuthn credential's public key has no source other than the
 // CA-verified manifest carried in webauthnManifestJSON, so this fails closed when no CA
-// roots are configured rather than silently skipping verification.
+// roots are configured rather than silently skipping verification
+// (TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected asserts that
+// branch directly, so a regression back to fail-open cannot ship unnoticed).
+//
+// The steward's own tenant path and its manifest freshness high-water mark are passed to
+// the verifier: the roster is fleet-wide, so the entry's tenant must cover this steward,
+// and a manifest older than one already accepted here must not resurrect a credential
+// that has since been removed from the roster.
 func (h *Handler) verifyWebAuthnOperatorSignature(envelope operatorpayload.Envelope, authDataB64, clientDataB64, sigB64, credIDB64, manifestJSON string) error {
 	if h.controllerCARoots == nil {
 		return fmt.Errorf("%w: webauthn verification requires a configured controller CA", ErrUnauthenticatedCommand)
@@ -557,7 +564,11 @@ func (h *Handler) verifyWebAuthnOperatorSignature(envelope operatorpayload.Envel
 		return fmt.Errorf("%w: failed to build webauthn proof: %v", ErrUnauthenticatedCommand, err)
 	}
 
-	credVerifier := OperatorCredentialVerifier(&webauthnOperatorCredentialVerifier{caRoots: h.controllerCARoots})
+	credVerifier := OperatorCredentialVerifier(&webauthnOperatorCredentialVerifier{
+		caRoots:       h.controllerCARoots,
+		stewardTenant: h.tenantID,
+		freshness:     h.webauthnManifestFloor,
+	})
 	if err := credVerifier.Verify(envelope, proof); err != nil {
 		return fmt.Errorf("%w: webauthn credential: %v", ErrUnauthenticatedCommand, err)
 	}

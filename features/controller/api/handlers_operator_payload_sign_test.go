@@ -6,7 +6,7 @@
 // Coverage:
 //   - handleOperatorPayloadSignBegin: not-configured, no-principal, no-session-id,
 //     account-not-found, no-credentials, missing-content, missing-shell, no-targets-matched,
-//     success (challenge equals sha256(CanonicalBytes(envelope))), differing nonce across
+//     success (challenge equals operatorpayload.ChallengeHash(envelope)), differing nonce across
 //     two otherwise-identical begin calls.
 //   - handleOperatorPayloadSignFinish: not-configured, no-principal, no-session-id,
 //     account-not-found, no-active-session, session-expired, throttle, replayed session ID
@@ -281,7 +281,7 @@ func TestOperatorPayloadSignBegin_NoTargetsMatched_400(t *testing.T) {
 }
 
 // TestOperatorPayloadSignBegin_ChallengeEqualsEnvelopeHash is the core [REQUIRED TEST]:
-// the challenge sent to the authenticator equals sha256(CanonicalBytes(envelope)) of the
+// the challenge sent to the authenticator equals operatorpayload.ChallengeHash(envelope) of the
 // exact envelope returned by begin (and, per the end-to-end finish test below, the exact
 // envelope returned by finish too).
 func TestOperatorPayloadSignBegin_ChallengeEqualsEnvelopeHash(t *testing.T) {
@@ -306,17 +306,26 @@ func TestOperatorPayloadSignBegin_ChallengeEqualsEnvelopeHash(t *testing.T) {
 		Nonce:     envelope.Data.Envelope.Nonce,
 		ExpiresAt: envelope.Data.Envelope.ExpiresAt,
 	}
-	canonical, err := operatorpayload.CanonicalBytes(recomputed)
+	wantHash, err := operatorpayload.ChallengeHash(recomputed)
 	require.NoError(t, err)
-	wantHash := sha256.Sum256(canonical)
 
 	assert.Equal(t, hex.EncodeToString(wantHash[:]), envelope.Data.EnvelopeHash,
-		"envelope_hash must equal sha256(CanonicalBytes(envelope))")
+		"envelope_hash must equal operatorpayload.ChallengeHash(envelope)")
 
 	challengeBytes, err := base64.RawURLEncoding.DecodeString(envelope.Data.Assertion.Response.Challenge.String())
 	require.NoError(t, err)
 	assert.Equal(t, wantHash[:], challengeBytes,
-		"the WebAuthn challenge must equal sha256(CanonicalBytes(envelope))")
+		"the WebAuthn challenge must equal operatorpayload.ChallengeHash(envelope)")
+
+	// Domain separation (W3C WebAuthn assertion-confusion defence): the challenge must
+	// NOT be a bare hash of the canonical bytes, or an assertion collected during any
+	// other ceremony at this relying party could be replayed as an operator
+	// authorization.
+	canonical, err := operatorpayload.CanonicalBytes(recomputed)
+	require.NoError(t, err)
+	bareHash := sha256.Sum256(canonical)
+	assert.NotEqual(t, bareHash[:], challengeBytes,
+		"the challenge preimage must be domain-separated, not bare CanonicalBytes")
 }
 
 // TestOperatorPayloadSignBegin_NonceDiffersAcrossCalls is the [REQUIRED TEST]: two begin
@@ -554,11 +563,10 @@ func TestOperatorPayloadSignFinish_Success_EndToEnd(t *testing.T) {
 		Nonce:     finish.Data.Envelope.Nonce,
 		ExpiresAt: finish.Data.Envelope.ExpiresAt,
 	}
-	canonical, err := operatorpayload.CanonicalBytes(recomputed)
+	wantHash, err := operatorpayload.ChallengeHash(recomputed)
 	require.NoError(t, err)
-	wantHash := sha256.Sum256(canonical)
 	assert.Equal(t, hex.EncodeToString(wantHash[:]), finish.Data.EnvelopeHash,
-		"envelope_hash returned by finish must equal sha256(CanonicalBytes(the exact envelope returned in finish))")
+		"envelope_hash returned by finish must equal ChallengeHash(the exact envelope returned in finish)")
 
 	// The sign count must have advanced (persisted).
 	acct, err := server.getAccount(context.Background(), username)

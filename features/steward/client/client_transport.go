@@ -1182,7 +1182,12 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		SigningConfig:      signingConfig,
 		RequireSignedAdhoc: scriptSigning.RequireSignedAdhoc,
 		ControllerCARoots:  controllerCARoots,
-		EventEmitter:       scriptEmitter,
+		// TenantID confines a fleet-wide authorized-WebAuthn-credential roster entry to
+		// the tenant subtree its owning account belongs to (Issue #3697). Empty until
+		// registration assigns one, in which case only a root-scope entry authorizes
+		// inline execution.
+		TenantID:     c.GetTenantID(),
+		EventEmitter: scriptEmitter,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command handler: %w", err)
