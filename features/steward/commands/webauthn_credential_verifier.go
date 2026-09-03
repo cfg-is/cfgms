@@ -111,6 +111,15 @@ type webauthnAssertionProof struct {
 	SignedManifestJSON string `json:"signed_manifest_json"`
 }
 
+// maxWebAuthnAssertionFieldLen bounds each binary proof field before it is used in any
+// further computation. A real FIDO2 assertion's authenticatorData and signature are
+// well under 1KB and a credential ID under 1KB per the CTAP2 recommendation; 64KB is
+// generous headroom for extensions while still rejecting a hostile or malformed proof
+// (this is an operator-supplied, potentially attacker-adjacent input per CLAUDE.md's
+// threat model) before its length is used to size an allocation (Verify's sigData
+// buffer) or drives further parsing.
+const maxWebAuthnAssertionFieldLen = 64 * 1024
+
 // manifestFreshnessFloor is the high-water mark of manifest issuance instants this
 // steward has already accepted. Held on the Handler and shared by every verification, so
 // a manifest older than the newest one already honoured is refused: an attacker holding
@@ -181,6 +190,10 @@ func (v *webauthnOperatorCredentialVerifier) Verify(envelope operatorpayload.Env
 	}
 	if len(p.AuthenticatorData) == 0 || len(p.ClientDataJSON) == 0 || len(p.Signature) == 0 || len(p.CredentialID) == 0 {
 		return fmt.Errorf("incomplete webauthn assertion proof")
+	}
+	if len(p.AuthenticatorData) > maxWebAuthnAssertionFieldLen || len(p.ClientDataJSON) > maxWebAuthnAssertionFieldLen ||
+		len(p.Signature) > maxWebAuthnAssertionFieldLen || len(p.CredentialID) > maxWebAuthnAssertionFieldLen {
+		return fmt.Errorf("webauthn assertion proof field exceeds maximum allowed size")
 	}
 
 	expectedHash, err := operatorpayload.ChallengeHash(envelope)

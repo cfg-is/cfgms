@@ -399,6 +399,30 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_InvalidProofJSON_Rejected(t *
 	assert.Contains(t, err.Error(), "invalid webauthn assertion proof")
 }
 
+// TestWebAuthnOperatorCredentialVerifier_Verify_OversizedField_Rejected verifies a
+// proof field exceeding maxWebAuthnAssertionFieldLen is rejected before it is used to
+// size any allocation (CodeQL: size computation for allocation may overflow, flagged
+// on Verify's sigData buffer, sized from len(AuthenticatorData)).
+func TestWebAuthnOperatorCredentialVerifier_Verify_OversizedField_Rejected(t *testing.T) {
+	_, caPool := sigTestCA(t)
+	env := operatorpayload.Envelope{
+		Content: []byte("echo hi"), Shell: "bash", Targets: []string{"steward-test"},
+		Nonce: "n", ExpiresAt: time.Now().Add(time.Minute),
+	}
+	proof, err := json.Marshal(webauthnAssertionProof{
+		AuthenticatorData: make([]byte, maxWebAuthnAssertionFieldLen+1),
+		ClientDataJSON:    []byte("{}"),
+		Signature:         []byte("x"),
+		CredentialID:      []byte("x"),
+	})
+	require.NoError(t, err)
+
+	v := newSigTestWebAuthnVerifier(caPool)
+	err = v.Verify(env, proof)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum allowed size")
+}
+
 // ---------------------------------------------------------------------------
 // W3C WebAuthn §7.2 assertion checks — the steward is the independent verifier,
 // so it applies at least the verification the controller's own ceremony does.
