@@ -79,15 +79,97 @@ func requireRealHypervHostOrSkip(t *testing.T) {
 	}
 }
 
-// runPowerShellFixture runs a short PowerShell script directly (not through the
-// hyperv module) to establish or tear down real host-level test fixtures — a real
-// VM shell for the module to find via its own Get-VM, not a mock of anything the
-// test itself verifies.
-func runPowerShellFixture(t *testing.T, script string) {
+// buildSeedPhaseFailedFixtureRealHost builds the "already failed during the seed
+// phase, attemptCount attempts made" starting fixture by driving the REAL
+// module — real transport, real Hyper-V host — through its own createVM ->
+// provisionVM -> failProvision code path attemptCount times, then reading the
+// resulting record back from the real hyperv.ProvisionStore — never a
+// hand-built ProvisionRecord literal that could silently drift from what
+// production actually writes (Issue #3804 AC2). This is the real-host
+// counterpart of the scripted-host fixture builder of the same name in the
+// untagged sibling file (hyperv_provision_timeout_recovery_test.go); it
+// cannot reuse that one directly because there is no scripted transport to
+// inject here.
+//
+// The technique: configure the module with a deliberately invalid seed_dir (a
+// UNC path). createVM never reads seed_dir, so it still runs for real against
+// the live host on the first (VM-absent) pass — a genuine New-VM. But
+// provisionVM's real validateSeedPath check rejects a UNC seed path before any
+// PowerShell is spawned for the seed itself (vm_provision.go), so every pass
+// fails deterministically and instantly: no dependency on real host timing, no
+// risk of a wedged VHD, and no PowerShell error string to guess at. Each call
+// still goes through the real loadOrInitProvision -> advanceProvision(creating)
+// -> validateSeedPath -> failProvision chain, so the resulting record is
+// exactly what production writes for an N-times-failed seed build. The VM
+// itself, and RetryCount, accumulate across passes the same way a real
+// steward's repeated convergence attempts would.
+//
+// The caller must build a FRESH module (hyperv.New + Configure with a valid,
+// unset seed_dir) over the returned store before driving the scenario it
+// actually wants to observe — this function's module used a poisoned seed_dir
+// on purpose and must not be reused.
+func buildSeedPhaseFailedFixtureRealHost(t *testing.T, vmName, vhdPath, isoPath string, attemptCount int) hyperv.ProvisionStore {
 	t.Helper()
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "fixture PowerShell failed: %s\noutput: %s", script, string(out))
+	require.Positive(t, attemptCount, "fixture requires at least one real failed attempt")
+
+	store := hyperv.NewMemProvisionStore()
+	m := hyperv.New(hyperv.NewDefaultDetector(), hyperv.WithProvisionStore(store))
+
+	injectable, ok := m.(modules.SecretStoreInjectable)
+	require.True(t, ok, "hyperv module must implement modules.SecretStoreInjectable")
+	require.NoError(t, injectable.SetSecretStore(newTestSecretStore()))
+
+	configurable, ok := m.(modules.Configurable)
+	require.True(t, ok, "hyperv module must implement modules.Configurable")
+	require.NoError(t, configurable.Configure(execution.NewConfigState(map[string]interface{}{
+		"tenant_id": "cfgms-it-3804",
+		// Deliberately invalid (UNC): rejected by the real validateSeedPath
+		// before any PowerShell runs for the seed step. createVM never reads
+		// seed_dir, so it is unaffected.
+		"seed_dir": `\\cfgms-it-3804-invalid-seed-host\seed`,
+	})))
+
+	desired := execution.NewConfigState(map[string]interface{}{
+		"name":        vmName,
+		"memory_mb":   512,
+		"cpu_count":   1,
+		"vhd_path":    vhdPath,
+		"generation":  2,
+		"state":       "running",
+		"switch_name": []interface{}{},
+		"source": map[string]interface{}{
+			"iso":       isoPath,
+			"os_family": "linux",
+			"completion": map[string]interface{}{
+				"mode":    "steward-registration",
+				"timeout": "60m",
+			},
+			"on_existing": "never",
+			// A budget comfortably larger than attemptCount so these
+			// fixture-building passes never themselves trip retry-exhaustion,
+			// which would stop short of attemptCount real failures.
+			"retry_max": attemptCount + 5,
+		},
+	})
+
+	for i := 0; i < attemptCount; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := m.Set(ctx, "vm:"+vmName, desired)
+		cancel()
+		require.Errorf(t, err, "attempt %d: an invalid seed_dir must deterministically fail the seed/create phase", i+1)
+		require.ErrorIsf(t, err, hyperv.ErrInvalidSeedPath, "attempt %d", i+1)
+	}
+
+	record, err := store.GetProvision(context.Background(), vmName)
+	require.NoError(t, err)
+	require.Equal(t, hyperv.ProvisionStateFailed, record.State,
+		"fixture-building must leave the record failed")
+	require.Equal(t, hyperv.ProvisionStateCreating, record.FailedFrom,
+		"fixture-building must fail during the seed/create phase")
+	require.Equal(t, attemptCount, record.RetryCount,
+		"fixture-building must consume exactly attemptCount real attempts")
+
+	return store
 }
 
 // TestHypervVMSeedRepair_Windows_DeadlineKilledMountRecoversOnRetry drives the REAL
@@ -112,21 +194,17 @@ func TestHypervVMSeedRepair_Windows_DeadlineKilledMountRecoversOnRetry(t *testin
 	// requires the path to exist.
 	require.NoError(t, os.WriteFile(isoPath, []byte("cfgms-3804-placeholder-iso"), 0o644))
 
-	// Real host fixture: a VM shell with no disks and no network, matching what the
-	// hyperv package's own TestApplySourceGated_FailedSeedPhaseRetriesWithinBudget
-	// scripts via a fake transport's getVM output — here it is an actual VM on the
-	// actual host, found by the module's own real Get-VM call.
-	runPowerShellFixture(t, `New-VM -Name '`+vmName+`' -Generation 2 -NoVHD -MemoryStartupBytes 512MB | Out-Null; Set-VMProcessor -VMName '`+vmName+`' -Count 1`)
 	t.Cleanup(func() {
 		_ = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
 			`Stop-VM -Name '`+vmName+`' -TurnOff -Force -ErrorAction SilentlyContinue; Remove-VM -Name '`+vmName+`' -Force -ErrorAction SilentlyContinue`).Run()
 	})
 
-	store := hyperv.NewMemProvisionStore()
-	// Reuses seedPhaseFailedRecord from hyperv_provision_timeout_recovery_test.go
-	// (same package, same GOOS=windows build): the real exported hyperv.ProvisionRecord
-	// type, one prior failed attempt, well within the default retry budget of 3.
-	require.NoError(t, store.SetProvision(context.Background(), seedPhaseFailedRecord(vmName, 1)))
+	// One prior failed attempt, built via the real module's own
+	// createVM/provisionVM/failProvision path (Issue #3804 AC2) — see
+	// buildSeedPhaseFailedFixtureRealHost. This is also what puts the real VM on the
+	// host (createVM), so no separate raw-PowerShell VM-shell fixture is
+	// needed. Well within the default retry budget of 3.
+	store := buildSeedPhaseFailedFixtureRealHost(t, vmName, vhdPath, isoPath, 1)
 
 	m := hyperv.New(hyperv.NewDefaultDetector(), hyperv.WithProvisionStore(store))
 
@@ -206,7 +284,6 @@ func TestHypervVMSeedRepair_Windows_RetryBudgetExhausted_NeverAttemptsHostWork(t
 	isoPath := filepath.Join(tempDir, "fake-install.iso")
 	require.NoError(t, os.WriteFile(isoPath, []byte("cfgms-3804-placeholder-iso"), 0o644))
 
-	runPowerShellFixture(t, `New-VM -Name '`+vmName+`' -Generation 2 -NoVHD -MemoryStartupBytes 512MB | Out-Null; Set-VMProcessor -VMName '`+vmName+`' -Count 1`)
 	t.Cleanup(func() {
 		_ = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
 			`Stop-VM -Name '`+vmName+`' -TurnOff -Force -ErrorAction SilentlyContinue; Remove-VM -Name '`+vmName+`' -Force -ErrorAction SilentlyContinue`).Run()
@@ -214,12 +291,13 @@ func TestHypervVMSeedRepair_Windows_RetryBudgetExhausted_NeverAttemptsHostWork(t
 
 	// Exhaustion is expressed through authored config, not a copy of the
 	// module's built-in default: the desired state below declares
-	// source.retry_max: 2 and the record already carries 2 attempts, so the
-	// module derives "exhausted" from the budget the operator declared.
+	// source.retry_max: 2 and the record already carries 2 real attempts,
+	// built via the real module's own createVM/provisionVM/failProvision path
+	// (Issue #3804 AC2, buildSeedPhaseFailedFixtureRealHost), so the module derives
+	// "exhausted" from the budget the operator declared.
 	const declaredRetryMax = 2
 
-	store := hyperv.NewMemProvisionStore()
-	require.NoError(t, store.SetProvision(context.Background(), seedPhaseFailedRecord(vmName, declaredRetryMax)))
+	store := buildSeedPhaseFailedFixtureRealHost(t, vmName, vhdPath, isoPath, declaredRetryMax)
 
 	m := hyperv.New(hyperv.NewDefaultDetector(), hyperv.WithProvisionStore(store))
 	injectable, ok := m.(modules.SecretStoreInjectable)

@@ -47,6 +47,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -94,14 +95,24 @@ const (
 // VM read; the mutation commands ignore output, exactly as a real host's do),
 // accepts every mutation, and powers the VM on when it is told to. slowCommand /
 // slowFor make one named command genuinely slow — a real seed build against a
-// real host takes minutes, which is the whole point of AC (a).
+// real host takes minutes, which is the whole point of AC (a). failCmd /
+// failRemaining make one named command fail for a bounded number of calls, used
+// by buildSeedPhaseFailedFixture (Issue #3804 AC2) to drive the real module's
+// own provisionVM/failProvision path into a genuine seed-phase failure instead
+// of hand-constructing a ProvisionRecord. created tracks whether New-VM has
+// actually been issued yet, so Get-VM correctly answers "not found" until the
+// real createVM call has run — required for the fixture-building "VM absent"
+// pass to reach createVM+provisionVM in the first place.
 type scriptedHypervHost struct {
-	mu       sync.Mutex
-	calls    []string
-	vmState  string
-	slowCmd  string
-	slowFor  time.Duration
-	slowSeen int
+	mu            sync.Mutex
+	calls         []string
+	created       bool
+	vmState       string
+	slowCmd       string
+	slowFor       time.Duration
+	slowSeen      int
+	failCmd       string
+	failRemaining int
 }
 
 var _ hyperv.HostCommandTransport = (*scriptedHypervHost)(nil)
@@ -109,9 +120,22 @@ var _ hyperv.HostCommandTransport = (*scriptedHypervHost)(nil)
 func (h *scriptedHypervHost) ExecutePS(ctx context.Context, psCommand string, _ map[string]string) (string, error) {
 	h.mu.Lock()
 	h.calls = append(h.calls, psCommand)
+
+	if h.failRemaining > 0 && h.failCmd != "" && strings.Contains(psCommand, h.failCmd) {
+		h.failRemaining--
+		h.mu.Unlock()
+		return "", fmt.Errorf("scripted host: forced failure of %s", h.failCmd)
+	}
+
 	slow := h.slowFor > 0 && h.slowCmd != "" && strings.Contains(psCommand, h.slowCmd)
 	if slow {
 		h.slowSeen++
+	}
+	// psCreateVM issues "New-VM -Name $Name ..." — matched with the trailing
+	// space so it never collides with New-VMSwitch (unused by these VM-only
+	// tests, but matched precisely regardless).
+	if strings.Contains(psCommand, "New-VM -Name") {
+		h.created = true
 	}
 	h.mu.Unlock()
 
@@ -132,6 +156,9 @@ func (h *scriptedHypervHost) ExecutePS(ctx context.Context, psCommand string, _ 
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.created {
+		return `{"found":false}`, nil
+	}
 	return `{"found":true,"Name":"` + seedRepairVMName + `","MemoryStartupBytes":4294967296,` +
 		`"ProcessorCount":2,"Generation":2,"Path":"C:\\VMs\\` + seedRepairVMName + `.vhdx",` +
 		`"ConfigurationLocation":"C:\\VMs",` +
@@ -164,24 +191,66 @@ func (hypervHostDetector) IsHypervHost(_ context.Context) (bool, error) { return
 
 var _ hyperv.HypervDetector = hypervHostDetector{}
 
-// seedPhaseFailedRecord builds the "already failed during the seed phase, N
-// attempts made" fixture as a literal of the real, exported hyperv.ProvisionRecord
-// — checked by the compiler against the real field set, and round-tripped through
-// the real hyperv.ProvisionStore the module reads. Field values mirror exactly
-// what features/modules/hyperv's failProvision writes on a create/seed-phase
-// failure.
-func seedPhaseFailedRecord(vmName string, retryCount int) *hyperv.ProvisionRecord {
-	now := time.Now().UTC()
-	return &hyperv.ProvisionRecord{
-		VMName:        vmName,
-		State:         hyperv.ProvisionStateFailed,
-		FailedFrom:    hyperv.ProvisionStateCreating,
-		CorrelationID: vmName,
-		StartedAt:     now.Add(-time.Hour),
-		UpdatedAt:     now,
-		LastError:     `hyperv: create seed VHDX for VM "` + vmName + `": exit status 1`,
-		RetryCount:    retryCount,
+// buildSeedPhaseFailedFixture builds the "already failed during the seed
+// phase, attemptCount attempts made" starting fixture by driving the REAL
+// module through its own createVM -> provisionVM -> failProvision code path
+// attemptCount times, then reading the resulting record back from the real
+// hyperv.ProvisionStore — never a hand-built ProvisionRecord literal that
+// could silently drift from what production actually writes (Issue #3804
+// AC2).
+//
+// It does this against a scripted host whose New-VHD command is set to fail
+// for exactly attemptCount calls: the first pass finds the VM absent (the
+// host has not yet seen "New-VM -Name", so Get-VM answers not-found) and goes
+// through applySourceGated's !vmExists branch — createVM (a real New-VM call
+// the host accepts) followed by provisionVM, which fails at the scripted
+// New-VHD. Every subsequent pass finds the VM existing (createVM already ran)
+// and re-enters provisionVM through the real seed-phase-failure repair gate,
+// consuming one more attempt from a budget declared generous enough
+// (attemptCount+5) that the fixture-building passes themselves never trip
+// retry-exhaustion. The returned host has its scripted failure and call log
+// cleared before return — New-VHD behaves normally again, and callers that
+// want to assert on calls made by the scenario under test start from a clean
+// slate — but retains the "VM exists" state learned while building the
+// fixture, so a fresh module instance wired to the same store+host picks up
+// exactly where fixture-building left off, the same way a real steward's
+// convergence loop would across two passes.
+func buildSeedPhaseFailedFixture(t *testing.T, vmName string, attemptCount int) (hyperv.ProvisionStore, *scriptedHypervHost) {
+	t.Helper()
+	require.Positive(t, attemptCount, "fixture requires at least one real failed attempt")
+
+	store := hyperv.NewMemProvisionStore()
+	host := &scriptedHypervHost{vmState: "Off", failCmd: "New-VHD", failRemaining: attemptCount}
+	exec := newSeedRepairExecutor(t, newRealHypervModule(t, store, host), 90)
+
+	// A retry budget comfortably larger than attemptCount so these
+	// fixture-building passes never themselves trip the retry-exhausted
+	// branch, which would stop re-invoking provisionVM short of attemptCount
+	// real failures.
+	configYAML := buildSeedRepairConfigYAML(t, attemptCount+5)
+
+	for i := 0; i < attemptCount; i++ {
+		report, applyErr := exec.ApplyConfiguration(context.Background(), configYAML, "v-fixture-build")
+		require.NoError(t, applyErr)
+		require.NotNil(t, report)
 	}
+
+	record, err := store.GetProvision(context.Background(), vmName)
+	require.NoError(t, err)
+	require.Equal(t, hyperv.ProvisionStateFailed, record.State,
+		"fixture-building must leave the record failed")
+	require.Equal(t, hyperv.ProvisionStateCreating, record.FailedFrom,
+		"fixture-building must fail during the seed/create phase")
+	require.Equal(t, attemptCount, record.RetryCount,
+		"fixture-building must consume exactly attemptCount real attempts")
+
+	host.mu.Lock()
+	host.calls = nil
+	host.failCmd = ""
+	host.failRemaining = 0
+	host.mu.Unlock()
+
+	return store, host
 }
 
 // newRealHypervModule builds the production hyperv module over the supplied
@@ -324,18 +393,15 @@ func TestHypervVMSeedRepair_SlowRetry_SucceedsPastOld30sCeiling(t *testing.T) {
 	// configured 90s ModuleCallTimeoutSec below.
 	const seedBuildDuration = 32 * time.Second
 
-	store := hyperv.NewMemProvisionStore()
-	// One prior failed attempt against a declared budget of 3 — within budget, so
-	// the real applySourceGated must repair rather than surface-and-wait.
-	require.NoError(t, store.SetProvision(context.Background(), seedPhaseFailedRecord(seedRepairVMName, 1)))
-
-	host := &scriptedHypervHost{
-		vmState: "Off",
-		// New-VHD appears only in the seed-build command (psNewSeedVHD); the VM
-		// itself already exists, so nothing else creates a disk on this pass.
-		slowCmd: "New-VHD",
-		slowFor: seedBuildDuration,
-	}
+	// One prior failed attempt, built via the real module's own
+	// createVM/provisionVM/failProvision path (Issue #3804 AC2) — against a
+	// declared budget of 3 below, so the real applySourceGated must repair
+	// rather than surface-and-wait.
+	store, host := buildSeedPhaseFailedFixture(t, seedRepairVMName, 1)
+	// New-VHD appears only in the seed-build command (psNewSeedVHD); the VM
+	// itself already exists, so nothing else creates a disk on this pass.
+	host.slowCmd = "New-VHD"
+	host.slowFor = seedBuildDuration
 
 	exec := newSeedRepairExecutor(t, newRealHypervModule(t, store, host), 90)
 	handler := newSyncConfigTestHandler(t, exec)
@@ -370,11 +436,10 @@ func TestHypervVMSeedRepair_SlowRetry_SucceedsPastOld30sCeiling(t *testing.T) {
 // repeating, indistinguishable "verification failed" — with the classification
 // originating in the real module's own retry-exhausted branch.
 func TestHypervVMSeedRepair_RetryExhausted_ReachesConfigStatusReport(t *testing.T) {
-	store := hyperv.NewMemProvisionStore()
-	// Two prior failed attempts against a declared budget of 2: exhausted.
-	require.NoError(t, store.SetProvision(context.Background(), seedPhaseFailedRecord(seedRepairVMName, 2)))
-
-	host := &scriptedHypervHost{vmState: "Off"}
+	// Two prior failed attempts, built via the real module's own
+	// createVM/provisionVM/failProvision path (Issue #3804 AC2), against a
+	// declared budget of 2 below: exhausted.
+	store, host := buildSeedPhaseFailedFixture(t, seedRepairVMName, 2)
 	exec := newSeedRepairExecutor(t, newRealHypervModule(t, store, host), 90)
 
 	// Drive ApplyConfiguration directly (not through commands.Handler) so this
