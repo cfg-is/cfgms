@@ -1023,6 +1023,39 @@ func TestSourceConfig_Validate(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrInvalidSourceRetryMax)
 	})
+
+	// ── edition (#3788 XML-injection hardening) validation ──────────────────
+	// source.edition is interpolated unescaped into a raw XML text node
+	// (autounattendTemplate's <Value>{{ .ProductEdition }}</Value>); a value
+	// carrying '<', '>', '&', a quote, or a newline could inject additional XML
+	// structure and must be rejected at config-apply time.
+	t.Run("edition empty is valid (optional, default used)", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Edition = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("edition with normal product name is valid", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Source.Edition = "Windows Server 2025 Standard (Desktop Experience)"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("edition containing injection chars is rejected", func(t *testing.T) {
+		payloads := []string{
+			"Windows Server</Value></MetaData><Bad>x</Bad><MetaData><Value>2025", // XML element injection
+			"Windows Server & Co",       // bare ampersand
+			`Windows Server "2025"`,     // quote
+			"Windows Server\nEvil:true", // newline
+		}
+		for _, payload := range payloads {
+			cfg := validBase()
+			cfg.Source.Edition = payload
+			err := cfg.Validate()
+			require.Error(t, err, "payload %q must be rejected", payload)
+			assert.ErrorIs(t, err, ErrInvalidSourceEdition, "payload %q should return ErrInvalidSourceEdition", payload)
+		}
+	})
 }
 
 // TestSourceConfig_RetryBudget covers the #3802 effective-budget resolution:

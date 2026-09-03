@@ -550,6 +550,12 @@ func TestCleanupTimedOutSessions_ContinuesAfterPerSessionError(t *testing.T) {
 
 	defaultManager := manager.(*DefaultSessionManager)
 
+	// Halt the background cleanup ticker and wait for it to fully exit before
+	// installing the hook below. Without this, a tick landing inside this
+	// test's window could call CleanupTimedOutSessions concurrently with the
+	// manual call below, invoking the hook twice.
+	defaultManager.quiesceBackgroundCleanup()
+
 	// Install a hook that terminates every collected session before the
 	// termination loop begins. This guarantees the loop sees "session not
 	// found" for all IDs in a deterministic, race-free way.
@@ -633,6 +639,12 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 
 	defaultManager := manager.(*DefaultSessionManager)
 
+	// Halt the background cleanup ticker and wait for it to fully exit before
+	// installing the hook below. Without this, a tick landing inside this
+	// test's window could call CleanupTimedOutSessions concurrently with the
+	// goroutine below, invoking the hook twice and double-closing hookReached.
+	defaultManager.quiesceBackgroundCleanup()
+
 	// hookReached is closed when cleanup has released m.mu and entered the hook.
 	// hookDone is closed by the test goroutine to let cleanup proceed to TerminateSession.
 	hookReached := make(chan struct{})
@@ -678,6 +690,106 @@ func TestCleanupTimedOutSessions_GetSessionDuringCleanup(t *testing.T) {
 
 	err = manager.TerminateSession(ctx, activeSession.ID)
 	require.NoError(t, err)
+}
+
+// TestQuiesceBackgroundCleanup_HaltsTickerWithoutTearingDownSessions verifies
+// that quiesceBackgroundCleanup only stops the background ticker: live
+// sessions survive it, unlike Stop. It also verifies the stop signal can be
+// sent through both quiesceBackgroundCleanup and a subsequent Stop without
+// panicking on a double close(stopCh).
+func TestQuiesceBackgroundCleanup_HaltsTickerWithoutTearingDownSessions(t *testing.T) {
+	config := &Config{
+		SessionTimeout: time.Hour,
+		MaxSessions:    10,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	req := &SessionRequest{
+		TenantID:  "test-tenant",
+		StewardID: "steward-1",
+		UserID:    "user-1",
+		Shell:     shell.GetDefaultShell(),
+		Cols:      80,
+		Rows:      24,
+	}
+	sess, err := manager.CreateSession(ctx, req)
+	require.NoError(t, err)
+
+	defaultManager := manager.(*DefaultSessionManager)
+
+	require.NotPanics(t, func() {
+		defaultManager.quiesceBackgroundCleanup()
+	}, "quiescing the background ticker must not panic")
+
+	_, err = manager.GetSession(sess.ID)
+	assert.NoError(t, err, "quiesceBackgroundCleanup must not tear down live sessions")
+
+	// A second quiesce call must be a no-op, not a double close(stopCh) panic.
+	require.NotPanics(t, func() {
+		defaultManager.quiesceBackgroundCleanup()
+	}, "a second quiesce call must not re-send the stop signal")
+
+	// Stop must still run its own teardown (close sessions) after the ticker
+	// was already halted by quiesceBackgroundCleanup, and must not panic by
+	// re-closing stopCh.
+	require.NotPanics(t, func() {
+		err = manager.Stop(ctx)
+	}, "Stop after quiesceBackgroundCleanup must not re-send the stop signal")
+	require.NoError(t, err)
+
+	assert.True(t, sess.IsClosed(), "Stop should close remaining sessions")
+}
+
+// TestCleanupTimedOutSessions_HookAccessIsRaceFree drives concurrent writes
+// and reads of afterCollectHook — writes under m.mu, reads via
+// CleanupTimedOutSessions — to prove the field is synchronized.
+//
+// This test is the demonstration required for this fix: reverting the
+// production read of afterCollectHook in CleanupTimedOutSessions to bypass
+// m.mu (reading the field directly instead of capturing it under the lock)
+// makes `go test -race` report a DATA RACE on this test, because the writer
+// goroutine below always takes the lock while the reader would not.
+func TestCleanupTimedOutSessions_HookAccessIsRaceFree(t *testing.T) {
+	config := &Config{
+		SessionTimeout: time.Hour, // no session ever times out; only the hook field is exercised
+		MaxSessions:    10,
+		RecordSessions: false,
+	}
+
+	manager, err := NewSessionManager(config, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	defaultManager := manager.(*DefaultSessionManager)
+
+	// Halt the real background ticker so only this test's two goroutines touch
+	// afterCollectHook and CleanupTimedOutSessions.
+	defaultManager.quiesceBackgroundCleanup()
+
+	const iterations = 500
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			defaultManager.mu.Lock()
+			defaultManager.afterCollectHook = func([]string) {}
+			defaultManager.mu.Unlock()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			defaultManager.CleanupTimedOutSessions()
+		}
+	}()
+
+	wg.Wait()
 }
 
 func TestSessionRecording(t *testing.T) {

@@ -19,14 +19,18 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -104,13 +108,15 @@ type streamEnv struct {
 	httpBase     string // "https://localhost:PORT"
 }
 
-// registrationResp mirrors the JSON shape of POST /api/v1/register.
+// registrationResp mirrors the JSON shape of POST /api/v1/register. No
+// client_key field: the steward generates its own keypair locally and submits
+// a CSR; the controller never generates or sees a private key for this
+// credential (Issue #3780).
 type registrationResp struct {
 	StewardID        string `json:"steward_id"`
 	TenantID         string `json:"tenant_id"`
 	TransportAddress string `json:"transport_address"`
 	ClientCert       string `json:"client_cert"`
-	ClientKey        string `json:"client_key"`
 	CACert           string `json:"ca_cert"`
 }
 
@@ -301,10 +307,25 @@ func newStreamEnv(t *testing.T) *streamEnv {
 	require.NoError(t, err)
 	identHash := sha256.Sum256(identPub)
 
+	// Generate the steward's mTLS keypair locally and submit only the public half
+	// as a CSR (Issue #3780); stewardKeyPEM never leaves this process.
+	stewardKeyPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	stewardKeyDER, err := x509.MarshalPKCS8PrivateKey(stewardKeyPriv)
+	require.NoError(t, err)
+	stewardKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: stewardKeyDER})
+	stewardCSRDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:            pkix.Name{CommonName: "e2e-event-stream-steward"},
+		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}, stewardKeyPriv)
+	require.NoError(t, err)
+	stewardCSRPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: stewardCSRDER})
+
 	regBody, err := json.Marshal(map[string]string{
 		"token":            tok.Token,
 		"device_id":        hex.EncodeToString(identHash[:]),
 		"identity_key_pub": base64.StdEncoding.EncodeToString(identPub),
+		"csr_pem":          string(stewardCSRPEM),
 	})
 	require.NoError(t, err)
 
@@ -325,7 +346,9 @@ func newStreamEnv(t *testing.T) *streamEnv {
 	require.NotEmpty(t, reg.StewardID, "steward_id must be set in registration response")
 
 	// ── 4. Connect gRPC control plane ─────────────────────────────────────────
-	stewardTLSCert, err := tls.X509KeyPair([]byte(reg.ClientCert), []byte(reg.ClientKey))
+	// Combine the controller-issued certificate with the locally held private key
+	// (Issue #3780) — no client_key field exists on the wire response to read.
+	stewardTLSCert, err := tls.X509KeyPair([]byte(reg.ClientCert), stewardKeyPEM)
 	require.NoError(t, err)
 
 	regCACertPool := x509.NewCertPool()

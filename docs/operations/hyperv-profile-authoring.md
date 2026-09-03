@@ -28,18 +28,27 @@ to install one OS family unattended:
 - an `enroll` block wiring how the freshly installed OS registers back into CFGMS.
 
 Profiles are stored in the controller's stored-config backend under the namespace
-**`hyperv/profiles`**, keyed by the profile name. A profile named `debian-12-base`
+**`hyperv-profiles`**, keyed by the profile name. A profile named `debian-12-base`
 lives at the key path:
 
 ```
-hyperv/profiles/debian-12-base
+hyperv-profiles/debian-12-base
 ```
 
 The module's `Configure` wiring builds a config-backed profile store from the
 controller's config backend (the `config_store` configuration key). When a VM
 source references `profile://debian-12-base`, the module reads
-`hyperv/profiles/debian-12-base` from that backend, YAML-decodes it into a profile,
+`hyperv-profiles/debian-12-base` from that backend, YAML-decodes it into a profile,
 validates it, and renders it.
+
+Author, list, show, and delete profiles with `cfg hyperv profile` (Issue #3785).
+The write path validates the profile (name, `answer_format`, that `template`
+parses, and a size cap) before it is ever stored — an invalid profile fails at
+author time, not at VM-provision time. Because a stored profile is rendered and
+executed as **root** by cloud-init/preseed at guest first boot, `create` and
+`delete` require an admin session at strong assurance with a fresh user-presence
+proof (the same step-up the `cfg` CLI already performs transparently for other
+catastrophic actions).
 
 If a VM source omits `unattend`, the module uses a **built-in default** profile for
 the `os_family` — `debian-12-base` for linux and `windows-server-default` for
@@ -58,7 +67,7 @@ shape):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | No | Profile identifier. Must match `^[a-zA-Z0-9_\-]{1,64}$`. If omitted, the key name (the `<name>` in `hyperv/profiles/<name>`) is authoritative. |
+| `name` | string | No | Profile identifier. Must match `^[a-zA-Z0-9_\-]{1,64}$`. If omitted, the key name (the `<name>` in `hyperv-profiles/<name>`) is authoritative. |
 | `os_family` | string | Yes | Installer family: `linux` or `windows`. Must match the `source.os_family` of any VM that references this profile. |
 | `answer_format` | string | Yes | Answer-file format: `preseed` (Debian/Ubuntu) or `autounattend` (Windows Setup). |
 | `template` | string | Yes | The answer-file body as a Go `text/template`. Rendered with `text/template` (never `html/template`), so installer syntax and XML are never HTML-escaped. |
@@ -100,7 +109,7 @@ Suppose you want a Debian 12 profile that pins a specific locale and uses your o
 enrollment bundle URL. Author the following YAML.
 
 ```yaml
-# hyperv/profiles/debian-12-acme-corp
+# hyperv-profiles/debian-12-acme-corp
 name: debian-12-acme-corp
 os_family: linux
 answer_format: preseed
@@ -146,9 +155,17 @@ template: |
     in-target cfgms-steward enroll --token {{ secret "hyperv/enroll/regtoken" }} --label {{ .CorrelationID }}
 ```
 
-Store it under the `hyperv/profiles` namespace (the exact command depends on your
-stored-config tooling; the key path is `hyperv/profiles/debian-12-acme-corp`).
-Then reference it from a VM:
+Store it with `cfg hyperv profile create`:
+
+```sh
+cfg hyperv profile create debian-12-acme-corp --file debian-12-acme-corp.yaml
+```
+
+This stores the profile at the key path `hyperv-profiles/debian-12-acme-corp`.
+The `create` command validates the profile server-side (name, `answer_format`,
+that `template` parses, and the size cap) before storing it, so a malformed
+profile is rejected immediately with an actionable error rather than surfacing
+as a provisioning failure later. Then reference it from a VM:
 
 ```yaml
 - name: stw-lin-02
@@ -183,7 +200,7 @@ volume), so no media repack is required. Enrollment runs at first logon via a
 signed `.ppkg` referenced by host path (resolved from a secret key).
 
 ```yaml
-# hyperv/profiles/windows-server-acme-corp
+# hyperv-profiles/windows-server-acme-corp
 name: windows-server-acme-corp
 os_family: windows
 answer_format: autounattend
@@ -236,7 +253,11 @@ template: |
   </unattend>
 ```
 
-Reference it from a VM:
+Store it with `cfg hyperv profile create` and reference it from a VM:
+
+```sh
+cfg hyperv profile create windows-server-acme-corp --file windows-server-acme-corp.yaml
+```
 
 ```yaml
 - name: stw-win-02
@@ -319,7 +340,7 @@ produced — the VM is not provisioned with a partial or empty answer file.
 ## 6. Referencing a profile from a VM declaration
 
 Reference a stored profile from a `hyperv.vm` resource's `source` block with a
-`profile://<name>` URI, where `<name>` is the key under `hyperv/profiles`:
+`profile://<name>` URI, where `<name>` is the key under `hyperv-profiles`:
 
 ```yaml
 source:

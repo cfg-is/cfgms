@@ -340,17 +340,21 @@ func (p *Provider) initializeClient(config map[string]interface{}) error {
 // Start begins control plane operation.
 func (p *Provider) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	p.ctx, p.cancel = context.WithCancel(ctx)
 	p.startTime = time.Now()
+	mode := p.mode
 
-	switch p.mode {
+	switch mode {
 	case ModeServer:
+		defer p.mu.Unlock()
 		return p.startServer()
 	case ModeClient:
+		// startClient manages its own locking rather than holding mu for the
+		// duration of this call -- see its doc comment.
+		p.mu.Unlock()
 		return p.startClient()
 	default:
+		p.mu.Unlock()
 		return fmt.Errorf("provider not initialized")
 	}
 }
@@ -414,22 +418,66 @@ func (p *Provider) startServer() error {
 	return nil
 }
 
-// startClient must be called with p.mu held.
+// startClient performs the initial ControlChannel dial. Unlike startServer,
+// it is NOT called with p.mu held: dialInitial retries the dial until p.ctx
+// is done, and a concurrent Stop() needs p.mu.Lock() to reach p.cancel() and
+// unblock that retry. Holding mu here would make Stop() wait on the very
+// thing only Stop() can end -- the same reason reconnectLoop never holds mu
+// across dialAndOpenStream or its own backoff wait.
 func (p *Provider) startClient() error {
 	p.setState(StateConnecting)
 
-	if err := p.dialAndOpenStream(); err != nil {
+	if err := p.dialInitial(); err != nil {
 		p.setState(StateDisconnected)
 		return err
 	}
 
+	p.mu.Lock()
+	p.lastConnectedAt = time.Now()
+	p.mu.Unlock()
 	p.setState(StateConnected)
-	p.lastConnectedAt = time.Now() // mu already held by caller
 
 	go p.clientReceiveLoop()
 
 	p.logger.Info("gRPC control plane client connected", "addr", logging.SanitizeLogValue(p.addr), "steward_id", logging.SanitizeLogValue(p.stewardID))
 	return nil
+}
+
+// dialInitial repeats dialAndOpenStream, using the same escalating backoff as
+// reconnectLoop, until it succeeds or p.ctx is done.
+//
+// A single dialAndOpenStream attempt can hit gRPC-go's own per-attempt
+// connect ceiling (MinConnectTimeout, 20s by default) before a QUIC+TLS
+// handshake completes under CPU contention -- even though the peer is
+// already listening -- and because ControlChannel is a fail-fast call (no
+// WaitForReady), that one failed attempt surfaces immediately as Unavailable.
+// Bumping the per-attempt ceiling would only move the same race to a bigger
+// number. Retrying against the caller's own context instead makes the
+// initial connect deterministic under load: as long as the caller does not
+// impose its own deadline, the dial keeps trying until the peer is reachable
+// (Issue #3849).
+func (p *Provider) dialInitial() error {
+	b := defaultBackoff()
+	for {
+		err := p.dialAndOpenStream()
+		if err == nil {
+			return nil
+		}
+
+		select {
+		case <-p.ctx.Done():
+			return err
+		default:
+		}
+
+		timer := time.NewTimer(b.next())
+		select {
+		case <-p.ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+	}
 }
 
 // dialAndOpenStream creates a new gRPC client connection over QUIC and opens the

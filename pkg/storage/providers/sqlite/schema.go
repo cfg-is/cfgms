@@ -262,11 +262,12 @@ func migrateRegistrationTokenClaimKey(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// backfillCfgmsPendingRegistrationColumns adds the five device-identity columns
-// introduced by Issue #3403 to a pre-existing cfgms_pending_registrations table
-// that was created before those columns existed. Fresh databases (table absent
-// or already carrying all columns) are skipped. Column-existence is checked via
-// PRAGMA before each ALTER TABLE so the pass is fully idempotent.
+// backfillCfgmsPendingRegistrationColumns adds the device-identity columns
+// introduced by Issue #3403, plus csr_pem (Issue #3780), to a pre-existing
+// cfgms_pending_registrations table that was created before those columns
+// existed. Fresh databases (table absent or already carrying all columns) are
+// skipped. Column-existence is checked via PRAGMA before each ALTER TABLE so
+// the pass is fully idempotent.
 func backfillCfgmsPendingRegistrationColumns(ctx context.Context, db *sql.DB) error {
 	exists, err := tableExists(ctx, db, "cfgms_pending_registrations")
 	if err != nil {
@@ -283,6 +284,7 @@ func backfillCfgmsPendingRegistrationColumns(ctx context.Context, db *sql.DB) er
 		{"device_id", `ALTER TABLE cfgms_pending_registrations ADD COLUMN device_id            TEXT NOT NULL DEFAULT ''`},
 		{"identity_key_pub", `ALTER TABLE cfgms_pending_registrations ADD COLUMN identity_key_pub     BLOB NOT NULL DEFAULT ''`},
 		{"key_protection_level", `ALTER TABLE cfgms_pending_registrations ADD COLUMN key_protection_level TEXT NOT NULL DEFAULT ''`},
+		{"csr_pem", `ALTER TABLE cfgms_pending_registrations ADD COLUMN csr_pem              TEXT NOT NULL DEFAULT ''`},
 		{"hostname", `ALTER TABLE cfgms_pending_registrations ADD COLUMN hostname             TEXT NOT NULL DEFAULT ''`},
 		{"platform", `ALTER TABLE cfgms_pending_registrations ADD COLUMN platform             TEXT NOT NULL DEFAULT ''`},
 	} {
@@ -771,6 +773,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			device_id            TEXT NOT NULL DEFAULT '',
 			identity_key_pub     BLOB NOT NULL DEFAULT '',
 			key_protection_level TEXT NOT NULL DEFAULT '',
+			csr_pem              TEXT NOT NULL DEFAULT '',
 			hostname             TEXT NOT NULL DEFAULT '',
 			platform             TEXT NOT NULL DEFAULT ''
 		)`,

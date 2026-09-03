@@ -404,15 +404,16 @@ func TestHandleRejectModuleBundle_NilReviewerReturns503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
-// TestModuleBundleApprovalHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST]
-// for this file (Issue #3761, ADR-031 Decision 1): handleApproveModuleBundle and
-// handleRejectModuleBundle used to return 503 and leave the bundle pending when the
-// serving node held no lease-backed leadership. Any-node service means every cluster
-// node accepts both writes — the shared module cache is the serialization point, not
-// leadership — so against a real, deliberately non-authoritative *ha.Manager
-// (ClusterMode, no lease ever acquired) each handler must reach the reviewer and the
-// bundle's approval status must actually change.
-func TestModuleBundleApprovalHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+// TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNode covers the
+// retained-gate carve-out documented on moduleDecisionNodeIsAuthoritative
+// (Issue #3761 residual review): unlike every other handler this story
+// ungates, module bundle approve/reject stay behind the lease-backed
+// leadership check because ModuleCache's approval status is a per-process
+// local-filesystem directory, not the shared database. Against a real,
+// deliberately non-authoritative *ha.Manager (ClusterMode, no lease ever
+// acquired) each handler must still return 503 and leave the bundle
+// untouched.
+func TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNode(t *testing.T) {
 	newNonAuthoritativeServer := func(t *testing.T) (*Server, *cache.ModuleCache) {
 		t.Helper()
 		server, mc, _ := setupModuleApprovalServer(t)
@@ -420,7 +421,7 @@ func TestModuleBundleApprovalHandlers_SucceedOnNonAuthoritativeNode(t *testing.T
 		return server, mc
 	}
 
-	t.Run("approve succeeds and invokes the reviewer", func(t *testing.T) {
+	t.Run("approve is blocked and does not invoke the reviewer", func(t *testing.T) {
 		server, mc := newNonAuthoritativeServer(t)
 		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
 		addressParam := formatModuleAddress(addr)
@@ -431,16 +432,16 @@ func TestModuleBundleApprovalHandlers_SucceedOnNonAuthoritativeNode(t *testing.T
 		handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
 		handler.ServeHTTP(rec, req)
 
-		require.Equal(t, http.StatusOK, rec.Code,
-			"approval must succeed regardless of leadership: %s", rec.Body.String())
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"a non-authoritative node must not decide module bundle approval")
 
 		status, err := mc.GetApprovalStatus(addr)
 		require.NoError(t, err)
-		assert.Equal(t, cache.ApprovalStatusApproved, status,
-			"moduleBundleReviewer.Approve must run on a non-authoritative node")
+		assert.Equal(t, cache.ApprovalStatusPending, status,
+			"moduleBundleReviewer.Approve must not run on a non-authoritative node")
 	})
 
-	t.Run("reject succeeds and invokes the reviewer", func(t *testing.T) {
+	t.Run("reject is blocked and does not invoke the reviewer", func(t *testing.T) {
 		server, mc := newNonAuthoritativeServer(t)
 		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
 		addressParam := formatModuleAddress(addr)
@@ -451,14 +452,35 @@ func TestModuleBundleApprovalHandlers_SucceedOnNonAuthoritativeNode(t *testing.T
 		handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
 		handler.ServeHTTP(rec, req)
 
-		require.Equal(t, http.StatusOK, rec.Code,
-			"rejection must succeed regardless of leadership: %s", rec.Body.String())
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"a non-authoritative node must not decide module bundle rejection")
 
 		status, err := mc.GetApprovalStatus(addr)
 		require.NoError(t, err)
-		assert.Equal(t, cache.ApprovalStatusRejected, status,
-			"moduleBundleReviewer.RejectPending must run on a non-authoritative node")
+		assert.Equal(t, cache.ApprovalStatusPending, status,
+			"moduleBundleReviewer.RejectPending must not run on a non-authoritative node")
 	})
+}
+
+// TestModuleBundleApprovalHandlers_SucceedOnAuthoritativeNode is the mirror case:
+// a real, deliberately authoritative *ha.Manager (SingleServerMode, the shape
+// every OSS single-controller install runs) must still reach the reviewer.
+func TestModuleBundleApprovalHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
+	server, mc, _ := setupModuleApprovalServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
+
+	addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+	req := makeApproveRequest(t, server, formatModuleAddress(addr), moduleTestStrongPrincipal())
+	rec := httptest.NewRecorder()
+
+	handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"approval must succeed on an authoritative node: %s", rec.Body.String())
+	status, err := mc.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusApproved, status)
 }
 
 // TestFormatAndParseModuleAddress verifies round-trip encoding of ContentAddress.

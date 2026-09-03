@@ -200,7 +200,9 @@ func TestRevokeAdminBundle_IdempotentDoubleRevoke(t *testing.T) {
 
 	require.NoError(t, RevokeAdminBundle(setup.cfg, setup.logger, serial))
 	require.NoError(t, RevokeAdminBundle(setup.cfg, setup.logger, serial), "double-revoke must be a no-op")
-	assert.True(t, setup.certManager.IsRevoked(serial), "cert must still be revoked after double-revoke")
+	revoked, err := setup.certManager.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.True(t, revoked, "cert must still be revoked after double-revoke")
 }
 
 // TestIssueAdminBundle_ValidityCap verifies that the issued cert's validity is
@@ -243,7 +245,9 @@ func TestRevokeAdminBundle_RevokedThenAuthFails(t *testing.T) {
 	assert.True(t, cert.HasAdminMarker(x509cert), "issued cert must carry admin marker")
 
 	// Before revocation: cert manager must not report it as revoked
-	assert.False(t, setup.certManager.IsRevoked(serial),
+	revokedBefore, err := setup.certManager.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.False(t, revokedBefore,
 		"cert must not be revoked before RevokeAdminBundle is called")
 
 	// Revoke
@@ -257,7 +261,9 @@ func TestRevokeAdminBundle_RevokedThenAuthFails(t *testing.T) {
 		LoadExistingCA: true,
 	})
 	require.NoError(t, err)
-	assert.True(t, freshManager.IsRevoked(serial),
+	revokedAfter, err := freshManager.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter,
 		"cert must be revoked after RevokeAdminBundle; auth would return CERT_REVOKED")
 }
 

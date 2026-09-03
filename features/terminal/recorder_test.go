@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -693,4 +694,105 @@ func TestDefaultRecorderConfigHasNoImplicitStoragePath(t *testing.T) {
 	require.NotNil(t, cfg)
 	assert.Empty(t, cfg.StoragePath,
 		"recorder must have no implicit storage path; callers supply a deployment-owned directory")
+}
+
+// TestGetRecordingOnActiveSessionReturnsRecordedData covers reading a recording
+// that has not been finalized — the live-session view an operator gets while the
+// terminal is still open. Frames are persisted by a background pump goroutine, so
+// GetRecording must drain it rather than sample whatever happens to be on disk;
+// without that synchronisation this returns an empty (or short-read) recording
+// depending on scheduling.
+func TestGetRecordingOnActiveSessionReturnsRecordedData(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	recorder, err := NewSessionRecorder(&RecorderConfig{
+		StoragePath:    t.TempDir(),
+		MaxRecordingMB: 100,
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+
+	const sessionID = "active-read-session"
+	require.NoError(t, recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID}))
+	require.NoError(t, recorder.RecordData(sessionID, []byte("$ echo hello\r\n"), DataDirectionInput))
+	require.NoError(t, recorder.RecordData(sessionID, []byte("hello\r\n"), DataDirectionOutput))
+
+	recording, err := recorder.GetRecording(sessionID)
+	require.NoError(t, err, "an in-progress recording must be readable")
+	require.NotNil(t, recording)
+	assert.Equal(t, "$ echo hello\r\nhello\r\n", string(recording.Data),
+		"every frame recorded before the call must be present")
+	assert.Len(t, recording.Events, 2)
+}
+
+// TestGetRecordingConcurrentWithActiveWrites reads a recording repeatedly while
+// its writer is appending. A frame reaches disk as three separate writes
+// ([length][content][HMAC]), so an unsynchronised reader observes a length prefix
+// whose content has not landed yet and fails with "failed to read event content:
+// EOF". The reader must instead stop at the last complete frame: an append in
+// flight can only truncate the tail, never invalidate the frames before it.
+func TestGetRecordingConcurrentWithActiveWrites(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	recorder, err := NewSessionRecorder(&RecorderConfig{
+		StoragePath:    t.TempDir(),
+		MaxRecordingMB: 100,
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+
+	const (
+		sessionID = "concurrent-read-session"
+		frames    = 500
+	)
+	require.NoError(t, recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID}))
+
+	var (
+		wg        sync.WaitGroup
+		writeDone = make(chan struct{})
+		writeErr  = make(chan error, 1)
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(writeDone)
+		for i := 0; i < frames; i++ {
+			if err := recorder.RecordData(sessionID, []byte("output frame\r\n"), DataDirectionOutput); err != nil {
+				writeErr <- err
+				return
+			}
+		}
+	}()
+
+	// Read continuously for the whole lifetime of the writer.
+	var previousLen int
+	for reading := true; reading; {
+		select {
+		case <-writeDone:
+			reading = false
+		default:
+		}
+
+		recording, readErr := recorder.GetRecording(sessionID)
+		require.NoError(t, readErr, "reading an actively written recording must not fail")
+		require.NotNil(t, recording)
+		require.GreaterOrEqual(t, len(recording.Data), previousLen,
+			"a recording snapshot must never shrink")
+		previousLen = len(recording.Data)
+	}
+
+	wg.Wait()
+	select {
+	case err := <-writeErr:
+		require.NoError(t, err)
+	default:
+	}
+
+	require.NoError(t, recorder.EndRecording(sessionID))
+
+	final, err := recorder.GetRecording(sessionID)
+	require.NoError(t, err)
+	assert.Len(t, final.Events, frames, "no frame may be lost by a concurrent reader")
+
+	valid, err := recorder.VerifyRecording(sessionID)
+	require.NoError(t, err)
+	assert.True(t, valid, "HMAC chain must remain intact across concurrent reads")
 }

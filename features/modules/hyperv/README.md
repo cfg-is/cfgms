@@ -551,7 +551,7 @@ Optional provisioning-debug config:
 | Key | Purpose |
 |-----|---------|
 | `enroll_launcher_path` | Host path to `cfgms-steward-launcher`, staged onto the seed so the guest performs a launcher-managed (push-upgradeable) install. |
-| `debug_ssh_authorized_key` | An SSH **public** key added to a provisioned Linux guest's `authorized_keys` so an operator can log in and diagnose a failed enrollment. Public key only (not a secret); omit to disable (production default). |
+| `debug_ssh_authorized_key` | An SSH **public** key added to a provisioned Linux guest's `authorized_keys` so an operator can log in and diagnose a failed enrollment. Public key only (not a secret); omit to disable (production default). Must be a single-line `ssh-<type> <base64> [comment]` value — a newline or other character outside the allowlist is rejected at config-apply, since the value is interpolated into a cloud-config YAML list item. |
 
 ### Annotated Linux example (legacy netinst ISO + preseed)
 
@@ -607,6 +607,22 @@ built-in default profile for the `os_family`. Operators add new OS editions,
 locales, or enrollment variants by authoring a stored profile and referencing it
 here, with **no Go code change**. See
 [Adding an unattended-install profile without code changes](../../../docs/operations/hyperv-profile-authoring.md).
+
+Profiles are authored, listed, shown, and deleted with `cfg hyperv profile`
+(Issue #3785):
+
+```sh
+cfg hyperv profile create debian-12-acme-corp --file profile.yaml
+cfg hyperv profile ls
+cfg hyperv profile show debian-12-acme-corp
+cfg hyperv profile delete debian-12-acme-corp
+```
+
+Because a stored profile is rendered and executed as **root** by cloud-init/
+preseed at guest first boot, `create` and `delete` require an admin session at
+strong assurance with a fresh user-presence proof, and the profile is validated
+server-side (name, `answer_format`, that `template` parses, and a size cap)
+before it is ever stored.
 
 ### Install media staging is out of scope
 

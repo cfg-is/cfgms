@@ -3,7 +3,9 @@
 package initialization
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // getTestDBPassword returns the test database password from CFGMS_TEST_DB_PASSWORD,
@@ -832,4 +836,465 @@ func TestRun_AdminBundleControllerURLMatchesTier1BootstrapTemplate(t *testing.T)
 		"admin bundle controller_url must embed the configured ExternalURL, not localhost:8080")
 	assert.NotContains(t, b.ControllerURL, "localhost:8080",
 		"admin bundle must not embed the compiled default ExternalURL")
+}
+
+// inMemSecretStore is a minimal thread-safe in-memory SecretStore for unit
+// tests. It exercises the real SecretStore interface without requiring a
+// running OpenBao instance — mirrors pkg/cert's identically-named test helper.
+type inMemSecretStore struct {
+	mu       sync.RWMutex
+	secrets  map[string]string
+	versions map[string]int
+}
+
+func newInMemSecretStore() *inMemSecretStore {
+	return &inMemSecretStore{secrets: make(map[string]string), versions: make(map[string]int)}
+}
+
+func (s *inMemSecretStore) StoreSecret(_ context.Context, req *secretsinterfaces.SecretRequest) error {
+	if req.TenantID == "" {
+		return fmt.Errorf("TenantID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[req.TenantID+"/"+req.Key] = req.Value
+	s.versions[req.TenantID+"/"+req.Key]++
+	return nil
+}
+
+// CompareAndSwapSecret honours expectedVersion per the SecretStore contract
+// (Issue #3775): version 0 means create-if-absent, and a mismatch is reported as
+// ok=false with a nil error rather than as a failure.
+func (s *inMemSecretStore) CompareAndSwapSecret(_ context.Context, key string, expectedVersion int, req *secretsinterfaces.SecretRequest) (int, bool, error) {
+	if req.TenantID == "" {
+		return 0, false, fmt.Errorf("TenantID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.versions[key] != expectedVersion {
+		return 0, false, nil
+	}
+	s.secrets[req.TenantID+"/"+req.Key] = req.Value
+	s.versions[key]++
+	return s.versions[key], true, nil
+}
+
+func (s *inMemSecretStore) GetSecret(_ context.Context, key string) (*secretsinterfaces.Secret, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	val, ok := s.secrets[key]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", secretsinterfaces.ErrSecretNotFound, key)
+	}
+	return &secretsinterfaces.Secret{Key: key, Value: val}, nil
+}
+
+func (s *inMemSecretStore) DeleteSecret(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.secrets, key)
+	delete(s.versions, key)
+	return nil
+}
+
+func (s *inMemSecretStore) ListSecrets(_ context.Context, _ *secretsinterfaces.SecretFilter) ([]*secretsinterfaces.SecretMetadata, error) {
+	return nil, nil
+}
+
+func (s *inMemSecretStore) GetSecrets(ctx context.Context, keys []string) (map[string]*secretsinterfaces.Secret, error) {
+	result := make(map[string]*secretsinterfaces.Secret, len(keys))
+	for _, k := range keys {
+		if sec, err := s.GetSecret(ctx, k); err == nil {
+			result[k] = sec
+		}
+	}
+	return result, nil
+}
+
+func (s *inMemSecretStore) StoreSecrets(ctx context.Context, secrets map[string]*secretsinterfaces.SecretRequest) error {
+	for _, req := range secrets {
+		if err := s.StoreSecret(ctx, req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *inMemSecretStore) GetSecretVersion(_ context.Context, key string, _ int) (*secretsinterfaces.Secret, error) {
+	return s.GetSecret(context.Background(), key)
+}
+
+func (s *inMemSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsinterfaces.SecretVersion, error) {
+	return nil, nil
+}
+
+func (s *inMemSecretStore) GetSecretMetadata(_ context.Context, key string) (*secretsinterfaces.SecretMetadata, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.secrets[key]; !ok {
+		return nil, fmt.Errorf("%w: %s", secretsinterfaces.ErrSecretNotFound, key)
+	}
+	now := time.Now()
+	return &secretsinterfaces.SecretMetadata{Key: key, CreatedAt: now, UpdatedAt: now}, nil
+}
+
+func (s *inMemSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+
+func (s *inMemSecretStore) RotateSecret(_ context.Context, key string, newValue string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secrets[key] = newValue
+	return nil
+}
+
+func (s *inMemSecretStore) ExpireSecret(ctx context.Context, key string) error {
+	return s.DeleteSecret(ctx, key)
+}
+
+func (s *inMemSecretStore) HealthCheck(_ context.Context) error { return nil }
+func (s *inMemSecretStore) Close() error                        { return nil }
+
+var _ secretsinterfaces.SecretStore = (*inMemSecretStore)(nil)
+
+// externalIntermediateFixture builds a real root CA and a regional
+// intermediate signed under it — mirroring an offline root ceremony's output —
+// and writes the intermediate's certificate, private key, and root-terminal
+// issuer chain to PEM files, returning their paths plus the PEM bytes needed
+// for assertions.
+func externalIntermediateFixture(t *testing.T) (certPath, keyPath, chainPath string, intermediateCertPEM, rootCertPEM []byte) {
+	t.Helper()
+
+	rootMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization:  "Test Offline Root",
+			Country:       "US",
+			ValidityDays:  3650,
+			PathLength:    1,
+			PathLengthSet: true,
+		},
+	})
+	require.NoError(t, err)
+
+	rootCertPEM, err = rootMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	subKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	subCert, err := rootMgr.SignSubordinateCA(&subKey.PublicKey, &cert.SubordinateCAConfig{
+		CommonName:   "Regional Intermediate",
+		Organization: "Test Org",
+		ValidityDays: 3650,
+		PathLength:   0,
+	})
+	require.NoError(t, err)
+	subKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(subKey),
+	})
+
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "intermediate.crt")
+	keyPath = filepath.Join(dir, "intermediate.key")
+	chainPath = filepath.Join(dir, "chain.pem")
+	require.NoError(t, os.WriteFile(certPath, subCert.CertificatePEM, 0600))
+	require.NoError(t, os.WriteFile(keyPath, subKeyPEM, 0600))
+	require.NoError(t, os.WriteFile(chainPath, rootCertPEM, 0600))
+
+	return certPath, keyPath, chainPath, subCert.CertificatePEM, rootCertPEM
+}
+
+// clusterCAConfigWithExternalPaths builds the cluster-mode controller config
+// the external-intermediate tests boot from.
+func clusterCAConfigWithExternalPaths(certPath, keyPath, chainPath string) *config.Config {
+	return &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			Server: &config.ServerCertificateConfig{
+				Organization: "Test Cluster",
+			},
+			ClusterCA: &config.ClusterCAConfig{
+				VaultAddress:                  "https://vault.test:8200",
+				VaultKeyPath:                  "root/cluster-ca",
+				ExternalIntermediateCertPath:  certPath,
+				ExternalIntermediateKeyPath:   keyPath,
+				ExternalIntermediateChainPath: chainPath,
+			},
+		},
+	}
+}
+
+// TestBuildClusterCertManager_ExternalIntermediate_TrustAnchorIsRoot is the
+// REQUIRED test for Issue #3779: booting a cluster-mode controller with
+// certificate.cluster_ca external-intermediate paths set must produce a
+// Manager whose GetCACertificate() equals the offline root's certificate PEM
+// byte-for-byte, and NOT the imported intermediate's own certificate — the
+// trust-anchor-identity check security review required, since chain validity
+// alone would pass whether the pinned anchor is the root or the intermediate.
+// A freshly issued leaf's IssuerChainPEM must carry the intermediate, proving
+// the two fields carry deliberately different material.
+//
+// The vault is a real in-process SecretStore implementation injected through
+// BuildClusterCertManagerWithStore — the same cluster-CA code path production
+// runs, with only the OpenBao connection replaced by the caller.
+func TestBuildClusterCertManager_ExternalIntermediate_TrustAnchorIsRoot(t *testing.T) {
+	certPath, keyPath, chainPath, intermediateCertPEM, rootCertPEM := externalIntermediateFixture(t)
+
+	store := newInMemSecretStore()
+	cfg := clusterCAConfigWithExternalPaths(certPath, keyPath, chainPath)
+
+	certStorageDir := t.TempDir()
+	logger := logging.NewNoopLogger()
+
+	mgr, err := BuildClusterCertManagerWithStore(context.Background(), cfg, certStorageDir, store, logger)
+	require.NoError(t, err)
+
+	anchor, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, anchor, "GetCACertificate() must equal the offline root's certificate PEM")
+	assert.NotEqual(t, intermediateCertPEM, anchor, "GetCACertificate() must NOT equal the imported intermediate's own certificate PEM")
+
+	leaf, err := mgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-001",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-001",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, intermediateCertPEM, leaf.IssuerChainPEM,
+		"a freshly issued leaf's IssuerChainPEM must carry the imported intermediate, for handshake chain assembly")
+
+	// The intermediate's private key must never be written to any node disk.
+	keyPaths := []string{
+		filepath.Join(certStorageDir, "ca.key"),
+		filepath.Join(certStorageDir, "ca", "ca.key"),
+	}
+	for _, kp := range keyPaths {
+		_, statErr := os.Stat(kp)
+		assert.True(t, os.IsNotExist(statErr), "ca.key must not exist at %s", kp)
+	}
+}
+
+// TestBuildClusterCertManager_PeerLoadingFromVaultPinsTheSameRoot is the
+// cluster-convergence half of the trust-anchor guarantee: a peer node whose own
+// config has no external_intermediate_* keys — so it takes the
+// cert.NewManagerFromSecretStore load path against the same vault — must
+// publish the SAME anchor (the offline root) and issue leaves carrying the
+// intermediate. If the importing node's issuer chain were not persisted, this
+// peer would pin the routinely-rotated intermediate as the fleet root and the
+// two nodes would hand stewards different permanent anchors.
+func TestBuildClusterCertManager_PeerLoadingFromVaultPinsTheSameRoot(t *testing.T) {
+	certPath, keyPath, chainPath, intermediateCertPEM, rootCertPEM := externalIntermediateFixture(t)
+
+	store := newInMemSecretStore()
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+
+	_, err := BuildClusterCertManagerWithStore(ctx, clusterCAConfigWithExternalPaths(certPath, keyPath, chainPath), t.TempDir(), store, logger)
+	require.NoError(t, err)
+
+	peerCfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			ClusterCA: &config.ClusterCAConfig{
+				VaultAddress: "https://vault.test:8200",
+				VaultKeyPath: "root/cluster-ca",
+			},
+		},
+	}
+	peerMgr, err := BuildClusterCertManagerWithStore(ctx, peerCfg, t.TempDir(), store, logger)
+	require.NoError(t, err)
+
+	peerAnchor, err := peerMgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.Equal(t, rootCertPEM, peerAnchor,
+		"a peer loading the cluster CA from the vault must pin the offline root, not the intermediate")
+	assert.NotEqual(t, intermediateCertPEM, peerAnchor)
+
+	peerLeaf, err := peerMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-002",
+		Organization: "CFGMS Stewards",
+		ClientID:     "steward-002",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, intermediateCertPEM, peerLeaf.IssuerChainPEM,
+		"leaves issued by the vault-loading peer must carry the intermediate so they chain to the root")
+}
+
+// TestBuildClusterCertManager_ImportRefusesToReplaceExistingVaultIdentity
+// proves the import path never silently re-roots a cluster: adding the
+// external_intermediate_* keys to a cluster whose vault already holds a
+// self-generated fleet root must fail closed, leaving the published CA
+// untouched, rather than overwriting it and breaking every certificate already
+// issued under it.
+func TestBuildClusterCertManager_ImportRefusesToReplaceExistingVaultIdentity(t *testing.T) {
+	certPath, keyPath, chainPath, _, _ := externalIntermediateFixture(t)
+
+	store := newInMemSecretStore()
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+
+	selfGenCfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			ClusterCA: &config.ClusterCAConfig{
+				VaultAddress: "https://vault.test:8200",
+				VaultKeyPath: "root/cluster-ca",
+			},
+		},
+	}
+	selfGenMgr, err := BuildClusterCertManagerWithStore(ctx, selfGenCfg, t.TempDir(), store, logger)
+	require.NoError(t, err)
+	originalAnchor, err := selfGenMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	_, err = BuildClusterCertManagerWithStore(ctx, clusterCAConfigWithExternalPaths(certPath, keyPath, chainPath), t.TempDir(), store, logger)
+	require.Error(t, err, "importing different material over an established cluster CA must fail closed")
+	assert.Contains(t, err.Error(), "refusing to overwrite")
+
+	stored, err := store.GetSecret(ctx, "root/cluster-ca")
+	require.NoError(t, err)
+	assert.Equal(t, string(originalAnchor), stored.Value,
+		"the vault must still hold the original self-generated CA certificate")
+}
+
+// TestBuildClusterCertManager_ExternalIntermediateReadFailures covers the three
+// file reads importClusterIntermediateCA performs: a configured path that names
+// a missing file, and one that names a directory, must each surface as an
+// explicit error naming which piece of material could not be read — not as a
+// panic, a nil manager, or a confusing downstream parse error.
+func TestBuildClusterCertManager_ExternalIntermediateReadFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		breakPaths func(t *testing.T, certPath, keyPath, chainPath string) (string, string, string)
+		wantErr    string
+	}{
+		{
+			name: "missing certificate file",
+			breakPaths: func(t *testing.T, certPath, keyPath, chainPath string) (string, string, string) {
+				require.NoError(t, os.Remove(certPath))
+				return certPath, keyPath, chainPath
+			},
+			wantErr: "failed to read external intermediate CA certificate",
+		},
+		{
+			name: "certificate path is a directory",
+			breakPaths: func(t *testing.T, _, keyPath, chainPath string) (string, string, string) {
+				return t.TempDir(), keyPath, chainPath
+			},
+			wantErr: "failed to read external intermediate CA certificate",
+		},
+		{
+			name: "missing private key file",
+			breakPaths: func(t *testing.T, certPath, keyPath, chainPath string) (string, string, string) {
+				require.NoError(t, os.Remove(keyPath))
+				return certPath, keyPath, chainPath
+			},
+			wantErr: "failed to read external intermediate CA private key",
+		},
+		{
+			name: "private key path is a directory",
+			breakPaths: func(t *testing.T, certPath, _, chainPath string) (string, string, string) {
+				return certPath, t.TempDir(), chainPath
+			},
+			wantErr: "failed to read external intermediate CA private key",
+		},
+		{
+			name: "missing issuer chain file",
+			breakPaths: func(t *testing.T, certPath, keyPath, chainPath string) (string, string, string) {
+				require.NoError(t, os.Remove(chainPath))
+				return certPath, keyPath, chainPath
+			},
+			wantErr: "failed to read external intermediate CA issuer chain",
+		},
+		{
+			name: "issuer chain path is a directory",
+			breakPaths: func(t *testing.T, certPath, keyPath, _ string) (string, string, string) {
+				return certPath, keyPath, t.TempDir()
+			},
+			wantErr: "failed to read external intermediate CA issuer chain",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			certPath, keyPath, chainPath, _, _ := externalIntermediateFixture(t)
+			certPath, keyPath, chainPath = tc.breakPaths(t, certPath, keyPath, chainPath)
+
+			store := newInMemSecretStore()
+			mgr, err := BuildClusterCertManagerWithStore(context.Background(),
+				clusterCAConfigWithExternalPaths(certPath, keyPath, chainPath),
+				t.TempDir(), store, logging.NewNoopLogger())
+
+			require.Error(t, err)
+			assert.Nil(t, mgr)
+			assert.Contains(t, err.Error(), tc.wantErr)
+
+			// A failed read must publish nothing to the vault.
+			_, getErr := store.GetSecret(context.Background(), "root/cluster-ca")
+			assert.Error(t, getErr, "no CA material may be published when the external material could not be read")
+		})
+	}
+}
+
+// TestBuildClusterCertManager_NoExternalPaths_SelfGeneratesAndStoresInVault
+// verifies that omitting the external intermediate paths preserves today's
+// self-generate-and-store-in-vault cluster CA behavior unmodified.
+func TestBuildClusterCertManager_NoExternalPaths_SelfGeneratesAndStoresInVault(t *testing.T) {
+	store := newInMemSecretStore()
+
+	cfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			Server: &config.ServerCertificateConfig{
+				Organization: "Test Cluster",
+			},
+			ClusterCA: &config.ClusterCAConfig{
+				VaultAddress: "https://vault.test:8200",
+				VaultKeyPath: "root/cluster-ca",
+			},
+		},
+	}
+
+	certStorageDir := t.TempDir()
+	logger := logging.NewNoopLogger()
+
+	mgr, err := BuildClusterCertManagerWithStore(context.Background(), cfg, certStorageDir, store, logger)
+	require.NoError(t, err)
+
+	info, err := mgr.GetCAInfo()
+	require.NoError(t, err)
+	assert.NotEmpty(t, info.CommonName)
+
+	anchor, err := mgr.GetCACertificate()
+	require.NoError(t, err)
+	assert.NotEmpty(t, anchor)
+
+	_, statErr := os.Stat(filepath.Join(certStorageDir, "ca", "ca.key"))
+	assert.True(t, os.IsNotExist(statErr), "self-generated cluster CA key must not be written to local disk")
+	assert.FileExists(t, filepath.Join(certStorageDir, "ca", "ca.crt"))
+}
+
+// TestBuildClusterCertManager_PartialExternalIntermediatePathsRejected proves
+// a partially configured external-intermediate path set fails closed at
+// config validation, before any vault or file I/O happens, rather than
+// failing deep inside a file read with a confusing error.
+func TestBuildClusterCertManager_PartialExternalIntermediatePathsRejected(t *testing.T) {
+	cfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			ClusterCA: &config.ClusterCAConfig{
+				VaultAddress:                 "https://vault.test:8200",
+				VaultKeyPath:                 "root/cluster-ca",
+				ExternalIntermediateCertPath: "/tmp/only-cert-path-set.pem",
+			},
+		},
+	}
+
+	_, err := BuildClusterCertManager(context.Background(), cfg, t.TempDir(), nil, logging.NewNoopLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must all be set together")
 }

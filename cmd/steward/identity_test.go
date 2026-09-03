@@ -154,6 +154,19 @@ func TestSaveAndLoadPendingState_RoundTrip(t *testing.T) {
 	assert.Equal(t, "pending-abc123", got.PendingID)
 }
 
+func TestSaveAndLoadPendingState_ClientKeyPEM_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	state := PendingState{PendingID: "pending-abc123", ClientKeyPEM: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----"}
+
+	require.NoError(t, savePendingState(dir, state))
+
+	got, err := loadPendingState(dir)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "pending-abc123", got.PendingID)
+	assert.Equal(t, state.ClientKeyPEM, got.ClientKeyPEM, "persisted steward private key must survive the round trip")
+}
+
 func TestLoadPendingState_MissingFile_ReturnsNilNoError(t *testing.T) {
 	dir := t.TempDir()
 	got, err := loadPendingState(dir)

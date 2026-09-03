@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +22,13 @@ import (
 // defaultRolloutHaltThreshold is the per-ring failure rate (failed/(on_version+failed)) that
 // triggers an automatic halt when a ring spec does not configure its own halt_threshold.
 const defaultRolloutHaltThreshold = 0.05
+
+// defaultRolloutHaltPollInterval is how often runRollout re-reads the rollout record
+// from the shared rolloutStore while waiting out a ring's soak duration, so a halt
+// persisted by a peer node (Server.rolloutHaltChans is per-process; POST .../halt
+// against a different node than the one running the goroutine) is noticed without
+// waiting for the full soak to elapse.
+const defaultRolloutHaltPollInterval = 5 * time.Second
 
 // startRolloutRequest is the JSON body for POST /api/v1/rollout.
 type startRolloutRequest struct {
@@ -59,10 +65,6 @@ type rolloutStatusResponse struct {
 	HaltedAt               *time.Time `json:"halted_at,omitempty"`
 	Error                  string     `json:"error,omitempty"`
 }
-
-// rolloutHaltChans tracks per-rollout halt-signal channels. The goroutine selects on the
-// channel; handleHaltRollout closes it to signal the goroutine to stop advancing.
-var rolloutHaltChans sync.Map // map[rolloutID string] chan struct{}
 
 // handleStartRollout handles POST /api/v1/rollout.
 //
@@ -154,7 +156,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	haltCh := make(chan struct{})
-	rolloutHaltChans.Store(rolloutID, haltCh)
+	s.rolloutHaltChans.Store(rolloutID, haltCh)
 
 	// #nosec G118 -- rollout is persisted and intentionally survives the
 	// initiating request; haltCh and per-command deadlines bound its lifecycle.
@@ -306,22 +308,32 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Signal the goroutine to stop.
-	if ch, loaded := rolloutHaltChans.Load(rolloutID); loaded {
+	// Persist the halt FIRST. The persisted store record is the cross-node source of
+	// truth — a peer node's runRollout goroutine only learns of this halt by re-reading
+	// it (see rolloutShouldStop) — so a write failure here means the halt has not
+	// actually happened anywhere and must be reported as such, not masked as a warning
+	// while the response claims success (Issue #3761 residual review).
+	now := time.Now().UTC()
+	if updErr := s.rolloutStore.UpdateRolloutProgress(r.Context(), rolloutID,
+		business.RolloutStatusHalted, record.CurrentRing, record.RingsCompleted,
+		&now, "halted by operator"); updErr != nil {
+		s.logger.Error("Failed to persist halt for rollout",
+			"rollout_id", logging.SanitizeLogValue(rolloutID), "error", logging.SanitizeLogValue(updErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to persist rollout halt", "HALT_PERSIST_ERROR")
+		return
+	}
+
+	// Fast-path signal for the case where this node happens to be the one running the
+	// rollout goroutine: closing the channel wakes it immediately rather than waiting
+	// for the next rolloutHaltPollInterval re-read of the now-halted store record.
+	if ch, loaded := s.rolloutHaltChans.Load(rolloutID); loaded {
 		select {
 		case <-ch.(chan struct{}):
 			// already closed
 		default:
 			close(ch.(chan struct{}))
 		}
-	}
-
-	now := time.Now().UTC()
-	if updErr := s.rolloutStore.UpdateRolloutProgress(r.Context(), rolloutID,
-		business.RolloutStatusHalted, record.CurrentRing, record.RingsCompleted,
-		&now, "halted by operator"); updErr != nil {
-		s.logger.Warn("Failed to persist halt for rollout",
-			"rollout_id", logging.SanitizeLogValue(rolloutID), "error", logging.SanitizeLogValue(updErr.Error()))
 	}
 
 	s.logger.Info("Rollout halted by operator",
@@ -343,14 +355,13 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 // git-backed); only the progress tracking is lost. See ADR-008 for the durable
 // workflow execution roadmap.
 func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord, rings []controllerconfig.RingSpec, haltCh <-chan struct{}) {
-	defer rolloutHaltChans.Delete(record.ID)
+	defer s.rolloutHaltChans.Delete(record.ID)
 
 	for i, ring := range rings {
-		// Check operator halt before processing each ring.
-		select {
-		case <-haltCh:
+		// Check operator halt before processing each ring: either this node served the
+		// halt (haltCh) or a peer node did and persisted it to the shared store.
+		if s.rolloutShouldStop(ctx, haltCh, record.ID) {
 			return
-		default:
 		}
 
 		// Advance this ring: update its desired_version in the in-memory config so
@@ -373,10 +384,8 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 			if s.onRolloutSoak != nil {
 				s.onRolloutSoak(record.ID)
 			}
-			select {
-			case <-haltCh:
+			if s.waitOutSoak(ctx, haltCh, record.ID, soakDur) {
 				return
-			case <-time.After(soakDur):
 			}
 		}
 
@@ -464,6 +473,57 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 		"rollout_id", record.ID,
 		"target_version", logging.SanitizeLogValue(record.TargetVersion))
 	s.notifyRolloutTerminal(record.ID)
+}
+
+// rolloutShouldStop reports whether the runRollout goroutine for rolloutID must stop
+// advancing: either this node served the halt (haltCh closed — the fast, same-node
+// path), or a fresh read of the shared rolloutStore shows a terminal status persisted
+// by a peer node's handleHaltRollout. An unreadable rollout record also stops the
+// rollout — the same fail-closed direction the ring-health query already takes — since
+// this goroutine must not keep advancing a fleet it can no longer confirm has not
+// already been halted or completed by another node (Issue #3761 residual review).
+func (s *Server) rolloutShouldStop(ctx context.Context, haltCh <-chan struct{}, rolloutID string) bool {
+	select {
+	case <-haltCh:
+		return true
+	default:
+	}
+
+	record, err := s.rolloutStore.GetRollout(ctx, rolloutID)
+	if err != nil {
+		s.logger.Error("Failed to re-read rollout record; stopping rollout goroutine fail-closed",
+			"rollout_id", rolloutID, "error", err)
+		return true
+	}
+	return record.Status == business.RolloutStatusHalted || record.Status == business.RolloutStatusCompleted
+}
+
+// waitOutSoak blocks for soakDur, re-checking rolloutShouldStop every
+// s.rolloutHaltPollInterval so a halt persisted by a peer node during a long soak is
+// noticed without waiting for the soak to fully elapse. Returns true if the wait was
+// cut short by a stop condition.
+func (s *Server) waitOutSoak(ctx context.Context, haltCh <-chan struct{}, rolloutID string, soakDur time.Duration) bool {
+	pollInterval := s.rolloutHaltPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultRolloutHaltPollInterval
+	}
+	remaining := soakDur
+	for remaining > 0 {
+		wait := pollInterval
+		if remaining < wait {
+			wait = remaining
+		}
+		select {
+		case <-haltCh:
+			return true
+		case <-time.After(wait):
+		}
+		remaining -= wait
+		if s.rolloutShouldStop(ctx, haltCh, rolloutID) {
+			return true
+		}
+	}
+	return false
 }
 
 // notifyRolloutTerminal fires the terminal lifecycle hook when configured. It is invoked

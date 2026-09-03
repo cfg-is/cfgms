@@ -151,6 +151,36 @@ If no file is found, built-in defaults are used and environment variable overrid
 | `common_name` | string | `"cfgms-config-signer"` | optional | CN for the config signing certificate | config.go:199 |
 | `organization` | string | `""` | optional | Organization name embedded in the certificate | config.go:202 |
 
+#### `certificate.cluster_ca` (cluster mode)
+
+`ClusterCAConfig` — `features/controller/config/config.go:624`. Only used when `ha.mode:
+cluster`; see [Cluster CA Trust Anchor Configuration](../operations/cluster-ca.md) for the full
+operational picture.
+
+| YAML field | Type | Default | Req | Description | Code ref |
+|---|---|---|---|---|---|
+| `vault_address` | string | `""` | required | OpenBao server URL; must be HTTPS in production | config.go:628 |
+| `vault_key_path` | string | `""` | required | KV v2 path in `"tenantID/key-name"` format; the cert is stored at this path, the key at `<path>-key`, and an imported intermediate's issuer chain at `<path>-chain` | config.go:634 |
+| `vault_tls_cert` | string | `""` | optional | Path to a PEM CA cert for verifying vault's TLS certificate; required when vault uses a private CA | config.go:638 |
+| `vault_mount_path` | string | `"secret"` | optional | KV v2 mount path | config.go:641 |
+| `external_intermediate_cert_path` | string | `""` | optional | Path to a regional intermediate CA certificate obtained out-of-band from an offline root ceremony (ADR-032 Decision 2); when set, all three `external_intermediate_*_path` fields must be set together | config.go:654 |
+| `external_intermediate_key_path` | string | `""` | optional | Path to the intermediate's private key; read once at import time and never written to any node's disk | config.go:658 |
+| `external_intermediate_chain_path` | string | `""` | optional | Path to the issuer chain from the intermediate up to and including the offline root (root-terminal order) | config.go:662 |
+
+**Environment overrides for `certificate.cluster_ca`:**
+
+| Env var | Overrides field |
+|---|---|
+| `CFGMS_CLUSTER_CA_VAULT_ADDRESS` | `certificate.cluster_ca.vault_address` |
+| `CFGMS_CLUSTER_CA_VAULT_KEY_PATH` | `certificate.cluster_ca.vault_key_path` |
+
+The `external_intermediate_*_path` fields have no environment variable override — set them in
+`controller.cfg` only. When omitted (all three), cluster CA init self-generates and stores a
+root CA in the vault, today's default behavior. Pointing them at material that differs from
+what the vault already holds fails closed at startup rather than replacing the cluster's
+published CA identity; see [Cluster CA Trust Anchor
+Configuration](../operations/cluster-ca.md#regional-intermediate-saas).
+
 ---
 
 ### `storage`

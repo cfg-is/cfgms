@@ -82,6 +82,7 @@ type Server struct {
 	systemMonitor                   *monitoring.SystemMonitor
 	healthCollector                 *health.Collector
 	haManager                       *ha.Manager
+	clusterBudgetDivisorCache       clusterBudgetDivisorCache                // Issue #3761: caches clusterBudgetDivisor()'s live cluster-membership query for clusterBudgetDivisorCacheTTL
 	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
@@ -147,10 +148,13 @@ type Server struct {
 	rolloutStore                    business.RolloutStore                    // Issue #2340: durable rollout-orchestration-state persistence
 	onRolloutSoak                   func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
 	onRolloutTerminal               func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
+	rolloutHaltChans                sync.Map                                 // Issue #3761: map[rolloutID string]chan struct{} — per-process fast-path halt signal; moved from a package-level var so two Server instances sharing one rolloutStore behave like two cluster nodes, not one shared process.
+	rolloutHaltPollInterval         time.Duration                            // Issue #3761: how often runRollout re-reads the rollout record from rolloutStore during a ring soak to notice a halt persisted by a peer node; defaults to 5s in NewServer, overridable in tests.
 	stopCleanup                     chan struct{}                            // signals startAPIKeyCleanup to exit
 	cleanupDone                     chan struct{}                            // closed when cleanup goroutine exits
 	closeOnce                       sync.Once                                // idempotent Close
 	roleConfigStore                 cfgconfig.ConfigStore                    // Issue #2543: role-config storage under role-policies namespace
+	hypervProfileConfigStore        cfgconfig.ConfigStore                    // Issue #3785: hyperv profile storage under hyperv-profiles namespace
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions; key=username, value=*webAuthnPendingSession
@@ -359,7 +363,20 @@ func New(
 		stopCliLoginSweep:      make(chan struct{}),
 		cliLoginSweepDone:      make(chan struct{}),
 		cliLoginSweepLease:     cliLoginSweepLease,
+		// Issue #3761: default poll interval for runRollout to notice a halt persisted
+		// by a peer node during a ring soak; tests shrink this for determinism.
+		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
 	}
+
+	// Issue #3761: divide each per-source rate limiter's configured budget across
+	// live cluster nodes (see Server.clusterBudgetDivisor) so any-node service does
+	// not multiply the operator-configured, single-server-equivalent budget by the
+	// number of nodes an attacker's requests can spread across.
+	server.enrolmentTokenMintLimiter.divisor = server.clusterBudgetDivisor
+	server.credentialRequestLodgeLimiter.divisor = server.clusterBudgetDivisor
+	server.credentialRequestCollectLimiter.divisor = server.clusterBudgetDivisor
+	server.cliLoginLodgeLimiter.divisor = server.clusterBudgetDivisor
+	server.cliLoginCollectLimiter.divisor = server.clusterBudgetDivisor
 
 	// Story #380: Initialize three-tier auth defense system
 	server.authDefense = authdefense.New(
@@ -1408,6 +1425,24 @@ func (s *Server) RoleConfigStore() cfgconfig.ConfigStore {
 	return s.roleConfigStore
 }
 
+// SetHypervProfileConfigStore wires the config store used to persist hyperv
+// VM-provisioning profiles under the hyperv-profiles namespace (Issue #3785).
+// Call this after New() returns but before Start() is called.
+func (s *Server) SetHypervProfileConfigStore(cs cfgconfig.ConfigStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hypervProfileConfigStore = cs
+}
+
+// HypervProfileConfigStore returns the wired hyperv-profile config store, or nil
+// when unwired. Exposed so controller startup wiring can be regression-tested
+// (the hyperv profile REST endpoints 503 when this is nil — Issue #3785).
+func (s *Server) HypervProfileConfigStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hypervProfileConfigStore
+}
+
 // SetRegistry wires the active-steward connection registry so that
 // GET /api/v1/stewards/{id} can report connection_state and active_sessions
 // (Issue #1323). Call this after New() returns but before Start() is called.
@@ -1632,6 +1667,17 @@ func (s *Server) SetSessionManager(mgr session.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessionManager = mgr
+}
+
+// SetCertManager wires the certificate Manager used for cert issuance,
+// revocation, and rotation. Exposed for tests that need to inject a Manager
+// backed by a failure-injecting RevocationStore (real implementation, not a
+// mock — see certinterfaces.RevocationStore) to exercise a revocation-failure
+// path deterministically.
+func (s *Server) SetCertManager(mgr *cert.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.certManager = mgr
 }
 
 // SetWebSessionManager wires the web session Manager used to authenticate browser

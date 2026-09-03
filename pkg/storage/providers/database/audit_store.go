@@ -641,11 +641,25 @@ func (s *DatabaseAuditStore) AppendChainedEntry(ctx context.Context, tenantID st
 	// Seed the chain-head row from any pre-existing audit_entries rows the first
 	// time a tenant is appended under this mechanism, so a tenant that wrote
 	// entries before audit_chain_heads existed keeps its sequence continuity.
+	//
+	// $1 appears three times below in two different type-inference contexts:
+	// once in the INSERT target list (assignment context, resolved against the
+	// tenant_id column) and twice inside WHERE tenant_id = $1 (operator context,
+	// resolved via equality-operator lookup). Postgres deduces a type for each
+	// occurrence independently and then requires them to agree; assignment
+	// context and operator context can deduce different types for the same
+	// unadorned placeholder, which Postgres rejects at parse time as SQLSTATE
+	// 42P08 "inconsistent types deduced for parameter $1" — this is not a race,
+	// it fails on every call. The explicit ::text cast pins all three
+	// occurrences to one identical type up front, so there is nothing left to
+	// deduce differently; text is implicitly assignable to the varchar(255)
+	// tenant_id column and implicitly comparable to it, so this changes no
+	// runtime semantics (Issue #3863).
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_chain_heads (tenant_id, sequence_number, checksum)
-		VALUES ($1,
-			COALESCE((SELECT MAX(sequence_number) FROM audit_entries WHERE tenant_id = $1), 0),
-			COALESCE((SELECT checksum FROM audit_entries WHERE tenant_id = $1 ORDER BY sequence_number DESC LIMIT 1), '')
+		VALUES ($1::text,
+			COALESCE((SELECT MAX(sequence_number) FROM audit_entries WHERE tenant_id = $1::text), 0),
+			COALESCE((SELECT checksum FROM audit_entries WHERE tenant_id = $1::text ORDER BY sequence_number DESC LIMIT 1), '')
 		)
 		ON CONFLICT (tenant_id) DO NOTHING
 	`, tenantID); err != nil {

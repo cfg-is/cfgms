@@ -3059,9 +3059,6 @@ func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) 
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
 
-	// Use a self-signed cert (serial 9995) that is NOT in certManager's store.
-	// The cascade will attempt to revoke it, fail, and return 500 — leaving the
-	// account disabled (but not deleted) as the fail-closed terminal state.
 	peerCert := makeAdminCertWithAttrs(t, 9995, "tenant-operator", false)
 	serial := peerCert.SerialNumber.String()
 
@@ -3078,11 +3075,18 @@ func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) 
 	require.False(t, before.GlobalScope)
 	require.False(t, before.ImplicitAdmin)
 
-	// Delete returns 500 (cert revoke fails — serial not in certManager store).
+	// Inject a cert manager whose RevocationStore always fails Revoke (real
+	// implementation, injected failure — see failingRevocationStore in
+	// handlers_accounts_test.go), simulating a transient revocation-store
+	// outage. extractAdminPrincipal's own IsRevoked check does not depend on
+	// certManager's FileStore, so swapping the whole Manager is safe here.
+	server.SetCertManager(newFailingCertManager(t))
+
+	// Delete returns 500 (cert revoke fails — injected store outage).
 	// Account is disabled (step 1 of the cascade always runs) but not deleted.
 	delRec := deleteAccount(t, server, strongPrincipal(), "tenant-operator")
 	require.Equal(t, http.StatusInternalServerError, delRec.Code,
-		"cascade fails when cert revocation fails (cert not in certMgr store): %s", delRec.Body.String())
+		"cascade fails when cert revocation fails (injected store outage): %s", delRec.Body.String())
 	assert.Contains(t, delRec.Body.String(), "CERT_REVOKE_FAILED")
 
 	// The certificate must NOT widen to unscoped root. The account is disabled,

@@ -608,7 +608,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 
 		var err error
-		certManager, err = loadExistingCertificateManager(cfg, logger)
+		certManager, err = loadExistingCertificateManager(cfg, storageManager, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
 		}
@@ -1363,6 +1363,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// selector-driven role adapter reads via GetConfigStore, config_service_v2.go).
 	if cs := storageManager.GetConfigStore(); cs != nil {
 		httpServer.SetRoleConfigStore(cs)
+	}
+
+	// Issue #3785: Wire the hyperv-profile store into the HTTP API server, same
+	// gap and same underlying store as the role-config wiring immediately above —
+	// the hyperv profile REST endpoints (`/api/v1/hyperv/profiles`,
+	// handlers_hyperv_profiles.go) read the API server's hypervProfileConfigStore
+	// field directly and 503 "Hyperv profile store not available" until it is set.
+	if cs := storageManager.GetConfigStore(); cs != nil {
+		httpServer.SetHypervProfileConfigStore(cs)
 	}
 
 	// Issue #3253: Wire entity graph provider and its ConfigStore desired-state
@@ -2678,7 +2687,7 @@ func (s *Server) GetHTTPListenAddr() string {
 // loadExistingCertificateManager loads the certificate manager from an existing CA.
 // Unlike the old initializeCertificateManager, this never creates a new CA — that
 // responsibility belongs to `controller --init` (initialization.Run).
-func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (*cert.Manager, error) {
+func loadExistingCertificateManager(cfg *config.Config, storageManager *interfaces.StorageManager, logger logging.Logger) (*cert.Manager, error) {
 	// StoragePath must be the parent of the "ca/" subdirectory; NewManager always derives
 	// the real CA directory as filepath.Join(StoragePath,"ca").
 	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
@@ -2688,8 +2697,10 @@ func loadExistingCertificateManager(cfg *config.Config, logger logging.Logger) (
 	// be re-fetched from the vault on every regular startup, not just --init.
 	// Without this branch, cert.NewManager's LoadExistingCA path below would try
 	// (and fail) to read a local ca.key that a cluster-mode node never has.
+	// storageManager also supplies the cluster-visible revocation/signing-cursor
+	// stores (ADR-031 Decision 1, Issue #3852 AC3).
 	if cfg.HA.IsClusterMode() && cfg.Certificate.ClusterCA != nil {
-		manager, err := initialization.BuildClusterCertManager(context.Background(), cfg, certPath, logger)
+		manager, err := initialization.BuildClusterCertManager(context.Background(), cfg, certPath, storageManager, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load cluster CA from vault: %w", err)
 		}

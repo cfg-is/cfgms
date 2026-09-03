@@ -22,8 +22,27 @@ const pendingStateFileName = "steward-pending.json"
 // PendingState holds the pending registration ID issued by the controller when
 // registration.workflow is set to "manual". Persisted between restarts so the
 // steward resumes polling the same record instead of creating duplicate entries.
+//
+// ClientKeyPEM is the PKCS8 PEM-encoded private key the steward generated
+// locally for this pending registration's CSR (Issue #3780 follow-up). Without
+// it, a restart during the quarantine poll window resumes polling with a fresh
+// HTTPClient that never generated a keypair — when the controller later reports
+// the registration claimed, the returned certificate has no key to pair with,
+// and the steward is orphaned (no way to recover: the pending record is single-
+// claim and a fresh Register with the same device_id is rejected as a
+// duplicate). Persisting it here lets registerAndConnect call
+// registration.HTTPClient.ResumePendingClientKey before resuming the poll, so
+// the eventual claim completes exactly as it would have in the original
+// process. Stored in cleartext at 0600 like the identity file above and the
+// client key cert.Manager persists once registration completes
+// (pkg/cert/storage.go) — this is the same file-permission-protected pattern
+// already used for the steward's ongoing mTLS identity, not a new class of
+// on-disk secret. May be empty when read from a pending-state file written
+// before this field existed; callers must treat that as "cannot resume,
+// re-register" rather than silently connecting without mTLS.
 type PendingState struct {
-	PendingID string `json:"pending_id"`
+	PendingID    string `json:"pending_id"`
+	ClientKeyPEM string `json:"client_key_pem,omitempty"`
 }
 
 // savePendingState writes state to dir/steward-pending.json with permissions 0600.

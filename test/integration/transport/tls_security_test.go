@@ -154,7 +154,10 @@ func (s *TLSSecurityTestSuite) TestTLSConfigFromRegistration() {
 }
 
 // TestRegistrationReturnsCertificates verifies that all required certificate fields
-// are present in the registration response for mTLS connectivity.
+// are present in the registration response for mTLS connectivity, and that the wire
+// response never carries a client_key field: the steward generates its own keypair
+// locally and submits a CSR, so the controller never generates or sees a private key
+// for this credential (Issue #3780).
 func (s *TLSSecurityTestSuite) TestRegistrationReturnsCertificates() {
 	s.T().Log("Testing certificate distribution via registration API")
 
@@ -164,9 +167,14 @@ func (s *TLSSecurityTestSuite) TestRegistrationReturnsCertificates() {
 
 	require.NotEmpty(s.T(), resp.StewardID, "Registration should return steward ID")
 	require.NotEmpty(s.T(), resp.ClientCert, "Registration should return client certificate")
-	require.NotEmpty(s.T(), resp.ClientKey, "Registration should return client key")
+	require.NotEmpty(s.T(), resp.ClientKey, "the steward's locally generated key must be available for mTLS")
 	require.NotEmpty(s.T(), resp.CACert, "Registration should return CA certificate")
 	require.NotEmpty(s.T(), resp.TransportAddress, "Registration should return transport address")
+
+	rawBody, err := s.helper.RegisterStewardRawBody(token)
+	require.NoError(s.T(), err, "raw registration for wire-contract check should succeed")
+	require.NotContains(s.T(), string(rawBody), "client_key",
+		"no client_key field may ever appear on the wire response")
 
 	s.T().Logf("Certificate distribution validated for steward: %s", resp.StewardID)
 }

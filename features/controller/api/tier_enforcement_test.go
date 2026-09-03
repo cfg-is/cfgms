@@ -171,6 +171,11 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Steward config push (Issue #3792) — root-equivalent write on the target host;
 	// previously reachable by any AssuranceMachine (API-key) principal cross-tenant.
 	{"PUT", "/api/v1/stewards/test-steward-id/config", "steward:write-config"},
+	// Hyper-V VM-provisioning profile write path (Issue #3785) — a stored profile
+	// is rendered and executed as root by cloud-init/preseed at guest first boot,
+	// so create/delete are code-execution-equivalent and gated like module:approve.
+	{"POST", "/api/v1/hyperv/profiles", "hyperv-profile:create"},
+	{"DELETE", "/api/v1/hyperv/profiles/test-profile", "hyperv-profile:delete"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

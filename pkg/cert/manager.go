@@ -50,12 +50,14 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -78,6 +80,18 @@ type ManagerConfig struct {
 	// Automatic renewal settings
 	EnableAutoRenewal    bool
 	RenewalThresholdDays int
+
+	// RevocationStore, if non-nil, overrides the default node-local
+	// file-backed revocation store. Pass a cluster-visible implementation
+	// (pkg/storage/providers/database) when the controller runs clustered
+	// (pkg/ha.Config.IsClusterMode()); leaving this nil preserves today's
+	// single-node file behavior exactly (Issue #3852 AC2).
+	RevocationStore certinterfaces.RevocationStore
+
+	// SigningCursorStore, if non-nil, overrides the default node-local
+	// file-backed signing-cursor store. Same clustered-vs-single-node
+	// selection as RevocationStore.
+	SigningCursorStore certinterfaces.SigningCursorStore
 }
 
 // Manager provides high-level certificate management functionality
@@ -87,8 +101,28 @@ type Manager struct {
 	validator  *Validator
 	renewer    *Renewer
 	config     *ManagerConfig
-	revocation *revocationStore
+	revocation certinterfaces.RevocationStore
+	cursor     certinterfaces.SigningCursorStore
 	rotateMu   sync.Mutex // serialises RotateSigningCertificate calls
+}
+
+// resolveRevocationStore returns config.RevocationStore if set, otherwise
+// the default node-local file-backed store rooted at config.StoragePath.
+func resolveRevocationStore(config *ManagerConfig) (certinterfaces.RevocationStore, error) {
+	if config.RevocationStore != nil {
+		return config.RevocationStore, nil
+	}
+	return NewFileRevocationStore(config.StoragePath)
+}
+
+// resolveSigningCursorStore returns config.SigningCursorStore if set,
+// otherwise the default node-local file-backed store rooted at
+// config.StoragePath.
+func resolveSigningCursorStore(config *ManagerConfig) (certinterfaces.SigningCursorStore, error) {
+	if config.SigningCursorStore != nil {
+		return config.SigningCursorStore, nil
+	}
+	return NewFileSigningCursorStore(config.StoragePath)
 }
 
 // NewManager creates a new certificate manager
@@ -147,10 +181,15 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 	// Initialize renewer
 	renewer := NewRenewer(ca, store, validator)
 
-	// Initialize revocation store (reads existing list if present, empty list if not)
-	revStore, err := newRevocationStore(config.StoragePath)
+	// Initialize revocation and signing-cursor stores (reads existing state if
+	// present, empty/nil state if not — or a cluster-visible override).
+	revStore, err := resolveRevocationStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+	cursorStore, err := resolveSigningCursorStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize signing cursor store: %w", err)
 	}
 
 	manager := &Manager{
@@ -160,6 +199,7 @@ func NewManager(config *ManagerConfig) (*Manager, error) {
 		renewer:    renewer,
 		config:     config,
 		revocation: revStore,
+		cursor:     cursorStore,
 	}
 
 	// Store the CA certificate in the certificate store for easy retrieval. Reads
@@ -271,6 +311,101 @@ func (m *Manager) SignSubordinateCA(pubKey crypto.PublicKey, config *Subordinate
 	}
 
 	return cert, nil
+}
+
+// ImportSubordinateCA replaces this Manager's active CA identity with an
+// externally-issued intermediate CA certificate, private key, and issuer chain
+// (see CA.ImportSubordinateCA), then refreshes the validator/renewer that were
+// built against the previous CA certificate and rewrites the local ca.crt —
+// public certificate only, mirroring NewManagerFromSecretStore's identical
+// constraint that a cluster-mode CA private key never touches local disk.
+func (m *Manager) ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM []byte) error {
+	if err := m.ca.ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM); err != nil {
+		return fmt.Errorf("failed to import subordinate CA: %w", err)
+	}
+
+	m.validator = NewValidator(m.ca.certificate)
+	m.renewer = NewRenewer(m.ca, m.store, m.validator)
+
+	caDir := filepath.Join(m.config.StoragePath, "ca")
+	if err := os.MkdirAll(caDir, 0700); err != nil {
+		return fmt.Errorf("failed to create CA directory: %w", err)
+	}
+	caCertPEM, err := m.ca.GetCACertificate()
+	if err != nil {
+		return fmt.Errorf("failed to get CA certificate: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(caDir, "ca.crt"), caCertPEM, 0600); err != nil {
+		return fmt.Errorf("failed to write CA certificate to disk: %w", err)
+	}
+
+	return nil
+}
+
+// NewManagerFromImportedCA builds a cluster-mode Manager whose active CA
+// identity is an externally-issued regional intermediate (ADR-032 Decision 2),
+// then publishes the cert, key, and issuer chain to the given SecretStore via
+// StoreImportedCAToSecretStore, so every cluster node that imports the same
+// external material converges on the same vault-held identity — including the
+// chain, without which a peer loading from the vault would pin the intermediate
+// as the fleet root. Like NewManagerFromSecretStore, the private key is never
+// written to local disk — only the public ca.crt is.
+//
+// This path runs on every process start, not only at --init, so it never
+// replaces a different identity already published at the key path: importing
+// material that does not match what the vault holds fails closed rather than
+// silently re-rooting the fleet. See StoreImportedCAToSecretStore.
+//
+// This is the cluster-mode entry point for importing an offline-root-issued
+// intermediate. Use NewManagerFromSecretStore for the self-generated-root path.
+func NewManagerFromImportedCA(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, keyPath string, config *ManagerConfig, certPEM, keyPEM, issuerChainPEM []byte) (*Manager, error) {
+	if store == nil {
+		return nil, fmt.Errorf("secret store is required")
+	}
+	if tenantID == "" || keyPath == "" {
+		return nil, fmt.Errorf("tenantID and keyPath are required")
+	}
+	if config == nil {
+		return nil, fmt.Errorf("manager config is required")
+	}
+	if config.StoragePath == "" {
+		return nil, fmt.Errorf("storage path is required")
+	}
+	if config.RenewalThresholdDays == 0 {
+		config.RenewalThresholdDays = 30
+	}
+
+	fileStore, err := NewFileStore(config.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
+	}
+
+	revStore, err := resolveRevocationStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+	cursorStore, err := resolveSigningCursorStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize signing cursor store: %w", err)
+	}
+
+	m := &Manager{
+		ca:         &CA{},
+		store:      fileStore,
+		config:     config,
+		revocation: revStore,
+		cursor:     cursorStore,
+	}
+
+	if err := m.ImportSubordinateCA(certPEM, keyPEM, issuerChainPEM); err != nil {
+		return nil, err
+	}
+
+	if err := m.ca.StoreImportedCAToSecretStore(ctx, store, tenantID, keyPath); err != nil {
+		return nil, fmt.Errorf("failed to store imported CA in secret store: %w", err)
+	}
+
+	return m, nil
 }
 
 // GenerateSigningCertificate creates a config signing certificate and stores it
@@ -401,23 +536,20 @@ func (m *Manager) ForceRotateSigningCertificate(overlapWindowDays int) (*Certifi
 func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*Certificate, error) {
 	m.rotateMu.Lock()
 	defer m.rotateMu.Unlock()
+	ctx := context.Background()
 
-	cursor, err := loadSigningCursor(m.store.basePath)
-	if err != nil {
-		return nil, fmt.Errorf("load signing cursor: %w", err)
-	}
-
-	if cursor != nil && cursor.RotatingSerial != "" {
-		if force {
-			// Clear in-progress state so the cursor transition proceeds as if the
-			// previous overlap had already closed. The just-cleared cursor is then
-			// re-read by transitionSigningCursor inside the same rotateMu critical
-			// section, so the bypass is atomic with respect to other rotations.
-			cursor.RotatingSerial = ""
-			if err := saveSigningCursor(m.store.basePath, cursor); err != nil {
-				return nil, fmt.Errorf("clear signing cursor for force rotate: %w", err)
-			}
-		} else {
+	if !force {
+		// Fail fast, before generating a certificate, when a rotation is
+		// already in progress. This is an optimization, not the authority:
+		// TransitionCursor below re-evaluates the same guard atomically
+		// against the store (cluster-wide when the store is cluster-visible),
+		// so a race with a concurrent rotation on another node is still
+		// caught correctly even though this pre-check is not itself atomic.
+		cursor, err := m.cursor.LoadCursor(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load signing cursor: %w", err)
+		}
+		if cursor != nil && cursor.RotatingSerial != "" {
 			overlapDuration := time.Duration(cursor.OverlapWindowDays) * 24 * time.Hour
 			if time.Since(cursor.RotatedAt) < overlapDuration {
 				return nil, fmt.Errorf(
@@ -444,7 +576,7 @@ func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*
 		return nil, fmt.Errorf("store signing certificate: %w", err)
 	}
 
-	if err := transitionSigningCursor(m.store, m.store.basePath, newCert.SerialNumber, overlapWindowDays); err != nil {
+	if _, err := m.cursor.TransitionCursor(ctx, newCert.SerialNumber, overlapWindowDays, force); err != nil {
 		return nil, fmt.Errorf("transition signing cursor: %w", err)
 	}
 
@@ -765,27 +897,39 @@ func (m *Manager) GetStoragePath() string {
 }
 
 // Revoke adds serial to the revoked-serials list and persists it atomically.
-// Returns an error if the serial is not found in the certificate store — revoking
-// an unknown serial is an operator error that must surface explicitly.
+//
+// It does not require serial to be present in this node's local certificate
+// store (m.store). That existence check used to gate revocation, but the
+// certificate store stays node-local by design (Issue #3852 explicitly keeps
+// FileStore out of scope), so on a clustered controller a serial issued on
+// node A is legitimately absent from node B's local store — the local check
+// could not tell "typo" apart from "issued elsewhere" and rejected the second
+// case with a hard error, silently defeating any-node revocation (Issue
+// #3761 escalation finding 2). Revoking a syntactically valid serial now
+// always succeeds cluster-wide; only an empty serial or a genuine store
+// failure returns an error.
 func (m *Manager) Revoke(serial string) error {
-	if _, err := m.store.GetCertificate(serial); err != nil {
-		return fmt.Errorf("cannot revoke unknown serial %q: %w", serial, err)
+	if serial == "" {
+		return fmt.Errorf("cannot revoke an empty serial")
 	}
-	return m.revocation.addAndPersist(RevocationEntry{
+	return m.revocation.Revoke(context.Background(), RevocationEntry{
 		Serial:    serial,
 		RevokedAt: time.Now().UTC(),
 	})
 }
 
 // IsRevoked reports whether the given certificate serial number appears in the
-// revoked-serials list. Called on every mTLS admin cert authentication request.
-func (m *Manager) IsRevoked(serial string) bool {
-	return m.revocation.isRevoked(serial)
+// revoked-serials list. Called on every mTLS admin cert authentication
+// request. Callers must treat a non-nil error as "cannot determine revocation
+// status" and fail closed (deny), never fall through as if unrevoked — a read
+// failure must never be interpreted as "not revoked."
+func (m *Manager) IsRevoked(serial string) (bool, error) {
+	return m.revocation.IsRevoked(context.Background(), serial)
 }
 
 // ListRevoked returns all revocation entries for auditing and --list output.
 func (m *Manager) ListRevoked() ([]RevocationEntry, error) {
-	return m.revocation.allEntries(), nil
+	return m.revocation.ListRevoked(context.Background())
 }
 
 // GetAllValidSigningCertificates returns the set of certificates that are valid
@@ -800,7 +944,7 @@ func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
 		return nil, err
 	}
 
-	cursor, err := loadSigningCursor(m.store.basePath)
+	cursor, err := m.cursor.LoadCursor(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to load signing cursor: %w", err)
 	}
@@ -831,15 +975,19 @@ func (m *Manager) GetAllValidSigningCertificates() ([]*CertificateInfo, error) {
 // GetSigningCursorState returns the current signing cursor, or nil if no rotation
 // has been initiated. Use this to inspect lifecycle state without modifying it.
 func (m *Manager) GetSigningCursorState() (*SigningCertCursor, error) {
-	return loadSigningCursor(m.store.basePath)
+	return m.cursor.LoadCursor(context.Background())
 }
 
 // NewManagerFromSecretStore creates a Manager that loads or bootstraps the cluster CA
 // from a SecretStore. The CA private key is never written to local disk.
 //
 // If no CA exists at caKeyPath in the store, a new CA is generated using config.CAConfig
-// and stored. Only the CA public certificate is written to storagePath/ca/ca.crt so
-// the TLS stack can load it; the private key remains in-process only.
+// and published create-if-absent, so a key path that turns out to hold a CA already —
+// a peer that won the race, or material the load could not read — is adopted rather
+// than overwritten. A load failure that is not a genuine absence never reaches the
+// generate branch at all. Only the CA public certificate is written to
+// storagePath/ca/ca.crt so the TLS stack can load it; the private key remains
+// in-process only.
 //
 // This is the cluster-mode entry point. Use NewManager for single-node deployments.
 func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.SecretStore, tenantID, caKeyPath string, config *ManagerConfig) (*Manager, error) {
@@ -868,6 +1016,15 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 	ca := &CA{}
 	loadErr := ca.LoadCAFromSecretStore(ctx, store, tenantID, caKeyPath)
 	if loadErr != nil {
+		// Bootstrap only into an unclaimed key path. Material that is present but
+		// unusable — a cert with no matching key, or a subordinate cert whose
+		// issuer chain is missing — must surface as an error: generating a
+		// replacement over it would silently re-root the fleet and invalidate
+		// every certificate already issued under the published CA.
+		if !errors.Is(loadErr, ErrCAMaterialAbsent) {
+			return nil, fmt.Errorf("cluster CA material at %q could not be loaded and will not be replaced: %w",
+				tenantID+"/"+caKeyPath, loadErr)
+		}
 		if config.CAConfig == nil {
 			return nil, fmt.Errorf("CA config required to generate new cluster CA (load failed: %w)", loadErr)
 		}
@@ -891,10 +1048,20 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 		if err := newCA.Initialize(genConfig); err != nil {
 			return nil, fmt.Errorf("failed to initialize cluster CA: %w", err)
 		}
+		// The publish is create-if-absent, so it also fails when the key path was
+		// in fact claimed — by a peer that won the race, or by material the load
+		// above could not see because the read itself failed. In that case the
+		// published material is the cluster's real CA and this node adopts it
+		// rather than replacing it; the generated CA is discarded unpublished.
 		if err := newCA.StoreCAToSecretStore(ctx, store, tenantID, caKeyPath); err != nil {
-			return nil, fmt.Errorf("failed to store cluster CA in secret store: %w", err)
+			published := &CA{}
+			if adoptErr := published.LoadCAFromSecretStore(ctx, store, tenantID, caKeyPath); adoptErr != nil {
+				return nil, fmt.Errorf("failed to store cluster CA in secret store: %w", err)
+			}
+			ca = published
+		} else {
+			ca = newCA
 		}
-		ca = newCA
 	}
 
 	// Write only the CA certificate (public) to disk for TLS config.
@@ -914,9 +1081,13 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 	validator := NewValidator(ca.certificate)
 	renewer := NewRenewer(ca, fileStore, validator)
 
-	revStore, err := newRevocationStore(config.StoragePath)
+	revStore, err := resolveRevocationStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+	cursorStore, err := resolveSigningCursorStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize signing cursor store: %w", err)
 	}
 
 	return &Manager{
@@ -926,6 +1097,7 @@ func NewManagerFromSecretStore(ctx context.Context, store secretsinterfaces.Secr
 		renewer:    renewer,
 		config:     config,
 		revocation: revStore,
+		cursor:     cursorStore,
 	}, nil
 }
 
@@ -1006,9 +1178,13 @@ func NewManagerFromCAMaterial(config *ManagerConfig, certPEM, keyPEM, issuerChai
 	validator := NewValidator(ca.certificate)
 	renewer := NewRenewer(ca, store, validator)
 
-	revStore, err := newRevocationStore(config.StoragePath)
+	revStore, err := resolveRevocationStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize revocation store: %w", err)
+	}
+	cursorStore, err := resolveSigningCursorStore(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize signing cursor store: %w", err)
 	}
 
 	return &Manager{
@@ -1018,5 +1194,6 @@ func NewManagerFromCAMaterial(config *ManagerConfig, certPEM, keyPEM, issuerChai
 		renewer:    renewer,
 		config:     config,
 		revocation: revStore,
+		cursor:     cursorStore,
 	}, nil
 }

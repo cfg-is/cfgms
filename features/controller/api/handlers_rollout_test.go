@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -441,6 +442,175 @@ func TestRollout_OperatorHalt(t *testing.T) {
 	stored, err := rolloutStore.GetRollout(context.Background(), rolloutID)
 	require.NoError(t, err)
 	assert.Equal(t, string(business.RolloutStatusHalted), string(stored.Status))
+}
+
+// TestRollout_HaltOnPeerNodeStopsTheOwningNodesGoroutine is the [REQUIRED TEST] for
+// Issue #3761's rollout-halt durability fix: Server.rolloutHaltChans is per-process,
+// so a halt served by a cluster node other than the one running the runRollout
+// goroutine cannot rely on the in-process channel — it must be observed via the
+// shared rolloutStore instead. Two Server instances share one testRolloutStore,
+// modeling two cluster nodes behind the shared database; the owning node starts the
+// rollout, a second "peer" node serves the halt, and the owning node's goroutine must
+// notice via its next rolloutHaltPollInterval re-read and never promote ring 2.
+func TestRollout_HaltOnPeerNodeStopsTheOwningNodesGoroutine(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	// No stewards in either ring: absent the halt, ring 1 would soak, clear its
+	// (denominator-zero) health gate, and promote to ring 2 well within the sleep
+	// below — so promotion happening at all is unambiguous evidence the fix didn't
+	// take effect.
+	owner, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	owner.rolloutHaltPollInterval = 20 * time.Millisecond
+	owner.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(300 * time.Millisecond)
+	owner.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(0)
+
+	// peer models a different cluster node: it shares owner's rolloutStore (the
+	// cross-node serialization point) but has never seen owner's in-process haltCh.
+	peer := newMinimalServerForRollout(t)
+	peer.cfg = owner.cfg
+	peer.rolloutStore = rolloutStore
+
+	rec := doStartRollout(owner, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	select {
+	case id := <-rolloutStore.soakC:
+		require.Equal(t, rolloutID, id, "unexpected rollout entered soak")
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner's rollout goroutine did not reach soak within 2s")
+	}
+
+	haltRec := doHaltRollout(peer, tenantID, rolloutID)
+	require.Equal(t, http.StatusOK, haltRec.Code, "halt served by the peer node must succeed: %s", haltRec.Body.String())
+
+	// Give the owning node's goroutine time to notice the peer-persisted halt via its
+	// next rolloutHaltPollInterval re-read, with margin past ring 1's full soak
+	// duration — long enough that, absent the fix, the goroutine would have advanced
+	// to ring 2.
+	time.Sleep(500 * time.Millisecond)
+
+	final, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, string(business.RolloutStatusHalted), string(final.Status))
+	assert.Equal(t, "pre-release", final.CurrentRing,
+		"the owning node's goroutine must never promote ring 2 after a peer-served halt")
+	assert.Equal(t, 0, final.RingsCompleted,
+		"no ring may be counted as completed after a peer-served halt")
+}
+
+// haltPersistFailingStore wraps a *testRolloutStore and fails only the halt-status
+// UpdateRolloutProgress call, letting every other write through unchanged. Simulates
+// a durable-store outage landing exactly when an operator halts a rollout.
+type haltPersistFailingStore struct {
+	*testRolloutStore
+}
+
+func (s *haltPersistFailingStore) UpdateRolloutProgress(ctx context.Context, id string, status business.RolloutStatus, currentRing string, ringsCompleted int, haltedAt *time.Time, errorMsg string) error {
+	if status == business.RolloutStatusHalted {
+		return fmt.Errorf("simulated store outage")
+	}
+	return s.testRolloutStore.UpdateRolloutProgress(ctx, id, status, currentRing, ringsCompleted, haltedAt, errorMsg)
+}
+
+// TestRollout_Halt_ReportsFailureWhenTheHaltCannotBePersisted is the [REQUIRED TEST]
+// for Issue #3761: a halt whose store write fails must answer 500 HALT_PERSIST_ERROR,
+// not report success while the halt silently did not happen.
+func TestRollout_Halt_ReportsFailureWhenTheHaltCannotBePersisted(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(30 * time.Second)
+	server.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(30 * time.Second)
+	server.rolloutStore = &haltPersistFailingStore{testRolloutStore: rolloutStore}
+
+	rec := doStartRollout(server, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	select {
+	case id := <-rolloutStore.soakC:
+		require.Equal(t, rolloutID, id, "unexpected rollout entered soak")
+	case <-time.After(2 * time.Second):
+		t.Fatal("rollout goroutine did not reach soak within 2s")
+	}
+
+	haltRec := doHaltRollout(server, tenantID, rolloutID)
+	require.Equal(t, http.StatusInternalServerError, haltRec.Code,
+		"a halt that fails to persist must not report success: %s", haltRec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(haltRec.Body).Decode(&errResp))
+	assert.Equal(t, "HALT_PERSIST_ERROR", errResp.Error.Code)
+
+	stored, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, string(business.RolloutStatusInProgress), string(stored.Status),
+		"a halt that fails to persist must not be reflected in the store")
+}
+
+// unreadableAfterNStore wraps a *testRolloutStore and fails every GetRollout call
+// after the first N succeed, simulating a store outage that starts partway through
+// an already-running rollout.
+type unreadableAfterNStore struct {
+	*testRolloutStore
+	remaining int32
+}
+
+func (s *unreadableAfterNStore) GetRollout(ctx context.Context, id string) (*business.RolloutRecord, error) {
+	if atomic.AddInt32(&s.remaining, -1) < 0 {
+		return nil, fmt.Errorf("simulated store outage")
+	}
+	return s.testRolloutStore.GetRollout(ctx, id)
+}
+
+// TestRollout_UnreadableStatusStopsTheRollout is the [REQUIRED TEST] for Issue #3761:
+// runRollout must fail closed when it cannot re-read the rollout record — treating an
+// unreadable status the same as a peer-served halt — rather than plough ahead across
+// rings it can no longer confirm are still authorized to run. With no stewards in
+// either ring, both rings would clear their health gate trivially and the rollout
+// would reach RolloutStatusCompleted well within the sleep below if the outage were
+// ignored, so completion at all is unambiguous evidence the fail-closed check didn't
+// fire.
+func TestRollout_UnreadableStatusStopsTheRollout(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	owner, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	owner.rolloutHaltPollInterval = 20 * time.Millisecond
+	owner.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(150 * time.Millisecond)
+	owner.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(0)
+	// Exactly one successful GetRollout: the pre-ring-1 check. Every subsequent
+	// re-read (the first soak poll tick onward) fails.
+	owner.rolloutStore = &unreadableAfterNStore{testRolloutStore: rolloutStore, remaining: 1}
+
+	rec := doStartRollout(owner, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	select {
+	case id := <-rolloutStore.soakC:
+		require.Equal(t, rolloutID, id, "unexpected rollout entered soak")
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner's rollout goroutine did not reach soak within 2s")
+	}
+
+	// Long enough for both rings to have completed normally (soak 150ms + 0, plus
+	// health-query/store overhead) had the read failure not stopped the goroutine.
+	time.Sleep(400 * time.Millisecond)
+
+	final, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, string(business.RolloutStatusInProgress), string(final.Status),
+		"an unreadable rollout record must stop the goroutine, not let it reach completed")
+	assert.Equal(t, "pre-release", final.CurrentRing,
+		"ring 2 must never start once the rollout record becomes unreadable")
+	assert.Equal(t, 0, final.RingsCompleted)
 }
 
 // TestRollout_Halt_CrossTenantForbidden verifies that a scoped caller cannot halt a rollout

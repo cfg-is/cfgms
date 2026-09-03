@@ -206,6 +206,14 @@ func isCheckAndSetMismatch(err error) bool {
 
 // GetSecret retrieves the current version of a secret.
 // The key must be in the format "tenantID/keyName".
+//
+// An absent secret is reported as an error wrapping interfaces.ErrSecretNotFound,
+// and only an absent secret is: a denial (the token's policy grants create/update
+// but not read), an expired token, a KV mount misconfiguration or a read timeout
+// all return an error that does NOT wrap the sentinel. Callers act on the
+// difference — pkg/cert's cluster-CA load treats "not found" as an unclaimed key
+// path it may bootstrap a new fleet CA into, so classifying a transient failure as
+// absence would re-root the fleet.
 func (s *OpenBaoSecretStore) GetSecret(ctx context.Context, key string) (*interfaces.Secret, error) {
 	tenantID, keyName, err := splitKey(key)
 	if err != nil {
@@ -216,13 +224,15 @@ func (s *OpenBaoSecretStore) GetSecret(ctx context.Context, key string) (*interf
 	kvSecret, err := s.client.KVv2(s.mountPath).Get(ctx, logging.SanitizeLogValue(path))
 	if err != nil {
 		if isNotFound(err) {
-			return nil, fmt.Errorf("secret not found: %s", logging.SanitizeLogValue(key))
+			return nil, fmt.Errorf("secret not found: %s: %w",
+				logging.SanitizeLogValue(key), interfaces.ErrSecretNotFound)
 		}
 		return nil, fmt.Errorf("failed to get secret %s: %w",
 			logging.SanitizeLogValue(key), err)
 	}
 	if kvSecret == nil {
-		return nil, fmt.Errorf("secret not found: %s", logging.SanitizeLogValue(key))
+		return nil, fmt.Errorf("secret not found: %s: %w",
+			logging.SanitizeLogValue(key), interfaces.ErrSecretNotFound)
 	}
 
 	return kvSecretToSecret(tenantID, keyName, kvSecret), nil
@@ -653,14 +663,25 @@ func kvSecretToSecret(tenantID, keyName string, kv *openbao.KVSecret) *interface
 	return secret
 }
 
-// isNotFound returns true for HTTP 404-style errors from the OpenBao client.
+// isNotFound reports whether err represents an absent secret, judged by the
+// OpenBao client's own classification rather than by matching rendered error
+// text. Substring matching on err.Error() previously misclassified any error
+// whose rendered text happened to contain "404" (an ephemeral port number, a
+// request path, a request ID) or the phrase "not found" (a DNS or connection
+// failure rendering as "host not found") as absence — turning a backend
+// outage into a false report that the secret does not exist.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	return err == openbao.ErrSecretNotFound ||
-		strings.Contains(err.Error(), "404") ||
-		strings.Contains(err.Error(), "not found")
+	if errors.Is(err, openbao.ErrSecretNotFound) {
+		return true
+	}
+	var respErr *openbao.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.StatusCode == http.StatusNotFound
+	}
+	return false
 }
 
 // hasAllTags returns true if secret tags contain all filter tags.

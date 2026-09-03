@@ -4,12 +4,15 @@ package hyperv
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // These tests drive the REAL executor path: module.Set(ctx, "vm:<name>", cfg)
@@ -580,9 +583,10 @@ func TestExistenceGating_OwnIncompleteAttemptDoesNotAutoRetry(t *testing.T) {
 // (RetryCount == defaultSeedPhaseRetryMax) must be surfaced-and-waited-on: the
 // module leaves the VM OFF, issues no Start-VM and no seed rebuild, rather than
 // powering on a guest that has no working seed or retrying past its budget.
-// applySourceGated (via Set) must return nil (surface-and-wait), not an error.
-// This is the exact terminal state (RetryCount == 3 on a Failed/seed-phase
-// record) the visibility sibling story's fixture checks.
+// applySourceGated (via Set) must return a *modules.RetryExhaustedError (Issue
+// #3803) — a distinct, queryable sentinel for this known-gated stall — not nil
+// and not a generic error. This is the exact terminal state (RetryCount == 3 on
+// a Failed/seed-phase record) the visibility sibling story's fixture checks.
 func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 	// getVM (call 0) reports the VM present but OFF; desired state is running
 	// (sourceVMConfigMap sets state: running), so absent the gate the VM would be
@@ -609,8 +613,15 @@ func TestApplySourceGated_FailedSeedPhaseDoesNotStartVM(t *testing.T) {
 	}))
 
 	cfg := rawConfigState{m: sourceVMConfigMap(2, "linux")} // state: running, on_existing: never
-	require.NoError(t, m.Set(context.Background(), "vm:stw-01", cfg),
-		"a retry-exhausted seed-phase-failed VM must surface-and-wait (return nil), not error")
+	err := m.Set(context.Background(), "vm:stw-01", cfg)
+
+	var retryExhaustedErr *modules.RetryExhaustedError
+	require.True(t, errors.As(err, &retryExhaustedErr),
+		"a retry-exhausted seed-phase-failed VM must surface-and-wait via a *modules.RetryExhaustedError, not nil or a generic error")
+	assert.Equal(t, string(ProvisionStateCreating), retryExhaustedErr.FailedFrom,
+		"the sentinel must carry the record's FailedFrom phase")
+	assert.Contains(t, retryExhaustedErr.LastError, "create seed VHDX",
+		"the sentinel must carry the record's LastError detail")
 
 	transport.mu.Lock()
 	calls := transport.calls

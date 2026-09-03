@@ -14,6 +14,7 @@ import (
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 
+	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -50,8 +51,11 @@ type DatabaseProvider struct {
 // the dependent endpoints answering 503 (Issue #3755, and #3401 before it).
 // These assertions turn that class of regression back into a build failure.
 var (
-	_ interfaces.StorageProvider   = (*DatabaseProvider)(nil)
-	_ interfaces.NonceStoreCreator = (*DatabaseProvider)(nil)
+	_ interfaces.StorageProvider            = (*DatabaseProvider)(nil)
+	_ interfaces.NonceStoreCreator          = (*DatabaseProvider)(nil)
+	_ interfaces.LeaseStoreCreator          = (*DatabaseProvider)(nil)
+	_ interfaces.CertRevocationStoreCreator = (*DatabaseProvider)(nil)
+	_ interfaces.SigningCursorStoreCreator  = (*DatabaseProvider)(nil)
 )
 
 // Name returns the provider name
@@ -357,6 +361,36 @@ func (p *DatabaseProvider) CreateLeaseStore(config map[string]interface{}) (busi
 	store, err := NewDatabaseLeaseStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database lease store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateCertRevocationStore creates a PostgreSQL-backed CertRevocationStore
+// (ADR-031 Decision 1, Issue #3852: pkg/cert's revocation list must be
+// cluster-visible). Implements interfaces.CertRevocationStoreCreator.
+func (p *DatabaseProvider) CreateCertRevocationStore(config map[string]interface{}) (certinterfaces.RevocationStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseCertRevocationStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database cert revocation store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateSigningCursorStore creates a PostgreSQL-backed SigningCursorStore
+// (ADR-031 Decision 1, Issue #3852: the config-signing rotation cursor must
+// be cluster-visible). Implements interfaces.SigningCursorStoreCreator.
+func (p *DatabaseProvider) CreateSigningCursorStore(config map[string]interface{}) (certinterfaces.SigningCursorStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseSigningCursorStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database signing cursor store: %w", err)
 	}
 	return store, nil
 }

@@ -36,6 +36,12 @@ type RegistrationRequest struct {
 	IdentityKeyPub     string `json:"identity_key_pub,omitempty"`     // base64-encoded Ed25519 public key (32 bytes)
 	KeyProtectionLevel string `json:"key_protection_level,omitempty"` // "file" or "tpm"
 
+	// CSRPEM is a PEM-encoded CERTIFICATE REQUEST over a keypair the steward
+	// generates locally (Issue #3780). The controller signs this public key into
+	// the steward's mTLS client certificate; the matching private key never
+	// crosses the wire.
+	CSRPEM string `json:"csr_pem,omitempty"`
+
 	// Best-effort identity hints seeded into initial DNA so the controller is not
 	// blind to connected stewards before their first DNA sync (Issue #2640).
 	// Registration succeeds even when these fields are absent.
@@ -51,9 +57,10 @@ type RegistrationResponse struct {
 	ControllerURL    string `json:"controller_url"`
 	TransportAddress string `json:"transport_address"`
 
-	// Certificate information (required for production mTLS)
+	// Certificate information (required for production mTLS). No client_key field:
+	// the steward generates its keypair locally and submits a CSR; the controller
+	// never generates or sees a private key for this credential (Issue #3780).
 	ClientCert string `json:"client_cert,omitempty"`
-	ClientKey  string `json:"client_key,omitempty"`
 	CACert     string `json:"ca_cert,omitempty"`
 
 	// IssuerChain is the PEM-concatenated chain from ClientCert's direct issuer up
@@ -102,7 +109,6 @@ type RegistrationStatusResponse struct {
 	ControllerURL    string `json:"controller_url,omitempty"`
 	TransportAddress string `json:"transport_address,omitempty"`
 	ClientCert       string `json:"client_cert,omitempty"`
-	ClientKey        string `json:"client_key,omitempty"`
 	CACert           string `json:"ca_cert,omitempty"`
 	IssuerChain      string `json:"issuer_chain,omitempty"`
 	ServerCert       string `json:"server_cert,omitempty"`
@@ -296,7 +302,7 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 
 	switch entry.Status {
 	case business.PendingRegistrationStatusPending:
-		// #nosec G117 -- this status-only instance leaves ClientKey empty; no
+		// #nosec G117 -- this status-only instance carries no cert fields; no
 		// credential is serialized on the pending branch.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "pending"})
 
@@ -338,8 +344,9 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		// #nosec G117 -- this authenticated, tenant-bound, atomically one-time
-		// claim response is the intended TLS delivery channel for the new key.
+		// #nosec G117 -- this authenticated, tenant-bound, atomically one-time claim
+		// response carries the signed client certificate; no private key is ever
+		// generated or held by the controller for this credential (Issue #3780).
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			s.logger.Error("Failed to encode registration status response", "error", logging.SanitizeLogValue(err.Error()))
 		}
@@ -348,15 +355,15 @@ func (s *Server) handleRegistrationStatus(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusGone)
 
 	case business.PendingRegistrationStatusDenied:
-		// #nosec G117 -- this status-only instance leaves ClientKey empty.
+		// #nosec G117 -- this status-only instance carries no cert fields.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "denied"})
 
 	case business.PendingRegistrationStatusExpired:
-		// #nosec G117 -- this status-only instance leaves ClientKey empty.
+		// #nosec G117 -- this status-only instance carries no cert fields.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: "expired"})
 
 	default:
-		// #nosec G117 -- this status-only instance leaves ClientKey empty.
+		// #nosec G117 -- this status-only instance carries no cert fields.
 		_ = json.NewEncoder(w).Encode(RegistrationStatusResponse{Status: entry.Status})
 	}
 }
@@ -503,7 +510,15 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		validityDays = s.cfg.Certificate.ClientCertValidityDays
 	}
 
-	clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+	// Sign the exact CSR the steward submitted with the original registration POST
+	// (Issue #3780) — the controller never generates or sees a private key for
+	// this credential.
+	csr, err := parseAndVerifyCSR(entry.CSRPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse claimed certificate signing request: %w", err)
+	}
+
+	clientCert, err := s.certManager.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
 		CommonName:   entry.StewardID,
 		Organization: "CFGMS Stewards",
 		ClientID:     entry.StewardID,
@@ -539,7 +554,6 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 		ControllerURL:    tok.ControllerURL,
 		TransportAddress: transportAddr,
 		ClientCert:       string(clientCert.CertificatePEM),
-		ClientKey:        string(clientCert.PrivateKeyPEM),
 		CACert:           string(caCert),
 		IssuerChain:      string(clientCert.IssuerChainPEM),
 		ServerCert:       string(serverCert),
@@ -857,6 +871,26 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	claimID := registrationClaimID(req.DeviceID, identityKeyBytes)
 
+	// Validate the CSR (Issue #3780): the steward generates its mTLS keypair
+	// locally and submits only the public half. Rejected before any store write,
+	// mirroring the credential-request lodge endpoint's same two checks
+	// (handlers_credential_requests.go handleLodgeCredentialRequest).
+	if req.CSRPEM == "" {
+		http.Error(w, "csr_pem is required", http.StatusBadRequest)
+		return
+	}
+	if containsPrivateKeyMaterial(req.CSRPEM) {
+		http.Error(w, "private key material is not accepted", http.StatusBadRequest)
+		return
+	}
+	csr, csrErr := parseAndVerifyCSR(req.CSRPEM)
+	if csrErr != nil {
+		s.logger.Warn("Rejected invalid certificate signing request at registration",
+			"error", logging.SanitizeLogValue(csrErr.Error()))
+		http.Error(w, "invalid certificate signing request", http.StatusBadRequest)
+		return
+	}
+
 	// Reject duplicate DeviceID within the same tenant. Cross-tenant collision is allowed —
 	// each tenant namespace is independent (matching the tenant-isolation pattern at line ~221).
 	if s.stewardStore != nil {
@@ -958,6 +992,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 				DeviceID:           req.DeviceID,
 				IdentityKeyPub:     identityKeyBytes,
 				KeyProtectionLevel: req.KeyProtectionLevel,
+				CSRPEM:             req.CSRPEM,
 				Hostname:           req.Hostname,
 				Platform:           req.OS,
 			}
@@ -1065,7 +1100,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+	clientCert, err := s.certManager.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
 		CommonName:   stewardID,
 		Organization: "CFGMS Stewards",
 		ClientID:     stewardID,
@@ -1081,9 +1116,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return certificates in response (ALWAYS - required for mTLS)
+	// Return certificates in response (ALWAYS - required for mTLS). No private key
+	// is ever generated by the controller for this credential (Issue #3780).
 	resp.ClientCert = string(clientCert.CertificatePEM)
-	resp.ClientKey = string(clientCert.PrivateKeyPEM)
 	resp.CACert = string(caCert)
 	resp.IssuerChain = string(clientCert.IssuerChainPEM)
 	resp.ServerCert = string(serverCert) // For config signature verification (backward compat)
@@ -1145,8 +1180,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Return response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	// #nosec G117 -- successful authenticated registration intentionally returns
-	// the freshly issued client key once over the required TLS endpoint.
+	// #nosec G117 -- successful authenticated registration returns the signed
+	// client certificate; no private key is ever generated or held by the
+	// controller for this credential (Issue #3780).
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.logger.Error("Failed to encode registration response", "error", logging.SanitizeLogValue(err.Error()))
 	}

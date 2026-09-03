@@ -46,7 +46,9 @@ func TestHandleCertRotation_FullSuccess(t *testing.T) {
 		Label:       "alice old laptop",
 	})
 	require.Equal(t, http.StatusCreated, bindRec.Code)
-	assert.False(t, certMgr.IsRevoked(oldSerial), "old cert must not be revoked before rotation")
+	revokedBefore, err := certMgr.IsRevoked(oldSerial)
+	require.NoError(t, err)
+	assert.False(t, revokedBefore, "old cert must not be revoked before rotation")
 
 	newSerial := provisionTestClientCert(t, certMgr, "alice-new-laptop")
 
@@ -56,7 +58,9 @@ func TestHandleCertRotation_FullSuccess(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "rotate: %s", rec.Body.String())
 
-	assert.True(t, certMgr.IsRevoked(oldSerial), "old cert must be revoked after rotation")
+	revoked, err := certMgr.IsRevoked(oldSerial)
+	require.NoError(t, err)
+	assert.True(t, revoked, "old cert must be revoked after rotation")
 
 	bindings := getCertBindings(t, server, "alice")
 	require.Len(t, bindings, 1, "exactly one binding must remain")
@@ -97,7 +101,9 @@ func TestHandleCertRotation_InterruptedThenResumed(t *testing.T) {
 	assert.Len(t, bindings, 2, "both certs must be bound after step 1 only")
 	assert.True(t, containsSerial(bindings, oldSerial), "old cert must still be bound")
 	assert.True(t, containsSerial(bindings, newSerial), "new cert must be bound")
-	assert.False(t, certMgr.IsRevoked(oldSerial), "old cert must NOT be revoked before resume")
+	revokedBefore, err := certMgr.IsRevoked(oldSerial)
+	require.NoError(t, err)
+	assert.False(t, revokedBefore, "old cert must NOT be revoked before resume")
 
 	// Resume: full handler call with the same arguments.
 	// Step 1 is already-done (new serial already bound) — must be skipped without error.
@@ -108,7 +114,9 @@ func TestHandleCertRotation_InterruptedThenResumed(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "resume rotation: %s", rec.Body.String())
 
-	assert.True(t, certMgr.IsRevoked(oldSerial), "old cert must be revoked after resume")
+	revoked, err := certMgr.IsRevoked(oldSerial)
+	require.NoError(t, err)
+	assert.True(t, revoked, "old cert must be revoked after resume")
 
 	bindings = getCertBindings(t, server, "alice")
 	require.Len(t, bindings, 1, "exactly one binding must remain after resume")
@@ -136,7 +144,9 @@ func TestHandleCertRotation_IdempotentRetry(t *testing.T) {
 		Fingerprint: "sha256:fp",
 	})
 	require.Equal(t, http.StatusOK, rec1.Code, "first rotation: %s", rec1.Body.String())
-	assert.True(t, certMgr.IsRevoked(oldSerial))
+	revokedAfterFirst, err := certMgr.IsRevoked(oldSerial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfterFirst)
 
 	bindings := getCertBindings(t, server, "alice")
 	require.Len(t, bindings, 1)
@@ -155,7 +165,9 @@ func TestHandleCertRotation_IdempotentRetry(t *testing.T) {
 	assert.Equal(t, newSerial, bindings[0].Serial)
 
 	// Old cert remains revoked, not double-revoked or un-revoked.
-	assert.True(t, certMgr.IsRevoked(oldSerial), "old cert must stay revoked")
+	revokedAfterRetry, err := certMgr.IsRevoked(oldSerial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfterRetry, "old cert must stay revoked")
 }
 
 // TestHandleCertRotation_OldBindingNotFound verifies that rotating a serial that is
@@ -247,7 +259,9 @@ func TestHandleCertRotation_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	bindings := getCertBindings(t, server, "alice")
 	assert.True(t, containsSerial(bindings, newSerial), "new binding must exist")
 	assert.False(t, containsSerial(bindings, oldSerial), "old binding must be removed")
-	assert.True(t, certMgr.IsRevoked(oldSerial), "old cert must be revoked")
+	revoked, err := certMgr.IsRevoked(oldSerial)
+	require.NoError(t, err)
+	assert.True(t, revoked, "old cert must be revoked")
 }
 
 // TestHandleCertRotation_AccountNotFound verifies 404 when the account does not exist.

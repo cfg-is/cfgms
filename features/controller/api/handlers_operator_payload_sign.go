@@ -513,13 +513,22 @@ func (s *Server) checkSignThrottle(key string) (blocked bool, retryAfter time.Du
 // recordSignFailure increments the failure counter for key and sets the next-allowed
 // timestamp via elevateBackoff. Mirrors recordElevateFailure but reads
 // s.operatorPayloadSignThrottle.
+//
+// The failure count consulted against the backoff schedule is scaled by
+// clusterBudgetDivisor (Issue #3761): this throttle's counter lives in per-process
+// memory, so in ClusterMode an attacker's failed attempts can spread across nodes
+// and each node's own count would undercount the fleet-wide total. Scaling the
+// count up before consulting elevateBackoff makes the configured schedule apply to
+// the fleet as a whole rather than to whichever single node happened to observe the
+// failure — the same approximation clusterBudgetDivisor's doc comment describes for
+// the source rate limiters.
 func (s *Server) recordSignFailure(key string) {
 	raw, _ := s.operatorPayloadSignThrottle.LoadOrStore(key, &elevateThrottleRecord{})
 	rec := raw.(*elevateThrottleRecord)
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.fails++
-	delay := elevateBackoff(rec.fails)
+	delay := elevateBackoff(rec.fails * s.clusterBudgetDivisor())
 	if delay > 0 {
 		rec.nextAllowed = time.Now().Add(delay)
 	}

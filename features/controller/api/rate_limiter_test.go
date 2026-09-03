@@ -264,3 +264,71 @@ func TestSourceRateLimiter_ConcurrentDistinctKeysCountedIndependently(t *testing
 		}
 	}
 }
+
+// TestSourceRateLimiter_SplitsBudgetAcrossClusterNodes is the [REQUIRED TEST] for
+// Issue #3761: when divisor reports more than one node can serve the limited route,
+// the effective per-key limit must be the configured limit divided by that count,
+// not the configured limit itself — otherwise any-node service grants node-count
+// times the operator-configured budget.
+func TestSourceRateLimiter_SplitsBudgetAcrossClusterNodes(t *testing.T) {
+	rl := newSourceRateLimiter(10, time.Minute)
+	rl.divisor = func() int { return 5 }
+
+	for i := 0; i < 2; i++ {
+		ok, _ := rl.allow("k1")
+		if !ok {
+			t.Fatalf("request %d: expected allow within the divided budget (10/5=2), got denied", i)
+		}
+	}
+	if ok, _ := rl.allow("k1"); ok {
+		t.Fatal("expected the 3rd request to be denied once the divided budget (2) is exhausted")
+	}
+}
+
+// TestSourceRateLimiter_SingleNodeKeepsFullBudget is the [REQUIRED TEST] for Issue
+// #3761: a nil divisor (the pre-#3761 construction, still used by any limiter that
+// never opts in) and a divisor reporting 1 node must both preserve the full
+// configured limit — dividing must never kick in for a single serving node.
+func TestSourceRateLimiter_SingleNodeKeepsFullBudget(t *testing.T) {
+	t.Run("nil divisor", func(t *testing.T) {
+		rl := newSourceRateLimiter(3, time.Minute)
+		for i := 0; i < 3; i++ {
+			if ok, _ := rl.allow("k1"); !ok {
+				t.Fatalf("request %d: expected allow with no divisor configured", i)
+			}
+		}
+		if ok, _ := rl.allow("k1"); ok {
+			t.Fatal("expected the 4th request to be denied")
+		}
+	})
+
+	t.Run("divisor reports one node", func(t *testing.T) {
+		rl := newSourceRateLimiter(3, time.Minute)
+		rl.divisor = func() int { return 1 }
+		for i := 0; i < 3; i++ {
+			if ok, _ := rl.allow("k2"); !ok {
+				t.Fatalf("request %d: expected allow at the full configured budget", i)
+			}
+		}
+		if ok, _ := rl.allow("k2"); ok {
+			t.Fatal("expected the 4th request to be denied")
+		}
+	})
+}
+
+// TestSourceRateLimiter_BudgetNeverDividesToZero is the [REQUIRED TEST] for Issue
+// #3761: a divisor larger than the configured limit must floor the effective limit
+// at one call per window, never at zero — a zero effective limit would lock every
+// caller out of the route entirely regardless of key.
+func TestSourceRateLimiter_BudgetNeverDividesToZero(t *testing.T) {
+	rl := newSourceRateLimiter(3, time.Minute)
+	rl.divisor = func() int { return 100 }
+
+	ok, _ := rl.allow("k1")
+	if !ok {
+		t.Fatal("expected exactly one call to be allowed even when limit/divisor rounds to zero")
+	}
+	if ok, _ := rl.allow("k1"); ok {
+		t.Fatal("expected the 2nd request to be denied once the floored budget (1) is exhausted")
+	}
+}

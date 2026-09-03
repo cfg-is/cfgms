@@ -4,6 +4,7 @@ package hyperv
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
@@ -51,6 +52,11 @@ func (m *MockConfigStore) GetConfig(_ context.Context, key *cfgconfig.ConfigKey)
 func (m *MockConfigStore) DeleteConfig(_ context.Context, key *cfgconfig.ConfigKey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, ok := m.entries[key.String()]; !ok {
+		// Mirrors the real backend (pkg/storage/providers/flatfile): deleting a
+		// missing key returns ErrConfigNotFound rather than succeeding silently.
+		return cfgconfig.ErrConfigNotFound
+	}
 	delete(m.entries, key.String())
 	return nil
 }
@@ -97,7 +103,7 @@ func (m *MockConfigStore) GetConfigStats(_ context.Context) (*cfgconfig.ConfigSt
 
 var _ cfgconfig.ConfigStore = (*MockConfigStore)(nil)
 
-// seedProfile stores a profile in the config store under hyperv/profiles/<name>
+// seedProfile stores a profile in the config store under hyperv-profiles/<name>
 // for the given tenant, mirroring how an operator would author it.
 func seedProfile(t *testing.T, store *MockConfigStore, tenantID string, p *UnattendProfile) {
 	t.Helper()
@@ -191,6 +197,132 @@ func TestConfigBackedProfileStore_ListProfiles(t *testing.T) {
 	names, err := ps.ListProfiles(context.Background())
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"p1", "p2"}, names)
+}
+
+// TestConfigBackedProfileStore_StoreProfile_RoundTrip asserts a profile stored
+// via StoreProfile is loadable via GetProfile and enumerable via ListProfiles.
+func TestConfigBackedProfileStore_StoreProfile_RoundTrip(t *testing.T) {
+	store := newMockConfigStore()
+	ps := NewConfigBackedProfileStore(store, "root")
+
+	profile := &UnattendProfile{
+		Name:         "debian-12-custom",
+		OSFamily:     "linux",
+		AnswerFormat: AnswerFormatPreseed,
+		Template:     "hostname={{ .VMName }}",
+		Enroll: EnrollConfig{
+			RegistrationTokenSecretKey: "hyperv/enroll/regtoken",
+			BundleURL:                  "https://controller.example/bundle",
+		},
+	}
+	require.NoError(t, ps.StoreProfile(context.Background(), profile))
+
+	got, err := ps.GetProfile(context.Background(), "debian-12-custom")
+	require.NoError(t, err)
+	assert.Equal(t, profile.OSFamily, got.OSFamily)
+	assert.Equal(t, profile.AnswerFormat, got.AnswerFormat)
+	assert.Equal(t, profile.Template, got.Template)
+	assert.Equal(t, profile.Enroll, got.Enroll)
+
+	names, err := ps.ListProfiles(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, names, "debian-12-custom")
+}
+
+// TestConfigBackedProfileStore_StoreProfile_RejectsInvalidName asserts an unsafe
+// name is rejected before any store write.
+func TestConfigBackedProfileStore_StoreProfile_RejectsInvalidName(t *testing.T) {
+	store := newMockConfigStore()
+	ps := NewConfigBackedProfileStore(store, "root")
+
+	err := ps.StoreProfile(context.Background(), &UnattendProfile{
+		Name:         "../etc/passwd",
+		OSFamily:     "linux",
+		AnswerFormat: AnswerFormatPreseed,
+		Template:     "x",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidProfileName)
+}
+
+// TestConfigBackedProfileStore_StoreProfile_RejectsBadAnswerFormat asserts an
+// invalid answer_format is rejected before any store write.
+func TestConfigBackedProfileStore_StoreProfile_RejectsBadAnswerFormat(t *testing.T) {
+	store := newMockConfigStore()
+	ps := NewConfigBackedProfileStore(store, "root")
+
+	err := ps.StoreProfile(context.Background(), &UnattendProfile{
+		Name:         "bad-format",
+		OSFamily:     "linux",
+		AnswerFormat: AnswerFormat("nope"),
+		Template:     "x",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidAnswerFormat)
+}
+
+// TestConfigBackedProfileStore_StoreProfile_RejectsUnparseableTemplate asserts a
+// template that fails text/template.Parse is rejected at author time, not at
+// VM-provision time.
+func TestConfigBackedProfileStore_StoreProfile_RejectsUnparseableTemplate(t *testing.T) {
+	store := newMockConfigStore()
+	ps := NewConfigBackedProfileStore(store, "root")
+
+	err := ps.StoreProfile(context.Background(), &UnattendProfile{
+		Name:         "bad-template",
+		OSFamily:     "linux",
+		AnswerFormat: AnswerFormatPreseed,
+		Template:     "hostname={{ .VMName",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidProfileTemplate)
+}
+
+// TestConfigBackedProfileStore_StoreProfile_RejectsOversizedProfile asserts a
+// profile whose YAML-encoded size exceeds profileMaxSizeBytes is rejected.
+func TestConfigBackedProfileStore_StoreProfile_RejectsOversizedProfile(t *testing.T) {
+	store := newMockConfigStore()
+	ps := NewConfigBackedProfileStore(store, "root")
+
+	err := ps.StoreProfile(context.Background(), &UnattendProfile{
+		Name:         "oversized",
+		OSFamily:     "linux",
+		AnswerFormat: AnswerFormatPreseed,
+		Template:     strings.Repeat("x", profileMaxSizeBytes+1),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProfileTooLarge)
+}
+
+// TestConfigBackedProfileStore_DeleteProfile_RemovesProfile asserts a stored
+// profile is removed and a subsequent GetProfile returns ErrProfileNotFound.
+func TestConfigBackedProfileStore_DeleteProfile_RemovesProfile(t *testing.T) {
+	store := newMockConfigStore()
+	ps := NewConfigBackedProfileStore(store, "root")
+
+	require.NoError(t, ps.StoreProfile(context.Background(), &UnattendProfile{
+		Name:         "to-delete",
+		OSFamily:     "linux",
+		AnswerFormat: AnswerFormatPreseed,
+		Template:     "x",
+	}))
+
+	require.NoError(t, ps.DeleteProfile(context.Background(), "to-delete"))
+
+	_, err := ps.GetProfile(context.Background(), "to-delete")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProfileNotFound)
+}
+
+// TestConfigBackedProfileStore_DeleteProfile_NotFound asserts deleting a
+// non-existent profile returns ErrProfileNotFound.
+func TestConfigBackedProfileStore_DeleteProfile_NotFound(t *testing.T) {
+	store := newMockConfigStore()
+	ps := NewConfigBackedProfileStore(store, "root")
+
+	err := ps.DeleteProfile(context.Background(), "no-such-profile")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProfileNotFound)
 }
 
 // TestConfigure_WiresConfigBackedProfileStore asserts that passing a config

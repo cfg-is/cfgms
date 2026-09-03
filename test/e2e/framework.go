@@ -5,14 +5,18 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -549,7 +553,10 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 }
 
 // RegistrationResponse represents the HTTP registration response
-// Story #294 Phase 3: Used for steward registration via controller API
+// Story #294 Phase 3: Used for steward registration via controller API.
+// No client_key field: the steward generates its own keypair locally and
+// submits a CSR; the controller never generates or sees a private key for
+// this credential (Issue #3780).
 type RegistrationResponse struct {
 	StewardID        string `json:"steward_id"`
 	TenantID         string `json:"tenant_id"`
@@ -557,8 +564,34 @@ type RegistrationResponse struct {
 	ControllerURL    string `json:"controller_url"`
 	TransportAddress string `json:"transport_address"`
 	ClientCert       string `json:"client_cert,omitempty"`
-	ClientKey        string `json:"client_key,omitempty"`
 	CACert           string `json:"ca_cert,omitempty"`
+}
+
+// generateE2ERegistrationKeypairAndCSR generates a fresh ECDSA P-256 keypair and a
+// self-signed PEM CERTIFICATE REQUEST over its public key, mirroring
+// features/steward/registration/client_http.go's generateStewardKeypair /
+// buildRegistrationCSR (Issue #3780). Returns the PKCS8 PEM-encoded private key
+// (held only by the caller, never transmitted) and the CSR PEM to submit.
+func generateE2ERegistrationKeypairAndCSR(commonName string) (keyPEM, csrPEM string, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate registration keypair: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal registration private key: %w", err)
+	}
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:            pkix.Name{CommonName: commonName},
+		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}, priv)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create registration CSR: %w", err)
+	}
+	csrPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
+	return keyPEM, csrPEM, nil
 }
 
 // RegisterStewardWithController performs full steward registration flow via HTTP + gRPC transport
@@ -604,10 +637,19 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		return nil, fmt.Errorf("failed to generate device identity key: %w", err)
 	}
 	identHash := sha256.Sum256(identPub)
+
+	// Generate the steward's mTLS keypair locally and submit only the public half
+	// as a CSR (Issue #3780); clientKeyPEM never leaves this process.
+	clientKeyPEM, csrPEM, err := generateE2ERegistrationKeypairAndCSR(stewardName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate steward registration keypair: %w", err)
+	}
+
 	reqBody := map[string]string{
 		"token":            token,
 		"device_id":        hex.EncodeToString(identHash[:]),
 		"identity_key_pub": base64.StdEncoding.EncodeToString(identPub),
+		"csr_pem":          csrPEM,
 	}
 	reqJSON, err := json.Marshal(reqBody)
 	if err != nil {
@@ -661,11 +703,13 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		"tenant_id", regResp.TenantID,
 		"transport_address", regResp.TransportAddress)
 
-	// Step 4: Create TLS config from registration certificates
+	// Step 4: Create TLS config from registration certificates, combining the
+	// controller-issued certificate with the locally held private key
+	// (Issue #3780) — no client_key field exists on the wire response to read.
 	tlsConfig, err := f.createTLSConfigFromPEM(
 		[]byte(regResp.CACert),
 		[]byte(regResp.ClientCert),
-		[]byte(regResp.ClientKey),
+		[]byte(clientKeyPEM),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
@@ -713,7 +757,7 @@ func (f *E2ETestFramework) RegisterStewardWithController(stewardName, tenantID s
 		TransportAddress: regResp.TransportAddress,
 		ControllerURL:    regResp.ControllerURL,
 		ClientCert:       regResp.ClientCert,
-		ClientKey:        regResp.ClientKey,
+		ClientKey:        clientKeyPEM,
 		CACert:           regResp.CACert,
 		heartbeatDone:    heartbeatDone,
 	}

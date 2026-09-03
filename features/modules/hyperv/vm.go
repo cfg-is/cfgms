@@ -64,6 +64,12 @@ var (
 	// ErrInvalidSourceRetryMax is returned when source retry_max is negative.
 	ErrInvalidSourceRetryMax = errors.New("hyperv: invalid source retry_max: must be zero or a positive integer")
 
+	// ErrInvalidSourceEdition is returned when source edition contains a
+	// character that could break out of the raw XML text node it is
+	// interpolated into (autounattendTemplate's
+	// <Value>{{ .ProductEdition }}</Value>, Issue #3788).
+	ErrInvalidSourceEdition = errors.New("hyperv: invalid source edition: must not contain '<', '>', '&', quotes, or newlines")
+
 	// ErrInvalidHARoleSeedDir is returned when an HA-role VM places its primary
 	// VHDX on a Cluster Shared Volume but the module-level seed_dir is empty or
 	// also on CSV. The provisioning seed directory must be host-local so the
@@ -90,6 +96,14 @@ var vmNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
 
 // vhdPathPattern validates Windows absolute paths.
 var vhdPathPattern = regexp.MustCompile(`^[A-Za-z]:\\.*`)
+
+// sourceEditionPattern is the allowlist for source.edition — a free-text
+// Windows image/edition name interpolated into a raw XML text node
+// (autounattendTemplate's <Value>{{ .ProductEdition }}</Value>, Issue #3788).
+// It admits the characters real edition names use (letters, digits, space,
+// parens, dot, slash, plus, hyphen) and excludes '<', '>', '&', quotes, and
+// newlines, which would let a value inject additional XML structure.
+var sourceEditionPattern = regexp.MustCompile(`^[A-Za-z0-9 ()./+\-]{1,256}$`)
 
 // CompletionConfig specifies how the provisioner detects that the installed OS
 // is ready and has registered its steward.
@@ -595,6 +609,9 @@ func (s *SourceConfig) validate() error {
 	}
 	if s.RetryMax != nil && *s.RetryMax < 0 {
 		return ErrInvalidSourceRetryMax
+	}
+	if s.Edition != "" && !sourceEditionPattern.MatchString(s.Edition) {
+		return ErrInvalidSourceEdition
 	}
 	return nil
 }
@@ -1810,8 +1827,10 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		}
 		// Retry budget exhausted: fall back to the original surface-and-wait
 		// behavior — the VM stays off, never destroyed, never powered on. This is
-		// the terminal state the visibility sibling story (Epic #3799) surfaces to
-		// an operator.
+		// the terminal state the visibility sibling story (Issue #3803, Epic #3799)
+		// surfaces to an operator: return a typed sentinel instead of nil so the
+		// executor can classify this outcome distinctly from a generic convergence
+		// failure (module.go's RetryExhaustedError, mirroring RebootDeferredError).
 		if logger, ok := m.GetLogger(); ok {
 			logger.Warn("hyperv: provisioning failed during the seed/create phase; retry budget exhausted, surface-and-wait (VM stays off until reseeded, no power-on)",
 				"vm_name", logging.SanitizeLogValue(vmName),
@@ -1822,7 +1841,7 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"vm-provision-skip-failed-seed-phase", "vm:"+vmName, nil,
 			map[string]interface{}{"reason": "seed-phase failure; retry budget exhausted; VM left powered off"}, nil)
-		return nil
+		return modules.NewRetryExhaustedError(record.LastError, string(record.FailedFrom))
 	}
 
 	if !isHealthyVMState(currentVM.State) {

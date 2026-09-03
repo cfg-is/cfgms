@@ -808,7 +808,7 @@ func TestLoadExistingCertificateManager_ClusterMode_UsesVaultNotLocalDisk(t *tes
 		HA: &config.HAConfig{Mode: "cluster"},
 	}
 
-	_, err := loadExistingCertificateManager(cfg, logging.NewNoopLogger())
+	_, err := loadExistingCertificateManager(cfg, nil, logging.NewNoopLogger())
 	require.Error(t, err, "unreachable vault must surface as an error, not a silent local-disk fallback")
 	assert.Contains(t, strings.ToLower(err.Error()), "vault",
 		"error must come from the vault-loading branch (Issue #3130)")

@@ -1797,10 +1797,16 @@ test-integration-short:
 # migrator tests need Postgres, were referenced by no Makefile target and no workflow,
 # and so had never run — which is how a skip list that hard-errors reached develop
 # unnoticed (Issue #3402).
+# pkg/cert (which covers pkg/cert/interfaces via ./...) is included for the same
+# reason again: the cluster-visible RevocationStore/SigningCursorStore tests
+# (Issue #3852 AC4-AC6, AC7 contract test) skip without CFGMS_TEST_DB_* reachable
+# and no other Makefile target or workflow points Postgres at them, so this is
+# their only run path too.
 # Those tests skip when Postgres is unreachable, so this target is their only run path.
 # -p 1 is required, not tidiness: these packages share one Postgres instance and the
-# database provider's setupTestDatabase drops every table, so running them concurrently
-# lets one package truncate another's fixtures mid-test.
+# database provider's setupTestDatabase (or, for pkg/cert, dropClusterTables) drops
+# every table, so running them concurrently lets one package truncate another's
+# fixtures mid-test.
 test-integration-db:
 	@echo "📊 Testing Database Storage Provider"
 	@echo "==================================="
@@ -1811,7 +1817,7 @@ test-integration-db:
 	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
-	go test -v -p 1 -tags=integration ./pkg/storage/providers/database/... ./pkg/storage/interfaces/... ./features/controller/api/... ./pkg/migrate/storage/...
+	go test -v -p 1 -tags=integration ./pkg/storage/providers/database/... ./pkg/storage/interfaces/... ./features/controller/api/... ./pkg/migrate/storage/... ./pkg/cert/...
 
 # Test git provider specifically  
 test-integration-git:

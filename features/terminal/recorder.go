@@ -107,9 +107,13 @@ var recordingSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // recordChunk is one queued recording frame awaiting durable write. The data is
 // an owned copy, so the caller may reuse its buffer immediately after enqueue.
+//
+// A chunk with a non-nil barrier carries no data: it is an ordering marker the
+// pump closes once every frame queued ahead of it has reached disk. See flush.
 type recordChunk struct {
 	data      []byte
 	direction DataDirection
+	barrier   chan struct{}
 }
 
 // recordingWriter manages writing data for a single session in the binary
@@ -387,9 +391,30 @@ func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 	return nil
 }
 
+// isShortRead reports whether err is io.ReadFull signalling that the file ended
+// before the requested bytes were available: io.EOF when nothing at all was
+// read, io.ErrUnexpectedEOF when the read stopped part-way through.
+func isShortRead(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // GetRecording retrieves a session recording. It decodes the binary format,
 // stripping length prefixes and HMACs, and returns only the content bytes.
+//
+// A recording that is still in progress can be retrieved: the returned data is
+// everything recorded as of the call. The writer's pump goroutine is drained
+// first so the file is read at a frame boundary, and a frame the pump appends
+// while the read is under way is treated as end-of-data rather than an error —
+// an in-flight append can only truncate the tail, never invalidate the frames
+// that precede it.
 func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecording, error) {
+	r.mu.RLock()
+	writer, recordingActive := r.activeWrites[sessionID]
+	r.mu.RUnlock()
+	if recordingActive {
+		writer.flush()
+	}
+
 	recPath := filepath.Join(r.storagePath, fmt.Sprintf("%s.rec", sessionID))
 
 	if _, err := os.Stat(recPath); os.IsNotExist(err) {
@@ -415,8 +440,11 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 	for {
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(file, lenBuf[:]); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
+			}
+			if recordingActive && errors.Is(err, io.ErrUnexpectedEOF) {
+				break // partial length prefix from a concurrent append
 			}
 			return nil, fmt.Errorf("failed to read event length: %w", err)
 		}
@@ -424,11 +452,17 @@ func (r *DefaultSessionRecorder) GetRecording(sessionID string) (*SessionRecordi
 		contentLen := binary.BigEndian.Uint32(lenBuf[:])
 		frameContent := make([]byte, contentLen)
 		if _, err := io.ReadFull(file, frameContent); err != nil {
+			if recordingActive && isShortRead(err) {
+				break // frame still being appended
+			}
 			return nil, fmt.Errorf("failed to read event content: %w", err)
 		}
 
 		// Skip the 32-byte HMAC — callers get only the content bytes.
 		if _, err := io.ReadFull(file, make([]byte, 32)); err != nil {
+			if recordingActive && isShortRead(err) {
+				break // frame still being appended
+			}
 			return nil, fmt.Errorf("failed to read event HMAC: %w", err)
 		}
 
@@ -646,6 +680,38 @@ func (w *recordingWriter) enqueue(data []byte, direction DataDirection) bool {
 	}
 }
 
+// flush blocks until every frame enqueued before the call has been written to
+// disk, leaving the recording file at a whole-frame boundary.
+//
+// Readers need this because a frame is persisted as three separate writes
+// ([length][content][HMAC]) by the pump goroutine: a reader that opens the file
+// while an append is in flight can observe a length prefix whose content bytes
+// have not landed yet and fail with a short read. Enqueuing an ordering marker
+// behind the pending frames — rather than sampling a "queue empty" flag — is
+// what makes the wait exact: the marker is released only after the write that
+// preceded it returned.
+//
+// Frames enqueued after flush returns are not covered; the reader's snapshot is
+// "everything recorded as of the call". It never blocks the recording path and
+// returns immediately once the writer is finalized.
+func (w *recordingWriter) flush() {
+	barrier := make(chan struct{})
+
+	// The send blocks while the backlog is full, which is correct — the pump is
+	// draining it. w.drained covers the finalized writer, whose pump has exited
+	// and will never observe the marker.
+	select {
+	case w.queue <- recordChunk{barrier: barrier}:
+	case <-w.drained:
+		return
+	}
+
+	select {
+	case <-barrier:
+	case <-w.drained:
+	}
+}
+
 // pump drains queued frames to disk on a dedicated goroutine, preserving
 // per-session ordering. On stop it flushes every remaining buffered frame before
 // signaling drained, so EndRecording/Close observe a complete recording.
@@ -672,6 +738,12 @@ func (w *recordingWriter) pump() {
 // failure) are logged and the pump stays alive — recording is best-effort and
 // must never take down terminal I/O.
 func (w *recordingWriter) writeChunk(chunk recordChunk) {
+	if chunk.barrier != nil {
+		// Ordering marker, not data: every frame queued before it has now been
+		// written, so release the waiter in flush.
+		close(chunk.barrier)
+		return
+	}
 	if err := w.writeData(chunk.data, chunk.direction); err != nil {
 		w.logger.Warn("Failed to persist terminal recording frame",
 			"session_id", logging.RedactedID(w.sessionID), "error", err)

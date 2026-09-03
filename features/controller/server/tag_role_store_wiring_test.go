@@ -73,4 +73,6 @@ func TestServer_New_WiresTagAndRoleConfigStoresIntoAPIServer(t *testing.T) {
 		"tag store must be wired into the API server (else /stewards/{id}/tags 503s)")
 	assert.NotNil(t, srv.httpServer.RoleConfigStore(),
 		"role-config store must be wired into the API server (else /roles 503s)")
+	assert.NotNil(t, srv.httpServer.HypervProfileConfigStore(),
+		"hyperv-profile store must be wired into the API server (else /hyperv/profiles 503s, Issue #3785)")
 }
