@@ -18,6 +18,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -510,7 +511,10 @@ func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope,
 	// x509OperatorCredentialVerifier and webauthnOperatorCredentialVerifier
 	// (webauthn_credential_verifier.go, Issue #3697) are its two implementations.
 	if h.controllerCARoots != nil {
-		credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{caRoots: h.controllerCARoots})
+		credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{
+			caRoots:            h.controllerCARoots,
+			revocationVerifier: h.revocationVerifier,
+		})
 		if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
 			return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
 		}
@@ -644,18 +648,24 @@ type OperatorCredentialVerifier interface {
 // script.VerifyScriptSignature, before this is ever called.
 type x509OperatorCredentialVerifier struct {
 	caRoots *x509.CertPool
+
+	// revocationVerifier answers whether the certificate's serial has been revoked
+	// (Issue #3699). Nil disables the check — the same degrade-safe default as an
+	// unconfigured controllerCARoots elsewhere in this file.
+	revocationVerifier *operatorroster.RevocationVerifier
 }
 
 func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proof []byte) error {
-	return verifyOperatorCert(string(proof), v.caRoots)
+	return verifyOperatorCert(string(proof), v.caRoots, v.revocationVerifier)
 }
 
 // verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it
-// chains to caRoots with client-auth EKU, has not expired, and carries the CFGMS
-// payload-signing marker (Issue #3696). An admin-bundle certificate — carrying
-// AdminMarkerOID but not PayloadSigningMarkerOID — chains and has the right EKU but is
-// rejected here: it authenticates mTLS transport, not operator payload signing.
-func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool) error {
+// chains to caRoots with client-auth EKU, has not expired, carries the CFGMS
+// payload-signing marker (Issue #3696), and has not been revoked (Issue #3699). An
+// admin-bundle certificate — carrying AdminMarkerOID but not PayloadSigningMarkerOID —
+// chains and has the right EKU but is rejected here: it authenticates mTLS transport,
+// not operator payload signing.
+func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool, revocationVerifier *operatorroster.RevocationVerifier) error {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
 		return fmt.Errorf("no PEM block found in signature_public_key")
@@ -673,6 +683,9 @@ func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool) error {
 	}
 	if !cert.HasPayloadSigningMarker(parsedCert) {
 		return fmt.Errorf("operator certificate is not a payload-signing certificate")
+	}
+	if revocationVerifier != nil && revocationVerifier.IsRevoked(parsedCert.SerialNumber.String()) {
+		return fmt.Errorf("operator certificate has been revoked")
 	}
 	return nil
 }
