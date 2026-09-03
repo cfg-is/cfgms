@@ -6,12 +6,13 @@
 // Issue #3804 (Epic #3799): the Windows-only half of the timeout-repair-visibility
 // regression. hyperv_provision_timeout_recovery_test.go proves the cross-component
 // composition (commands.Handler deadline decoupling + retry-exhausted visibility)
-// with a stub that mirrors the real seed-phase retry decision. This file proves the
-// piece that stub cannot reach: that a deadline-killed seed-mount operation against
-// the REAL pstransport_windows.go transport (features/modules/hyperv's default
-// "ps-host" transport) does not leave a seed VHD wedged on the host, and that a
-// subsequent convergence pass genuinely repairs the VM rather than failing again
-// with a "still attached" / sharing-violation error.
+// by driving the real module against a scripted host injected at its exported
+// hyperv.HostCommandTransport boundary. This file proves the piece a scripted host
+// cannot reach: that a deadline-killed seed-mount operation against the REAL
+// pstransport_windows.go transport (features/modules/hyperv's default "ps-host"
+// transport) does not leave a seed VHD wedged on the host, and that a subsequent
+// convergence pass genuinely repairs the VM rather than failing again with a
+// "still attached" / sharing-violation error.
 //
 // # Why this drives the real hyperv module instead of a fake transport
 //
@@ -52,7 +53,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -62,185 +62,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	"github.com/cfgis/cfgms/features/steward/execution"
-	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
-
-// testSecretStore is a minimal, real (non-mock) in-memory implementation of
-// secretsif.SecretStore. hypervModule.Configure requires an injected SecretStore
-// unconditionally (regardless of whether any given VM source actually references a
-// {{ secret "key" }} placeholder), so a real, correct implementation of the
-// interface is required to reach Configure/Set at all — the built-in legacy Linux
-// preseed profile this test drives (no source.unattend override) does not reference
-// any secret placeholder, so no key is ever actually looked up, but the store must
-// still behave correctly if that ever changes.
-type testSecretStore struct {
-	mu   sync.Mutex
-	data map[string]*secretsif.Secret
-}
-
-func newTestSecretStore() *testSecretStore {
-	return &testSecretStore{data: make(map[string]*secretsif.Secret)}
-}
-
-func (s *testSecretStore) StoreSecret(_ context.Context, req *secretsif.SecretRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	version := 1
-	if existing, ok := s.data[req.Key]; ok {
-		version = existing.Version + 1
-	}
-	s.data[req.Key] = &secretsif.Secret{
-		Key: req.Key, Value: req.Value, Metadata: req.Metadata, Tags: req.Tags,
-		Version: version, CreatedAt: now, UpdatedAt: now,
-		CreatedBy: req.CreatedBy, UpdatedBy: req.CreatedBy,
-		TenantID: req.TenantID, Description: req.Description,
-	}
-	return nil
-}
-
-func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsif.Secret, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	secret, ok := s.data[key]
-	if !ok {
-		return nil, secretsif.ErrSecretNotFound
-	}
-	copySecret := *secret
-	return &copySecret, nil
-}
-
-func (s *testSecretStore) DeleteSecret(_ context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.data, key)
-	return nil
-}
-
-func (s *testSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*secretsif.SecretMetadata, 0, len(s.data))
-	for _, secret := range s.data {
-		out = append(out, &secretsif.SecretMetadata{
-			Key: secret.Key, Metadata: secret.Metadata, Tags: secret.Tags,
-			Version: secret.Version, CreatedAt: secret.CreatedAt, UpdatedAt: secret.UpdatedAt,
-			CreatedBy: secret.CreatedBy, UpdatedBy: secret.UpdatedBy,
-			TenantID: secret.TenantID, Description: secret.Description,
-		})
-	}
-	return out, nil
-}
-
-func (s *testSecretStore) GetSecrets(ctx context.Context, keys []string) (map[string]*secretsif.Secret, error) {
-	out := make(map[string]*secretsif.Secret, len(keys))
-	for _, key := range keys {
-		secret, err := s.GetSecret(ctx, key)
-		if err == nil {
-			out[key] = secret
-		}
-	}
-	return out, nil
-}
-
-func (s *testSecretStore) StoreSecrets(ctx context.Context, secrets map[string]*secretsif.SecretRequest) error {
-	for _, req := range secrets {
-		if err := s.StoreSecret(ctx, req); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *testSecretStore) CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
-	s.mu.Lock()
-	existing, ok := s.data[key]
-	currentVersion := 0
-	if ok {
-		currentVersion = existing.Version
-	}
-	s.mu.Unlock()
-	if currentVersion != expectedVersion {
-		return currentVersion, false, nil
-	}
-	if err := s.StoreSecret(ctx, req); err != nil {
-		return currentVersion, false, err
-	}
-	updated, err := s.GetSecret(ctx, key)
-	if err != nil {
-		return currentVersion, false, err
-	}
-	return updated.Version, true, nil
-}
-
-func (s *testSecretStore) GetSecretVersion(ctx context.Context, key string, _ int) (*secretsif.Secret, error) {
-	return s.GetSecret(ctx, key)
-}
-
-func (s *testSecretStore) ListSecretVersions(_ context.Context, key string) ([]*secretsif.SecretVersion, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	secret, ok := s.data[key]
-	if !ok {
-		return nil, secretsif.ErrSecretNotFound
-	}
-	return []*secretsif.SecretVersion{{Version: secret.Version, CreatedAt: secret.CreatedAt, CreatedBy: secret.CreatedBy}}, nil
-}
-
-func (s *testSecretStore) GetSecretMetadata(ctx context.Context, key string) (*secretsif.SecretMetadata, error) {
-	secret, err := s.GetSecret(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	return &secretsif.SecretMetadata{
-		Key: secret.Key, Metadata: secret.Metadata, Tags: secret.Tags,
-		Version: secret.Version, CreatedAt: secret.CreatedAt, UpdatedAt: secret.UpdatedAt,
-		CreatedBy: secret.CreatedBy, UpdatedBy: secret.UpdatedBy,
-		TenantID: secret.TenantID, Description: secret.Description,
-	}, nil
-}
-
-func (s *testSecretStore) UpdateSecretMetadata(_ context.Context, key string, metadata map[string]string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	secret, ok := s.data[key]
-	if !ok {
-		return secretsif.ErrSecretNotFound
-	}
-	secret.Metadata = metadata
-	secret.UpdatedAt = time.Now()
-	return nil
-}
-
-func (s *testSecretStore) RotateSecret(ctx context.Context, key string, newValue string) error {
-	s.mu.Lock()
-	existing, ok := s.data[key]
-	s.mu.Unlock()
-	req := &secretsif.SecretRequest{Key: key, Value: newValue}
-	if ok {
-		req.TenantID = existing.TenantID
-		req.Metadata = existing.Metadata
-		req.Tags = existing.Tags
-	}
-	return s.StoreSecret(ctx, req)
-}
-
-func (s *testSecretStore) ExpireSecret(_ context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	secret, ok := s.data[key]
-	if !ok {
-		return secretsif.ErrSecretNotFound
-	}
-	past := time.Now().Add(-time.Second)
-	secret.ExpiresAt = &past
-	return nil
-}
-
-func (s *testSecretStore) HealthCheck(_ context.Context) error { return nil }
-func (s *testSecretStore) Close() error                        { return nil }
-
-var _ secretsif.SecretStore = (*testSecretStore)(nil)
 
 // requireRealHypervHostOrSkip gates the test on the SAME production detector
 // hypervModule itself uses (hyperv.NewDefaultDetector). On a non-elevated host, the
@@ -292,7 +114,7 @@ func TestHypervVMSeedRepair_Windows_DeadlineKilledMountRecoversOnRetry(t *testin
 
 	// Real host fixture: a VM shell with no disks and no network, matching what the
 	// hyperv package's own TestApplySourceGated_FailedSeedPhaseRetriesWithinBudget
-	// simulates via a fake transport's getVM output — here it is an actual VM on the
+	// scripts via a fake transport's getVM output — here it is an actual VM on the
 	// actual host, found by the module's own real Get-VM call.
 	runPowerShellFixture(t, `New-VM -Name '`+vmName+`' -Generation 2 -NoVHD -MemoryStartupBytes 512MB | Out-Null; Set-VMProcessor -VMName '`+vmName+`' -Count 1`)
 	t.Cleanup(func() {
@@ -390,8 +212,14 @@ func TestHypervVMSeedRepair_Windows_RetryBudgetExhausted_NeverAttemptsHostWork(t
 			`Stop-VM -Name '`+vmName+`' -TurnOff -Force -ErrorAction SilentlyContinue; Remove-VM -Name '`+vmName+`' -Force -ErrorAction SilentlyContinue`).Run()
 	})
 
+	// Exhaustion is expressed through authored config, not a copy of the
+	// module's built-in default: the desired state below declares
+	// source.retry_max: 2 and the record already carries 2 attempts, so the
+	// module derives "exhausted" from the budget the operator declared.
+	const declaredRetryMax = 2
+
 	store := hyperv.NewMemProvisionStore()
-	require.NoError(t, store.SetProvision(context.Background(), seedPhaseFailedRecord(vmName, seedPhaseRetryBudget)))
+	require.NoError(t, store.SetProvision(context.Background(), seedPhaseFailedRecord(vmName, declaredRetryMax)))
 
 	m := hyperv.New(hyperv.NewDefaultDetector(), hyperv.WithProvisionStore(store))
 	injectable, ok := m.(modules.SecretStoreInjectable)
@@ -416,6 +244,7 @@ func TestHypervVMSeedRepair_Windows_RetryBudgetExhausted_NeverAttemptsHostWork(t
 			"os_family":   "linux",
 			"completion":  map[string]interface{}{"mode": "steward-registration", "timeout": "60m"},
 			"on_existing": "never",
+			"retry_max":   declaredRetryMax,
 		},
 	})
 
@@ -429,6 +258,6 @@ func TestHypervVMSeedRepair_Windows_RetryBudgetExhausted_NeverAttemptsHostWork(t
 
 	rec, getErr := store.GetProvision(context.Background(), vmName)
 	require.NoError(t, getErr)
-	assert.Equal(t, seedPhaseRetryBudget, rec.RetryCount,
+	assert.Equal(t, declaredRetryMax, rec.RetryCount,
 		"RetryCount must not increment past the budget — no further real host attempt was made")
 }
