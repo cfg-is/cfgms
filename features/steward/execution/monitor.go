@@ -66,6 +66,33 @@ type monitorEntry struct {
 	monitor    modules.Monitor
 }
 
+// maxTargetedReconcileFailures bounds how many consecutive failing targeted
+// reconciles runTargetedReconcile will dispatch for one resourceID before it
+// stops trying (Issue #3876). Without a ceiling, a persistently-failing
+// reconcile (e.g. a module error on every Set) retries every time its monitor
+// re-signals — observed live as ~11-second-cadence New-VM attempts running for
+// over 20 minutes, allocating a fresh Hyper-V VM ID each time — with no backoff
+// and no way for an operator to stop it short of a steward service restart. The
+// count resets whenever StartMonitors rebuilds monitorEntries (Issue #3876
+// desired-state bullet 4): pushing a corrected config is a full engine restart
+// (stopMonitorEngine runs before the new entries are retained), so recovery
+// needs no service restart.
+const maxTargetedReconcileFailures = 5
+
+// resourceDeclaredAbsent reports whether resource's own desired config declares
+// state: absent. Used by runTargetedReconcile (Issue #3876) to refuse the create
+// path for a resource whose last declared state was absent — the specific
+// defect observed live: an orphaned/stale monitor entry retried New-VM against a
+// VM that had already been torn down, because nothing stopped a reconcile from
+// running against a resource whose OWN declared state says it should not exist.
+// Only the literal string "absent" qualifies — an empty/missing state field
+// means "module default", not "declared absent", and must still reconcile
+// normally.
+func resourceDeclaredAbsent(resource config.ResourceConfig) bool {
+	state, _ := resource.Config["state"].(string)
+	return state == "absent"
+}
+
 // bundleNameFromModuleRef extracts the module bundle name from a module reference.
 // "hyperv.vm" → "hyperv"; "file" → "file".
 func bundleNameFromModuleRef(moduleRef string) string {
@@ -101,6 +128,14 @@ type monitorFields struct {
 	// monitorReconcileObserver is called after a targeted reconcile applies changes.
 	// Standalone mode wires in DNA refresh + counter increment; controller mode leaves nil.
 	monitorReconcileObserver func(ctx context.Context, resourceID string)
+
+	// monitorFailures tracks consecutive targeted-reconcile failures per
+	// resourceID (Issue #3876), guarded by monitorMu. A resourceID absent from
+	// the map has no recorded failures. Reset in full whenever stopMonitorEngine
+	// runs — including the stop-then-restart StartMonitors performs on every
+	// call — so a fresh config (even redeclaring the same resourceID) gets a
+	// clean failure budget rather than inheriting one from before the push.
+	monitorFailures map[string]int
 }
 
 // SetMonitorReconcileObserver registers a callback invoked by the monitor engine
@@ -283,6 +318,7 @@ func (e *Executor) stopMonitorEngine() {
 	entries := e.monitorEntries
 	e.monitorStop = nil
 	e.monitorEntries = nil
+	e.monitorFailures = nil
 	e.monitorMu.Unlock()
 
 	if stopCh != nil {
@@ -568,6 +604,22 @@ func (e *Executor) RunTargetedReconcile(ctx context.Context, resourceID string) 
 // a no-op. Both ctx.Done() and stopCh are checked before the reconcile so a
 // shutdown mid-dispatch exits cleanly without calling Set after Close().
 //
+// Two guards run before ExecuteResource is called (Issue #3876), both aimed at
+// the same observed defect — a monitor-driven reconcile hammering a module
+// indefinitely:
+//
+//   - A resource whose retained desired state is literally "absent" never
+//     reconciles here at all. A monitor firing against a resource declared
+//     absent has nothing legitimate to converge toward — the create path is
+//     exactly what must never run for it — so scheduled convergence (which
+//     reads the current, non-stale config on every pass) is left to handle any
+//     eventual deletion instead.
+//   - A resourceID that has already failed maxTargetedReconcileFailures times
+//     in a row is skipped without calling ExecuteResource again. This is the
+//     bounded-retry-with-backoff AC: an operator recovers by pushing a
+//     corrected config (StartMonitors resets the counter), not by restarting
+//     the steward service.
+//
 // An optional monitorReconcileObserver is called when ChangesApplied is true;
 // standalone mode registers DNA refresh logic there (Issue #2435).
 func (e *Executor) runTargetedReconcile(ctx context.Context, stopCh <-chan struct{}, resourceID string) {
@@ -583,14 +635,30 @@ func (e *Executor) runTargetedReconcile(ctx context.Context, stopCh <-chan struc
 	e.monitorMu.Lock()
 	entries := e.monitorEntries
 	observer := e.monitorReconcileObserver
+	failures := e.monitorFailures[resourceID]
 	e.monitorMu.Unlock()
+
+	if failures >= maxTargetedReconcileFailures {
+		// Already gave up and logged why when the budget was first exhausted
+		// (recordReconcileOutcome) — nothing further to log on every subsequent
+		// no-op fire, which would just reproduce the same log-spam problem this
+		// guard exists to stop.
+		return
+	}
 
 	for _, entry := range entries {
 		if entry.resourceID == resourceID {
+			if resourceDeclaredAbsent(entry.resource) {
+				e.logger.Info("Skipping targeted reconcile: resource's declared state is absent",
+					"resource", logging.SanitizeLogValue(entry.resource.Name),
+					"resource_id", logging.SanitizeLogValue(resourceID))
+				return
+			}
 			e.logger.Info("Running targeted reconcile for monitored resource",
 				"resource", logging.SanitizeLogValue(entry.resource.Name),
 				"resource_id", logging.SanitizeLogValue(resourceID))
 			result := e.ExecuteResource(ctx, entry.resource)
+			e.recordReconcileOutcome(resourceID, result.Status)
 			if result.ChangesApplied && observer != nil {
 				observer(ctx, resourceID)
 			}
@@ -600,6 +668,52 @@ func (e *Executor) runTargetedReconcile(ctx context.Context, stopCh <-chan struc
 
 	e.logger.Info("Monitor event for unmanaged resource (not in cfg, skipping)",
 		"resource_id", logging.SanitizeLogValue(resourceID))
+}
+
+// isReconcileFailure reports whether status represents a targeted reconcile
+// outcome that should count against a resourceID's failure budget (Issue
+// #3876). Deliberately excludes StatusDeferred: a reboot-window deferral is an
+// intentional, self-clearing wait, not a hammering failure, and already carries
+// its own DeferredUntil-based re-check — counting it here would back off a
+// perfectly-behaving deferred reboot. StatusSkipped/StatusSuccess/
+// StatusNoChange/StatusNonCompliant are not failures either. StatusFailed,
+// StatusTimeout, and StatusRetryExhausted are: a persistent module error, a
+// wedged module call, and a module that has already exhausted its own bounded
+// retry all describe the same "retrying this will not help" shape the monitor
+// engine must stop repeating.
+func isReconcileFailure(status ResourceStatus) bool {
+	switch status {
+	case StatusFailed, StatusTimeout, StatusRetryExhausted:
+		return true
+	default:
+		return false
+	}
+}
+
+// recordReconcileOutcome updates resourceID's consecutive-failure count after a
+// dispatched targeted reconcile (Issue #3876): a non-failure clears the count
+// (the resource has recovered, or was never failing), and a failure increments
+// it, logging once — at the moment the budget is exhausted, not on every
+// subsequent no-op skip — so an operator can find why a resource stopped
+// reconciling without the log volume the unbounded retry itself produced.
+func (e *Executor) recordReconcileOutcome(resourceID string, status ResourceStatus) {
+	e.monitorMu.Lock()
+	defer e.monitorMu.Unlock()
+
+	if !isReconcileFailure(status) {
+		delete(e.monitorFailures, resourceID)
+		return
+	}
+
+	if e.monitorFailures == nil {
+		e.monitorFailures = make(map[string]int)
+	}
+	e.monitorFailures[resourceID]++
+	if e.monitorFailures[resourceID] == maxTargetedReconcileFailures {
+		e.logger.Warn("Targeted reconcile failure budget exhausted; no longer retrying until config changes",
+			"resource_id", logging.SanitizeLogValue(resourceID),
+			"attempts", e.monitorFailures[resourceID])
+	}
 }
 
 // CollectModuleFragments returns ADR-017 fragments for module resources observed

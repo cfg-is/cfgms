@@ -87,6 +87,67 @@ func TestReconcile_CreateWhenHostMissing_ConnectsEachSwitchByExactName(t *testin
 	assert.NotContains(t, adds[0].scriptBlock, "sw-b", "switch name must travel via args, not the script")
 }
 
+// TestReconcile_CreateWithMissingMemoryMB_RejectedBeforeDispatch is the
+// [REQUIRED TEST] for Issue #3876: hyperv.vm validates memory_mb before
+// dispatching New-VM and fails with a clear module-level error rather than
+// passing 0 to Hyper-V. This is the exact fixture shape observed live: a
+// desired config that omitted memory_mb entirely (an int64 field silently
+// resolving to 0), which previously reached New-VM as
+// -MemoryStartupBytes 0 and failed inside PowerShell on every monitor-driven
+// retry instead of being rejected up front, in-process, before any dispatch.
+func TestReconcile_CreateWithMissingMemoryMB_RejectedBeforeDispatch(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":false}`},
+	}
+	m := vmModuleWithTransport(transport, "ops")
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name": "web-01",
+		// memory_mb deliberately omitted.
+		"cpu_count":   2,
+		"vhd_path":    `C:\VMs\web-01.vhdx`,
+		"generation":  2,
+		"state":       "stopped",
+		"switch_name": "sw-a",
+	}}
+
+	err := m.Set(context.Background(), "vm:web-01", cfg)
+	require.ErrorIs(t, err, ErrInvalidMemoryMB)
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	assert.Empty(t, callsContaining(calls, "New-VM"), "New-VM must never be dispatched once memory_mb fails validation")
+}
+
+// TestReconcile_CreateWithBelowMinimumMemoryMB_RejectedBeforeDispatch covers the
+// non-zero-but-still-invalid case: a memory_mb explicitly set but still below
+// Hyper-V's own floor.
+func TestReconcile_CreateWithBelowMinimumMemoryMB_RejectedBeforeDispatch(t *testing.T) {
+	transport := &testWinRMTransport{
+		perCallOutputs: []string{`{"found":false}`},
+	}
+	m := vmModuleWithTransport(transport, "ops")
+
+	cfg := rawConfigState{m: map[string]interface{}{
+		"name":        "web-01",
+		"memory_mb":   16,
+		"cpu_count":   2,
+		"vhd_path":    `C:\VMs\web-01.vhdx`,
+		"generation":  2,
+		"state":       "stopped",
+		"switch_name": "sw-a",
+	}}
+
+	err := m.Set(context.Background(), "vm:web-01", cfg)
+	require.ErrorIs(t, err, ErrInvalidMemoryMB)
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	assert.Empty(t, callsContaining(calls, "New-VM"), "New-VM must never be dispatched once memory_mb fails validation")
+}
+
 // TestReconcile_MultiNICSet_AddsAdapterFromHostTruth drives the multi-NIC SET via
 // the map path: host VM is on [sw-a], desired is ["sw-a","sw-b"] → one
 // Add-VMNetworkAdapter for sw-b, no New-VM. Proves the reconcile reads the host

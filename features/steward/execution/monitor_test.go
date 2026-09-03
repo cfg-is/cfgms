@@ -40,6 +40,17 @@ type monitorTestModule struct {
 	getCalls   int
 	setCalls   int
 	setConfigs []map[string]interface{}
+	setErr     error // when non-nil, Set returns this error instead of succeeding
+
+	// converges, when true, makes Get report "present" (matching desired) after
+	// the first successful Set — a genuinely healthy resource that stops
+	// drifting once converged, rather than the default fixture's permanently
+	// "drifted" Get (which exists so ordinary tests always see a reconcile
+	// dispatch Set, but reads as perpetual remaining-drift/failure to a
+	// consumer, such as Issue #3876's backoff tracking, that cares whether
+	// convergence actually succeeded).
+	converges bool
+	setOK     bool
 
 	monitorCalled     bool
 	monitorResourceID string
@@ -56,17 +67,40 @@ func newMonitorTestModule() *monitorTestModule {
 func (m *monitorTestModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
 	m.mu.Lock()
 	m.getCalls++
+	state := "drifted"
+	if m.converges && m.setOK {
+		state = "present"
+	}
 	m.mu.Unlock()
-	// Return drifted state so a targeted reconcile detects drift and calls Set.
-	return execution.NewConfigState(map[string]interface{}{"state": "drifted"}), nil
+	// Return drifted state (by default) so a targeted reconcile detects drift
+	// and calls Set; a converges-fixture reports "present" once Set has
+	// actually succeeded.
+	return execution.NewConfigState(map[string]interface{}{"state": state}), nil
 }
 
 func (m *monitorTestModule) Set(_ context.Context, _ string, cfg modules.ConfigState) error {
 	m.mu.Lock()
 	m.setCalls++
 	m.setConfigs = append(m.setConfigs, cfg.AsMap())
+	err := m.setErr
+	m.setOK = err == nil
 	m.mu.Unlock()
-	return nil
+	return err
+}
+
+// SetSetError makes every subsequent Set call return err (nil to clear).
+func (m *monitorTestModule) SetSetError(err error) {
+	m.mu.Lock()
+	m.setErr = err
+	m.mu.Unlock()
+}
+
+// SetConverges makes Get report "present" after the next successful Set,
+// instead of the fixture's default permanently-"drifted" response.
+func (m *monitorTestModule) SetConverges(v bool) {
+	m.mu.Lock()
+	m.converges = v
+	m.mu.Unlock()
 }
 
 func (m *monitorTestModule) Monitor(_ context.Context, resourceID string, _ modules.ConfigState) error {
@@ -528,6 +562,201 @@ func TestExecutor_RunTargetedReconcile_UnmanagedResource(t *testing.T) {
 
 	assert.Equal(t, 0, mod.GetCallCount(), "Get must not be called for unmanaged resource")
 	assert.Equal(t, 0, mod.SetCallCount(), "Set must not be called for unmanaged resource")
+}
+
+// ─── Issue #3876: unbounded monitor-driven create-retry loop ───────────────────
+
+// absentResourceCfg builds a single-resource slice whose desired state is
+// literally "absent" — the fixture for TestExecutor_RunTargetedReconcile_AbsentDesiredState_NeverReconciles.
+func absentResourceCfg(name, moduleName string) []stewardconfig.ResourceConfig {
+	return []stewardconfig.ResourceConfig{
+		{
+			Name:   name,
+			Module: moduleName,
+			Config: map[string]interface{}{"state": "absent"},
+		},
+	}
+}
+
+// TestExecutor_RunTargetedReconcile_AbsentDesiredState_NeverReconciles is the
+// [REQUIRED TEST] for Issue #3876: a monitor-driven targeted reconcile can never
+// take the create path for a resource whose last declared state was absent. A
+// monitored resource whose retained desired config is state: absent must never
+// call module.Get/Set via a targeted reconcile, however many change-events fire.
+func TestExecutor_RunTargetedReconcile_AbsentDesiredState_NeverReconciles(t *testing.T) {
+	e := newMonitorExecutor(t)
+	e.SetMonitorDebounceWindow(20 * time.Millisecond)
+
+	mod := newMonitorTestModule()
+	execution.ExecutorFactory(e).RegisterModule("testmon", mod)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, e.StartMonitors(ctx, absentResourceCfg("res1", "testmon")))
+	defer e.StopMonitors()
+
+	mod.SendChange(modules.ChangeEvent{ResourceID: "res1", ChangeType: modules.ChangeTypeModified})
+
+	// Give the debounce+dispatch pipeline ample time to have run if it were
+	// going to — then assert it did not.
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 0, mod.GetCallCount(), "a resource declared absent must never be reconciled by the monitor engine")
+	assert.Equal(t, 0, mod.SetCallCount(), "a resource declared absent must never take the create path")
+
+	// A direct RunTargetedReconcile call (the same entry point a fired debounce
+	// timer uses) must also refuse it.
+	e.RunTargetedReconcile(context.Background(), "res1")
+	assert.Equal(t, 0, mod.GetCallCount())
+	assert.Equal(t, 0, mod.SetCallCount())
+}
+
+// TestExecutor_StartMonitors_RemovedResourceStopsBeingMonitored is the
+// [REQUIRED TEST] for Issue #3876: a resource removed from the steward config
+// stops being monitored on the next StartMonitors call — its monitor state is
+// dropped rather than retained and reconciled — and this recovery requires only
+// a fresh config, not a service restart.
+func TestExecutor_StartMonitors_RemovedResourceStopsBeingMonitored(t *testing.T) {
+	e := newMonitorExecutor(t)
+	e.SetMonitorDebounceWindow(20 * time.Millisecond)
+
+	mod := newMonitorTestModule()
+	execution.ExecutorFactory(e).RegisterModule("testmon", mod)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, e.StartMonitors(ctx, singleResourceCfg("res1", "testmon")))
+	mod.SendChange(modules.ChangeEvent{ResourceID: "res1", ChangeType: modules.ChangeTypeModified})
+	require.Eventually(t, func() bool { return mod.SetCallCount() > 0 }, 2*time.Second, 5*time.Millisecond,
+		"sanity: res1 must be reconciled while still declared")
+
+	// A new config no longer declares res1 at all — the same shape as the
+	// observed incident's step 3 (config replaced, resource entirely gone).
+	require.NoError(t, e.StartMonitors(ctx, nil))
+	defer e.StopMonitors()
+
+	mod.ResetTracking()
+	// A direct dispatch attempt for the now-undeclared resourceID must take the
+	// unmanaged-resource path, not reconcile: it is no longer in monitorEntries,
+	// so it is not retained and reconciled.
+	e.RunTargetedReconcile(context.Background(), "res1")
+	assert.Equal(t, 0, mod.GetCallCount(), "a resource no longer declared must not be reconciled")
+	assert.Equal(t, 0, mod.SetCallCount())
+}
+
+// TestExecutor_RunTargetedReconcile_BacksOffAfterRepeatedFailures is the
+// [REQUIRED TEST] for Issue #3876: a repeatedly-failing targeted reconcile backs
+// off and stops after a bounded number of attempts, logging why, instead of
+// retrying forever. Firing far more change-events than the failure budget must
+// still only call Set exactly maxTargetedReconcileFailures times.
+func TestExecutor_RunTargetedReconcile_BacksOffAfterRepeatedFailures(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	e := newMonitorExecutorWithLogger(t, logger)
+	e.SetMonitorDebounceWindow(5 * time.Millisecond)
+
+	mod := newMonitorTestModule()
+	mod.SetSetError(errors.New("simulated persistent module failure"))
+	execution.ExecutorFactory(e).RegisterModule("testmon", mod)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, e.StartMonitors(ctx, singleResourceCfg("res1", "testmon")))
+	defer e.StopMonitors()
+
+	// Fire far more events than the failure budget, waiting out the debounce
+	// window between each so every fire dispatches its own reconcile attempt.
+	for i := 0; i < 20; i++ {
+		mod.SendChange(modules.ChangeEvent{ResourceID: "res1", ChangeType: modules.ChangeTypeModified})
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	assert.Equal(t, 5, mod.SetCallCount(),
+		"exactly maxTargetedReconcileFailures attempts must be made, however many events fire afterward")
+
+	entry, ok := logger.FindWarn("Targeted reconcile failure budget exhausted; no longer retrying until config changes")
+	require.True(t, ok, "exhausting the failure budget must be logged once, explaining why reconciles stopped")
+	assert.Equal(t, "res1", entry["resource_id"])
+
+	// A fresh config (the operator's recovery path) resets the budget without a
+	// service restart: a new StartMonitors call — closing the old, exhausted
+	// module instance and starting a new (here, fixed) one, exactly as a real
+	// config push swaps the factory's cached instance — must reconcile again
+	// immediately rather than staying backed off.
+	fixed := newMonitorTestModule()
+	execution.ExecutorFactory(e).RegisterModule("testmon", fixed)
+	require.NoError(t, e.StartMonitors(ctx, singleResourceCfg("res1", "testmon")))
+	fixed.SendChange(modules.ChangeEvent{ResourceID: "res1", ChangeType: modules.ChangeTypeModified})
+	require.Eventually(t, func() bool { return fixed.SetCallCount() > 0 }, 2*time.Second, 5*time.Millisecond,
+		"pushing a corrected config must be a sufficient recovery, without a service restart")
+}
+
+// TestExecutor_RunTargetedReconcile_FailingResourceDoesNotStarveOthers is the
+// [REQUIRED TEST] for Issue #3876: a failing reconcile for one resource cannot
+// starve convergence of others. A second, healthy monitored resource must keep
+// reconciling normally throughout — including after the failing resource's
+// budget is exhausted and its events become no-ops.
+func TestExecutor_RunTargetedReconcile_FailingResourceDoesNotStarveOthers(t *testing.T) {
+	e := newMonitorExecutor(t)
+	e.SetMonitorDebounceWindow(5 * time.Millisecond)
+
+	bad := newMonitorTestModule()
+	bad.SetSetError(errors.New("simulated persistent module failure"))
+	good := newMonitorTestModule()
+	good.SetConverges(true) // a genuinely healthy resource, not the fixture's default permanent drift
+	execution.ExecutorFactory(e).RegisterModule("badmon", bad)
+	execution.ExecutorFactory(e).RegisterModule("goodmon", good)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resources := []stewardconfig.ResourceConfig{
+		{Name: "bad1", Module: "badmon", Config: map[string]interface{}{"state": "present"}},
+		{Name: "good1", Module: "goodmon", Config: map[string]interface{}{"state": "present"}},
+	}
+	require.NoError(t, e.StartMonitors(ctx, resources))
+	defer e.StopMonitors()
+
+	// Interleave: fire the failing resource's event repeatedly (well past its
+	// budget), and the healthy resource's event once after each.
+	for i := 0; i < 10; i++ {
+		bad.SendChange(modules.ChangeEvent{ResourceID: "bad1", ChangeType: modules.ChangeTypeModified})
+		time.Sleep(15 * time.Millisecond)
+		good.SendChange(modules.ChangeEvent{ResourceID: "good1", ChangeType: modules.ChangeTypeModified})
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	assert.LessOrEqual(t, bad.SetCallCount(), maxTargetedReconcileFailuresForTest,
+		"the failing resource must have backed off, not retried on every one of the 10 fires")
+	// good1 converges on its first Set, so later dispatches correctly find no
+	// drift and never call Set again — GetCallCount (incremented on every
+	// dispatched reconcile, converged or not) is the proof each of its 10
+	// events was actually processed rather than starved behind bad1's noise.
+	// >= rather than == : debounce-window timing can coalesce or split a fire
+	// by one at these millisecond scales, which is not what this test is about.
+	assert.GreaterOrEqual(t, good.GetCallCount(), 10,
+		"the healthy resource must be reconciled for every one of its own events, unaffected by the failing resource")
+}
+
+const maxTargetedReconcileFailuresForTest = 5
+
+// TestExecutor_RunTargetedReconcile_TimeoutAndRetryExhaustedCountAsFailures
+// verifies isReconcileFailure's classification indirectly: StatusTimeout and
+// StatusRetryExhausted must count toward the backoff budget exactly like
+// StatusFailed — both describe "retrying this will not help" just as much as an
+// outright module error, and a module already reporting its own exhausted
+// bounded retry (Issue #3802) must not be re-driven by the monitor engine on
+// top of it.
+func TestExecutor_RunTargetedReconcile_TimeoutAndRetryExhaustedCountAsFailures(t *testing.T) {
+	assert.True(t, execution.IsReconcileFailureForTest(execution.StatusFailed))
+	assert.True(t, execution.IsReconcileFailureForTest(execution.StatusTimeout))
+	assert.True(t, execution.IsReconcileFailureForTest(execution.StatusRetryExhausted))
+	assert.False(t, execution.IsReconcileFailureForTest(execution.StatusDeferred),
+		"a reboot-window deferral is an intentional, self-clearing wait, not a hammering failure")
+	assert.False(t, execution.IsReconcileFailureForTest(execution.StatusSuccess))
+	assert.False(t, execution.IsReconcileFailureForTest(execution.StatusNoChange))
+	assert.False(t, execution.IsReconcileFailureForTest(execution.StatusNonCompliant))
 }
 
 // TestExecutor_CollectModuleDNAAttributes_EvictsOnChannelClose verifies that

@@ -27,3 +27,8 @@ const MaxModuleFragments = maxModuleFragments
 // MaxModuleFragmentCanonicalBytes exposes the CollectModuleFragments per-fragment
 // size bound for package execution_test.
 const MaxModuleFragmentCanonicalBytes = maxModuleFragmentCanonicalBytes
+
+// IsReconcileFailureForTest exposes isReconcileFailure (Issue #3876) so package
+// execution_test can assert its classification directly, independently of
+// driving each ResourceStatus through a full targeted-reconcile dispatch.
+var IsReconcileFailureForTest = isReconcileFailure
