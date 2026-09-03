@@ -294,9 +294,16 @@ func TestDatabaseRegistrationStore_SaveToken_HealsEmptyStoredID(t *testing.T) {
 	require.NoError(t, store.SaveToken(ctx, seed))
 
 	// Force the stored id to the empty string, bypassing the store's own assignment.
-	_, err := store.db.ExecContext(ctx,
-		`UPDATE cfgms_registration_tokens SET id = '' WHERE token = $1`, "db-empty-id")
+	// The token column holds the hashed lookup key (SaveToken never stores the raw
+	// token string), so the WHERE clause must match on that same derived value or
+	// this UPDATE silently affects zero rows.
+	result, err := store.db.ExecContext(ctx,
+		`UPDATE cfgms_registration_tokens SET id = '' WHERE token = $1`,
+		business.RegistrationTokenLookupKey("db-empty-id"))
 	require.NoError(t, err)
+	rowsAffected, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rowsAffected, "precondition setup: expected to clear the id of exactly one row")
 
 	stale, err := store.GetToken(ctx, "db-empty-id")
 	require.NoError(t, err)
