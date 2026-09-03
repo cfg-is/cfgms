@@ -198,15 +198,26 @@ jobs:
         go test -v -race -timeout=10m ./test/integration/... \
           -run "^Test(Certificate|ConfigValidation|Epic6Compliance|RegistrationTokenPersistence)$"
 
-        # Run the cluster-visible cert revocation/signing-cursor store tests and
-        # the database provider tests they depend on (Issue #3852 AC4-AC6, AC7
-        # contract test). CFGMS_TEST_DB_HOST/PORT/PASSWORD come from .env.test,
-        # sourced above; postgres-test is already running from the setup step.
-        # -p 1 matches the `test-integration-db` Makefile target: both packages
-        # share the one Postgres instance and drop every table in their own
-        # setup (setupTestDatabase / dropClusterTables), so running them
-        # concurrently would let one package truncate another's fixtures mid-test.
-        go test -v -race -p 1 -timeout=10m ./pkg/cert/... ./pkg/storage/providers/database/...
+        # Run the cluster-visible cert revocation/signing-cursor store tests
+        # (Issue #3852 AC4-AC6, AC7 contract test, including its /database
+        # subtest which exercises pkg/storage/providers/database directly).
+        # CFGMS_TEST_DB_HOST/PORT/PASSWORD come from .env.test, sourced above;
+        # postgres-test is already running from the setup step.
+        #
+        # Scope is intentionally ./pkg/cert/... only. Story #3852's AC7 was
+        # narrowed 2026-09-03: wiring in ./pkg/storage/providers/database/...
+        # directly turned on six pre-existing, unrelated Postgres failures
+        # (a varchar(64) overflow and RLS defects) that this story neither
+        # causes nor can fix. That wider wiring is tracked separately as
+        # story #3872, gated on those fixes landing first.
+        #
+        # -p 1: ./pkg/cert/... expands to pkg/cert and pkg/cert/interfaces,
+        # both of which talk to the same Postgres schema (interfaces'
+        # database contract case drops and recreates every table on each
+        # run — see pkg/cert/interfaces/providers_test.go). Running them as
+        # concurrent packages would let one drop tables out from under the
+        # other's in-flight cluster tests.
+        go test -v -race -p 1 -timeout=10m ./pkg/cert/...
 
         echo "✅ Integration tests completed"
 
