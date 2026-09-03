@@ -24,6 +24,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -114,6 +115,14 @@ type Handler struct {
 	// credential — cannot be replayed after a newer one has been honoured.
 	webauthnManifestFloor *manifestFreshnessFloor
 
+	// revocationVerifier answers whether an operator certificate's serial has been
+	// revoked, from the last signed revocation manifest this steward independently
+	// verified for itself (Issue #3699). nil is treated as "no manifest verified
+	// yet" — the same graceful-degradation behavior as an unset revocationVerifier
+	// field, since operatorroster.RevocationVerifier.IsRevoked already answers
+	// false when it has never verified a manifest.
+	revocationVerifier *operatorroster.RevocationVerifier
+
 	// Issue #1675: per-execution relay registry.
 	// relays maps executionID → *scriptrelay.Relay for CommandRelayResponse dispatch.
 	relays sync.Map
@@ -192,6 +201,12 @@ type Config struct {
 	// EventEmitter, when non-nil, receives script output LogEntry events after each
 	// CommandExecuteScript completes (Issue #2143). Enqueue must never block.
 	EventEmitter EventEmitter
+
+	// RevocationVerifier answers whether an operator certificate has been revoked,
+	// from the last signed revocation manifest independently verified against this
+	// steward's controller CA (Issue #3699). Nil disables the revocation check —
+	// the same degrade-safe default as an unconfigured controllerCARoots.
+	RevocationVerifier *operatorroster.RevocationVerifier
 }
 
 const (
@@ -264,6 +279,7 @@ func New(cfg *Config) (*Handler, error) {
 		controllerCARoots:       cfg.ControllerCARoots,
 		tenantID:                cfg.TenantID,
 		webauthnManifestFloor:   &manifestFreshnessFloor{},
+		revocationVerifier:      cfg.RevocationVerifier,
 		eventEmitter:            cfg.EventEmitter,
 	}
 

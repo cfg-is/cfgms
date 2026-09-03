@@ -641,6 +641,48 @@ WebAuthn path. What remains is the shallower risk that a compromised controller 
 bogus WebAuthn registration — bounded by `webauthn:register`'s existing `AssuranceStrong`
 gate — not the deeper risk of silently stealing a years-old credential.
 
+#### Operator Certificate Revocation Consumption (Issue #3699)
+
+The X.509 path above verifies an operator certificate's chain, EKU, expiry, and
+payload-signing marker — none of which change the moment a certificate is revoked, since
+revocation is deliberately independent of the certificate's own claims about itself.
+`features/steward/operatorroster.RevocationVerifier` closes that gap: it independently
+fetches and verifies the same signed revocation manifest the WebAuthn path resolves its
+roster from (`GET /api/v1/certificates/revocation-manifest`), and `verifyOperatorCert`
+adds `IsRevoked(serial)` as a final check after the marker check succeeds — a certificate
+that is otherwise perfectly valid is still rejected once its serial appears in the
+manifest.
+
+Deliberately, this is never a live controller assertion made at verification time: the
+steward checks the last manifest it independently verified for itself, using the same
+`controllerCARoots` chain-of-trust `verifyOperatorCert` already uses for the certificate
+itself. Checking revocation live against the controller on every command would make
+execution availability depend on a controller round trip for exactly the case (a
+leaked/stolen operator credential) most likely to coincide with an attacker also
+controlling or blocking that connection.
+
+`VerifyManifest` mirrors `stewardtrust.StewardTrustEnforcer.VerifyForLoad`'s mode dispatch
+(`module_trust.mode`, `features/steward/modules/trust/trust.go`):
+
+- **strict.** The manifest's `signer_certificate_pem` must chain to the steward's pinned
+  CA roots with a CodeSigning EKU, and its signature must verify against that certificate
+  — a manifest signed by a key that does not chain to the pinned root is rejected even if
+  the controller serving it claims validity.
+- **controller** (default). The manifest is applied without independently verifying its
+  signature — the steward has already decided to trust the controller's own judgment for
+  other artifacts under this mode, so it does the same here.
+- **bypass.** A genuine no-op (development use only): the manifest is never applied and
+  `IsRevoked` stays inert.
+
+In strict and controller mode, anti-rollback is enforced on `version` (the manifest's own
+revoked-serial count, which `Manager.Revoke` only ever grows): a manifest older than the
+last one this steward accepted is rejected, so a captured, still-validly-signed older
+manifest — one missing revocations the steward has already learned about — cannot roll it
+back. `IsRevoked` answers `false` until the first manifest is successfully verified,
+matching the same graceful-degradation posture as an unconfigured `controllerCARoots`
+elsewhere in this verification path: it is a defense-in-depth layer on top of chain/EKU/
+marker verification, not the only check standing between an attacker and execution.
+
 ### Remote Terminal
 
 The controller can establish an interactive terminal session through the steward for live troubleshooting. The steward provides a secure, authenticated shell session back to the administrator.

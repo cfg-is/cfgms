@@ -44,6 +44,7 @@ import (
 	dna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/driftdiff"
 	"github.com/cfgis/cfgms/features/steward/execution"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -1172,6 +1173,18 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		}
 	}
 
+	// RevocationVerifier answers whether an operator certificate has been revoked
+	// (Issue #3699), independently verified against the same controllerCARoots
+	// chain-of-trust used above. Constructed unconditionally (even when
+	// controllerCARoots is nil — IsRevoked then simply never sees a manifest verify
+	// successfully and answers false, the same degrade-safe posture as the rest of
+	// operator-cert verification when no usable CA bundle is configured). Fetching
+	// and applying a manifest into it is a separate, not-yet-wired concern (the
+	// story's own Out of Scope note: exact fetch/refresh scheduling is an
+	// implementation detail, not an acceptance criterion) — operatorroster.RevocationVerifier
+	// exposes FetchAndVerify/RunPeriodicRefresh, ready for that wiring.
+	revocationVerifier := operatorroster.NewRevocationVerifier(controllerCARoots)
+
 	handler, err := commands.New(&commands.Config{
 		StewardID:          stewardID,
 		OnStatus:           statusCallback,
@@ -1186,8 +1199,9 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		// the tenant subtree its owning account belongs to (Issue #3697). Empty until
 		// registration assigns one, in which case only a root-scope entry authorizes
 		// inline execution.
-		TenantID:     c.GetTenantID(),
-		EventEmitter: scriptEmitter,
+		TenantID:           c.GetTenantID(),
+		RevocationVerifier: revocationVerifier,
+		EventEmitter:       scriptEmitter,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create command handler: %w", err)

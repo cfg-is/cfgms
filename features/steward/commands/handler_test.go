@@ -11,9 +11,12 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,7 +29,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -1273,6 +1278,68 @@ func sigTestOperatorCert(t *testing.T, ca *cert.CA, modifier func(*x509.Certific
 	return c
 }
 
+// sigTestManifestSigningCert issues a real CodeSigning certificate from ca,
+// mirroring the controller's own PurposeSigning certificate
+// (features/controller/api/handlers_revocation_manifest.go's signRevocationManifest).
+func sigTestManifestSigningCert(t *testing.T, ca *cert.CA) *cert.Certificate {
+	t.Helper()
+	c, err := ca.GenerateSigningCertificate(&cert.SigningCertConfig{
+		CommonName:   "test-config-signer",
+		Organization: "Test CFGMS",
+		ValidityDays: 365,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	return c
+}
+
+// revocationManifestForTest and signedRevocationManifestForTest mirror
+// RevocationManifest/SignedRevocationManifest field-for-field (this package cannot
+// import features/controller/api), matching operatorroster's own local duplicate.
+type revocationManifestForTest struct {
+	Kind           string    `json:"kind"`
+	Version        int64     `json:"version"`
+	IssuedAt       time.Time `json:"issued_at"`
+	RevokedSerials []string  `json:"revoked_serials"`
+}
+
+type signedRevocationManifestForTest struct {
+	Manifest             revocationManifestForTest  `json:"manifest"`
+	Signature            *signature.ConfigSignature `json:"signature"`
+	SignerCertificatePEM string                     `json:"signer_certificate_pem"`
+}
+
+// sigTestSignRevocationManifest signs a revocation manifest with signingCert and
+// returns the JSON bytes exactly as the controller's
+// GET /api/v1/certificates/revocation-manifest serves them.
+func sigTestSignRevocationManifest(t *testing.T, signingCert *cert.Certificate, version int64, revokedSerials []string) []byte {
+	t.Helper()
+	manifest := revocationManifestForTest{
+		Kind:           "operator-cert-revocation",
+		Version:        version,
+		IssuedAt:       time.Now().UTC().Truncate(time.Second),
+		RevokedSerials: revokedSerials,
+	}
+	data, err := json.Marshal(manifest)
+	require.NoError(t, err)
+
+	signer, err := signature.NewSigner(&signature.SignerConfig{
+		CertificatePEM: signingCert.CertificatePEM,
+		PrivateKeyPEM:  signingCert.PrivateKeyPEM,
+	})
+	require.NoError(t, err)
+	sig, err := signer.Sign(data)
+	require.NoError(t, err)
+
+	out, err := json.Marshal(signedRevocationManifestForTest{
+		Manifest:             manifest,
+		Signature:            sig,
+		SignerCertificatePEM: string(signingCert.CertificatePEM),
+	})
+	require.NoError(t, err)
+	return out
+}
+
 // sigTestOperatorEnvelopeParams builds a valid operatorpayload.Envelope over content
 // (targets=[stewardID], a fresh nonce, a 5-minute expiry), signs its canonical bytes
 // with the RSA private key in keyPEM, and returns the full cmd.Params map
@@ -1610,6 +1677,68 @@ func TestExecuteScriptHandler_InlineScript_NonAdminCert_Rejected(t *testing.T) {
 	err := h.HandleCommand(context.Background(), sc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
 		"a chained, unexpired, client-auth cert WITHOUT the admin marker must be rejected")
+}
+
+// TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch is the
+// [REQUIRED TEST] for Issue #3699: revoking a certificate (simulated here as the
+// controller's certificate:revoke flow would produce — the certificate's serial
+// added to RevokedSerials in a newly-signed, higher-version manifest), re-fetching
+// the manifest via a real HTTP round trip against an httptest server standing in
+// for GET /api/v1/certificates/revocation-manifest, and then attempting to use
+// that certificate to sign an ad-hoc command is rejected end-to-end.
+//
+// This proves resistance to a leaked/stolen-credential attacker who still holds a
+// since-revoked private key; per the story's Acceptance Criteria it does not prove
+// resistance to an attacker with RCE on the controller host — both revocation-list
+// and a full authorized-key roster fail identically against that threat class.
+func TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	operatorCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	signingCert := sigTestManifestSigningCert(t, ca)
+
+	// First fetch: the certificate is not yet revoked.
+	var currentManifest []byte
+	currentManifest = sigTestSignRevocationManifest(t, signingCert, 1, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(currentManifest)
+	}))
+	defer srv.Close()
+
+	revocationVerifier := operatorroster.NewRevocationVerifier(caPool)
+	require.NoError(t, revocationVerifier.FetchAndVerify(context.Background(), srv.Client(), srv.URL, stewardtypes.ModuleTrustModeStrict))
+
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           noopStatus,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+		RevocationVerifier: revocationVerifier,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	dispatch := func(execID string) error {
+		content := []byte(echoScriptBody("operator-hello"))
+		params := sigTestOperatorEnvelopeParams(t, operatorCert.PrivateKeyPEM, string(operatorCert.CertificatePEM), content, platformShell(), "steward-test")
+		params["execution_id"] = execID
+		sc := testSignedCommandWithParams(execID, cpTypes.CommandExecuteScript, params)
+		return h.HandleCommand(context.Background(), sc)
+	}
+
+	require.NoError(t, dispatch("sig-revoke-before-001"), "before revocation, a valid payload-signing cert must be accepted")
+	h.Wait()
+
+	// Simulate the controller's certificate:revoke flow having run: the next
+	// manifest served now lists the certificate's real serial, at a higher version.
+	currentManifest = sigTestSignRevocationManifest(t, signingCert, 2, []string{operatorCert.SerialNumber})
+	require.NoError(t, revocationVerifier.FetchAndVerify(context.Background(), srv.Client(), srv.URL, stewardtypes.ModuleTrustModeStrict))
+
+	err = dispatch("sig-revoke-after-001")
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a certificate present in the last-verified revocation manifest must be rejected, even though its chain/EKU/marker checks still pass")
+	assert.Contains(t, err.Error(), "revoked")
 }
 
 // ---------------------------------------------------------------------------
