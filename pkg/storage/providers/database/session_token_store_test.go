@@ -248,13 +248,136 @@ func TestDatabaseSessionTokenStore_SetUpdatesExistingEntry(t *testing.T) {
 	require.NoError(t, store.Set(ctx, hash, sess))
 
 	updated := *sess
-	updated.LastActivity = now.Add(5 * time.Minute)
+	// Postgres TIMESTAMP WITH TIME ZONE columns store microsecond precision, so the
+	// value Get() returns is rounded to microseconds; round the expectation the same
+	// way rather than comparing against a nanosecond-precision time.Now() value that
+	// the column can never represent exactly.
+	updated.LastActivity = now.Add(5 * time.Minute).Round(time.Microsecond)
 	require.NoError(t, store.Set(ctx, hash, &updated))
 
 	got, err := store.Get(ctx, hash)
 	require.NoError(t, err)
 	assert.True(t, got.LastActivity.Equal(updated.LastActivity),
 		"LastActivity should be updated; got %v want %v", got.LastActivity, updated.LastActivity)
+}
+
+// TestRoundToStorablePrecision verifies the microsecond-quantization helper against the
+// exact values from the Issue #3864 CI failure: Postgres returned 2026-09-03
+// 01:42:51.117902 +0000 UTC for a value written as .117901613 (nanosecond precision) —
+// i.e. Postgres rounds to the nearest microsecond rather than truncating.
+func TestRoundToStorablePrecision(t *testing.T) {
+	in := time.Date(2026, 9, 3, 1, 42, 51, 117901613, time.UTC)
+	want := time.Date(2026, 9, 3, 1, 42, 51, 117902000, time.UTC)
+
+	got := roundToStorablePrecision(in)
+	assert.True(t, got.Equal(want), "got %v want %v", got, want)
+
+	assert.True(t, roundToStorablePrecision(time.Time{}).IsZero(), "zero time must remain zero")
+
+	// A value already at microsecond precision must round-trip unchanged.
+	exact := time.Date(2026, 9, 3, 1, 42, 51, 117902000, time.UTC)
+	assert.True(t, roundToStorablePrecision(exact).Equal(exact))
+}
+
+// TestComputeStorableSessionTimestamps verifies computeStorableSessionTimestamps
+// rounds every write-path timestamp field to microsecond precision, purely in memory
+// — no Postgres required. This is the revert-proof counterpart to the round-3
+// acceptance-review finding on PR #3869: a round-trip through Postgres cannot
+// distinguish "the write path rounds" from "it doesn't", because Postgres rounds
+// TIMESTAMPTZ values to microsecond precision on write regardless of what the client
+// sends (verified against a real Postgres instance: neutralizing
+// roundToStorablePrecision to an identity function left every round-trip test still
+// passing). Testing the pure computation directly, instead of through a round-trip,
+// is the only way to detect a regression here.
+func TestComputeStorableSessionTimestamps(t *testing.T) {
+	issuedAt := time.Date(2026, 9, 3, 1, 42, 51, 117901613, time.UTC)
+	lastActivity := time.Date(2026, 9, 3, 2, 0, 0, 500000500, time.UTC)
+	absoluteExpiresAt := time.Date(2026, 9, 3, 9, 42, 51, 999999999, time.UTC)
+	lastProvenAt := time.Date(2026, 9, 3, 1, 50, 0, 250000250, time.UTC)
+
+	sess := &session.Session{
+		IssuedAt:          issuedAt,
+		LastActivity:      lastActivity,
+		AbsoluteExpiresAt: absoluteExpiresAt,
+		LastProvenAt:      lastProvenAt,
+	}
+
+	ts := computeStorableSessionTimestamps(sess)
+
+	assert.True(t, ts.issuedAt.Equal(issuedAt.Round(time.Microsecond)),
+		"issuedAt not rounded: got %v", ts.issuedAt)
+	assert.True(t, ts.lastActivity.Equal(lastActivity.Round(time.Microsecond)),
+		"lastActivity not rounded: got %v", ts.lastActivity)
+	assert.True(t, ts.absoluteExpiresAt.Equal(absoluteExpiresAt.Round(time.Microsecond)),
+		"absoluteExpiresAt not rounded: got %v", ts.absoluteExpiresAt)
+	require.IsType(t, time.Time{}, ts.lastProvenAt)
+	assert.True(t, ts.lastProvenAt.(time.Time).Equal(lastProvenAt.Round(time.Microsecond)),
+		"lastProvenAt not rounded: got %v", ts.lastProvenAt)
+
+	// None of the inputs happened to already sit on a microsecond boundary, so a
+	// reverted (identity) implementation would leave these fields unequal to the
+	// rounded expectation above — that is what makes this assertion revert-proof.
+	assert.NotEqual(t, issuedAt, ts.issuedAt, "fixture must carry a sub-microsecond remainder")
+
+	// sess itself must be untouched: computeStorableSessionTimestamps must not mutate
+	// the caller's Session, since it may already be registered in session.Manager's
+	// in-memory index — reachable by a concurrent reader/writer holding a different
+	// lock — before Set's caller (manager.issue) gets a chance to guard it.
+	assert.Equal(t, issuedAt, sess.IssuedAt, "sess.IssuedAt must not be mutated")
+	assert.Equal(t, lastActivity, sess.LastActivity, "sess.LastActivity must not be mutated")
+	assert.Equal(t, absoluteExpiresAt, sess.AbsoluteExpiresAt, "sess.AbsoluteExpiresAt must not be mutated")
+	assert.Equal(t, lastProvenAt, sess.LastProvenAt, "sess.LastProvenAt must not be mutated")
+
+	// A zero LastProvenAt (no strong-factor proof yet) must produce a nil param, not
+	// the zero time rounded to some non-zero value.
+	zeroSess := &session.Session{
+		IssuedAt:          issuedAt,
+		LastActivity:      lastActivity,
+		AbsoluteExpiresAt: absoluteExpiresAt,
+	}
+	zeroTS := computeStorableSessionTimestamps(zeroSess)
+	assert.Nil(t, zeroTS.lastProvenAt, "zero LastProvenAt must produce a nil SQL param")
+}
+
+// TestDatabaseSessionTokenStore_SetSurvivesNanosecondPrecisionInput exercises Set()
+// with a raw, unrounded time.Now() (nanosecond precision) end to end against real
+// Postgres, and confirms both that the write succeeds and that the caller's Session
+// is left untouched by Set (see TestComputeStorableSessionTimestamps for the
+// revert-proof assertion on the rounding logic itself, which a DB round-trip cannot
+// provide since Postgres rounds on write regardless of client-side rounding).
+func TestDatabaseSessionTokenStore_SetSurvivesNanosecondPrecisionInput(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	tok := mustGenerateToken(t)
+	hash := session.HashToken(tok)
+	// A raw time.Now() carries nanosecond precision that essentially never lands
+	// exactly on a microsecond boundary — do not round it before calling Set.
+	now := time.Now().UTC()
+	issuedAt := now
+	absoluteExpiresAt := now.Add(time.Hour)
+
+	sess := &session.Session{
+		ID:                "nanosecond-input-id",
+		PrincipalID:       "grace",
+		ConnectionName:    "ctrl",
+		TenantID:          "tenant-1",
+		IssuedAt:          issuedAt,
+		LastActivity:      issuedAt,
+		AbsoluteExpiresAt: absoluteExpiresAt,
+	}
+
+	require.NoError(t, store.Set(ctx, hash, sess))
+
+	// Set must not mutate the caller's Session.
+	assert.Equal(t, issuedAt, sess.IssuedAt, "sess.IssuedAt must not be mutated by Set")
+	assert.Equal(t, issuedAt, sess.LastActivity, "sess.LastActivity must not be mutated by Set")
+	assert.Equal(t, absoluteExpiresAt, sess.AbsoluteExpiresAt, "sess.AbsoluteExpiresAt must not be mutated by Set")
+
+	got, err := store.Get(ctx, hash)
+	require.NoError(t, err)
+	assert.True(t, got.IssuedAt.Equal(issuedAt.Round(time.Microsecond)),
+		"got.IssuedAt: got %v want %v", got.IssuedAt, issuedAt.Round(time.Microsecond))
 }
 
 // TestDatabaseSessionTokenStore_NoRawTokenInStoredRows performs a raw-SQL scan of
