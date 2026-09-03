@@ -23,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -2670,7 +2671,9 @@ func TestAccounts_Delete_CascadesRevokesBindingsAndDeletes(t *testing.T) {
 		Label:  "offboarding laptop",
 	})
 	require.Equal(t, http.StatusCreated, bindRec.Code, "bind: %s", bindRec.Body.String())
-	assert.False(t, certMgr.IsRevoked(serial), "cert must not be revoked before delete")
+	revokedBefore, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.False(t, revokedBefore, "cert must not be revoked before delete")
 
 	// Delete cascades: revokes the cert and then deletes the account in one step.
 	delRec := deleteAccount(t, server, strongPrincipal(), "offboard-me")
@@ -2678,7 +2681,9 @@ func TestAccounts_Delete_CascadesRevokesBindingsAndDeletes(t *testing.T) {
 		"offboarding cascade must return 200: %s", delRec.Body.String())
 
 	// Certificate must be revoked as part of the cascade.
-	assert.True(t, certMgr.IsRevoked(serial),
+	revokedAfter, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter,
 		"delete must revoke every bound certificate via certManager")
 
 	// Account must be gone from the store.
@@ -2763,8 +2768,12 @@ func TestAccounts_Offboarding_RevokesAllCertsAndSessions(t *testing.T) {
 	require.Equal(t, http.StatusOK, delRec.Code, "offboarding cascade must succeed: %s", delRec.Body.String())
 
 	// All bound certificates must be revoked.
-	assert.True(t, certMgr.IsRevoked(serial1), "first bound cert must be revoked by cascade")
-	assert.True(t, certMgr.IsRevoked(serial2), "second bound cert must be revoked by cascade")
+	revoked1, err := certMgr.IsRevoked(serial1)
+	require.NoError(t, err)
+	assert.True(t, revoked1, "first bound cert must be revoked by cascade")
+	revoked2, err := certMgr.IsRevoked(serial2)
+	require.NoError(t, err)
+	assert.True(t, revoked2, "second bound cert must be revoked by cascade")
 
 	// All CLI sessions (including cross-node) must be revoked.
 	cliSessions, listErr := cliMgr.List(ctx)
@@ -2814,29 +2823,68 @@ func TestAccounts_Offboarding_RevokesAllCertsAndSessions(t *testing.T) {
 	require.NotEmpty(t, deletedEntries, "account.deleted audit event must be emitted")
 }
 
+// failingRevocationStore wraps a real RevocationStore and forces Revoke to
+// fail, simulating a transient revocation-store outage. It is a real
+// certinterfaces.RevocationStore implementation — no mock framework — matching
+// failingListAllStore's convention below. Issue #3852 removed Manager.Revoke's
+// former "serial must be present in the local FileStore" check (that check
+// made revocation silently fail off the issuing node in a cluster — the exact
+// bug Issue #3761's fix agent escalated), so tests that need a genuine
+// revocation failure now inject a failing store instead of an unknown serial.
+type failingRevocationStore struct {
+	certinterfaces.RevocationStore
+	failErr error
+}
+
+func (s *failingRevocationStore) Revoke(_ context.Context, _ certinterfaces.RevocationEntry) error {
+	return s.failErr
+}
+
+// newFailingCertManager returns a cert.Manager whose RevocationStore always
+// fails Revoke, for tests exercising the cascade's revocation-failure path.
+func newFailingCertManager(t *testing.T) *cert.Manager {
+	t.Helper()
+	baseRevStore, err := cert.NewFileRevocationStore(t.TempDir())
+	require.NoError(t, err)
+	mgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig:    &cert.CAConfig{Organization: "Test", Country: "US", ValidityDays: 365},
+		RevocationStore: &failingRevocationStore{
+			RevocationStore: baseRevStore,
+			failErr:         errors.New("revocation store temporarily unavailable"),
+		},
+	})
+	require.NoError(t, err)
+	return mgr
+}
+
 // TestAccounts_Offboarding_PartialCertFailureLeavesDisabledAndUndeleted is the [REQUIRED TEST]
 // for Issue #3581: a failure during certificate revocation leaves the account in the
 // more-restrictive state (disabled, not deleted) so that a retry is possible.
 //
-// The scenario: the account has a cert binding for a serial that is not registered in
-// certManager's store (simulating a cert the manager cannot revoke). The cascade disables
-// the account (step 1) but fails at step 2 (cert revocation), returning 500 without
-// proceeding to the delete step.
+// The scenario: certManager's RevocationStore is swapped for one that always fails Revoke
+// (failingRevocationStore above), simulating a transient revocation-store outage. The
+// cascade disables the account (step 1) but fails at step 2 (cert revocation), returning
+// 500 without proceeding to the delete step.
 func TestAccounts_Offboarding_PartialCertFailureLeavesDisabledAndUndeleted(t *testing.T) {
 	srv, _ := setupCertBindingServer(t)
 	ctx := context.Background()
 
 	createTestAccount(t, srv, "partial-fail-user")
 
-	// Inject a cert binding with a serial that does NOT exist in certManager's store.
-	// This simulates a cert that certManager.Revoke cannot process ("unknown serial").
-	// We bypass handleBindCert's serial-format check by injecting directly into the account.
+	// Inject a cert manager whose RevocationStore always fails Revoke (real
+	// implementation, injected failure — see failingRevocationStore above),
+	// simulating a transient revocation-store outage.
+	srv.SetCertManager(newFailingCertManager(t))
+
+	// Bind a well-formed serial; the injected store above is what makes the
+	// revocation attempt fail, not an unknown/malformed serial.
 	srv.mu.Lock()
 	acctPtr := srv.accounts["partial-fail-user"]
 	require.NotNil(t, acctPtr, "account must be in cache after creation")
 	acctCopy := *acctPtr
 	acctCopy.CertBindings = []CertBinding{
-		{Serial: "UNKNOWNSERIAL001", Fingerprint: "sha256:fake", Label: "injected"},
+		{Serial: "SOMESERIAL001", Fingerprint: "sha256:fake", Label: "injected"},
 	}
 	srv.accounts["partial-fail-user"] = &acctCopy
 	srv.mu.Unlock()
@@ -2844,7 +2892,7 @@ func TestAccounts_Offboarding_PartialCertFailureLeavesDisabledAndUndeleted(t *te
 	require.NoError(t, srv.persistAccount(ctx, &acctCopy, "test"))
 
 	// Offboarding cascade: step 1 (disable) succeeds, step 2 (cert revoke) fails
-	// because "UNKNOWNSERIAL001" is not in certManager's store.
+	// because the injected RevocationStore always errors.
 	delRec := deleteAccount(t, srv, strongPrincipal(), "partial-fail-user")
 	require.Equal(t, http.StatusInternalServerError, delRec.Code,
 		"partial cert revocation failure must return 500: %s", delRec.Body.String())

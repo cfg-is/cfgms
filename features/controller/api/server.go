@@ -1671,6 +1671,17 @@ func (s *Server) SetSessionManager(mgr session.Manager) {
 	s.sessionManager = mgr
 }
 
+// SetCertManager wires the certificate Manager used for cert issuance,
+// revocation, and rotation. Exposed for tests that need to inject a Manager
+// backed by a failure-injecting RevocationStore (real implementation, not a
+// mock — see certinterfaces.RevocationStore) to exercise a revocation-failure
+// path deterministically.
+func (s *Server) SetCertManager(mgr *cert.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.certManager = mgr
+}
+
 // SetWebSessionManager wires the web session Manager used to authenticate browser
 // clients via the cfgms_session HttpOnly cookie (Issue #2492, ADR-018 §1,2).
 // Uses explicit Config (idle 60m / absolute 12h / grace 30s) — distinct from the

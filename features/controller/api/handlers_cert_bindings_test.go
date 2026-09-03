@@ -283,14 +283,18 @@ func TestHandleCertBinding_RevokeActuallyRevokes(t *testing.T) {
 		Label:       "alice laptop",
 	})
 	require.Equal(t, http.StatusCreated, bindRec.Code)
-	assert.False(t, certMgr.IsRevoked(serial), "cert must not be revoked before revoke call")
+	revokedBefore, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.False(t, revokedBefore, "cert must not be revoked before revoke call")
 
 	// Revoke the binding.
 	revokeRec := revokeCertBindingReq(t, server, strongPrincipal(), "alice", serial)
 	require.Equal(t, http.StatusOK, revokeRec.Code, "revoke: %s", revokeRec.Body.String())
 
 	// Assert the certificate is actually revoked via the cert manager.
-	assert.True(t, certMgr.IsRevoked(serial), "cert must be revoked via certManager after handleRevokeCertBinding")
+	revokedAfter, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter, "cert must be revoked via certManager after handleRevokeCertBinding")
 
 	// Assert the binding is gone from the list.
 	listRec := listCertsReq(t, server, testAdminPrincipal(), "alice")

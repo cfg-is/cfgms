@@ -33,7 +33,9 @@ func TestRevokeAdminBundle_PersistsAcrossRestart(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, manager.Revoke(c.SerialNumber))
-	assert.True(t, manager.IsRevoked(c.SerialNumber))
+	revoked, err := manager.IsRevoked(c.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked)
 
 	// Simulate restart: new Manager, same storage path
 	manager2, err := NewManager(&ManagerConfig{
@@ -42,28 +44,37 @@ func TestRevokeAdminBundle_PersistsAcrossRestart(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.True(t, manager2.IsRevoked(c.SerialNumber),
-		"revocation must persist across Manager restart")
+	revoked, err = manager2.IsRevoked(c.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked, "revocation must persist across Manager restart")
 }
 
-// TestRevokeAdminBundle_UnknownSerial_Errors verifies that revoking a serial
-// not found in the certificate store returns an error (not silent success).
-func TestRevokeAdminBundle_UnknownSerial_Errors(t *testing.T) {
-	tempDir := t.TempDir()
+// TestRevoke_UnknownSerial_SucceedsClusterWide verifies that revoking a
+// serial not found in this node's local certificate store still succeeds,
+// rather than erroring. The certificate store (pkg/cert's FileStore) stays
+// node-local by design (Issue #3852 keeps it out of scope), so on a
+// clustered controller a serial issued on another node is legitimately
+// absent locally; requiring local presence made revocation silently fail
+// off the issuing node (Issue #3761 escalation finding 2). Only an empty
+// serial is now rejected — see TestRevoke_EmptySerial_Errors.
+func TestRevoke_UnknownSerial_SucceedsClusterWide(t *testing.T) {
+	manager := setupTestManager(t)
 
-	manager, err := NewManager(&ManagerConfig{
-		StoragePath: tempDir,
-		CAConfig: &CAConfig{
-			Organization: "Test",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
+	err := manager.Revoke("00000000-nonexistent-serial-9999")
+	require.NoError(t, err, "revoking a serial absent from this node's local store must not error")
+
+	revoked, err := manager.IsRevoked("00000000-nonexistent-serial-9999")
 	require.NoError(t, err)
+	assert.True(t, revoked)
+}
 
-	err = manager.Revoke("00000000-nonexistent-serial-9999")
-	assert.Error(t, err, "revoking an unknown serial must return an error")
-	assert.Contains(t, err.Error(), "00000000-nonexistent-serial-9999")
+// TestRevoke_EmptySerial_Errors verifies that revoking an empty serial
+// returns an error — the one input validation Revoke still performs.
+func TestRevoke_EmptySerial_Errors(t *testing.T) {
+	manager := setupTestManager(t)
+
+	err := manager.Revoke("")
+	assert.Error(t, err)
 }
 
 // TestIsRevoked_FalseBeforeRevoke verifies that a freshly-issued cert is not revoked.
@@ -77,8 +88,9 @@ func TestIsRevoked_FalseBeforeRevoke(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.False(t, manager.IsRevoked(c.SerialNumber),
-		"freshly-issued cert must not be revoked")
+	revoked, err := manager.IsRevoked(c.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked, "freshly-issued cert must not be revoked")
 }
 
 // TestListRevoked_ReturnsEntry verifies that ListRevoked returns the revoked serial.
@@ -141,7 +153,7 @@ func TestRevocationConcurrentAccess(t *testing.T) {
 	for i := 0; i < readers; i++ {
 		go func() {
 			defer wg.Done()
-			_ = manager.IsRevoked(c.SerialNumber)
+			_, _ = manager.IsRevoked(c.SerialNumber)
 		}()
 	}
 
@@ -153,7 +165,9 @@ func TestRevocationConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 	// Race correctness verified by the race detector; also confirm the revoke actually persisted.
-	assert.True(t, manager.IsRevoked(c.SerialNumber), "revoke must persist after concurrent access")
+	revoked, err := manager.IsRevoked(c.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked, "revoke must persist after concurrent access")
 }
 
 // TestRevokeIdempotent verifies that revoking the same serial twice is a no-op and

@@ -1715,7 +1715,9 @@ func TestHandleRevokeCertificate_Success(t *testing.T) {
 	assert.True(t, resp.Data.IsRevoked, "revoked cert must report IsRevoked: true")
 
 	// Verify actual revocation in the cert manager.
-	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
 		"cert must be on the revocation list after successful revoke")
 }
 
@@ -1752,7 +1754,9 @@ func TestHandleRevokeCertificate_RevokedCertReportsCorrectly(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "revoke must succeed: %s", rec.Body.String())
 
 	// IsRevoked must return true.
-	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
 		"IsRevoked must return true after revocation")
 
 	// ListCertificates must still include the cert (revocation doesn't delete it).
@@ -1882,7 +1886,9 @@ func TestHandleRevokeCertificate_TenantScope_SiblingTenant_Returns404_AndDoesNot
 
 	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"cross-tenant revoke must return 404 to avoid disclosing cert existence across tenants")
-	assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
 		"cross-tenant revoke must NOT revoke the certificate")
 }
 
@@ -1925,7 +1931,9 @@ func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code,
 		"own-tenant revoke must succeed: %s", rec.Body.String())
-	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
 		"cert must be revoked after successful own-tenant revoke")
 }
 
@@ -1979,7 +1987,9 @@ func TestHandleRevokeCertificate_TenantScope_InternalCert_Returns404_AndDoesNotR
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
-	assert.False(t, certMgr.IsRevoked(serial),
+	revoked, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.False(t, revoked,
 		"controller-internal certificate must remain un-revoked after a tenant-scoped attempt")
 }
 
@@ -2000,7 +2010,9 @@ func TestHandleRevokeCertificate_InternalCert_UnscopedAdminSucceeds(t *testing.T
 
 	require.Equal(t, http.StatusOK, rec.Code,
 		"unscoped admin must be able to revoke a controller-internal cert: %s", rec.Body.String())
-	assert.True(t, certMgr.IsRevoked(serial),
+	revoked, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.True(t, revoked,
 		"cert must be revoked after unscoped-admin revoke")
 }
 
@@ -2032,7 +2044,9 @@ func TestHandleRevokeCertificate_TenantScope_StewardNotInStore_Returns404_AndDoe
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
-	assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
 		"unattributable certificate must remain un-revoked after a tenant-scoped attempt")
 }
 
@@ -2058,7 +2072,9 @@ func TestHandleRevokeCertificate_StewardNotInStore_UnscopedAdminSucceeds(t *test
 
 	require.Equal(t, http.StatusOK, rec.Code,
 		"unscoped admin must be able to revoke an unattributable cert: %s", rec.Body.String())
-	assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
 		"cert must be revoked after unscoped-admin revoke")
 }
 
@@ -2101,7 +2117,9 @@ func TestHandleRevokeCertificate_TenantScope_NilStewardStore_Returns503(t *testi
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
-	assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
 		"certificate must remain un-revoked when scope evaluation is impossible")
 }
 
@@ -2155,7 +2173,9 @@ func TestHandleRevokeCertificate_TenantScope_StoreFault_Returns500(t *testing.T)
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
 	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
-	assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
 		"certificate must remain un-revoked when scope evaluation fails")
 }
 
@@ -2219,7 +2239,9 @@ func TestCertificateHandlerLeaderGate(t *testing.T) {
 
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
 			"non-authoritative controller must return 503 for revoke")
-		assert.False(t, certMgr.IsRevoked(issued.SerialNumber),
+		revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+		require.NoError(t, err)
+		assert.False(t, revoked,
 			"cert must remain valid when the leadership gate blocks the revoke")
 	})
 }
@@ -2299,7 +2321,9 @@ func TestCertificateHandlerLeaderGate_Passthrough(t *testing.T) {
 				server.router.ServeHTTP(rec, req)
 				assert.Equal(t, http.StatusOK, rec.Code,
 					"checker must not block the revocation path; body: %s", rec.Body.String())
-				assert.True(t, certMgr.IsRevoked(issued.SerialNumber),
+				revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+				require.NoError(t, err)
+				assert.True(t, revoked,
 					"cert must be revoked when checker does not block")
 			})
 		})

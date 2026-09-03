@@ -12,6 +12,7 @@ import (
 	"io"
 	"sync"
 
+	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -112,6 +113,24 @@ type NonceStoreCreator interface {
 // business.NodeSharedLeaseStore and declares SharedAcrossNodes() true.
 type LeaseStoreCreator interface {
 	CreateLeaseStore(config map[string]interface{}) (business.LeaseStore, error)
+}
+
+// CertRevocationStoreCreator is an optional StorageProvider extension for
+// backends that support cluster-visible certificate revocation storage
+// (ADR-031 Decision 1, Issue #3852). Backends that do not implement this
+// interface leave the store nil; pkg/cert falls back to its node-local
+// file-backed implementation.
+type CertRevocationStoreCreator interface {
+	CreateCertRevocationStore(config map[string]interface{}) (certinterfaces.RevocationStore, error)
+}
+
+// SigningCursorStoreCreator is an optional StorageProvider extension for
+// backends that support cluster-visible config-signing rotation cursor
+// storage (ADR-031 Decision 1, Issue #3852). Backends that do not implement
+// this interface leave the store nil; pkg/cert falls back to its node-local
+// file-backed implementation.
+type SigningCursorStoreCreator interface {
+	CreateSigningCursorStore(config map[string]interface{}) (certinterfaces.SigningCursorStore, error)
 }
 
 // StorageProvider defines the interface that all storage backends must implement.
@@ -678,14 +697,16 @@ type StorageManager struct {
 	pushStore                business.PushStore
 	pendingRegistrationStore business.PendingRegistrationStore
 	ipTrustStore             business.IPTrustStore
-	alertStore               business.AlertStore           // Issue #3266: alert acknowledge and silence
-	pendingRefreshStore      business.PendingRefreshStore  // Issue #2098: registration-refresh approval queue
-	refreshPolicyStore       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
-	assurancePolicyStore     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
-	tenantCrossingStore      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
-	caseStore                business.CaseStore            // ADR-022 §8: cockpit investigation cases
-	nonceStore               business.NonceStore           // Issue #3755, ADR-031: durable registration-refresh nonce
-	leaseStore               business.LeaseStore           // ADR-031 Decision 5: fenced singleton-claim leases
+	alertStore               business.AlertStore               // Issue #3266: alert acknowledge and silence
+	pendingRefreshStore      business.PendingRefreshStore      // Issue #2098: registration-refresh approval queue
+	refreshPolicyStore       business.RefreshPolicyStore       // Issue #2098: per-tenant refresh policy
+	assurancePolicyStore     business.AssurancePolicyStore     // Issue #2845: per-tenant assurance-policy overrides
+	tenantCrossingStore      business.TenantCrossingStore      // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	caseStore                business.CaseStore                // ADR-022 §8: cockpit investigation cases
+	nonceStore               business.NonceStore               // Issue #3755, ADR-031: durable registration-refresh nonce
+	leaseStore               business.LeaseStore               // ADR-031 Decision 5: fenced singleton-claim leases
+	certRevocationStore      certinterfaces.RevocationStore    // Issue #3852, ADR-031: cluster-visible cert revocation list
+	signingCursorStore       certinterfaces.SigningCursorStore // Issue #3852, ADR-031: cluster-visible signing rotation cursor
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -873,6 +894,32 @@ func (sm *StorageManager) GetLeaseStore() business.LeaseStore {
 // SetLeaseStore wires the lease store after construction.
 func (sm *StorageManager) SetLeaseStore(s business.LeaseStore) {
 	sm.leaseStore = s
+}
+
+// GetCertRevocationStore returns the cluster-visible certificate revocation
+// store (ADR-031 Decision 1, Issue #3852). Returns nil when the running
+// provider does not implement CertRevocationStoreCreator; callers fall back
+// to pkg/cert's node-local file-backed implementation.
+func (sm *StorageManager) GetCertRevocationStore() certinterfaces.RevocationStore {
+	return sm.certRevocationStore
+}
+
+// SetCertRevocationStore wires the cert revocation store after construction.
+func (sm *StorageManager) SetCertRevocationStore(s certinterfaces.RevocationStore) {
+	sm.certRevocationStore = s
+}
+
+// GetSigningCursorStore returns the cluster-visible config-signing rotation
+// cursor store (ADR-031 Decision 1, Issue #3852). Returns nil when the
+// running provider does not implement SigningCursorStoreCreator; callers
+// fall back to pkg/cert's node-local file-backed implementation.
+func (sm *StorageManager) GetSigningCursorStore() certinterfaces.SigningCursorStore {
+	return sm.signingCursorStore
+}
+
+// SetSigningCursorStore wires the signing cursor store after construction.
+func (sm *StorageManager) SetSigningCursorStore(s certinterfaces.SigningCursorStore) {
+	sm.signingCursorStore = s
 }
 
 // GetCapabilities returns the provider's capabilities.
@@ -1192,6 +1239,30 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if leaseStore != nil {
 			sm.SetLeaseStore(leaseStore)
+		}
+	}
+	// Wire cert revocation store if the provider implements CertRevocationStoreCreator
+	// (ADR-031 Decision 1, Issue #3852: revocation state must be cluster-visible so a
+	// revocation issued on one controller node is observed by every node).
+	if crc, ok := provider.(CertRevocationStoreCreator); ok {
+		certRevocationStore, err := crc.CreateCertRevocationStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create cert revocation store: %w", err)
+		}
+		if certRevocationStore != nil {
+			sm.SetCertRevocationStore(certRevocationStore)
+		}
+	}
+	// Wire signing cursor store if the provider implements SigningCursorStoreCreator
+	// (ADR-031 Decision 1, Issue #3852: the config-signing rotation cursor must be
+	// cluster-visible so concurrent rotations from different nodes converge).
+	if scc, ok := provider.(SigningCursorStoreCreator); ok {
+		signingCursorStore, err := scc.CreateSigningCursorStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create signing cursor store: %w", err)
+		}
+		if signingCursorStore != nil {
+			sm.SetSigningCursorStore(signingCursorStore)
 		}
 	}
 	return sm, nil

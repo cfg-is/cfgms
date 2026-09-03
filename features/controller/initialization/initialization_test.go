@@ -1294,7 +1294,7 @@ func TestBuildClusterCertManager_PartialExternalIntermediatePathsRejected(t *tes
 		},
 	}
 
-	_, err := BuildClusterCertManager(context.Background(), cfg, t.TempDir(), logging.NewNoopLogger())
+	_, err := BuildClusterCertManager(context.Background(), cfg, t.TempDir(), nil, logging.NewNoopLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must all be set together")
 }

@@ -10,22 +10,20 @@
 package cert
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
+
+	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 )
 
 const revocationFileName = "revocation.json"
 
 // RevocationEntry records a revoked certificate serial with metadata.
-type RevocationEntry struct {
-	Serial    string    `json:"serial"`
-	RevokedAt time.Time `json:"revoked_at"`
-	Reason    string    `json:"reason,omitempty"`
-}
+type RevocationEntry = certinterfaces.RevocationEntry
 
 // revocationList is the on-disk JSON format.
 type revocationList struct {
@@ -147,4 +145,31 @@ func (rs *revocationStore) allEntries() []RevocationEntry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// Revoke implements certinterfaces.RevocationStore.Revoke. ctx is unused: all
+// I/O here is local-file, matching the rest of pkg/cert's Manager API, which
+// predates context propagation.
+func (rs *revocationStore) Revoke(_ context.Context, entry RevocationEntry) error {
+	return rs.addAndPersist(entry)
+}
+
+// IsRevoked implements certinterfaces.RevocationStore.IsRevoked.
+func (rs *revocationStore) IsRevoked(_ context.Context, serial string) (bool, error) {
+	return rs.isRevoked(serial), nil
+}
+
+// ListRevoked implements certinterfaces.RevocationStore.ListRevoked.
+func (rs *revocationStore) ListRevoked(_ context.Context) ([]RevocationEntry, error) {
+	return rs.allEntries(), nil
+}
+
+// NewFileRevocationStore returns the node-local, file-backed RevocationStore
+// implementation: a JSON file at basePath/revocation.json, preserving the
+// exact on-disk layout and "missing file means empty list" semantics this
+// package has always used. This is pkg/cert's default for single-node
+// deployments (Issue #3852 AC2); a clustered controller overrides it via
+// ManagerConfig.RevocationStore.
+func NewFileRevocationStore(basePath string) (certinterfaces.RevocationStore, error) {
+	return newRevocationStore(basePath)
 }
