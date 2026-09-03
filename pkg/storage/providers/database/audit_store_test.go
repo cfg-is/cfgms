@@ -5,6 +5,8 @@ package database
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -23,8 +25,18 @@ import (
 // dependency graph). Its output depends on SequenceNumber and PreviousChecksum,
 // so a correct chain requires AppendChainedEntry to have assigned both before
 // invoking it.
+//
+// The real checksum (audit.Manager's HMAC-SHA256, hex-encoded) is a fixed 64
+// hex characters regardless of chain length — it fits the checksum column's
+// varchar(64) exactly. This stand-in must preserve that property: hashing the
+// input (rather than embedding PreviousChecksum verbatim) keeps the output at
+// a fixed 64 hex chars even though PreviousChecksum grows with every chain
+// entry. Embedding it verbatim previously overflowed varchar(64) on Postgres
+// after a handful of chained entries (Issue #3871) — invisible on SQLite,
+// which does not enforce declared column widths.
 func concurrencyChecksum(e *business.AuditEntry) string {
-	return fmt.Sprintf("chk-%s-%d-%s", e.ID, e.SequenceNumber, e.PreviousChecksum)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("chk-%s-%d-%s", e.ID, e.SequenceNumber, e.PreviousChecksum)))
+	return hex.EncodeToString(sum[:])
 }
 
 // TestDatabaseAuditStore_AppendChainedEntry_ConcurrentWriters is the regression
