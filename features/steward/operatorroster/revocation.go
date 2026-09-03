@@ -13,11 +13,20 @@
 // command would make execution availability depend on a live controller round trip
 // for a case (assessed threat: a leaked/stolen operator credential) that is exactly
 // when the controller may be unreachable or the connection compromised. Instead, a
-// steward independently fetches and verifies the controller's signed manifest
+// steward independently verifies the controller's signed manifest
 // (features/controller/api/handlers_revocation_manifest.go) against its own pinned
 // CA root — the same controllerCARoots chain-of-trust verifyOperatorCert already
 // uses — and answers IsRevoked from the last manifest it verified for itself, never
 // from an unsigned, live controller claim.
+//
+// Delivery is not yet wired. FetchAndVerify and RunPeriodicRefresh have no production
+// caller: the manifest endpoint is gated on certificate:list, and the controller only
+// derives a REST principal from an mTLS certificate carrying the CFGMS admin marker,
+// which a steward certificate does not carry. IsRevoked therefore answers false on every
+// deployed steward today. The full reasoning, and why pointing RunPeriodicRefresh at that
+// URL anyway would be worse than leaving it uncalled, is at the verifier's construction
+// site (features/steward/client/client_transport.go).
+// Deferred: tracked in #3571 — steward-reachable delivery of the signed revocation manifest.
 //
 // This package cannot import features/controller/api (controller-only), so the wire
 // shapes it verifies are duplicated here field-for-field, matching json tag and
@@ -52,17 +61,49 @@ const revocationManifestKind = "operator-cert-revocation"
 // buffer an unbounded body in memory.
 const maxManifestBytes = 4 * 1024 * 1024
 
-// revocationManifest mirrors RevocationManifest field-for-field. Only the fields
-// this package actually consumes are duplicated; AuthorizedWebAuthnCredentials and
-// WebAuthnRelyingParty (Issue #3697) are that story's own concern
-// (webauthn_credential_verifier.go carries its own copy) and are intentionally
-// omitted here — encoding/json ignores JSON fields with no matching struct field, so
-// their presence in the real payload is harmless to unmarshal.
+// authorizedWebAuthnCredential mirrors
+// features/controller/api.AuthorizedWebAuthnCredential field-for-field (Issue #3697).
+// This package consumes none of these fields — it exists solely so the manifest
+// round-trips losslessly through json.Unmarshal/json.Marshal in VerifyManifest.
+type authorizedWebAuthnCredential struct {
+	Kind         string   `json:"kind"`
+	CredentialID []byte   `json:"credential_id"`
+	PublicKey    []byte   `json:"public_key"`
+	TenantID     string   `json:"tenant_id"`
+	RootScope    bool     `json:"root_scope"`
+	Grants       []string `json:"grants"`
+}
+
+// webauthnRelyingParty mirrors features/controller/api.WebAuthnRelyingParty
+// field-for-field (Issue #3697), for the same round-trip-fidelity reason as
+// authorizedWebAuthnCredential.
+type webauthnRelyingParty struct {
+	ID      string   `json:"id"`
+	Origins []string `json:"origins"`
+}
+
+// revocationManifest mirrors features/controller/api.RevocationManifest field-for-field
+// (name, order, json tags) — ALL six fields, not just the ones this package reads.
+//
+// Completeness is a correctness requirement, not tidiness. The controller signs
+// json.Marshal of the full struct (handlers_revocation_manifest.go's
+// signRevocationManifest), and VerifyManifest re-marshals the struct it unmarshalled to
+// recompute the bytes the signature is checked against. encoding/json silently drops
+// JSON members with no matching struct field, so any omitted field makes that round trip
+// lossy and strict-mode verification fails with "signature does not match data" against
+// every manifest that carries the omitted member. AuthorizedWebAuthnCredentials and
+// WebAuthnRelyingParty are populated on the same manifest object before signing whenever
+// the controller has WebAuthn configured (Issue #3697) — a routine, already-shipped
+// production configuration — so omitting them here broke strict mode outright. Same
+// constraint and same resolution as webauthn_credential_verifier.go's
+// revocationManifestPayload, which mirrors this struct for its own copy of the payload.
 type revocationManifest struct {
-	Kind           string    `json:"kind"`
-	Version        int64     `json:"version"`
-	IssuedAt       time.Time `json:"issued_at"`
-	RevokedSerials []string  `json:"revoked_serials"`
+	Kind                          string                         `json:"kind"`
+	Version                       int64                          `json:"version"`
+	IssuedAt                      time.Time                      `json:"issued_at"`
+	RevokedSerials                []string                       `json:"revoked_serials"`
+	AuthorizedWebAuthnCredentials []authorizedWebAuthnCredential `json:"authorized_webauthn_credentials,omitempty"`
+	WebAuthnRelyingParty          *webauthnRelyingParty          `json:"webauthn_relying_party,omitempty"`
 }
 
 // signedRevocationManifest mirrors SignedRevocationManifest.
@@ -90,10 +131,11 @@ type RevocationVerifier struct {
 // manifest's signer against caRoots in strict mode. caRoots should be the same
 // controller CA pool verifyOperatorCert already verifies operator certificates
 // against — a manifest and the certificates it revokes come from the same issuing
-// authority. A nil caRoots is accepted (strict-mode verification then always fails
-// closed on the chain check, matching x509 verification against an empty pool)
-// rather than panicking, so a steward not yet holding a usable CA bundle can still
-// construct the verifier and have IsRevoked answer false until one is available.
+// authority. A nil caRoots is accepted rather than panicking, so a steward not yet
+// holding a usable CA bundle can still construct the verifier and have IsRevoked
+// answer false until one is available; VerifyManifest then rejects every strict-mode
+// manifest outright (see its nil-roots guard — a nil pool must never reach
+// x509.VerifyOptions.Roots, where it would mean "use the host's system roots").
 func NewRevocationVerifier(caRoots *x509.CertPool) *RevocationVerifier {
 	return &RevocationVerifier{caRoots: caRoots}
 }
@@ -141,6 +183,16 @@ func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustM
 	}
 
 	if mode == stewardtypes.ModuleTrustModeStrict {
+		// Strict mode verifies against the steward's own pinned controller root, and
+		// only that root. x509.VerifyOptions treats a nil Roots as "use the system
+		// roots or the platform verifier" (crypto/x509/verify.go), so passing a nil
+		// pool through would silently widen strict mode to accept any manifest whose
+		// signer chains to any platform-trusted CA with a CodeSigning EKU — the exact
+		// opposite of this verifier's purpose. Refuse before building VerifyOptions so
+		// a steward without a usable CA bundle fails closed and says why.
+		if v.caRoots == nil {
+			return fmt.Errorf("strict mode requires pinned controller CA roots")
+		}
 		if manifest.Signature == nil {
 			return fmt.Errorf("manifest carries no signature")
 		}
@@ -220,7 +272,7 @@ func (v *RevocationVerifier) FetchAndVerify(ctx context.Context, httpClient *htt
 	if err != nil {
 		return fmt.Errorf("fetch revocation manifest: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("fetch revocation manifest: unexpected status %d", resp.StatusCode)
 	}

@@ -1295,12 +1295,38 @@ func sigTestManifestSigningCert(t *testing.T, ca *cert.CA) *cert.Certificate {
 
 // revocationManifestForTest and signedRevocationManifestForTest mirror
 // RevocationManifest/SignedRevocationManifest field-for-field (this package cannot
-// import features/controller/api), matching operatorroster's own local duplicate.
+// import features/controller/api), matching operatorroster's own local duplicate and
+// webauthn_credential_verifier.go's revocationManifestPayload.
+//
+// All six fields are declared, including the two WebAuthn roster fields this test never
+// populates. A verifier re-marshals the payload it unmarshalled to recompute the signed
+// bytes, so a mirror missing a field the controller signs makes that round trip lossy —
+// and a test fixture that omits the same field as the code under test hides the defect
+// instead of catching it.
 type revocationManifestForTest struct {
-	Kind           string    `json:"kind"`
-	Version        int64     `json:"version"`
-	IssuedAt       time.Time `json:"issued_at"`
-	RevokedSerials []string  `json:"revoked_serials"`
+	Kind                          string                                `json:"kind"`
+	Version                       int64                                 `json:"version"`
+	IssuedAt                      time.Time                             `json:"issued_at"`
+	RevokedSerials                []string                              `json:"revoked_serials"`
+	AuthorizedWebAuthnCredentials []authorizedWebAuthnCredentialForTest `json:"authorized_webauthn_credentials,omitempty"`
+	WebAuthnRelyingParty          *webauthnRelyingPartyForTest          `json:"webauthn_relying_party,omitempty"`
+}
+
+// authorizedWebAuthnCredentialForTest mirrors
+// features/controller/api.AuthorizedWebAuthnCredential.
+type authorizedWebAuthnCredentialForTest struct {
+	Kind         string   `json:"kind"`
+	CredentialID []byte   `json:"credential_id"`
+	PublicKey    []byte   `json:"public_key"`
+	TenantID     string   `json:"tenant_id"`
+	RootScope    bool     `json:"root_scope"`
+	Grants       []string `json:"grants"`
+}
+
+// webauthnRelyingPartyForTest mirrors features/controller/api.WebAuthnRelyingParty.
+type webauthnRelyingPartyForTest struct {
+	ID      string   `json:"id"`
+	Origins []string `json:"origins"`
 }
 
 type signedRevocationManifestForTest struct {
@@ -1312,13 +1338,35 @@ type signedRevocationManifestForTest struct {
 // sigTestSignRevocationManifest signs a revocation manifest with signingCert and
 // returns the JSON bytes exactly as the controller's
 // GET /api/v1/certificates/revocation-manifest serves them.
+//
+// The WebAuthn roster fields are populated deliberately: handleGetRevocationManifest sets
+// AuthorizedWebAuthnCredentials and WebAuthnRelyingParty on the same manifest object
+// before signing it whenever the controller has WebAuthn configured (Issue #3697), so
+// this is the shape a real controller serves. A fixture that left them unset would only
+// exercise the subset of the payload the consumer happens to read, and would pass against
+// a consumer whose local mirror silently drops the rest.
 func sigTestSignRevocationManifest(t *testing.T, signingCert *cert.Certificate, version int64, revokedSerials []string) []byte {
 	t.Helper()
+	if revokedSerials == nil {
+		// buildRevocationManifest always emits a non-nil slice.
+		revokedSerials = []string{}
+	}
 	manifest := revocationManifestForTest{
 		Kind:           "operator-cert-revocation",
 		Version:        version,
 		IssuedAt:       time.Now().UTC().Truncate(time.Second),
 		RevokedSerials: revokedSerials,
+		AuthorizedWebAuthnCredentials: []authorizedWebAuthnCredentialForTest{{
+			Kind:         "webauthn-credential",
+			CredentialID: []byte{0x01, 0x02, 0x03},
+			PublicKey:    []byte{0x0a, 0x0b, 0x0c},
+			TenantID:     "root/msp-a",
+			Grants:       []string{"operator-payload:sign"},
+		}},
+		WebAuthnRelyingParty: &webauthnRelyingPartyForTest{
+			ID:      "controller.example.com",
+			Origins: []string{"https://controller.example.com"},
+		},
 	}
 	data, err := json.Marshal(manifest)
 	require.NoError(t, err)

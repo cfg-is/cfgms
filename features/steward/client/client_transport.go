@@ -1176,13 +1176,41 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// RevocationVerifier answers whether an operator certificate has been revoked
 	// (Issue #3699), independently verified against the same controllerCARoots
 	// chain-of-trust used above. Constructed unconditionally (even when
-	// controllerCARoots is nil — IsRevoked then simply never sees a manifest verify
-	// successfully and answers false, the same degrade-safe posture as the rest of
-	// operator-cert verification when no usable CA bundle is configured). Fetching
-	// and applying a manifest into it is a separate, not-yet-wired concern (the
-	// story's own Out of Scope note: exact fetch/refresh scheduling is an
-	// implementation detail, not an acceptance criterion) — operatorroster.RevocationVerifier
-	// exposes FetchAndVerify/RunPeriodicRefresh, ready for that wiring.
+	// controllerCARoots is nil — VerifyManifest then rejects every strict-mode manifest
+	// on its nil-roots guard, so IsRevoked never sees one verify successfully and answers
+	// false, the same degrade-safe posture as the rest of operator-cert verification when
+	// no usable CA bundle is configured).
+	//
+	// READ THIS BEFORE RELYING ON OPERATOR-CERTIFICATE REVOCATION: nothing here, or
+	// anywhere else in the steward, currently fetches a manifest into this verifier, so
+	// IsRevoked answers false on every real steward and the revocation check in
+	// verifyOperatorCert (features/steward/commands/execute_script.go) does not fire in
+	// production. Revoking a leaked operator certificate does NOT yet cause stewards to
+	// reject it for inline script execution; the certificate's chain, client-auth EKU,
+	// expiry and payload-signing marker are still enforced, and remain the controls that
+	// actually run.
+	//
+	// The blocker is authorization, not scheduling. The manifest is served by
+	// GET /api/v1/certificates/revocation-manifest behind requirePermission("certificate",
+	// "list") (features/controller/api/routes_certificates.go), and the controller's REST
+	// authentication derives a principal from an mTLS certificate only when that
+	// certificate carries the CFGMS admin marker (extractAdminPrincipal,
+	// features/controller/api/middleware.go). A steward's client certificate carries no
+	// admin marker — the same reason the steward binary download needed a separate
+	// unauthenticated route (features/controller/api/server.go, the public
+	// steward-binaries handler). Pointing RunPeriodicRefresh at that URL today would loop
+	// on 403 forever and make an inert control look wired, so it is deliberately not
+	// called. Closing the gap needs a steward-reachable delivery path for the manifest
+	// (a steward-authenticated route, or delivery over the already-mTLS'd control plane),
+	// which is a controller-side design decision about what the fleet-wide manifest may
+	// disclose to any single steward — it carries revoked steward-certificate serials and
+	// the fleet's authorized-WebAuthn roster, which is why the existing endpoint is closed
+	// even to tenant-scoped administrators.
+	//
+	// Deferred: tracked in #3571 — steward-reachable delivery of the signed revocation
+	// manifest; until it lands, operatorroster.RevocationVerifier's verification,
+	// anti-rollback and IsRevoked semantics are complete and tested, and
+	// FetchAndVerify/RunPeriodicRefresh are the entry points that delivery will call.
 	revocationVerifier := operatorroster.NewRevocationVerifier(controllerCARoots)
 
 	handler, err := commands.New(&commands.Config{
