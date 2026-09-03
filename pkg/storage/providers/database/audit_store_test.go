@@ -5,11 +5,13 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -122,4 +124,94 @@ func TestDatabaseAuditStore_AppendChainedEntry_ConcurrentWriters(t *testing.T) {
 		assert.Equal(t, concurrencyChecksum(e), e.Checksum,
 			"Checksum must be computeChecksum's output computed after sequence assignment")
 	}
+}
+
+// TestDatabaseAuditStore_AppendChainedEntry_SeedsChainHeadOnPostgres is the
+// regression test for Issue #3863: the audit_chain_heads seed statement in
+// AppendChainedEntry (audit_store.go) used its $1 placeholder in both an
+// INSERT assignment context and two WHERE-clause operator contexts without a
+// cast. Postgres deduces a type for each occurrence independently and, when
+// the two contexts disagree, rejects the statement at parse time with
+// SQLSTATE 42P08 ("inconsistent types deduced for parameter $1") on every
+// call — a real Postgres is required to observe this; SQLite never rejects
+// unmatched parameter types, so a test run only against SQLite cannot fail
+// this way and would not have caught the bug.
+//
+// This also exercises the seeding semantics the fix must preserve exactly
+// (Issue #3863 AC3): a tenant with audit_entries rows written before
+// audit_chain_heads existed keeps its sequence continuity, and the seed
+// INSERT — which runs on every call — is a no-op on the second call via
+// ON CONFLICT (tenant_id) DO NOTHING rather than resetting the chain.
+func TestDatabaseAuditStore_AppendChainedEntry_SeedsChainHeadOnPostgres(t *testing.T) {
+	// setupTestDatabase both skips cleanly without Postgres and drops any
+	// leftover tables from a prior run so the schema is created fresh below.
+	_ = setupTestDatabase(t)
+
+	db := getTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+
+	store, err := NewDatabaseAuditStore(db, map[string]interface{}{})
+	require.NoError(t, err)
+
+	const tenantID = "seed-chain-head-tenant"
+
+	// Simulate a tenant that wrote audit_entries rows before audit_chain_heads
+	// existed: insert a legacy row directly, bypassing AppendChainedEntry (and
+	// therefore the broken seed statement) entirely.
+	_, err = db.Exec(`
+		INSERT INTO audit_entries (
+			id, tenant_id, timestamp, event_type, action, user_id, user_type,
+			resource_type, resource_id, result, severity, source, version,
+			checksum, sequence_number, previous_checksum
+		) VALUES (
+			'legacy-entry-1', $1, NOW(), 'configuration', 'legacy_action', 'legacy-user', 'human',
+			'legacy-resource', 'res-1', 'success', 'low', 'legacy-writer', '1.0',
+			'legacy-checksum', 5, ''
+		)
+	`, tenantID)
+	require.NoError(t, err, "failed to seed legacy audit_entries row")
+
+	entry := &business.AuditEntry{
+		EventType:    business.AuditEventConfiguration,
+		Action:       "seed_action",
+		UserID:       "seed-user",
+		UserType:     business.AuditUserTypeHuman,
+		ResourceType: "seed-resource",
+		ResourceID:   "res-seed",
+		Result:       business.AuditResultSuccess,
+		Severity:     business.AuditSeverityMedium,
+		Source:       "seed-test",
+		Version:      "1.0",
+	}
+
+	err = store.AppendChainedEntry(context.Background(), tenantID, entry, concurrencyChecksum)
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "42P08" {
+		t.Fatalf("chain-head seed statement failed with Postgres 42P08 (inconsistent parameter type deduction): %v", pqErr)
+	}
+	require.NoError(t, err, "AppendChainedEntry must seed audit_chain_heads without error on Postgres")
+
+	assert.Equal(t, uint64(6), entry.SequenceNumber,
+		"seeding must continue sequence numbers from pre-existing audit_entries rows written before audit_chain_heads existed")
+	assert.Equal(t, "legacy-checksum", entry.PreviousChecksum,
+		"seeding must carry forward the checksum of the last pre-existing audit_entries row")
+
+	// The seed INSERT runs again on this second call; it must be a no-op via
+	// ON CONFLICT DO NOTHING and the chain must continue from the locked head
+	// rather than re-seeding from audit_entries.
+	entry2 := &business.AuditEntry{
+		EventType:    business.AuditEventConfiguration,
+		Action:       "seed_action_2",
+		UserID:       "seed-user",
+		UserType:     business.AuditUserTypeHuman,
+		ResourceType: "seed-resource",
+		ResourceID:   "res-seed-2",
+		Result:       business.AuditResultSuccess,
+		Severity:     business.AuditSeverityMedium,
+		Source:       "seed-test",
+		Version:      "1.0",
+	}
+	require.NoError(t, store.AppendChainedEntry(context.Background(), tenantID, entry2, concurrencyChecksum))
+	assert.Equal(t, uint64(7), entry2.SequenceNumber,
+		"ON CONFLICT DO NOTHING must make the second seed attempt a no-op, continuing the chain rather than resetting it")
 }
