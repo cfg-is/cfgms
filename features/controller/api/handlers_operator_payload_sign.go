@@ -9,9 +9,10 @@
 //	POST /api/v1/operator-payload/sign/begin
 //	     Resolves Targets via the same tenant-scoped selector resolution as
 //	     POST /api/v1/fleet/resolve, builds the Envelope (server fills Nonce + ExpiresAt),
-//	     computes sha256(operatorpayload.CanonicalBytes(envelope)), and issues a WebAuthn
-//	     assertion challenge equal to that hash — so a successful assertion is a signature
-//	     over the exact envelope, not an unrelated proof-of-presence value.
+//	     computes operatorpayload.ChallengeHash(envelope) — sha256 over a domain-separated
+//	     preimage, never over bare CanonicalBytes — and issues a WebAuthn assertion
+//	     challenge equal to that hash, so a successful assertion is a signature over the
+//	     exact envelope, not an unrelated proof-of-presence value collected elsewhere.
 //
 //	POST /api/v1/operator-payload/sign/finish
 //	     Verifies the authenticator assertion against the server-stored envelope/challenge,
@@ -78,7 +79,7 @@ type operatorPayloadSignSession struct {
 	expires   time.Time
 	accountID string // principal.ID at begin time; finish re-derives this from context
 	envelope  operatorpayload.Envelope
-	hash      [sha256.Size]byte // sha256(operatorpayload.CanonicalBytes(envelope)); == data.Challenge
+	hash      [sha256.Size]byte // operatorpayload.ChallengeHash(envelope); == data.Challenge
 }
 
 // generateOperatorPayloadSignNonce returns a hex-encoded nonce read directly from
@@ -125,7 +126,7 @@ func toSignedEnvelopeView(e operatorpayload.Envelope) OperatorPayloadSignedEnvel
 type OperatorPayloadSignBeginResponse struct {
 	Assertion    *protocol.CredentialAssertion `json:"assertion"`
 	Envelope     OperatorPayloadSignedEnvelope `json:"envelope"`
-	EnvelopeHash string                        `json:"envelope_hash"` // hex sha256(CanonicalBytes(envelope)); == assertion.publicKey.challenge
+	EnvelopeHash string                        `json:"envelope_hash"` // hex operatorpayload.ChallengeHash(envelope); == assertion.publicKey.challenge
 }
 
 // OperatorPayloadSignFinishResponse is the JSON response from POST /api/v1/operator-payload/sign/finish.
@@ -145,7 +146,7 @@ type OperatorPayloadSignFinishResponse struct {
 // Resolves req.Selector to a frozen Targets list via the same tenant-scoped resolution as
 // handleResolveSelector (resolveSelectorFilter), builds the Envelope with a server-generated
 // Nonce and ExpiresAt, and issues a WebAuthn assertion challenge equal to
-// sha256(operatorpayload.CanonicalBytes(envelope)) — so finishing the ceremony proves
+// operatorpayload.ChallengeHash(envelope) — so finishing the ceremony proves
 // possession of a registered WebAuthn key AND signs this exact envelope in one step.
 //
 // Gated by the "operator-payload:sign" permission (requirePermission, registered by Issue
@@ -255,12 +256,15 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 		ExpiresAt: time.Now().Add(operatorPayloadSignExpiryTTL),
 	}
 
-	canonical, err := operatorpayload.CanonicalBytes(envelope)
+	// Domain-separated challenge preimage (operatorpayload.ChallengeHash): the hash is
+	// taken over a tagged message, never over bare CanonicalBytes, so an assertion
+	// collected during any other ceremony at this relying party cannot be replayed as an
+	// operator-payload authorization. The steward recomputes the identical value.
+	hash, err := operatorpayload.ChallengeHash(envelope)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_ENVELOPE")
 		return
 	}
-	hash := sha256.Sum256(canonical)
 
 	user := buildWebauthnUser(acct)
 

@@ -3,6 +3,8 @@
 package operatorpayload_test
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -166,4 +168,68 @@ func TestCanonicalBytes_DifferentExpiryProducesDifferentOutput(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotEqual(t, gotOne, gotTwo)
+}
+
+// TestChallengeBytes_IsDomainSeparatedFromCanonicalBytes proves the WebAuthn challenge
+// preimage is not the canonical message itself: a hash taken over CanonicalBytes alone
+// would be indistinguishable from an arbitrary opaque challenge, letting a taken-over
+// controller serve it during a routine passkey login and collect an operator-payload
+// authorization from a user who believed they were signing in.
+func TestChallengeBytes_IsDomainSeparatedFromCanonicalBytes(t *testing.T) {
+	env := baseEnvelope()
+
+	canonical, err := operatorpayload.CanonicalBytes(env)
+	require.NoError(t, err)
+	challenge, err := operatorpayload.ChallengeBytes(env)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, canonical, challenge,
+		"the challenge preimage must not be the bare canonical message")
+	assert.True(t, bytes.HasSuffix(challenge, canonical),
+		"the challenge preimage must be the canonical message behind a domain tag")
+	assert.Greater(t, len(challenge), len(canonical))
+
+	bare := sha256.Sum256(canonical)
+	tagged, err := operatorpayload.ChallengeHash(env)
+	require.NoError(t, err)
+	assert.NotEqual(t, bare[:], tagged[:],
+		"ChallengeHash must not equal sha256(CanonicalBytes(envelope))")
+}
+
+// TestChallengeHash_BindsEveryEnvelopeField proves the domain tag did not displace the
+// envelope's own binding: two envelopes differing in any single field still hash
+// differently.
+func TestChallengeHash_BindsEveryEnvelopeField(t *testing.T) {
+	base, err := operatorpayload.ChallengeHash(baseEnvelope())
+	require.NoError(t, err)
+
+	variants := map[string]func(e *operatorpayload.Envelope){
+		"content":   func(e *operatorpayload.Envelope) { e.Content = []byte("echo other") },
+		"shell":     func(e *operatorpayload.Envelope) { e.Shell = "powershell" },
+		"targets":   func(e *operatorpayload.Envelope) { e.Targets = []string{"host-1", "host-2"} },
+		"nonce":     func(e *operatorpayload.Envelope) { e.Nonce = "nonce-2" },
+		"expiresAt": func(e *operatorpayload.Envelope) { e.ExpiresAt = e.ExpiresAt.Add(time.Hour) },
+	}
+	for name, mutate := range variants {
+		t.Run(name, func(t *testing.T) {
+			env := baseEnvelope()
+			mutate(&env)
+			got, err := operatorpayload.ChallengeHash(env)
+			require.NoError(t, err)
+			assert.NotEqual(t, base, got)
+		})
+	}
+}
+
+// TestChallengeBytes_InvalidEnvelopeRejected proves the challenge helpers apply
+// CanonicalBytes' own validation rather than hashing an ambiguous message.
+func TestChallengeBytes_InvalidEnvelopeRejected(t *testing.T) {
+	env := baseEnvelope()
+	env.Nonce = "" // required field
+
+	_, err := operatorpayload.ChallengeBytes(env)
+	require.ErrorIs(t, err, operatorpayload.ErrInvalidEnvelope)
+
+	_, err = operatorpayload.ChallengeHash(env)
+	require.ErrorIs(t, err, operatorpayload.ErrInvalidEnvelope)
 }

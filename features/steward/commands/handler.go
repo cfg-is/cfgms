@@ -104,6 +104,16 @@ type Handler struct {
 	// command certificates. When nil, CA chain verification of operator certs is skipped.
 	controllerCARoots *x509.CertPool
 
+	// tenantID is this steward's own tenant path, used to confine an authorized
+	// WebAuthn credential to the tenant subtree it was registered in (Issue #3697).
+	tenantID string
+
+	// webauthnManifestFloor is the per-steward high-water mark of accepted
+	// authorized-credential-manifest issuance instants (Issue #3697). Shared across
+	// verifications so a captured older manifest — one still listing a since-removed
+	// credential — cannot be replayed after a newer one has been honoured.
+	webauthnManifestFloor *manifestFreshnessFloor
+
 	// Issue #1675: per-execution relay registry.
 	// relays maps executionID → *scriptrelay.Relay for CommandRelayResponse dispatch.
 	relays sync.Map
@@ -172,6 +182,12 @@ type Config struct {
 	// ControllerCARoots is the certificate pool for verifying operator-signed inline
 	// command certs. When nil, CA chain verification of operator certs is skipped.
 	ControllerCARoots *x509.CertPool
+
+	// TenantID is this steward's own tenant path. It confines a fleet-wide
+	// authorized-WebAuthn-credential roster entry (Issue #3697) to the tenant subtree
+	// its owning account belongs to. Empty in standalone mode or before registration
+	// has assigned one, in which case only a root-scope entry authorizes execution.
+	TenantID string
 
 	// EventEmitter, when non-nil, receives script output LogEntry events after each
 	// CommandExecuteScript completes (Issue #2143). Enqueue must never block.
@@ -246,6 +262,8 @@ func New(cfg *Config) (*Handler, error) {
 		signingConfig:           cfg.SigningConfig,
 		requireSignedAdhoc:      cfg.RequireSignedAdhoc,
 		controllerCARoots:       cfg.ControllerCARoots,
+		tenantID:                cfg.TenantID,
+		webauthnManifestFloor:   &manifestFreshnessFloor{},
 		eventEmitter:            cfg.EventEmitter,
 	}
 

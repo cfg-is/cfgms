@@ -2,6 +2,8 @@
 // Copyright 2026 Jordan Ritz
 //
 // Issue #3691: tests for the signed operator-certificate revocation manifest.
+// Issue #3697: tests for the manifest's AuthorizedWebAuthnCredentials extension and
+// SignerCertificatePEM field.
 package api
 
 import (
@@ -242,6 +244,210 @@ func TestHandleGetRevocationManifest_UnscopedCallerServedFleetWide(t *testing.T)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, body.Manifest.RevokedSerials, issued.SerialNumber,
 		"an unscoped admin must receive the complete fleet-wide manifest")
+}
+
+// setupManifestServerWithWebAuthn returns a setupCertTestServer server (real certMgr,
+// for manifest signing) additionally configured with WebAuthn and one pre-created
+// account holding operator-payload signing authority, so a test can inject a credential
+// and confirm it surfaces in the manifest.
+func setupManifestServerWithWebAuthn(t *testing.T) (*Server, *cert.Manager, string) {
+	t.Helper()
+	server, certMgr := setupManifestServerWithoutAccount(t)
+
+	const username = "manifest-webauthn-user"
+	createManifestAccount(t, server, AccountRequest{
+		Username:    username,
+		TenantID:    "root/msp-a",
+		Permissions: []string{OperatorPayloadSignGrant},
+	})
+	return server, certMgr, username
+}
+
+// setupManifestServerWithoutAccount is setupManifestServerWithWebAuthn without any
+// account, for tests that create their own with a specific authority shape.
+func setupManifestServerWithoutAccount(t *testing.T) (*Server, *cert.Manager) {
+	t.Helper()
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	wa, err := NewWebAuthnFromConfig(tvRPID, tvRPID, []string{tvOrigin})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	return server, certMgr
+}
+
+// createManifestAccount creates req's account through the real handler and fails the
+// test if creation did not succeed.
+func createManifestAccount(t *testing.T, server *Server, req AccountRequest) {
+	t.Helper()
+	rec := postAccount(t, server, testAdminPrincipal(), req)
+	require.Equal(t, http.StatusCreated, rec.Code, "create account: %s", rec.Body.String())
+}
+
+// TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_IncludesRegisteredCredential
+// verifies Issue #3697's manifest extension: a WebAuthn credential registered to an
+// account that holds operator-payload signing authority appears in the fleet-wide
+// manifest as a Kind-discriminated entry carrying its exact credential ID, COSE public
+// key, owning tenant and grant, and the manifest's signature still verifies with the
+// extended shape included.
+func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_IncludesRegisteredCredential(t *testing.T) {
+	server, certMgr, username := setupManifestServerWithWebAuthn(t)
+	credID := []byte("manifest-cred-1")
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, credID, pubKey, 0)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	require.Len(t, body.Manifest.AuthorizedWebAuthnCredentials, 1)
+	entry := body.Manifest.AuthorizedWebAuthnCredentials[0]
+	assert.Equal(t, AuthorizedWebAuthnCredentialKind, entry.Kind)
+	assert.Equal(t, credID, entry.CredentialID)
+	assert.Equal(t, pubKey, entry.PublicKey)
+	assert.Equal(t, "root/msp-a", entry.TenantID,
+		"the entry must name the tenant the credential's account belongs to")
+	assert.False(t, entry.RootScope, "a tenant-scoped account's entry must not claim root scope")
+	assert.Contains(t, entry.Grants, OperatorPayloadSignGrant,
+		"the entry must carry the grant that authorizes it, not merely exist")
+
+	// The relying-party binding a steward needs for the rpIdHash/origin checks travels
+	// inside the signed manifest, since a steward has no other trustworthy source.
+	require.NotNil(t, body.Manifest.WebAuthnRelyingParty)
+	assert.Equal(t, tvRPID, body.Manifest.WebAuthnRelyingParty.ID)
+	assert.Equal(t, []string{tvOrigin}, body.Manifest.WebAuthnRelyingParty.Origins)
+
+	// IssuedAt is the freshness anchor a consumer bounds the manifest's age against.
+	assert.WithinDuration(t, time.Now(), body.Manifest.IssuedAt, time.Minute,
+		"the manifest must state when it was issued")
+
+	// The signature must still verify with AuthorizedWebAuthnCredentials populated —
+	// proves the extended shape didn't break the existing sign/verify round trip.
+	signingCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(signingCert.CertificatePEM)
+	require.NoError(t, err)
+	verifier, err := signature.NewVerifierFromCertificate(x509Cert)
+	require.NoError(t, err)
+	data, err := json.Marshal(body.Manifest)
+	require.NoError(t, err)
+	assert.NoError(t, verifier.Verify(data, body.Signature),
+		"manifest signature must verify with AuthorizedWebAuthnCredentials populated")
+}
+
+// TestHandleGetRevocationManifest_SignerCertificatePEM_ChainsToCA verifies Issue #3697's
+// SignerCertificatePEM field: it is the exact PurposeSigning certificate the signature
+// was produced with, and it chain-verifies against the CA — the property a caller with
+// no other side channel (e.g. a steward) relies on to trust it.
+func TestHandleGetRevocationManifest_SignerCertificatePEM_ChainsToCA(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.NotEmpty(t, body.SignerCertificatePEM)
+
+	signingCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	assert.Equal(t, string(signingCert.CertificatePEM), body.SignerCertificatePEM,
+		"SignerCertificatePEM must be the exact cert the signature was produced with")
+
+	parsedSigner, err := cert.ParseCertificateFromPEM([]byte(body.SignerCertificatePEM))
+	require.NoError(t, err)
+
+	caPEM, err := certMgr.GetCACertificate()
+	require.NoError(t, err)
+	pool := x509.NewCertPool()
+	require.True(t, pool.AppendCertsFromPEM(caPEM))
+
+	_, err = parsedSigner.Verify(x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	})
+	require.NoError(t, err, "SignerCertificatePEM must chain-verify to the CA with CodeSigning EKU")
+}
+
+// TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_ZeroPrivilegeAccountExcluded
+// verifies the roster is an authority list, not a credential census: a passkey belonging
+// to an account that holds no permission at all never appears, so it can never authorize
+// inline execution on a steward.
+func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_ZeroPrivilegeAccountExcluded(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+	const username = "manifest-zero-privilege"
+	createManifestAccount(t, server, AccountRequest{Username: username, TenantID: "root/msp-a"})
+
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, []byte("manifest-cred-zero-priv"), pubKey, 0)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Empty(t, body.Manifest.AuthorizedWebAuthnCredentials,
+		"a passkey on a zero-privilege account must not authorize operator payloads")
+}
+
+// TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_DisabledAccountExcluded
+// verifies a disabled account's credentials are excluded. Disabling is a login gate that
+// deliberately leaves credentials in place (Issue #3126), so they remain enumerable and
+// must be filtered out here — otherwise disabling a compromised operator would not stop
+// their passkey authorizing execution.
+func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_DisabledAccountExcluded(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+	const username = "manifest-disabled-user"
+	createManifestAccount(t, server, AccountRequest{
+		Username:    username,
+		TenantID:    "root/msp-a",
+		Permissions: []string{OperatorPayloadSignGrant},
+	})
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, []byte("manifest-cred-disabled"), pubKey, 0)
+
+	// Present while enabled...
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.Len(t, body.Manifest.AuthorizedWebAuthnCredentials, 1)
+
+	disabled := true
+	updateRec := putAccount(t, server, testAdminPrincipal(), username,
+		AccountUpdateRequest{Disabled: &disabled})
+	require.Equal(t, http.StatusOK, updateRec.Code, "disable account: %s", updateRec.Body.String())
+
+	// ...and gone once disabled.
+	rec, body = getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Empty(t, body.Manifest.AuthorizedWebAuthnCredentials,
+		"a disabled account's passkey must not authorize operator payloads")
+}
+
+// TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_RootScopeAccountMarked
+// verifies a root-scope (unscoped platform administrator) account's entry is marked as
+// such and carries no tenant — the only shape a steward accepts fleet-wide.
+func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_RootScopeAccountMarked(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+	const username = "manifest-root-scope-user"
+	createManifestAccount(t, server, AccountRequest{Username: username, RootScope: true})
+
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, username, []byte("manifest-cred-root"), pubKey, 0)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.Len(t, body.Manifest.AuthorizedWebAuthnCredentials, 1)
+	entry := body.Manifest.AuthorizedWebAuthnCredentials[0]
+	assert.True(t, entry.RootScope, "a root-scope administrator's entry must be marked root-scope")
+	assert.Empty(t, entry.TenantID)
+	assert.Contains(t, entry.Grants, OperatorPayloadSignGrant,
+		"a root-scope administrator holds every permission, including this one")
+}
+
+// TestHandleGetRevocationManifest_NoWebAuthnCredentials_EmptyRoster verifies the
+// no-credentials case is a valid, signable empty roster rather than an error.
+func TestHandleGetRevocationManifest_NoWebAuthnCredentials_EmptyRoster(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Empty(t, body.Manifest.AuthorizedWebAuthnCredentials)
 }
 
 func sortStringsIsSorted(s []string) bool {

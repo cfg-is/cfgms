@@ -130,6 +130,52 @@ func CanonicalBytes(e Envelope) ([]byte, error) {
 	return []byte(strings.Join(parts, envelopeFieldSep)), nil
 }
 
+// challengeDomainTag prefixes the WebAuthn challenge preimage so that
+// sha256(challengeDomainTag || CanonicalBytes(e)) can never collide with a hash taken
+// over any other assertion challenge at the same relying party.
+//
+// Without it, the challenge for an operator payload is sha256 of a bare canonical
+// message, which is indistinguishable from an arbitrary opaque challenge: a controller
+// that has been taken over could serve sha256(CanonicalBytes(envelope)) as the challenge
+// in a routine passkey login, and an operator who touched their authenticator for what
+// looked like a login would have produced a valid authorization for that envelope. The
+// tag makes the preimage self-describing, so an assertion produced for any other
+// ceremony cannot be replayed as an operator-payload authorization.
+//
+// It ends with the same reserved field separator CanonicalBytes joins on, and no
+// legitimate field may contain that separator, so tag and canonical message can never
+// run together ambiguously.
+const challengeDomainTag = "cfgms-operator-payload-challenge-v1" + envelopeFieldSep
+
+// ChallengeBytes returns the domain-separated preimage an operator's WebAuthn assertion
+// challenge is taken over: challengeDomainTag || CanonicalBytes(e).
+//
+// The X.509 operator-signature path signs CanonicalBytes directly and is unaffected:
+// that signature is produced by a certificate whose EKU and payload-signing marker
+// already establish what it is for, whereas a WebAuthn assertion carries no such
+// statement of purpose and needs the purpose encoded into the signed bytes themselves.
+func ChallengeBytes(e Envelope) ([]byte, error) {
+	canonical, err := CanonicalBytes(e)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(challengeDomainTag)+len(canonical))
+	out = append(out, challengeDomainTag...)
+	out = append(out, canonical...)
+	return out, nil
+}
+
+// ChallengeHash returns sha256(ChallengeBytes(e)) — the exact bytes the controller
+// issues as the WebAuthn assertion challenge and the steward independently recomputes
+// when verifying the resulting assertion.
+func ChallengeHash(e Envelope) ([sha256.Size]byte, error) {
+	preimage, err := ChallengeBytes(e)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(preimage), nil
+}
+
 // requireCleanField rejects an empty value or one containing the reserved top-level
 // separator, naming the offending field/element in the error.
 func requireCleanField(name, value string) error {

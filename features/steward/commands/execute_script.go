@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -404,8 +405,16 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 		return nil
 	}
 
-	// Inline ad-hoc command: operator-envelope verification is mandatory.
-	if !hasSig {
+	// Inline ad-hoc command: operator-envelope verification is mandatory, over either
+	// credential type (Issue #3697 adds the WebAuthn branch alongside X.509).
+	webauthnAuthDataB64, _ := cmd.Params["webauthn_authenticator_data"].(string)
+	webauthnClientDataB64, _ := cmd.Params["webauthn_client_data_json"].(string)
+	webauthnSigB64, _ := cmd.Params["webauthn_signature"].(string)
+	webauthnCredIDB64, _ := cmd.Params["webauthn_credential_id"].(string)
+	webauthnManifestJSON, _ := cmd.Params["webauthn_manifest"].(string)
+	hasWebAuthn := webauthnAuthDataB64 != "" && webauthnClientDataB64 != "" && webauthnSigB64 != "" && webauthnCredIDB64 != ""
+
+	if !hasSig && !hasWebAuthn {
 		return ErrUnauthenticatedCommand
 	}
 
@@ -424,40 +433,15 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 		Nonce:     nonce,
 		ExpiresAt: expiresAt,
 	}
-	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
-	if err != nil {
-		return fmt.Errorf("%w: invalid operator envelope: %v", ErrUnauthenticatedCommand, err)
-	}
 
-	sig := &script.ScriptSignature{
-		Algorithm: sigAlgorithm,
-		Signature: sigValue,
-		PublicKey: sigPublicKey,
-	}
-	// Cryptographic verification over the canonical envelope bytes — NOT raw content —
-	// with any_valid mode; CA chain and admin-marker check is separate below. Reusing
-	// VerifyScriptSignature unmodified is deliberate (Issue #3694 Implementation
-	// Notes): only the bytes fed to it change. A signature computed over content alone
-	// (the pre-#3694 wire format) does not verify here, because contentBytes is only
-	// one component of canonicalBytes.
-	inlineCfg := script.ModuleSigningConfig{
-		TrustMode: script.TrustModeAnyValid,
-	}
-	if err := script.VerifyScriptSignature(canonicalBytes, sig, script.ShellType(shellStr), inlineCfg); err != nil {
-		return fmt.Errorf("%w: inline script verification failed: %v", ErrUnauthenticatedCommand, err)
-	}
-
-	// Operator credential verification: the signing credential must be trusted and
-	// carry administrator authority. Skipped when no CA roots are configured (e.g.
-	// standalone mode or tests without a controller CA) — same as before #3694.
-	// Routed through OperatorCredentialVerifier (Issue #3694 Implementation Notes):
-	// x509OperatorCredentialVerifier is the sole implementation today; a later
-	// WebAuthn-verification story adds a second implementation for the WebAuthn
-	// assertion shape without preflightScriptSignature itself changing again.
-	if h.controllerCARoots != nil {
-		credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{caRoots: h.controllerCARoots})
-		if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
-			return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
+	if hasSig {
+		if err := h.verifyX509OperatorSignature(envelope, shellStr, sigAlgorithm, sigValue, sigPublicKey); err != nil {
+			return err
+		}
+	} else {
+		if err := h.verifyWebAuthnOperatorSignature(envelope,
+			webauthnAuthDataB64, webauthnClientDataB64, webauthnSigB64, webauthnCredIDB64, webauthnManifestJSON); err != nil {
+			return err
 		}
 	}
 
@@ -489,6 +473,105 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 		return fmt.Errorf("%w: operator envelope nonce already used", ErrUnauthenticatedCommand)
 	}
 
+	return nil
+}
+
+// verifyX509OperatorSignature performs the mTLS/CSR-credential inline verification
+// (Issue #3694/#3696): a raw signature over the canonical envelope bytes, then CA-chain
+// and payload-signing-marker verification of the operator certificate.
+func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope, shellStr, sigAlgorithm, sigValue, sigPublicKey string) error {
+	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
+	if err != nil {
+		return fmt.Errorf("%w: invalid operator envelope: %v", ErrUnauthenticatedCommand, err)
+	}
+
+	sig := &script.ScriptSignature{
+		Algorithm: sigAlgorithm,
+		Signature: sigValue,
+		PublicKey: sigPublicKey,
+	}
+	// Cryptographic verification over the canonical envelope bytes — NOT raw content —
+	// with any_valid mode; CA chain and marker check is separate below. Reusing
+	// VerifyScriptSignature unmodified is deliberate (Issue #3694 Implementation
+	// Notes): only the bytes fed to it change. A signature computed over content alone
+	// (the pre-#3694 wire format) does not verify here, because contentBytes is only
+	// one component of canonicalBytes.
+	inlineCfg := script.ModuleSigningConfig{
+		TrustMode: script.TrustModeAnyValid,
+	}
+	if err := script.VerifyScriptSignature(canonicalBytes, sig, script.ShellType(shellStr), inlineCfg); err != nil {
+		return fmt.Errorf("%w: inline script verification failed: %v", ErrUnauthenticatedCommand, err)
+	}
+
+	// Operator credential verification: the signing credential must be trusted and
+	// carry payload-signing authority. Skipped when no CA roots are configured (e.g.
+	// standalone mode or tests without a controller CA) — same as before #3694.
+	// Routed through OperatorCredentialVerifier (Issue #3694 Implementation Notes):
+	// x509OperatorCredentialVerifier and webauthnOperatorCredentialVerifier
+	// (webauthn_credential_verifier.go, Issue #3697) are its two implementations.
+	if h.controllerCARoots != nil {
+		credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{caRoots: h.controllerCARoots})
+		if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
+			return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
+		}
+	}
+	return nil
+}
+
+// verifyWebAuthnOperatorSignature verifies a WebAuthn-signed operator envelope (Issue
+// #3697) via webauthnOperatorCredentialVerifier (webauthn_credential_verifier.go).
+// Unlike verifyX509OperatorSignature, there is no "any_valid, no CA roots configured"
+// relaxation: a WebAuthn credential's public key has no source other than the
+// CA-verified manifest carried in webauthnManifestJSON, so this fails closed when no CA
+// roots are configured rather than silently skipping verification
+// (TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected asserts that
+// branch directly, so a regression back to fail-open cannot ship unnoticed).
+//
+// The steward's own tenant path and its manifest freshness high-water mark are passed to
+// the verifier: the roster is fleet-wide, so the entry's tenant must cover this steward,
+// and a manifest older than one already accepted here must not resurrect a credential
+// that has since been removed from the roster.
+func (h *Handler) verifyWebAuthnOperatorSignature(envelope operatorpayload.Envelope, authDataB64, clientDataB64, sigB64, credIDB64, manifestJSON string) error {
+	if h.controllerCARoots == nil {
+		return fmt.Errorf("%w: webauthn verification requires a configured controller CA", ErrUnauthenticatedCommand)
+	}
+
+	authData, err := base64.StdEncoding.DecodeString(authDataB64)
+	if err != nil {
+		return fmt.Errorf("%w: invalid webauthn authenticator_data encoding", ErrUnauthenticatedCommand)
+	}
+	clientDataJSON, err := base64.StdEncoding.DecodeString(clientDataB64)
+	if err != nil {
+		return fmt.Errorf("%w: invalid webauthn client_data_json encoding", ErrUnauthenticatedCommand)
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return fmt.Errorf("%w: invalid webauthn signature encoding", ErrUnauthenticatedCommand)
+	}
+	credID, err := base64.StdEncoding.DecodeString(credIDB64)
+	if err != nil {
+		return fmt.Errorf("%w: invalid webauthn credential_id encoding", ErrUnauthenticatedCommand)
+	}
+
+	proof, err := json.Marshal(webauthnAssertionProof{
+		AuthenticatorData:  authData,
+		ClientDataJSON:     clientDataJSON,
+		Signature:          sigBytes,
+		CredentialID:       credID,
+		SignedManifestJSON: manifestJSON,
+	})
+	if err != nil {
+		return fmt.Errorf("%w: failed to build webauthn proof: %v", ErrUnauthenticatedCommand, err)
+	}
+
+	credVerifier := OperatorCredentialVerifier(&webauthnOperatorCredentialVerifier{
+		caRoots:       h.controllerCARoots,
+		stewardTenant: h.tenantID,
+		freshness:     h.webauthnManifestFloor,
+	})
+	if err := credVerifier.Verify(envelope, proof); err != nil {
+		return fmt.Errorf("%w: webauthn credential: %v", ErrUnauthenticatedCommand, err)
+	}
 	return nil
 }
 
@@ -539,13 +622,14 @@ func mergeEnv(base, additional map[string]string) map[string]string {
 }
 
 // OperatorCredentialVerifier verifies that an operator credential (proof) authorizes
-// envelope. It is the seam Issue #3694's Implementation Notes call for:
-// x509OperatorCredentialVerifier wraps the X.509 certificate check, whose marker
-// requirement Issue #3696 switched from the admin-bundle marker to the CSR-issued
-// payload-signing marker; a still-later WebAuthn-verification story adds a second
-// implementation for the WebAuthn assertion shape — preflightScriptSignature calls
-// through this interface rather than a single hardcoded verification path so neither
-// change requires touching it again.
+// envelope. It is the seam Issue #3694's Implementation Notes call for: two
+// implementations exist — x509OperatorCredentialVerifier wraps the X.509 certificate
+// check, whose marker requirement Issue #3696 switched from the admin-bundle marker to
+// the CSR-issued payload-signing marker, and webauthnOperatorCredentialVerifier
+// (webauthn_credential_verifier.go, Issue #3697) verifies a WebAuthn assertion for the
+// browser-only-operator path — preflightScriptSignature calls through this interface
+// rather than a single hardcoded verification path so neither change requires
+// touching it again.
 type OperatorCredentialVerifier interface {
 	// Verify reports whether proof authorizes envelope under this credential type.
 	Verify(envelope operatorpayload.Envelope, proof []byte) error
