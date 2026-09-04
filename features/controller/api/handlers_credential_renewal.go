@@ -317,10 +317,6 @@ func (s *Server) renewBoundCertificate(
 // this handler additionally requires that "somehow" to have been the certificate
 // being renewed, never an API key or session.
 func (s *Server) handleRenewCredential(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.certManager == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
 		return

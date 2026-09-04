@@ -151,15 +151,7 @@ type OperatorPayloadSignFinishResponse struct {
 //
 // Gated by the "operator-payload:sign" permission (requirePermission, registered by Issue
 // #3687 at {Min: session.AssuranceStrong}) before this handler ever runs.
-//
-// Calls s.registrationLeaderStatus.HasLeadership() before mutating (storing the pending sign
-// session), per the architecture-checker authority-gating rule (Story #3547) — mirrors
-// handleRequestSigningCredential's identical check.
 func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	wa := s.getWebAuthn()
 	if wa == nil {
@@ -308,14 +300,7 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 //
 // A per-session and per-IP throttle with exponential backoff guards against brute-force
 // attempts, reusing elevateBackoff's schedule via s.operatorPayloadSignThrottle.
-//
-// Calls s.registrationLeaderStatus.HasLeadership() before mutating (persisting the advanced
-// sign count), per the architecture-checker authority-gating rule (Story #3547).
 func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	wa := s.getWebAuthn()
 	if wa == nil {
@@ -463,7 +448,15 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	}
 
 	// Persist the advanced sign count. Non-fatal on failure: the cryptographic verification
-	// already performed is not affected by a persistence error.
+	// already performed is not affected by a persistence error. Uses persistAccountCAS,
+	// keyed on the version read alongside acct above, rather than a blind overwrite
+	// (Issue #3761, ADR-031 Decision 1): acct.Credentials/CertBindings/etc. are copied
+	// wholesale into updatedAcct, so a blind persistAccount here would silently discard
+	// any unrelated field a concurrent write on a peer node — e.g. a cert bind or a
+	// different credential's own sign-count advance — committed between this handler's
+	// getAccount read and this persist. A lost CAS race is logged and swallowed exactly
+	// like any other persist failure here; the next successful assertion advances the
+	// count from whatever the winning write left in place.
 	updatedAcct := *acct
 	updatedAcct.Credentials = make([]WebAuthnCredential, len(acct.Credentials))
 	copy(updatedAcct.Credentials, acct.Credentials)
@@ -473,11 +466,15 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			break
 		}
 	}
-	if persistErr := s.persistAccount(r.Context(), &updatedAcct, principal.ID); persistErr != nil {
+	if newVersion, ok, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, principal.ID); persistErr != nil {
 		s.logger.Error("Operator-payload sign finish: failed to persist updated sign count",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(persistErr.Error()))
+	} else if !ok {
+		s.logger.Warn("Operator-payload sign finish: sign count persist lost a concurrent-write race, not retried",
+			"principal_id", logging.SanitizeLogValue(principal.ID))
 	} else {
+		updatedAcct.Version = newVersion
 		s.cacheAccount(&updatedAcct)
 	}
 
@@ -520,13 +517,22 @@ func (s *Server) checkSignThrottle(key string) (blocked bool, retryAfter time.Du
 // recordSignFailure increments the failure counter for key and sets the next-allowed
 // timestamp via elevateBackoff. Mirrors recordElevateFailure but reads
 // s.operatorPayloadSignThrottle.
+//
+// The failure count consulted against the backoff schedule is scaled by
+// clusterBudgetDivisor (Issue #3761): this throttle's counter lives in per-process
+// memory, so in ClusterMode an attacker's failed attempts can spread across nodes
+// and each node's own count would undercount the fleet-wide total. Scaling the
+// count up before consulting elevateBackoff makes the configured schedule apply to
+// the fleet as a whole rather than to whichever single node happened to observe the
+// failure — the same approximation clusterBudgetDivisor's doc comment describes for
+// the source rate limiters.
 func (s *Server) recordSignFailure(key string) {
 	raw, _ := s.operatorPayloadSignThrottle.LoadOrStore(key, &elevateThrottleRecord{})
 	rec := raw.(*elevateThrottleRecord)
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.fails++
-	delay := elevateBackoff(rec.fails)
+	delay := elevateBackoff(rec.fails * s.clusterBudgetDivisor())
 	if delay > 0 {
 		rec.nextAllowed = time.Now().Add(delay)
 	}

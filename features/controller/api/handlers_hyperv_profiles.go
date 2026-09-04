@@ -108,15 +108,7 @@ func (s *Server) resolveHypervProfileTenant(w http.ResponseWriter, r *http.Reque
 }
 
 // handleCreateHypervProfile handles POST /api/v1/hyperv/profiles.
-// Calls s.registrationLeaderStatus.HasLeadership() before mutating (storing the
-// profile) — the generic lease-backed authority checker (HasLeadership() bool,
-// satisfied by *ha.Manager, ADR-029 Decision 4), reused unchanged from the
-// registration/token endpoints (Issue #3547).
 func (s *Server) handleCreateHypervProfile(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.hypervProfileConfigStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Hyperv profile store not available", "SERVICE_UNAVAILABLE")
 		return
@@ -212,13 +204,7 @@ func (s *Server) handleListHypervProfiles(w http.ResponseWriter, r *http.Request
 }
 
 // handleDeleteHypervProfile handles DELETE /api/v1/hyperv/profiles/{name}.
-// Calls s.registrationLeaderStatus.HasLeadership() before mutating (deleting the
-// profile), mirroring handleCreateHypervProfile.
 func (s *Server) handleDeleteHypervProfile(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.hypervProfileConfigStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Hyperv profile store not available", "SERVICE_UNAVAILABLE")
 		return

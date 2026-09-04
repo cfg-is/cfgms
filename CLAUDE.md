@@ -309,23 +309,6 @@ Consult these before implementing steward or controller behavior changes:
 
 See `pkg/README.md` for the full decision tree.
 
-### Architecture Checker: Authority Gating Rule (Story #3547 / Epic #3411)
-
-`make check-architecture` runs `TestNoUngatedMutatingHandler` in `features/controller/api/architecture_test.go` as its final gate. This rule detects mutating handlers (POST/PUT/DELETE/PATCH) in `features/controller/api` that lack a `HasLeadership()` authority gate.
-
-**The rule:** every new mutating handler added to `features/controller/api` must either:
-1. Call `HasLeadership()` in its own body (the preferred path), OR
-2. Appear in the in-file `ungatedHandlerBaseline` map with a bucket and reason (technical debt, never a blessed exemption), OR
-3. Carry an `//architecture:allow-nogate` annotation explaining why the gate does not apply.
-
-**The baseline is a ratchet — entries are removed as handlers are gated, never added for new handlers.** Three bucket values are valid: `excluded-by-epic-non-goals`, `gated-via-deprecated-primitive` (handler IS gated but on the deprecated `IsLeader()` flag; must name the tracking issue), and `unclassified-pending-risk-review`.
-
-**Do not confuse with `//architecture:allow-raw-leader`** (Story #3391). That annotation suppresses a different rule about direct `IsLeader()` calls. The two rules are distinct:
-- `//architecture:allow-raw-leader` — story #3391 rule, about `IsLeader()` call sites in the codebase
-- `//architecture:allow-nogate` — this rule, about mutating handler declarations in `features/controller/api` with no `HasLeadership()` gate
-
-**Detection walk:** the test walks all non-test `.go` files in the package, including handlers registered inline in `server.go` and handlers on non-`*Server` receiver types (`*WorkflowHandler`, `*RollbackHandler`). Files compiled only under `cfgms_test_endpoints` build tag are excluded. Anonymous handler functions (func literals) are not detected — they are an explicit coverage limit documented in the test.
-
 ### Architecture Checker: Raw Leader Primitive Rule (Story #3391 / Epic #3386)
 
 `make check-architecture` runs `TestNoRawLeaderPrimitiveOutsidePkgHA` in `pkg/ha/architecture_test.go`. This rule detects calls to `IsRaftLeader()` and the deprecated `IsLeader()` outside `pkg/ha` that lack a reasoned annotation.
@@ -341,10 +324,6 @@ raftIsLeader := haManager.IsRaftLeader() //architecture:allow-raw-leader -- <rea
 **Annotate, don't weaken.** If the rule fires on a legitimate use (a status handler or diagnostic log), add the annotation with the reason — do not add the call site to an exemption list or broaden the exclusion path.
 
 **Known evasion limits:** the rule matches method calls by name. It does not detect the primitive accessed through a local wrapper function that re-exposes `IsRaftLeader` under a different name. Wrappers that smuggle the primitive should be treated as the same violation.
-
-**Do not confuse with `//architecture:allow-nogate`** (Story #3547). The two annotations suppress different rules:
-- `//architecture:allow-raw-leader` — this rule, about `IsRaftLeader()`/`IsLeader()` call sites outside `pkg/ha`
-- `//architecture:allow-nogate` — the authority gating rule, about mutating handler declarations in `features/controller/api` with no `HasLeadership()` gate
 
 ### Modules
 

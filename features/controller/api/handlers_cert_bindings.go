@@ -9,14 +9,14 @@
 //
 //	POST /api/v1/accounts/{username}/certs/bind
 //	     Binds a certificate serial to the account. Rejects 409 if the serial is
-//	     already bound to a different account. Leadership-gated (mutating).
+//	     already bound to a different account.
 //
 //	GET  /api/v1/accounts/{username}/certs
 //	     Lists all CertBinding records for the account (public metadata only).
 //
 //	POST /api/v1/accounts/{username}/certs/revoke/{serial}
 //	     Revokes the certificate via certManager.Revoke FIRST (fail-closed), then
-//	     removes the binding from the durable store. Leadership-gated (mutating).
+//	     removes the binding from the durable store.
 //
 // Serial is the binding and lookup key — it is the same value that IsRevoked(serial)
 // checks on every admin mTLS request in extractAdminPrincipal (middleware.go), so
@@ -71,6 +71,15 @@ var (
 	// the in-memory cache inside the lock — surfaces as 500 (unexpected, since the
 	// caller must have populated the cache via getAccount before acquiring the lock).
 	errAccountDisappearedFromCache = errors.New("account not found in cache")
+
+	// errCertBindingConcurrentModification is returned when persistAccountCAS loses
+	// the race: a different cluster node persisted a newer version of this account
+	// between this node's fresh getAccount read and this node's own persist (Issue
+	// #3761, ADR-031 Decision 1 — any-node service removed the leadership gate that
+	// used to make s.mu's single-process lock incidentally sufficient). Both handlers
+	// surface it as 409 so the caller retries against the now-current account state,
+	// rather than the write being silently lost to a last-writer-wins overwrite.
+	errCertBindingConcurrentModification = errors.New("account was concurrently modified")
 )
 
 // certSerialRE constrains certificate serial numbers to alphanumeric characters, max 40
@@ -127,24 +136,26 @@ func sanitizeCertLabel(label string) string {
 //
 // Binds a certificate serial to the named account. Rejects with 409 CONFLICT if
 // the serial is already bound to a different account — a serial must resolve to at
-// most one account. Calls s.registrationLeaderStatus.HasLeadership() before mutating.
+// most one account.
 //
 // The critical section (cross-account serial scan + cap check + duplicate check +
 // persist) is delegated to bindCertOnAccount, which holds s.mu.Lock across the whole
 // scan-and-write window. Two goroutines racing to bind the same serial to two different
 // accounts write to two different store keys with no natural collision point — both
 // writes would succeed, leaving the serial bound to both accounts. The mutex closes
-// this race for a single controller process.
+// this race for a single controller process. The final persist uses
+// persistAccountCAS (Issue #3761, ADR-031 Decision 1): a bind landing on a different
+// cluster node between this node's fresh account read and this node's persist loses
+// the race and surfaces as 409, rather than silently overwriting the other node's
+// write — s.mu alone cannot close that window since it is single-process.
 //
-// Known, accepted out-of-scope limitations:
-//   - s.mu is single-process; concurrent binds across HA controller nodes are not caught.
-//   - The cross-account scan covers only the in-memory account cache; accounts that have
-//     never been loaded in this process are not checked.
+// Known, accepted out-of-scope limitation:
+//   - The cross-account serial-conflict scan covers only the in-memory account cache
+//     on this node; an account that has never been loaded in this process — including
+//     one only ever touched on a peer node — is not checked. A serial bound to a
+//     different account by a peer node is not caught by this scan; only the
+//     one-serial-per-request path this handler itself writes is CAS-protected.
 func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	username := mux.Vars(r)["username"]
 	if err := validateUsername(username); err != nil {
@@ -253,6 +264,10 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errAccountDisappearedFromCache):
 			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 			return
+		case errors.Is(err, errCertBindingConcurrentModification):
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Account was concurrently modified; retry the request", "ACCOUNT_CONFLICT")
+			return
 		default:
 			s.logger.Error("Failed to persist cert binding",
 				"error", logging.SanitizeLogValue(err.Error()),
@@ -330,8 +345,7 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 // handleRevokeCertBinding handles POST /api/v1/accounts/{username}/certs/revoke/{serial}.
 //
 // Revokes the named certificate via certManager.Revoke FIRST (fail-closed), then removes
-// the binding from the durable store. Calls s.registrationLeaderStatus.HasLeadership()
-// before mutating.
+// the binding from the durable store.
 //
 // Ordering rationale: revoking the cert first means that if the subsequent persist fails,
 // the cert is already invalid and the operator sees an active-looking binding pointing to
@@ -344,10 +358,6 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 // fallback as unscoped root — so an unrevokable unbind is a privilege escalation, not a
 // partial success. Revocation is authoritative on this path or the path is closed.
 func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	username := mux.Vars(r)["username"]
 	if err := validateUsername(username); err != nil {
@@ -487,7 +497,8 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 //   - errCertBoundToDifferentAccount if the serial is bound to a different account
 //   - errBindingCapReached if the per-account cap is already at the maximum
 //   - errAccountDisappearedFromCache if username is no longer in the cache under the lock
-//   - any error from persistAccount
+//   - errCertBindingConcurrentModification if a peer node persisted a newer version first
+//   - any other error from persistAccountCAS
 func (s *Server) bindCertOnAccount(ctx context.Context, username string, newBinding CertBinding, actingPrincipalID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -522,9 +533,17 @@ func (s *Server) bindCertOnAccount(ctx context.Context, username string, newBind
 	updated := *cached
 	updated.CertBindings = append(append([]CertBinding(nil), cached.CertBindings...), newBinding)
 
-	if err := s.persistAccount(ctx, &updated, actingPrincipalID); err != nil {
+	newVersion, ok, err := s.persistAccountCAS(ctx, &updated, actingPrincipalID)
+	if err != nil {
 		return err
 	}
+	if !ok {
+		// A different cluster node persisted a newer version of this account between
+		// our fresh getAccount read and this persist — surface as a conflict rather
+		// than silently overwriting that write (Issue #3761, ADR-031 Decision 1).
+		return errCertBindingConcurrentModification
+	}
+	updated.Version = newVersion
 
 	s.accounts[username] = &updated
 	return nil
@@ -567,9 +586,17 @@ func (s *Server) removeCertBindingFromAccount(ctx context.Context, username, ser
 	updated := *cached
 	updated.CertBindings = remaining
 
-	if err := s.persistAccount(ctx, &updated, actingPrincipalID); err != nil {
+	newVersion, ok, err := s.persistAccountCAS(ctx, &updated, actingPrincipalID)
+	if err != nil {
 		return err
 	}
+	if !ok {
+		// A different cluster node persisted a newer version of this account between
+		// our fresh getAccount read and this persist — surface as a conflict rather
+		// than silently overwriting that write (Issue #3761, ADR-031 Decision 1).
+		return errCertBindingConcurrentModification
+	}
+	updated.Version = newVersion
 
 	s.accounts[username] = &updated
 	return nil
@@ -596,14 +623,7 @@ type RotateCertRequest struct {
 // A partial failure between steps 1 and 2 leaves both certificates bound and valid —
 // a short, safe window where two live credentials exist. A repeated call with the same
 // arguments closes that window by completing step 2 without re-doing step 1.
-//
-// Leadership is gated before any mutation — mirrors handlers_certificates.go's existing
-// certificate lifecycle handlers verbatim.
 func (s *Server) handleRotateCert(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	username := mux.Vars(r)["username"]
 	if err := validateUsername(username); err != nil {
@@ -722,6 +742,10 @@ func (s *Server) handleRotateCert(w http.ResponseWriter, r *http.Request) {
 				return
 			case errors.Is(err, errAccountDisappearedFromCache):
 				s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+				return
+			case errors.Is(err, errCertBindingConcurrentModification):
+				s.writeErrorResponse(w, http.StatusConflict,
+					"Account was concurrently modified; retry the request", "ACCOUNT_CONFLICT")
 				return
 			default:
 				s.logger.Error("Failed to bind new certificate during rotation",

@@ -1064,3 +1064,53 @@ func TestRotateRegistrationToken_EmitsAuditEvent(t *testing.T) {
 	assert.Equal(t, string(business.AuditEventSystemAccess), string(entry.EventType))
 	assert.Equal(t, string(business.AuditResultSuccess), string(entry.Result))
 }
+
+// --- any-node service (Issue #3761, ADR-031 Decision 1) ---
+
+// TestRegistrationTokenMutations_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file: the four mutating registration-token handlers (create, delete, revoke,
+// rotate) used to answer 503 on any node that held no lease-backed leadership. Any-node
+// service means every cluster node serves them — the registration token store is the
+// serialization point, not leadership. Driven against a real, deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired), create and revoke
+// (the representative mint and state-change paths) must return their normal success codes
+// and the mutation must be durable in the store.
+func TestRegistrationTokenMutations_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	server.haManager = newNonAuthoritativeHAManager(t)
+
+	body, err := json.Marshal(registration.TokenCreateRequest{
+		TenantID:      "nonauthoritative-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Group:         "production",
+		ExpiresIn:     "7d",
+	})
+	require.NoError(t, err)
+
+	createReq := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	server.router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	var created TokenResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.Token)
+
+	stored, err := tokenStore.GetToken(ctx, created.Token)
+	require.NoError(t, err)
+	require.NotNil(t, stored, "a non-authoritative node must persist the minted token")
+	assert.Equal(t, "nonauthoritative-tenant", stored.TenantID)
+
+	revokeReq := makeAdminRequest(t, "POST", "/api/v1/registration/tokens/"+created.Token+"/revoke", nil)
+	revokeRec := httptest.NewRecorder()
+	server.router.ServeHTTP(revokeRec, revokeReq)
+	require.Equal(t, http.StatusOK, revokeRec.Code, revokeRec.Body.String())
+
+	revoked, err := tokenStore.GetToken(ctx, created.Token)
+	require.NoError(t, err)
+	assert.True(t, revoked.Revoked, "the revocation must be durable on a non-authoritative node")
+	assert.False(t, revoked.IsValid())
+}

@@ -535,21 +535,45 @@ func TestRenewCredential_APIKeyCannotAuthenticate(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// ---- leadership gate ----------------------------------------------------------------
+// ---- any-node service ----------------------------------------------------------------
 
-func TestRenewCredential_LeadershipGate(t *testing.T) {
+// TestRenewCredential_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for this file
+// (Issue #3761, ADR-031 Decision 1). Renewal used to answer 503 and leave the old binding
+// in place whenever the serving node held no lease-backed leadership. Any-node service
+// means every cluster node serves the renewal: the binding swap is already serialized by
+// the store's compare-and-swap (Story S2b), so leadership adds nothing. Against a real,
+// deliberately non-authoritative *ha.Manager (ClusterMode, no lease ever acquired) the
+// renewal must succeed and replace the binding.
+func TestRenewCredential_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server := setupRenewalTestServer(t)
-	fx := issueRenewableCredential(t, server, "renew-leadership-tenant", "renew-leadership-owner", ApproveCredentialRequestBody{GrantAdminMarker: true}, nil)
+	fx := issueRenewableCredential(t, server, "renew-nonauthoritative-tenant", "renew-nonauthoritative-owner", ApproveCredentialRequestBody{GrantAdminMarker: true}, nil)
 	presented := withNotAfter(fx.oldCert, time.Now().UTC().Add(10*24*time.Hour))
 
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
-	rec, _ := renewCredential(t, server, presented)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.NotNil(t, certBindingBySerial(t, server, fx.accountUser, fx.oldSerial), "a 503 from a non-leader must leave the old binding untouched")
+	server.haManager = newNonAuthoritativeHAManager(t)
 
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
-	rec2, _ := renewCredential(t, server, presented)
-	assert.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+	rec, _ := renewCredential(t, server, presented)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := decodeRenewResponse(t, rec)
+	assert.NotEmpty(t, resp.SerialNumber)
+
+	assert.NotNil(t, certBindingBySerial(t, server, fx.accountUser, resp.SerialNumber),
+		"the renewed certificate must be bound to the account by a non-authoritative node")
+	assert.Nil(t, certBindingBySerial(t, server, fx.accountUser, fx.oldSerial),
+		"the superseded binding must be replaced, not left in place")
+}
+
+// TestRenewCredential_SucceedsOnAuthoritativeNode is the mirror case: the always-
+// authoritative single-server deployment must reach the same renewal logic unchanged.
+func TestRenewCredential_SucceedsOnAuthoritativeNode(t *testing.T) {
+	server := setupRenewalTestServer(t)
+	fx := issueRenewableCredential(t, server, "renew-authoritative-tenant", "renew-authoritative-owner", ApproveCredentialRequestBody{GrantAdminMarker: true}, nil)
+	presented := withNotAfter(fx.oldCert, time.Now().UTC().Add(10*24*time.Hour))
+
+	server.haManager = newAuthoritativeHAManager(t)
+
+	rec, _ := renewCredential(t, server, presented)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, decodeRenewResponse(t, rec).SerialNumber)
 }
 
 // ---- audit --------------------------------------------------------------------------

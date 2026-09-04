@@ -13,7 +13,7 @@ func init() { RegisterRoutes(registerOsqueryRoutes) }
 
 func registerOsqueryRoutes(s *Server, api *mux.Router) {
 	// POST /osquery/query — dispatch an ad-hoc catalog query to targeted stewards (Issue #3569).
-	// Gated by osquery:execute (AssuranceStrong + RequireUserPresence) and HasLeadership().
+	// Gated by osquery:execute (AssuranceStrong + RequireUserPresence).
 	osquery := api.PathPrefix("/osquery").Subrouter()
 	osquery.Handle("/query",
 		s.requirePermission("osquery", "execute")(http.HandlerFunc(s.handleOsqueryQuery))).Methods("POST")

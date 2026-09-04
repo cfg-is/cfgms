@@ -34,18 +34,11 @@ import (
 	sqliteprovider "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
-	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
-
-// stubLeaderStatus is a minimal test double for leadership-check behavior.
-// It is NOT a mock: it has no expectations and carries only a fixed boolean.
-type stubLeaderStatus struct{ leader bool }
-
-func (s *stubLeaderStatus) HasLeadership() bool { return s.leader }
 
 // validPushPayload returns a minimal valid configPushRequest body.
 // The default selector is "all"; the TenantID is "tenant-abc".
@@ -131,11 +124,10 @@ func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 	return server, auditMgr
 }
 
-// TestHandleConfigPush_Leader verifies that a valid request on the leader node
+// TestHandleConfigPush_ValidRequest_Accepted verifies that a valid request
 // returns 202 Accepted with a non-empty push_id and status "accepted".
-func TestHandleConfigPush_Leader(t *testing.T) {
+func TestHandleConfigPush_ValidRequest_Accepted(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil // nil → treated as leader
 
 	req := withAdminPrincipal(newPushRequest(t, validPushPayload()))
 	rec := httptest.NewRecorder()
@@ -150,62 +142,46 @@ func TestHandleConfigPush_Leader(t *testing.T) {
 	assert.Equal(t, "accepted", resp.Status)
 }
 
-// TestHandleConfigPush_NoLeadership_Rejects503 is the story #3389 REQUIRED TEST: the
-// push gate rejects with 503 when leadership is held by Raft but the lease has
-// expired. The leaderStatus interface only exposes HasLeadership() (Issue #3389 —
-// IsRaftLeader() is intentionally not reachable through it, ADR-029 Decision 3), so
-// "Raft leader with an expired lease" and "not the Raft leader at all" are the same
-// observable state at this layer: HasLeadership() == false. stubLeaderStatus{leader:
-// false} represents exactly that state — the handler cannot distinguish the two
-// underlying causes, and per the interface's own design it should not need to.
-func TestHandleConfigPush_NoLeadership_Rejects503(t *testing.T) {
+// TestHandleConfigPush_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for this
+// file (Issue #3761, ADR-031 Decision 1): handleConfigPush used to reject with 503
+// ("not the leader"), before even reading the body, whenever the serving node held no
+// lease-backed leadership. Any-node service means every cluster node accepts the push —
+// the shared push store is the serialization point, not leadership — so a valid push
+// driven against a real, deliberately non-authoritative *ha.Manager (ClusterMode, no
+// lease ever acquired) must be accepted with 202 and a real push_id, exactly as it
+// would be on a leader.
+func TestHandleConfigPush_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = &stubLeaderStatus{leader: false}
-
-	// Leadership check runs before principal check — no principal needed here.
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/push", marshalPayload(t, validPushPayload()))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	server.handleConfigPush(rec, req)
-
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-
-	var resp map[string]string
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "not the leader", resp["error"])
-
-	// REQUIRED TEST (promoted from Constraints to an explicit AC, story #3389): the
-	// response must not name or imply which other node currently holds leadership.
-	// respondError's wire shape is always exactly {"error": message} — asserting the
-	// map has no keys beyond "error" is what makes this independently verifiable
-	// rather than an unstated assumption about respondError's implementation.
-	assert.Len(t, resp, 1, "error response must carry no fields beyond \"error\" — no node ID, address, or topology hint")
-}
-
-// TestHandleConfigPush_RealSingleServerMode_AcceptsUnconditionally is the story
-// #3389 REQUIRED TEST: SingleServerMode accepts pushes unconditionally — no new
-// rejection path for OSS single-node. Unlike the other tests in this file, this
-// wires a REAL *ha.Manager (not a nil pushLeaderStatus, which only proves the
-// nil-checker shortcut) constructed in SingleServerMode, proving HasLeadership()
-// itself returns true unconditionally there and that the real type satisfies
-// leaderStatus end to end.
-func TestHandleConfigPush_RealSingleServerMode_AcceptsUnconditionally(t *testing.T) {
-	server := setupTestServer(t)
-
-	storageManager := pkgtesting.SetupTestStorage(t)
-	haManager, err := ha.NewManager(ha.DefaultConfig(), logging.NewNoopLogger(), storageManager, nil, "")
-	require.NoError(t, err)
-	require.Equal(t, ha.SingleServerMode, haManager.GetDeploymentMode())
-
-	server.pushLeaderStatus = haManager
+	server.haManager = newNonAuthoritativeHAManager(t)
 
 	req := withAdminPrincipal(newPushRequest(t, validPushPayload()))
 	rec := httptest.NewRecorder()
 
 	server.handleConfigPush(rec, req)
 
-	require.Equal(t, http.StatusAccepted, rec.Code, "a real SingleServerMode ha.Manager must never reject a push")
+	require.Equal(t, http.StatusAccepted, rec.Code,
+		"push must be accepted regardless of leadership: %s", rec.Body.String())
+
+	var resp ConfigPushResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.PushID, "push_id must be non-empty on a non-authoritative node")
+	assert.Equal(t, "accepted", resp.Status)
+}
+
+// TestHandleConfigPush_SucceedsOnAuthoritativeNode is the mirror case: a real,
+// deliberately authoritative *ha.Manager (SingleServerMode, the shape every OSS
+// single-controller install runs) must also reach the existing push logic unchanged.
+func TestHandleConfigPush_SucceedsOnAuthoritativeNode(t *testing.T) {
+	server := setupTestServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
+
+	req := withAdminPrincipal(newPushRequest(t, validPushPayload()))
+	rec := httptest.NewRecorder()
+
+	server.handleConfigPush(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code,
+		"push must be accepted on an authoritative node: %s", rec.Body.String())
 }
 
 // TestHandleConfigPush_MissingFields verifies that omitting any required field
@@ -295,7 +271,6 @@ func TestHandleConfigPush_RouteRegistered(t *testing.T) {
 // the leader records a "config.push.initiated" audit event in the audit store.
 func TestHandleConfigPush_AuditEventEmitted(t *testing.T) {
 	server, auditMgr := setupPushServer(t)
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
@@ -418,7 +393,6 @@ func makeSyncedPublisher(t *testing.T, cp *syncedControlPlane) *commands.Publish
 // calls are dispatched.
 func TestHandleConfigPush_FanoutNoActiveStewards(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil // leader
 
 	cp := &syncedControlPlane{}
 	server.commandPublisher = makeSyncedPublisher(t, cp)
@@ -440,7 +414,6 @@ func TestHandleConfigPush_FanoutNoActiveStewards(t *testing.T) {
 // goroutine dispatches TriggerConfigSync (via SendCommand) to that steward.
 func TestHandleConfigPush_FanoutToActiveStewards(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil // leader
 
 	cp := &syncedControlPlane{}
 	server.commandPublisher = makeSyncedPublisher(t, cp)
@@ -486,7 +459,6 @@ func newConfigStoreWriterProvider(t *testing.T, server *Server) *sqliteprovider.
 // config revision carried by the push.
 func TestHandleConfigPush_ConfigStoreWriterIngestsDesiredState(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil // leader
 
 	p := newConfigStoreWriterProvider(t, server)
 
@@ -518,7 +490,6 @@ func TestHandleConfigPush_ConfigStoreWriterIngestsDesiredState(t *testing.T) {
 // failure is produced by a real closed-store provider, not a mock.
 func TestHandleConfigPush_ConfigStoreWriterFailureDoesNotBlock(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil // leader
 
 	p, err := sqliteprovider.NewSQLiteEntityGraphProvider(filepath.Join(t.TempDir(), "eg.db"))
 	require.NoError(t, err)
@@ -595,8 +566,6 @@ func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
 		defer cancel()
 		_ = server.Close(closeCtx)
 	})
-
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	req := withScopedPrincipal(newPushRequest(t, payload), payload.TenantID)
@@ -746,7 +715,6 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 func TestHandleConfigPush_PersistenceStatusCompleted(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, pushStore := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	stewardID := registerActiveSteward(t, server.controllerService, "persist-complete-dna-1", payload.TenantID)
@@ -791,7 +759,6 @@ func TestHandleConfigPush_PersistenceStatusFailed(t *testing.T) {
 		sendErr:            fmt.Errorf("simulated delivery failure"),
 	}
 	server, pushStore := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	// Register an active steward so the fanout targets it and fails.
@@ -896,7 +863,6 @@ func makePushServerWithCommandStore(t *testing.T, cp controlplaneInterfaces.Cont
 func TestHandleConfigPush_DeliveryRecordsCreated(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, commandStore := makePushServerWithCommandStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	stewardID := registerActiveSteward(t, server.controllerService, "delivery-dna-1", payload.TenantID)
@@ -933,7 +899,6 @@ func TestHandleConfigPush_DeliveryRecordsCreated(t *testing.T) {
 func TestHandleConfigPush_DeliveryRecordMarkedDeliveredSynchronously(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, commandStore := makePushServerWithCommandStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	stewardID := registerActiveSteward(t, server.controllerService, "delivery-sync-dna-1", payload.TenantID)
@@ -968,7 +933,6 @@ func TestHandleConfigPush_DeliveryRecordFailedAttemptStaysPending(t *testing.T) 
 		sendErr:            fmt.Errorf("simulated delivery failure"),
 	}
 	server, commandStore := makePushServerWithCommandStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	registerActiveSteward(t, server.controllerService, "delivery-fail-dna-1", payload.TenantID)
@@ -1001,7 +965,6 @@ func TestHandleConfigPush_DeliveryRecordFailedAttemptStaysPending(t *testing.T) 
 func TestHandleConfigPush_DeliveryRecordsAtomicAcrossFanout(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, commandStore := makePushServerWithCommandStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	payload := validPushPayload()
 	stewardA := registerActiveSteward(t, server.controllerService, "delivery-multi-a", payload.TenantID)
@@ -1033,7 +996,6 @@ func TestHandleConfigPush_DeliveryRecordsAtomicAcrossFanout(t *testing.T) {
 // selector is rejected with 400 — there is no implicit "all" default.
 func TestHandleConfigPush_EmptySelector(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil
 
 	body := configPushRequest{
 		Selector: "", // explicitly empty
@@ -1058,7 +1020,6 @@ func TestHandleConfigPush_EmptySelector(t *testing.T) {
 // authenticated principal is rejected with 401.
 func TestHandleConfigPush_MissingPrincipal(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil
 
 	// No principal injected into context.
 	req := newPushRequest(t, validPushPayload())
@@ -1075,7 +1036,6 @@ func TestHandleConfigPush_MissingPrincipal(t *testing.T) {
 func TestHandleConfigPush_TenantCallerCrosstenantRejected(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, pushStore := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil
 
 	payload := validPushPayload() // TenantID = "tenant-abc"
 	// Caller belongs to "tenant-other" — different from cfg.TenantID "tenant-abc".
@@ -1105,7 +1065,6 @@ func TestHandleConfigPush_TenantCallerCrosstenantRejected(t *testing.T) {
 func TestHandleConfigPush_AdminCallerTenantScoped(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, _ := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil
 
 	// Register one steward in each tenant.
 	stewardA := registerActiveSteward(t, server.controllerService, "admin-scope-dna-a", "tenant-a")
@@ -1143,7 +1102,6 @@ func TestHandleConfigPush_AdminCallerTenantScoped(t *testing.T) {
 func TestHandleConfigPush_FanoutTenantIsolation(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, _ := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil
 
 	payload := validPushPayload() // TenantID = "tenant-abc"
 
@@ -1179,7 +1137,6 @@ func TestHandleConfigPush_FanoutTenantIsolation(t *testing.T) {
 func TestHandleConfigPush_ExplicitTenantPrefix_OutsideSubtreeRejected(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, pushStore := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	body := configPushRequest{
 		Selector: "tenant-other/all",
@@ -1214,7 +1171,6 @@ func TestHandleConfigPush_ExplicitTenantPrefix_OutsideSubtreeRejected(t *testing
 func TestHandleConfigPush_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, _ := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 
 	// Two active stewards under sibling sub-tenants of tenant-abc.
 	inScope := registerActiveSteward(t, server.controllerService, "push-prefix-c1", "tenant-abc/client-1")
@@ -1528,7 +1484,6 @@ func TestHandleGetConfigPush_MissingPrincipal(t *testing.T) {
 // expression returns 400 with the parse error message.
 func TestHandleConfigPush_SelectorParseError(t *testing.T) {
 	server := setupTestServer(t)
-	server.pushLeaderStatus = nil
 
 	body := configPushRequest{
 		Selector: "badkey:value", // "badkey" is not a valid selector key
@@ -1557,7 +1512,6 @@ func TestHandleConfigPush_SelectorParseError(t *testing.T) {
 func TestHandleConfigPush_FleetQueryError_Returns500(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, pushStore := makePushServerWithStore(t, cp)
-	server.pushLeaderStatus = nil // leader
 	server.fleetQuery = &failingFleetQuery{}
 
 	payload := validPushPayload()

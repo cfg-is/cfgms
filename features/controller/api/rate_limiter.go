@@ -38,8 +38,32 @@ type sourceRateLimiter struct {
 	maxTrackedKeys int
 	now            func() time.Time
 
+	// divisor, if set, scales limit down to a fleet-wide budget when more than one
+	// cluster node can serve the limited route (Issue #3761; see
+	// Server.clusterBudgetDivisor's doc comment). nil means limit is applied as
+	// configured — the pre-#3761, single-server-equivalent behavior.
+	divisor func() int
+
 	mu      sync.Mutex
 	entries map[string]*sourceRateLimiterRecord
+}
+
+// effectiveLimit returns limit divided by divisor() when divisor is set, floored at
+// one call so a large cluster can never divide a route's budget down to zero and
+// lock it out entirely.
+func (l *sourceRateLimiter) effectiveLimit() int {
+	if l.divisor == nil {
+		return l.limit
+	}
+	d := l.divisor()
+	if d < 1 {
+		d = 1
+	}
+	eff := l.limit / d
+	if eff < 1 {
+		eff = 1
+	}
+	return eff
 }
 
 // newSourceRateLimiter returns a limiter that allows up to limit calls per key
@@ -84,7 +108,7 @@ func (l *sourceRateLimiter) allow(key string) (bool, time.Duration) {
 	}
 	rec.lastSeen = now
 
-	if rec.count >= l.limit {
+	if rec.count >= l.effectiveLimit() {
 		retryAfter := rec.windowStart.Add(l.window).Sub(now)
 		if retryAfter < time.Second {
 			retryAfter = time.Second

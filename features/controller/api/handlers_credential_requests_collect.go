@@ -271,13 +271,6 @@ func (s *Server) handleCollectCredentialRequest(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Leadership is gated on the minting branch only (Issue #3719 amendment): polling
-	// remains available on a non-authoritative node, but no certificate is ever minted
-	// from one. The request stays "approved" — untouched — on a 503 here.
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.certManager == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
 		return

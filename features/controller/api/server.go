@@ -82,6 +82,7 @@ type Server struct {
 	systemMonitor                   *monitoring.SystemMonitor
 	healthCollector                 *health.Collector
 	haManager                       *ha.Manager
+	clusterBudgetDivisorCache       clusterBudgetDivisorCache                // Issue #3761: caches clusterBudgetDivisor()'s live cluster-membership query for clusterBudgetDivisorCacheTTL
 	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
@@ -105,8 +106,6 @@ type Server struct {
 	scriptMonitor                   *script.ExecutionMonitor                 // Issue #708: active execution tracking
 	scriptRepo                      script.ScriptRepository                  // Issue #1670: git-backed script library
 	privilegeStore                  cfgconfig.ConfigStore                    // Issue #1670: controller-side script privilege metadata
-	pushLeaderStatus                leaderStatus                             // Issue #1318: leader check for config push (nil = leader)
-	registrationLeaderStatus        registrationLeaderStatus                 // Issue #3471: leader check for registration/token endpoints (nil = always leader)
 	commandPublisher                *commands.Publisher                      // Issue #1319: fan-out config push to active stewards
 	pushStore                       business.PushStore                       // Issue #1320: durable push-state persistence for HA failover
 	commandStore                    business.CommandStore                    // Issue #3757: durable delivery-lifecycle outbox for steward-directed writes (ADR-031 Decision 2)
@@ -149,6 +148,8 @@ type Server struct {
 	rolloutStore                    business.RolloutStore                    // Issue #2340: durable rollout-orchestration-state persistence
 	onRolloutSoak                   func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired when runRollout enters a ring soak.
 	onRolloutTerminal               func(rolloutID string)                   // Issue #2340: test-only lifecycle hook; nil in production. Fired after runRollout commits a terminal (completed/halted) store update.
+	rolloutHaltChans                sync.Map                                 // Issue #3761: map[rolloutID string]chan struct{} — per-process fast-path halt signal; moved from a package-level var so two Server instances sharing one rolloutStore behave like two cluster nodes, not one shared process.
+	rolloutHaltPollInterval         time.Duration                            // Issue #3761: how often runRollout re-reads the rollout record from rolloutStore during a ring soak to notice a halt persisted by a peer node; defaults to 5s in NewServer, overridable in tests.
 	stopCleanup                     chan struct{}                            // signals startAPIKeyCleanup to exit
 	cleanupDone                     chan struct{}                            // closed when cleanup goroutine exits
 	closeOnce                       sync.Once                                // idempotent Close
@@ -362,18 +363,20 @@ func New(
 		stopCliLoginSweep:      make(chan struct{}),
 		cliLoginSweepDone:      make(chan struct{}),
 		cliLoginSweepLease:     cliLoginSweepLease,
+		// Issue #3761: default poll interval for runRollout to notice a halt persisted
+		// by a peer node during a ring soak; tests shrink this for determinism.
+		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
 	}
 
-	// Issue #1318: wire leader-check for config push; nil haManager = OSS single-node = always leader
-	if haManager != nil {
-		server.pushLeaderStatus = haManager
-	}
-
-	// Issue #3471: wire lease-backed leader-check for registration and token endpoints;
-	// nil haManager = OSS single-node = always authoritative (Decision 4, ADR-029).
-	if haManager != nil {
-		server.registrationLeaderStatus = haManager
-	}
+	// Issue #3761: divide each per-source rate limiter's configured budget across
+	// live cluster nodes (see Server.clusterBudgetDivisor) so any-node service does
+	// not multiply the operator-configured, single-server-equivalent budget by the
+	// number of nodes an attacker's requests can spread across.
+	server.enrolmentTokenMintLimiter.divisor = server.clusterBudgetDivisor
+	server.credentialRequestLodgeLimiter.divisor = server.clusterBudgetDivisor
+	server.credentialRequestCollectLimiter.divisor = server.clusterBudgetDivisor
+	server.cliLoginLodgeLimiter.divisor = server.clusterBudgetDivisor
+	server.cliLoginCollectLimiter.divisor = server.clusterBudgetDivisor
 
 	// Story #380: Initialize three-tier auth defense system
 	server.authDefense = authdefense.New(
@@ -500,11 +503,6 @@ func New(
 	// automatically distributes to all active stewards of the affected tenant.
 	if configService != nil && commandPublisher != nil {
 		configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
-			// Side-effecting: fans out to stewards outside the replicated log — same
-			// admission primitive as handleConfigPush (Issue #3389).
-			if checker := server.pushLeaderStatus; checker != nil && !checker.HasLeadership() {
-				return
-			}
 			cfg := &push.StewardConfiguration{
 				ConfigID:  cfgID,
 				TenantID:  tenantID,

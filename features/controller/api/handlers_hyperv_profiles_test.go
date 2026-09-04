@@ -374,3 +374,32 @@ func TestHandleHypervProfile_RootAdminTenantTargeting(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec2.Code,
 		"root admin with ?tenant= must succeed; body: %s", rec2.Body.String())
 }
+
+// TestHypervProfileHandlers_SucceedOnNonAuthoritativeNode covers the same gap
+// class as the [REQUIRED TEST] in handlers_cert_bindings_test.go (Issue #3761,
+// ADR-031 Decision 1). handleCreateHypervProfile and handleDeleteHypervProfile
+// used to sit behind a HasLeadership() gate; writes go through the git-backed
+// ConfigStore, which is the serialization point now, not leadership. Both
+// handlers must reach their normal success path against a real, deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired).
+func TestHypervProfileHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	server := setupHypervProfileServer(t)
+	server.haManager = newNonAuthoritativeHAManager(t)
+	principal := hypervProfileStrongPrincipal("admin-non-leader", "tenant-x")
+
+	recCreate := createHypervProfileReq(t, server, principal, validHypervProfilePayload("non-leader-profile"))
+	require.Equal(t, http.StatusCreated, recCreate.Code,
+		"create must succeed regardless of leadership; body: %s", recCreate.Body.String())
+
+	recShow := getHypervProfileReq(server, principal, "non-leader-profile")
+	require.Equal(t, http.StatusOK, recShow.Code,
+		"the profile must actually be persisted on a non-authoritative node; body: %s", recShow.Body.String())
+
+	recDelete := deleteHypervProfileReq(t, server, principal, "non-leader-profile")
+	require.Equal(t, http.StatusOK, recDelete.Code,
+		"delete must succeed regardless of leadership; body: %s", recDelete.Body.String())
+
+	recShowAfterDelete := getHypervProfileReq(server, principal, "non-leader-profile")
+	assert.Equal(t, http.StatusNotFound, recShowAfterDelete.Code,
+		"the profile must actually be removed on a non-authoritative node")
+}

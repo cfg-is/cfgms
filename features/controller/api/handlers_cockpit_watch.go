@@ -191,8 +191,6 @@ func pinnedEIDsForWatch(pins []*business.Pin) []eginterfaces.EIDRef {
 // EIDs and the caller's tenant subtree. The cursor feed begins from the current
 // position (empty cursor); reconnects on the client side are needed for
 // cursor-resume (MVP — follow-on story for backfill on reconnect).
-//
-// This is a GET (WebSocket upgrade) — no HasLeadership() gate applies.
 func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 	if s.casesStore == nil {
 		http.Error(w, "cases store unavailable", http.StatusServiceUnavailable)

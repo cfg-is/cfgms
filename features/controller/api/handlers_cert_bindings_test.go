@@ -637,3 +637,57 @@ func TestHandleCertBinding_RevokeRefusedWithoutCertManager(t *testing.T) {
 	require.Len(t, resp.Data, 1, "the binding must survive a refused revoke")
 	assert.Equal(t, serial, resp.Data[0].Serial)
 }
+
+// TestCertBindingHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file (Issue #3761, ADR-031 Decision 1). handleBindCert and
+// handleRevokeCertBinding used to sit behind a package-level HasLeadership() gate
+// — file removed, no replacement — so this file previously had zero coverage
+// proving either handler works on a node that never won leadership. (handleRotateCert,
+// the third handler in this file, already has this coverage in
+// TestHandleCertRotation_SucceedsOnNonAuthoritativeNode, handlers_cert_bindings_test.go's
+// companion file.) persistAccountCAS is the serialization point now, not leadership, so
+// both handlers must reach their normal success path against a real, deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired).
+func TestCertBindingHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	t.Run("handleBindCert binds a certificate", func(t *testing.T) {
+		server, certMgr := setupCertBindingServer(t)
+		createTestAccount(t, server, "alice")
+		serial := provisionTestClientCert(t, certMgr, "alice-non-leader")
+
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		rec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{
+			Serial:      serial,
+			Fingerprint: "sha256:non-leader",
+			Label:       "alice non-leader laptop",
+		})
+		require.Equal(t, http.StatusCreated, rec.Code,
+			"bind must succeed regardless of leadership; body: %s", rec.Body.String())
+
+		bindings := getCertBindings(t, server, "alice")
+		require.Len(t, bindings, 1, "the binding must actually be persisted on a non-authoritative node")
+		assert.Equal(t, serial, bindings[0].Serial)
+	})
+
+	t.Run("handleRevokeCertBinding revokes and removes the binding", func(t *testing.T) {
+		server, certMgr := setupCertBindingServer(t)
+		createTestAccount(t, server, "alice")
+		serial := provisionTestClientCert(t, certMgr, "alice-non-leader-revoke")
+
+		bindRec := bindCertReq(t, server, strongPrincipal(), "alice", BindCertRequest{Serial: serial})
+		require.Equal(t, http.StatusCreated, bindRec.Code)
+
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		rec := revokeCertBindingReq(t, server, strongPrincipal(), "alice", serial)
+		require.Equal(t, http.StatusOK, rec.Code,
+			"revoke must succeed regardless of leadership; body: %s", rec.Body.String())
+
+		revoked, err := certMgr.IsRevoked(serial)
+		require.NoError(t, err)
+		assert.True(t, revoked, "the certificate must actually be revoked on a non-authoritative node")
+
+		bindings := getCertBindings(t, server, "alice")
+		assert.Empty(t, bindings, "the binding must actually be removed on a non-authoritative node")
+	})
+}

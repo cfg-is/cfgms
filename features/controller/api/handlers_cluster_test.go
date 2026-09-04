@@ -385,98 +385,80 @@ func TestHandleClusterNodeDecommission_NodeNotFound_Returns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// TestHandleClusterNodeDrain_NonLeader_Returns503 verifies the Issue #3538 leadership
-// gate: when registrationLeaderStatus is set and HasLeadership() returns false (the
-// partition scenario — minority node still holds the raw Raft leader flag but has lost
-// quorum), the handler returns 503 immediately without invoking cluster.Drain or
-// touching s.membershipStore.
-func TestHandleClusterNodeDrain_NonLeader_Returns503(t *testing.T) {
+// TestHandleClusterNodeDrain_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST]
+// for handlers_cluster.go (Issue #3761, ADR-031 Decision 1): handleClusterNodeDrain
+// used to return 503 and leave the membership store untouched when the serving node
+// held no lease-backed leadership. Under any-node service every cluster node accepts
+// the write — the shared membership store is the serialization point, not leadership —
+// so draining against a real, deliberately non-authoritative *ha.Manager (ClusterMode,
+// no lease ever acquired) must return 202 and move the node to StateDraining.
+func TestHandleClusterNodeDrain_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	srv, store := setupClusterTestServer(t)
 	require.NoError(t, store.Register(cluster.NodeRecord{
 		ID:           "node-1",
 		State:        cluster.StateActive,
 		RegisteredAt: time.Now(),
 	}))
-	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	srv.haManager = newNonAuthoritativeHAManager(t)
 
 	req := injectAdminPrincipal(drainRequest("node-1"), "alice")
 	rec := httptest.NewRecorder()
 	srv.handleClusterNodeDrain(rec, req)
 
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "non-leader must return 503")
+	require.Equal(t, http.StatusAccepted, rec.Code, "drain must succeed regardless of leadership: %s", rec.Body.String())
 
-	// Verify cluster.Drain was not invoked: node state must remain unchanged.
+	// Verify cluster.Drain actually ran: node state must have advanced.
 	got, err := store.GetNode("node-1")
 	require.NoError(t, err)
-	assert.Equal(t, cluster.StateActive, got.State, "drain must not have run on non-leader")
-	assert.False(t, srv.clusterDraining.Load(), "health gate must not be set on non-leader")
+	assert.Equal(t, cluster.StateDraining, got.State, "drain must have run on a non-authoritative node")
+	assert.True(t, srv.clusterDraining.Load(), "health gate must be set once drain runs")
 }
 
-// TestHandleClusterNodeDecommission_NonLeader_Returns503 verifies the Issue #3538
-// leadership gate on the decommission handler: a minority node returns 503 without
-// invoking cluster.Decommission or touching s.membershipStore or s.registry.
-func TestHandleClusterNodeDecommission_NonLeader_Returns503(t *testing.T) {
+// TestHandleClusterNodeDecommission_SucceedsOnNonAuthoritativeNode is the same
+// any-node assertion for handleClusterNodeDecommission (Issue #3761, ADR-031
+// Decision 1): a node holding no lease-backed leadership must still perform the
+// decommission against the shared membership store instead of returning 503.
+func TestHandleClusterNodeDecommission_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	srv, store := setupClusterTestServerWithRegistry(t)
 	require.NoError(t, store.Register(cluster.NodeRecord{
 		ID:           "node-1",
 		State:        cluster.StateDraining,
 		RegisteredAt: time.Now(),
 	}))
-	srv.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	srv.haManager = newNonAuthoritativeHAManager(t)
 
 	req := injectAdminPrincipal(decommissionRequest("node-1"), "alice")
 	rec := httptest.NewRecorder()
 	srv.handleClusterNodeDecommission(rec, req)
 
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "non-leader must return 503")
+	require.Equal(t, http.StatusOK, rec.Code, "decommission must succeed regardless of leadership: %s", rec.Body.String())
 
-	// Verify cluster.Decommission was not invoked: node state must remain unchanged.
+	// Verify cluster.Decommission actually ran: node state must have advanced.
 	got, err := store.GetNode("node-1")
 	require.NoError(t, err)
-	assert.Equal(t, cluster.StateDraining, got.State, "decommission must not have run on non-leader")
+	assert.Equal(t, cluster.StateDecommissioned, got.State, "decommission must have run on a non-authoritative node")
 }
 
-// TestHandleClusterNodeDrain_NilLeaderChecker_ReachesExistingLogic verifies that
-// a nil registrationLeaderStatus (SingleServerMode / no HA) still reaches the
-// existing drain logic unchanged — the gate is a no-op when the checker is nil.
-func TestHandleClusterNodeDrain_NilLeaderChecker_ReachesExistingLogic(t *testing.T) {
+// TestHandleClusterNodeDrain_SucceedsOnAuthoritativeNode is the mirror case: removing
+// the gate must not have broken the authoritative path either, so a real *ha.Manager
+// in SingleServerMode (HasLeadership() == true) still reaches the existing drain logic.
+func TestHandleClusterNodeDrain_SucceedsOnAuthoritativeNode(t *testing.T) {
 	srv, store := setupClusterTestServer(t)
 	require.NoError(t, store.Register(cluster.NodeRecord{
 		ID:           "node-1",
 		State:        cluster.StateActive,
 		RegisteredAt: time.Now(),
 	}))
-	srv.registrationLeaderStatus = nil // explicit nil: no HA configured
+	srv.haManager = newAuthoritativeHAManager(t)
 
 	req := injectAdminPrincipal(drainRequest("node-1"), "alice")
 	rec := httptest.NewRecorder()
 	srv.handleClusterNodeDrain(rec, req)
 
-	require.Equal(t, http.StatusAccepted, rec.Code, "nil checker must not block drain")
+	require.Equal(t, http.StatusAccepted, rec.Code, "drain must succeed on an authoritative node: %s", rec.Body.String())
 	got, err := store.GetNode("node-1")
 	require.NoError(t, err)
-	assert.Equal(t, cluster.StateDraining, got.State, "drain must have run with nil checker")
-}
-
-// TestHandleClusterNodeDecommission_NilLeaderChecker_ReachesExistingLogic verifies
-// that a nil registrationLeaderStatus still reaches the existing decommission logic.
-func TestHandleClusterNodeDecommission_NilLeaderChecker_ReachesExistingLogic(t *testing.T) {
-	srv, store := setupClusterTestServerWithRegistry(t)
-	require.NoError(t, store.Register(cluster.NodeRecord{
-		ID:           "node-1",
-		State:        cluster.StateDraining,
-		RegisteredAt: time.Now(),
-	}))
-	srv.registrationLeaderStatus = nil // explicit nil: no HA configured
-
-	req := injectAdminPrincipal(decommissionRequest("node-1"), "alice")
-	rec := httptest.NewRecorder()
-	srv.handleClusterNodeDecommission(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code, "nil checker must not block decommission")
-	got, err := store.GetNode("node-1")
-	require.NoError(t, err)
-	assert.Equal(t, cluster.StateDecommissioned, got.State, "decommission must have run with nil checker")
+	assert.Equal(t, cluster.StateDraining, got.State, "drain must have run on an authoritative node")
 }
 
 // TestHandleClusterNodeDecommission_AdminDrainingNode_Returns200 verifies the

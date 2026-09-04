@@ -114,11 +114,16 @@ func signTestCertificateOutsideEnrolmentFlow(t *testing.T, server *Server, commo
 }
 
 // accountPersistFailingSecretStore wraps a real SecretStore and fails only
-// StoreSecret calls tagged "account" — every other operation (including the
-// credential-request listing revoke-by-token itself depends on) is served by the
-// real store. Used to inject a failure between certManager.Revoke and
-// removeCertBindingFromAccount's persistAccount call, mirroring
-// accountListFailingSecretStore's narrow-by-tag shape (handlers_credential_requests_test.go).
+// account-tagged persists — StoreSecret and CompareAndSwapSecret alike — every
+// other operation (including the credential-request listing revoke-by-token itself
+// depends on) is served by the real store. Used to inject a failure between
+// certManager.Revoke and removeCertBindingFromAccount's persistAccountCAS call,
+// mirroring accountListFailingSecretStore's narrow-by-tag shape
+// (handlers_credential_requests_test.go). CompareAndSwapSecret must be covered
+// alongside StoreSecret: removeCertBindingFromAccount persists through
+// persistAccountCAS (Issue #3761, ADR-031 Decision 1), so a fixture that only
+// intercepted StoreSecret would let the real store's CompareAndSwapSecret succeed
+// and silently defeat the injected failure.
 type accountPersistFailingSecretStore struct {
 	secretsif.SecretStore
 	failErr error
@@ -131,6 +136,15 @@ func (s *accountPersistFailingSecretStore) StoreSecret(ctx context.Context, req 
 		}
 	}
 	return s.SecretStore.StoreSecret(ctx, req)
+}
+
+func (s *accountPersistFailingSecretStore) CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *secretsif.SecretRequest) (int, bool, error) {
+	for _, tag := range req.Tags {
+		if tag == "account" {
+			return 0, false, s.failErr
+		}
+	}
+	return s.SecretStore.CompareAndSwapSecret(ctx, key, expectedVersion, req)
 }
 
 // ---- cancel -------------------------------------------------------------------------
@@ -225,30 +239,90 @@ func TestCancelCredentialRequest_ThenCollectNeverMints(t *testing.T) {
 	assert.Nil(t, stored.CollectedAt)
 }
 
-// ---- leadership gates -----------------------------------------------------------------
+// ---- any-node service (Issue #3761, ADR-031 Decision 1) --------------------------------
 
-func TestCancelCredentialRequest_LeadershipGate(t *testing.T) {
+// TestCancelCredentialRequest_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file. The containment handlers used to return 503 without touching any state
+// when the serving node held no lease-backed leadership. Any-node service means every
+// cluster node serves containment: driven against a real, deliberately non-authoritative
+// *ha.Manager (ClusterMode, no lease ever acquired), the cancel must succeed and the
+// request must actually be transitioned to denied. Containment is the operation least
+// tolerable to defer — a leaked credential is not less leaked on a follower.
+func TestCancelCredentialRequest_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server := setupTestServer(t)
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	server.haManager = newNonAuthoritativeHAManager(t)
+	fx := lodgeAndApprove(t, server, "cancel-nonauth-tenant", "cancel-nonauth-owner", ApproveCredentialRequestBody{})
 
-	rec := cancelCredentialRequest(t, server, testAdminPrincipal(), "some-id")
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	rec := cancelCredentialRequest(t, server, testAdminPrincipal(), fx.requestID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	stored, err := server.getPendingCredentialRequestByID(context.Background(), fx.requestID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, credentialRequestStatusDenied, stored.Status,
+		"the cancel must actually be recorded on a non-authoritative node")
 }
 
-func TestRevokeByEnrolmentToken_LeadershipGate(t *testing.T) {
-	server := setupTestServer(t)
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+// TestRevokeByEnrolmentToken_SucceedsOnNonAuthoritativeNode covers the token-scoped
+// containment sweep on a non-authoritative node: every request lodged against the token
+// must still be blocked.
+func TestRevokeByEnrolmentToken_SucceedsOnNonAuthoritativeNode(t *testing.T) {
+	server := setupCollectTestServer(t)
+	server.haManager = newNonAuthoritativeHAManager(t)
+	tok := mintTestEnrolmentToken(t, server, "revoke-token-nonauth-tenant")
+	lodgeRec := lodgeCredentialRequest(t, server, tok.Token, LodgeCredentialRequestBody{
+		CSRPEM: generateTestCSR(t, "revoke-token-nonauth-device"),
+	})
+	require.Equal(t, http.StatusCreated, lodgeRec.Code, lodgeRec.Body.String())
+	lodged := decodeLodgeResponse(t, lodgeRec)
 
-	rec := revokeByEnrolmentToken(t, server, testAdminPrincipal(), "et-some-id")
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	rec := revokeByEnrolmentToken(t, server, testAdminPrincipal(), tok.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := decodeRevokeByTokenResponse(t, rec)
+	require.Len(t, resp.Results, 1)
+	assert.Equal(t, "contained", resp.Results[0].Outcome)
+
+	stored, err := server.getPendingCredentialRequestByID(context.Background(), lodged.RequestID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, credentialRequestStatusDenied, stored.Status,
+		"the containment must actually be recorded on a non-authoritative node")
 }
 
-func TestRevokeOrphanedCredential_LeadershipGate(t *testing.T) {
-	server := setupTestServer(t)
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+// TestRevokeOrphanedCredential_SucceedsOnNonAuthoritativeNode covers orphan revocation
+// on a non-authoritative node: the certificate must actually land on the CRL.
+func TestRevokeOrphanedCredential_SucceedsOnNonAuthoritativeNode(t *testing.T) {
+	server := setupCollectTestServer(t)
+	server.haManager = newNonAuthoritativeHAManager(t)
+	fx := collectThenOrphan(t, server, "revoke-orphan-nonauth-tenant", "revoke-orphan-nonauth-owner", ApproveCredentialRequestBody{})
+	revokedBefore, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	require.False(t, revokedBefore)
 
-	rec := revokeOrphanedCredential(t, server, testAdminPrincipal(), "some-serial")
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	rec := revokeOrphanedCredential(t, server, testAdminPrincipal(), fx.serial)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	revokedAfter, err := server.certManager.IsRevoked(fx.serial)
+	require.NoError(t, err)
+	assert.True(t, revokedAfter,
+		"the orphaned certificate must actually be revoked on a non-authoritative node")
+}
+
+// TestCancelCredentialRequest_SucceedsOnAuthoritativeNode is the mirror case for
+// continuity: a real, deliberately authoritative *ha.Manager (SingleServerMode, the
+// shape every OSS single-controller install runs) must still reach the same containment
+// logic unchanged.
+func TestCancelCredentialRequest_SucceedsOnAuthoritativeNode(t *testing.T) {
+	server := setupTestServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
+	fx := lodgeAndApprove(t, server, "cancel-auth-tenant", "cancel-auth-owner", ApproveCredentialRequestBody{})
+
+	rec := cancelCredentialRequest(t, server, testAdminPrincipal(), fx.requestID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	stored, err := server.getPendingCredentialRequestByID(context.Background(), fx.requestID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, credentialRequestStatusDenied, stored.Status)
 }
 
 // ---- revoke-by-token --------------------------------------------------------------

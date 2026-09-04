@@ -685,10 +685,6 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 
 // handleUpdateStewardConfig handles PUT /api/v1/stewards/{id}/config
 func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
@@ -986,10 +982,6 @@ func (s *Server) handleStewardAuthRefresh(w http.ResponseWriter, r *http.Request
 
 // handleDeleteStewardConfig handles DELETE /api/v1/stewards/{id}/config
 func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
@@ -1026,10 +1018,6 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 // registry, and drops any active QUIC/gRPC session. The record is retained for audit.
 // Requires an admin mTLS certificate (TierMTLSOnly gate). Issue #2408.
 func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
@@ -1602,10 +1590,6 @@ var allowedMoveSources = map[string]bool{
 // source and destination tenants. Registered in the Tier-3 (mTLS-only) endpoint
 // class (Issue #2341).
 func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 	stewardIDForLog := logging.SanitizeLogValue(stewardID)

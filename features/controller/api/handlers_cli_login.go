@@ -393,10 +393,6 @@ type LodgeCliLoginResponse struct {
 // credential (Issue #3721). Registered on the base router, not the authenticated api
 // subrouter, mirroring handleLodgeCredentialRequest.
 func (s *Server) handleLodgeCliLoginRequest(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Cli login service not available", "SERVICE_UNAVAILABLE")
 		return
@@ -529,10 +525,6 @@ type ApproveCliLoginResponse struct {
 // the resulting session inherits the approving principal's scope exactly, including
 // the root-scope marker for a root-scoped principal (ADR-025 Amendment 4).
 func (s *Server) handleApproveCliLoginRequest(w http.ResponseWriter, r *http.Request) {
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
@@ -749,15 +741,6 @@ func (s *Server) handleCollectCliLoginRequest(w http.ResponseWriter, r *http.Req
 		// Fall through to the claim branch below.
 	default:
 		s.writeSuccessResponse(w, CollectCliLoginResponse{Status: reqRecord.Status})
-		return
-	}
-
-	// Leadership is gated on the claim/mutate branch only (mirrors
-	// handleCollectCredentialRequest): polling remains available on a
-	// non-authoritative node, but the single-use transition is only ever performed
-	// by the leader. The request stays "approved" — untouched — on a 503 here.
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 

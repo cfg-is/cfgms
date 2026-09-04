@@ -1315,19 +1315,28 @@ The `GET /api/v1/raft/status` endpoint is protected by RBAC (`ha:read-status` pe
 
 > **Do not use the `X-Raft-From` header for authentication** — it is set by the sender and is untrusted. Only the TLS peer certificate is authoritative.
 
-#### Authority Gating
+#### Write Admission (ADR-031 Decision 1)
 
-All side-effecting controller endpoints are gated on lease-backed authority (ADR-029 Decision 4). When `HasLeadership()` returns false, the handler returns HTTP 503 immediately — before any store access, authentication, or principal lookup. A nil checker (single-server mode) is unconditionally authoritative and never returns 503. Read-only and status-poll endpoints are excluded from each gate. Batch-job command dispatch uses Raft term-stamping rather than an HTTP-layer gate; see the final entry.
+Every cluster node accepts every read and write; there is no per-request
+leadership gate. Before this decision, ~50 inline `HasLeadership()` checks
+enforced a leader-only write convention across `features/controller/api`
+(inconsistently — a parallel `ungatedHandlerBaseline` ratchet tracked dozens of
+handlers that were never gated at all). The shared PostgreSQL database (ADR-007)
+was already the only durable store these writes reached, so the gate blocked no
+actual race there — it only enforced routing. ADR-031 removes the gates and makes
+multi-writer safety explicit at the database layer instead: uniqueness
+constraints and compare-and-set on version columns per write path (see "Write
+Admission for Mutating Admin API Actions" under the REST API section below for
+the inventory).
 
-- **Registration/token endpoints** (#3471) — all eight mutating registration and token handlers, including the generate-on-claim branch of `handleRegistrationStatus`, return 503 when `HasLeadership()` is false; the read-only `GET /api/v1/registration/status/{pending_id}` status-poll branches remain available on any node.
-- **Cluster node drain/decommission** (#3538) — `handleClusterNodeDrain` and `handleClusterNodeDecommission` return 503 on a non-authoritative node; read-only node-list and status queries are unaffected.
-- **Module bundle approval/rejection** (#3539) — `handleApproveModuleBundle` and `handleRejectModuleBundle` return 503 when `HasLeadership()` is false; list and status endpoints remain available.
-- **Version-ring rollout start/halt** (#3540) — `handleStartRollout` (`POST /api/v1/installer/rollouts`) and `handleHaltRollout` (`POST /api/v1/installer/rollouts/{id}/halt`) return 503 on a non-authoritative node; rollout-status reads are unaffected.
-- **Certificate issuance/rotation/revocation** (#3541) — `POST /api/v1/certificates/provision`, `POST /api/v1/certificates/signing/rotate`, and `POST /api/v1/certificates/{serial}/revoke` return 503 when `HasLeadership()` is false; read-only `GET /api/v1/certificates` and `GET /api/v1/certificates/{serial}` remain available.
-- **Installer artifact upload/delete** (#3542) — `handleUploadInstallerArtifact` and `handleDeleteInstallerArtifact` return 503 on a non-authoritative node; read and list endpoints are unaffected.
-- **Steward binary publish** (#3543) — `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}` returns 503 when `HasLeadership()` is false; read and list endpoints remain available.
-- **Steward decommission/move/config write** (#3544) — `handleDecommissionSteward` (`DELETE /api/v1/stewards/{id}`), `handleMoveSteward` (`POST /api/v1/stewards/{id}/move`), `handleUpdateStewardConfig` (`PUT /api/v1/stewards/{id}/config`), and `handleDeleteStewardConfig` (`DELETE /api/v1/stewards/{id}/config`) each return 503 on a non-authoritative node; read-only status and config-read endpoints are unaffected.
-- **Batch-job/run-script command dispatch** (#3545) — fencing via Raft term-stamping, confirmed by test in #3545; `RollingBatchExecutor`'s command dispatch stamps `Term: p.currentTerm()` on every published command (`features/controller/commands/publisher.go:181`), so commands from a stale leader are rejected by followers holding a higher term. This surface is **not** `HasLeadership()`-gated — it operates at the Raft log level rather than the HTTP handler layer.
+`HasLeadership()` (lease-backed, ADR-029 Decision 4) still exists and still
+governs the one thing that remains a true cluster singleton: background
+sweep/expiry/scheduler loops, claimed via `pkg/lease.SingletonJob` (see
+Background-Loop Singleton Scheduling below) rather than a request-path gate. It
+also remains available for status/diagnostic reporting (`GET /api/v1/ha/status`
+et al.). Batch-job command dispatch continues to use Raft-term-derived fencing
+(now sourced from the database lease's monotonic token rather than `GetTerm()`,
+per ADR-031 Decision 3) rather than an HTTP-layer gate.
 
 #### Background-Loop Singleton Scheduling (Issue #3762, ADR-031 Decision 4)
 
@@ -1446,53 +1455,27 @@ The REST API is the admin interface to the controller. All operations are authen
 
 - **Backward compatibility:** requests without `limit`/`offset` return the existing payload shape unchanged — a plain JSON array of stewards — so `cfg` and existing API clients are unaffected.
 
-### Authority Gating for Mutating Admin API Actions
+### Write Admission for Mutating Admin API Actions (ADR-031 Decision 1)
 
-Every state-mutating handler (POST/PUT/DELETE/PATCH) in `features/controller/api` that can affect fleet-wide state must call `HasLeadership()` on the `*ha.Manager` before performing any durable action. `HasLeadership()` is the lease-backed authority gate defined in ADR-029 (Decision 4); it is distinct from the deprecated `IsLeader()` Raft flag, which is not a safe authority check because it does not account for leadership lease expiry or fencing tokens.
+Every state-mutating handler (POST/PUT/DELETE/PATCH) in `features/controller/api` accepts requests on any cluster node — there is no per-handler `HasLeadership()` gate on the request path. Before ADR-031, epic #3411 had gated roughly fifty of these handlers on `HasLeadership()` (the lease-backed authority primitive, ADR-029 Decision 4) while a parallel `ungatedHandlerBaseline` ratchet tracked dozens more that were never gated at all — the leader-only model was a convention, not a completed invariant. ADR-031 Decision 1 removes the convention rather than finishing it: the shared PostgreSQL database (ADR-007) was already the only durable store these writes reached, from any node, so the gate blocked no actual race there.
 
-#### Why the gate matters
+#### Multi-writer safety is now explicit per write path
 
-Without an authority gate on mutating operations, a stale Raft leader that has lost its lease can still execute admin actions — approving registrations, applying cfg pushes, issuing certificates, initiating decommissions — and replicate those writes into the log before a new leader fences them. The result is a brief window of split-brain write authority. `HasLeadership()` bounds this window by refusing to act when the node has lost the leadership lease, regardless of what the raw Raft flag says.
+Removing the gate transferred the safety obligation it used to provide implicitly to each write path individually. Reviewed and made safe as part of this decision and its dependencies:
 
-#### Surfaces gated by epic #3411
+- **Credential and CLI-login lifecycle transitions** (WebAuthn credential revocation, enrolment-token spend-then-lodge, both approved→collected transitions, credential issue-and-rebind, credential-request approval) persist via `SecretStore.CompareAndSwapSecret`, keyed on the version read alongside the record — a concurrent conflicting write observes `409 Conflict` rather than silently losing an update (Issue #3775).
+- **Audit-chain sequencing** (ADR-004) — per-tenant sequence numbers and `previous_checksum` linkage are assigned by database-side serialization rather than a single in-process drain goroutine, which N cluster nodes running independently could no longer make safe (Issue #3754).
+- **Registration-refresh nonces** (ADR-011) — the single-use nonce lives in a durable, cross-node consumable `NonceStore` rather than an in-process cache, so a challenge and its completion can land on different nodes safely (Issue #3755).
 
-The following handler groups were gated during epic #3411. Each story is noted beside its handlers.
+#### Config push and background loops
 
-| Handler | Story | Surface |
-|---------|-------|---------|
-| `handleClusterNodeDrain`, `handleClusterNodeDecommission` | Story A (#3538) | Cluster node lifecycle |
-| `handleApproveModuleBundle`, `handleRejectModuleBundle` | Story B (#3539) | Bundle approval/rejection |
-| `handleStartRollout`, `handleHaltRollout` | Story C (#3540) | Version-ring rollout start/halt |
-| `handleProvisionCertificate`, `handleRotateSigningCert`, `handleRevokeCertificate` | Story D (#3541) | Certificate issuance/rotation/revocation |
-| `handleUploadInstallerArtifact`, `handleDeleteInstallerArtifact` | Story E (#3542) | Installer artifact management |
-| `handlePublishStewardBinary` | Story F (#3543) | Steward binary publication |
-| `handleDecommissionSteward`, `handleMoveSteward`, `handleUpdateStewardConfig`, `handleDeleteStewardConfig` | Story I (#3544) | Steward decommission/move/config write |
+`POST /api/v1/config/push` (`handleConfigPush`), the save=deploy fanout callback (`RegisterFanoutCallback` in `server.go`), and the startup replay of interrupted pushes (`resumePendingPushes`) are, likewise, no longer leadership-gated. Any node now accepts a push, resolves the selector, queries the fleet, writes desired state to the entity graph, and fans out to stewards via `commandPublisher` directly. Delivery durability — one outbox row per targeted steward, committed atomically with the push record so a controller crash mid-fan-out cannot silently drop a steward — is ADR-031 Decision 2, a separate concern from this admission change.
 
-**Story H finding (#3436) — batch-job and run-script dispatch:** the batch-job and run-script paths (`handleCreateJob`, `handlePostRunScript`, `handlePostRunCommand`) lack both an authority gate and term-stamping on the dispatch envelope. A stale leader can queue jobs that stewards accept until the leader's lease expires and the fencing token cuts it off at the steward side. The steward-side term-rejection mechanism is tracked under #3436; the handler-side `HasLeadership()` gate is left for a follow-up story so that the steward fix and the controller fix land together.
+`HasLeadership()` remains the correct primitive for the one thing that is still a genuine cluster singleton: background sweep/expiry/scheduler loops, which claim a `pkg/lease.SingletonJob` lease per cycle rather than gating a request (see Background-Loop Singleton Scheduling above). It also remains available for status/diagnostic reporting. The deprecated raw Raft flag (`IsLeader()`/`IsRaftLeader()`) remains forbidden outside `pkg/ha` without a written `//architecture:allow-raw-leader` reason (Story #3391) — that rule is unaffected by this decision.
 
-#### Config push (epic #3386, story #3389)
+#### Retired: the baseline ratchet
 
-`POST /api/v1/config/push` (`handleConfigPush`), the save=deploy fanout callback (`RegisterFanoutCallback` in `server.go`), and the startup replay of interrupted pushes (`resumePendingPushes`) are gated on `HasLeadership()`, not epic #3411 — they were re-homed off the deprecated `IsLeader()` flag by story #3389, under epic #3386 (Controller leadership authority). All three are side-effecting outside the replicated log: past the gate, a push resolves the selector, queries the fleet, writes desired state to the entity graph, and fans out to real stewards via `commandPublisher`, with no Raft commit anywhere in that path — `IsLeader()`/`IsRaftLeader()` only guarantee write-safety for the replicated log itself, which never covered these effects. This is the finding that made `test/e2e/ha/network_partition_real_test.go`'s `TestRealClusterPartition_NoDualLeader` fail reproducibly against a real cluster (story #3095) before this story landed.
-
-**What a caller sees during a handover window:** a request to `POST /api/v1/config/push` arriving while the current node's lease has expired but a new leader's lease has not yet been acknowledged returns `503 {"error":"not the leader"}` — the same response shape the deprecated primitive already produced, so client retry behaviour is unchanged. The message never names or implies which other node currently holds leadership (that information may itself be stale, and disclosing it is an unnecessary topology hint). The window is bounded by the lease duration (ADR-029 Decision 1 / #3387's derivation), not by the underlying Raft election timeout.
-
-#### Baseline ratchet
-
-`features/controller/api/architecture_test.go` enforces the gate via `TestNoUngatedMutatingHandler`. The test walks all non-test `.go` files in the package (receiver-agnostic, full-package scan — not scoped to `routes_*.go` or to `*Server` receiver methods), and for every mutating route registration it checks that the handler:
-
-1. Calls `HasLeadership()` in its own body, OR
-2. Appears in the in-file `ungatedHandlerBaseline` map with a classified bucket and a one-line reason, OR
-3. Carries an `//architecture:allow-nogate` annotation on its declaration.
-
-The baseline is a ratchet — entries can only be removed as handlers are gated, never added for new handlers. Three bucket values are recognised:
-
-- `excluded-by-epic-non-goals` — handler is explicitly out of scope for epic #3411 (RBAC CRUD, tenant management, account CRUD, API keys, session lifecycle, presentation state)
-- `gated-via-deprecated-primitive` — handler IS gated, but on the deprecated `IsLeader()` flag rather than `HasLeadership()`; migration tracked separately
-- `unclassified-pending-risk-review` — handler was inventoried during decomposition but not individually risk-reviewed; a follow-up story must either gate it or explicitly reassign its bucket
-
-The test `TestDetectionFiresOnViolation` (AC2) proves the rule fires on ungated handlers by confirming `handleCreateRole` (excluded-by-epic-non-goals, so it stays ungated indefinitely) is detected as ungated and that its baseline entry is the sole thing preventing a violation report; it also confirms `handleConfigPush` is detected as gated and absent from the baseline, now that story #3389 has re-homed it — `handleConfigPush` was this test's original ungated-but-baselined example, before that story landed. `TestDetectsInlineServerGoHandler` (AC3) proves the scan covers handlers registered directly in `server.go`, not just `routes_*.go` files. `TestDetectsNonServerReceiverHandler` (AC4) proves the scan covers handlers on non-`*Server` receiver types such as `*WorkflowHandler` and `*RollbackHandler`.
-
-The `check-architecture` Makefile target runs this test as its final gate.
+`features/controller/api/architecture_test.go`'s `TestNoUngatedMutatingHandler` and its `ungatedHandlerBaseline` map — the mechanism that used to enforce the gate and track handlers still owing one — are deleted along with the gates themselves (Issue #3761). Per ADR-031 Decision 1, epic #3411's remaining scope (gating the handlers the baseline still listed) inverts rather than completing: there is no gate left to add those handlers to. `check-architecture` no longer runs this test; `TestNoRawLeaderPrimitiveOutsidePkgHA` (Story #3391, `pkg/ha/architecture_test.go`) is unaffected and continues to run as part of the same Makefile target.
 
 ---
 

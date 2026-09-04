@@ -330,17 +330,18 @@ func TestGetCliLoginRequest_RequiresStrongAssurance(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
 }
 
-// TestGetCliLoginRequest_AvailableOnNonLeader asserts the read is exempt from the
-// leadership gate that guards approve/collect's mutating branches — mirroring collect's
-// own polling, which "remains available on a non-authoritative node" (handlers_cli_login.go).
-func TestGetCliLoginRequest_AvailableOnNonLeader(t *testing.T) {
+// TestGetCliLoginRequest_SucceedsOnNonAuthoritativeNode asserts the confirmation
+// screen's read is served by every cluster node (Issue #3761, ADR-031 Decision 1:
+// any-node service), exercised against a real, deliberately non-authoritative
+// *ha.Manager (ClusterMode, no lease ever acquired).
+func TestGetCliLoginRequest_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server, _ := setupCliLoginTestServer(t)
 	principal := browserPrincipalAfterPasskeyLogin("browser-op-get-7", false)
 
 	_, hash := newTestVerifier(t)
 	lodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, hash))
 
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	server.haManager = newNonAuthoritativeHAManager(t)
 
 	rec := getCliLoginRequestHTTP(t, server, principal, lodged.RequestID)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -920,78 +921,64 @@ func TestCliLoginSession_CannotObtainRootScopeCertificate(t *testing.T) {
 // (Client-side behaviors — a timeout/denial/interrupt distinction and the revoked-vs-
 // expired distinction — are covered in cmd/cfg/cmd/login_test.go.)
 
-// ---- leadership gate ---------------------------------------------------------------------
+// ---- any-node service --------------------------------------------------------------------
 
-// TestCliLogin_LeadershipGate is the authority-gating test for all three mutating
-// cli-login handlers (CLAUDE.md Authority Gating Rule, Story #3547 / Epic #3411):
-// lodge, approve and the collect handler's claim branch each call HasLeadership() in
-// their own body — routes_cli_login.go relies on exactly that, since the scanner cannot
-// see a gate through the rate-limiter middleware wrapper — and each returns 503 on a
-// non-authoritative node. Mirrors TestCredentialRequests_LeadershipGate and
-// TestCollectCredentialRequest_LeadershipGate.
-func TestCliLogin_LeadershipGate(t *testing.T) {
+// TestCliLogin_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// handlers_cli_login.go (Issue #3761, ADR-031 Decision 1). Lodge, approve and the
+// collect handler's claim branch each used to call HasLeadership() in their own body
+// and return 503 on a node holding no lease-backed leadership. Under any-node service
+// every cluster node runs the full ceremony — the shared request store and the session
+// manager are the serialization points, not leadership — so the entire lodge → approve
+// → collect flow must complete against a real, deliberately non-authoritative
+// *ha.Manager (ClusterMode, no lease ever acquired), and polling must keep working too.
+func TestCliLogin_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server, _ := setupCliLoginTestServer(t)
 	ctx := context.Background()
 	principal := browserPrincipalAfterPasskeyLogin("browser-op-17", false)
 
-	// Every fixture must be built while the node is still leader — lodge and approve
-	// are themselves gated, so the follower branches below have nothing to act on
-	// otherwise.
-	approvedID, approvedVerifier := lodgeAndApproveCliLogin(t, server, principal)
+	server.haManager = newNonAuthoritativeHAManager(t)
+
 	pendingVerifier, pendingHash := newTestVerifier(t)
 	pendingLodged := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, pendingHash))
-	toApproveVerifier, toApproveHash := newTestVerifier(t)
-	toApprove := decodeLodgeCliLoginResponse(t, lodgeCliLogin(t, server, toApproveHash))
 
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: false}
+	toClaimVerifier, toClaimHash := newTestVerifier(t)
+	var toClaim LodgeCliLoginResponse
 
 	t.Run("lodge", func(t *testing.T) {
-		_, hash := newTestVerifier(t)
-		rec := lodgeCliLogin(t, server, hash)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		rec := lodgeCliLogin(t, server, toClaimHash)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		toClaim = decodeLodgeCliLoginResponse(t, rec)
+
+		stored, err := server.getCliLoginRequestByID(ctx, toClaim.RequestID)
+		require.NoError(t, err)
+		require.NotNil(t, stored, "a non-authoritative node must persist the lodged request")
+		assert.Equal(t, cliLoginRequestStatusPending, stored.Status)
 	})
 
 	t.Run("approve", func(t *testing.T) {
-		rec := approveCliLogin(t, server, principal, toApprove.RequestID,
-			ApproveCliLoginRequestBody{UserCode: toApprove.UserCode})
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		rec := approveCliLogin(t, server, principal, toClaim.RequestID,
+			ApproveCliLoginRequestBody{UserCode: toClaim.UserCode})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-		stored, err := server.getCliLoginRequestWithToken(ctx, toApprove.RequestID)
+		stored, err := server.getCliLoginRequestWithToken(ctx, toClaim.RequestID)
 		require.NoError(t, err)
-		assert.Equal(t, cliLoginRequestStatusPending, stored.Status,
-			"a 503 from a non-leader must leave the request pending")
-		assert.Empty(t, stored.SessionToken, "a non-leader must never mint a session")
+		assert.Equal(t, cliLoginRequestStatusApproved, stored.Status,
+			"approval on a non-authoritative node must persist the approved status")
+		assert.NotEmpty(t, stored.SessionToken,
+			"approval on a non-authoritative node must mint the session")
 	})
 
 	t.Run("collect claim branch", func(t *testing.T) {
-		rec := collectCliLogin(t, server, approvedID, approvedVerifier)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-
-		stored, err := server.getCliLoginRequestByID(ctx, approvedID)
-		require.NoError(t, err)
-		assert.Equal(t, cliLoginRequestStatusApproved, stored.Status,
-			"a 503 from a non-leader must leave the request unconsumed")
+		rec := collectCliLogin(t, server, toClaim.RequestID, toClaimVerifier)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotEmpty(t, decodeCollectCliLoginResponse(t, rec).Token,
+			"the claim branch must hand back the minted token from any node")
 	})
 
-	t.Run("polling stays available on a non-leader", func(t *testing.T) {
+	t.Run("polling", func(t *testing.T) {
 		rec := collectCliLogin(t, server, pendingLodged.RequestID, pendingVerifier)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Equal(t, "pending", decodeCollectCliLoginResponse(t, rec).Status)
-	})
-
-	server.registrationLeaderStatus = &stubRegistrationLeaderStatus{hasLeadership: true}
-
-	t.Run("leader completes what the follower refused", func(t *testing.T) {
-		approveRec := approveCliLogin(t, server, principal, toApprove.RequestID,
-			ApproveCliLoginRequestBody{UserCode: toApprove.UserCode})
-		require.Equal(t, http.StatusOK, approveRec.Code, approveRec.Body.String())
-		collectRec := collectCliLogin(t, server, toApprove.RequestID, toApproveVerifier)
-		require.Equal(t, http.StatusOK, collectRec.Code, collectRec.Body.String())
-		assert.NotEmpty(t, decodeCollectCliLoginResponse(t, collectRec).Token)
-
-		retryRec := collectCliLogin(t, server, approvedID, approvedVerifier)
-		require.Equal(t, http.StatusOK, retryRec.Code, retryRec.Body.String())
-		assert.NotEmpty(t, decodeCollectCliLoginResponse(t, retryRec).Token)
 	})
 }
 

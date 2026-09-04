@@ -785,49 +785,41 @@ func newAuthoritativeHAManager(t *testing.T) *ha.Manager {
 	return manager
 }
 
-// TestPublishStewardBinary_LeaderGate_RejectsWith503WhenNotAuthoritative verifies that
-// handlePublishStewardBinary returns 503 and stores nothing when the serving node is not
-// the lease-backed leader — the partition scenario: a non-authoritative controller cannot
-// publish a new steward installer binary to the fleet (Issue #3543).
-func TestPublishStewardBinary_LeaderGate_RejectsWith503WhenNotAuthoritative(t *testing.T) {
+// TestPublishStewardBinary_SucceedsOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file (Issue #3761, ADR-031 Decision 1): handlePublishStewardBinary used to
+// return 503 and store nothing when the serving node held no lease-backed
+// leadership (the former partition-scenario gate, Issue #3543). Any-node service
+// means every cluster node now accepts this write — the shared store is the
+// serialization point, not leadership — so publishing against a real, deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired) must succeed
+// and the binary must land in the blob store exactly as it would on a leader.
+func TestPublishStewardBinary_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
-	server.registrationLeaderStatus = newNonAuthoritativeHAManager(t)
+	server.haManager = newNonAuthoritativeHAManager(t)
 
-	content := []byte("binary that must not be stored")
+	content := []byte("binary published from a non-authoritative node")
 	sigBase64 := fix.signContent(content, "v1.0.0", "linux", "amd64")
 
 	rec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code, "publish must succeed regardless of leadership: %s", rec.Body.String())
 
-	// Confirm the blob store is empty — no signature verification or write occurred.
 	blobs, err := server.blobStore.ListBlobs(context.Background(), blob.BlobKey{
 		TenantID:  "test-tenant",
 		Namespace: "steward-binaries",
 	})
 	require.NoError(t, err)
-	assert.Empty(t, blobs, "blob store must remain empty when the node is not authoritative")
+	assert.NotEmpty(t, blobs, "blob store must contain the published binary")
 }
 
-// TestPublishStewardBinary_LeaderGate_AllowsWhenAuthoritative verifies that
-// handlePublishStewardBinary reaches the existing publish logic unchanged when:
-//   - registrationLeaderStatus is nil (OSS single-server / no HA configured)
-//   - registrationLeaderStatus.HasLeadership() returns true (current leader)
-func TestPublishStewardBinary_LeaderGate_AllowsWhenAuthoritative(t *testing.T) {
-	t.Run("nil checker reaches publish logic", func(t *testing.T) {
-		server, fix := setupStewardBinaryServer(t)
-		// registrationLeaderStatus is nil by default; nil means always-leader.
-		content := []byte("binary content for nil-checker path")
-		sigBase64 := fix.signContent(content, "v1.1.0", "linux", "amd64")
-		rec := doPublish(server, "v1.1.0", "linux", "amd64", "test-tenant", sigBase64, content)
-		assert.Equal(t, http.StatusOK, rec.Code, "nil checker must not block publish: %s", rec.Body.String())
-	})
-
-	t.Run("authoritative checker reaches publish logic", func(t *testing.T) {
-		server, fix := setupStewardBinaryServer(t)
-		server.registrationLeaderStatus = newAuthoritativeHAManager(t)
-		content := []byte("binary content for authoritative-checker path")
-		sigBase64 := fix.signContent(content, "v1.2.0", "linux", "amd64")
-		rec := doPublish(server, "v1.2.0", "linux", "amd64", "test-tenant", sigBase64, content)
-		assert.Equal(t, http.StatusOK, rec.Code, "authoritative checker must not block publish: %s", rec.Body.String())
-	})
+// TestPublishStewardBinary_SucceedsOnAuthoritativeNode is the mirror case: a real,
+// deliberately authoritative *ha.Manager (SingleServerMode) must also reach the
+// existing publish logic unchanged — the removal of the leader gate must not have
+// broken the leader path either.
+func TestPublishStewardBinary_SucceedsOnAuthoritativeNode(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
+	content := []byte("binary content for authoritative-node path")
+	sigBase64 := fix.signContent(content, "v1.2.0", "linux", "amd64")
+	rec := doPublish(server, "v1.2.0", "linux", "amd64", "test-tenant", sigBase64, content)
+	assert.Equal(t, http.StatusOK, rec.Code, "publish must succeed on an authoritative node: %s", rec.Body.String())
 }

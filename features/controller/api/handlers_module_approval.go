@@ -66,14 +66,31 @@ func (s *Server) handleListModuleApprovals(w http.ResponseWriter, r *http.Reques
 	s.writeSuccessResponse(w, moduleApprovalListResponse{Pending: pending})
 }
 
+// moduleDecisionNodeIsAuthoritative reports whether this node may serve a module
+// bundle approve/reject decision (Issue #3761 residual review — ADR-031 Decision
+// 1's "the shared database is the serialization point" premise does not hold
+// here). Approval status lives in ModuleCache, a per-process local-filesystem
+// directory: any-node service would let a concurrent approve overwrite an
+// operator's rejection, and would leave a bundle rejected on one node still
+// approvable, stageable and distributable from a peer, since every staging path
+// gates on the *local* status. This is the trust decision authorizing
+// publisher-signed binaries to run on endpoints, so the gate is retained until
+// approval status moves to the shared durable store behind a conditional update
+// (follow-up under epic #3751). SingleServerMode (s.haManager nil, or a
+// non-clustered Manager) is unconditionally authoritative, so single-controller
+// installs are unaffected.
+func (s *Server) moduleDecisionNodeIsAuthoritative() bool {
+	if s.haManager == nil {
+		return true
+	}
+	return s.haManager.HasLeadership()
+}
+
 // handleApproveModuleBundle handles POST /api/v1/modules/approvals/{address}/approve.
 // Approves a queued module bundle, authorizing it for deployment to managed endpoints.
+// Gated by moduleDecisionNodeIsAuthoritative — see that method's doc comment.
 func (s *Server) handleApproveModuleBundle(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// wired for registration/token endpoints by #3471; reused here unchanged —
-	// the name is registration-era but the check is generic (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+	if !s.moduleDecisionNodeIsAuthoritative() {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -101,12 +118,9 @@ func (s *Server) handleApproveModuleBundle(w http.ResponseWriter, r *http.Reques
 
 // handleRejectModuleBundle handles POST /api/v1/modules/approvals/{address}/reject.
 // Rejects a queued module bundle, blocking it from deployment.
+// Gated by moduleDecisionNodeIsAuthoritative — see that method's doc comment.
 func (s *Server) handleRejectModuleBundle(w http.ResponseWriter, r *http.Request) {
-	// s.registrationLeaderStatus is the generic lease-backed authority checker
-	// (HasLeadership() bool, satisfied by *ha.Manager, ADR-029 Decision 4)
-	// wired for registration/token endpoints by #3471; reused here unchanged —
-	// the name is registration-era but the check is generic (Issue #3411).
-	if checker := s.registrationLeaderStatus; checker != nil && !checker.HasLeadership() {
+	if !s.moduleDecisionNodeIsAuthoritative() {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
