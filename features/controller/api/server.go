@@ -174,6 +174,7 @@ type Server struct {
 	terminalHandler                 http.Handler                             // Issue #2761: terminal WebSocket relay handler
 	tenantStore                     business.TenantStore                     // Issue #2839: tenant hierarchy for per-tenant assurance resolution
 	assurancePolicyStore            business.AssurancePolicyStore            // Issue #2839: per-tenant assurance-policy overrides
+	blastRadiusPolicyStore          business.BlastRadiusPolicyStore          // Issue #3698: per-tenant operator-payload blast-radius overrides
 	tenantCrossingStore             business.TenantCrossingStore             // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	casesStore                      business.CaseStore                       // Issue #3605: cockpit investigation case CRUD
 	egWatchProv                     egWatchProvider                          // Issue #3613: cockpit Watch cursor fan-out to browser WebSocket
@@ -1598,6 +1599,16 @@ func (s *Server) SetAssurancePolicyStore(store business.AssurancePolicyStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.assurancePolicyStore = store
+}
+
+// SetBlastRadiusPolicyStore wires the per-tenant BlastRadiusPolicyStore (Issue #3698).
+// When nil (default), resolveMaxTargetsForTenant returns defaultMaxOperatorPayloadTargets
+// unchanged for every tenant — the bound is still enforced, just not per-tenant
+// configurable, so a bare Server without this store wired stays safe rather than open.
+func (s *Server) SetBlastRadiusPolicyStore(store business.BlastRadiusPolicyStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blastRadiusPolicyStore = store
 }
 
 // SetCommandStore wires the durable command/delivery outbox store (Issue #3757,

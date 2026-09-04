@@ -46,6 +46,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // setupOperatorPayloadSignServer returns a test Server with WebAuthn configured, a
@@ -355,6 +356,51 @@ func TestOperatorPayloadSignBegin_NonceDiffersAcrossCalls(t *testing.T) {
 		"identical Content/Shell/Targets with differing nonce must produce different hashes")
 	assert.NotEqual(t, r1.Data.Assertion.Response.Challenge.String(), r2.Data.Assertion.Response.Challenge.String(),
 		"identical Content/Shell/Targets with differing nonce must produce different challenges")
+}
+
+// TestOperatorPayloadSignBegin_ExceedsBlastRadius_Rejected covers the WebAuthn half of
+// Issue #3698's AC1 (the bound is enforced for both the mTLS and WebAuthn paths): with no
+// dispatch-for-execution endpoint yet consuming a WebAuthn-signed envelope, begin — where
+// Targets is resolved and frozen into the envelope — is the earliest and only point today
+// to enforce it, and the rejection must still be audited as a bound violation.
+func TestOperatorPayloadSignBegin_ExceedsBlastRadius_Rejected(t *testing.T) {
+	server, username := setupOperatorPayloadSignServer(t)
+	server.fleetQuery = seededFleetQuery(
+		makeSeedSteward("steward-1", "es-hv01", "linux", "amd64", "prod"),
+		makeSeedSteward("steward-2", "es-hv02", "linux", "amd64", "prod"),
+	)
+	injectSignCredential(t, server, username, []byte("blast-cred"), []byte("pubkey"), 0)
+
+	// makeSeedSteward always assigns "tenant-a" — the caller's tenant must match for
+	// resolveSelectorFilter's tenant-subtree scoping to admit these stewards at all.
+	blastStore := newTestBlastRadiusPolicyStore()
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "tenant-a", MaxTargets: ptrInt(1),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"tenant-a": {"tenant-a"},
+	}))
+
+	// "all" resolves both seeded stewards — 2 targets, over the tenant's bound of 1.
+	principal := &Principal{ID: username, TenantID: "tenant-a"}
+	rec := doSignBegin(t, server, principal, "sess", validBeginBody())
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a resolved target list over the tenant's blast-radius bound must be hard rejected; body: %s", rec.Body.String())
+	assert.Equal(t, "BLAST_RADIUS_EXCEEDED", errCode(t, rec.Body.Bytes()))
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "tenant-a"})
+	require.NoError(t, err)
+	var found *business.AuditEntry
+	for _, e := range entries {
+		if e.Action == "operator_payload.dispatch" {
+			found = e
+			break
+		}
+	}
+	require.NotNil(t, found, "a rejected-for-blast-radius WebAuthn sign attempt must still produce an audit record")
+	assert.Equal(t, business.AuditResultDenied, found.Result)
 }
 
 // --- TestOperatorPayloadSignFinish ---

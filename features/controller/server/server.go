@@ -1412,6 +1412,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if aps := storageManager.GetAssurancePolicyStore(); aps != nil {
 		httpServer.SetAssurancePolicyStore(aps)
 	}
+	if brps := storageManager.GetBlastRadiusPolicyStore(); brps != nil {
+		httpServer.SetBlastRadiusPolicyStore(brps)
+	}
 	if tcs := storageManager.GetTenantCrossingStore(); tcs != nil {
 		httpServer.SetTenantCrossingStore(tcs)
 	}

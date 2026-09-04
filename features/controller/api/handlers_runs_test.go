@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,8 +31,39 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "modernc.org/sqlite"
 )
+
+// testBlastRadiusPolicyStore is a real in-memory BlastRadiusPolicyStore (Issue #3698),
+// mirroring testAssurancePolicyStore's shape (assurance_resolve_test.go) — a genuine
+// implementation of the interface, not a mock.
+type testBlastRadiusPolicyStore struct {
+	mu       sync.RWMutex
+	policies map[string]*business.BlastRadiusPolicy
+}
+
+func newTestBlastRadiusPolicyStore() *testBlastRadiusPolicyStore {
+	return &testBlastRadiusPolicyStore{policies: make(map[string]*business.BlastRadiusPolicy)}
+}
+
+func (s *testBlastRadiusPolicyStore) GetPolicy(_ context.Context, tenantID string) (*business.BlastRadiusPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.policies[tenantID]; ok {
+		cp := *p
+		return &cp, nil
+	}
+	return &business.BlastRadiusPolicy{TenantID: tenantID, MaxTargets: nil}, nil
+}
+
+func (s *testBlastRadiusPolicyStore) SetPolicy(_ context.Context, p *business.BlastRadiusPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *p
+	s.policies[p.TenantID] = &cp
+	return nil
+}
 
 // withPrincipal injects a principal + its tenant into the request context exactly
 // as authenticationMiddleware does for an mTLS admin cert (Issue #1990).
@@ -856,6 +889,153 @@ func TestPostRunCommand_MissingContent_ReturnsBadRequest(t *testing.T) {
 		"shell":  "bash",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ---- [REQUIRED TEST] Blast-radius bound (Issue #3698) -----------------------
+
+// TestPostRunCommand_ExceedsBlastRadius_Rejected is the primary [REQUIRED TEST]:
+// a validly signed payload — correct signature, correct payload-signing credential,
+// everything else legitimate — whose resolved Targets list exceeds the caller's
+// tenant bound is rejected at submission. The signature being good is the whole
+// point: a bound that only stops malformed or unsigned requests is not a bound.
+func TestPostRunCommand_ExceedsBlastRadius_Rejected(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "blast-steward-1", TenantID: "test-tenant"},
+		{ID: "blast-steward-2", TenantID: "test-tenant"},
+		{ID: "blast-steward-3", TenantID: "test-tenant"},
+	}
+	server, _, queue := setupRunServer(t, stewards)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "test-tenant", MaxTargets: ptrInt(2),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"test-tenant": {"test-tenant"},
+	}))
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	targets := []string{"blast-steward-1", "blast-steward-2", "blast-steward-3"}
+	rawContent := []byte("#!/bin/bash\necho hi")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a validly signed payload over the tenant's blast-radius bound must be hard rejected; body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "BLAST_RADIUS_EXCEEDED")
+
+	for _, id := range targets {
+		assert.Empty(t, queue.PeekForDevice(id), "a rejected-for-blast-radius dispatch must never reach the execution queue for %s", id)
+	}
+}
+
+// TestPostRunCommand_ChildTenantNarrowerOverride_Enforced is the second [REQUIRED
+// TEST]: a child tenant's narrower override is enforced even when the parent
+// tenant's default would have allowed the request — direct proof of root-to-leaf
+// inheritance, not just the raw cap.
+func TestPostRunCommand_ChildTenantNarrowerOverride_Enforced(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "child-steward-1", TenantID: "root/child"},
+		{ID: "child-steward-2", TenantID: "root/child"},
+	}
+	server, _, queue := setupRunServer(t, stewards)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	// Parent ("root") allows up to 10 targets; child narrows it to 1.
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root", MaxTargets: ptrInt(10),
+	}))
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root/child", MaxTargets: ptrInt(1),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"root/child": {"root", "root/child"},
+	}))
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "root/child")
+	// Two targets: within the parent's default of 10, but over the child's own
+	// override of 1 — this must be rejected only if the child's narrower value
+	// (not the parent's) actually governs resolution.
+	targets := []string{"child-steward-1", "child-steward-2"}
+	rawContent := []byte("echo hi")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"the child tenant's narrower override must be enforced even though the parent's default would allow this request; body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "BLAST_RADIUS_EXCEEDED")
+	assert.Empty(t, queue.PeekForDevice("child-steward-1"))
+}
+
+// TestPostRunCommand_RejectedBlastRadius_AuditedAsBoundViolation is the third
+// [REQUIRED TEST]: a rejected-for-blast-radius request still produces an audit
+// record naming it as a bound violation, not silently dropped from the trail.
+func TestPostRunCommand_RejectedBlastRadius_AuditedAsBoundViolation(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "audit-steward-1", TenantID: "test-tenant"},
+		{ID: "audit-steward-2", TenantID: "test-tenant"},
+	}
+	server, _, _ := setupRunServer(t, stewards)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "test-tenant", MaxTargets: ptrInt(1),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"test-tenant": {"test-tenant"},
+	}))
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	targets := []string{"audit-steward-1", "audit-steward-2"}
+	rawContent := []byte("echo audit-me")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+
+	require.NoError(t, server.auditManager.Flush(context.Background()))
+	entries, err := server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: "test-tenant"})
+	require.NoError(t, err)
+
+	var found *business.AuditEntry
+	for _, e := range entries {
+		if e.Action == "operator_payload.dispatch" {
+			found = e
+			break
+		}
+	}
+	require.NotNil(t, found, "a rejected-for-blast-radius dispatch must still produce an audit record")
+	assert.Equal(t, business.AuditResultDenied, found.Result, "the audit record must name this a denial, not a silent no-op")
+	require.NotNil(t, found.Details)
+	reason, _ := found.Details["rejection_reason"].(string)
+	assert.Contains(t, reason, "exceeds tenant bound", "the record must name the rejection as a blast-radius bound violation")
+	// The payload is identified by digest, never stored verbatim: an investigator
+	// holding a candidate payload can confirm it is the one dispatched, while an
+	// operator payload carrying an inline credential never reaches the audit store.
+	wantDigest := sha256.Sum256([]byte("echo audit-me"))
+	assert.Equal(t, hex.EncodeToString(wantDigest[:]), found.Details["payload_sha256"],
+		"the audit record must identify the payload by its SHA-256 digest")
+	assert.Equal(t, "13", found.Details["payload_bytes"],
+		"the audit record must carry the payload byte length")
+	assert.NotContains(t, found.Details, "payload",
+		"the audit record must never carry the literal payload text")
 }
 
 // ---- Tenant isolation (IDOR prevention) -------------------------------------

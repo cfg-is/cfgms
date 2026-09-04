@@ -48,6 +48,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -56,8 +57,10 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // operatorPayloadSignNonceBytes is the raw byte length of the server-generated nonce
@@ -229,6 +232,26 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 	targets := make([]string, 0, len(results))
 	for _, res := range results {
 		targets = append(targets, res.ID)
+	}
+
+	// Blast-radius bound (Issue #3698): a hard reject at admission for the WebAuthn
+	// path too. No execution endpoint yet consumes a WebAuthn-signed envelope (S8 is
+	// the future dispatch story), so this ceremony's begin call — the point where
+	// Targets is resolved and frozen into the envelope that gets signed — is the
+	// earliest and only place today to enforce it: no signing credential exists yet
+	// at this point (the operator has not authenticated the assertion), so the audit
+	// record for a rejection here carries no credential_id, which is expected and
+	// correct — an operator attempting to exceed the bound is itself the signal,
+	// regardless of which passkey they would have used.
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if maxTargets := s.resolveMaxTargetsForTenant(r.Context(), tenantID); len(targets) > maxTargets {
+		s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(req.Content),
+			"", targets, "", business.AuditResultDenied,
+			fmt.Sprintf("resolved target count %d exceeds tenant bound of %d", len(targets), maxTargets))
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			fmt.Sprintf("resolved target count %d exceeds the maximum of %d targets allowed for this tenant", len(targets), maxTargets),
+			"BLAST_RADIUS_EXCEEDED")
+		return
 	}
 
 	nonce, err := generateOperatorPayloadSignNonce()
@@ -483,6 +506,14 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		"session_id", logging.SanitizeLogValue(sessID),
 		"credential_id", logging.SanitizeLogValue(string(credential.ID)),
 		"source_ip", logging.SanitizeLogValue(sourceIP))
+
+	// Audit the completed sign (Issue #3698): the blast-radius bound already gated
+	// Targets at begin, so a signed envelope reaching this point has always passed it —
+	// this record is the "accepted" half of the dispatch trail for the WebAuthn path,
+	// now naming the concrete credential the begin-time rejection could not.
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(pending.envelope.Content),
+		hex.EncodeToString(credential.ID), pending.envelope.Targets, "", business.AuditResultSuccess, "")
 
 	s.writeResponse(w, http.StatusOK, OperatorPayloadSignFinishResponse{
 		Envelope:          toSignedEnvelopeView(pending.envelope),

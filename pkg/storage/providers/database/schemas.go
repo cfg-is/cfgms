@@ -1027,6 +1027,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateBlastRadiusPolicyOverridesTable(ctx, db); err != nil {
+		return err
+	}
+
 	if err := s.CreateAlertStatesTable(ctx, db); err != nil {
 		return err
 	}
@@ -1053,6 +1057,21 @@ func (s DatabaseSchemas) CreateAssurancePolicyOverridesTable(ctx context.Context
 		"CREATE INDEX IF NOT EXISTS idx_assurance_policy_overrides_tenant_id ON assurance_policy_overrides(tenant_id);",
 	); err != nil {
 		return fmt.Errorf("failed to create assurance_policy_overrides index: %w", err)
+	}
+	return nil
+}
+
+// CreateBlastRadiusPolicyOverridesTable creates the blast_radius_policy_overrides
+// table (Issue #3698). Each row holds one per-tenant MaxTargets override; a
+// SetPolicy call upserts the tenant's single row.
+func (s DatabaseSchemas) CreateBlastRadiusPolicyOverridesTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS blast_radius_policy_overrides (
+			tenant_id   TEXT PRIMARY KEY,
+			max_targets INTEGER
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create blast_radius_policy_overrides table: %w", err)
 	}
 	return nil
 }

@@ -866,6 +866,13 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_assurance_policy_overrides_tenant_id ON assurance_policy_overrides(tenant_id)`,
 
+		// Per-tenant blast-radius overrides (Issue #3698). One row per tenant;
+		// SetPolicy upserts. Absent rows mean no override at that tenant.
+		`CREATE TABLE IF NOT EXISTS blast_radius_policy_overrides (
+			tenant_id   TEXT PRIMARY KEY,
+			max_targets INTEGER
+		)`,
+
 		// Registration-refresh challenge nonces (Issue #3755, ADR-031 amendment to
 		// ADR-011). GetAndConsumeNonce deletes the row it reads via DELETE ... RETURNING.
 		`CREATE TABLE IF NOT EXISTS refresh_nonces (

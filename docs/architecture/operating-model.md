@@ -226,6 +226,44 @@ public key (bounded by `webauthn:register`'s existing `AssuranceStrong` gate, an
 legitimate operator as an unrecognized credential the next time they list their passkeys), which
 is a shallower failure than silently retaining a credential capable of unattended reuse.
 
+**Blast-radius bound and audit trail are the compensating controls for the accepted
+UI-trust gap (Issue #3698).** Neither residual-risk profile above defends against a
+compromised controller showing an operator one payload while collecting a signature over
+another — that gap is an accepted non-goal of the operator-signed-payload epic, not
+something either credential path closes. Two server-side controls carry that accepted
+risk instead, and both are enforced, not advisory:
+
+- **A per-tenant maximum-target-count**, resolved root-to-leaf via the identical
+  override-walk pattern the assurance-policy per-tenant overrides already use
+  (`resolveAssuranceRequirement`/`resolveAssuranceRequirementForPath`,
+  `features/controller/api/handlers_assurance_policy.go`): a parent tenant's bound is
+  the default, and a child tenant can narrow it by setting its own
+  (`business.BlastRadiusPolicyStore`, `resolveMaxTargetsForTenant`,
+  `features/controller/api/handlers_runs.go`). It is a flat count, deliberately never a
+  percentage of fleet size — a percentage grows exactly as the fleet gets more
+  dangerous, so 10% of a 40,000-host fleet is still 4,000 hosts — and deliberately not a
+  single global number either, since a bound sized for a 20-host tenant is wrong for a
+  20,000-host tenant. This is the permanent, deliberately chosen enforced primitive for
+  the epic, not a placeholder for a future percentage-based or more elaborate policy
+  engine. The bound is checked after target resolution and before dispatch, for both the
+  mTLS path (`POST /api/v1/runs/command`) and the WebAuthn path
+  (`POST /api/v1/operator-payload/sign/begin`), and a request whose resolved target list
+  exceeds it is hard rejected at admission — never a warning the operator can click
+  through.
+- **Every operator payload dispatch is audited**, accepted or rejected, via
+  `audit.NewEventBuilder` (`emitOperatorPayloadDispatchAudit`,
+  `features/controller/api/handlers_runs.go`), recording the payload's SHA-256 digest and
+  byte length (never its literal text — an operator payload is arbitrary script text and
+  routinely carries credentials inline, so storing it verbatim would violate the rule
+  against writing secrets to disk; a digest still lets an investigator holding a candidate
+  payload prove or disprove that it is the one dispatched), the
+  resolved target list using each steward's cfg-declared resource id (never a live
+  hostname), the signing credential's identifier (the X.509 certificate serial or the
+  WebAuthn credential id), and the caller identity. A rejected-for-exceeding-the-bound
+  attempt is itself audited as a bound violation, not silently dropped — an operator
+  attempting to exceed the bound is a signal worth keeping in the trail, not a benign
+  no-op.
+
 ### Outpost (Future)
 
 Regional infrastructure component deployed at site level. Two roles:
