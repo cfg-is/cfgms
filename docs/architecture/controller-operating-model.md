@@ -638,6 +638,65 @@ The controller can send commands to stewards over the gRPC control plane service
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 
+#### Cluster Command Delivery — Routing Table + Internal RPC + Outbox (ADR-031 Decision 3, Issue #3764)
+
+A cluster deployment is any-node: the controller node that decides to dispatch a
+command to a steward is not necessarily the node holding that steward's live
+control-plane connection. Two primitives compose to make dispatch safe regardless
+of which node that is:
+
+- **Shared steward-routing table** (`pkg/storage/interfaces/business.RoutingStore`,
+  `business.RoutingStaleAfter` = 90s). Every node records, on each steward connect,
+  which node currently holds that steward's connection
+  (`RecordConnection(ctx, stewardID, nodeID)`), refreshed by the same connect event
+  that populates the node-local registry — there is no polling loop. A record older
+  than the staleness window is not trusted and is treated as absent.
+- **Internal controller-to-controller delivery RPC**
+  (`pkg/controlplane/internaldelivery`, `cfgms.clusterdelivery.DeliveryService`) —
+  the first inter-node RPC other than Raft's own transport. mTLS-secured on a
+  dedicated internal listener (`InternalDeliveryListenAddr`), using the same
+  certificate infrastructure as the Raft internal listener but its own port —
+  gRPC needs to own its listener's connections directly, so it cannot share
+  Raft's plain-HTTP listener. Node A calls `DeliverCommand` on node B to ask B to
+  deliver locally; B returns a normal `DeliverCommandResponse` with
+  `not_connected = true` if the steward is not connected there at that instant —
+  never a gRPC error — since "not here right now" is an expected outcome the
+  caller falls back on, not a failure.
+
+`pkg/controlplane/internaldelivery.ClusterAwareSender` wraps the node-local
+`ControlPlaneProvider` (the grpc/memory `SendCommand`/`FanOutCommand`
+implementations) with this composition: try local delivery first; on a
+"not connected here" result (`controlplane/interfaces.ErrStewardNotConnected`),
+look up the routing table, and if a peer node claims the steward, forward via the
+internal delivery RPC. Any miss along that chain — no routing entry, the routing
+table naming this node itself, an unreachable peer, or the peer's own
+`not_connected` response — surfaces the *original* local error to the caller,
+unchanged. The
+dispatcher (`features/controller/dispatcher`) and command publisher
+(`features/controller/commands.Publisher`) are both constructed against this
+wrapped sender in cluster mode, so every existing dispatch call site becomes
+cluster-safe without a call-site change.
+
+This RPC is a fast path, not a substitute for the durable outbox (Issue #3757,
+ADR-031 Decision 2): the outbox row is the guarantee underneath it. A command
+that fails every fast-path attempt (no routing entry, peer unreachable, peer
+itself lost the connection since its last routing-table refresh) stays `pending`
+in `CommandStore` and is drained the moment the steward next connects to any
+node — `features/controller/service.PendingDeliveryDrainHook`, wired as an
+on-connect hook, calls `CommandStore.ListPendingDeliveries` keyed by the
+mTLS-authenticated connecting steward's own identity (never a caller-supplied
+ID) and republishes each pending row through the normal publish path.
+
+**Retired by this mechanism:** the `GetAllStewardsCluster`/`GetAllStewards` split
+(`features/controller/service.ControllerService`) — the former had to stay
+node-local because dispatching to a steward it didn't know about locally simply
+failed, while the fleet-wide method was explicitly documented "NOT for
+dispatch". `ControllerService.ListFleetStewards` is now the single fleet source
+for every consumer, including dispatch: it reads durable storage directly on
+every call (no polling cache, no populate-lag window) and dispatch safety no
+longer depends on which source produced the steward ID at all — it is a property
+of `ClusterAwareSender`, not of the listing method.
+
 #### Outbound Command Contract — Fencing Term (#3390, ADR-029 Decision 5)
 
 The `Command` proto message carries a `term` field (field 8, `uint64`). Commands

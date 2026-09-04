@@ -477,7 +477,7 @@ func (p *Provider) deliverCommand(cmd *types.SignedCommand, stewardID string) er
 
 	client, ok := bus.lookupClient(stewardID)
 	if !ok {
-		return fmt.Errorf("steward %s not connected", stewardID)
+		return fmt.Errorf("steward %s not connected: %w", stewardID, interfaces.ErrStewardNotConnected)
 	}
 	client.receiveCommand(cloneSignedCommand(cmd))
 	return nil

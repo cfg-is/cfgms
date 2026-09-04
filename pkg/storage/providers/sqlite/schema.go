@@ -855,6 +855,17 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_leases_expires_at ON cfgms_leases(expires_at)`,
 
+		// Shared steward-routing table (ADR-031 Decision 3, Issue #3764): which
+		// controller node currently holds a steward's control-plane connection.
+		// updated_at is the liveness timestamp business.RoutingStore.LookupNode
+		// evaluates against business.RoutingStaleAfter.
+		`CREATE TABLE IF NOT EXISTS cfgms_routing (
+			steward_id TEXT PRIMARY KEY,
+			node_id    TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_routing_node_id ON cfgms_routing(node_id)`,
+
 		// Per-tenant assurance-policy overrides (ADR-021, Issue #2845).
 		// Each row holds one per-permission override. Absent rows mean global defaults apply.
 		`CREATE TABLE IF NOT EXISTS assurance_policy_overrides (

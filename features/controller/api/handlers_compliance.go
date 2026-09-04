@@ -350,7 +350,7 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 
 	// Collect steward IDs while applying tenant scoping from the steward registry.
 	stewardsByTenant := make(map[string][]string) // tenantID → steward IDs
-	for _, st := range s.controllerService.GetAllStewards() {
+	for _, st := range s.controllerService.ListFleetStewards(r.Context()) {
 		if callerTenant != "" {
 			sameTenant := st.TenantID == callerTenant
 			descendantTenant := strings.HasPrefix(st.TenantID, callerTenant+"/")

@@ -343,11 +343,12 @@ func TestHandleListAllConnections_DisconnectedStewardNotIncluded(t *testing.T) {
 }
 
 // TestHandleListAllConnections_PeerAttachedSteward proves the tenant-scoping set that
-// gates the connection list is now built from the cluster-wide steward view (Issue #3495).
-// A steward that only exists in durable fleet storage — registered through a peer
-// controller node, so absent from this node's live registry — was previously missing from
-// allowedIDs, and its connection to this node was filtered out of the response even though
-// the caller's tenant owns it. After the cluster inventory refreshes it is allowed through.
+// gates the connection list is now built from the fleet-wide steward view (Issue #3495,
+// ADR-031 Decision 3 / Issue #3764). A steward that only exists in durable fleet storage
+// — registered through a peer controller node, so absent from this node's live registry —
+// was previously missing from allowedIDs, and its connection to this node was filtered out
+// of the response even though the caller's tenant owns it. ListFleetStewards reads durable
+// storage directly, so it is allowed through immediately, with no refresh step.
 func TestHandleListAllConnections_PeerAttachedSteward(t *testing.T) {
 	ctx := context.Background()
 
@@ -399,23 +400,11 @@ func TestHandleListAllConnections_PeerAttachedSteward(t *testing.T) {
 		return resp.Data.Connections
 	}
 
-	// Before any cluster refresh the handler degrades to the node-local view, which does
-	// not know this steward — the pre-story behaviour.
-	assert.Empty(t, listConnections(t),
-		"before the cluster inventory is populated the node-local fallback hides the peer steward")
-
-	refreshCtx, cancel := context.WithCancel(ctx)
-	t.Cleanup(cancel)
-	// StartClusterRefresh refreshes immediately; the long interval keeps the ticker quiet.
-	peerSvc.StartClusterRefresh(refreshCtx, 24*time.Hour)
-
-	require.Eventually(t, func() bool {
-		for _, c := range listConnections(t) {
-			if c.StewardID == "peer-conn" {
-				return true
-			}
+	found := false
+	for _, c := range listConnections(t) {
+		if c.StewardID == "peer-conn" {
+			found = true
 		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond,
-		"peer steward connection must appear once the cluster inventory refreshed")
+	}
+	require.True(t, found, "peer steward connection must appear immediately")
 }

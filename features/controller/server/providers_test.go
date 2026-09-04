@@ -46,3 +46,13 @@ func requireInMemoryUpgradeStore(t *testing.T, store business.UpgradeStore, msgA
 	t.Helper()
 	require.IsType(t, (*memoryprovider.UpgradeStore)(nil), store, msgAndArgs...)
 }
+
+// newFlatFileRoutingStore returns a real flat-file RoutingStore rooted at a
+// t.TempDir(). The concrete flatfile import is confined to this allowlisted
+// */providers_test.go path (see scripts/check-providers.sh).
+func newFlatFileRoutingStore(t *testing.T) business.RoutingStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
+	require.NoError(t, err, "creating flat-file routing store")
+	return st
+}

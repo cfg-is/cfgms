@@ -55,14 +55,6 @@ type ControllerService struct {
 	// Tags are controller-owned and survive DNA refreshes.  Wired in via
 	// SetTagStore following the late-wiring idiom; nil until wired.
 	tagStore *tagstore.Store
-
-	// clusterMu guards clusterStewards. Separate from mu so reads of the
-	// cluster inventory never contend with the live-registry path.
-	clusterMu sync.RWMutex
-	// clusterStewards is the background-refreshed cluster-wide steward
-	// inventory (Issue #3494). Nil until the first refresh completes.
-	// Populated by refreshClusterInventory; read by GetAllStewardsCluster.
-	clusterStewards map[string]*StewardInfo
 }
 
 // StewardInfo holds connection/heartbeat state for a registered steward.
@@ -82,8 +74,8 @@ type StewardInfo struct {
 	Hidden bool
 
 	// Tags holds the controller-assigned tags for this steward (Issue #3494).
-	// Populated only by GetAllStewardsCluster's background refresh; never by
-	// GetAllStewards or GetStewardInfo, so existing callers see nil.
+	// Populated only by ListFleetStewards; never by GetStewardInfo, so
+	// existing callers of the latter see nil.
 	Tags []string
 }
 
@@ -722,8 +714,7 @@ func (s *ControllerService) GetStewardCount() int {
 // GetStewardInfo returns information about a specific steward from the
 // node-local in-memory registry. It only knows stewards that registered or
 // reconnected through this controller node; stewards attached to peer nodes
-// in a cluster are invisible here. Dispatch-safe: a steward found by this
-// method is reachable on this node. See GetAllStewardsCluster for the
+// in a cluster are invisible here. See ListFleetStewards for the
 // cluster-wide read.
 //
 // The returned value is a copy-on-read: the DNA pointer is deep-cloned and
@@ -1292,31 +1283,26 @@ func (s *ControllerService) TagStore() *tagstore.Store {
 	return s.tagStore
 }
 
-// GetAllStewards returns a list of all stewards in the node-local in-memory
-// registry. It only reflects stewards that registered or reconnected through
-// this controller node; stewards attached to peer nodes in a cluster are
-// invisible here. Dispatch-safe: every steward returned by this method is
-// reachable on this node via the local control-plane registry. Callers that
-// need the cluster-wide inventory — for reporting, auditing, or inventory
-// queries — should use GetAllStewardsCluster instead.
+// liveStewardsSnapshot returns a copy-on-read snapshot of every steward
+// currently connected to this node's local control-plane registry. DNA is
+// deep-cloned and Metrics is shallow-copied under the read lock, so callers
+// can safely read the results concurrently with SyncDNA writes without
+// holding a reference into the live registry.
 //
-// Each entry is a copy-on-read: DNA is deep-cloned and Metrics is
-// shallow-copied under the read lock, so callers can safely read the results
-// concurrently with SyncDNA writes without holding a reference into the live
-// registry. The Tags field is always nil; use GetAllStewardsCluster to
-// include controller-assigned tags.
-func (s *ControllerService) GetAllStewards() []*StewardInfo {
+// This is a building block for ListFleetStewards, not a fleet source on its
+// own: a steward connected to a peer node in a cluster is invisible here.
+func (s *ControllerService) liveStewardsSnapshot() map[string]*StewardInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	stewards := make([]*StewardInfo, 0, len(s.stewards))
-	for _, info := range s.stewards {
+	snap := make(map[string]*StewardInfo, len(s.stewards))
+	for id, info := range s.stewards {
 		copied := *info
 		copied.DNA = cloneDNA(info.DNA)
 		copied.Metrics = copyMetrics(info.Metrics)
-		stewards = append(stewards, &copied)
+		snap[id] = &copied
 	}
-	return stewards
+	return snap
 }
 
 // findStewardByDNAId finds an existing steward by DNA ID and returns a
@@ -1404,114 +1390,46 @@ func clusterTenantInScope(callerTenant, resourceTenant string) bool {
 		strings.HasPrefix(resourceTenant, callerTenant+"/")
 }
 
-// GetAllStewardsCluster returns a cluster-wide inventory of every steward known
-// to the durable backend — identity, status, DNA-fragment attributes, and
-// controller tags — refreshed on an ongoing basis by the background goroutine
-// started by StartClusterRefresh.
+// ListFleetStewards returns the cluster-safe-by-construction fleet source
+// (ADR-031 Decision 3, Issue #3764): every steward known to the durable
+// backend — identity, status, DNA-fragment attributes, and controller tags —
+// merged with this node's live control-plane registry.
 //
-// This method performs zero per-call durable-store I/O. It reads from an
-// in-memory cache populated by refreshClusterInventory and returns nil before
-// the first refresh completes.
+// It replaces the former GetAllStewardsCluster/GetAllStewards split. Under
+// that split, GetAllStewards was dispatch-safe but node-local-only, and
+// GetAllStewardsCluster was fleet-wide but NOT dispatch-safe (sending to a
+// peer-node steward from its list failed with "steward not connected").
+// Callers no longer have to choose: dispatching to any steward in this list
+// is safe regardless of which controller node currently holds its
+// connection, because SendCommand/FanOutCommand — via
+// pkg/controlplane/internaldelivery.ClusterAwareSender, wired into the
+// dispatcher and command publisher in cluster mode — resolve node locality
+// themselves through the shared routing table before falling back to the
+// durable outbox (Issue #3757).
 //
-// NOT for dispatch: the set of stewards returned here may include stewards
-// attached to peer controller nodes. Sending a command to a steward from this
-// list via the local control plane will fail with "steward not connected" for
-// any steward not attached to this node. Use GetAllStewards for dispatch.
-//
-// Tenant scoping: a context carrying a TenantID key limits the result to
-// stewards within that tenant's subtree. An unscoped (admin) context returns
-// the full fleet.
-func (s *ControllerService) GetAllStewardsCluster(ctx context.Context) []*StewardInfo {
-	callerTenant, _ := ctx.Value(ctxkeys.TenantID).(string)
-
-	s.clusterMu.RLock()
-	defer s.clusterMu.RUnlock()
-
-	if s.clusterStewards == nil {
-		return nil
-	}
-
-	result := make([]*StewardInfo, 0, len(s.clusterStewards))
-	for _, info := range s.clusterStewards {
-		if !clusterTenantInScope(callerTenant, info.TenantID) {
-			continue
-		}
-		copied := *info
-		copied.DNA = cloneDNA(info.DNA)
-		copied.Metrics = copyMetrics(info.Metrics)
-		if len(info.Tags) > 0 {
-			tagsCopy := make([]string, len(info.Tags))
-			copy(tagsCopy, info.Tags)
-			copied.Tags = tagsCopy
-		}
-		result = append(result, &copied)
-	}
-	return result
-}
-
-// StartClusterRefresh starts a background goroutine that periodically calls
-// refreshClusterInventory to maintain the cluster-wide steward inventory.
-// The goroutine stops when ctx is cancelled.
-//
-// Interval guidance: 30 s balances inventory freshness (a steward that
-// registers on a peer becomes visible within one interval) against backend
-// load at 50 k-steward scale. Wire this during server startup, after
-// SetStewardStore and SetTagStore have been called.
-func (s *ControllerService) StartClusterRefresh(ctx context.Context, interval time.Duration) {
-	go func() {
-		s.refreshClusterInventory(ctx)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.refreshClusterInventory(ctx)
-			}
-		}
-	}()
-}
-
-// refreshClusterInventory rebuilds the cluster-wide steward inventory by
-// reading from all available durable sources (dnaStorage, stewardStore,
-// tagStore) and merging with the current live registry.
+// Reads durable storage directly on every call, the same pattern
+// POST /api/v1/fleet/resolve and `steward list` already use, rather than the
+// retired StartClusterRefresh/refreshClusterInventory in-memory cache (which
+// had a populate-lag window before its first tick and could serve minutes-old
+// data between ticks).
 //
 // Live-takes-precedence rule: a steward actively connected to this node is
 // never overwritten by a possibly stale durable read for the same ID.
 //
-// Degradation: if a per-device DNA lookup fails, the steward is preserved in
-// the inventory with its previously-known state (from the prior refresh) so
-// that a transient I/O error does not silently remove fleet members from the
-// cluster view. A list-level failure (ListDeviceTenants, ListAllDeviceIDs,
-// ListStewards) degrades the entire class of devices that source would supply;
-// devices known from other sources or the prior inventory are still included.
-func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
-	// Copy the previous inventory as a degraded-baseline fallback. Entries
-	// that cannot be refreshed due to per-device I/O failures stay here.
-	s.clusterMu.RLock()
-	prev := s.clusterStewards
-	s.clusterMu.RUnlock()
+// Degradation: a list-level failure (ListDeviceTenants, ListAllDeviceIDs,
+// ListStewards) degrades the entire class of devices that source would
+// supply; devices known from other sources are still included. A per-device
+// DNA read failure leaves that device's DNA as an empty stub for this call
+// rather than serving a stale cached copy.
+//
+// Tenant scoping: a context carrying a TenantID key limits the result to
+// stewards within that tenant's subtree. An unscoped (admin) context returns
+// the full fleet.
+func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInfo {
+	callerTenant, _ := ctx.Value(ctxkeys.TenantID).(string)
 
-	// Snapshot the current live registry. Live entries take precedence over
-	// any durable read for the same steward ID.
-	s.mu.RLock()
-	liveSnap := make(map[string]*StewardInfo, len(s.stewards))
-	for id, info := range s.stewards {
-		copied := *info
-		copied.DNA = cloneDNA(info.DNA)
-		copied.Metrics = copyMetrics(info.Metrics)
-		liveSnap[id] = &copied
-	}
-	s.mu.RUnlock()
+	liveSnap := s.liveStewardsSnapshot()
 
-	// Track whether at least one list operation succeeded. When no durable
-	// stores are configured there is nothing to enumerate, so the trivial
-	// case (live stewards only) counts as succeeded.
-	listSucceeded := s.dnaStorage == nil && s.stewardStore == nil
-
-	// Load all device IDs and tenant mappings from DNA storage.
-	//
 	// tenantMapReadable records whether the authoritative device_tenant mapping
 	// was actually read. It gates the dna_history tenant fallback below: that
 	// fallback is only sound as a "device predates the device_tenant migration"
@@ -1525,21 +1443,19 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 	if s.dnaStorage != nil {
 		tm, tenantErr := s.dnaStorage.ListDeviceTenants(ctx)
 		if tenantErr != nil {
-			s.logger.Warn("Cluster refresh: failed to list device tenants; durable tenant resolution limited to the fleet registry",
+			s.logger.Warn("ListFleetStewards: failed to list device tenants; durable tenant resolution limited to the fleet registry",
 				"error", logging.SanitizeLogValue(tenantErr.Error()))
 		} else {
 			tenantMap = tm
 			tenantMapReadable = true
-			listSucceeded = true
 		}
 
 		ids, idsErr := s.dnaStorage.ListAllDeviceIDs(ctx)
 		if idsErr != nil {
-			s.logger.Warn("Cluster refresh: failed to list device IDs",
+			s.logger.Warn("ListFleetStewards: failed to list device IDs",
 				"error", logging.SanitizeLogValue(idsErr.Error()))
 		} else {
 			deviceIDs = ids
-			listSucceeded = true
 		}
 	}
 
@@ -1548,11 +1464,10 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 	if s.stewardStore != nil {
 		recs, listErr := s.stewardStore.ListStewards(ctx)
 		if listErr != nil {
-			s.logger.Warn("Cluster refresh: failed to list stewards from durable store",
+			s.logger.Warn("ListFleetStewards: failed to list stewards from durable store",
 				"error", logging.SanitizeLogValue(listErr.Error()))
 		} else {
 			stewardStoreRecords = recs
-			listSucceeded = true
 		}
 	}
 
@@ -1569,17 +1484,20 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 		allDevices[rec.ID] = struct{}{}
 		stewardByID[rec.ID] = rec
 	}
-	// Always include every live steward; they belong in the cluster inventory
-	// even when no durable record exists yet (e.g. newly registered).
+	// Always include every live steward; they belong in the fleet even when no
+	// durable record exists yet (e.g. newly registered).
 	for id := range liveSnap {
 		allDevices[id] = struct{}{}
 	}
 
-	inventory := make(map[string]*StewardInfo, len(allDevices))
+	result := make([]*StewardInfo, 0, len(allDevices))
 
 	for deviceID := range allDevices {
 		// Live entry wins unconditionally — augment with tags and move on.
 		if live, ok := liveSnap[deviceID]; ok {
+			if !clusterTenantInScope(callerTenant, live.TenantID) {
+				continue
+			}
 			entry := *live
 			if s.tagStore != nil {
 				tags := s.tagStore.TagsFor(deviceID)
@@ -1589,7 +1507,7 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 					entry.Tags = tagsCopy
 				}
 			}
-			inventory[deviceID] = &entry
+			result = append(result, &entry)
 			continue
 		}
 
@@ -1604,15 +1522,13 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 		var storedAt time.Time
 		var status string
 		var dnaRecordTenant string
-		dnaFailed := false
 
 		if s.dnaStorage != nil {
 			record, err := s.dnaStorage.GetLatestByDeviceID(ctx, deviceID)
 			if err != nil {
-				s.logger.Warn("Cluster refresh: failed to load DNA for device; preserving last known state",
+				s.logger.Warn("ListFleetStewards: failed to load DNA for device; reporting an empty DNA stub for this call",
 					"device_id", logging.SanitizeLogValue(deviceID),
 					"error", logging.SanitizeLogValue(err.Error()))
-				dnaFailed = true
 			} else if record != nil {
 				dna = record.DNA
 				storedAt = record.StoredAt
@@ -1648,37 +1564,17 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 			tenantID = dnaRecordTenant
 		}
 
-		// No authoritative tenant. Fall back to the previous inventory entry so a
-		// transient failure of either authoritative source (per-device DNA read,
-		// or the device_tenant list) does not drop the device from the cluster
-		// view. The retained entry carries the tenant established by the last
-		// refresh that could read an authoritative source; it is never a tenant
-		// guessed from dna_history during this refresh.
-		if tenantID == "" && (dnaFailed || !tenantMapReadable) {
-			if prevEntry, ok := prev[deviceID]; ok {
-				prevCopy := *prevEntry
-				prevCopy.DNA = cloneDNA(prevEntry.DNA)
-				prevCopy.Metrics = copyMetrics(prevEntry.Metrics)
-				inventory[deviceID] = &prevCopy
-			}
+		if tenantID == "" {
+			s.logger.Warn("ListFleetStewards: skipping device with unresolvable tenant",
+				"device_id", logging.SanitizeLogValue(deviceID))
 			continue
 		}
-
-		if tenantID == "" {
-			s.logger.Warn("Cluster refresh: skipping device with unresolvable tenant",
-				"device_id", logging.SanitizeLogValue(deviceID))
+		if !clusterTenantInScope(callerTenant, tenantID) {
 			continue
 		}
 
 		if dna == nil {
 			dna = &common.DNA{Id: deviceID}
-		}
-		// If a DNA lookup failed but we have a tenant from another source, preserve
-		// the previously known DNA rather than replacing it with a stub.
-		if dnaFailed {
-			if prevEntry, ok := prev[deviceID]; ok && prevEntry.DNA != nil {
-				dna = cloneDNA(prevEntry.DNA)
-			}
 		}
 
 		entry := &StewardInfo{
@@ -1697,19 +1593,8 @@ func (s *ControllerService) refreshClusterInventory(ctx context.Context) {
 				entry.Tags = tagsCopy
 			}
 		}
-		inventory[deviceID] = entry
+		result = append(result, entry)
 	}
 
-	// If all durable list operations failed AND there are no live stewards, the
-	// refresh would blank the cluster inventory. Preserve the previous inventory
-	// instead so a transient storage outage does not silently remove fleet members
-	// from the cluster-aware view. (A legitimately empty fleet always has at least
-	// one successful list call that returns empty, so listSucceeded is true.)
-	if !listSucceeded && len(inventory) == 0 && len(prev) > 0 {
-		return
-	}
-
-	s.clusterMu.Lock()
-	s.clusterStewards = inventory
-	s.clusterMu.Unlock()
+	return result
 }

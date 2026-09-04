@@ -428,6 +428,21 @@ func stringMapToInterfaceMap(m map[string]string) map[string]interface{} {
 	return result
 }
 
+// SignedCommandToProto exports signedCommandToProto's wire-format conversion
+// for pkg/controlplane/internaldelivery (Issue #3764), which needs to encode a
+// SignedCommand the same way before forwarding it to a peer controller node —
+// the peer's local SendCommand path decodes it with SignedCommandFromProto and
+// must see byte-identical framing to what a directly connected steward would.
+func SignedCommandToProto(sc *types.SignedCommand) *transportpb.Command {
+	return signedCommandToProto(sc)
+}
+
+// SignedCommandFromProto exports signedCommandFromProto for
+// pkg/controlplane/internaldelivery (Issue #3764); see SignedCommandToProto.
+func SignedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
+	return signedCommandFromProto(pb)
+}
+
 // --- Timestamp helpers ---
 
 func protoTimestampToTime(ts *timestamppb.Timestamp) time.Time {

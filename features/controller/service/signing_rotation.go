@@ -14,6 +14,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -67,9 +68,14 @@ func (s *SigningRotationService) SetControllerService(cs *ControllerService) {
 }
 
 // Rotate generates a new ConfigSigning certificate, transitions the lifecycle
-// cursor, and fans out a COMMAND_TYPE_PUSH_SIGNING_CERT command to all currently
-// connected stewards. Per-steward delivery errors are logged but do not abort
-// the rotation. An audit log entry is emitted that contains no PEM body data.
+// cursor, and fans out a COMMAND_TYPE_PUSH_SIGNING_CERT command to every steward
+// in the fleet. Per-steward delivery errors are logged but do not abort the
+// rotation. An audit log entry is emitted that contains no PEM body data.
+//
+// The fan-out is deliberately fleet-wide and tenant-independent: there is one
+// controller-wide signing CA, so a rotation that reached only part of the fleet
+// would strand the rest once the overlap window expires. The caller's tenant
+// scope, if any, does not narrow the fan-out.
 //
 // When force is true, an active in-progress overlap is cleared before the new
 // rotation runs — operator-initiated rotations should not block on a previous
@@ -130,7 +136,16 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		// can authenticate the command before updating its trust set.
 		oldSigner := s.buildRotatingSigner(oldSerial)
 
-		stewards := controllerSvc.GetAllStewards()
+		// The signing CA is controller-wide, not per-tenant: every steward in the
+		// fleet verifies commands against it, so every steward must receive the new
+		// cert before the overlap window closes. ListFleetStewards narrows its result
+		// to the subtree named by ctxkeys.TenantID, and Rotate runs on an HTTP request
+		// context whose tenant is the calling admin's own tenant — so passing ctx
+		// through unchanged would silently skip every steward outside that subtree and
+		// strand them on the retired cert. Clear the scope (empty tenant == whole
+		// fleet) while keeping the request's cancellation and deadline.
+		fleetCtx := context.WithValue(ctx, ctxkeys.TenantID, "")
+		stewards := controllerSvc.ListFleetStewards(fleetCtx)
 		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
 		params := map[string]interface{}{
 			"cert_pem":           certPEM,

@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+syntax = "proto3";
+
+package cfgms.clusterdelivery;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/clusterdelivery";
+
+import "transport/control.proto";
+
+// DeliveryService is the internal controller-to-controller delivery RPC
+// (ADR-031 Decision 3, Issue #3764) — the first inter-node RPC other than
+// Raft's own transport. It lets a controller node that does not hold a
+// steward's control-plane connection ask the node that does to deliver a
+// command immediately, without waiting for the steward to poll or reconnect.
+//
+// mTLS-secured on the internal listener using the same certificate
+// infrastructure as the Raft transport (pkg/cert.Manager); this service mints
+// no new PKI of its own. The handshake alone does NOT establish a peer-node
+// caller: that listener's trust anchor is the controller CA, which also signs
+// every steward and admin client certificate. Authorization is therefore an
+// application-layer check — the caller must present a client certificate whose
+// CommonName is a known cluster node ID (internaldelivery.PeerAuthorizer),
+// mirroring the CN allowlist the Raft transport applies on its own listener.
+// Steward and admin certificates are refused with PERMISSION_DENIED.
+service DeliveryService {
+  // DeliverCommand asks the receiving node to deliver command to the steward
+  // named by steward_id using ITS OWN local control-plane connection. The
+  // response acknowledges that the receiving node's local registry holds (or
+  // does not hold) a connection for the steward and that a local delivery
+  // attempt was made — not that the steward itself has received or executed
+  // the command, which remains async and is tracked separately via the
+  // durable outbox (Issue #3757).
+  rpc DeliverCommand(DeliverCommandRequest) returns (DeliverCommandResponse);
+}
+
+// DeliverCommandRequest carries the target steward and the full signed
+// command envelope, wire-encoded exactly as pkg/controlplane/providers/grpc
+// encodes it for direct steward delivery (see convert.go's
+// SignedCommandToProto/SignedCommandFromProto) — the receiving node decodes
+// it and hands it to its own local SendCommand path unchanged.
+message DeliverCommandRequest {
+  string steward_id = 1;
+  cfgms.transport.Command command = 2;
+}
+
+// DeliverCommandResponse reports whether the receiving node's local registry
+// held a connection for the requested steward and attempted local delivery.
+message DeliverCommandResponse {
+  // delivered is true only when the receiving node found a live local
+  // connection for the steward and its local SendCommand call succeeded.
+  bool delivered = 1;
+
+  // not_connected is true when the receiving node has no live local
+  // connection for the steward (e.g. it disconnected between the caller's
+  // routing-table lookup and this call). The caller falls back to the
+  // durable outbox in this case rather than treating it as a transport error.
+  bool not_connected = 2;
+
+  // message carries a human-readable detail for logging/diagnostics only;
+  // callers must not branch on its contents.
+  string message = 3;
+}

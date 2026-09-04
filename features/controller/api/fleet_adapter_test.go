@@ -6,7 +6,6 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,11 +145,11 @@ func TestControllerServiceAdapter_TagsMerged(t *testing.T) {
 	assert.False(t, hasTags, "an untagged steward must not gain a tags attribute")
 }
 
-// TestClusterServiceAdapter_GetAllStewards verifies that clusterServiceAdapter reads
-// from the cluster-wide inventory: it returns nothing until StartClusterRefresh has
-// populated the cache, then returns every steward with identity fields intact
-// (Issue #3495).
-func TestClusterServiceAdapter_GetAllStewards(t *testing.T) {
+// TestControllerServiceAdapter_FleetWide verifies that controllerServiceAdapter —
+// now the single cluster-safe-by-construction fleet source (ADR-031 Decision 3,
+// Issue #3764, retiring the former clusterServiceAdapter split) — returns every
+// steward with identity fields intact immediately, with no separate refresh step.
+func TestControllerServiceAdapter_FleetWide(t *testing.T) {
 	svc := service.NewControllerService(logging.NewNoopLogger())
 
 	require.NoError(t, svc.RegisterSteward("c1", "tenant-a", "addr-1", "online"))
@@ -163,23 +162,9 @@ func TestClusterServiceAdapter_GetAllStewards(t *testing.T) {
 	}))
 	require.NoError(t, svc.RegisterSteward("c2", "tenant-b", "addr-2", "offline"))
 
-	// Before the first refresh the cluster cache is empty by contract.
-	require.Nil(t, svc.GetAllStewardsCluster(context.Background()),
-		"cluster inventory must be nil before the first refresh")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	// A long interval keeps the ticker out of the way: StartClusterRefresh performs the
-	// first refresh immediately, which is the one this test waits on.
-	svc.StartClusterRefresh(ctx, 24*time.Hour)
-
-	adapter := &clusterServiceAdapter{svc: svc}
-	var stewards []fleet.StewardData
-	require.Eventually(t, func() bool {
-		stewards = adapter.GetAllStewards()
-		return len(stewards) == 2
-	}, 5*time.Second, 10*time.Millisecond,
-		"cluster adapter must return all stewards after the first refresh")
+	adapter := &controllerServiceAdapter{svc: svc}
+	stewards := adapter.GetAllStewards()
+	require.Len(t, stewards, 2, "both stewards must be visible immediately, no refresh step required")
 
 	byID := make(map[string]fleet.StewardData, len(stewards))
 	for _, s := range stewards {
@@ -189,7 +174,7 @@ func TestClusterServiceAdapter_GetAllStewards(t *testing.T) {
 	assert.Equal(t, "online", byID["c1"].Status)
 	assert.Equal(t, "linux", byID["c1"].DNAAttributes["os"])
 	assert.Len(t, byID["c1"].DNAFragments, 2,
-		"DNAFragments must be forwarded by the cluster adapter")
+		"DNAFragments must be forwarded by the adapter")
 	assert.Equal(t, "tenant-b", byID["c2"].TenantID)
 	assert.Equal(t, "offline", byID["c2"].Status)
 }

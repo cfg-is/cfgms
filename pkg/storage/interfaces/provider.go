@@ -124,6 +124,17 @@ type LeaseStoreCreator interface {
 	CreateLeaseStore(config map[string]interface{}) (business.LeaseStore, error)
 }
 
+// RoutingStoreCreator is an optional StorageProvider extension for backends
+// that support the shared steward-routing table (ADR-031 Decision 3, Issue
+// #3764): which controller node currently holds a steward's control-plane
+// connection, visible to every node in the cluster. Backends that do not
+// implement this interface leave the store nil in the manager; the internal
+// delivery service then has no fast-path node lookup available and falls back
+// entirely to the durable outbox (Issue #3757).
+type RoutingStoreCreator interface {
+	CreateRoutingStore(config map[string]interface{}) (business.RoutingStore, error)
+}
+
 // CertRevocationStoreCreator is an optional StorageProvider extension for
 // backends that support cluster-visible certificate revocation storage
 // (ADR-031 Decision 1, Issue #3852). Backends that do not implement this
@@ -668,6 +679,18 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		}
 	}
 
+	// Routing store is optional at the interface level: only providers
+	// implementing RoutingStoreCreator supply one (ADR-031 Decision 3, Issue
+	// #3764). A nil store leaves the internal delivery service without a
+	// fast-path node lookup; it still functions via the durable outbox.
+	var routingStore business.RoutingStore
+	if rsc, ok := provider.(RoutingStoreCreator); ok {
+		routingStore, err = rsc.CreateRoutingStore(config)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("failed to create routing store: %w", err)
+		}
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -686,6 +709,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		alertStore:             alertStore,
 		nonceStore:             nonceStore,
 		leaseStore:             leaseStore,
+		routingStore:           routingStore,
 	}, nil
 }
 
@@ -715,6 +739,7 @@ type StorageManager struct {
 	caseStore                business.CaseStore                // ADR-022 §8: cockpit investigation cases
 	nonceStore               business.NonceStore               // Issue #3755, ADR-031: durable registration-refresh nonce
 	leaseStore               business.LeaseStore               // ADR-031 Decision 5: fenced singleton-claim leases
+	routingStore             business.RoutingStore             // ADR-031 Decision 3, Issue #3764: shared steward-routing table
 	certRevocationStore      certinterfaces.RevocationStore    // Issue #3852, ADR-031: cluster-visible cert revocation list
 	signingCursorStore       certinterfaces.SigningCursorStore // Issue #3852, ADR-031: cluster-visible signing rotation cursor
 }
@@ -917,6 +942,20 @@ func (sm *StorageManager) SetLeaseStore(s business.LeaseStore) {
 	sm.leaseStore = s
 }
 
+// GetRoutingStore returns the shared steward-routing table (ADR-031 Decision 3,
+// Issue #3764). Returns nil when the running provider does not implement
+// RoutingStoreCreator; callers must nil-check before use and fall back to the
+// durable outbox (Issue #3757) rather than treating a nil store as "no peer
+// holds this steward".
+func (sm *StorageManager) GetRoutingStore() business.RoutingStore {
+	return sm.routingStore
+}
+
+// SetRoutingStore wires the routing store after construction.
+func (sm *StorageManager) SetRoutingStore(s business.RoutingStore) {
+	sm.routingStore = s
+}
+
 // GetCertRevocationStore returns the cluster-visible certificate revocation
 // store (ADR-031 Decision 1, Issue #3852). Returns nil when the running
 // provider does not implement CertRevocationStoreCreator; callers fall back
@@ -995,6 +1034,7 @@ func (sm *StorageManager) Close() error {
 		sm.caseStore,
 		sm.nonceStore,
 		sm.leaseStore,
+		sm.routingStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -1272,6 +1312,19 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 			sm.SetLeaseStore(leaseStore)
 		}
 	}
+	// Wire routing store if the provider implements RoutingStoreCreator (ADR-031
+	// Decision 3, Issue #3764). Cluster deployments are exactly the shape that
+	// needs a shared routing table — the internal delivery service's fast path
+	// has no cross-node lookup without it.
+	if rsc, ok := provider.(RoutingStoreCreator); ok {
+		routingStore, err := rsc.CreateRoutingStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create routing store: %w", err)
+		}
+		if routingStore != nil {
+			sm.SetRoutingStore(routingStore)
+		}
+	}
 	// Wire cert revocation store if the provider implements CertRevocationStoreCreator
 	// (ADR-031 Decision 1, Issue #3852: revocation state must be cluster-visible so a
 	// revocation issued on one controller node is observed by every node).
@@ -1445,6 +1498,17 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		}
 		if leaseStore != nil {
 			sm.SetLeaseStore(leaseStore)
+		}
+	}
+	// Wire routing store if the SQLite provider implements RoutingStoreCreator
+	// (ADR-031 Decision 3, Issue #3764).
+	if rsc, ok := sqProvider.(RoutingStoreCreator); ok {
+		routingStore, err := rsc.CreateRoutingStore(sqliteCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("failed to create routing store (sqlite): %w", err)
+		}
+		if routingStore != nil {
+			sm.SetRoutingStore(routingStore)
 		}
 	}
 	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle

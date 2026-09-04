@@ -21,7 +21,9 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
+	"github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -578,6 +580,92 @@ func TestEnsureStewardCurrent_SignsWithRotatingCertAfterOverlapExpiry(t *testing
 	require.NoError(t, signBytesErr)
 	require.NoError(t, oldVerifier.Verify(cmdBytes, pushCmd.Signature),
 		"push_signing_cert must be verifiable with the rotating (old) cert so offline stewards can bootstrap (Issue #1844)")
+}
+
+// TestRotate_FanOutIgnoresCallerTenantScope verifies that the signing-cert
+// rotation fan-out reaches every steward in the fleet even when Rotate runs on a
+// tenant-scoped context.
+//
+// Rotate is invoked from handleRotateSigningCert with the HTTP request context,
+// and authenticationMiddleware populates ctxkeys.TenantID from the authenticated
+// admin principal's own tenant — the handler requires AssuranceStrong, not root
+// scope. The signing CA is controller-wide, so a fan-out that honoured that scope
+// would notify only the caller's tenant subtree and leave every other tenant's
+// stewards unable to verify controller-signed commands once the overlap window
+// closed. Both stewards below must receive push_signing_cert even though the
+// caller is scoped to root/tenant-a.
+func TestRotate_FanOutIgnoresCallerTenantScope(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	certMgr := newTestCertManager(t, t.TempDir())
+	logger := logging.NewNoopLogger()
+
+	bus := memory.NewBus()
+	server := memory.New(memory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Stop(stopCtx)
+	})
+
+	// Two stewards in sibling tenant subtrees; the caller is scoped to the first.
+	stewardTenants := map[string]string{
+		"steward-in-caller-tenant": "root/tenant-a",
+		"steward-in-other-tenant":  "root/tenant-b",
+	}
+
+	controllerSvc := service.NewControllerService(logging.NewNoopLogger())
+	received := make(map[string]chan *types.SignedCommand, len(stewardTenants))
+	for stewardID, tenantID := range stewardTenants {
+		require.NoError(t, controllerSvc.RegisterSteward(stewardID, tenantID, "", "active"))
+
+		client := memory.New(memory.ModeClient)
+		require.NoError(t, client.Initialize(ctx, map[string]interface{}{"bus": bus, "steward_id": stewardID}))
+		require.NoError(t, client.Start(ctx))
+		t.Cleanup(func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = client.Stop(stopCtx)
+		})
+
+		ch := make(chan *types.SignedCommand, 4)
+		received[stewardID] = ch
+		require.NoError(t, client.SubscribeCommands(ctx, stewardID, func(_ context.Context, sc *types.SignedCommand) error {
+			ch <- sc
+			return nil
+		}))
+	}
+
+	publisher, err := commands.New(&commands.Config{ControlPlane: server, Logger: logger})
+	require.NoError(t, err)
+
+	svc := service.NewSigningRotationService(certMgr, logger)
+	svc.SetPublisher(publisher)
+	svc.SetControllerService(controllerSvc)
+
+	// A tenant-scoped admin context, exactly as the API middleware builds it.
+	scopedCtx := context.WithValue(ctx, ctxkeys.TenantID, "root/tenant-a")
+
+	result, err := svc.Rotate(scopedCtx, "operator-serial-scoped", 7, false)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, len(stewardTenants), result.StewardsNotified,
+		"a controller-wide signing rotation must notify every steward in the fleet, not just the caller's tenant subtree")
+
+	for stewardID := range stewardTenants {
+		select {
+		case sc := <-received[stewardID]:
+			assert.Equal(t, types.CommandPushSigningCert, sc.Command.Type,
+				"steward %s received the wrong command type", stewardID)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("steward %s (tenant %s) never received push_signing_cert; the rotation fan-out was tenant-scoped",
+				stewardID, stewardTenants[stewardID])
+		}
+	}
 }
 
 // TestRotateAuditLogNoPEMBody verifies that SigningRotationService.Rotate emits a

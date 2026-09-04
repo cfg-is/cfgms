@@ -5,7 +5,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -99,7 +98,7 @@ func (s *Server) handleGetStewardConnection(w http.ResponseWriter, r *http.Reque
 // handleListAllConnections handles GET /api/v1/stewards/connections/all.
 //
 // Returns all currently-connected stewards from the registry, filtered to the
-// caller's tenant. Cross-references registry entries against GetAllStewards() to
+// caller's tenant. Cross-references registry entries against ListFleetStewards() to
 // enforce tenant isolation (registry entries carry no TenantID directly).
 //
 // The path /stewards/connections/all (2 segments under the stewards subrouter) cannot
@@ -116,26 +115,17 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 
 	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 
-	// Build the set of steward IDs visible to the caller using the cluster-aware source so
-	// stewards attached to peer nodes are included in tenant-scoping checks. The actual
-	// connection data still comes from this node's registry (reg.GetAll()), which is
-	// node-local by design. (Issue #3495: intended behavior change — peer-attached steward
-	// IDs now appear in allowedIDs, improving tenant-scoping correctness.)
+	// Build the set of steward IDs visible to the caller using the fleet-wide source
+	// (ADR-031 Decision 3, Issue #3764) so stewards attached to peer nodes are included
+	// in tenant-scoping checks. The actual connection data still comes from this node's
+	// registry (reg.GetAll()), which is node-local by design. (Issue #3495: intended
+	// behavior change — peer-attached steward IDs now appear in allowedIDs, improving
+	// tenant-scoping correctness.)
 	clusterCtx := context.Background()
 	if callerTenant != "" {
 		clusterCtx = context.WithValue(clusterCtx, ctxkeys.TenantID, callerTenant)
 	}
-	allStewards := s.controllerService.GetAllStewardsCluster(clusterCtx)
-	if allStewards == nil {
-		// Cluster cache not yet populated; degrade to node-local (pre-StartClusterRefresh).
-		// Apply the same subtree-tenant filter that GetAllStewardsCluster does via context.
-		local := s.controllerService.GetAllStewards()
-		for _, st := range local {
-			if callerTenant == "" || st.TenantID == callerTenant || strings.HasPrefix(st.TenantID, callerTenant+"/") {
-				allStewards = append(allStewards, st)
-			}
-		}
-	}
+	allStewards := s.controllerService.ListFleetStewards(clusterCtx)
 	allowedIDs := make(map[string]bool, len(allStewards))
 	for _, st := range allStewards {
 		allowedIDs[st.ID] = true

@@ -411,6 +411,24 @@ func TestCreateAllStoresFromConfig(t *testing.T) {
 		if !found || string(entry) != "challenge" {
 			t.Fatalf("nonce round-trip mismatch: found=%v entry=%q", found, entry)
 		}
+
+		// Issue #3764: the routing store opens its own dedicated SQLite
+		// connection (like the nonce and lease stores above), so Close() must
+		// close it too. A Linux run does not surface a leaked handle the way
+		// Windows' file-locking does on t.TempDir() cleanup, so assert
+		// directly that the handle is closed instead: this fails on any
+		// platform if the routing store slot is ever dropped from
+		// StorageManager.Close() again.
+		routingStore := manager.GetRoutingStore()
+		if routingStore == nil {
+			t.Fatal("RoutingStore should not be nil for the SQLite provider")
+		}
+		if err := manager.Close(); err != nil {
+			t.Fatalf("manager.Close() failed: %v", err)
+		}
+		if err := routingStore.RecordConnection(ctx, "steward-after-close", "node-1"); err == nil {
+			t.Fatal("expected RecordConnection to fail after manager.Close(), routing store's DB handle was not closed")
+		}
 	})
 
 	t.Run("unregistered provider name returns an error", func(t *testing.T) {

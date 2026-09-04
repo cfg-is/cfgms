@@ -841,6 +841,32 @@ func (s DatabaseSchemas) CreateLeaseTable(ctx context.Context, db *sql.DB) error
 	return nil
 }
 
+// CreateRoutingTable creates the cfgms_routing table backing the shared
+// steward-routing table (ADR-031 Decision 3, Issue #3764): which controller
+// node currently holds a steward's control-plane connection. updated_at is
+// the liveness timestamp business.RoutingStore.LookupNode evaluates against
+// business.RoutingStaleAfter, always compared using the database server's own
+// now() so no caller clock enters the decision (see business.RoutingStore).
+func (s DatabaseSchemas) CreateRoutingTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_routing (
+			steward_id TEXT PRIMARY KEY,
+			node_id    TEXT NOT NULL,
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+		);
+	`
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_routing table: %w", err)
+	}
+
+	indexQuery := "CREATE INDEX IF NOT EXISTS idx_routing_node_id ON cfgms_routing(node_id);"
+	if _, err := db.ExecContext(ctx, indexQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_routing index: %w", err)
+	}
+
+	return nil
+}
+
 // CreateCertRevocationsTable creates the cfgms_cert_revocations table backing
 // the cluster-visible CertRevocationStore (ADR-031 Decision 1, Issue #3852).
 func (s DatabaseSchemas) CreateCertRevocationsTable(ctx context.Context, db *sql.DB) error {
@@ -1012,6 +1038,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 	}
 
 	if err := s.CreateLeaseTable(ctx, db); err != nil {
+		return err
+	}
+
+	if err := s.CreateRoutingTable(ctx, db); err != nil {
 		return err
 	}
 
@@ -1540,6 +1570,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_registration_token_claims;",
 		"DROP TABLE IF EXISTS cfgms_ip_trust_ranges;",
 		"DROP TABLE IF EXISTS cfgms_leases;",
+		"DROP TABLE IF EXISTS cfgms_routing;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key

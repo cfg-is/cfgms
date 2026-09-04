@@ -439,19 +439,16 @@ func TestMemberClusters_PeerAttachedSteward(t *testing.T) {
 	t.Cleanup(func() { _ = storage2.Close() })
 	svc2 := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage2)
 
-	require.Empty(t, svc2.GetAllStewards(),
-		"peer steward must not be in node-local view on the second node")
+	require.Empty(t, svc2.ListFleetStewards(context.WithValue(ctx, ctxkeys.TenantID, "nonexistent-tenant")),
+		"sanity check: tenant-scoping actually filters ListFleetStewards")
 
+	// ListFleetStewards reads durable storage directly (ADR-031 Decision 3, Issue
+	// #3764), so MemberClusters sees the peer's cluster membership on the very
+	// first call — no separate refresh step, no populate-lag window.
 	adapter := &clusterRegistryAdapter{controllerSvc: svc2}
-	require.Empty(t, adapter.MemberClusters("peer-member"),
-		"before the cluster inventory refreshes, node 2 knows nothing about the peer steward")
-
-	// Refresh the cluster inventory — the same work StartClusterRefresh does on a timer.
-	svc2.refreshClusterInventory(ctx)
-
 	clusters := adapter.MemberClusters("peer-member")
 	require.Contains(t, clusters, "my-peer-cluster",
-		"peer steward's cluster membership must be visible via MemberClusters after cluster refresh")
+		"peer steward's cluster membership must be visible via MemberClusters immediately")
 
 	// A steward that exists in neither view still resolves to no clusters.
 	assert.Empty(t, adapter.MemberClusters("no-such-steward"),

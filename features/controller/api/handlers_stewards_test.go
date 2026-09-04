@@ -3284,7 +3284,7 @@ func TestListStewards_SurfacesLostStatusFromStore(t *testing.T) {
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, tenantID, "addr", string(business.StewardStatusLost)))
 
 	// Call handleListStewards directly (no filter → unfiltered path that reads
-	// s.controllerService.GetAllStewards()).
+	// s.controllerService.ListFleetStewards()).
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
 	req = withTenant(req, "")
 	rec := httptest.NewRecorder()

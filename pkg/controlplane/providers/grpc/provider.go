@@ -841,7 +841,7 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) er
 	conn, ok := p.registry.Get(cmd.Command.StewardID)
 	if !ok {
 		p.deliveryFailures.Add(1)
-		return fmt.Errorf("steward %s not connected", cmd.Command.StewardID)
+		return fmt.Errorf("steward %s not connected: %w", cmd.Command.StewardID, interfaces.ErrStewardNotConnected)
 	}
 
 	msg := &transportpb.ControlMessage{
@@ -878,7 +878,7 @@ func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, 
 	for _, id := range stewardIDs {
 		conn, ok := conns[id]
 		if !ok {
-			result.Failed[id] = fmt.Errorf("steward not connected")
+			result.Failed[id] = fmt.Errorf("steward %s not connected: %w", id, interfaces.ErrStewardNotConnected)
 			p.deliveryFailures.Add(1)
 			continue
 		}

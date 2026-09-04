@@ -31,7 +31,8 @@ var (
 	// The optional store-creator extensions are wired through a type assertion,
 	// so a missing method silently leaves the store nil rather than failing the
 	// build at the call site (Issue #3755).
-	_ interfaces.NonceStoreCreator = (*SQLiteProvider)(nil)
+	_ interfaces.NonceStoreCreator   = (*SQLiteProvider)(nil)
+	_ interfaces.RoutingStoreCreator = (*SQLiteProvider)(nil)
 )
 
 // SQLiteProvider implements the StorageProvider interface using SQLite for persistence.
@@ -565,6 +566,17 @@ func (p *SQLiteProvider) CreateLeaseStore(config map[string]interface{}) (busine
 		return nil, err
 	}
 	return &SQLiteLeaseStore{db: db}, nil
+}
+
+// CreateRoutingStore returns a SQLite-backed RoutingStore — the shared
+// steward-routing table (ADR-031 Decision 3, Issue #3764).
+// Implements interfaces.RoutingStoreCreator.
+func (p *SQLiteProvider) CreateRoutingStore(config map[string]interface{}) (business.RoutingStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteRoutingStore{db: db}, nil
 }
 
 // init auto-registers the SQLite provider so it is available after a blank import.
