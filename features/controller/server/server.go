@@ -1109,6 +1109,22 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				"threshold", ipTrustThreshold)
 		}
 
+		// Issue #3764: refresh this steward's routing-table liveness timestamp on
+		// every heartbeat, in addition to on connect, so a long-lived connection
+		// never goes stale under business.RoutingStaleAfter between reconnects.
+		onHeartbeatReceived := jobDispatcher.OnHeartbeat
+		if routingStore != nil {
+			dispatcherOnHeartbeat := jobDispatcher.OnHeartbeat
+			onHeartbeatReceived = func(stewardID string) {
+				dispatcherOnHeartbeat(stewardID)
+				if err := routingStore.RecordConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
+					logger.Warn("internaldelivery: failed to refresh routing connection on heartbeat",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+			}
+		}
+
 		// Initialize heartbeat monitoring service
 		logger.Info("Initializing heartbeat monitoring service...")
 		heartbeatService, err = heartbeat.New(&heartbeat.Config{
@@ -1116,7 +1132,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			HeartbeatTimeout:    15 * time.Second,
 			CheckInterval:       5 * time.Second,
 			OnStatusChange:      makeHeartbeatStatusChangeCallback(hbStewardStore, logger),
-			OnHeartbeatReceived: jobDispatcher.OnHeartbeat,
+			OnHeartbeatReceived: onHeartbeatReceived,
 			TrustEvaluator:      heartbeatTrustEvaluator,
 			Logger:              logger,
 		})

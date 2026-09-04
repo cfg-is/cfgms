@@ -658,8 +658,10 @@ of which node that is:
   certificate infrastructure as the Raft internal listener but its own port —
   gRPC needs to own its listener's connections directly, so it cannot share
   Raft's plain-HTTP listener. Node A calls `DeliverCommand` on node B to ask B to
-  deliver locally; B returns `NOT_FOUND` if the steward is not connected there at
-  that instant, never a fatal error.
+  deliver locally; B returns a normal `DeliverCommandResponse` with
+  `not_connected = true` if the steward is not connected there at that instant —
+  never a gRPC error — since "not here right now" is an expected outcome the
+  caller falls back on, not a failure.
 
 `pkg/controlplane/internaldelivery.ClusterAwareSender` wraps the node-local
 `ControlPlaneProvider` (the grpc/memory `SendCommand`/`FanOutCommand`
@@ -668,7 +670,8 @@ implementations) with this composition: try local delivery first; on a
 look up the routing table, and if a peer node claims the steward, forward via the
 internal delivery RPC. Any miss along that chain — no routing entry, the routing
 table naming this node itself, an unreachable peer, or the peer's own
-`NOT_FOUND` — surfaces the *original* local error to the caller, unchanged. The
+`not_connected` response — surfaces the *original* local error to the caller,
+unchanged. The
 dispatcher (`features/controller/dispatcher`) and command publisher
 (`features/controller/commands.Publisher`) are both constructed against this
 wrapped sender in cluster mode, so every existing dispatch call site becomes

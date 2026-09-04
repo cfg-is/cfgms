@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -46,7 +46,7 @@ CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
 PROTO_DIR=api/proto
-PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto" -not -path "*/transport/*")
+PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto" -not -path "*/transport/*" -not -path "*/clusterdelivery/*")
 PROTO_INCLUDES=-I$(PROTO_DIR)
 
 # Check for required tools
@@ -113,6 +113,22 @@ proto-gen-modules: check-proto-grpc-tools
 		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
 		$(MODULES_PROTO_FILES)
 	@echo "Done. Generated files in $(MODULES_PROTO_DIR)/"
+
+# Internal controller-to-controller delivery proto files requiring gRPC
+# service generation (ADR-031 Decision 3, Issue #3764)
+CLUSTERDELIVERY_PROTO_DIR=api/proto/clusterdelivery
+CLUSTERDELIVERY_PROTO_FILES=$(shell find $(CLUSTERDELIVERY_PROTO_DIR) -name "*.proto")
+
+# Generate Go code from the clusterdelivery proto file including gRPC service
+# stubs. IMPORTANT: This is the authoritative target for clusterdelivery protos.
+.PHONY: proto-gen-clusterdelivery
+proto-gen-clusterdelivery: check-proto-grpc-tools
+	@echo "Generating clusterdelivery proto files (messages + gRPC services)..."
+	@protoc $(PROTO_INCLUDES) \
+		--go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
+		$(CLUSTERDELIVERY_PROTO_FILES)
+	@echo "Done. Generated files in $(CLUSTERDELIVERY_PROTO_DIR)/"
 
 # Build all binaries
 .PHONY: build

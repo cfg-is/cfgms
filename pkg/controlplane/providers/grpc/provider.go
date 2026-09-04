@@ -878,7 +878,7 @@ func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, 
 	for _, id := range stewardIDs {
 		conn, ok := conns[id]
 		if !ok {
-			result.Failed[id] = fmt.Errorf("steward not connected")
+			result.Failed[id] = fmt.Errorf("steward %s not connected: %w", id, interfaces.ErrStewardNotConnected)
 			p.deliveryFailures.Add(1)
 			continue
 		}
