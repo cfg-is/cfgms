@@ -162,8 +162,12 @@ func TestEveryHTTPRouteHasSecurityClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The private mTLS-only internal listener carried the Raft message route
+	// before Issue #3763 deleted the Raft transport it delegated to; it
+	// currently serves no HTTP routes of its own (the internal delivery
+	// service registered on the same listener is gRPC, not HTTP).
 	internalEntries := walkRoutes(t, s.internalRouter)
-	if len(internalEntries) != 1 || internalEntries[0].String() != "POST /raft/message" {
+	if len(internalEntries) != 0 {
 		t.Fatalf("unexpected private listener route set: %v", internalEntries)
 	}
 

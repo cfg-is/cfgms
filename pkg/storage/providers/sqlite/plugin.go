@@ -579,6 +579,18 @@ func (p *SQLiteProvider) CreateRoutingStore(config map[string]interface{}) (busi
 	return &SQLiteRoutingStore{db: db}, nil
 }
 
+// CreateNodeRegistryStore returns a SQLite-backed NodeRegistryStore — the
+// shared controller-node registry (Issue #3763, ADR-031 Decision 5's
+// post-Raft membership mechanism). Implements
+// interfaces.NodeRegistryStoreCreator.
+func (p *SQLiteProvider) CreateNodeRegistryStore(config map[string]interface{}) (business.NodeRegistryStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteNodeRegistryStore{db: db}, nil
+}
+
 // init auto-registers the SQLite provider so it is available after a blank import.
 func init() {
 	interfaces.RegisterStorageProvider(&SQLiteProvider{})

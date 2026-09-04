@@ -71,8 +71,8 @@ After initialization, the controller starts normally. If required infrastructure
 4. **Initialize RBAC** — Load permissions, roles, subjects from storage
 5. **Start transport server** — Unified gRPC-over-QUIC server for the control and data planes (port 4433, mTLS). Serves control plane (heartbeats, commands, status) and data plane (cfg delivery, DNA sync) over multiplexed QUIC streams. **Exception — installer/steward-binary distribution:** steward binary payloads (both the controller push and the steward self-fetch, Issue #2833) transfer over the **HTTPS REST listener** (port 9080, step 9), not the QUIC transport — matching how installers and package managers are fetched everywhere and keeping large-file transfer off the control/data-plane streams. The QUIC transport carries control/data-plane messages, not binary payloads. Deployment consequence: a managed steward needs reachability to **both** port 4433 (QUIC) and port 9080 (HTTPS) on the controller — the "single port for everything" goal holds for the control+data plane, not for binary distribution
 7. **Start services** — Heartbeat monitoring, command publisher, registration handler, tenant manager
-8. **Start HA** (if clustered) — Join Raft cluster, participate in leader election. On restart into a live cluster, the node reads its cluster membership from a durable bbolt snapshot (`pkg/ha/raft_log_store.go`) before the Raft loop starts, so `GET /api/v1/ha/nodes` and `GET /api/v1/ha/leader` return correct results immediately without waiting for log-entry redelivery. **Post-restart recovery bound:** a restarted node reaches correct membership and leader state within **2 minutes** of container start — dominated by container startup and TLS certificate exchange, not by discovery or log replay (Issue #3394).
-9. **Start REST API and Web UI** — A single TLS HTTP server (port 9080) serves both the REST API and the embedded web UI from the same listener. Owned exclusively by `server.Server` (`httpServer` field); `controller.go` does not create a second instance. The web UI is embedded in the controller binary via `//go:embed all:dist` in the `web/` package — no separate server, no second port, no Node toolchain at runtime. A committed placeholder (`web/dist/index.html`) keeps `go build` self-contained; a real Vite build (`npm run build` inside `web/`) writes to `web/dist/app/`, which the controller prefers over the placeholder when producing a release binary. The placeholder carries the `CFGMS_DIST_PLACEHOLDER` sentinel: a binary built without a frontend build refuses to route `/` and logs the reason, rather than serving an empty shell as if it were the application. The SPA is served as a lowest-priority catch-all route: REST API (`/api/*`) and Raft (`/raft/*`) routes always take precedence. In `ClusterMode` the TLS listener is configured with `ClientAuth = tls.RequestClientCert`: HA peers that present a client certificate will have it recorded in `r.TLS.PeerCertificates` for application-layer CN verification, while non-cluster API clients (operators, curl, stewards, browsers) that do not present a client certificate are accepted without modification
+8. **Start HA** (if clustered) — Begin contending for the cluster leadership lease (`pkg/lease`, ADR-031 Decision 5) against the shared database, and begin self-registering this node in the shared controller-node registry (Issue #3763) so peers can resolve it for cluster-to-cluster delivery. `GET /api/v1/ha/nodes` and `GET /api/v1/ha/leader` converge once the node's own registration and lease-acquisition loops complete their first cycle — both are independent background loops with no cross-node log to replay.
+9. **Start REST API and Web UI** — A single TLS HTTP server (port 9080) serves both the REST API and the embedded web UI from the same listener. Owned exclusively by `server.Server` (`httpServer` field); `controller.go` does not create a second instance. The web UI is embedded in the controller binary via `//go:embed all:dist` in the `web/` package — no separate server, no second port, no Node toolchain at runtime. A committed placeholder (`web/dist/index.html`) keeps `go build` self-contained; a real Vite build (`npm run build` inside `web/`) writes to `web/dist/app/`, which the controller prefers over the placeholder when producing a release binary. The placeholder carries the `CFGMS_DIST_PLACEHOLDER` sentinel: a binary built without a frontend build refuses to route `/` and logs the reason, rather than serving an empty shell as if it were the application. The SPA is served as a lowest-priority catch-all route: REST API (`/api/*`) routes always take precedence. In `ClusterMode` the TLS listener is configured with `ClientAuth = tls.RequestClientCert`: HA peers that present a client certificate will have it recorded in `r.TLS.PeerCertificates` for application-layer CN verification, while non-cluster API clients (operators, curl, stewards, browsers) that do not present a client certificate are accepted without modification
 10. **Start workflow engine** — Begin processing scheduled and queued workflows
 
 **Failure modes on startup:**
@@ -653,11 +653,11 @@ of which node that is:
   than the staleness window is not trusted and is treated as absent.
 - **Internal controller-to-controller delivery RPC**
   (`pkg/controlplane/internaldelivery`, `cfgms.clusterdelivery.DeliveryService`) —
-  the first inter-node RPC other than Raft's own transport. mTLS-secured on a
-  dedicated internal listener (`InternalDeliveryListenAddr`), using the same
-  certificate infrastructure as the Raft internal listener but its own port —
+  the one inter-node RPC this deployment shape has. mTLS-secured on a
+  dedicated internal listener (`InternalDeliveryListenAddr`), sharing the same
+  mTLS trust material as the internal admin listener but its own port —
   gRPC needs to own its listener's connections directly, so it cannot share
-  Raft's plain-HTTP listener. Node A calls `DeliverCommand` on node B to ask B to
+  the internal HTTP listener. Node A calls `DeliverCommand` on node B to ask B to
   deliver locally; B returns a normal `DeliverCommandResponse` with
   `not_connected = true` if the steward is not connected there at that instant —
   never a gRPC error — since "not here right now" is an expected outcome the
@@ -703,8 +703,9 @@ The `Command` proto message carries a `term` field (field 8, `uint64`). Commands
 published through `commands.Publisher` — `PublishCommand`,
 `PublishCommandWithCallback`, and `PublishCommandWithSigner`
 (`features/controller/commands/publisher.go`) — are stamped at publish time with the
-current Raft term, read from the `TermSource` wired at construction
-(`*ha.Manager`, whose `GetTerm()` delegates to `RaftConsensus.GetTerm()`). This is
+current fencing term, read from the `TermSource` wired at construction
+(`*ha.Manager`, whose `GetTerm()` is lease-backed — the shared database lease,
+ADR-031 Decision 5 — rather than a Raft term). This is
 the **controller-side half** of the command fencing scheme defined in ADR-029:
 
 - **Wire-compatible additive field.** A steward that does not yet understand field
@@ -1339,40 +1340,52 @@ The controller runs as a single instance. If it goes down, stewards continue ope
 
 ### Clustered
 
-Multiple controller instances form a **Raft consensus cluster**. Raft is the sole authority for cluster membership and leader election — there is no static or geographic node discovery layer, and no ad-hoc election logic outside Raft:
+Multiple controller instances form a cluster with no leader-election protocol
+of its own. Cluster membership and leadership authority are both derived from
+the **shared PostgreSQL backend** every node already reads and writes — there
+is no replicated log, no peer-to-peer consensus transport, and no election
+timer (Issue #3763, ADR-031 Decision 5, superseding the Raft-based design of
+ADR-028):
 
-- **Cluster membership** — determined exclusively by Raft consensus; a new node bootstraps from `discovery.config.nodes` and thereafter membership is managed by Raft configuration changes; a restarting node recovers its persisted Raft log (HardState, entries, applied index) from the per-node bbolt WAL at `<dna-data-root>/raft-log/raft.db` and rejoins via `raft.RestartNode` without re-bootstrapping from the peer list (ADR-028)
-- **Leader election** — Raft consensus elects one node as leader to handle writes; `CheckQuorum:true` causes the leader to step down when it loses quorum, without any explicit demotion call. **`CheckQuorum` guarantees replicated-log write safety only** — it makes no statement about side effects that never reach the Raft log, and its step-down timing overlaps the followers' election timers, so two nodes can briefly both hold the raw leader flag. Authority to *act* is a separate property, defined by ADR-029 (lease-backed `HasLeadership()` plus command fencing)
-- **State replication** — Raft owns leader election and cluster membership/session bookkeeping only (two command types: `node_update` and `session_update`, per `pkg/ha/raft_consensus.go:762-777` `applyCommand`); cfg data, registration records, audit, and RBAC are not replicated via Raft — every node reads and writes a **shared PostgreSQL backend** directly
-- **Automatic failover** — if the leader goes down, Raft elects a new leader automatically
-- **Split-brain detection** — the cluster detects and resolves network partitions; quorum-based resolution delegates leader step-down to Raft (`CheckQuorum`) rather than calling explicit demote operations. This detects a partition; it does not bound the window in which a stale leader can still act. That bound comes from ADR-029's lease and fencing token
+- **Cluster membership** — every `ClusterMode` node periodically registers its
+  own ID and advertised address in the shared controller-node registry
+  (`pkg/storage/interfaces/business.NodeRegistryStore`,
+  `business.NodeRegistryStaleAfter` = 90s). `GetClusterNodes()` reads the
+  registry directly; a node that stops registering (crash, graceful shutdown)
+  drops out once its record goes stale — there is no separate deregistration
+  call and no persisted membership log to recover on restart. A restarting
+  node simply resumes registering itself on the next cycle.
+- **Leadership** — one cluster-wide lease (`pkg/lease`, row name
+  `controller-cluster-leadership`) is the sole authority. Every node contends
+  for it independently via `TryAcquire`; `HasLeadership()` reads a
+  monotonic-clock-bounded local cache of the last successful acquire/renew
+  (`pkg/lease.SafetyMargin`, derived from `cfg.Cluster.ElectionTimeout` via
+  the same 0.8× ratio ADR-029 Decision 1 established for the Raft-era lease).
+  A node that can no longer renew — because it lost network access to the
+  database, or crashed — has its cached authority lapse on its own clock,
+  with no live database read required to detect the loss.
+- **State replication** — there is nothing to replicate: every node reads and
+  writes the shared PostgreSQL backend directly for cfg data, registration
+  records, audit, RBAC, the leadership lease, and cluster membership alike.
+- **Automatic failover** — if the leader goes down (or loses database
+  reachability), its cached authority lapses within one `SafetyMargin`
+  window and any contending node may then acquire the now-expired lease row.
+  There is no explicit election: whichever node's next `TryAcquire` lands
+  first wins.
+- **Split-brain prevention** — two nodes cannot simultaneously hold the same
+  lease row for longer than the derived `SafetyMargin` bound: the lease row
+  itself is exclusive at the database layer (`AcquireOrRenew`'s
+  compare-and-set), and each node's belief that it still holds authority is
+  bounded by its own monotonic clock, not by a live check. This is the same
+  property ADR-029's Raft-era lease existed to provide; ADR-031 Decision 5
+  keeps the property while removing the Raft layer it used to sit on top of.
 
 Stewards connect to any cluster node. If their node goes down, they reconnect to another.
 
-#### Raft Peer Authentication
-
-The `POST /raft/message` endpoint exists only on the private address configured
-by top-level `internal_listen_addr`; it is not registered on the public product
-router. Cluster startup fails when this address is absent, is a wildcard/public
-address, or has no fixed port. The private listener requires a client
-certificate signed by the configured controller/HA peer CA
-(`ClientAuth = tls.RequireAndVerifyClientCert`) before the request reaches the
-application-layer peer identity check. Do not publish this listener through an
-Internet-facing load balancer or container port mapping.
-
-`HandleMessage` extracts `r.TLS.PeerCertificates[0].Subject.CommonName` and rejects (HTTP 403) any request where:
-
-- `r.TLS` is nil (plain HTTP, not mTLS)
-- No peer certificate was presented
-- The peer certificate CN does not match any entry in the node's `allowedCNs` list
-
-The `allowedCNs` list is built at startup from the `discovery.config.nodes` peer entries (each node's `id` field) plus the local node's own `id`. This means **peer certificates must carry a CN that matches the `node.id` value declared in the cluster node configuration**.
-
-**Peer certificate provisioning** is automatic. During `ClusterMode` startup, `ha.NewManager` requires a non-nil `*cert.Manager` and calls `certManager.GenerateClientCertificate` with `CommonName = cfg.Node.ID` to mint a dedicated peer identity cert. This cert is loaded into the outbound `raftTransport` HTTP client as `tls.Config.Certificates`, so every `POST /raft/message` the transport makes automatically presents it. Passing a nil `*cert.Manager` to `NewManager` in `ClusterMode` returns an error immediately. `SingleServerMode` and `BlueGreenMode` do not require a cert manager (no peer transport is created).
-
-The `GET /api/v1/raft/status` endpoint is protected by RBAC (`ha:read-status` permission) via the standard API authentication middleware — it is not a peer endpoint and must not be accessed without a valid API key.
-
-> **Do not use the `X-Raft-From` header for authentication** — it is set by the sender and is untrusted. Only the TLS peer certificate is authoritative.
+Cross-node steward dispatch — reaching a steward whose control-plane
+connection is held by a *different* node than the one that decided to send it
+a command — is a separate mechanism from either of the above: see "Cluster
+Command Delivery — Routing Table + Internal RPC + Outbox" below.
 
 #### Write Admission (ADR-031 Decision 1)
 
@@ -1393,8 +1406,8 @@ governs the one thing that remains a true cluster singleton: background
 sweep/expiry/scheduler loops, claimed via `pkg/lease.SingletonJob` (see
 Background-Loop Singleton Scheduling below) rather than a request-path gate. It
 also remains available for status/diagnostic reporting (`GET /api/v1/ha/status`
-et al.). Batch-job command dispatch continues to use Raft-term-derived fencing
-(now sourced from the database lease's monotonic token rather than `GetTerm()`,
+et al.). Batch-job command dispatch continues to use lease-token-derived fencing
+(sourced from the database lease's monotonic token rather than `GetTerm()`,
 per ADR-031 Decision 3) rather than an HTTP-layer gate.
 
 #### Background-Loop Singleton Scheduling (Issue #3762, ADR-031 Decision 4)
@@ -1530,7 +1543,7 @@ Removing the gate transferred the safety obligation it used to provide implicitl
 
 `POST /api/v1/config/push` (`handleConfigPush`), the save=deploy fanout callback (`RegisterFanoutCallback` in `server.go`), and the startup replay of interrupted pushes (`resumePendingPushes`) are, likewise, no longer leadership-gated. Any node now accepts a push, resolves the selector, queries the fleet, writes desired state to the entity graph, and fans out to stewards via `commandPublisher` directly. Delivery durability — one outbox row per targeted steward, committed atomically with the push record so a controller crash mid-fan-out cannot silently drop a steward — is ADR-031 Decision 2, a separate concern from this admission change.
 
-`HasLeadership()` remains the correct primitive for the one thing that is still a genuine cluster singleton: background sweep/expiry/scheduler loops, which claim a `pkg/lease.SingletonJob` lease per cycle rather than gating a request (see Background-Loop Singleton Scheduling above). It also remains available for status/diagnostic reporting. The deprecated raw Raft flag (`IsLeader()`/`IsRaftLeader()`) remains forbidden outside `pkg/ha` without a written `//architecture:allow-raw-leader` reason (Story #3391) — that rule is unaffected by this decision.
+`HasLeadership()` remains the correct primitive for the one thing that is still a genuine cluster singleton: background sweep/expiry/scheduler loops, which claim a `pkg/lease.SingletonJob` lease per cycle rather than gating a request (see Background-Loop Singleton Scheduling above). It also remains available for status/diagnostic reporting. `IsLeader()`/`IsRaftLeader()` — the raw Raft replication-protocol primitives the architecture rule (Story #3391) used to police outside `pkg/ha` — were deleted along with Raft itself (Issue #3763); `TestNoRawLeaderPrimitiveOutsidePkgHA` (`pkg/ha/architecture_test.go`) remains in place as a name-based guard against either being reintroduced.
 
 #### Retired: the baseline ratchet
 

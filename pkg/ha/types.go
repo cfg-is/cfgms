@@ -22,9 +22,6 @@ type Config struct {
 	// Failover configuration (only used in commercial builds)
 	Failover *FailoverConfig `yaml:"failover,omitempty" json:"failover,omitempty"`
 
-	// Split-brain detection configuration (only used in commercial builds)
-	SplitBrain *SplitBrainConfig `yaml:"split_brain,omitempty" json:"split_brain,omitempty"`
-
 	// Health check configuration
 	HealthCheck *HealthCheckConfig `yaml:"health_check,omitempty" json:"health_check,omitempty"`
 }
@@ -84,16 +81,6 @@ type FailoverConfig struct {
 	MaxDuration         time.Duration `yaml:"max_duration" json:"max_duration"`                   // Maximum time for failover
 	GracePeriod         time.Duration `yaml:"grace_period" json:"grace_period"`                   // Grace period before failover
 	MaxSessionMigration int           `yaml:"max_session_migration" json:"max_session_migration"` // Max sessions to migrate
-}
-
-// SplitBrainConfig contains split-brain detection configuration (commercial only)
-type SplitBrainConfig struct {
-	Enabled            bool          `yaml:"enabled" json:"enabled"`
-	DetectionInterval  time.Duration `yaml:"detection_interval" json:"detection_interval"`
-	QuorumCheck        bool          `yaml:"quorum_check" json:"quorum_check"`
-	AutoResolve        bool          `yaml:"auto_resolve" json:"auto_resolve"`
-	QuorumInterval     time.Duration `yaml:"quorum_interval" json:"quorum_interval"`         // Quorum validation interval
-	ResolutionStrategy string        `yaml:"resolution_strategy" json:"resolution_strategy"` // Split-brain resolution strategy
 }
 
 // HealthCheckConfig contains health check configuration

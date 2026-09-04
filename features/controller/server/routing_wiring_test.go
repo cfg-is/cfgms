@@ -24,7 +24,7 @@ func newTestHAManager(t *testing.T, nodeID, externalAddr string) *ha.Manager {
 	cfg.Node.ID = nodeID
 	cfg.Node.ExternalAddress = externalAddr
 
-	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), storageManager, nil, "")
+	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), storageManager)
 	require.NoError(t, err)
 	return manager
 }

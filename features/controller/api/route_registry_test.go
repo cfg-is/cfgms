@@ -166,7 +166,6 @@ var goldenRouteTable = []string{
 	"GET /api/v1/monitoring/config",
 	"GET /api/v1/monitoring/health",
 	"GET /api/v1/public/steward-binaries/{version}/{platform}/{arch}",
-	"GET /api/v1/raft/status",
 	"GET /api/v1/rbac/permissions",
 	"GET /api/v1/rbac/permissions/{id}",
 	"GET /api/v1/rbac/roles",

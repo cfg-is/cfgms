@@ -13,11 +13,10 @@ import (
 
 // HAStatusResponse represents the response for HA status endpoint
 type HAStatusResponse struct {
-	NodeID       string `json:"node_id"`
-	IsLeader     bool   `json:"is_leader"`
-	RaftIsLeader bool   `json:"raft_is_leader"`
-	Mode         string `json:"mode"`
-	Health       string `json:"health"`
+	NodeID   string `json:"node_id"`
+	IsLeader bool   `json:"is_leader"`
+	Mode     string `json:"mode"`
+	Health   string `json:"health"`
 	// AbsentCapabilities lists declared-optional storage capabilities that are
 	// absent in this deployment. An empty slice means all declared capabilities
 	// are present. Each entry names the capability, the subsystem that declared
@@ -62,8 +61,6 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isLeader := haManager.HasLeadership()
-	// IsRaftLeader: raw Raft replication-protocol state — observational only, not an admission primitive.
-	raftIsLeader := haManager.IsRaftLeader() //architecture:allow-raw-leader -- observational only: status endpoint reports raw protocol state for diagnostics, not an admission decision
 	mode := haManager.GetDeploymentMode().String()
 	health := "healthy"
 
@@ -80,7 +77,6 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 	response := HAStatusResponse{
 		NodeID:             nodeID,
 		IsLeader:           isLeader,
-		RaftIsLeader:       raftIsLeader,
 		Mode:               mode,
 		Health:             health,
 		AbsentCapabilities: absentCaps,
@@ -222,41 +218,4 @@ func (s *Server) respondError(w http.ResponseWriter, status int, message string)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		s.logger.Error("Failed to encode error response", "error", err)
 	}
-}
-
-// handleRaftMessage handles POST /raft/message - receives Raft messages from peers
-func (s *Server) handleRaftMessage(w http.ResponseWriter, r *http.Request) {
-	haManager := s.getHAManager()
-	if haManager == nil {
-		http.Error(w, "HA manager not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Get Raft transport from HA manager
-	transport := haManager.GetRaftTransport()
-	if transport == nil {
-		http.Error(w, "Raft transport not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Delegate to transport handler
-	transport.HandleMessage(w, r)
-}
-
-// handleRaftStatus handles GET /raft/status - returns Raft cluster status
-func (s *Server) handleRaftStatus(w http.ResponseWriter, r *http.Request) {
-	haManager := s.getHAManager()
-	if haManager == nil {
-		s.respondError(w, http.StatusServiceUnavailable, "HA manager not available")
-		return
-	}
-
-	transport := haManager.GetRaftTransport()
-	if transport == nil {
-		s.respondError(w, http.StatusServiceUnavailable, "Raft transport not available")
-		return
-	}
-
-	// Delegate to transport handler
-	transport.HandleStatus(w, r)
 }

@@ -394,6 +394,21 @@ func (p *DatabaseProvider) CreateRoutingStore(config map[string]interface{}) (bu
 	return store, nil
 }
 
+// CreateNodeRegistryStore creates a PostgreSQL-backed NodeRegistryStore — the
+// shared controller-node registry (Issue #3763, ADR-031 Decision 5's
+// post-Raft membership mechanism). Implements interfaces.NodeRegistryStoreCreator.
+func (p *DatabaseProvider) CreateNodeRegistryStore(config map[string]interface{}) (business.NodeRegistryStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseNodeRegistryStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database node registry store: %w", err)
+	}
+	return store, nil
+}
+
 // CreateCertRevocationStore creates a PostgreSQL-backed CertRevocationStore
 // (ADR-031 Decision 1, Issue #3852: pkg/cert's revocation list must be
 // cluster-visible). Implements interfaces.CertRevocationStoreCreator.

@@ -135,6 +135,17 @@ type RoutingStoreCreator interface {
 	CreateRoutingStore(config map[string]interface{}) (business.RoutingStore, error)
 }
 
+// NodeRegistryStoreCreator is an optional StorageProvider extension for
+// backends that support the shared controller-node registry (Issue #3763,
+// ADR-031 Decision 5's post-Raft membership mechanism): each ClusterMode
+// node's advertised identity, visible to every node in the cluster.
+// Backends that do not implement this interface leave the store nil in the
+// manager; ha.Manager's GetClusterNodes()/GetLeader() then fall back to
+// reporting only the local node.
+type NodeRegistryStoreCreator interface {
+	CreateNodeRegistryStore(config map[string]interface{}) (business.NodeRegistryStore, error)
+}
+
 // CertRevocationStoreCreator is an optional StorageProvider extension for
 // backends that support cluster-visible certificate revocation storage
 // (ADR-031 Decision 1, Issue #3852). Backends that do not implement this
@@ -691,6 +702,18 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		}
 	}
 
+	// Node registry store is optional at the interface level: only providers
+	// implementing NodeRegistryStoreCreator supply one (Issue #3763, ADR-031
+	// Decision 5's post-Raft membership mechanism). A nil store leaves
+	// ha.Manager reporting only the local node from GetClusterNodes().
+	var nodeRegistryStore business.NodeRegistryStore
+	if nrsc, ok := provider.(NodeRegistryStoreCreator); ok {
+		nodeRegistryStore, err = nrsc.CreateNodeRegistryStore(config)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("failed to create node registry store: %w", err)
+		}
+	}
+
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -710,6 +733,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		nonceStore:             nonceStore,
 		leaseStore:             leaseStore,
 		routingStore:           routingStore,
+		nodeRegistryStore:      nodeRegistryStore,
 	}, nil
 }
 
@@ -740,6 +764,7 @@ type StorageManager struct {
 	nonceStore               business.NonceStore               // Issue #3755, ADR-031: durable registration-refresh nonce
 	leaseStore               business.LeaseStore               // ADR-031 Decision 5: fenced singleton-claim leases
 	routingStore             business.RoutingStore             // ADR-031 Decision 3, Issue #3764: shared steward-routing table
+	nodeRegistryStore        business.NodeRegistryStore        // Issue #3763, ADR-031 Decision 5: post-Raft cluster membership
 	certRevocationStore      certinterfaces.RevocationStore    // Issue #3852, ADR-031: cluster-visible cert revocation list
 	signingCursorStore       certinterfaces.SigningCursorStore // Issue #3852, ADR-031: cluster-visible signing rotation cursor
 }
@@ -956,6 +981,20 @@ func (sm *StorageManager) SetRoutingStore(s business.RoutingStore) {
 	sm.routingStore = s
 }
 
+// GetNodeRegistryStore returns the shared controller-node registry (Issue
+// #3763, ADR-031 Decision 5's post-Raft membership mechanism). Returns nil
+// when the running provider does not implement NodeRegistryStoreCreator;
+// callers must nil-check before use and fall back to reporting only the
+// local node.
+func (sm *StorageManager) GetNodeRegistryStore() business.NodeRegistryStore {
+	return sm.nodeRegistryStore
+}
+
+// SetNodeRegistryStore wires the node registry store after construction.
+func (sm *StorageManager) SetNodeRegistryStore(s business.NodeRegistryStore) {
+	sm.nodeRegistryStore = s
+}
+
 // GetCertRevocationStore returns the cluster-visible certificate revocation
 // store (ADR-031 Decision 1, Issue #3852). Returns nil when the running
 // provider does not implement CertRevocationStoreCreator; callers fall back
@@ -1035,6 +1074,7 @@ func (sm *StorageManager) Close() error {
 		sm.nonceStore,
 		sm.leaseStore,
 		sm.routingStore,
+		sm.nodeRegistryStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -1325,6 +1365,20 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 			sm.SetRoutingStore(routingStore)
 		}
 	}
+	// Wire node registry store if the provider implements NodeRegistryStoreCreator
+	// (Issue #3763, ADR-031 Decision 5's post-Raft membership mechanism). Cluster
+	// deployments are exactly the shape that needs shared node membership —
+	// pkg/ha's GetClusterNodes()/GetLeader() and the internal delivery resolver
+	// have no cross-node view without it.
+	if nrsc, ok := provider.(NodeRegistryStoreCreator); ok {
+		nodeRegistryStore, err := nrsc.CreateNodeRegistryStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create node registry store: %w", err)
+		}
+		if nodeRegistryStore != nil {
+			sm.SetNodeRegistryStore(nodeRegistryStore)
+		}
+	}
 	// Wire cert revocation store if the provider implements CertRevocationStoreCreator
 	// (ADR-031 Decision 1, Issue #3852: revocation state must be cluster-visible so a
 	// revocation issued on one controller node is observed by every node).
@@ -1509,6 +1563,18 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		}
 		if routingStore != nil {
 			sm.SetRoutingStore(routingStore)
+		}
+	}
+	// Wire node registry store if the SQLite provider implements
+	// NodeRegistryStoreCreator (Issue #3763, ADR-031 Decision 5's post-Raft
+	// membership mechanism).
+	if nrsc, ok := sqProvider.(NodeRegistryStoreCreator); ok {
+		nodeRegistryStore, err := nrsc.CreateNodeRegistryStore(sqliteCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("failed to create node registry store (sqlite): %w", err)
+		}
+		if nodeRegistryStore != nil {
+			sm.SetNodeRegistryStore(nodeRegistryStore)
 		}
 	}
 	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle

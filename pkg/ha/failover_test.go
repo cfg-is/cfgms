@@ -14,11 +14,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
-// TestFailoverManager_electNewLeader_DeferesToRaft verifies that electNewLeader
-// no longer calls promoteToLeader/demoteFromLeader but instead defers to Raft.
-// After the legacy election removal (Issue #1291), electNewLeader always returns
-// nil and logs that Raft is the authority.
-func TestFailoverManager_electNewLeader_DeferesToRaft(t *testing.T) {
+// TestFailoverManager_electNewLeader_DefersToLease verifies that electNewLeader
+// no longer calls promoteToLeader/demoteFromLeader but instead defers to the
+// cluster leadership lease (ADR-031 Decision 5). After the legacy election
+// removal (Issue #1291), electNewLeader always returns nil.
+func TestFailoverManager_electNewLeader_DefersToLease(t *testing.T) {
 	storageManager, err := storage.CreateTestStorageManager()
 	require.NoError(t, err)
 
@@ -27,22 +27,17 @@ func TestFailoverManager_electNewLeader_DeferesToRaft(t *testing.T) {
 	cfg.Node.ID = "test-failover-raft-node"
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager, newTestCertManager(t), "")
+	manager, err := NewManager(cfg, logger, storageManager)
 	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		if manager.raftConsensus != nil {
-			_ = manager.raftConsensus.Stop()
-		}
-	})
 
 	fm, err := NewFailoverManager(cfg.Failover, logger, manager)
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	// electNewLeader must return nil — Raft is now the election authority.
+	// electNewLeader must return nil — the cluster leadership lease is the
+	// election authority.
 	err = fm.electNewLeader(ctx)
-	assert.NoError(t, err, "electNewLeader must defer to Raft and return nil")
+	assert.NoError(t, err, "electNewLeader must defer to the lease and return nil")
 }
 
 // TestFailoverManager_executeFailover_NonClusterMode verifies that in non-cluster
@@ -55,7 +50,7 @@ func TestFailoverManager_executeFailover_NonClusterMode(t *testing.T) {
 	cfg.Mode = SingleServerMode
 
 	logger := logging.GetLogger()
-	manager, err := NewManager(cfg, logger, storageManager, nil, "")
+	manager, err := NewManager(cfg, logger, storageManager)
 	require.NoError(t, err)
 
 	fm, err := NewFailoverManager(cfg.Failover, logger, manager)

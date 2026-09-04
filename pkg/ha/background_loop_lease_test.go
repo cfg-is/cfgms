@@ -27,7 +27,7 @@ func TestManager_NewBackgroundLoopLease_SingleServerMode_AlwaysRuns(t *testing.T
 	cfg := DefaultConfig()
 	cfg.Mode = SingleServerMode
 
-	manager, err := NewManager(cfg, logging.GetLogger(), storageManager, nil, "")
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
 	require.NoError(t, err)
 
 	job, err := manager.NewBackgroundLoopLease("test-loop", nil)

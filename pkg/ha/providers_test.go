@@ -30,3 +30,16 @@ func newTestLeaseStore(t *testing.T) business.LeaseStore {
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
+
+// newTestNodeRegistryStore returns a real (not mocked) business.NodeRegistryStore
+// backed by a temp-dir flatfile store (Issue #3763, ADR-031 Decision 5's post-Raft
+// membership mechanism). Safe to share across multiple *Manager instances within
+// one test process: FlatFileNodeRegistryStore serializes concurrent access with
+// its own in-process mutex.
+func newTestNodeRegistryStore(t *testing.T) business.NodeRegistryStore {
+	t.Helper()
+	store, err := flatfile.NewFlatFileNodeRegistryStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
