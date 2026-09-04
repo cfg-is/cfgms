@@ -69,6 +69,37 @@ func newHAClusterNodeResolver(haManager *ha.Manager, localDeliveryListenAddr str
 	return &haClusterNodeResolver{haManager: haManager, port: port, logger: logger}, nil
 }
 
+// clusterPeerNodeIDs returns the function the API server hands to
+// internaldelivery.PeerAuthorizer: the IDs of every controller node allowed to
+// call this node's internal delivery RPC. Membership is read from pkg/ha on
+// every call so a node joining or leaving takes effect without a restart, and
+// the local node's own ID is included because a routing-table/self race can
+// legitimately produce a loopback forward.
+//
+// A nil haManager (non-cluster deployment) yields an empty set, which the
+// authorizer treats as deny-all.
+func clusterPeerNodeIDs(haManager *ha.Manager) func() []string {
+	return func() []string {
+		if haManager == nil {
+			return nil
+		}
+		var ids []string
+		if local := haManager.GetLocalNode(); local != nil && local.ID != "" {
+			ids = append(ids, local.ID)
+		}
+		nodes, err := haManager.GetClusterNodes()
+		if err != nil {
+			return ids
+		}
+		for _, n := range nodes {
+			if n != nil && n.ID != "" {
+				ids = append(ids, n.ID)
+			}
+		}
+		return ids
+	}
+}
+
 // ResolveDeliveryAddr implements internaldelivery.NodeResolver.
 func (r *haClusterNodeResolver) ResolveDeliveryAddr(nodeID string) (string, bool) {
 	if r.haManager == nil {

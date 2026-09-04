@@ -37,7 +37,13 @@ const (
 //
 // mTLS-secured on the internal listener using the same certificate
 // infrastructure as the Raft transport (pkg/cert.Manager); this service mints
-// no new PKI of its own.
+// no new PKI of its own. The handshake alone does NOT establish a peer-node
+// caller: that listener's trust anchor is the controller CA, which also signs
+// every steward and admin client certificate. Authorization is therefore an
+// application-layer check — the caller must present a client certificate whose
+// CommonName is a known cluster node ID (internaldelivery.PeerAuthorizer),
+// mirroring the CN allowlist the Raft transport applies on its own listener.
+// Steward and admin certificates are refused with PERMISSION_DENIED.
 type DeliveryServiceClient interface {
 	// DeliverCommand asks the receiving node to deliver command to the steward
 	// named by steward_id using ITS OWN local control-plane connection. The
@@ -79,7 +85,13 @@ func (c *deliveryServiceClient) DeliverCommand(ctx context.Context, in *DeliverC
 //
 // mTLS-secured on the internal listener using the same certificate
 // infrastructure as the Raft transport (pkg/cert.Manager); this service mints
-// no new PKI of its own.
+// no new PKI of its own. The handshake alone does NOT establish a peer-node
+// caller: that listener's trust anchor is the controller CA, which also signs
+// every steward and admin client certificate. Authorization is therefore an
+// application-layer check — the caller must present a client certificate whose
+// CommonName is a known cluster node ID (internaldelivery.PeerAuthorizer),
+// mirroring the CN allowlist the Raft transport applies on its own listener.
+// Steward and admin certificates are refused with PERMISSION_DENIED.
 type DeliveryServiceServer interface {
 	// DeliverCommand asks the receiving node to deliver command to the steward
 	// named by steward_id using ITS OWN local control-plane connection. The

@@ -21,8 +21,6 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	"github.com/cfgis/cfgms/pkg/testutil"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
@@ -104,8 +102,7 @@ func TestClusterAwareSender_SendCommand_ForwardsToRoutedPeer(t *testing.T) {
 	// through it must fail with ErrStewardNotConnected.
 	localCP, _ := newConnectedMemoryPair(t, "some-other-steward")
 
-	routingStore, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
-	require.NoError(t, err)
+	routingStore := newFlatFileRoutingStore(t)
 	require.NoError(t, routingStore.RecordConnection(ctx, "steward-remote", "node-b"))
 
 	resolver := &fakeNodeResolver{addrs: map[string]string{"node-b": peerAddr}}
@@ -162,8 +159,7 @@ func TestClusterAwareSender_SendCommand_FallsBackToOriginalErrorWhenNoRoute(t *t
 	ctx := context.Background()
 	localCP, _ := newConnectedMemoryPair(t, "some-other-steward")
 
-	routingStore, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
-	require.NoError(t, err)
+	routingStore := newFlatFileRoutingStore(t)
 	// No RecordConnection call: no routing entry exists for steward-remote.
 
 	sender := NewClusterAwareSender(localCP, "node-a", routingStore, &fakeNodeResolver{addrs: map[string]string{}}, nil, logging.NewNoopLogger())
@@ -177,7 +173,7 @@ func TestClusterAwareSender_SendCommand_FallsBackToOriginalErrorWhenNoRoute(t *t
 		},
 	}
 
-	err = sender.SendCommand(ctx, cmd)
+	err := sender.SendCommand(ctx, cmd)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, controlplaneInterfaces.ErrStewardNotConnected,
 		"with no routing entry, the caller must see the same error it would see without cluster mode, so its existing outbox fallback still fires")
@@ -187,8 +183,7 @@ func TestClusterAwareSender_SendCommand_DoesNotForwardWhenRoutingPointsToSelf(t 
 	ctx := context.Background()
 	localCP, _ := newConnectedMemoryPair(t, "some-other-steward")
 
-	routingStore, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
-	require.NoError(t, err)
+	routingStore := newFlatFileRoutingStore(t)
 	require.NoError(t, routingStore.RecordConnection(ctx, "steward-remote", "node-a"))
 
 	sender := NewClusterAwareSender(localCP, "node-a", routingStore, &fakeNodeResolver{addrs: map[string]string{}}, nil, logging.NewNoopLogger())
@@ -202,7 +197,7 @@ func TestClusterAwareSender_SendCommand_DoesNotForwardWhenRoutingPointsToSelf(t 
 		},
 	}
 
-	err = sender.SendCommand(ctx, cmd)
+	err := sender.SendCommand(ctx, cmd)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, controlplaneInterfaces.ErrStewardNotConnected)
 }
@@ -214,8 +209,7 @@ func TestClusterAwareSender_FanOutCommand_ForwardsOnlyFailedStewards(t *testing.
 
 	localCP, localReceived := newConnectedMemoryPair(t, "steward-local")
 
-	routingStore, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
-	require.NoError(t, err)
+	routingStore := newFlatFileRoutingStore(t)
 	require.NoError(t, routingStore.RecordConnection(ctx, "steward-remote", "node-b"))
 
 	resolver := &fakeNodeResolver{addrs: map[string]string{"node-b": peerAddr}}
@@ -246,8 +240,3 @@ func TestClusterAwareSender_FanOutCommand_ForwardsOnlyFailedStewards(t *testing.
 		t.Fatal("remote steward never received the forwarded command")
 	}
 }
-
-// Compile-time documentation that business.RoutingStore is the seam
-// ClusterAwareSender consults — asserted here rather than relying on an
-// import-only reference.
-var _ business.RoutingStore = (*flatfile.FlatFileRoutingStore)(nil)

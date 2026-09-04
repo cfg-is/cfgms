@@ -15,7 +15,6 @@ package internaldelivery
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -88,10 +87,13 @@ func (s *Server) DeliverCommand(ctx context.Context, req *deliverypb.DeliverComm
 			// as "not connected", not as a delivery error.
 			return &deliverypb.DeliverCommandResponse{NotConnected: true, Message: "steward disconnected before delivery"}, nil
 		}
+		// The concrete failure is logged, never returned: the error text comes
+		// from the local control-plane provider and can carry internal detail
+		// back to the caller.
 		s.logger.Warn("internaldelivery: local delivery failed",
 			"steward_id", logging.SanitizeLogValue(stewardID),
 			"error", logging.SanitizeLogValue(err.Error()))
-		return nil, status.Error(codes.Internal, fmt.Sprintf("local delivery failed: %v", err))
+		return nil, status.Error(codes.Internal, "local delivery failed")
 	}
 
 	return &deliverypb.DeliverCommandResponse{Delivered: true}, nil

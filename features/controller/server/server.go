@@ -1023,9 +1023,23 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		var dispatchControlPlane = controlPlane
 		deliveryServer = internaldelivery.NewServer(connRegistry, controlPlane, logger)
 		if haManager != nil && cfg.HA.IsClusterMode() && routingStore != nil && certManager != nil && cfg.InternalDeliveryListenAddr != "" {
-			deliveryClientCert, dErr := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+			// Mint a dedicated mTLS CLIENT certificate for outbound delivery
+			// forwarding, exactly as pkg/ha mints one for the Raft peer
+			// transport. Two properties matter and neither holds for the
+			// PurposeTransport certificate this used to present: that cert
+			// carries ExtKeyUsage ServerAuth only, so a peer's
+			// RequireAndVerifyClientCert handshake rejects it outright; and its
+			// CommonName is the fixed "cfgms-internal", which cannot identify
+			// which node is calling. The CommonName here is the local cluster
+			// node ID, which is what the receiving node's PeerAuthorizer
+			// allowlists.
+			localNodeID := haManager.GetLocalNode().ID
+			deliveryClientCert, dErr := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+				CommonName:   localNodeID,
+				ValidityDays: 365,
+			})
 			if dErr != nil {
-				logger.Warn("internaldelivery: transport certificate unavailable, cluster dispatch fallback disabled", "error", dErr)
+				logger.Warn("internaldelivery: peer client certificate unavailable, cluster dispatch fallback disabled", "error", dErr)
 			} else {
 				caCertPEM, caErr := certManager.GetCACertificate()
 				if caErr != nil {
@@ -1566,8 +1580,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Wire the internal controller-to-controller delivery RPC service (ADR-031
 	// Decision 3, Issue #3764). A nil deliveryServer or empty
 	// InternalDeliveryListenAddr leaves the delivery listener unstarted — the
-	// expected state outside cluster mode.
-	httpServer.SetDeliveryHandler(deliveryServer, cfg.InternalDeliveryListenAddr)
+	// expected state outside cluster mode. clusterPeerNodeIDs is the authorized
+	// caller set for the RPC: peers authenticate with a client certificate whose
+	// CommonName is their cluster node ID, exactly as pkg/ha's Raft transport
+	// requires on the sibling internal listener. Outside cluster mode it returns
+	// no IDs, so the endpoint (which is itself unstarted there) denies everything.
+	httpServer.SetDeliveryHandler(deliveryServer, cfg.InternalDeliveryListenAddr, clusterPeerNodeIDs(haManager))
 
 	// Issue #1816: Wire signing rotation service so the rotate endpoint is available.
 	if signingRotationSvc != nil {

@@ -11,7 +11,6 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	teststorage "github.com/cfgis/cfgms/pkg/testing/storage"
 )
 
@@ -66,8 +65,7 @@ func TestRoutingTableConnectHook_NilStoreIsNoop(t *testing.T) {
 }
 
 func TestRoutingTableConnectHook_RecordsConnectionOnConnect(t *testing.T) {
-	routingStore, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
-	require.NoError(t, err)
+	routingStore := newFlatFileRoutingStore(t)
 
 	hook := &routingTableConnectHook{routingStore: routingStore, logger: logging.NewNoopLogger(), localNodeID: "node-a-0001"}
 	require.NoError(t, hook.OnConnect(context.Background(), "steward-1"))
@@ -76,4 +74,24 @@ func TestRoutingTableConnectHook_RecordsConnectionOnConnect(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, "node-a-0001", nodeID)
+}
+
+// TestClusterPeerNodeIDs_IncludesLocalNode verifies the authorized-caller set
+// handed to the delivery listener's PeerAuthorizer: this node's own ID is
+// present, because a routing-table entry that still points at ourselves
+// produces a legitimate loopback forward.
+func TestClusterPeerNodeIDs_IncludesLocalNode(t *testing.T) {
+	manager := newTestHAManager(t, "node-a-0001", "10.0.0.5:7000")
+
+	ids := clusterPeerNodeIDs(manager)()
+
+	assert.Contains(t, ids, "node-a-0001", "the local node must be an authorized delivery caller")
+}
+
+// TestClusterPeerNodeIDs_NilManagerDeniesEveryone is the fail-closed half: with
+// no HA manager there is no cluster membership to authorize against, so the
+// authorizer must receive an empty set rather than a permissive default.
+func TestClusterPeerNodeIDs_NilManagerDeniesEveryone(t *testing.T) {
+	assert.Empty(t, clusterPeerNodeIDs(nil)(),
+		"without cluster membership no caller may be authorized")
 }

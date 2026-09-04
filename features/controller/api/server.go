@@ -74,6 +74,7 @@ type Server struct {
 	internalHTTPServer              *http.Server
 	deliveryHandler                 *internaldelivery.Server // ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery RPC
 	deliveryListenAddr              string
+	deliveryPeerNodeIDs             func() []string // cluster node IDs authorized to call the delivery RPC (nil denies every caller)
 	deliveryGRPCServer              *grpc.Server
 	router                          *mux.Router
 	metricsRouter                   *mux.Router
@@ -998,7 +999,19 @@ func (s *Server) Start() error {
 		}()
 	}
 	if deliveryListener != nil {
-		deliveryServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(internalTLSConfig)))
+		// The listener's client CA pool is the public API pool (controller CA,
+		// which also signs every steward and admin client certificate) plus the
+		// HA peer CA, so the handshake alone does not establish "peer controller
+		// node". The interceptor is what enforces that identity, mirroring the
+		// CN allowlist pkg/ha's Raft transport applies on the sibling internal
+		// listener. It is constructed here rather than by the caller so the
+		// delivery service can never be served unauthenticated; a nil node-ID
+		// source denies every call.
+		peerAuth := internaldelivery.NewPeerAuthorizer(s.deliveryPeerNodeIDs, s.logger)
+		deliveryServer := grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(internalTLSConfig)),
+			grpc.UnaryInterceptor(peerAuth.UnaryInterceptor),
+		)
 		clusterdeliverypb.RegisterDeliveryServiceServer(deliveryServer, s.deliveryHandler)
 		s.deliveryGRPCServer = deliveryServer
 		go func() {
@@ -1239,7 +1252,20 @@ func (s *Server) Close(ctx context.Context) error {
 			select {
 			case <-deliveryStopped:
 			case <-ctx.Done():
-				s.deliveryGRPCServer.Stop()
+				// The hard Stop is deliberately NOT called synchronously here.
+				// grpc-go's stop() holds the server mutex while it waits for
+				// in-flight handlers, and GracefulStop is already inside that
+				// wait — so a synchronous Stop() blocks on that mutex for
+				// exactly as long as the RPC this fallback exists to abandon,
+				// turning the timeout into the indefinite hang it is meant to
+				// prevent. Firing it in the background still force-closes the
+				// connections in the cases where the drain is stuck on a
+				// lingering connection rather than a running handler (there
+				// the mutex is released across the wait), and Close stays
+				// bounded by ctx either way. The listener itself is already
+				// closed: GracefulStop closes listeners before it starts
+				// draining, so no port is held past this point.
+				go s.deliveryGRPCServer.Stop()
 				if firstErr == nil {
 					firstErr = fmt.Errorf("api server close: timed out stopping internal delivery server: %w", ctx.Err())
 				}
@@ -1500,11 +1526,19 @@ func (s *Server) SetRegistry(r registry.Registry) {
 // Call this after New() returns but before Start() is called. A nil handler
 // or empty listenAddr leaves the delivery service unstarted — the expected
 // state for a single-node (non-cluster) deployment.
-func (s *Server) SetDeliveryHandler(handler *internaldelivery.Server, listenAddr string) {
+//
+// peerNodeIDs supplies the cluster node IDs whose client certificates may call
+// the delivery RPC; it is evaluated per RPC so membership changes apply without
+// a restart. The listener's mTLS trust anchor is wider than the peer set (the
+// controller CA also signs steward and admin certificates), so this is the
+// control that keeps a steward or admin certificate from reaching the service.
+// A nil peerNodeIDs denies every caller.
+func (s *Server) SetDeliveryHandler(handler *internaldelivery.Server, listenAddr string, peerNodeIDs func() []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deliveryHandler = handler
 	s.deliveryListenAddr = listenAddr
+	s.deliveryPeerNodeIDs = peerNodeIDs
 }
 
 // Registry returns the wired active-steward connection registry, or nil if

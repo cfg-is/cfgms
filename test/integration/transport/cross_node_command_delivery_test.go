@@ -14,12 +14,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	deliverypb "github.com/cfgis/cfgms/api/proto/clusterdelivery"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	certpkg "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
+	grpcconvert "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	"github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -56,7 +59,7 @@ func (r *crossNodeResolver) ResolveDeliveryAddr(nodeID string) (string, bool) {
 // subscribed for stewardID, and the real internaldelivery.Server exposed over
 // a real mTLS gRPC listener — exactly the shape ADR-031 Decision 3 describes
 // as the receiving side of a forwarded delivery request.
-func startNodeBDeliveryListener(t *testing.T, stewardID string, serverTLS *tls.Config) (addr string, received chan *controlplaneTypes.SignedCommand) {
+func startNodeBDeliveryListener(t *testing.T, stewardID string, serverTLS *tls.Config, authorizedNodeIDs []string) (addr string, received chan *controlplaneTypes.SignedCommand) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -97,7 +100,16 @@ func startNodeBDeliveryListener(t *testing.T, stewardID string, serverTLS *tls.C
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)))
+	// The peer authorizer the API server installs in production: the mTLS trust
+	// anchor admits any controller-CA leaf, so only the CommonName check keeps a
+	// steward or admin certificate off this endpoint.
+	peerAuth := internaldelivery.NewPeerAuthorizer(
+		func() []string { return authorizedNodeIDs }, logging.NewNoopLogger())
+
+	grpcServer := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(serverTLS)),
+		grpc.UnaryInterceptor(peerAuth.UnaryInterceptor),
+	)
 	deliverypb.RegisterDeliveryServiceServer(grpcServer, deliveryServer)
 	go func() { _ = grpcServer.Serve(lis) }()
 	t.Cleanup(grpcServer.Stop)
@@ -105,9 +117,15 @@ func startNodeBDeliveryListener(t *testing.T, stewardID string, serverTLS *tls.C
 	return lis.Addr().String(), received
 }
 
-func crossNodeTestTLS(t *testing.T) (serverTLS, clientTLS *tls.Config) {
+// crossNodeTestTLS issues the two-sided material for the forwarding hop. The
+// client leaf's CommonName is callerNodeID because that is the identity node B's
+// PeerAuthorizer allowlists — the same shape production uses, where each node
+// forwards under a client certificate minted with its own cluster node ID.
+func crossNodeTestTLS(t *testing.T, callerNodeID string) (serverTLS, clientTLS *tls.Config) {
 	t.Helper()
-	certDir, cleanup := testutil.SetupTestCerts(t)
+	certConfig := testutil.DefaultCertConfig()
+	certConfig.ClientName = callerNodeID
+	certDir, cleanup := testutil.SetupTestCertsWithConfig(t, certConfig)
 	t.Cleanup(cleanup)
 
 	read := func(name string) []byte {
@@ -143,8 +161,8 @@ func TestCrossNodeCommandDelivery_ReachesStewardConnectedToPeerNode(t *testing.T
 	const nodeAID = "node-a"
 	const nodeBID = "node-b"
 
-	serverTLS, clientTLS := crossNodeTestTLS(t)
-	nodeBAddr, nodeBReceived := startNodeBDeliveryListener(t, stewardID, serverTLS)
+	serverTLS, clientTLS := crossNodeTestTLS(t, nodeAID)
+	nodeBAddr, nodeBReceived := startNodeBDeliveryListener(t, stewardID, serverTLS, []string{nodeAID})
 
 	// Node A's own local control plane: started, but with no client ever
 	// connected for stewardID, so every local SendCommand attempt for it
@@ -268,4 +286,50 @@ func TestCrossNodeCommandDelivery_FallsBackToOutboxWhenPeerUnreachable(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, business.DeliveryStatusPending, rec2.DeliveryStatus,
 		"a failed delivery attempt must leave the outbox row pending for the normal retry/drain path, never falsely delivered")
+}
+
+// TestCrossNodeCommandDelivery_RefusesNonPeerCertificate is the security
+// regression test for the delivery endpoint's authorization boundary (security
+// review, Issue #3764). The listener's mTLS trust anchor is the controller CA,
+// which signs steward client certificates too, so the handshake here succeeds —
+// a steward-identity caller reaching the handler would learn, from the
+// delivered/not_connected answer, whether any steward in ANY tenant is attached
+// to this node. The application-layer identity check is what stops it, and this
+// exercises that over the real wire rather than in isolation.
+func TestCrossNodeCommandDelivery_RefusesNonPeerCertificate(t *testing.T) {
+	const stewardID = "steward-cross-node"
+
+	// The caller's leaf is a valid controller-CA client certificate whose
+	// CommonName is a steward ID, not a cluster node ID.
+	serverTLS, stewardTLS := crossNodeTestTLS(t, stewardID)
+	nodeBAddr, nodeBReceived := startNodeBDeliveryListener(t, stewardID, serverTLS, []string{"node-a"})
+
+	conn, err := grpc.NewClient(nodeBAddr, grpc.WithTransportCredentials(credentials.NewTLS(stewardTLS)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = deliverypb.NewDeliveryServiceClient(conn).DeliverCommand(ctx, &deliverypb.DeliverCommandRequest{
+		StewardId: stewardID,
+		Command: grpcconvert.SignedCommandToProto(&controlplaneTypes.SignedCommand{
+			Command: controlplaneTypes.Command{
+				ID:        "cross-node-unauthorized",
+				Type:      controlplaneTypes.CommandSyncConfig,
+				StewardID: stewardID,
+			},
+		}),
+	})
+
+	require.Error(t, err, "a non-peer certificate must not be served by the inter-node delivery RPC")
+	assert.Equal(t, codes.PermissionDenied, status.Code(err),
+		"the endpoint must refuse the caller outright rather than answering with steward connectivity")
+
+	// The steward connected to node B must not have been touched by the attempt.
+	select {
+	case <-nodeBReceived:
+		t.Fatal("a refused caller must never cause a delivery to a connected steward")
+	case <-time.After(500 * time.Millisecond):
+	}
 }

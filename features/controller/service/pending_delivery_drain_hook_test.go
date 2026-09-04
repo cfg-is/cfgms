@@ -16,21 +16,16 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	"github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 )
 
 // newDrainHookTestStores returns real, in-memory SQLite-backed CommandStore
-// and StewardStore instances (no mocks) for exercising the drain hook.
+// and StewardStore instances (no mocks) for exercising the drain hook. The
+// concrete provider construction lives in providers_test.go, the allowlisted
+// path for direct pkg/storage/providers/* imports (see
+// scripts/check-providers.sh).
 func newDrainHookTestStores(t *testing.T) (business.CommandStore, business.StewardStore) {
 	t.Helper()
-	provider := &sqlite.SQLiteProvider{}
-	commandStore, err := provider.CreateCommandStore(map[string]interface{}{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = commandStore.Close() })
-
-	stewardStore, err := provider.CreateStewardStore(map[string]interface{}{})
-	require.NoError(t, err)
-	return commandStore, stewardStore
+	return newSQLiteDrainHookStores(t)
 }
 
 // newDrainHookTestPublisher starts a real memory.Provider server/client pair
