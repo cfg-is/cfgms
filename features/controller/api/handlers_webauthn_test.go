@@ -1497,6 +1497,28 @@ func TestNewWebAuthnFromConfig_RejectsLoopbackHTTPOrigin(t *testing.T) {
 	assert.Contains(t, err.Error(), "must use https")
 }
 
+// TestNewWebAuthnFromConfig_RejectsIPAddressRPID is a REQUIRED test (Issue #3827 AC 4):
+// go-webauthn v0.18.0 rejects a Config whose relying-party id is an IP address rather
+// than a domain, where v0.17.4 accepted it. The rejection comes from the library's own
+// Config validation, so this test pins the behavioral change the bump introduces rather
+// than a check this repository added.
+//
+// No supported deployment path configures an IP: both walkthroughs specify rp_id as the
+// controller's public hostname, "no scheme, no port"
+// (docs/deployment/single-controller/walkthrough.md). This test exists so that a future
+// change introducing one fails here instead of at an operator's first passkey ceremony.
+func TestNewWebAuthnFromConfig_RejectsIPAddressRPID(t *testing.T) {
+	for _, rpID := range []string{"192.168.1.10", "10.0.0.1", "::1"} {
+		t.Run(rpID, func(t *testing.T) {
+			wa, err := NewWebAuthnFromConfig(rpID, "Display Name",
+				[]string{"https://cfgms.example.com"})
+			require.Error(t, err)
+			assert.Nil(t, wa)
+			assert.Contains(t, err.Error(), "must be a domain and not an IP address")
+		})
+	}
+}
+
 // TestNewWebAuthnFromConfig_AcceptsValidHTTPSConfig verifies the constructor still
 // accepts a well-formed HTTPS relying-party configuration — the tightened validation
 // must not reject the shape every existing test in this package already uses.
@@ -1543,4 +1565,100 @@ func TestHandlePasskeyLoginBegin_AnswersWithWiredWebAuthn(t *testing.T) {
 
 	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code,
 		"a wired relying party must not leave the passkey login begin endpoint at 503")
+}
+
+// TestWebAuthnRegistration_RejectsRawIDMismatch is a REQUIRED test (Issue #3827 AC 4):
+// go-webauthn v0.18.0 rejects a registration credential response whose `id` and `rawId`
+// disagree, or which omits `rawId` entirely. v0.17.4 accepted both.
+//
+// The check is discriminating, not merely "a bad body is refused". All three subtests
+// send the same W3C Level 3 §16.2 NoneES256 spec vector against the same session, and
+// differ only in the identifier fields. The matching case registers successfully (201),
+// so a 400 in the other two is attributable to the identifier fields and nothing else.
+// This matters because the handler deliberately returns one generic
+// WEBAUTHN_VERIFY_ERROR for every verification failure — it discloses no detail — so
+// the error body alone cannot tell a rawId rejection from an attestation rejection.
+//
+// Each subtest builds its own server: the matching case persists a credential, and
+// sharing one server would let that registration change what the later subtests see.
+func TestWebAuthnRegistration_RejectsRawIDMismatch(t *testing.T) {
+	const (
+		svRPID   = "example.org"
+		svOrigin = "https://example.org"
+		// W3C Level 3 §16.2 NoneES256 spec test vector (hex-encoded), the same vector
+		// TestWebAuthnRegistration/Finish_Success uses.
+		svAttObjectHex  = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220" //nolint:gosec // W3C Level 3 §16.2 spec test vector, not a real credential secret
+		svClientDataHex = "7b2274797065223a22776562617574686e2e637265617465222c226368616c6c656e6765223a22414d4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755657345441222c226f726967696e223a2268747470733a2f2f6578616d706c652e6f7267222c2263726f73734f726967696e223a66616c73652c22657874726144617461223a22636c69656e74446174614a534f4e206d617920626520657874656e6465642077697468206164646974696f6e616c206669656c647320696e20746865206675747572652c207375636820617320746869733a20426b5165446a646354427258426941774a544c453551227d"
+		svCredIDHex     = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4" //nolint:gosec // W3C Level 3 §16.2 spec test vector credential ID, not a real credential secret
+		svChallengeHex  = "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130"
+	)
+
+	svAttObj, err := hex.DecodeString(svAttObjectHex)
+	require.NoError(t, err)
+	svCDJ, err := hex.DecodeString(svClientDataHex)
+	require.NoError(t, err)
+	svCredIDBytes, err := hex.DecodeString(svCredIDHex)
+	require.NoError(t, err)
+	svChallengeBytes, err := hex.DecodeString(svChallengeHex)
+	require.NoError(t, err)
+
+	svCredIDStr := base64.RawURLEncoding.EncodeToString(svCredIDBytes)
+	svChallenge := base64.RawURLEncoding.EncodeToString(svChallengeBytes)
+	otherCredentialID := base64.RawURLEncoding.EncodeToString([]byte("a-different-credential"))
+
+	// finish stands up a fresh server, injects the spec-vector session, and posts a
+	// registration-finish body whose id and rawId are supplied independently.
+	// omitRawID drops the field entirely rather than sending it empty, which is the
+	// second shape v0.18.0 refuses.
+	finish := func(t *testing.T, id, rawID string, omitRawID bool) *httptest.ResponseRecorder {
+		t.Helper()
+		server, username := setupWebAuthnServer(t, svRPID, []string{svOrigin})
+		acct, err := server.getAccount(context.Background(), username)
+		require.NoError(t, err)
+
+		injectSession(server, username, webauthn.SessionData{
+			Challenge:        svChallenge,
+			UserID:           []byte(acct.ID),
+			UserVerification: protocol.VerificationPreferred,
+			RelyingPartyID:   svRPID,
+			CredParams: []protocol.CredentialParameter{
+				{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256},
+			},
+		}, 10*time.Minute)
+
+		outer := map[string]any{
+			"id":   id,
+			"type": "public-key",
+			"response": map[string]string{
+				"clientDataJSON":    base64.RawURLEncoding.EncodeToString(svCDJ),
+				"attestationObject": base64.RawURLEncoding.EncodeToString(svAttObj),
+			},
+		}
+		if !omitRawID {
+			outer["rawId"] = rawID
+		}
+		b, err := json.Marshal(outer)
+		require.NoError(t, err)
+
+		return doFinish(t, server, username, bytes.NewReader(b))
+	}
+
+	// Control. Establishes that this vector, session and body shape do register
+	// successfully, so the two rejections below isolate the identifier fields.
+	t.Run("MatchingIDAndRawIDRegisters", func(t *testing.T) {
+		rec := finish(t, svCredIDStr, svCredIDStr, false)
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("IDAndRawIDDisagreeRejected", func(t *testing.T) {
+		rec := finish(t, svCredIDStr, otherCredentialID, false)
+		assert.Equal(t, http.StatusBadRequest, rec.Code,
+			"a credential whose id and rawId disagree must be refused; body: %s", rec.Body.String())
+	})
+
+	t.Run("RawIDOmittedRejected", func(t *testing.T) {
+		rec := finish(t, svCredIDStr, "", true)
+		assert.Equal(t, http.StatusBadRequest, rec.Code,
+			"a credential omitting rawId must be refused; body: %s", rec.Body.String())
+	})
 }
