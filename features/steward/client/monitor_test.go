@@ -166,3 +166,49 @@ func TestTransportClient_GetConfigExecutor_ReturnsExecutorAfterInitialize(t *tes
 
 	assert.Equal(t, e, c.GetConfigExecutor(), "GetConfigExecutor must return the wired executor")
 }
+
+// TestTransportClient_InitializeConfigExecutor_StopsOutgoingExecutorMonitors is
+// the regression test for Issue #3876: InitializeConfigExecutor replaces
+// c.configExecutor with a brand-new Executor, but previously never told the
+// outgoing executor's monitor engine to stop. An active monitor engine on the
+// outgoing executor was orphaned — its fan-in/event-loop goroutines kept running
+// against stale, retained monitorEntries, invisible to and unstoppable by any
+// config pushed to the new executor, with no recovery short of a steward
+// service restart.
+func TestTransportClient_InitializeConfigExecutor_StopsOutgoingExecutorMonitors(t *testing.T) {
+	mod := newClientMonitorTestModule()
+	outgoing := newExecutorWithModule(t, "testmon", mod)
+	outgoing.SetMonitorDebounceWindow(20 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, outgoing.StartMonitors(ctx, []stewardconfig.ResourceConfig{
+		{Name: "res1", Module: "testmon", Config: map[string]interface{}{"state": "present"}},
+	}))
+	require.True(t, mod.IsMonitorCalled(), "sanity: the outgoing executor's monitor engine must be running")
+	require.Equal(t, 0, mod.CloseCallCount(), "sanity: not yet stopped")
+
+	q, err := NewOfflineQueue(OfflineQueueConfig{Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+	c := &TransportClient{
+		stewardID:       "test-steward",
+		tenantID:        "test-tenant",
+		heartbeatStop:   make(chan struct{}),
+		convergenceStop: make(chan struct{}),
+		dnaRefreshStop:  make(chan struct{}),
+		offlineQueue:    q,
+		logger:          logging.NewLogger("debug"),
+	}
+	c.mu.Lock()
+	c.configExecutor = outgoing
+	c.mu.Unlock()
+
+	// The reconnect scenario: InitializeConfigExecutor is called again while an
+	// executor with an active monitor engine is already wired.
+	require.NoError(t, c.InitializeConfigExecutor("test-tenant"))
+
+	assert.NotEqual(t, outgoing, c.GetConfigExecutor(),
+		"sanity: InitializeConfigExecutor must have replaced the executor")
+	assert.Equal(t, 1, mod.CloseCallCount(),
+		"the outgoing executor's monitor engine must be stopped (module Closed), not orphaned, when replaced")
+}

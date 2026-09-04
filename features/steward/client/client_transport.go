@@ -820,11 +820,24 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 	})
 
 	c.mu.Lock()
+	outgoing := c.configExecutor
 	c.configExecutor = executor
 	if emitter != nil && c.eventEmitter == nil {
 		c.eventEmitter = emitter
 	}
 	c.mu.Unlock()
+
+	// Stop any monitor engine running on the executor this call just replaced
+	// (Issue #3876). Without this, a monitor engine started on outgoing (e.g. by
+	// a prior syncConfigNow) is never told to stop: its fan-in and event-loop
+	// goroutines keep running against outgoing's own retained monitorEntries —
+	// invisible to and unstoppable by any config pushed to the NEW executor —
+	// dispatching targeted reconciles from stale desired state forever, with no
+	// recovery short of a steward service restart. StopMonitors is a no-op when
+	// no engine is running, so this is safe to call unconditionally.
+	if outgoing != nil {
+		outgoing.StopMonitors()
+	}
 
 	if emitter != nil {
 		// Start is idempotent — a no-op if setupCommandHandler already started this emitter.

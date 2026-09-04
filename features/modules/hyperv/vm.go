@@ -48,6 +48,16 @@ var (
 	// ErrInvalidSourceUnattend is returned when source unattend does not start with profile://.
 	ErrInvalidSourceUnattend = errors.New("hyperv: invalid source unattend: must start with profile://")
 
+	// ErrInvalidMemoryMB is returned when a VM create dispatches with a
+	// memory_mb below Hyper-V's own minimum (32 MB) — including 0, which is
+	// what an int64 field silently resolves to when memory_mb is omitted from
+	// a config entirely (Issue #3876: a partial/stale desired-state config
+	// missing memory_mb reached New-VM as -MemoryStartupBytes 0, which
+	// Hyper-V rejects, and a monitor-driven retry then repeated the same
+	// failing New-VM call indefinitely). Checked only on the create path —
+	// never for state: absent, which carries no memory_mb at all by design.
+	ErrInvalidMemoryMB = errors.New("hyperv: invalid memory_mb: must be at least 32 (Hyper-V's own minimum startup memory)")
+
 	// ErrInvalidSourceCompletionMode is returned when source completion.mode is not steward-registration.
 	ErrInvalidSourceCompletionMode = errors.New("hyperv: invalid source completion.mode: must be steward-registration")
 
@@ -89,6 +99,12 @@ var (
 // csvPathPrefix is the Cluster Shared Volume mount root. A VHDX or seed dir under
 // this prefix lives on shared cluster storage.
 const csvPathPrefix = `C:\ClusterStorage\`
+
+// minVMMemoryMB is Hyper-V's own minimum startup memory (Issue #3876) — the
+// floor createVM enforces before ever dispatching New-VM, matching the value
+// Hyper-V itself reports when a create is attempted below it ("The minimum
+// amount of memory you can assign to this virtual machine is '32' MB").
+const minVMMemoryMB = 32
 
 // vmNamePattern is the allowlist for user-supplied VM names. It is an injection
 // safety guard only — the name is used verbatim as the host-side VM name.
@@ -1944,6 +1960,16 @@ func (m *hypervModule) renameProvisionRecord(ctx context.Context, cfg *VMConfig,
 // when unset (0). It does NOT power the VM on — the caller decides whether to
 // start (plain lifecycle) or hand off to provisionVM (create-from-source).
 func (m *hypervModule) createVM(ctx context.Context, vmName, hostName string, cfg *VMConfig) error {
+	// Reject before any PowerShell dispatch: a memory_mb below Hyper-V's own
+	// minimum (32 MB) — most commonly 0, from a config that omitted memory_mb
+	// entirely — must never reach New-VM as a startup-memory value (Issue
+	// #3876). Unlike Generation, memory_mb has no "0 means accept the
+	// default" convention: a VM genuinely needs an operator-declared amount to
+	// create, so 0 here means missing config, not "use the default".
+	if cfg.MemoryMB < minVMMemoryMB {
+		return ErrInvalidMemoryMB
+	}
+
 	// 0 means "accept the default" — ADR-009 §5 default is Generation 2.
 	generation := cfg.Generation
 	if generation == 0 {
