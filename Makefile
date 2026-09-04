@@ -1132,7 +1132,7 @@ security-gosec:
 		echo "❌ Error: gosec is not installed"; \
 		echo ""; \
 		echo "Install gosec using Go:"; \
-		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0"; \
+		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0"; \
 		echo ""; \
 		echo "For more info: https://github.com/securego/gosec"; \
 		exit 1; \
@@ -1406,7 +1406,7 @@ security-remediation-report:
 # GOLANGCI_LINT_VERSION must match .github/workflows/dependency-pin-check.yml,
 # .github/workflows/golangci-lint.yml, .devcontainer/Dockerfile and
 # windows-setup.ps1.
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.13.2
 GO_TOOLCHAIN_VERSION := $(shell awk '$$1 == "toolchain" { print $$2 }' go.mod)
 LINT_TOOLS_BIN := $(HOME)/.cache/cfgms/tools/bin
 

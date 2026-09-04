@@ -86,11 +86,11 @@ if ($goBinDir) {
     # from source ties its build Go to the Go on this box, which the same bump
     # already moved. See the comment in .devcontainer/Dockerfile (Issue #3627).
     $goTools = @(
-        @{ Name = 'gosec';         Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.28.0' },
+        @{ Name = 'gosec';         Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.29.0' },
         @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.2.1' },
         @{ Name = 'gitleaks';      Package = 'github.com/zricethezav/gitleaks/v8@v8.30.1' },
         @{ Name = 'go-licenses';   Package = 'github.com/google/go-licenses/v2@v2.0.1' },
-        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1' }
+        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2' }
     )
 
     foreach ($tool in $goTools) {
@@ -182,8 +182,8 @@ if ($goBinDir) {
         },
         @{
             Name   = 'trufflehog'
-            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.0/trufflehog_3.97.0_windows_amd64.tar.gz'
-            Sha256 = '2a8208e6e5be8d6cd855322480eda4790a437f805dbd6538ad7495c27f40d4e5'
+            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.1/trufflehog_3.97.1_windows_amd64.tar.gz'
+            Sha256 = 'dc1759892a41d64ee0d46cd5d4391dad7f916f54257154aa1b0732f9c50901b2'
             Member = 'trufflehog.exe'
         },
         @{

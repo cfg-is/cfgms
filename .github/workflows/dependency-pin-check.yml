@@ -200,14 +200,14 @@ jobs:
         }
 
         echo "Checking pinned tool versions..."
-        check_version "gosec"       "securego/gosec"                          "v2.28.0"
+        check_version "gosec"       "securego/gosec"                          "v2.29.0"
         check_version "staticcheck" "dominikh/go-tools"                       "2026.2.1"
         check_version "gitleaks"    "zricethezav/gitleaks"                    "v8.30.1"
         check_version "nancy"       "sonatype-nexus-community/nancy"          "v2.1.0"
-        check_version "trufflehog"  "trufflesecurity/trufflehog"              "v3.97.0"
+        check_version "trufflehog"  "trufflesecurity/trufflehog"              "v3.97.1"
         check_version "trivy"       "aquasecurity/trivy"                      "v0.74.0"
         check_version "go-licenses" "google/go-licenses"                      "v2.0.1"
-        check_version "golangci-lint" "golangci/golangci-lint"                "v2.13.1"
+        check_version "golangci-lint" "golangci/golangci-lint"                "v2.13.2"
         # osquery: the bundled binary version shipped in the publisher-signed module
         # bundle (features/modules/extended/osquery/module.go pinnedVersion). A bump
         # here must also update pinnedVersion — the two must stay in lockstep.
