@@ -1567,7 +1567,6 @@ func TestHandlePasskeyLoginBegin_AnswersWithWiredWebAuthn(t *testing.T) {
 		"a wired relying party must not leave the passkey login begin endpoint at 503")
 }
 
-
 // TestWebAuthnRegistration_RejectsRawIDMismatch is a REQUIRED test (Issue #3827 AC 4):
 // go-webauthn v0.18.0 rejects a registration credential response whose `id` and `rawId`
 // disagree, or which omits `rawId` entirely. v0.17.4 accepted both.
