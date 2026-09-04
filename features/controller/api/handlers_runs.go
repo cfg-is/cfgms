@@ -4,8 +4,10 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -773,14 +775,20 @@ func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string
 // emitOsqueryAudit's field shape (handlers_osquery.go). It is a no-op when auditManager
 // is nil.
 //
-// Unlike the exec-audit code this replaces (which stored only a command hash),
-// payloadText is recorded literally: Issue #3698 makes the blast-radius bound and this
-// audit trail the compensating controls for the epic's accepted UI-trust residual risk
-// (a compromised controller could show an operator one payload and sign another), so
-// the trail must be able to reconstruct exactly what was dispatched, not just its
-// digest. Every steward reference in targets is already a cfg-declared resource id
-// (steward ID), never a live hostname. Target entries beyond the first 10 are counted
-// but not individually recorded, to keep audit record size bounded — the same cap
+// The payload is recorded as a SHA-256 digest and a byte length, never as literal
+// text. Issue #3698 makes the blast-radius bound and this audit trail the compensating
+// controls for the epic's accepted UI-trust residual risk (a compromised controller
+// could show an operator one payload and sign another), and a digest discharges that:
+// an investigator holding a candidate payload can prove or disprove that it is the one
+// dispatched. Storing the text itself cannot be reconciled with the project rule against
+// writing secrets to disk — an operator payload is arbitrary operator-authored script
+// text and routinely carries credentials inline. Redaction was attempted and rejected:
+// a filter over free-form script text in any shell leaks on the shapes it does not
+// model, so the digest is the enforced form rather than a best-effort scrub.
+//
+// Every steward reference in targets is already a cfg-declared resource id (steward ID),
+// never a live hostname. Target entries beyond the first 10 are counted but not
+// individually recorded, to keep audit record size bounded — the same cap
 // emitOsqueryAudit applies.
 func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID, callerID, payloadText, credentialID string, targets []string, runID string, result business.AuditResult, rejectionReason string) {
 	if s.auditManager == nil {
@@ -796,6 +804,12 @@ func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID,
 	if result != business.AuditResultSuccess {
 		severity = business.AuditSeverityCritical
 	}
+
+	// The payload is identified by digest, never stored. hex.EncodeToString of a
+	// sha256 sum is fixed-width and contains no operator-supplied bytes, so it needs
+	// no sanitizing before it reaches the audit record.
+	digest := sha256.Sum256([]byte(payloadText))
+	payloadDigest := hex.EncodeToString(digest[:])
 
 	// AuditEntry.ResourceID is a required, non-empty field (Manager.validateEntry) — but
 	// the WebAuthn path's begin-time blast-radius rejection has no credential yet (the
@@ -817,7 +831,8 @@ func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID,
 		Resource("operator_credential", logging.SanitizeLogValue(resourceID), "").
 		Result(result).
 		Severity(severity).
-		Detail("payload", payloadText).
+		Detail("payload_sha256", payloadDigest).
+		Detail("payload_bytes", fmt.Sprintf("%d", len(payloadText))).
 		Detail("credential_id", logging.SanitizeLogValue(credentialID)).
 		Detail("target_count", fmt.Sprintf("%d", len(targets))).
 		Detail("run_id", runID)

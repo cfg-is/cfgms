@@ -252,8 +252,11 @@ risk instead, and both are enforced, not advisory:
   through.
 - **Every operator payload dispatch is audited**, accepted or rejected, via
   `audit.NewEventBuilder` (`emitOperatorPayloadDispatchAudit`,
-  `features/controller/api/handlers_runs.go`), recording the literal payload text (not
-  just its hash — the trail must be able to reconstruct exactly what was dispatched), the
+  `features/controller/api/handlers_runs.go`), recording the payload's SHA-256 digest and
+  byte length (never its literal text — an operator payload is arbitrary script text and
+  routinely carries credentials inline, so storing it verbatim would violate the rule
+  against writing secrets to disk; a digest still lets an investigator holding a candidate
+  payload prove or disprove that it is the one dispatched), the
   resolved target list using each steward's cfg-declared resource id (never a live
   hostname), the signing credential's identifier (the X.509 certificate serial or the
   WebAuthn credential id), and the caller identity. A rejected-for-exceeding-the-bound

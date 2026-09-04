@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
@@ -1025,7 +1026,16 @@ func TestPostRunCommand_RejectedBlastRadius_AuditedAsBoundViolation(t *testing.T
 	require.NotNil(t, found.Details)
 	reason, _ := found.Details["rejection_reason"].(string)
 	assert.Contains(t, reason, "exceeds tenant bound", "the record must name the rejection as a blast-radius bound violation")
-	assert.Equal(t, "echo audit-me", found.Details["payload"], "the audit record must carry the literal payload text")
+	// The payload is identified by digest, never stored verbatim: an investigator
+	// holding a candidate payload can confirm it is the one dispatched, while an
+	// operator payload carrying an inline credential never reaches the audit store.
+	wantDigest := sha256.Sum256([]byte("echo audit-me"))
+	assert.Equal(t, hex.EncodeToString(wantDigest[:]), found.Details["payload_sha256"],
+		"the audit record must identify the payload by its SHA-256 digest")
+	assert.Equal(t, "13", found.Details["payload_bytes"],
+		"the audit record must carry the payload byte length")
+	assert.NotContains(t, found.Details, "payload",
+		"the audit record must never carry the literal payload text")
 }
 
 // ---- Tenant isolation (IDOR prevention) -------------------------------------
