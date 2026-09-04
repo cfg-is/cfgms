@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -418,25 +419,43 @@ func TestRevocationVerifier_RunPeriodicRefresh_FetchesOnStartupAndOnInterval(t *
 	signingCert := revTestSigningCert(t, ca)
 	raw := revTestSignManifest(t, signingCert, 1, []string{"555"})
 
-	var requestCount int
+	// requestCount is incremented on the httptest handler goroutine and read on the
+	// test goroutine, so it is atomic; fetches are observed over a channel so the
+	// test synchronises on real progress instead of a wall-clock deadline.
+	var requestCount atomic.Int64
+	fetched := make(chan struct{}, 16)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(raw)
+		select {
+		case fetched <- struct{}{}:
+		default: // never block the handler once the test has seen enough fetches
+		}
 	}))
 	defer srv.Close()
 
 	v := NewRevocationVerifier(caPool)
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
-		v.RunPeriodicRefresh(ctx, srv.Client(), srv.URL, stewardtypes.ModuleTrustModeStrict, 50*time.Millisecond, nil)
+		v.RunPeriodicRefresh(ctx, srv.Client(), srv.URL, stewardtypes.ModuleTrustModeStrict, 10*time.Millisecond, nil)
 		close(done)
 	}()
+
+	// The startup fetch, then at least one more driven by the ticker.
+	for i := 1; i <= 2; i++ {
+		select {
+		case <-fetched:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for fetch %d of 2 (observed %d)", i, requestCount.Load())
+		}
+	}
+	cancel()
 	<-done
 
 	assert.True(t, v.IsRevoked("555"), "the startup fetch must have applied the manifest")
-	assert.GreaterOrEqual(t, requestCount, 2, "the periodic ticker must have fetched at least once more after startup")
+	assert.GreaterOrEqual(t, requestCount.Load(), int64(2), "the periodic ticker must have fetched at least once more after startup")
 }
